@@ -18,11 +18,53 @@ case "${BOX_DRY_RUN_CONTROL:-}" in
 esac
 git() {
   box_dry_run_record git "$@"
-  case " $* " in
-    *' remote get-url origin '*) printf '%s\n' 'https://github.com/yulanventures/commonswarm.git' ;;
-    *' fetch origin main '*) return 0 ;;
-    *' status --porcelain '*) return 0 ;;
-    *' diff --exit-code HEAD -- site deploy/site '*) return 0 ;;
+  # A dry run never touches the network. The only remote it knows is the repository the plan names; a clone of
+  # it is a clone of the dry run's own temporary checkout, with the plan's URL as origin. Every other
+  # operation that talks to a remote is refused, not answered.
+  local git_arguments=("$@") git_index=0 git_subcommand=''
+  while [ "$git_index" -lt "${#git_arguments[@]}" ]; do
+    case "${git_arguments[$git_index]}" in
+      -C|-c|--git-dir|--work-tree) git_index=$((git_index + 2)) ;;
+      -*) git_index=$((git_index + 1)) ;;
+      *) git_subcommand=${git_arguments[$git_index]}; break ;;
+    esac
+  done
+  case "$git_subcommand" in
+    clone)
+      local git_url='' git_destination='' git_flags=() git_argument
+      for git_argument in "${git_arguments[@]:$((git_index + 1))}"; do
+        case "$git_argument" in
+          --no-checkout) git_flags+=("$git_argument") ;;
+          -*) printf 'UNPRODUCED git clone flag %s\n' "$git_argument" >&2; return 69 ;;
+          *) if [ -z "$git_url" ]; then git_url=$git_argument; else git_destination=$git_argument; fi ;;
+        esac
+      done
+      if [ "$git_url" != https://github.com/yulanventures/commonswarm.git ] || [ -z "$git_destination" ] || [ -z "${BOX_DRY_RUN_SOURCE_CLONE:-}" ]; then
+        printf 'UNPRODUCED network git operation: git clone %s\n' "$git_url" >&2
+        return 69
+      fi
+      command git clone --no-hardlinks ${git_flags[@]+"${git_flags[@]}"} "$BOX_DRY_RUN_SOURCE_CLONE" "$git_destination" || return $?
+      command git -C "$git_destination" remote set-url origin "$git_url" || return $?
+      # The repository's own view of origin/main stands for the remote's main. Without one, the clone has
+      # none, and a block that needs it fails on its own check.
+      [ -z "${BOX_DRY_RUN_ORIGIN_MAIN:-}" ] || command git -C "$git_destination" update-ref refs/remotes/origin/main "$BOX_DRY_RUN_ORIGIN_MAIN"
+      ;;
+    fetch)
+      # Fetch the harness's measured origin/main object from its temporary clone. This transfers real Git
+      # objects and updates the fixture ref; it neither contacts GitHub nor supplies a success-shaped echo.
+      if [ "${git_arguments[*]:$git_index}" != 'fetch origin main' ] ||
+         [ "$(command git "${git_arguments[@]:0:$git_index}" remote get-url origin)" != https://github.com/yulanventures/commonswarm.git ] ||
+         [ -z "${BOX_DRY_RUN_SOURCE_CLONE:-}" ] || [ -z "${BOX_DRY_RUN_ORIGIN_MAIN:-}" ]; then
+        printf '%s\n' 'UNPRODUCED exact-SHA checkout preparation' >&2
+        return 69
+      fi
+      command git "${git_arguments[@]:0:$git_index}" fetch --no-tags "$BOX_DRY_RUN_SOURCE_CLONE" \
+        "$BOX_DRY_RUN_ORIGIN_MAIN:refs/remotes/origin/main"
+      ;;
+    pull|push|ls-remote|submodule)
+      printf 'UNPRODUCED network git operation: git %s\n' "$git_subcommand" >&2
+      return 69
+      ;;
     *) command git "$@" ;;
   esac
 }
@@ -33,51 +75,28 @@ python3() {
     printf 'injected dry-run failure: %s\n' "${BOX_DRY_RUN_STEP:-}" >&2
     return 41
   fi
-  if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ] && [ "${BOX_DRY_RUN_STEP:-}" = 1-apply-release-directories ]; then
+  if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ]; then
     printf '%s\n' 'STOP: existing release directory cannot be reopened after rollback' >&2
     return 42
   fi
-  case "${BOX_DRY_RUN_STEP:-}" in
-    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-deno-install|hm37-hosted-control-stage|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|runbook-31|runbook-34|site-03*|site-05*)
-      command python3 "$@"
-      ;;
-    *)
-      printf '%s\n' 'dry-run python PASS'
-      ;;
-  esac
+  command python3 "$@"
 }
 
 node() {
   box_dry_run_record node "$@"
-  case "${BOX_DRY_RUN_STEP:-}" in
-    site-03*|runbook-44) command node "$@" ;;
-    hm37-hosted-human-session-input)
-      output=${4:?dry-run human-session output missing}
-      printf '%s\n' '{"access_token":"dry-run-placeholder"}' >"$output"
-      chmod 0600 "$output"
-      ;;
-    *) printf '%s\n' 'dry-run node PASS' ;;
-  esac
+  command node "$@"
 }
 
 release_psql() {
   box_dry_run_record release_psql "$@"
-  printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}"
+  printf '%s\n' 'UNPRODUCED database observation' >&2
+  return 69
 }
 
 release_psql_ro() {
   box_dry_run_record release_psql_ro "$@"
-  case "${BOX_DRY_RUN_STEP:-} $*" in
-    *"20260916000001"*"20260916000002"*) : ;;
-    runbook-26*"20260928000004"*"count"*) printf '%s\n' 0 ;;
-    runbook-26*"20260928000004-catalog.sql"*) printf '%s\n' f ;;
-    runbook-28*"20260928000004"*"count"*) printf '%s\n' 1 ;;
-    runbook-28*"20260928000004-catalog.sql"*) printf '%s\n' t ;;
-    *"ORDER BY version"*)
-      printf '%s\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003
-      ;;
-    *) printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}" ;;
-  esac
+  printf '%s\n' 'UNPRODUCED database observation' >&2
+  return 69
 }
 
 date() {

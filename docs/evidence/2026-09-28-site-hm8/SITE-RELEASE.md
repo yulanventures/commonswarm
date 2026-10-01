@@ -1,772 +1,1095 @@
 # CommonSwarm site release — HM lane 8
 
-**Release input:** `8b8989f2b29e440a317a2cdedf11195901c8342c`
-**Intended evidence path:** `docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md`
-**Status:** Plan only. Deployment, live browser controls, approval and closure are **not established**.
+**Release:** `4d6a06509f9abf1aefac8c88ec00280d025df673`
 
-Anvil executes `site-01` through `site-05` under HezLead’s direction. This
-review read repository files and Git history only; it ran no build, test,
-browser control or production command.
+**Baseline source:** `109e4db75f673ddd8003662dc1882159dd72b1b2`
 
-This lane is the next operation in the same approved window: start `site-01` immediately after lanes 3+7 record successful controls and cleanup. A lanes-3+7 `CONTROLS=failed` disposition still stops the combined window as its plan requires. On success, do not insert another release, stop for a fresh plan review, or reuse stale HM37 evidence between the lanes; all site holds must be closed before the combined window opens.
+**Baseline release:** `20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5`
+**Status:** executable plan; no operation recorded here has run.
 
-The governing procedures are [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md), [`deploy/site/RUNBOOK.md`](../../../deploy/site/RUNBOOK.md), and the workspace `hetzner-handoff/HETZNER-OPERATIONS.md`.
+Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
+blocks use `/bin/bash` 3.2. They never assign `HOME`, print a credential, run
+Docker, deploy a second SHA, change Caddy or DNS, or restart a service.
 
-Measured 2026-09-29 on the Mac mini: Node `https.request` with no explicit User-Agent—the exact request shape used by `deploy/site/parity-check.mjs`—returned 200 for `https://commonswarm.com/`, `/app`, and `/download`; curl with no User-Agent, curl’s default User-Agent, and python-requests also returned 200, while only Python urllib’s default User-Agent returned 403 `error code: 1010`. The runnable probes still send and record `User-Agent: commonswarm-release-probe/1.0`; the parity procedure may run unchanged, and lane 8 chains immediately after successful lanes 3+7 controls and cleanup.
+Lane 8 starts only after HM37 WINDOW A closes with
+`eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` live and hosted MCP dark. It does
+not wait for WINDOW B. The site SHA is an ancestor of that edge SHA. While MCP
+is dark, no hosted connection exists, so customers see Connected apps empty and
+cannot reach a revoke. The live grant-and-seat revoke control moves to HM37
+WINDOW B before MCP enable; lane 8 keeps only the real-Chrome empty-state
+control.
 
-## 1. Release identity and baseline
+## 1. Named prompt inputs
 
-Measured in this checkout:
+Credential values are never prompt inputs. A value-bearing file is named only
+by an absolute path and is read without printing it.
 
-| Fact | Result |
-|---|---|
-| `HEAD` | `8b8989f2b29e440a317a2cdedf11195901c8342c` |
-| Local `origin/main` | Same SHA; fresh remote confirmation is not established |
-| Working tree | Clean |
-| HM8 merge | `d5e9403d16e64d727fd2a98787e35111f4f1992e`, ancestor of the release |
-| HM8 implementation | `92e7c1c6` |
-| Root package version | `0.1.80` |
-| Site difference from OAuth retry SHA `ad964ed1` | None |
-| Current live site release | `20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e` (measured 2026-09-29) |
-| Current live source | `9b085c82352390cf8f0fe515c02b3ccff423476a` |
-| Current markers | `/download` contains `0.1.80`; `/app` does not contain `data-connected-apps-open` |
+| Name | Supplier and meaning | Exact format |
+|---|---|---|
+| `HM37_A_CLOSE_RECEIPT` | Anvil, produced only by WINDOW A | absolute regular non-symlink mode-`0600` WINDOW A close receipt; the only A-to-lane-8 handoff |
+| `SITE_APPROVER` | HezLead | `HezLead` |
+| `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
+| `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `4d6a06509f9abf1aefac8c88ec00280d025df673` |
+| `SITE_BASE_SHA` | Anvil, full SHA from baseline receipt | `109e4db75f673ddd8003662dc1882159dd72b1b2` |
+| `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
+| `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute task-owned empty directory before `site-00-source-checkout` |
+| `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute task-owned empty mode-`0700` directory before `site-01` |
+| `SITE_BUILD_ENV_OP_REFERENCE` | HezLead/Anvil, approved 1Password document reference | `op://Yulan Ventures Infra/ITEM/FIELD` with nonempty item and field segments; no credential value |
+| `OP_SERVICE_ACCOUNT_TOKEN_FILE` | Anvil, existing protected 1Password service-account token file | absolute regular non-symlink mode-`0600` file; never a credential value in the prompt |
 
-The older committed site deployment receipt [`2026-09-25-v0.1.77-release/RELEASE.md`](../2026-09-25-v0.1.77-release/RELEASE.md) records:
+```prompt-inputs
+{"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
+{"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for the lane 8 release."}
+{"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing the lane 8 plan."}
+{"name":"SITE_RELEASE_SHA","format":"literal:4d6a06509f9abf1aefac8c88ec00280d025df673","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
+{"name":"SITE_BASE_SHA","format":"literal:109e4db75f673ddd8003662dc1882159dd72b1b2","supplier":"Anvil","meaning":"Measured full baseline source commit."}
+{"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+{"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
+{"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
+{"name":"SITE_BUILD_ENV_OP_REFERENCE","format":"literal:op://Yulan Ventures Infra/CommonSwarm Site/public-build-env","supplier":"HezLead and Anvil","meaning":"Approved 1Password document reference; never a credential value."}
+{"name":"OP_SERVICE_ACCOUNT_TOKEN_FILE","format":"abs-file:op-service-account-token","supplier":"Anvil","meaning":"Protected token file used by the noninteractive 1Password service-account workflow."}
+```
+The WINDOW A close receipt contains these exact public lines:
 
-- Source: `218cf921d07d56f2b937822bcf18feb9d3be0f53`.
-- Release directory: `20260925T003349Z-218cf921d07d-3a154c81c821946d`.
-- Build setting: `PUBLIC_H0_LINK_JOIN=1`.
+```text
+release_sha=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+edge_live=true
+edge_dark=true
+prep_seats_revoked=true
+prep_active_tokens=0
+close=PASS
+```
 
-The M15 box measurement supersedes that receipt as the lane-8 baseline. It
-resolved the live release above, read `/app`, `/download`, and all five referenced
-assets, found the `0.1.80` marker, and did not find the Connected apps marker.
-
-**The first operational step opens the site window from the approved start and
-then confirms the live symlink still names the measured release.** That exact
-release is the base and rollback target. Any different value stops the window;
-site-02 does not silently adopt a new baseline.
+## 2. Preparation and window open
 
 ```sh
-# step: site-01 — Mac mini /bin/bash 3.2; Anvil; open the site window, then read the box
+# step: site-00-source-checkout — Mac mini /bin/bash 3.2; Anvil; create isolated exact-SHA checkout
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  : "${SITE_RELEASE_REPO:?named input missing}"
+  : "${SITE_RELEASE_SHA:?named input missing}"
+  : "${SITE_BASE_SHA:?named input missing}"
+  case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
+  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
+  test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
+  test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
+  git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
+  git -C "$SITE_RELEASE_REPO" checkout --detach "$SITE_RELEASE_SHA"
+  test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  test "$(git -C "$SITE_RELEASE_REPO" remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
+  test -z "$(git -C "$SITE_RELEASE_REPO" status --short --untracked-files=all)"
+  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${SITE_BASE_SHA}^{commit}")" = "$SITE_BASE_SHA"
+  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
+)
+```
+
+`site-01` refuses existing window state, an active release process, a changed
+baseline, wrong SSH identity, missing write access, or failed box HTTPS/DNS. It
+reads the box UTC clock to the second, calculates end as start plus four hours,
+and derives the ID. Nobody types a time or ID.
+
+```sh
+# step: site-01 — Mac mini /bin/bash 3.2; Anvil; open from box clock and verify baseline/access
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
-  : "${SITE_WINDOW_START_UTC:?Set the HezLead-approved UTC site window start}"
-  : "${SITE_EVIDENCE:?Set the protected site evidence directory}"
-  case "$SITE_WINDOW_START_UTC" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
-    *) false ;;
-  esac
-  SITE_WINDOW_ID="$(printf '%s' "$SITE_WINDOW_START_UTC" | tr -d ':-')"
-  case "$SITE_EVIDENCE" in /*) ;; *) false ;; esac
-  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) false ;; esac
-  SITE_WINDOW_FILE="$HOME/.commonswarm-site-window.env"
-  ( umask 077; printf 'SITE_WINDOW_START_UTC=%q\nSITE_WINDOW_ID=%q\nSITE_EVIDENCE=%q\nSITE_WINDOW_FILE=%q\n' \
-      "$SITE_WINDOW_START_UTC" "$SITE_WINDOW_ID" "$SITE_EVIDENCE" "$SITE_WINDOW_FILE" \
-      >"$SITE_WINDOW_FILE" )
-  chmod 0600 "$SITE_WINDOW_FILE"
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
-set -euo pipefail
-root=/srv/commonswarm/site
-test -L "$root/current"
-previous=$(readlink -f "$root/current")
-case "$previous" in
-  "$root"/releases/*) ;;
-  *) printf '%s\n' 'STOP: current resolves outside site/releases' >&2; exit 1 ;;
-esac
-test -d "$previous"
-test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
-test -f "$previous/app/index.html"
-test -f "$previous/download/index.html"
-date -u '+measured_at=%Y-%m-%dT%H:%M:%SZ'
-printf 'previous_release=%s\n' "$previous"
-sha256sum "$previous/app/index.html" "$previous/download/index.html"
-BOX
-)
-```
-
-**Evidence:** UTC time, resolved previous release path, `/app` and `/download` hashes, and the historical receipt or operator record mapping that directory to a full source SHA. A directory’s abbreviated SHA is a lead to resolve, not independent proof of provenance.
-
-For subsequent blocks, Anvil supplies these non-secret inputs:
-
-- `SITE_RELEASE_REPO`: absolute path to the checkout whose `HEAD` is the exact release SHA.
-- `SITE_BASE_SHA`: exactly `9b085c82352390cf8f0fe515c02b3ccff423476a`, resolved from the measured current site release.
-- `SITE_WINDOW_START_UTC`: HezLead-approved UTC start in `YYYY-MM-DDTHH:MM:SSZ` form. `site-01` derives `SITE_WINDOW_ID` from it; the operator never types an ID.
-- `SITE_WINDOW_ID`: derived `YYYYMMDDTHHMMSSZ` identifier read from `$HOME/.commonswarm-site-window.env` after `site-01`.
-- `SITE_EVIDENCE`: absolute, protected evidence directory for this execution, outside the release checkout, whose basename ends in `-$SITE_WINDOW_ID`.
-
-Do not change a shared checkout to satisfy these inputs. Prepare a separate checkout if necessary.
-
-```sh
-# step: site-02 — Mac mini /bin/bash 3.2; Anvil; measured source reconciliation
-# readonly: yes
-# host: Mac mini /bin/bash 3.2 as Anvil
-(
-  set -euo pipefail
-  . "$HOME/.commonswarm-site-window.env"
-  : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
-  : "${SITE_BASE_SHA:?Resolve the live site source to a full SHA}"
-  case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
-  case "$SITE_WINDOW_ID" in
-    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
-    *) exit 1 ;;
-  esac
-  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
-  cd "$SITE_RELEASE_REPO"
-  target=8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
-  test "$(git rev-parse HEAD)" = "$target"
-  base=$(git rev-parse --verify "${SITE_BASE_SHA}^{commit}")
-  test "$base" = "$SITE_BASE_SHA"
-  test "${#base}" -eq 40
-  if ! git merge-base --is-ancestor "$base" "$target"; then
-    printf '%s\n' 'STOP: measured live base is not an ancestor of the release SHA' >&2
+  : "${HM37_A_CLOSE_RECEIPT:?named input missing}"
+  : "${SITE_RELEASE_REPO:?named input missing}"
+  : "${SITE_BASE_SHA:?named input missing}"
+  : "${SITE_RELEASE_SHA:?named input missing}"
+  : "${SITE_EVIDENCE:?named input missing}"
+  : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
+  : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
+  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
+  for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
+    case "$input_path" in /*) ;; *) exit 1 ;; esac
+  done
+  test -d "$SITE_EVIDENCE" && test ! -L "$SITE_EVIDENCE"
+  test -z "$(find "$SITE_EVIDENCE" -mindepth 1 -maxdepth 1 -print -quit)"
+  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
+  test ! -e "$HOME/.commonswarm-site-window.env"
+  test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
+  test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
+  case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
+  case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
+  case "$OP_SERVICE_ACCOUNT_TOKEN_FILE" in /*) ;; *) exit 1 ;; esac
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
+  for expected in \
+    release_sha=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 \
+    edge_live=true edge_dark=true prep_seats_revoked=true \
+    prep_active_tokens=0 close=PASS; do
+    grep -qFx "$expected" "$HM37_A_CLOSE_RECEIPT"
+  done
+  if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
+    printf '%s\n' 'STOP: another local site release process exists' >&2
     exit 1
   fi
-  test ! -e "$SITE_EVIDENCE/site-02-summary.txt"
+
+  box_open=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
+set -euo pipefail
+root=/srv/commonswarm/site
+test "$(id -un)" = commonswarm
+test ! -e /tmp/commonswarm-site-window.env
+test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -z "$(find "$root/releases" -maxdepth 1 \( -type d -o -type l \) -name '.site-window-pin-*' -print)"
+if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
+  printf '%s\n' 'STOP: another box site release process exists' >&2
+  exit 1
+fi
+test -w "$root" && test -w "$root/releases"
+previous=$(readlink -f "$root/current")
+test "$previous" = "$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+test -f "$previous/app/index.html" && test -f "$previous/download/index.html"
+start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+end=$(date -u -d "$start + 4 hours" '+%Y-%m-%dT%H:%M:%SZ')
+printf 'SITE_WINDOW_START_UTC=%s\nSITE_WINDOW_END_UTC=%s\n' "$start" "$end"
+printf 'PREVIOUS_RELEASE=%s\n' "$previous"
+sha256sum "$previous/app/index.html" "$previous/download/index.html"
+python3 - <<'PY'
+import urllib.request
+UA = "commonswarm-release-probe/1.0"
+for url, media in (
+    ("https://commonswarm.com/app", "text/html"),
+    ("https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "application/json"),
+):
+    request = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept-Encoding": "identity", "Range": "bytes=0-0",
+    })
+    with urllib.request.urlopen(request, timeout=15) as response:
+        assert response.status in (200, 206)
+        assert response.headers.get_content_type() == media
+        response.read(1)
+print("BOX_EGRESS=PASS user_agent=" + UA)
+PY
+BOX
+  )
+  start=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_START_UTC=//p')
+  end=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_END_UTC=//p')
+  previous=$(printf '%s\n' "$box_open" | sed -n 's/^PREVIOUS_RELEASE=//p')
+  case "$start" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  case "$end" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  python3 - "$start" "$end" <<'PY'
+import datetime
+import sys
+start = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
+end = datetime.datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%SZ")
+assert (end - start).total_seconds() == 14400
+PY
+  test "$previous" = /srv/commonswarm/site/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5
+  SITE_WINDOW_ID=$(printf '%s' "$start" | tr -d ':-')
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  SITE_WINDOW_FILE="$HOME/.commonswarm-site-window.env"
   umask 077
-  git log --format=fuller "$base..$target" -- site/ \
-    > "$SITE_EVIDENCE/site-02-git-log.txt"
-  git log --format='%H %s' "$base..$target" -- site/ \
-    > "$SITE_EVIDENCE/site-02-commits.txt"
-  git diff --stat=200,200 "$base" "$target" -- site/ \
-    > "$SITE_EVIDENCE/site-02-diff-stat.txt"
-  git diff --name-status "$base" "$target" -- site/ \
-    > "$SITE_EVIDENCE/site-02-name-status.txt"
-  git diff --numstat "$base" "$target" -- site/ \
-    > "$SITE_EVIDENCE/site-02-numstat.txt"
-  commit_count=$(git rev-list --count "$base..$target" -- site/)
-  listed_commit_count=$(wc -l < "$SITE_EVIDENCE/site-02-commits.txt" | tr -d ' ')
-  changed_file_count=$(git diff --name-only "$base" "$target" -- site/ | wc -l | tr -d ' ')
-  listed_file_count=$(wc -l < "$SITE_EVIDENCE/site-02-name-status.txt" | tr -d ' ')
-  numstat_file_count=$(wc -l < "$SITE_EVIDENCE/site-02-numstat.txt" | tr -d ' ')
-  test "$commit_count" -eq "$listed_commit_count"
-  test "$changed_file_count" -eq "$listed_file_count"
-  test "$changed_file_count" -eq "$numstat_file_count"
   {
-    printf 'base=%s\n' "$base"
-    printf 'target=%s\n' "$target"
-    printf 'site_commit_count=%s\n' "$commit_count"
-    printf 'site_changed_file_count=%s\n' "$changed_file_count"
-    printf '%s\n' 'PASS: measured commits and file inventories reconcile'
-  } > "$SITE_EVIDENCE/site-02-summary.txt"
-  cat "$SITE_EVIDENCE/site-02-summary.txt"
+    printf 'SITE_WINDOW_START_UTC=%q\n' "$start"
+    printf 'SITE_WINDOW_END_UTC=%q\n' "$end"
+    printf 'SITE_WINDOW_ID=%q\n' "$SITE_WINDOW_ID"
+    printf 'SITE_WINDOW_FILE=%q\n' "$SITE_WINDOW_FILE"
+    printf 'SITE_EVIDENCE=%q\n' "$SITE_EVIDENCE"
+    printf 'SITE_RELEASE_REPO=%q\n' "$SITE_RELEASE_REPO"
+    printf 'SITE_RELEASE_SHA=%q\n' "$SITE_RELEASE_SHA"
+    printf 'SITE_BASE_SHA=%q\n' "$SITE_BASE_SHA"
+    printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
+    printf 'OP_SERVICE_ACCOUNT_TOKEN_FILE=%q\n' "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+    printf 'HM37_A_CLOSE_RECEIPT=%q\n' "$HM37_A_CLOSE_RECEIPT"
+  } >"$SITE_WINDOW_FILE"
+  chmod 0600 "$SITE_WINDOW_FILE"
+  printf '%s\n' "$box_open" >"$SITE_EVIDENCE/site-01-open.txt"
+  chmod 0600 "$SITE_EVIDENCE/site-01-open.txt"
+  scp "$SITE_WINDOW_FILE" commonswarm@yulan-vps-1:/tmp/commonswarm-site-window.env >/dev/null
 )
 ```
 
-**Evidence:** `site-02-summary.txt`, complete `git log`, complete commit list, diff stat, name/status and numerical inventory. Stop if the measured base cannot be resolved or is not an ancestor of the release SHA. The measured list governs. Before approval, classify every commit in that list absent from the expected list below as requiring a live server dependency or not; do not approve it as an unreviewed carry.
-
-### Expected site history from the measured live base
-
-The governing comparison is:
-
-`9b085c82352390cf8f0fe515c02b3ccff423476a..8b8989f2b29e440a317a2cdedf11195901c8342c`
-
-It has six entries touching `site/`: `d0ccf3a8`, `11660541`, `92e7c1c6`,
-`a8272445`, `02c4e9a9`, and `93b8d202`. The reconciled net inventory is 10
-files, 546 insertions, and 31 deletions. Site-02 regenerates the commit and file
-inventories; these counts are positive expectations, not a substitute for that
-measurement.
-
-The 10 paths, relative to `site/`, are:
-
-| Path | + / − |
-|---|---:|
-| `src/components/app/LiveDashboard.astro` | 270 / 6 |
-| `src/components/app/brain-view.fixture.ts` | 3 / 0 |
-| `src/components/app/markdown-wordwrap-qa.observer.test.ts` | 29 / 4 |
-| `src/components/app/message-blocks-layout.observer.test.ts` | 23 / 2 |
-| `src/components/app/mobile-feed-layout.observer.test.ts` | 14 / 0 |
-| `src/components/connect/agent-connect-mint.observer.test.ts` | 5 / 5 |
-| `src/lib/agent-connect.ts` | 6 / 6 |
-| `src/lib/connected-apps.test.mjs` | 43 / 0 |
-| `src/lib/connected-apps.ts` | 145 / 0 |
-| `src/pages/acceptable-use.astro` | 8 / 8 |
-
-### Historical pre-M15 inventory — superseded, do not use as the base
-
-This precomputed expected comparison is:
-
-`218cf921d07d56f2b937822bcf18feb9d3be0f53..8b8989f2b29e440a317a2cdedf11195901c8342c`
-
-It has **28 entries touching `site/`**, grouped below. This older comparison is
-retained only to show what the plan previously expected. M15 proved that its
-base is not live; site-02 must not use this inventory for approval.
-
-| Item and commits | What this site release carries | Server dependency and disposition |
-|---|---|---|
-| G lane 1: `96a9fe1e`, `bb229da9`, `e433f48a`, `a503577e` | Roster wake-path staleness and its controls | Requires `swarm_read.agent_wake_path` and corresponding delivery behavior. Recorded migration `20260925000001` has ledger `1`, catalog `t` in the September 26 `9627cb37e697` evidence. Fresh availability must be checked. |
-| G lane 2b: `68cbd8c9`, `92107eaf` | Changes carried through the watcher/lease integration, including site fixtures | Requires the existing lease backend for affected wake behavior. September 27 `d4677b0d1c86` evidence records migration `20260926000001` and a 50-call renewal gate PASS. Do not infer current health from that receipt alone. |
-| Company address: `79ade46a`, `7de16d21`, `4cb609cc` | Centralized address and corrected street number in legal pages | Static copy; no new server deployment. |
-| CP0: `9cbab6e9` | Shared Chrome launcher, provider fixtures and observer updates | Test infrastructure only; no production server dependency. |
-| CP1: `c0b1f004` | Google-first sign-in, primary provider button, revised sign-in text | Uses existing GoTrue settings. Build reads `/auth/v1/settings`; current enabled providers are **not established** here. Preserve the live configuration and verify rendered choices. |
-| CP3: `f00a5c00`, `9b1f9959`, `99881c8b`, `2079b5aa`, `8a3cd5b4`, `05eb6ad6` | Consumer homepage, Grok Bot example/glyph, OG changes, Grok Bot guide and footer link. The guide was removed and then restored. | No HM OAuth dependency. The guide uses the CLI on the Bot’s computer, names gateway prerequisites, labels wake a preview and states idle wake has not been proved. Verify the published client still supports its instructions; do not claim a new live wake proof. |
-| G3d/G3e: `e609bed3`, `4f970237` | Roster presence, wake route, last call and client-build information | Requires `swarm_read.agent_presence` and its underlying presence state. September 27 `38343e74cbd5/migration-state-after.txt` records migrations `20260927000001`–`…03`, each ledger `1`, catalog `t`. Fresh owner reads remain required. |
-| T3a: `cc5e4386` | Site-side changes accompanying ask-chain limits | Server migration `20260927000003` is recorded applied in the same `38343e74cbd5` evidence. This release does not apply it again. |
-| Citation/diagnostic repairs: `9b3030f8`, `d0ccf3a8`, `11660541` | Comment citations and observer diagnostic text in agent-connect and acceptable-use sources | These site changes do not activate HM2 or change authority. HM2 remains a separate server dependency of HM8. |
-| HM4: `163da7d4` | Queries and displays agent `transport` and `turn_only`; labels Local/Hosted MCP | Requires migration `20260928000001`. September 27 `9b085c823523/migration-state-after.txt` records ledger `1`, catalog `t`. Unlike optional presence display, the roster explicitly selects these columns: absence blocks release. |
-| HM8: `92e7c1c6` | Account-menu Connected apps dialog, owner connections/workspaces/seats, grant and seat revocation with committed-state rereads | Requires HM2 views and revoke command handlers. Historical HM2 deployment evidence exists; fresh signed-in-owner acceptance is **not established**. |
-| CI-GREEN b: `a8272445`, `02c4e9a9`, `93b8d202` | One-row mobile app bar below `34rem`; real-width observer measurements; sample-notice and scroll-reset fixture corrections | CSS and test changes; no new server deployment. Real Chrome controls at 320px and 390px are mandatory. |
-
-### Historical net file inventory from the superseded base
-
-The superseded comparison produced **62 files changed, 1,865 insertions, 524
-deletions**, including `og.png` changing from **66,152 to 65,141 bytes**. These
-numbers are not lane-8 acceptance criteria after M15.
-
-All paths below are relative to `site/`. Counts are additions/deletions from the same expected comparison. Shared files carry multiple items from the preceding table.
-
-| Group | Path | + / − |
-|---|---|---:|
-| Test infrastructure | `package.json` | 1 / 1 |
-| CP3 | `public/og.png` | binary |
-| CP3 | `scripts/metadata.test.mjs` | 12 / 2 |
-| CP3 | `scripts/og-card.mjs` | 6 / 6 |
-| CP0 | `scripts/provider-fixtures.ts` | 63 / 19 |
-| CP3 | `scripts/seo-pages.test.mjs` | 51 / 2 |
-| CP3 | `src/components/SiteFooter.astro` | 1 / 0 |
-| Shared application changes | `src/components/app/LiveDashboard.astro` | 433 / 42 |
-| Observer | `src/components/app/agent-model-editor.observer.test.ts` | 2 / 8 |
-| Presence | `src/components/app/agent-presence.observer.test.ts` | 82 / 0 |
-| Observer | `src/components/app/agent-row-geometry.observer.test.ts` | 5 / 31 |
-| Sign-in/observer | `src/components/app/app-signed-out.observer.test.ts` | 71 / 18 |
-| Observer | `src/components/app/brain-links-blocks.observer.test.ts` | 2 / 8 |
-| Observer | `src/components/app/brain-links.observer.test.ts` | 2 / 8 |
-| Fixture | `src/components/app/brain-view.fixture.ts` | 5 / 8 |
-| Observer | `src/components/app/chat-threads.observer.test.ts` | 8 / 29 |
-| Observer | `src/components/app/composer-addressing.observer.test.ts` | 2 / 8 |
-| Observer | `src/components/app/composer-polish.observer.test.ts` | 2 / 9 |
-| Observer | `src/components/app/composer-sprint-browser.observer.test.ts` | 2 / 8 |
-| Observer | `src/components/app/composer-to-field.observer.test.ts` | 12 / 35 |
-| HM4 | `src/components/app/entity-panel.observer.test.ts` | 3 / 0 |
-| Observer | `src/components/app/feed-composer-clearance.observer.test.ts` | 2 / 8 |
-| Fixture | `src/components/app/file-list.fixture.ts` | 2 / 8 |
-| Observer/mobile | `src/components/app/markdown-wordwrap-qa.observer.test.ts` | 32 / 16 |
-| Observer/mobile | `src/components/app/message-blocks-layout.observer.test.ts` | 25 / 10 |
-| CI-GREEN/mobile | `src/components/app/mobile-feed-layout.observer.test.ts` | 16 / 8 |
-| Fixture | `src/components/app/participant-rail.fixture.ts` | 4 / 50 |
-| Observer/HM4 | `src/components/app/slack-shape.observer.test.ts` | 6 / 10 |
-| HM4 | `src/components/app/transport-roster.observer.test.ts` | 39 / 0 |
-| Observer | `src/components/app/update-notice.observer.test.ts` | 2 / 8 |
-| G lane 1 | `src/components/app/wake-path.observer.test.ts` | 29 / 0 |
-| Observer | `src/components/app/workspace-entry.observer.test.ts` | 7 / 6 |
-| Observer | `src/components/app/workspace-settings.observer.test.ts` | 2 / 8 |
-| CP1 | `src/components/auth/ProviderButtons.astro` | 18 / 5 |
-| CP0/CP1 | `src/components/auth/provider-buttons.observer.test.ts` | 111 / 28 |
-| Observer/citations | `src/components/connect/agent-connect-mint.observer.test.ts` | 5 / 5 |
-| CP3 | `src/components/landing/ConsumerHero.astro` | 29 / 33 |
-| CP3 | `src/components/landing/ConsumerStory.astro` | 14 / 16 |
-| CP3 | `src/components/landing/consumer-copy.observer.mjs` | 46 / 15 |
-| Observer | `src/components/landing/heading-lines.observer.test.ts` | 2 / 8 |
-| CP3 | `src/components/seo/AboutCommonSwarm.astro` | 22 / 6 |
-| CP3 | `src/layouts/Base.astro` | 3 / 3 |
-| CP3 | `src/layouts/SeoPage.astro` | 7 / 2 |
-| Citations | `src/lib/agent-connect.ts` | 6 / 6 |
-| Presence | `src/lib/agent-presence.ts` | 89 / 0 |
-| CP1 | `src/lib/auth-providers.ts` | 7 / 7 |
-| Company address | `src/lib/company.test.mjs` | 30 / 0 |
-| Company address | `src/lib/company.ts` | 10 / 0 |
-| HM8 | `src/lib/connected-apps.test.mjs` | 43 / 0 |
-| HM8 | `src/lib/connected-apps.ts` | 145 / 0 |
-| HM4 | `src/lib/entity-panel.ts` | 3 / 0 |
-| CP3 | `src/lib/model-glyph.test.mjs` | 10 / 0 |
-| CP3 | `src/lib/model-glyph.ts` | 6 / 1 |
-| HM4 | `src/lib/participant-rail.ts` | 12 / 0 |
-| G lane 1 | `src/lib/wake-path.ts` | 12 / 0 |
-| Citations | `src/pages/acceptable-use.astro` | 8 / 8 |
-| CP3 | `src/pages/guides/grok-bot.astro` | 124 / 0 |
-| CP3 | `src/pages/index.astro` | 2 / 2 |
-| Company address | `src/pages/privacy.astro` | 4 / 2 |
-| Company address | `src/pages/terms.astro` | 5 / 3 |
-| CP0 | `tests/chrome-launch-sweep.test.ts` | 35 / 0 |
-| CP0 | `tests/chrome.ts` | 126 / 0 |
-
-Observer and fixture changes do not require an additional production server release. Application dependencies are identified above.
-
-## 2. Public feature exposure
-
-Connected apps is **not hidden behind a feature flag**. `LiveDashboard.astro` renders its account-menu button unconditionally; opening it requires a session and refuses sample mode.
-
-This plan treats the dialog as available account management:
-
-- It lists and revokes existing connections.
-- It offers no connection-creation or OAuth authorization action.
-- Its empty state is `No apps are connected to this account.`
-- Its introduction describes hosted seats. That text will be visible to signed-in users and must not be represented as hidden.
-
-This is safe before public hosted MCP availability **only if HM2 owner reads and revocation are available**, and HezLead accepts exposing this management-only surface. If the requirement is to hide every mention of hosted connections until public launch, **this SHA cannot meet it**; a separately reviewed code change and new release SHA are required.
-
-The Grok Bot guide is a separate CLI setup path. It does not advertise a hosted MCP connector.
-
-The OAuth consent page belongs to `services/mcp-auth/`, not this static site deployment. [`2026-09-28-box-hm6/BOX-WINDOW.md`](../2026-09-28-box-hm6/BOX-WINDOW.md) specifies retry image input `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, which includes HM8, with `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED=0`. That document establishes a plan, not successful retry execution. This site window changes no OAuth flag, `/mcp` route, metadata route, DNS, GoTrue configuration or service.
-
-## 3. Preconditions and release holds
-
-### HM2 and existing server dependencies
-
-Recorded HM2 evidence:
-
-- [`close-readback.txt`](../2026-09-28-release-72c57e0d76d0-rerun-4/close-readback.txt): edge at `72c57e0d76d0aa86fe4f811a2cf51499919fed20`, healthy, on `commonswarm-net`.
-- [`20260928000002-functional.txt`](../2026-09-28-release-72c57e0d76d0-rerun-4/20260928000002-functional.txt): `t`.
-- Migration source: `supabase/migrations/20260928000002_hm_hosted_authority.sql`.
-- Command handlers: `supabase/functions/command/index.ts`.
-
-The two views filter by `owner_user_id = auth.uid()` and grant SELECT to `authenticated`. The site does not supply an owner ID.
-
-**Do not overstate the functional receipt:** its SQL reconciles existing authority state and can pass with no hosted grants. `hm2-local-control.json` exercises local seats. Neither establishes a live signed-in owner’s successful hosted-grant and hosted-seat revocation.
-
-Before GO, each read-only requirement has an executable owner or an explicit decision owner:
-
-1. `hm37-current-window-state` verifies the active edge and mounted source identity. HezLead confirms from the exact release diff that the mounted source contains both revoke handlers.
-2. `hm37-current-window-state` verifies migration `20260928000002` and both owner views through the governing runbook’s read-only database procedure. Do not reapply migrations or rerun seed/mutation controls.
-3. `site-03` performs authenticated reads of both views for the dedicated test owner through the public API, with the same selected columns and ordering as `site/src/lib/connected-apps.ts`.
-4. Existing owner-scoped evidence that both revoke commands answer correctly, including committed deny-state readback, is explicitly a HezLead GO decision. If no such evidence exists, HezLead records **not established** and holds GO for a separately authorized control. An empty view, OPTIONS response or unauthenticated refusal is not a positive revoke control.
-5. `hm37-current-window-state` verifies current availability of roster transport columns, `agent_presence` and `agent_wake_path`.
-
-The signed-in checks use Anvil’s real Chrome and the dedicated test account below. Keep tokens in the browser; do not export HAR files, storage contents or authorization headers.
-
-### Build environment
-
-`deploy/site/validate-site-env.mjs` checks non-empty values, a three-part JWT and rejection of `service_role`. It does **not** require the expected URL or require `role === "anon"`. The following supplements it without printing either configured value.
+## 3. Produced inputs and pre-switch gates
 
 ```sh
-# step: site-03 — Mac mini /bin/bash 3.2; Anvil; read-only environment validation
+# step: site-00-a-close-ingest — Mac mini /bin/bash 3.2; Anvil; copy WINDOW A close receipt
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
+  test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
+  install -m 0600 "$HM37_A_CLOSE_RECEIPT" "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
+  test "$(shasum -a 256 "$HM37_A_CLOSE_RECEIPT" | awk '{print $1}')" = \
+    "$(shasum -a 256 "$SITE_EVIDENCE/hm37-a-close-receipt.txt" | awk '{print $1}')"
+)
+```
+
+```sh
+# step: site-00-build-env — Mac mini /bin/bash 3.2; Anvil; install and validate protected build settings
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  cd "$SITE_RELEASE_REPO"
+  test -z "${OP_SERVICE_ACCOUNT_TOKEN+x}"
+  test -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}"
+  if compgen -A variable OP_SESSION_ >/dev/null; then exit 1; fi
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
+  SITE_BUILD_ENV_TEMP="$(mktemp -d /tmp/commonswarm-site-build-env.XXXXXX)"
+  case "$SITE_BUILD_ENV_TEMP" in /tmp/commonswarm-site-build-env.??????) ;; *) exit 1 ;; esac
+  trap 'status=$?; find "$SITE_BUILD_ENV_TEMP" -depth -delete; exit "$status"' EXIT
+  SITE_BUILD_ENV_SOURCE="$SITE_BUILD_ENV_TEMP/site-build.env"
+  test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
+  op read "$SITE_BUILD_ENV_OP_REFERENCE" --out-file "$SITE_BUILD_ENV_SOURCE"
+  chmod 0600 "$SITE_BUILD_ENV_SOURCE"
+  test -f "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
+  test "$(stat -f '%Lp' "$SITE_BUILD_ENV_SOURCE")" = 600
+  test ! -e site/.env
+  for override in site/.env.local site/.env.production site/.env.production.local; do
+    test ! -e "$override"
+  done
+  install -m 0600 "$SITE_BUILD_ENV_SOURCE" site/.env
+  test "$(grep -Ec '^[A-Za-z_][A-Za-z0-9_]*=' site/.env)" -eq 3
+  for name in PUBLIC_SUPABASE_URL PUBLIC_SUPABASE_ANON_KEY PUBLIC_H0_LINK_JOIN; do
+    test "$(grep -Ec "^${name}=" site/.env)" -eq 1
+  done
+  node deploy/site/validate-site-env.mjs site/.env </dev/null
+  node - <<'NODE' >"$SITE_EVIDENCE/site-00-build-env.txt"
+const fs = require("node:fs");
+const values = new Map(fs.readFileSync("site/.env", "utf8").split(/\r?\n/)
+  .filter((line) => line.includes("=")).map((line) => {
+    const at = line.indexOf("=");
+    return [line.slice(0, at), line.slice(at + 1).replace(/^['"]|['"]$/g, "")];
+  }));
+if (values.get("PUBLIC_SUPABASE_URL") !== "https://api.commonswarm.com") process.exit(1);
+if (values.get("PUBLIC_H0_LINK_JOIN") !== "1") process.exit(1);
+const parts = (values.get("PUBLIC_SUPABASE_ANON_KEY") || "").split(".");
+if (parts.length !== 3) process.exit(1);
+const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+if (payload.role !== "anon") process.exit(1);
+console.log("BUILD_ENV=PASS url=https://api.commonswarm.com role=anon h0=1");
+NODE
+  chmod 0600 "$SITE_EVIDENCE/site-00-build-env.txt"
+  find "$SITE_BUILD_ENV_TEMP" -depth -delete
+  test ! -e "$SITE_BUILD_ENV_TEMP"
+  trap - EXIT
+)
+```
+
+`site-02` produces the full site-only inventory from the full live base and
+verifies the deletion guards at the release SHA. The stale deletion hold is
+removed: `deploy.sh:47-116,242-254` and
+`finalize-release.sh:35-106,160-215` contain the guards/call sites, while
+`tests/p1-cli/site-deletion-safety.test.ts:65-122,183-221` contains refusal and
+positive controls.
+
+```sh
+# step: site-02 — Mac mini /bin/bash 3.2; Anvil; exact source and guard reconciliation
 # readonly: yes
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
-  : "${SITE_OWNER_ACCESS_TOKEN_FILE:?Set the protected dedicated-owner access-token file}"
   cd "$SITE_RELEASE_REPO"
-  test "$(git rev-parse HEAD)" = 8b8989f2b29e440a317a2cdedf11195901c8342c
-  node --input-type=module <<'NODE'
-import fs from "node:fs";
-
-function requireCheck(ok, label) {
-  if (!ok) {
-    console.error(`FAIL: ${label}`);
-    process.exit(1);
-  }
-}
-const version = process.versions.node.split(".").map(Number);
-requireCheck(version[0] > 22 || (version[0] === 22 && version[1] >= 12),
-             "Node >=22.12");
-const filename = "site/.env";
-requireCheck((fs.statSync(filename).mode & 0o777) === 0o600,
-             "site environment permissions");
-const values = new Map();
-for (const line of fs.readFileSync(filename, "utf8").split(/\r?\n/)) {
-  const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-  if (!match) continue;
-  requireCheck(!values.has(match[1]), "no duplicate environment names");
-  let value = match[2].trim();
-  if ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-  values.set(match[1], value);
-}
-requireCheck(values.get("PUBLIC_SUPABASE_URL") === "https://api.commonswarm.com",
-             "production backend URL");
-const parts = (values.get("PUBLIC_SUPABASE_ANON_KEY") || "").split(".");
-requireCheck(parts.length === 3 && parts.every(Boolean), "three-part JWT");
-let payload;
-try {
-  payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-} catch {
-  requireCheck(false, "JWT payload");
-}
-requireCheck(payload?.role === "anon", "JWT role is anon");
-requireCheck(values.get("PUBLIC_H0_LINK_JOIN") === "1", "H0 link join preserved");
-for (const name of ["PUBLIC_SUPABASE_URL", "PUBLIC_SUPABASE_ANON_KEY",
-                    "PUBLIC_H0_LINK_JOIN"]) {
-  requireCheck(process.env[name] === undefined, "no inherited build override");
-}
-for (const file of ["site/.env.local", "site/.env.production",
-                    "site/.env.production.local"]) {
-  requireCheck(!fs.existsSync(file), "no unreviewed environment override file");
-}
-console.log("PASS: runtime, environment permissions, URL, anon role and H0 setting");
-NODE
-  node deploy/site/validate-site-env.mjs site/.env </dev/null
-  python3 - "$SITE_OWNER_ACCESS_TOKEN_FILE" "$SITE_EVIDENCE/site-03-owner-views.json" <<'PY'
-import json
-import os
-import pathlib
-import urllib.parse
-import urllib.request
-import sys
-
-token_file = pathlib.Path(sys.argv[1])
-evidence_file = pathlib.Path(sys.argv[2])
-assert token_file.is_file() and not token_file.is_symlink()
-assert token_file.stat().st_mode & 0o777 == 0o600
-token = token_file.read_text(encoding="utf-8").strip()
-assert token
-
-values = {}
-for line in pathlib.Path("site/.env").read_text(encoding="utf-8").splitlines():
-    if "=" in line:
-        name, value = line.split("=", 1)
-        values[name] = value.strip().strip("\"'")
-base = values["PUBLIC_SUPABASE_URL"].rstrip("/")
-anon = values["PUBLIC_SUPABASE_ANON_KEY"]
-queries = {
-    "connections": ("hosted_mcp_connections",
-        "grant_id,client_id,home_workspace_id,selected_workspace_ids,state,revoked_at",
-        "created_at.desc"),
-    "seats": ("hosted_mcp_seats",
-        "seat_id,grant_id,workspace_id,principal_id,name,revoked_at",
-        "created_at.asc"),
-}
-result = {"user_agent": "commonswarm-release-probe/1.0", "views": {}}
-for label, (view, columns, order) in queries.items():
-    query = urllib.parse.urlencode({"select": columns, "order": order})
-    request = urllib.request.Request(
-        f"{base}/rest/v1/{view}?{query}",
-        headers={
-            "Accept-Profile": "swarm_read",
-            "apikey": anon,
-            "Authorization": "Bearer " + token,
-            "User-Agent": "commonswarm-release-probe/1.0",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read(1048577)
-        assert response.status == 200
-        assert response.headers.get_content_type() == "application/json"
-        assert len(raw) <= 1048576
-    rows = json.loads(raw)
-    assert isinstance(rows, list)
-    result["views"][label] = {"status": 200, "row_count": len(rows)}
-evidence_file.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-os.chmod(evidence_file, 0o600)
-print("PASS: dedicated owner reads both connected-app views")
-PY
+  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
+  git merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
+  git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
+  git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
+  git show "$SITE_RELEASE_SHA:deploy/site/finalize-release.sh" | grep -q guarded_delete
+  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
+    grep -q 'deletes valid temporary paths'
+  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
+    grep -q 'with a valid-delete control'
+  umask 077
+  git log --format='%H %s' "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/ \
+    >"$SITE_EVIDENCE/site-02-commits.txt"
+  git diff --name-status "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+    >"$SITE_EVIDENCE/site-02-name-status.txt"
+  git diff --numstat "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+    >"$SITE_EVIDENCE/site-02-numstat.txt"
+  commit_count=$(git rev-list --count "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/)
+  listed_commit_count=$(wc -l <"$SITE_EVIDENCE/site-02-commits.txt" | tr -d ' ')
+  changed_count=$(git diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ | wc -l | tr -d ' ')
+  listed_count=$(wc -l <"$SITE_EVIDENCE/site-02-name-status.txt" | tr -d ' ')
+  test "$commit_count" -eq "$listed_commit_count"
+  test "$changed_count" -eq "$listed_count"
+  {
+    printf 'base=%s\ntarget=%s\n' "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
+    printf 'site_commit_count=%s\nsite_changed_file_count=%s\n' "$commit_count" "$changed_count"
+    printf '%s\n' 'DELETE_GUARDS=PASS' 'SOURCE_RECONCILIATION=PASS'
+  } >"$SITE_EVIDENCE/site-02-summary.txt"
 )
 ```
 
-**Evidence:** exit statuses, PASS/FAIL labels, and protected
-`site-03-owner-views.json`, which contains only response status and row counts.
-JWT payload inspection does not validate its signature; the two successful API
-reads supply the separate operational check without recording either token.
+### Dedicated Anvil Chrome session
 
-### Exact-SHA gates and operational holds
+Browser controls use only Anvil's retained Chrome user-data directory
+`/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome`, started with
+`--password-store=basic`. They never create or copy another Chrome profile and
+never print a token or email. The site's client enables persisted sessions at
+`site/src/lib/commonswarm.ts:138-140`; the browser inspection finds that
+client's `sb-*-auth-token` key and returns only `user.id` from its parsed value.
 
-Before execution, attach reviewed exact-SHA gate results from an allowed non-mini runner. Source tests are not test results. A passing run for another SHA is not an exact-SHA pass. No site suite, headless browser suite or parity test runs on the Mac mini. The deployment build and Anvil’s real-Chrome controls are the permitted work here.
-
-Also establish:
-
-- HezLead’s exact-SHA approval and accepted complete site scope.
-- The authenticated test owner and workspace restriction.
-- SSH host identity and `commonswarm` write access. Use `commonswarm@yulan-vps-1`; `ops` cannot write the site root.
-- Previous build settings and rollback directory.
-- No concurrent site deployment.
-- Preservation of the previous release despite the helper’s five-release retention. An older rollback target is not automatically protected from pruning.
-
-**Deletion-rule conflict — execution hold:** the supplied `deploy/site/deploy.sh` contains recursive temporary-directory cleanup without the required resolved-path guard; `finalize-release.sh` recursively prunes releases not created by `mktemp` in the invoking block. Thus invoking these helpers does not satisfy a literal application of this assignment’s recursive-deletion rule.
-
-Do not claim that omitting `rm -rf` from the blocks below removes those effects. The hold lifts only when the separate deployment-helper fix is on `main` and the release SHA contains its resolved-path guards and their tests; check that both guards and their tests are present at the exact release SHA. This plan does not move `8b8989f2b29e440a317a2cdedf11195901c8342c`: if that fix is absent from this SHA, selecting a new reviewed release SHA that includes it is a precondition. No exception is established here. The deployment block below is the existing interface, **not authorization to bypass this hold**.
-
-## 4. Build, validate, upload and switch
-
-The script supports one production invocation:
-
-`deploy/site/deploy.sh commonswarm@yulan-vps-1`
-
-It has no build-only, upload-only or delayed-switch production mode. Its `--dry-run --npm-ci` option performs an install; it is not a harmless simulation. Do not invent staged deployment options.
-
-One invocation performs these phases:
-
-| Phase | Measured implementation | Required evidence |
-|---|---|---|
-| Build | `git archive HEAD`, link operator `site/.env`, `npm ci`, `npm run build` | Exact HEAD, build settings PASS, command log and exit status |
-| Validate | Require built `/start/index.html` and a non-empty backend URL meta value | Script reaches upload only after validation; supplementary environment PASS |
-| Upload | Unique timestamp/SHA/random `.tmp` directory; `rsync -a --delete` | Upload exit status and resulting release path |
-| Switch | Carry previous `/_astro` assets forward, normalize permissions, rename completed release, atomically replace `current` on Linux | Resolved symlink before/after and page/asset hashes |
-| Retention | Keep five newest matching release directories; cleanup failures warn after the switch | Warnings recorded; previous rollback target confirmed present |
-
-The built `/start` check alone does not prove the backend is correct, `/app` works or HM8 is usable.
-
-After all holds are resolved, HezLead’s execution approval must name the exact SHA and the actual baseline. Keep the approval with the evidence. Do not deploy a later `main` merely because it contains this plan.
+The first block compares that web user ID with the CLI human user ID and the
+fixed expected ID, asserts the displayed label `Ridgeio`, records the initially
+selected CICD workspace, and uses the normal workspace switcher to select Cold
+Agent Test. If the site is signed out, it may choose the GitHub button and use
+the existing Ridgeio GitHub session. A 2FA challenge, keychain dialog, or any
+failure to restore the session selects `REDUCED-CONTROL` automatically; there
+is no operator branch input. Neither branch signs out.
 
 ```sh
-# step: site-04 — Mac mini /bin/bash 3.2; Anvil; production deployment after all holds close
+# step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome identity and workspace preflight
 # readonly: no
-# host: Mac mini /bin/bash 3.2 as Anvil; ssh children on box
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  : "${SITE_RELEASE_REPO:?Set the approved exact-release checkout}"
-  case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
-  case "$SITE_WINDOW_ID" in
-    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
-    *) exit 1 ;;
-  esac
-  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
-  cd "$SITE_RELEASE_REPO"
-  target=8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$(git rev-parse HEAD)" = "$target"
-  git diff --exit-code HEAD -- site deploy/site
-  test -f "$SITE_EVIDENCE/GO.txt"
-  grep -qFx "SHA=$target" "$SITE_EVIDENCE/GO.txt"
-  grep -qFx 'All release holds resolved' "$SITE_EVIDENCE/GO.txt"
-
-  umask 077
-  test ! -e "$SITE_EVIDENCE/deploy.log"
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
-    'readlink -f /srv/commonswarm/site/current' \
-    > "$SITE_EVIDENCE/previous.release"
-  previous=$(cat "$SITE_EVIDENCE/previous.release")
-  case "$previous" in
-    /srv/commonswarm/site/releases/*) ;;
-    *) printf '%s\n' 'STOP: invalid previous release' >&2; exit 1 ;;
-  esac
-  test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
-
-  set +e
-  env -u PUBLIC_SUPABASE_URL -u PUBLIC_SUPABASE_ANON_KEY \
-    -u PUBLIC_H0_LINK_JOIN \
-    /bin/sh deploy/site/deploy.sh commonswarm@yulan-vps-1 \
-    2>&1 | tee "$SITE_EVIDENCE/deploy.log"
-  results=("${PIPESTATUS[@]}")
-  set -e
-
-  printf 'deploy_exit=%s\nlog_exit=%s\n' "${results[0]}" "${results[1]}" \
-    > "$SITE_EVIDENCE/deploy-status.txt"
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
-    'readlink -f /srv/commonswarm/site/current' \
-    > "$SITE_EVIDENCE/after.release"
-  cat "$SITE_EVIDENCE/deploy-status.txt"
-  cat "$SITE_EVIDENCE/after.release"
-  test "${results[0]}" -eq 0
-  test "${results[1]}" -eq 0
-  scp "$SITE_WINDOW_FILE" commonswarm@yulan-vps-1:/tmp/commonswarm-site-window.env
-)
-```
-
-**Evidence:** `GO.txt`, `previous.release`, `deploy.log`, `deploy-status.txt`, `after.release`.
-
-If the script fails or SSH disconnects, inspect `current` before retrying. Failure does not prove the switch did not happen. Never blindly invoke deployment again.
-
-## 5. Controls after the switch
-
-### Build identity and public delivery
-
-There is no embedded release-SHA marker in this site. `LiveDashboard.astro` intentionally detects updates using asset URLs and served markup. `/download` derives `0.1.80` from the root package; that version alone cannot distinguish HM8 from another `0.1.80` build.
-
-Use the release directory’s SHA prefix **plus the actual `/app` hash and referenced asset hashes** as the version evidence. The following runs on the box, not as a mini site test.
-
-```sh
-# step: site-05 — box /bin/bash; Anvil as commonswarm; read-only public delivery control
-# readonly: yes
-# host: box /bin/bash 5.2 as commonswarm
-(
-  set -euo pipefail
-  . /tmp/commonswarm-site-window.env
-  python3 - <<'PY'
-import hashlib
-import json
-import pathlib
-import re
-import urllib.error
-import urllib.request
-
-PROBE_USER_AGENT = "commonswarm-release-probe/1.0"
-
-root = pathlib.Path("/srv/commonswarm/site")
-release = (root / "current").resolve(strict=True)
-assert release.parent == root / "releases", "unexpected release parent"
-assert re.fullmatch(
-    r"\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}", release.name
-), "unexpected release identity"
-
-def fetch(path):
-    request = urllib.request.Request(
-        "https://commonswarm.com" + path,
-        headers={
-            "Cache-Control": "no-cache",
-            "Accept-Encoding": "identity",
-            "User-Agent": PROBE_USER_AGENT,
-        },
-    )
-    try:
-        response = urllib.request.urlopen(request, timeout=30)
-    except urllib.error.HTTPError as error:
-        response = error
-    with response:
-        status = response.status
-        content_type = response.headers.get("Content-Type", "")
-        raw = response.read()
-        record = {
-            "url": request.full_url,
-            "method": "GET",
-            "status": status,
-            "user_agent": PROBE_USER_AGENT,
-            "headers": {
-                "server": response.headers.get("Server"),
-                "cf-ray": response.headers.get("CF-Ray"),
-                "content-type": content_type,
-            },
-        }
-    if status == 403 and b"error code: 1010" in raw[:2048].lower():
-        record["failure_kind"] = "cloudflare_challenge"
-    if status != 200:
-        # HTML and built assets can embed the anon JWT. Never print their body.
-        record["body_prefix_omitted"] = "site response may contain configured anon credential"
-        print("probe=" + json.dumps(record, separators=(",", ":")))
-        raise SystemExit(1)
-    record["pass"] = True
-    print("probe=" + json.dumps(record, separators=(",", ":")))
-    return raw
-
-app = (release / "app/index.html").read_bytes()
-assert b"data-connected-apps-open" in app, "Connected apps marker absent"
-assert fetch("/app") == app, "public /app differs from current release"
-download = (release / "download/index.html").read_bytes()
-assert b"0.1.80" in download, "download version absent"
-assert fetch("/download") == download, "public /download differs"
-
-assets = sorted(set(re.findall(
-    rb'(?:src|href)="(/_astro/[^"]+\.(?:js|css))"', app
-)))
-assert assets, "no app assets found"
-for item in assets:
-    path = item.decode("utf-8")
-    local = (release / path.lstrip("/")).resolve(strict=True)
-    assert release in local.parents, "asset escapes release"
-    expected = local.read_bytes()
-    assert fetch(path) == expected, "public asset differs"
-    print("asset_sha256=" + hashlib.sha256(expected).hexdigest() + " " + path)
-
-print("release=" + release.name)
-print("app_sha256=" + hashlib.sha256(app).hexdigest())
-print("download_sha256=" + hashlib.sha256(download).hexdigest())
-print("PASS: public pages and referenced assets match current release")
+  profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"
+  test -d "$profile"
+  test ! -L "$profile"
+  chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+  test -x "$chrome"
+  CLI_USER_ID="$(cswarm status \
+    --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -er '.identity.user_id')"
+  test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
+  chrome_port=9335
+  "$chrome" --user-data-dir="$profile" --password-store=basic --remote-debugging-port="$chrome_port" \
+    --no-first-run --no-default-browser-check about:blank \
+    >"$SITE_EVIDENCE/chrome-launch.log" 2>&1 &
+  chrome_pid=$!
+  port_file="$profile/DevToolsActivePort"
+  tries=0
+  while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
+    tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
+  done
+  endpoint="http://127.0.0.1:$chrome_port"
+  {
+    printf 'SITE_CHROME_PROFILE=%q\n' "$profile"
+    printf 'SITE_CHROME_PID=%q\n' "$chrome_pid"
+    printf 'SITE_CHROME_ENDPOINT=%q\n' "$endpoint"
+  } >>"$SITE_WINDOW_FILE"
+  chmod 0600 "$SITE_WINDOW_FILE"
+  export CLI_USER_ID SITE_EVIDENCE
+  BU_CDP_URL="$endpoint" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
+import json, os, pathlib, time
+expected_user = "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
+start_workspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+control_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+new_tab("https://commonswarm.com/app")
+wait_for_load()
+def state():
+    return js("""(() => {
+      let userId='';
+      for (const key of Object.keys(localStorage)) {
+        if (!key.startsWith('sb-') || !key.endsWith('-auth-token')) continue;
+        try { const value=JSON.parse(localStorage.getItem(key)); if(value?.user?.id) userId=value.user.id; } catch {}
+      }
+      const selected=document.querySelector('[data-workspace-list] [data-workspace-id][aria-checked="true"]');
+      const workspaces=[...document.querySelectorAll('[data-workspace-list] [data-workspace-id]')];
+      return {userId, selectedWorkspace:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
+        workspaceIds:workspaces.map(item=>item.dataset.workspaceId),
+        display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
+        signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden')};
+    })()""")
+observed=state()
+signin_attempted=False
+if observed.get("signedOut"):
+    signin_attempted=True
+    github=js("""(() => [...document.querySelectorAll('button,a')]
+      .find(node => node.textContent?.trim() === 'Sign in with GitHub')?.click() || false)()""")
+    if github:
+        for _ in range(120):
+            time.sleep(1); observed=state()
+            if observed.get("userId"): break
+challenge=js("/two-factor|2fa|verification code|keychain/i.test(document.body?.innerText||'')")
+if observed.get("signedOut") or challenge:
+    result={"branch":"REDUCED-CONTROL","signin_attempted":signin_attempted,
+      "reason":"signed-out-or-interactive-challenge",
+      "signed_in_connected_apps_load":"NOT PROVED","signed_in_empty_state":"NOT PROVED",
+      "signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED",
+      "mobile_320":"NOT PROVED","mobile_390":"NOT PROVED"}
+else:
+    if observed["display"] != "Ridgeio": raise SystemExit(1)
+    if observed["userId"] != expected_user or observed["userId"] != os.environ["CLI_USER_ID"]: raise SystemExit(1)
+    if observed["selectedWorkspace"] != start_workspace: raise SystemExit(1)
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    switched=js("""(() => { const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      if(!target)return false; target.click(); return true; })()""")
+    if not switched: raise SystemExit(1)
+    for _ in range(60):
+        time.sleep(.5); observed=state()
+        if observed.get("selectedWorkspace")==control_workspace: break
+    if observed.get("selectedWorkspace") != control_workspace: raise SystemExit(1)
+    result={"branch":"FULL-CONTROL","account_label":"Ridgeio",
+      "cli_user_id":expected_user,"web_user_id":expected_user,
+      "start_workspace_id":start_workspace,"control_workspace_id":control_workspace}
+path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site-03-browser-preflight.json"
+path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
 )
 ```
 
-**Evidence:** release name, page hashes, enumerated asset hashes, PASS, and one sanitized probe record per request. Every public request sends and records `User-Agent: commonswarm-release-probe/1.0`; failures record status plus `Server`, `CF-Ray`, and `Content-Type`. A 403 body containing `error code: 1010` is classified as `cloudflare_challenge`. Do not print HTML or built asset bodies: they may contain the configured anon key.
-
-A mismatch is a failed control requiring diagnosis or rollback. Do not dismiss it as caching without measuring the bytes subsequently served to Chrome.
-
-### Anvil’s real-Chrome controls
-
-Use a task-owned tab in a dedicated test-account browser context. Never navigate an existing Tom tab, use Tom’s account, or press the web **Sign out** control; it is global. Close only the task-owned tab/context after verification.
-
-The only workspace permitted is:
-
-**Cold Agent Test — `c2ea0541-f56d-4c73-bf71-56c5405c4934`.**
-
-Connected apps is account-wide, not filtered to the currently selected workspace. Confirm the test owner has no unrelated connections or workspace access before opening it. Selecting Cold Agent Test in Tom’s account would not satisfy this restriction.
-
-Record these controls with UTC time, sanitized screenshots and pass/fail results:
-
-| Control | Required result |
-|---|---|
-| Build loaded | Fresh `/app` navigation loads the asset names established in site-05; no stale-build or failed-asset condition |
-| Identity | Dedicated signed-in test owner; selected workspace is the full Cold Agent Test UUID |
-| Workspace | Feed and roster load; no transport-column, presence or wake-view errors; existing local seats display Local |
-| Connected apps | Open account menu → Connected apps; dialog renders and both owner-view requests succeed |
-| Empty state | Owner with zero connections sees exactly `No apps are connected to this account.` Loading, retry or an error must not be mistaken for empty success |
-| Console | No application console errors or unhandled rejections during load, dialog open/close and responsive controls |
-| 320px | Actual CSS viewport `innerWidth` is 320; header remains one row, with no overlap, clipped controls or horizontal overflow |
-| 390px | Same measurements at actual CSS viewport width 390 |
-| H0 | Existing link-join entry remains available; do not mint a credential merely to inspect it |
-| Carried public pages | Homepage consumer copy, Grok Bot guide/footer link and download version render as inventoried |
-
-For mobile checks, measure the workspace control, mobile view controls and account control in `.dashboard__rail`, including their rectangles and the rail’s height. At both widths they must occupy the same row and remain usable. Capture the signed-in page at rest and after returning the transcript to its initial scroll position.
-
-The source change at `LiveDashboard.astro`’s `@media (max-width: 34rem)` uses `grid-template-columns: minmax(0, 1fr) auto auto`. The CI-GREEN follow-ups correct fixture measurement; they do not substitute for these real-Chrome results. Do not hide real production notices or inject fixture CSS to obtain a pass.
-
-### Revocation acceptance boundary
-
-The source requires an accepted command response and then rereads both owner views:
-
-- A seat receipt requires the reread seat’s `revoked` state.
-- A grant receipt requires the reread connection’s `status === "revoked"`.
-- Missing deny state produces an error rather than a success receipt.
-
-This window’s empty-state control does not exercise those mutations. Do not create a public OAuth connection or revoke an unrelated connection to manufacture evidence. If a separately approved disposable Cold Agent Test fixture is available, its grant must be confined entirely to that workspace, and both successful revocation/readback controls can be recorded under that separate authorization. Otherwise live revoke behavior remains **not established** and the precondition remains open.
-
-## 6. Rollback
-
-Rollback triggers include wrong build bytes, failed signed-in `/app`, owner-view errors, unexpected public connector activation, console failures attributable to the release, or broken mobile header geometry.
-
-HezLead directs rollback; Anvil executes `site-06`. Restore the measured
-previous site release only. Do not roll back HM2 schema or edge code, restart
-services, change Caddy, or change DNS.
-
-Before invoking the block, `previous.release` must identify the measured previous directory and `after.release` the failed new directory. Their existence on the box is checked again. No recursive deletion is used.
+`site-03` validates the build environment and the automatically selected
+browser branch. No bearer is exported from Chrome and no revoke is exercised.
 
 ```sh
-# step: site-06 — Mac mini /bin/bash 3.2; Anvil; atomic rollback on the box
+# step: site-03 — Mac mini /bin/bash 3.2; Anvil; environment and browser-branch validation
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  cd "$SITE_RELEASE_REPO"
+  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  test -f site/.env && test ! -L site/.env
+  test "$(stat -f '%Lp' site/.env)" = 600
+  node deploy/site/validate-site-env.mjs site/.env </dev/null
+  test -f "$SITE_EVIDENCE/site-03-browser-preflight.json"
+  test ! -L "$SITE_EVIDENCE/site-03-browser-preflight.json"
+  test "$(stat -f '%Lp' "$SITE_EVIDENCE/site-03-browser-preflight.json")" = 600
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
+)
+```
+
+### Retention pin
+
+The pin is a metadata-preserving copy named
+`.site-window-pin-$SITE_WINDOW_ID`. The helper's stale selector is
+`"$releases"/*.tmp` (`finalize-release.sh:163`), and its five-release selectors
+are `"$releases"/20??????T??????Z-????????????-????????????????`
+(`finalize-release.sh:190,197`). The hidden pin matches neither. The block
+proves relative paths, types, modes, link targets, and file hashes match before
+the switch.
+
+```sh
+# step: site-03-pin-previous — Mac mini /bin/bash 3.2; Anvil; pin measured rollback tree
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  case "$SITE_WINDOW_ID" in
-    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
-    *) exit 1 ;;
-  esac
-  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
-  previous=$(cat "$SITE_EVIDENCE/previous.release")
-  failed=$(cat "$SITE_EVIDENCE/after.release")
-  for candidate in "$previous" "$failed"; do
-    case "$candidate" in
-      /srv/commonswarm/site/releases/*) ;;
-      *) printf '%s\n' 'STOP: invalid release path' >&2; exit 1 ;;
-    esac
-    case "$candidate" in
-      *[!A-Za-z0-9/._-]*) exit 1 ;;
-    esac
-  done
-  test "$previous" != "$failed"
-
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
-    /bin/bash -s -- "$previous" "$failed" "$SITE_WINDOW_ID" <<'BOX'
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
+    >"$SITE_EVIDENCE/site-03-pin.txt" <<'BOX'
 set -euo pipefail
-previous=$1
-failed=$2
-window_id=$3
+window_id=${1:-}
+case "$window_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+esac
 root=/srv/commonswarm/site
-next="$root/current.next.$window_id"
-test "$(readlink -f "$previous")" = "$previous"
-test "$(readlink -f "$failed")" = "$failed"
-test -f "$previous/app/index.html"
-test "$(readlink -f "$root/current")" = "$failed"
-test ! -e "$next"
-test ! -L "$next"
-ln -s "$previous" "$next"
-mv -Tf "$next" "$root/current"
+previous="$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+pin="$root/releases/.site-window-pin-$window_id"
 test "$(readlink -f "$root/current")" = "$previous"
-date -u '+rollback_at=%Y-%m-%dT%H:%M:%SZ'
-printf 'restored_release=%s\n' "$previous"
-sha256sum "$previous/app/index.html" "$previous/download/index.html"
+test -d "$previous" && test ! -L "$previous"
+test ! -e "$pin" && test ! -L "$pin"
+cp -a --reflink=auto "$previous" "$pin"
+python3 - "$previous" "$pin" <<'PY'
+import hashlib,json,os,pathlib,stat,sys
+def manifest(root):
+    root=pathlib.Path(root); rows=[]
+    for path in sorted(root.rglob("*"),key=lambda item:item.relative_to(root).as_posix()):
+        rel=path.relative_to(root).as_posix(); info=path.lstat(); mode=stat.S_IMODE(info.st_mode)
+        if path.is_symlink(): rows.append((rel,"link",mode,os.readlink(path)))
+        elif path.is_dir(): rows.append((rel,"dir",mode,""))
+        elif path.is_file(): rows.append((rel,"file",mode,hashlib.sha256(path.read_bytes()).hexdigest()))
+        else: raise SystemExit(1)
+    return rows
+left=manifest(sys.argv[1]); right=manifest(sys.argv[2]); assert left==right
+print("pin_manifest_sha256="+hashlib.sha256(json.dumps(left,separators=(",",":")).encode()).hexdigest())
+print("pin_entry_count="+str(len(left)))
+PY
+test -f "$pin/app/index.html"
+printf 'previous_original=%s\nprevious_pin=%s\nPIN=PASS\n' "$previous" "$pin"
 BOX
+  chmod 0600 "$SITE_EVIDENCE/site-03-pin.txt"
+  previous=$(sed -n 's/^previous_original=//p' "$SITE_EVIDENCE/site-03-pin.txt")
+  pin=$(sed -n 's/^previous_pin=//p' "$SITE_EVIDENCE/site-03-pin.txt")
+  test "$previous" = /srv/commonswarm/site/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5
+  test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
+  printf '%s\n' "$previous" >"$SITE_EVIDENCE/previous.original"
+  printf '%s\n' "$pin" >"$SITE_EVIDENCE/previous.release"
+  chmod 0600 "$SITE_EVIDENCE/previous.original" "$SITE_EVIDENCE/previous.release"
 )
 ```
 
-**Evidence:** rollback reason and approval, restored path, timestamp and hashes matching the pre-release record. Recheck public page bytes and signed-in Cold Agent Test loading in Anvil’s Chrome. Do not reuse site-05 unchanged: its assertion deliberately requires the new release.
+### GO and static assertions
 
-The previous release must still exist. The helper’s retention policy is not a guarantee that an arbitrarily old current release survives pruning.
+These are fixed assertions, not window decisions:
 
-## 7. Closure
+- Connected apps exposure with no creation action is accepted for the SHA.
+- Gate, SSH/account, source/base, environment, browser branch, and rollback pin
+  all pass before GO.
+- Deployment approval applies only to the exact release/base pair in `GO.txt`.
+- Every failed post-switch control restores the pin automatically; no rollback
+  approval is requested.
+- A deployment failure is reconciled once; this plan never retries it.
 
-HezLead closes the window only after reviewing:
+```sh
+# step: site-03-go-record — Mac mini /bin/bash 3.2; Anvil; write exact bounded GO
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  : "${SITE_APPROVER:?named input missing}"
+  : "${SITE_PLAN_COMMIT:?named input missing}"
+  : "${SITE_PROMPT_NUMBER:?named input missing}"
+  test "$SITE_APPROVER" = HezLead
+  test "${#SITE_PLAN_COMMIT}" -eq 40
+  case "$SITE_PLAN_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+  case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
+  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
+  grep -qFx 'close=PASS' "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
+  grep -qFx 'PIN=PASS' "$SITE_EVIDENCE/site-03-pin.txt"
+  grep -qFx 'DELETE_GUARDS=PASS' "$SITE_EVIDENCE/site-02-summary.txt"
+  test -f "$SITE_EVIDENCE/site-03-browser-preflight.json"
+  test ! -e "$SITE_EVIDENCE/GO.txt"
+  umask 077
+  {
+    printf 'APPROVER=%s\nPLAN_COMMIT=%s\nSHA=%s\nBASE_SHA=%s\nPROMPT_NUMBER=%s\n' \
+      "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$SITE_BASE_SHA" "$SITE_PROMPT_NUMBER"
+    printf '%s\n' 'HM37_WINDOW_A_LIVE=yes' 'HM37_MCP_DARK=yes'
+    printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-state-only' 'LIVE_REVOKE_CONTROL=HM37_WINDOW_B'
+    jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site-03-browser-preflight.json"
+    printf '%s\n' 'ROLLBACK_PIN=verified' 'All release holds resolved'
+  } >"$SITE_EVIDENCE/GO.txt"
+  chmod 0600 "$SITE_EVIDENCE/GO.txt"
+)
+```
 
-- Exact release SHA and freshly reconciled baseline.
-- Complete carried site inventory and accepted public exposure.
-- Environment validation without values.
-- HM2 and other server dependency evidence.
-- Exact-SHA gate evidence and any explicit exceptions.
-- Deployment status, before/after release paths and public build hashes.
-- Signed-in empty-state, console and both mobile-width controls.
-- Rollback result if invoked.
-- A sanitized evidence manifest containing no credentials, raw HTML, HAR files or private account data.
+## 4. Build, upload, switch, and failure reconciliation
 
-Record each outcome separately: **built**, **uploaded**, **switched**, **public bytes verified**, **browser controls passed**, and **closed**.
+```sh
+# step: site-04 — Mac mini /bin/bash 3.2; Anvil; exact-SHA production deployment
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  cd "$SITE_RELEASE_REPO"
+  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  git diff --exit-code HEAD -- site deploy/site
+  grep -qFx "SHA=$SITE_RELEASE_SHA" "$SITE_EVIDENCE/GO.txt"
+  grep -qFx "BASE_SHA=$SITE_BASE_SHA" "$SITE_EVIDENCE/GO.txt"
+  grep -qFx 'All release holds resolved' "$SITE_EVIDENCE/GO.txt"
+  box_now=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 date -u '+%Y-%m-%dT%H:%M:%SZ')
+  python3 - "$box_now" "$SITE_WINDOW_END_UTC" <<'PY'
+import datetime
+import sys
+now = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
+end = datetime.datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%SZ")
+assert now < end
+PY
+  previous=$(cat "$SITE_EVIDENCE/previous.original")
+  pin=$(cat "$SITE_EVIDENCE/previous.release")
+  test "$previous" = /srv/commonswarm/site/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5
+  test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
+    "test \"\$(readlink -f /srv/commonswarm/site/current)\" = '$previous' && test -f '$pin/app/index.html'"
+  test ! -e "$SITE_EVIDENCE/deploy.log"
+  set +e
+  env -u PUBLIC_SUPABASE_URL -u PUBLIC_SUPABASE_ANON_KEY -u PUBLIC_H0_LINK_JOIN \
+    /bin/sh deploy/site/deploy.sh commonswarm@yulan-vps-1 \
+    >"$SITE_EVIDENCE/deploy.log" 2>&1
+  deploy_status=$?
+  set -e
+  printf 'deploy_exit=%s\n' "$deploy_status" >"$SITE_EVIDENCE/deploy-status.txt"
+  chmod 0600 "$SITE_EVIDENCE/deploy.log" "$SITE_EVIDENCE/deploy-status.txt"
+  set +e
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 'readlink -f /srv/commonswarm/site/current' \
+    >"$SITE_EVIDENCE/after.release"
+  read_status=$?
+  set -e
+  printf 'after_read_exit=%s\n' "$read_status" >>"$SITE_EVIDENCE/deploy-status.txt"
+  chmod 0600 "$SITE_EVIDENCE/after.release"
+  if test "$deploy_status" -ne 0 || test "$read_status" -ne 0; then exit 70; fi
+  after=$(cat "$SITE_EVIDENCE/after.release")
+  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06503564-????????????????) ;; *) exit 1 ;; esac
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "test -f '$pin/app/index.html'"
+  printf '%s\n' 'PIN_AFTER_DEPLOY=PASS' >"$SITE_EVIDENCE/pin-after-deploy.txt"
+  chmod 0600 "$SITE_EVIDENCE/pin-after-deploy.txt"
+)
+```
 
-At preparation time, execution approval, resolution of the deployment-helper deletion conflict, actual live-site baseline, fresh owner preconditions, exact-SHA gate results, deployment and closure are **not established**. This document does not claim public hosted MCP availability or successful OAuth retry deployment.
+Run `site-04-reconcile-failure` only after a nonzero/disconnected `site-04`.
+No switch means failed close with no retry; the exact target current means
+immediate rollback; a third state stops for incident handling.
+
+```sh
+# step: site-04-reconcile-failure — Mac mini /bin/bash 3.2; Anvil; one-shot no-retry reconciliation
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  previous=$(cat "$SITE_EVIDENCE/previous.original")
+  pin=$(cat "$SITE_EVIDENCE/previous.release")
+  current=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 'readlink -f /srv/commonswarm/site/current')
+  if test "$current" = "$previous"; then
+    printf '%s\n' 'DEPLOYMENT=failed-before-switch' 'RETRY=forbidden' \
+      >"$SITE_EVIDENCE/site-04-reconciliation.txt"
+  else
+    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06503564-????????????????) ;; *) exit 1 ;; esac
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
+      >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
+set -euo pipefail
+pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
+test "$pin" = "$root/releases/.site-window-pin-$window_id"
+test -f "$pin/app/index.html"; test "$(readlink -f "$root/current")" = "$failed"
+test ! -e "$next" && test ! -L "$next"
+ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"
+test "$(readlink -f "$root/current")" = "$pin"
+printf 'rollback_reason=deployment-failure-after-switch\nrestored_release=%s\n' "$pin"
+BOX
+    printf '%s\n' 'DEPLOYMENT=failed-after-switch' 'RETRY=forbidden' \
+      >"$SITE_EVIDENCE/site-04-reconciliation.txt"
+  fi
+  chmod 0600 "$SITE_EVIDENCE/site-04-reconciliation.txt"
+  test ! -e "$SITE_EVIDENCE/retry-approved"
+)
+```
+
+## 5. Post-switch controls
+
+Every scripted public request uses `User-Agent:
+commonswarm-release-probe/1.0`. A failed public control automatically restores
+the pin.
+
+```sh
+# step: site-05 — Mac mini /bin/bash 3.2; Anvil; public bytes with automatic rollback
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
+  set +e
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
+    >"$SITE_EVIDENCE/site-05-public.txt" <<'BOX'
+set -euo pipefail
+expected=$1
+python3 - "$expected" <<'PY'
+import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
+UA="commonswarm-release-probe/1.0"; root=pathlib.Path("/srv/commonswarm/site")
+release=(root/"current").resolve(strict=True); assert str(release)==sys.argv[1]
+assert re.fullmatch(r"\d{8}T\d{6}Z-4d6a06503564-[0-9a-f]{16}",release.name)
+def fetch(path,media):
+    request=urllib.request.Request("https://commonswarm.com"+path,headers={
+      "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
+    try: response=urllib.request.urlopen(request,timeout=30)
+    except urllib.error.HTTPError as error: response=error
+    with response:
+        raw=response.read(); record={"url":request.full_url,"status":response.status,"user_agent":UA,
+          "media_type":response.headers.get_content_type(),"server":response.headers.get("Server"),
+          "cf-ray":response.headers.get("CF-Ray")}
+    print("probe="+json.dumps(record,sort_keys=True,separators=(",",":")))
+    assert record["status"]==200 and record["media_type"]==media; return raw
+app=(release/"app/index.html").read_bytes(); assert b"data-connected-apps-open" in app
+assert fetch("/app","text/html")==app
+download=(release/"download/index.html").read_bytes(); assert b"0.1.80" in download
+assert fetch("/download","text/html")==download
+home=fetch("/","text/html"); guide=fetch("/guides/grok-bot","text/html")
+assert b"CommonSwarm" in home and b"cswarm" in guide and b"Grok" in guide
+assets=sorted(set(re.findall(rb'(?:src|href)="(/_astro/[^"]+\.(?:js|css))"',app))); assert assets
+for encoded in assets:
+    path=encoded.decode(); local=(release/path.lstrip("/")).resolve(strict=True); assert release in local.parents
+    data=local.read_bytes(); media="text/css" if path.endswith(".css") else "text/javascript"
+    assert fetch(path,media)==data; print("asset_sha256="+hashlib.sha256(data).hexdigest()+" "+path)
+print("release="+release.name); print("app_sha256="+hashlib.sha256(app).hexdigest())
+print("download_sha256="+hashlib.sha256(download).hexdigest())
+print("PUBLIC_BYTES=PASS user_agent="+UA)
+PY
+BOX
+  control_status=$?
+  set -e
+  chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"
+  if test "$control_status" -ne 0; then
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
+      >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
+set -euo pipefail
+pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
+test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
+test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
+ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$pin"
+printf 'rollback_reason=public-control-failure\nrestored_release=%s\n' "$pin"
+BOX
+    chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$control_status"
+  fi
+)
+```
+
+Full control verifies the signed-in production page, exact owner/workspace,
+release assets, empty Connected apps, no creation action, clean console, and
+320px/390px one-row geometry. Reduced control stays signed out, proves the
+shipped bundle has the surface and no creation action, and records the four
+signed-in claims as `NOT PROVED`. All actions are view-only: do not click a
+revoke control, create action, or Sign out. The full branch switches back to
+the recorded start workspace before it finishes. Failure rolls back
+automatically.
+
+```sh
+# step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome acceptance
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child only for automatic rollback
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  export SITE_EVIDENCE SITE_CHROME_ENDPOINT
+  set +e
+  BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
+import base64,json,os,pathlib,re,time
+expected_user="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"; expected_workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+start_workspace="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
+branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+cdp("Page.addScriptToEvaluateOnNewDocument",source="""
+window.__siteControlErrors=[];
+addEventListener('error',e=>window.__siteControlErrors.push(String(e.message||'error')));
+addEventListener('unhandledrejection',e=>window.__siteControlErrors.push(String(e.reason||'rejection')));
+const originalConsoleError=console.error.bind(console);
+console.error=(...args)=>{window.__siteControlErrors.push('console.error');originalConsoleError(...args)};
+""")
+goto_url("https://commonswarm.com/app?w="+expected_workspace); wait_for_load()
+def inspect():
+    return js("""(() => {
+      let userId=''; for(const key of Object.keys(localStorage)){if(!key.startsWith('sb-')||!key.endsWith('-auth-token'))continue;
+      try{const value=JSON.parse(localStorage.getItem(key));if(value?.user?.id)userId=value.user.id;}catch{}}
+      const selected=document.querySelector('[data-workspace-list] [data-workspace-id][aria-checked="true"]');
+      const dialog=document.querySelector('[data-connected-apps-dialog]');
+      return {userId,workspaceId:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
+      workspaceCount:document.querySelectorAll('[data-workspace-list] [data-workspace-id]').length,
+      display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
+      signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden'),
+      connectedSurface:!!document.querySelector('[data-connected-apps-open]'),
+      connectedCreateAction:!!dialog&&[...dialog.querySelectorAll('button,a')].some(x=>/connect|create|add app/i.test(x.textContent||'')),
+      errors:window.__siteControlErrors||[]};})()""")
+for _ in range(60):
+    observed=inspect()
+    if observed.get("signedOut") or observed.get("workspaceId"): break
+    time.sleep(1)
+if branch=="FULL-CONTROL":
+    if observed["userId"]!=expected_user or observed["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    if observed["display"]!="Ridgeio": raise SystemExit(1)
+    workspace_state=js("""(() => ({
+      feed:!!document.querySelector('[data-feed-list]'),
+      roster:!!document.querySelector('[data-sidebar-participant-list]'),
+      localSeat:/\\bLocal\\b/.test(document.querySelector('[data-sidebar-participant-list]')?.textContent||''),
+      h0:!!document.querySelector('agent-connect [data-h0-link-join]'),
+      workspaceError:!document.querySelector('[data-panel="workspace-error"]')?.hasAttribute('hidden')
+    }))()""")
+    if not workspace_state["feed"] or not workspace_state["roster"] or not workspace_state["localSeat"]:
+        raise SystemExit(1)
+    if not workspace_state["h0"] or workspace_state["workspaceError"]:
+        raise SystemExit(1)
+    asset_paths=[]
+    for line in (evidence/"site-05-public.txt").read_text(encoding="utf-8").splitlines():
+        match=re.match(r"asset_sha256=[0-9a-f]{64} (/_astro/.+)",line)
+        if match: asset_paths.append(match.group(1))
+    loaded=js("performance.getEntriesByType('resource').map(entry => new URL(entry.name).pathname)")
+    if not asset_paths or not all(path in loaded for path in asset_paths): raise SystemExit(1)
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    js("document.querySelector('[data-user-menu-trigger]').click()")
+    js("document.querySelector('[data-connected-apps-open]').click()")
+    empty=""
+    for _ in range(60):
+        empty=js("document.querySelector('[data-connected-apps-list]')?.textContent?.trim()||''")
+        status=js("document.querySelector('[data-connected-apps-status]')?.textContent?.trim()||''")
+        if empty or "Nothing was changed" in status: break
+        time.sleep(.5)
+    if empty!="No apps are connected to this account.": raise SystemExit(1)
+    if js("!document.querySelector('[data-connected-apps-retry]').hidden"): raise SystemExit(1)
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    if inspect()["connectedCreateAction"] or inspect()["errors"]: raise SystemExit(1)
+    dialog_clip=js("""(() => {const r=document.querySelector('[data-connected-apps-dialog]').getBoundingClientRect();
+      return{x:r.x,y:r.y,width:r.width,height:r.height,scale:1};})()""")
+    dialog_png=cdp("Page.captureScreenshot",format="png",fromSurface=True,clip=dialog_clip)["data"]
+    dialog_path=evidence/"site-05-connected-empty.png"; dialog_path.write_bytes(base64.b64decode(dialog_png)); dialog_path.chmod(0o600)
+    geometry={}
+    for width,height in ((320,568),(390,844)):
+        cdp("Emulation.setDeviceMetricsOverride",width=width,height=height,deviceScaleFactor=1,mobile=True); time.sleep(.5)
+        measured=js("""(() => {const rail=document.querySelector('.dashboard__rail');
+        const controls=[document.querySelector('[data-workspace-menu-trigger]'),document.querySelector('[data-workspace-view="signals"]'),
+        document.querySelector('[data-user-menu-trigger]')].filter(Boolean).map(node=>{const r=node.getBoundingClientRect();return{top:r.top,bottom:r.bottom,left:r.left,right:r.right};});
+        return{innerWidth,scrollWidth:document.documentElement.scrollWidth,railHeight:rail?.getBoundingClientRect().height||0,controls};})()""")
+        if measured["innerWidth"]!=width or measured["scrollWidth"]>width or len(measured["controls"])!=3: raise SystemExit(1)
+        tops=[item["top"] for item in measured["controls"]]
+        if max(tops)-min(tops)>2: raise SystemExit(1)
+        geometry[str(width)]=measured
+        rail_height=max(1,min(height,int(measured["railHeight"]+1)))
+        mobile_png=cdp("Page.captureScreenshot",format="png",fromSurface=True,
+          clip={"x":0,"y":0,"width":width,"height":rail_height,"scale":1})["data"]
+        mobile_path=evidence/("site-05-mobile-%s.png"%width)
+        mobile_path.write_bytes(base64.b64decode(mobile_png)); mobile_path.chmod(0o600)
+    cdp("Emulation.clearDeviceMetricsOverride")
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    js("document.querySelector('[data-connected-apps-close]').click()")
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    switched=js("""(() => { const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"]');
+      if(!target)return false; target.click(); return true; })()""")
+    if not switched: raise SystemExit(1)
+    for _ in range(60):
+        time.sleep(.5)
+        if inspect()["workspaceId"]==start_workspace: break
+    if inspect()["workspaceId"]!=start_workspace: raise SystemExit(1)
+    result={"branch":"FULL-CONTROL","identity":"PASS","workspace":expected_workspace,
+      "start_workspace_id":start_workspace,"restored_workspace_id":start_workspace,
+      "assets_loaded":"PASS","feed_roster_local_h0":"PASS","connected_apps_empty_state":"PASS",
+      "connection_creation_action_absent":"PASS","console":"PASS","mobile_geometry":geometry,
+      "screenshots":["site-05-connected-empty.png","site-05-mobile-320.png","site-05-mobile-390.png"]}
+else:
+    if not observed["signedOut"] or not observed["connectedSurface"] or observed["connectedCreateAction"]: raise SystemExit(1)
+    result={"branch":"REDUCED-CONTROL","signed_out_bundle_connected_apps_surface":"PASS",
+      "signed_out_bundle_creation_action_absent":"PASS","signed_in_connected_apps_load":"NOT PROVED",
+      "signed_in_empty_state":"NOT PROVED","signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED"}
+path=evidence/"site-05-browser.json"; path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
+PY
+  browser_status=$?
+  set -e
+  if test "$browser_status" -ne 0; then
+    pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
+      >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
+set -euo pipefail
+pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
+test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
+test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
+ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$pin"
+printf 'rollback_reason=browser-control-failure\nrestored_release=%s\n' "$pin"
+BOX
+    chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$browser_status"
+  fi
+)
+```
+
+## 6. Rollback verification
+
+`site-06` always runs. It records `not-needed`, or verifies pinned baseline
+bytes through the public boundary and rechecks the appropriate browser branch.
+
+```sh
+# step: site-06 — Mac mini /bin/bash 3.2; Anvil; verify automatic rollback or record not-needed
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  if test ! -f "$SITE_EVIDENCE/rollback-auto.txt"; then
+    printf '%s\n' 'rollback=not-needed' >"$SITE_EVIDENCE/site-06-rollback-verify.txt"
+    chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"; exit 0
+  fi
+  pin=$(cat "$SITE_EVIDENCE/previous.release")
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" \
+    >"$SITE_EVIDENCE/site-06-rollback-verify.txt" <<'BOX'
+set -euo pipefail
+pin=$1; test "$(readlink -f /srv/commonswarm/site/current)" = "$pin"
+python3 - "$pin" <<'PY'
+import pathlib,sys,urllib.request
+UA="commonswarm-release-probe/1.0"; release=pathlib.Path(sys.argv[1]); local=(release/"app/index.html").read_bytes()
+request=urllib.request.Request("https://commonswarm.com/app",headers={
+ "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
+with urllib.request.urlopen(request,timeout=30) as response:
+    remote=response.read(); assert response.status==200; assert response.headers.get_content_type()=="text/html"
+assert remote==local; print("ROLLBACK_PUBLIC_BYTES=PASS user_agent="+UA)
+PY
+BOX
+  chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+  export SITE_EVIDENCE
+  BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
+import json,os,pathlib,time
+workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+start="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
+branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+goto_url("https://commonswarm.com/app"); wait_for_load()
+if branch=="FULL-CONTROL":
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    if not js("""(() => {const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    for _ in range(60):
+        selected=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
+        if selected==workspace: break
+        time.sleep(.5)
+    if selected!=workspace: raise SystemExit(1)
+    # Workspace is asserted before this rollback-view control.
+    if js("document.querySelector('[data-rail-account]')?.textContent?.trim()")!="Ridgeio": raise SystemExit(1)
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    if not js("""(() => {const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"]');
+      if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    for _ in range(60):
+        restored=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
+        if restored==start: break
+        time.sleep(.5)
+    if restored!=start: raise SystemExit(1)
+else:
+    if not js("!document.querySelector('[data-panel=\"auth\"]')?.hasAttribute('hidden')"): raise SystemExit(1)
+PY
+)
+```
+
+## 7. Manifest, pin release, and close
+
+Closure is mechanical. It rejects credentials, raw HTML, HAR content, email
+addresses, and private browser state. It records the browser branch. On success
+the pin is guardedly removed. After rollback, `current` first returns to the
+measured normal release name; if retention pruned it, the pin is renamed back.
+The existing Chrome profile and its session are left open and signed in. The
+temporary build `site/.env` is removed at close.
+
+```sh
+# step: site-07-manifest-close — Mac mini /bin/bash 3.2; Anvil; sanitize, release pin, and close
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
+  pin=$(cat "$SITE_EVIDENCE/previous.release"); previous=$(cat "$SITE_EVIDENCE/previous.original")
+  if test -f "$SITE_EVIDENCE/rollback-auto.txt"; then
+    grep -qFx 'ROLLBACK_PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+    outcome=rolled-back
+  elif test -f "$SITE_EVIDENCE/site-04-reconciliation.txt"; then
+    grep -qFx 'DEPLOYMENT=failed-before-switch' "$SITE_EVIDENCE/site-04-reconciliation.txt"; outcome=failed-before-switch
+  else
+    grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-05-public.txt"
+    test -f "$SITE_EVIDENCE/site-05-browser.json"; outcome=released
+  fi
+  python3 - "$SITE_EVIDENCE" <<'PY'
+import hashlib,json,pathlib,re,stat,sys
+root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
+for path in sorted(root.rglob("*")):
+    if path.name=="chrome-launch.log" or path.is_dir(): continue
+    if path.is_symlink() or not path.is_file(): raise SystemExit(1)
+    data=path.read_bytes()
+    if path.suffix.lower() in {".html",".har"}: raise SystemExit(1)
+    if path.suffix.lower() in {".txt",".json",".log",""}:
+        text=data.decode("utf-8"); patterns=(r"Authorization:\s*Bearer",
+          r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",
+          r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",r"<!doctype\s+html|<html[ >]",r'"log"\s*:\s*\{\s*"version"')
+        if any(re.search(pattern,text,re.I) for pattern in patterns): raise SystemExit(1)
+    rows.append({"path":path.relative_to(root).as_posix(),"bytes":len(data),
+      "mode":format(stat.S_IMODE(path.stat().st_mode),"04o"),"sha256":hashlib.sha256(data).hexdigest()})
+if not rows: raise SystemExit(1)
+manifest=root/"manifest.json"; manifest.write_text(json.dumps(rows,sort_keys=True,indent=2)+"\n",encoding="utf-8"); manifest.chmod(0o600)
+PY
+  manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" \
+    >"$SITE_EVIDENCE/site-07-pin-close.txt" <<'BOX'
+set -euo pipefail
+pin=$1; previous=$2; window_id=$3; outcome=$4; root=/srv/commonswarm/site
+test "$pin" = "$root/releases/.site-window-pin-$window_id"
+test "$previous" = "$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+current=$(readlink -f "$root/current")
+if test "$current" = "$pin"; then
+  if test -d "$previous" && test ! -L "$previous"; then target="$previous"
+  else test ! -e "$previous" && test ! -L "$previous"; mv "$pin" "$previous"; target="$previous"; pin=''; fi
+  next="$root/current.next.$window_id.close"; test ! -e "$next" && test ! -L "$next"
+  ln -s "$target" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$target"
+fi
+if test -n "$pin" && test -d "$pin" && test ! -L "$pin"; then
+  python3 - "$pin" "$root/releases" "$window_id" <<'PY'
+import pathlib,shutil,sys
+target=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve(strict=True); window_id=sys.argv[3]
+assert target.name==".site-window-pin-"+window_id and not target.is_symlink()
+resolved=target.resolve(strict=True); assert resolved.parent==root and resolved!=pathlib.Path.home().resolve()
+shutil.rmtree(resolved); assert not target.exists()
+PY
+fi
+rm -f /tmp/commonswarm-site-window.env
+printf 'pin_released=yes\noutcome=%s\n' "$outcome"
+BOX
+  chmod 0600 "$SITE_EVIDENCE/site-07-pin-close.txt"
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  {
+    printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
+    printf 'BROWSER_BRANCH=%s\n' "$branch"
+    if test "$branch" = FULL-CONTROL; then
+      printf '%s\n' \
+        'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
+        'BROWSER_RESTORED_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'NOT_PROVED=[]'
+    else
+      printf '%s\n' \
+        'NOT_PROVED=[signed-in Connected apps load; signed-in empty state; signed-in no-creation-action; signed-in console clean; 320px header; 390px header]'
+    fi
+    printf 'MANIFEST_SHA256=%s\nPIN_RELEASED=yes\nCLOSED_AT=%s\n' \
+      "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$SITE_EVIDENCE/CLOSE.txt"
+  chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
+  python3 - "$SITE_RELEASE_REPO/site/.env" <<'PY'
+import pathlib,sys
+build_env=pathlib.Path(sys.argv[1])
+if build_env.exists(): assert build_env.is_file() and not build_env.is_symlink(); build_env.unlink()
+assert not build_env.exists()
+PY
+  rm -f "$SITE_WINDOW_FILE"
+)
+```
+
+## 8. Gap-to-plan mapping
+
+| Audit item | Resolution |
+|---|---|
+| P2-K1-01 | `site-01`: box-clock start, derived four-hour end and ID. |
+| P2-K1-02 | Named `SITE_EVIDENCE`; `site-01` creates/verifies `0700`. |
+| P2-K1-03 | Named `SITE_RELEASE_REPO`; `site-00-source-checkout` creates/verifies it. |
+| P2-K1-04 | Removed: no browser bearer is exported; controls use the existing site session in Anvil's dedicated Chrome directory. |
+| P2-K2-01 | `site-01` creates the protected evidence directory. |
+| P2-K2-02 | `site-00-source-checkout` creates detached exact-SHA source. |
+| P2-K2-03 | Named `SITE_BUILD_ENV_OP_REFERENCE` and service-account token-file path; `site-00-build-env` creates a private temporary directory, reads with `op read --out-file`, installs and validates the build file, then removes the whole temporary directory. |
+| P2-K2-04 | Browser preflight reads only `user.id` from the persisted site session and never writes a token. |
+| P2-K2-05 | Named `HM37_A_CLOSE_RECEIPT`; `site-00-a-close-ingest` validates/copies the sole A-to-lane-8 handoff. |
+| P2-K2-06 | `site-03-go-record` writes bounded `GO.txt`. |
+| P2-K2-07 | `site-03-pin-previous` creates/proves the retention-proof copy; close releases it. |
+| P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
+| P2-K2-09 | The marked browser steps use only Anvil's dedicated retained Chrome directory and restore its starting workspace. |
+| P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
+| P2-K2-11 | `site-07-manifest-close` scans, hashes, closes, and cleans inputs. |
+| P2-K3-01 | `site-01` produces the evidence directory. |
+| P2-K3-02 | `site-00-source-checkout` produces the checkout. |
+| P2-K3-03 | `site-00-build-env` produces `site/.env`. |
+| P2-K3-04 | Browser preflight selects full or reduced control automatically; reduced control marks signed-in claims `NOT PROVED`. |
+| P2-K3-05 | `site-00-a-close-ingest` copies the Window A close receipt. |
+| P2-K3-06 | `site-03-go-record` produces `GO.txt`. |
+| P2-K3-07 | Pin step produces the rollback path consumed by rollback blocks. |
+| P2-K3-08 | Browser preflight proves Ridgeio and CLI/web user-ID equality, then switches through the normal workspace switcher or enforces reduced control. |
+| P2-K3-09 | Close produces and validates `manifest.json`. |
+| P2-K4-01 | `site-01` proves direct SSH identity and site-root write access. |
+| P2-K4-02 | `site-01` proves box Python/DNS/HTTPS, exact media types and required User-Agent. |
+| P2-K4-03 | Branch selection is automatic from the dedicated Chrome session; 2FA/keychain/sign-in failure selects reduced control. |
+| P2-K5-01 | Named `HM37_A_CLOSE_RECEIPT`; no WINDOW B wait. |
+| P2-K5-02 | Static Connected apps exposure acceptance in GO. |
+| P2-K5-03 | Live revoke moved to HM37 WINDOW B; lane 8 uses empty state only. |
+| P2-K5-04 | Static exact-SHA deletion-guard assertion in `site-02`. |
+| P2-K5-05 | Static hold list consumed by GO; missing evidence stops. |
+| P2-K5-06 | Static exact SHA/base authorization consumed by `site-04`. |
+| P2-K5-07 | Static automatic rollback in both controls and failed-deploy reconciliation. |
+| P2-K5-08 | Static mechanical close after required readbacks. |
+| P2-K6 | Empty by audit. |
+| Pre-seed: start/evidence | `site-01` measures time and creates the named destination. |
+| Pre-seed: checkout/base | Named checkout/base; source and `site-02` prove them. |
+| Pre-seed: `site/.env` | Named 1Password reference and protected service-account token-file path; the build-env step produces its own temporary output path, installs and proves `site/.env`, and clears the temporary directory. |
+| Pre-seed: browser session | K4-8/K4-9 measured the retained dedicated Chrome directory; the live block revalidates it and exports no token. |
+| Pre-seed: `GO.txt` | GO step produces it from approver, plan commit, release SHA and prompt number. |
+
+## 9. Recorded outcomes
+
+`CLOSE.txt` separately records outcome, browser branch, manifest digest, pin
+release, and closure. The evidence set separately records build/upload/switch,
+public bytes, browser controls, and any rollback. A successful site release
+does not claim hosted MCP availability or live revoke behavior; both remain
+WINDOW B work.

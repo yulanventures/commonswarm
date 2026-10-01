@@ -385,6 +385,668 @@
     "exit": 0,
     "output": "edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20\nedge_health=healthy\nstack_current=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f\noauth_current=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05\noauth_container_count=1\noauth_health=healthy\noauth_workdir=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth\nId=commonswarm-edge-recycle.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-backup.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-restore.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
   },
+  "k4": {
+    "recorded_at_utc": "2026-09-29T09:42:29Z",
+    "constraints": {
+      "release_window_opened": false,
+      "box_changes": "none",
+      "account_changes": "none",
+      "signals_or_messages_sent": "none",
+      "github_actions_dispatched": "none",
+      "credential_values_printed": "none",
+      "browser_actions": "one task-owned /app tab opened read-only and closed; no click, login, logout or workspace switch"
+    },
+    "items": [
+      {
+        "id": "K4-1",
+        "status": "MEASURED",
+        "command": "command -v cswarm; cswarm --version",
+        "result": {
+          "path": "/Users/yulanbot/.local/bin/cswarm",
+          "version": "0.1.80",
+          "protocol": "0.1.0"
+        }
+      },
+      {
+        "id": "K4-2",
+        "status": "MEASURED",
+        "command": "cswarm profile ls --json | jq -r '.profiles[] | [.path,(.workspace_id//\"\"),(.principal_id//\"\"),(.principal_name//\"\"),(.url_host//\"\"),(.error//\"\")] | @tsv'",
+        "token_field_precheck": "PASS: recursive object-key inspection exposed no token or credential-value field",
+        "matching_rows": [
+          {
+            "path": "/Users/yulanbot/anvil-work/uat-20260927/seat-b/connect-profile-b.json",
+            "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+            "principal_id": "cee27f94-4231-4a02-934d-5bf08d73ed75",
+            "principal_name": "",
+            "url_host": "api.commonswarm.com",
+            "error": ""
+          }
+        ],
+        "other_row_count": 29
+      },
+      {
+        "id": "K4-3",
+        "status": "NOT MEASURED",
+        "command": "cswarm whoami --profile \"/Users/yulanbot/anvil-work/uat-20260927/seat-b/connect-profile-b.json\" --json | jq '{credential_valid,credential_metadata_match,principal_id,display_name,workspace_id,workspace_name,owner_user_id}'",
+        "reason": "The sole matching profile returned HTTP 403 forbidden, so its credential validity, metadata match, display identity and owner identity were not measurable.",
+        "window_a": {
+          "requirement": "NOT MET",
+          "cli_version_ok": true,
+          "production_host_ok": true,
+          "workspace_id_ok": true,
+          "matching_profile_count": 1,
+          "valid_credential_profile_count": 0,
+          "distinct_verified_principal_count": 0,
+          "sender_profile": null,
+          "receiver_profile": null,
+          "third_seat_profile": null,
+          "note": "Three distinct verified Cold Agent Test seats are required. Only one matching profile exists and its whoami request is forbidden, so no sender, receiver or exclusion-check seat can be assigned safely."
+        }
+      },
+      {
+        "id": "K4-4",
+        "status": "MEASURED",
+        "command": "cswarm status --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq '{user_id:.identity.user_id,workspace_id:.selected_project.workspace_id,workspace_name:.selected_project.name,project_count,warning_codes:[.warnings[]?.code]}'",
+        "human_session_exists": true,
+        "result": {
+          "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+          "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+          "workspace_name": "Cold Agent Test 0.1.12",
+          "project_count": 6,
+          "warning_codes": []
+        }
+      },
+      {
+        "id": "K4-5",
+        "status": "MEASURED",
+        "command": "ssh -o BatchMode=yes commonswarm@yulan-vps-1 'id -un; readlink -f /srv/commonswarm/site/current; test -w /srv/commonswarm/site && echo site_root_writable=yes; test -w /srv/commonswarm/site/releases && echo releases_writable=yes; stat -c \"%n %F %U:%G %a\" /srv/commonswarm/site /srv/commonswarm/site/releases'",
+        "direct_ssh": true,
+        "fallback_via_ops_used": false,
+        "result": {
+          "remote_user": "commonswarm",
+          "site_current": "/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e",
+          "site_root_writable": true,
+          "releases_writable": true,
+          "site_root": "directory commonswarm:commonswarm 755",
+          "releases_root": "directory commonswarm:commonswarm 755"
+        }
+      },
+      {
+        "id": "K4-6",
+        "status": "MEASURED",
+        "command": "ssh -o BatchMode=yes commonswarm@yulan-vps-1 'python3 --version; curl -sS -I --max-time 15 -A commonswarm-release-probe/1.0 -o /dev/null -w \"site_http=%{http_code}\\n\" https://commonswarm.com/app; curl -sS -I --max-time 15 -A commonswarm-release-probe/1.0 -o /dev/null -w \"api_http=%{http_code}\\n\" https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke'",
+        "result": {
+          "python": "3.12.3",
+          "probe_user_agent": "commonswarm-release-probe/1.0",
+          "site_http": 200,
+          "api_http": 200
+        }
+      },
+      {
+        "id": "K4-7",
+        "status": "MEASURED",
+        "command": "Immediate release entries were enumerated with a read-only shell glob and stat; retention was read from deploy/site/finalize-release.sh lines 183-215.",
+        "releases": [
+          {
+            "name": "20260926T032049Z-3ca168761cd5-3b58e64bc00d55dc",
+            "mtime_utc": "2026-09-26 03:20:17.000000000 +0000"
+          },
+          {
+            "name": "20260927T041743Z-21e40223ce7b-961cc6f2ca19e61a",
+            "mtime_utc": "2026-09-27 04:17:43.000000000 +0000"
+          },
+          {
+            "name": "20260927T085803Z-ff27acfbb805-3940c8d1ed9caa99",
+            "mtime_utc": "2026-09-27 08:58:03.000000000 +0000"
+          },
+          {
+            "name": "20260927T135007Z-736bac7a1fb9-2eb0bb6c002fdd19",
+            "mtime_utc": "2026-09-27 13:50:07.000000000 +0000"
+          },
+          {
+            "name": "20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e",
+            "mtime_utc": "2026-09-27 17:39:37.000000000 +0000"
+          }
+        ],
+        "retention": {
+          "keeps_newest": 5,
+          "release_count_now": 5,
+          "release_count_after_one_new": 6,
+          "prune_count_after_one_new": 1,
+          "release_pruned_after_one_new": "20260926T032049Z-3ca168761cd5-3b58e64bc00d55dc",
+          "current_live_release_pruned_after_one_new": false
+        }
+      },
+      {
+        "id": "K4-8",
+        "status": "MEASURED",
+        "command": "browser-harness opened one task-owned background tab at https://commonswarm.com/app and read only source-defined DOM state; no page action was clicked.",
+        "result": {
+          "signed_in": true,
+          "displayed_account": "Ridgeio",
+          "displayed_account_note": "The UI displayed a non-email account label, so there was no email address to mask or record.",
+          "selected_workspace_name": "CICD",
+          "selected_workspace_id": "292be0f9-ca5d-43ed-a6f7-31354fe7fe56",
+          "connected_apps_visible": false,
+          "cold_agent_test_profile_match": false
+        },
+        "note": "The existing Chrome session was not the requested Cold Agent Test account/workspace. It was not signed out, signed in or switched."
+      },
+      {
+        "id": "K4-9",
+        "status": "MEASURED",
+        "recorded_at_utc": "2026-09-29T10:10:58Z",
+        "constraints": {
+          "site_methods": [
+            "GET"
+          ],
+          "browser_started": false,
+          "browser_actions": "none",
+          "login_or_logout": "none",
+          "magic_link_requested": false,
+          "mailbox_opened": false,
+          "onepassword_vault": "Yulan Ventures Infra",
+          "onepassword_auth": "service-account token file",
+          "onepassword_values_printed": false,
+          "secrets_printed": false
+        },
+        "cli_human_session": {
+          "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+          "requested_command": "cswarm status --json | jq -r '.identity.email|split(\"@\")[1]'",
+          "requested_command_observation": "The unscoped status result had no identity object, so the requested jq expression did not produce the domain.",
+          "measured_command": "cswarm status --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -r 'select(.identity.user_id==\"d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc\") | .identity.email | split(\"@\")[1]'",
+          "mail_domain": "ridge.io"
+        },
+        "mailbox": {
+          "mx_command": "dig +short MX ridge.io",
+          "mx": [
+            "1 aspmx.l.google.com",
+            "2 alt1.aspmx.l.google.com",
+            "5 alt2.aspmx.l.google.com",
+            "10 alt3.aspmx.l.google.com",
+            "10 alt4.aspmx.l.google.com"
+          ],
+          "mail_system": "Google Workspace / Gmail",
+          "readable_without_new_login": false,
+          "reason": "gog is installed but its stored-account list contains no ridge.io account; no Gmail connector is available; and the allowed 1Password vault contains no matching owner mailbox/login item. The mailbox was not opened."
+        },
+        "onepassword": {
+          "owner_web_login_items": [],
+          "owner_web_login_item_count": 0,
+          "result": "No item in Yulan Ventures Infra had an owner username marker or a CommonSwarm/GitHub/Google owner-login combination. The two related CommonSwarm OAuth items below are application configuration, not owner login credentials.",
+          "related_nonlogin_items": [
+            {
+              "title": "CommonSwarm Google OAuth client secret",
+              "url_hosts": [],
+              "fields": [
+                {
+                  "name": "password",
+                  "type": "CONCEALED/PASSWORD"
+                },
+                {
+                  "name": "notesPlain",
+                  "type": "STRING/NOTES"
+                },
+                {
+                  "name": "client_id",
+                  "type": "STRING"
+                }
+              ],
+              "totp_or_2fa_field": false
+            },
+            {
+              "title": "CommonSwarm GitHub OAuth app (yulanventures)",
+              "url_hosts": [
+                "api.commonswarm.com"
+              ],
+              "fields": [
+                {
+                  "name": "password",
+                  "type": "CONCEALED/PASSWORD"
+                },
+                {
+                  "name": "notesPlain",
+                  "type": "STRING/NOTES"
+                },
+                {
+                  "name": "client_id",
+                  "type": "STRING"
+                },
+                {
+                  "name": "callback_url",
+                  "type": "STRING"
+                },
+                {
+                  "name": "owner",
+                  "type": "STRING"
+                },
+                {
+                  "name": "created",
+                  "type": "STRING"
+                },
+                {
+                  "name": "usage",
+                  "type": "STRING"
+                }
+              ],
+              "totp_or_2fa_field": false
+            }
+          ]
+        },
+        "recorded_web_session": {
+          "browser": "Google Chrome 153.0.8010.53",
+          "browser_executable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "remote_debugging_port": 9335,
+          "password_store": "basic",
+          "user_data_dir": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome",
+          "profile_path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default",
+          "profile_name": "chartingalpha.com",
+          "signed_in_account_label": "Ridgeio",
+          "owner_email_masked": "to***@ridge.io",
+          "provider": "GitHub",
+          "sign_in_actor": "Anvil",
+          "sign_in_evidence": "Anvil used browser-harness to choose Sign in with GitHub and the existing GitHub session continued as Ridgeio. No magic link was used. The separate Google UAT session was not the owner account and was signed out before Ridgeio was restored through GitHub.",
+          "exists_on_disk": true,
+          "user_data_dir_mtime": "2026-09-27T19:59:33-0500",
+          "profile_mtime": "2026-09-27T19:59:33-0500",
+          "local_storage_evidence": {
+            "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default/Local Storage/leveldb/006852.log",
+            "mtime": "2026-09-27T19:59:33-0500",
+            "commonswarm_host_marker_present": true,
+            "auth_token_key_marker_present": true,
+            "values_read_or_printed": false
+          },
+          "latest_live_verification": "K4-8 measured the same dedicated Chrome session signed in as Ridgeio; its selected workspace was CICD, not Cold Agent Test. No account or workspace action was taken."
+        },
+        "chrome_inventory": {
+          "scope": "Persistent/non-scoped Chrome user-data roots found under the conventional Google path and task-owned Anvil paths. Profile names came from Preferences without starting Chrome.",
+          "user_data_dirs": [
+            {
+              "path": "/Users/yulanbot/Library/Application Support/Google/Chrome",
+              "mtime": "2026-09-29T04:44:08.399967-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-06-11T15:47:24.655447-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 1",
+                  "name": "chartingalpha.com",
+                  "mtime": "2026-09-28T21:46:01.486145-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 2",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T21:49:11.244577-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 3",
+                  "name": "Your Chrome",
+                  "mtime": "2026-05-17T12:21:35.864925-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 4",
+                  "name": "Your Chrome",
+                  "mtime": "2026-07-19T08:48:26.362369-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 5",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-29T05:08:08.361729-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/System Profile",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T08:43:07.465041-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.chrome-agent-profile",
+              "mtime": "2026-09-29T04:49:19.093537-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.chrome-agent-profile/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-29T05:08:20.756580-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/.chrome-agent-profile/System Profile",
+                  "name": "Person 1",
+                  "mtime": "2026-09-07T08:25:56.896765-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome",
+              "mtime": "2026-09-27T19:59:33.316180-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default",
+                  "name": "chartingalpha.com",
+                  "mtime": "2026-09-27T19:59:33.313744-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/cache/scratch/tax-2025/chrome-profile-headed",
+              "mtime": "2026-09-28T08:18:48.851200-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/cache/scratch/tax-2025/chrome-profile-headed/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T08:18:48.862429-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/profiles/anvil/home/.chrome-agent-profile",
+              "mtime": "2026-06-11T15:47:38.822236-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/profiles/anvil/home/.chrome-agent-profile/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-06-11T15:46:38.177024-05:00"
+                }
+              ]
+            }
+          ],
+          "transient_headless_scoped_dirs": {
+            "path_glob": "/Users/yulanbot/Library/Application Support/Google/Chrome-headless/scoped_dir*",
+            "count": 265,
+            "classification": "temporary automatically named Chrome-headless roots, not retained named user profiles",
+            "oldest_mtime_utc": "2026-08-07T21:25:28.186455+00:00",
+            "newest_mtime_utc": "2026-09-26T03:00:04.405458+00:00"
+          }
+        },
+        "signed_out_site_probe": {
+          "url": "https://commonswarm.com/app",
+          "method": "GET",
+          "user_agent": "commonswarm-signin-facts/1.0",
+          "http_status": 200,
+          "buttons": [
+            "Email me a sign-in link",
+            "Sign in with Google",
+            "Sign in with GitHub"
+          ]
+        },
+        "conclusion": {
+          "CAN_SIGN_IN_ALONE": "yes — GitHub SSO using the existing Ridgeio GitHub session in the dedicated Anvil Chrome user-data directory; prior use required no Tom help, 2FA or keychain dialog. This does not establish that a brand-new empty Chrome directory could be bootstrapped.",
+          "EXISTING_TEST_SESSION": "yes — the dedicated Anvil Chrome directory retains CommonSwarm auth storage and K4-8 verified Ridgeio signed in; CICD was selected, but the account owns Cold Agent Test."
+        }
+      },
+      {
+        "id": "K4-10",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "commands": [
+          "stat -c '%n %F %U:%G %a %s' /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "sha256sum /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "A read-only Python indentation parser emitted environment key names only; it never emitted YAML values or file content."
+        ],
+        "result": {
+          "path": "/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "type": "regular file",
+          "owner": "commonswarm:commonswarm",
+          "mode": "644",
+          "size": 648,
+          "sha256": "492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c",
+          "environment_sections": 0,
+          "environment_values_present": false,
+          "environment_key_names": []
+        },
+        "evidence_note": "No environment: values are present by the names-only scan. The file content itself was not printed."
+      },
+      {
+        "id": "K4-10b",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T12:02:58Z",
+        "path": "docs/evidence/2026-09-29-box-facts/k4-10-compose.override.yaml",
+        "sha256": "492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c",
+        "public_repository_review": "CLEAN"
+      },
+      {
+        "id": "K4-11",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "scope": "The active OAuth proof directory plus every immediate *.closed-window-* directory under the stack and edge release-proofs parents; the edge release-proofs parent does not exist.",
+        "search_roots": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05",
+            "exists": true
+          },
+          {
+            "path": "/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+            "exists": true
+          },
+          {
+            "path": "/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020",
+            "exists": true
+          }
+        ],
+        "oauth_image_file_count": 1,
+        "files": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id",
+            "type": "regular file",
+            "owner": "root:root",
+            "mode": "644",
+            "size": 71,
+            "sha256": "4d506fe4168980c14704b9f5b6e123663dbd1a32de1197da8084b1850c5e0383",
+            "last_byte_od": "   a",
+            "last_byte": "a",
+            "newline_terminated": false,
+            "image_id": "sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a"
+          }
+        ],
+        "closed_window_result": "No oauth-image.id file was found in either closed-window proof directory."
+      },
+      {
+        "id": "K4-12",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "parents": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs",
+            "exists": true,
+            "directory_count": 20,
+            "directories": [
+              {
+                "name": "1200ebb19f56b3e154499ebb09963788d10e69ad",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-23T21:53:10Z"
+              },
+              {
+                "name": "30ba33f9202138b3ec59b968b6282cf76d3dc7f3",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-23T04:28:46Z"
+              },
+              {
+                "name": "38343e74cbd51ec1375317fb4770d2522ca09d0b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T08:54:01Z"
+              },
+              {
+                "name": "4ef0f3005a3981941512698a3e1e3e7641773f5b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-25T00:30:14Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T06:50:57Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt1-abort-20260928T035302Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T03:44:11Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt2-abort-20260928T041514Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T04:13:05Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-108d6b89",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T04:56:41Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062737Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T05:57:38Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062815Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T06:27:37Z"
+              },
+              {
+                "name": "826db6a34f235064a3a03c57377d8e32a35d2f05",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T21:11:16Z"
+              },
+              {
+                "name": "9627cb37e697046d22ab02dd2b57bc56937afc14",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-26T21:57:46Z"
+              },
+              {
+                "name": "9b085c82352390cf8f0fe515c02b3ccff423476a",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T18:13:07Z"
+              },
+              {
+                "name": "9fa4217da9f6447e55fb8c6d577b8fd3997f926b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T09:17:49Z"
+              },
+              {
+                "name": "a54afaf696ff16b594fd91ae9a9c93c68398475a",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-26T22:13:29Z"
+              },
+              {
+                "name": "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T13:42:15Z"
+              },
+              {
+                "name": "d4677b0d1c86a6c7247d030a54a1122d6bfd5777",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T04:07:22Z"
+              },
+              {
+                "name": "e7bb7a46b24e7bc794234416d43605bca52b55d4",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T14:13:31Z"
+              },
+              {
+                "name": "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-29T00:30:10Z"
+              },
+              {
+                "name": "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-29T02:29:09Z"
+              }
+            ],
+            "closed_window_names": [
+              "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+              "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020"
+            ]
+          },
+          {
+            "path": "/home/commonswarm/edge/release-proofs",
+            "exists": false,
+            "directory_count": 0,
+            "directories": [],
+            "closed_window_names": []
+          }
+        ]
+      }
+    ],
+    "command_review": {
+      "supplied_commands_changed": [
+        "K4-11: replaced tail -c1 <file> | od -An -c with a bounded Python final-byte read passed to od -An -c. The output is equivalent; the prohibited tail command was not run.",
+        "K4-11 discovery: the first read-only pass considered only OAuth-SHA-prefixed closed-window names. After K4-12 enumerated the parents, discovery was rerun against every immediate *.closed-window-* directory under both release-proofs parents; the final evidence records the broader result."
+      ],
+      "supplied_commands_refused": [],
+      "safety_prechecks_added": [
+        "Before K4-2, recursive JSON object keys were inspected without printing values; no token or credential-value field was present.",
+        "K4-10 parsed only environment key names and emitted no YAML value or file content.",
+        "K4-11 required each artifact to be a bounded regular file inside its proof root and to match the image-ID format before printing the explicitly non-secret image ID."
+      ],
+      "fallbacks": [
+        "K4-5 direct SSH as commonswarm succeeded; the ops sudo fallback was not run."
+      ]
+    },
+    "production_recheck": {
+      "status": "MEASURED",
+      "measured_at_utc": "2026-09-29T11:47:01Z",
+      "edge_current": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+      "edge_state": "running",
+      "edge_health": "healthy",
+      "stack_current": "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+      "stack_containers": {
+        "postgres": "running/healthy",
+        "gotrue": "running/healthy",
+        "postgrest": "running/healthy",
+        "realtime": "running/healthy",
+        "storage-api": "running/healthy"
+      },
+      "oauth_current": "826db6a34f235064a3a03c57377d8e32a35d2f05",
+      "oauth_state": "running",
+      "oauth_health": "healthy",
+      "timers": {
+        "commonswarm-edge-recycle.timer": "active",
+        "commonswarm-postgres-backup.timer": "active",
+        "commonswarm-postgres-restore.timer": "active"
+      }
+    }
+  },
   "measured_count": 18,
   "fact_count": 20
 }

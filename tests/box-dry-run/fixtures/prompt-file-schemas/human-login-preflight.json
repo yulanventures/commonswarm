@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "encoding": "utf8",
+  "content": "result=PASS\nauth_method=1password_service_account\ntarget=https://api.commonswarm.com\nworkspace_id=c2ea0541-f56d-4c73-bf71-56c5405c4934\nworkspace_count=1\nkeychain_dialog=no\ntwo_factor_prompt=no\n"
+}

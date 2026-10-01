@@ -16,6 +16,7 @@ import { test } from "node:test";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
 const PLAN = "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md";
+const PLAN_B = "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md";
 const BASE_REVISION = "b912b349";
 const SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -36,8 +37,12 @@ function extractStep(markdown: string, step: string): string {
 
 function extractVerifier(step: string): string {
   const start = step.indexOf("  prepare_release_directory() {");
-  const end = step.indexOf("\n  for KIND in $KIND_LIST; do", start);
-  assert.ok(start >= 0 && end > start, "release-directory verifier is missing");
+  // The historical verifier is exercised as a failing rollback control too.
+  // Accept its scalar loop and the current guarded array loop, but require a loop.
+  const close = step.indexOf("\n  }\n\n", start);
+  const end = close < 0 ? -1 : close + "\n  }\n".length;
+  const loop = /^\n  for KIND in (?:"\$\{KIND_ARRAY\[@\]\}"|\$KIND_LIST); do/.test(step.slice(end));
+  assert.ok(start >= 0 && end > start && loop, "release-directory verifier is missing");
   return step.slice(start, end) + "\n";
 }
 
@@ -52,6 +57,18 @@ function extractRange(source: string, first: string, last: string): string {
 
 function runShell(script: string) {
   return spawnSync("/bin/bash", ["-c", script], { encoding: "utf8" });
+}
+
+function bindReleaseSha(source: string): string {
+  return source
+    .replace(
+      /\. \/home\/commonswarm\/stack\/release-proofs\/[^/\n]+\/window\.env/,
+      '. "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
+    )
+    .replace(
+      /PROOF_DIR='\/home\/commonswarm\/stack\/release-proofs\/[^'\n]+'/,
+      'PROOF_DIR="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"',
+    );
 }
 
 function commandStubs(callLog: string, user: string, group: string): string {
@@ -111,6 +128,7 @@ function safeRemove(root: string): void {
 test("a rollback leaves release and window state acceptable to the next window", () => {
   const runbook = readFileSync(RUNBOOK, "utf8");
   const plan = readFileSync(PLAN, "utf8");
+  const planB = readFileSync(PLAN_B, "utf8");
   const apply = extractStep(runbook, "1-apply-release-directories");
   const verifier = extractVerifier(apply);
   const move = extractStep(runbook, "runbook-31");
@@ -189,8 +207,8 @@ test("a rollback leaves release and window state acceptable to the next window",
     symlinkSync(release, join(edgeRoot, "current"));
     const rolledBack = runShell([
       commandStubs(callLog, user, group),
-      rollback
-        .replaceAll("<sha>", SHA)
+      `RELEASE_SHA=${shellQuote(SHA)}`,
+      bindReleaseSha(rollback)
         .replaceAll("/home/commonswarm", homePrefix)
         .replaceAll("-o root -g root", `-o ${user} -g ${group}`)
         .replaceAll("root:root:600", `${user}:${group}:600`),
@@ -203,9 +221,9 @@ test("a rollback leaves release and window state acceptable to the next window",
     assert.match(readFileSync(callLog, "utf8"), /curl -fsS/);
 
     const closeOne = runShell(
-      close
-        .replace("<sha>", SHA)
+      [`RELEASE_SHA=${shellQuote(SHA)}`, bindReleaseSha(close)
         .replaceAll("/home/commonswarm", homePrefix),
+      ].join("\n"),
     );
     assert.equal(closeOne.status, 0, closeOne.stderr);
     assert.ok(!runbook.includes("release-proofs/*"));
@@ -247,8 +265,8 @@ test("a rollback leaves release and window state acceptable to the next window",
     assert.notEqual(changedOverride.status, 0, "changed override unexpectedly passed");
     assert.match(changedOverride.stderr, /file hash differs: deploy\/edge-runtime\/compose\.override\.yaml/);
 
-    const input = extractStep(plan, "hm37-hosted-human-session-input");
-    const stage = extractStep(plan, "hm37-hosted-control-stage");
+    const input = extractStep(planB, "hm37-hosted-human-session-input");
+    const stage = extractStep(planB, "hm37-hosted-control-stage");
     assert.match(input, /box-hm37-\$\{WINDOW_ID\}/);
     assert.match(stage, /controls\/\$\{SHA\}-\$\{WINDOW_ID\}/);
     assert.match(stage, /commonswarm-hm37-\$\{WINDOW_ID\}/);
@@ -258,4 +276,16 @@ test("a rollback leaves release and window state acceptable to the next window",
   } finally {
     safeRemove(root);
   }
+});
+
+test("controls: the release verifier extractor refuses a removed apply loop", () => {
+  const apply = extractStep(readFileSync(RUNBOOK, "utf8"), "1-apply-release-directories");
+  assert.ok(extractVerifier(apply).includes("prepare_release_directory()"));
+  // Earlier input guards also iterate KIND_ARRAY. Mutate the loop that calls
+  // this verifier, rather than the first array loop in the apply block.
+  const verifierStart = apply.indexOf("  prepare_release_directory() {");
+  const removed = apply.slice(0, verifierStart) + apply.slice(verifierStart)
+    .replace(/\n  for KIND in "\$\{KIND_ARRAY\[@\]\}"; do/, "\n  # removed apply loop");
+  assert.notEqual(removed, apply, "control did not remove the current loop");
+  assert.throws(() => extractVerifier(removed), /release-directory verifier is missing/);
 });

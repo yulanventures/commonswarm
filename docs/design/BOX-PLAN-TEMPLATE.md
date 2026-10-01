@@ -27,6 +27,12 @@ path or metadata difference stops. Every other window artifact is removed by
 that window's close/rollback or has an approved-window-ID name, and no step may
 list, glob, or select a `<name>.closed-window-<id>` leftover.
 
+An opening check refuses the named `RELEASE_SHA`'s open window and stale proof
+path, including a dangling symlink, and any other currently running window by
+the plan's running-window process marker. Other releases' proof directories are
+historical evidence, not running-window markers; do not require closing, moving,
+or touching them to open the named release.
+
 When a window temporarily installs a host runtime that was absent in the
 measured baseline, pin and verify the downloaded archive before extraction,
 record the installed binary's digest in durable window state, and remove the
@@ -40,6 +46,89 @@ they do not maintain a second fixture-value file. A static agreement control
 checks every fixture string that names a container image, repository path, or
 environment name against repository text or the measurement artifact, and
 must reject a same-shaped invented value.
+
+The honest dry run starts every block shell from an empty environment and may
+pre-seed only cited measured facts or named prompt inputs with fixed synthetic
+values. Stubs return command outputs in measured or source-defined JSON shapes;
+they never return a step result. Execute PREP, every main-window state and exit
+path, each dependent window, and every browser branch in whole-block order.
+`UNPRODUCED` is a dependency defect and the report must be empty. Keep a
+separate non-substitutable list for live database, container, HTTP, browser, and
+CLI behavior that a dry run cannot prove.
+
+Every prompt-input table names the value's format, supplier, and meaning. A
+HezLead-supplied input must be a fact HezLead can write before execution: a SHA,
+a literal, or a path Anvil has already produced. A timestamp, window ID, output
+path, receipt, or other value that only Anvil can produce during the run is
+produced by a marked block and consumed from its guarded state, not requested
+from HezLead. A pre-given rollback approval authorizes only an attempt; the
+rollback block still verifies every live-state and durable-history guard and
+stops before rollback when any guard fails.
+
+An `op://` prompt input is a reference, not a secret. Read it only through the
+noninteractive service-account token-file workflow, never a desktop-app session.
+Use `op read "$REFERENCE" --out-file "$OUTPUT"` with `$OUTPUT` inside a
+mode-`0700` `mktemp -d` directory, keep the output mode `0600`, and remove that
+directory in the same block on success or failure. Never send the retrieved
+value to the terminal, argv, environment, or evidence.
+
+For split windows, persist exactly one receipt at each handoff. The consuming
+open block validates the receipt before any change; no second file, inherited
+variable, profile discovery, or operator branch choice may carry cross-window
+state. Cleanup that owns temporary principals runs on success, rollback,
+pre-commit failure, post-commit control failure, and abort.
+
+Serialize every value written to a file that a later shell sources with Bash
+`printf '%q'`, or single-quote a literal or a value whose validation excludes
+single quotes. Apply the same rule to appended assignments and replacements.
+Double quotes around a writer's argument do not quote the generated assignment:
+`printf '%s\n' "KIND_LIST=$KIND_LIST"` writes an executable `stack` command when
+the value is `edge stack`. Use `printf 'KIND_LIST=%q\n' "$KIND_LIST"` instead.
+
+List prompt inputs remain quoted scalars in sourced state files. Each consuming
+block parses its own array before any array length, iteration, or membership
+check; it never assumes the source file or a previous shell declared an array.
+For a required nonempty list, guard the scalar with `${LIST:?required list missing}`.
+Copy the scalar before clearing the destination array, especially when the scalar
+and array share a name. Split spaces and tabs into lines, then read each token
+with a Bash 3.2-safe guarded loop:
+
+```text
+(
+  set -euo pipefail
+  : "${LIST:?required list missing}"
+  LIST_INPUT="$LIST"
+  ITEMS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then ITEMS[${#ITEMS[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  test -n "${ITEMS[*]:-}"
+)
+```
+
+`IFS=` preserves each token and the guard retains an unterminated final token.
+Array checks compare the parsed entries, rather than require the first entry to
+equal the whole list. Iterate with `"${ITEMS[@]}"` so list entries cannot expand
+as file globs. Keep all count, entry-format, and subset checks. Validate a
+declared empty-list sentinel such as `none` before normalizing it to an empty
+array, and guard empty-array expansions under `set -u` (including on Bash 3.2).
+
+A plan whose opening gate proves a clean release checkout
+(`test -z "$(git status --porcelain)"`) keeps every file the window writes
+outside that checkout. Its open receipt names `EVIDENCE_ROOT`, an absolute Mac
+directory, and `RELEASE_REPO`, the checkout itself; each block that creates the
+evidence directory refuses a path inside the checkout, and the runbook's opening
+block runs in the checkout the receipt names. The window file persists the
+resulting `EVIDENCE_DIR`, and the lead copies the reviewed directory into
+`docs/evidence/` after the window closes. Do not weaken the clean check to make
+room for evidence.
+
+A rollback or abort tail can run before the state it reads exists. Each tail
+block reads a durable file only when it can prove from what remains that an
+earlier step produced it, and says what it skipped. A missing file that an
+earlier step must have produced is a stop, not a skip: for example, the Mac
+copy-back block skips only when the open receipt exists and no per-window box
+input was written, and stops when the window file is gone but that input exists.
 
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either

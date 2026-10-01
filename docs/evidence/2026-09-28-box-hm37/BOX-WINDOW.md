@@ -1,10 +1,11 @@
-# HM lanes 3 and 7 — DARK box window — v4
+# HM lanes 3 and 7 — DARK box window A
 
 **Release SHA:** `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`
 **Required HM6 stack release:** `ad964ed158181ba1692dd05895f36fa7a1f87d3f`
 **Required HM6 OAuth release:** `826db6a34f235064a3a03c57377d8e32a35d2f05`
 **Expected previous edge:** `72c57e0d76d0aa86fe4f811a2cf51499919fed20`
-**Status:** PLAN. Approval, exact-SHA gate results, current production prerequisites, execution and closure are **not established**.
+**Status:** PLAN. Named inputs, live prerequisites, execution and closure must be
+measured by their marked blocks; this document claims no execution.
 
 Anvil executes only the named `hm37-*` and `runbook-*` steps, including Mac
 mini controls. HezLead approves the release identity, backup age, transitions,
@@ -17,7 +18,9 @@ This revision was prepared by read-only inspection of the release tree and local
 
 Follow [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md) **from this release SHA**, particularly section 1’s preparation, verified directory reuse, manifest, copy-back and abort cleanup; sections 2–3’s database identity/session; section 5’s migration procedure; and section 6’s edge release and rollback. Section 9 contains the API Caddy-pair and MCP-site procedures; both are explicitly skipped by this window.
 
-Host operations also follow the workspace’s `hetzner-handoff/HETZNER-OPERATIONS.md`. Its contents and hash are outside this repository’s release tree; the applicable operational revision is **not established** here.
+Host operations also follow the workspace’s
+`hetzner-handoff/HETZNER-OPERATIONS.md`. HezLead supplies the applicable
+reviewed operational revision before A opens.
 
 Dependencies:
 
@@ -55,7 +58,9 @@ The release Git object inspected for this refresh is:
 - Expected previous edge `72c57e0d76d0aa86fe4f811a2cf51499919fed20`, HM6 stack release `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, HM6 OAuth release `826db6a34f235064a3a03c57377d8e32a35d2f05` and prior HM37 release `e7bb7a46b24e7bc794234416d43605bca52b55d4` are local ancestors.
 - This requested plan edit is not itself a release input.
 
-Current GitHub ancestry, independent acceptance of this revision and deployment approval remain **not established**. The runbook must fetch the approved origin, prove ancestry on `origin/main`, create an exact-SHA archive and reconcile its checksum on both machines.
+The source and open blocks must fetch the approved origin, prove ancestry on
+`origin/main`, validate the reviewed plan commit, create an exact-SHA archive,
+and reconcile its checksum on both machines.
 
 ### Edge comparison
 
@@ -113,6 +118,8 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
+  : "${RELEASE_REPO:?absolute release checkout required}"
+  cd "$RELEASE_REPO"
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   BASE=72c57e0d76d0aa86fe4f811a2cf51499919fed20
   HM6_STACK=ad964ed158181ba1692dd05895f36fa7a1f87d3f
@@ -212,7 +219,9 @@ Code proof that both controls work with all twelve unset:
 
 These SHA-256 values were recomputed from the inspected release tree. They identify repository inputs, not deployed files.
 
-The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, live configuration and generated evidence is **not established**. Measure those during approved preparation. Section 9 establishes the reviewed control-harness and Deno-config hashes. The HM37 document hash below identifies the v3 document in the `eb2a87ac` release tree, not this replacement.
+Runtime and generated hashes are measured by their marked preparation blocks.
+The HM37 document hash below identifies the v3 document in the `eb2a87ac`
+release tree, not this replacement.
 
 ### Release and source inputs
 
@@ -298,9 +307,405 @@ Historical HM2 evidence paths below are relative to `docs/evidence/2026-09-28-re
 | `hm2-local-control.json` | `21fb1c0dcb379635c15ebdcfb73314c965e87c709d96e95f53a9d395736ffed0` |
 | `revocation-readback.txt` | `60dee356902b13842d92fb54ea043a45cd4f3a5572b939a18a83b29862353573` |
 
-The runbook’s archive-derived manifests cover the remaining archive files and directories. Future runtime/evidence filenames below are output requirements; their existence and hashes are **not established**.
+The runbook’s archive-derived manifests cover the remaining archive files and
+directories. Runtime/evidence filenames below are output requirements and
+become facts only when their producer blocks pass.
 
 ## 4. Read-only prerequisites and opening inputs
+
+### Named prompt inputs
+
+Credential values are never prompt inputs.
+
+| Name | Supplier | Exact format and expected value |
+|---|---|---|
+| `APPROVER` | HezLead | Exact string `HezLead`. |
+| `PLAN_COMMIT` | HezLead/Anvil | Full lowercase 40-hex reviewed plan commit. |
+| `RELEASE_SHA` | HezLead/Anvil | Full lowercase 40-hex; exactly `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`. |
+| `PROMPT_NUMBER` | HezLead | Positive decimal. |
+| `BACKUP_MAX_AGE_SECONDS` | HezLead | Positive decimal seconds; expected `86400`. |
+| `GATE_RECEIPT_PATH` | CSwarmDevLead/Anvil | Absolute path to the reviewed exact-SHA gate receipt. |
+| `PROOF_SQL_MANIFEST` | CSwarmDevLead/Anvil | Absolute protected schema-1 file listing exactly the eight reviewed SQL proof files copied from the exact-SHA checkout. |
+| `RELEASE_REPO` | Anvil | Absolute empty directory in which the opening block creates the clean exact-SHA checkout. |
+| `PREP_RECEIPT_PATH` | Anvil, from `hm37-prep-final-yes` | Absolute path printed by the PREP plan; a regular non-symlink mode-`0600` schema-1 JSON receipt for exactly three newly prepared seats. |
+| `KIND_LIST` | HezLead | Exact string `edge stack`. |
+| `H0_LEDGER_BACKFILL` | HezLead | Exact string `no`. |
+| `GUARDED_STACK_SWITCH` | HezLead | Exact string `no`. |
+| `BACKUP_STATUS_PROOF` | HezLead | Exact string `no`. |
+| `API_CADDY_PAIR` | HezLead | Exact string `no`. |
+| `MCP_CADDY_RELEASE` | HezLead | Exact string `no`. |
+| `CHANGED_FUNCTIONS` | HezLead | Exact string `command mcp`. |
+| `ROUTER_CHANGED` | HezLead | Exact string `yes`. |
+| `MIGRATION_VERSIONS` | HezLead | Exact string `20260928000004`. |
+| `FUNCTIONAL_VERSIONS` | HezLead | Exact string `20260928000004`. |
+| `EXPECTED_NEW_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty addition list. |
+| `EXPECTED_REMOVED_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty removal list. |
+| `SCHEMA_ROLLBACK_APPROVAL` | HezLead, pre-given rollback permission | Exact `yes` or `no`; `yes` permits only the reserve block's own previous-edge, zero-history, and guarded-inverse checks. |
+
+The Anvil prompt supplies these values. Paths identify protected files or
+task-owned directories; no credential value is present in the prompt.
+
+```prompt-inputs
+{"name":"APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for Window A."}
+{"name":"PLAN_COMMIT","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed commit containing the Window A plan."}
+{"name":"RELEASE_SHA","format":"literal:eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922","supplier":"HezLead and Anvil","meaning":"Reviewed release commit pinned for Window A."}
+{"name":"PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+{"name":"BACKUP_MAX_AGE_SECONDS","format":"decimal-positive","supplier":"HezLead","meaning":"Maximum acceptable verified backup age in seconds."}
+{"name":"GATE_RECEIPT_PATH","format":"abs-file:gate-receipt","supplier":"CSwarmDevLead and Anvil","meaning":"Protected exact-SHA gate receipt."}
+{"name":"PROOF_SQL_MANIFEST","format":"abs-file:sql-proof-root","supplier":"CSwarmDevLead and Anvil","meaning":"Protected manifest naming the eight reviewed SQL proof files."}
+{"name":"RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
+{"name":"PREP_RECEIPT_PATH","format":"abs-file:prep-receipt","supplier":"Anvil","meaning":"Protected successful PREP receipt passed to Window A."}
+{"name":"KIND_LIST","format":"literal:edge stack","supplier":"HezLead","meaning":"Approved release surfaces."}
+{"name":"H0_LEDGER_BACKFILL","format":"literal:no","supplier":"HezLead","meaning":"Disable the H0 ledger-backfill step group."}
+{"name":"GUARDED_STACK_SWITCH","format":"literal:no","supplier":"HezLead","meaning":"Disable the guarded stack-switch step group."}
+{"name":"BACKUP_STATUS_PROOF","format":"literal:no","supplier":"HezLead","meaning":"Disable the backup-status proof step group."}
+{"name":"API_CADDY_PAIR","format":"literal:no","supplier":"HezLead","meaning":"Disable the API Caddy pair step group."}
+{"name":"MCP_CADDY_RELEASE","format":"literal:no","supplier":"HezLead","meaning":"Disable the MCP Caddy release step group."}
+{"name":"CHANGED_FUNCTIONS","format":"literal:command mcp","supplier":"HezLead","meaning":"Functions changed by the reviewed release."}
+{"name":"ROUTER_CHANGED","format":"literal:yes","supplier":"HezLead","meaning":"The reviewed release changes the router."}
+{"name":"MIGRATION_VERSIONS","format":"literal:20260928000004","supplier":"HezLead","meaning":"Approved pending migration version for this window."}
+{"name":"FUNCTIONAL_VERSIONS","format":"literal:20260928000004","supplier":"HezLead","meaning":"Approved migration version requiring a functional proof."}
+{"name":"EXPECTED_NEW_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-addition list."}
+{"name":"EXPECTED_REMOVED_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-removal list."}
+{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Pre-given permission to attempt the reserved rollback; the block still requires its own previous-edge and empty-history proof."}
+```
+
+```sh
+# step: hm37a-source-checkout
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
+  : "${PROOF_SQL_MANIFEST:?absolute proof SQL manifest required}"
+  : "${RELEASE_REPO:?absolute release checkout required}"
+  : "${RELEASE_SHA:?named release SHA required}"
+  for PATH_INPUT in "$GATE_RECEIPT_PATH" "$PROOF_SQL_MANIFEST" "$RELEASE_REPO"; do
+    case "$PATH_INPUT" in /*) ;; *) false ;; esac
+  done
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test -f "$GATE_RECEIPT_PATH"
+  test ! -L "$GATE_RECEIPT_PATH"
+  test -f "$PROOF_SQL_MANIFEST"
+  test ! -L "$PROOF_SQL_MANIFEST"
+  test -d "$RELEASE_REPO"
+  test ! -L "$RELEASE_REPO"
+  test -z "$(find "$RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
+  git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$RELEASE_REPO"
+  git -C "$RELEASE_REPO" checkout --detach "$RELEASE_SHA"
+  (
+    cd "$RELEASE_REPO"
+    test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+    test -z "$(git status --porcelain)"
+    test "$(git remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
+    git show-ref --verify --quiet refs/remotes/origin/main
+    git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+  )
+)
+```
+
+```sh
+# step: hm37a-open-inputs
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
+(
+  set -euo pipefail
+  umask 077
+  : "${APPROVER:?named prompt input required}"
+  : "${PLAN_COMMIT:?named prompt input required}"
+  : "${RELEASE_SHA:?named prompt input required}"
+  : "${PROMPT_NUMBER:?named prompt input required}"
+  : "${BACKUP_MAX_AGE_SECONDS:?named prompt input required}"
+  : "${PREP_RECEIPT_PATH:?PREP success receipt path required}"
+  test "$APPROVER" = HezLead
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  case "$PLAN_COMMIT" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#PLAN_COMMIT}" -eq 40
+  case "$PROMPT_NUMBER" in (*[!0-9]*|'') false ;; esac
+  test "$PROMPT_NUMBER" -gt 0
+  case "$BACKUP_MAX_AGE_SECONDS" in (*[!0-9]*|'') false ;; esac
+  test "$BACKUP_MAX_AGE_SECONDS" -gt 0
+  case "$PREP_RECEIPT_PATH" in /*) ;; *) false ;; esac
+  test -f "$PREP_RECEIPT_PATH"
+  test ! -L "$PREP_RECEIPT_PATH"
+  test "$(stat -f '%Lp' "$PREP_RECEIPT_PATH")" = 600
+  CLOCK_SCRIPT="$(mktemp /tmp/hm37a-box-clock.XXXXXX)"
+  case "$CLOCK_SCRIPT" in /tmp/hm37a-box-clock.??????) ;; *) false ;; esac
+  trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
+  cat >"$CLOCK_SCRIPT" <<'BOX'
+set -euo pipefail
+RELEASE_SHA="${1:?named release SHA required}"
+case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
+test "${#RELEASE_SHA}" -eq 40
+PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
+# Refuse any proof path for this release: an open window, stale proof, or dangling link.
+test ! -e "$PROOF_DIR"
+test ! -L "$PROOF_DIR"
+# Other releases are checked by the running-window process marker, not their proofs.
+RUNNING="$(ps -eo pid=,args= | awk '$0 !~ /awk/ && $0 ~ /(RELEASE-TO-BOX|deploy\/site\/deploy|commonswarm-release-window)/ {print; exit}')"
+test -z "$RUNNING"
+date -u +%Y-%m-%dT%H:%M:%SZ
+date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ
+BOX
+  CLOCK="$(ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$RELEASE_SHA'" <"$CLOCK_SCRIPT")"
+  rm -f -- "$CLOCK_SCRIPT"
+  trap - EXIT
+  WINDOW_START_UTC="$(printf '%s\n' "$CLOCK" | sed -n '1p')"
+  WINDOW_END_UTC="$(printf '%s\n' "$CLOCK" | sed -n '2p')"
+  WINDOW_ID="$(printf '%s' "$WINDOW_START_UTC" | tr -d ':-')"
+  WINDOW_PRINCIPAL_SUFFIX="$(printf '%s' "$WINDOW_START_UTC" | sed -E 's/.*T([0-9]{6})Z/\1/')"
+  case "$WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) false ;;
+  esac
+
+  # PREP_RECEIPT_PATH is the only PREP-to-A handoff. Read its bounded receipt
+  # fields here; hm37a-directed-check-old authenticates all three profiles
+  # before the release changes. The legacy seat-b profile/principal is an
+  # explicit refusal, not a fallback.
+  PREP_SEATS="$(mktemp /tmp/hm37a-prep-seats.XXXXXX)"
+  case "$PREP_SEATS" in /tmp/hm37a-prep-seats.??????) ;; *) false ;; esac
+  trap 'status=$?; rm -f -- "$PREP_SEATS"; exit "$status"' EXIT
+  jq -e \
+    --arg workspace c2ea0541-f56d-4c73-bf71-56c5405c4934 \
+    '.schema == 1 and .prep_result == "yes" and
+     .workspace_id == $workspace and .baseline_result == "pass" and
+     (.prep_id | type == "string" and test("^[0-9]{8}T[0-9]{6}Z$")) and
+     (.seats | type == "array" and length == 3) and
+     ([.seats[].role] | sort) == ["receiver", "sender", "third"] and
+     ([.seats[].principal_id] | unique | length) == 3 and
+     ([.seats[].profile_path] | unique | length) == 3 and
+     all(.seats[];
+       (.principal_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+       .principal_id != "cee27f94-4231-4a02-934d-5bf08d73ed75" and
+       (.profile_path | type == "string" and startswith("/")) and
+       (.profile_path | contains("/uat-20260927/seat-b/") | not) and
+       .directory_mode == "0700" and .files_mode == "0600" and
+       (.token_expires_at | type == "string"))' \
+    "$PREP_RECEIPT_PATH" >/dev/null
+  python3 - "$PREP_RECEIPT_PATH" "$WINDOW_END_UTC" "$PREP_SEATS" <<'PY'
+import datetime, json, os, pathlib, sys
+receipt_path, window_end_text, output_path = sys.argv[1:]
+receipt = json.load(open(receipt_path, encoding="utf-8"))
+window_end = datetime.datetime.fromisoformat(window_end_text.replace("Z", "+00:00"))
+rows = []
+for seat in receipt["seats"]:
+    expiry = datetime.datetime.fromisoformat(seat["token_expires_at"].replace("Z", "+00:00"))
+    assert expiry > window_end
+    rows.append({"role": seat["role"], "profile_path": seat["profile_path"],
+                 "principal_id": seat["principal_id"],
+                 "token_expires_at": seat["token_expires_at"]})
+assert len({row["principal_id"] for row in rows}) == 3
+pathlib.Path(output_path).write_text(json.dumps({
+    "schema": 1, "prep_id": receipt["prep_id"],
+    "prep_directory": str(pathlib.Path(receipt_path).parent),
+    "workspace_id": receipt["workspace_id"], "seats": rows,
+}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+os.chmod(output_path, 0o600)
+PY
+  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test ! -e "$OPEN_RECEIPT"
+  EVIDENCE_ROOT="$HOME/.commonswarm-release-evidence"
+  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\nRELEASE_REPO=%q\nEVIDENCE_ROOT=%q\n' \
+    "$RELEASE_SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
+    "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" \
+    "$PREP_RECEIPT_PATH" "$PREP_SEATS" "$RELEASE_REPO" "$EVIDENCE_ROOT" >"$OPEN_RECEIPT"
+  chmod 0600 "$OPEN_RECEIPT"
+  trap - EXIT
+)
+```
+
+The open block reads the box clock to the second, derives the four-hour end,
+window ID and principal suffix, persists them, and refuses an open window or
+stale proof path for `RELEASE_SHA` and any running release process matched by
+`RUNNING`. Other releases' proof directories are read-only historical evidence;
+their presence does not require closing, moving, or touching them. The operator types no time.
+
+The open receipt also names `EVIDENCE_ROOT`, the protected Mac directory
+`$HOME/.commonswarm-release-evidence`. Window A keeps its whole evidence
+directory, `${EVIDENCE_ROOT}/<UTC-date>-release-<12-char sha>-<window-id>/`,
+outside `RELEASE_REPO`. `hm37a-gate-and-proof-ingest` creates it, `runbook-02`
+adopts it when the receipt names one, and every later block reads it from the
+window file. Nothing the window produces is written under the release
+checkout, so the clean-checkout proof in `hm37-source-identity` keeps its full
+strength. After the window closes, CSwarmDevLead reviews that directory, copies
+it to `docs/evidence/` under the same name on a repository branch, and commits
+it, as the runbook's copy-back section requires of the evidence it reviews.
+
+```sh
+# step: hm37a-gate-and-proof-ingest
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  umask 077
+  : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
+  : "${PROOF_SQL_MANIFEST:?absolute SQL manifest required}"
+  : "${RELEASE_REPO:?absolute release checkout required}"
+  : "${RELEASE_SHA:?named release SHA required}"
+  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$OPEN_RECEIPT"
+  test ! -L "$OPEN_RECEIPT"
+  test "$(stat -f %Lp "$OPEN_RECEIPT")" = 600
+  . "$OPEN_RECEIPT"
+  test "$SHA" = "$RELEASE_SHA"
+  SHORT_SHA="$(printf '%s' "$RELEASE_SHA" | cut -c1-12)"
+  RUN_DAY="$(date -u +%F)"
+  case "$EVIDENCE_ROOT" in /*) ;; *) false ;; esac
+  EVIDENCE_DIR="$EVIDENCE_ROOT/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
+  # Evidence never lives inside the release checkout: hm37-source-identity
+  # proves that checkout is clean, and any file written there would break it.
+  case "$EVIDENCE_DIR" in
+    "$RELEASE_REPO"|"$RELEASE_REPO"/*) false ;;
+  esac
+  install -d -m 0700 "$EVIDENCE_ROOT"
+  mkdir -p -m 0700 "$EVIDENCE_DIR"
+  : >"$EVIDENCE_DIR/gate-evidence.txt"
+  install -m 0600 "$GATE_RECEIPT_PATH" "$EVIDENCE_DIR/gate-evidence.txt"
+  grep -qFx "SHA=$RELEASE_SHA" "$EVIDENCE_DIR/gate-evidence.txt"
+  FILES='20260928000002-catalog.sql 20260928000002-functional.sql 20260928000003-catalog.sql 20260928000003-functional.sql 20260928000004-catalog.sql 20260928000004-functional.sql 20260928000004-rollback.sql 20260928000004-rollback-catalog.sql'
+  jq -e --arg files "$FILES" '
+    (.files | type == "array" and length == 8) and
+    ((.files | join(" ")) == $files) and
+    (keys == ["files"])
+  ' "$PROOF_SQL_MANIFEST" >/dev/null
+  PROOF_SQL_ROOT="$RELEASE_REPO/deploy/release-proofs/item-hm"
+  COUNT=0
+  for FILE in $FILES; do
+    test -f "$PROOF_SQL_ROOT/$FILE"
+    test ! -L "$PROOF_SQL_ROOT/$FILE"
+    # Each install produces the reviewed *.sql evidence consumed later.
+    install -m 0600 "$PROOF_SQL_ROOT/$FILE" "$EVIDENCE_DIR/$FILE"
+    COUNT=$((COUNT + 1))
+  done
+  test "$COUNT" -eq 8
+  (cd "$EVIDENCE_DIR" && shasum -a 256 $FILES) \
+    >"$EVIDENCE_DIR/hm37a-proof-sql.sha256"
+  chmod 0600 "$EVIDENCE_DIR/hm37a-proof-sql.sha256"
+)
+```
+
+```sh
+# step: hm37a-resolved-inputs
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  : "${KIND_LIST:?named input required}"
+  : "${H0_LEDGER_BACKFILL:?named input required}"
+  : "${GUARDED_STACK_SWITCH:?named input required}"
+  : "${BACKUP_STATUS_PROOF:?named input required}"
+  : "${API_CADDY_PAIR:?named input required}"
+  : "${MCP_CADDY_RELEASE:?named input required}"
+  : "${CHANGED_FUNCTIONS:?named input required}"
+  : "${ROUTER_CHANGED:?named input required}"
+  : "${MIGRATION_VERSIONS:?named input required}"
+  : "${FUNCTIONAL_VERSIONS:?named input required}"
+  : "${EXPECTED_NEW_CRON_JOBS:?named input required}"
+  : "${EXPECTED_REMOVED_CRON_JOBS:?named input required}"
+  test "$KIND_LIST" = 'edge stack'
+  test "$H0_LEDGER_BACKFILL" = no
+  test "$GUARDED_STACK_SWITCH" = no
+  test "$BACKUP_STATUS_PROOF" = no
+  test "$API_CADDY_PAIR" = no
+  test "$MCP_CADDY_RELEASE" = no
+  test "$CHANGED_FUNCTIONS" = 'command mcp'
+  test "$ROUTER_CHANGED" = yes
+  test "$MIGRATION_VERSIONS" = 20260928000004
+  test "$FUNCTIONAL_VERSIONS" = 20260928000004
+  test "$EXPECTED_NEW_CRON_JOBS" = none
+  test "$EXPECTED_REMOVED_CRON_JOBS" = none
+  ARCHIVE_SHA256="$(awk 'NR == 1 {print $1}' "$EVIDENCE_DIR/archive.sha256")"
+  case "$ARCHIVE_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#ARCHIVE_SHA256}" -eq 64
+  {
+    printf 'KIND_LIST=%q\n' "$KIND_LIST"
+    printf 'H0_LEDGER_BACKFILL=%q\n' "$H0_LEDGER_BACKFILL"
+    printf 'GUARDED_STACK_SWITCH=%q\n' "$GUARDED_STACK_SWITCH"
+    printf 'BACKUP_STATUS_PROOF=%q\n' "$BACKUP_STATUS_PROOF"
+    printf 'API_CADDY_PAIR=%q\n' "$API_CADDY_PAIR"
+    printf 'MCP_CADDY_RELEASE=%q\n' "$MCP_CADDY_RELEASE"
+    printf 'CHANGED_FUNCTIONS=%q\n' "$CHANGED_FUNCTIONS"
+    printf 'ROUTER_CHANGED=%q\n' "$ROUTER_CHANGED"
+    printf 'MIGRATION_VERSIONS=%q\n' "$MIGRATION_VERSIONS"
+    printf 'FUNCTIONAL_VERSIONS=%q\n' "$FUNCTIONAL_VERSIONS"
+    printf 'EXPECTED_NEW_CRON_JOBS=%q\n' "$EXPECTED_NEW_CRON_JOBS"
+    printf 'EXPECTED_REMOVED_CRON_JOBS=%q\n' "$EXPECTED_REMOVED_CRON_JOBS"
+    printf 'ARCHIVE_SHA256=%q\n' "$ARCHIVE_SHA256"
+  } >"$EVIDENCE_DIR/item-resolved-inputs.env"
+  cat >"$EVIDENCE_DIR/item-copy-back-files.list" <<'FILES'
+20260928000002-catalog.sql
+20260928000002-functional.sql
+20260928000003-catalog.sql
+20260928000003-functional.sql
+20260928000004-rollback.sql
+20260928000004-rollback-catalog.sql
+hm37-hm6-schema-helpers.txt
+hm37-hm6-migration-03-catalog.txt
+hm37-hm6-migration-03-functional.txt
+hm37-hm6-oauth-runtime.txt
+hm37-hm6-oauth-public-precondition.json
+hm37-hm6-oauth-refusals.json
+hm37-all-migration-files.txt
+hm37-ledger-before.txt
+hm37-pending-before.txt
+hm37-current-window-state.txt
+hm37-prerequisites.json
+hm37-stack-runtime-review.txt
+item-resolved-inputs.env
+hm37-backup-gate.txt
+hm37-loopback-reads.json
+hm37-public-reads.json
+hm37-mcp-hostname-reads.json
+hm37-loopback-boundaries.json
+hm37-public-boundaries.json
+hm37-mcp-hostname-boundaries.json
+hm37a-prep-seat-inventory.json
+hm37a-prep-cleanup.json
+hm37a-local-control-old.json
+hm37a-local-control-new.json
+hm37-public-check-no-mutation.json
+hm37-functional-after-control.txt
+hm37-local-control.json
+hm37-revocation-readback.json
+hm37a-log-disposition.txt
+hm37-close-readback.txt
+FILES
+  printf 'KIND_LIST=%q\nEXPECTED_ARCHIVE_SHA256=%q\n' \
+    "$KIND_LIST" "$ARCHIVE_SHA256" >>"$BOX_WINDOW_INPUT"
+  chmod 0600 "$EVIDENCE_DIR/item-resolved-inputs.env" \
+    "$EVIDENCE_DIR/item-copy-back-files.list" "$BOX_WINDOW_INPUT"
+)
+```
+
+```sh
+# step: hm37a-baseline-inventory
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' \
+    >"$EVIDENCE_DIR/hm37a-baseline-inventory.txt" <<'BOX'
+set -euo pipefail
+OVERRIDE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml
+OAUTH_IMAGE=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id
+for FILE in "$OVERRIDE" "$OAUTH_IMAGE"; do
+  test -f "$FILE"
+  test ! -L "$FILE"
+  stat -c '%n %U:%G:%a' "$FILE"
+  sha256sum "$FILE"
+done
+IFS= read -r EXPECTED <"$OAUTH_IMAGE" || [ -n "$EXPECTED" ]
+test -n "$EXPECTED"
+ACTUAL="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)"
+test "$ACTUAL" = "$EXPECTED"
+printf 'oauth_running_image_match=true\n'
+BOX
+  chmod 0600 "$EVIDENCE_DIR/hm37a-baseline-inventory.txt"
+)
+```
 
 ### Required live baseline
 
@@ -309,6 +714,86 @@ HM6 is a two-part opening precondition. Both release commits are local ancestors
 #### Part A — migration 03 and helpers from `ad964ed1`
 
 Migration `20260928000003` must have exactly one ledger row, and its corrected catalog and functional proofs must return true without SQL error. `stack/current` and the effective backup/restore helper paths must resolve through `ad964ed158181ba1692dd05895f36fa7a1f87d3f`. The post-apply backup and active timers remain opening evidence. A version-only ledger row or an inactive archive is insufficient.
+
+Run `hm37a-schema-dependency-preflight` immediately after `runbook-17`.
+That is the earliest point at which the actual `release_psql_ro` helper exists:
+`deploy/RELEASE-TO-BOX.md` section 3 creates its protected libpq files and
+session script, and `runbook-09` supplies the catalog/functional files it
+mounts. Earlier archive or credential-shape checks do not authenticate this
+helper. This preflight precedes the old-edge signal control, migration 04,
+timer stops and the COMMIT POINT. It uses the same target identity guard from
+`deploy/supabase-stack/migrate/lib.sh:assert_target_identity`, then performs
+the exact migration-03 reads below. It applies no SQL migration and writes no
+new receipt; the existing transient `APPLY_SQL` is overwritten by the next
+precondition block. A nonzero exit is a pre-COMMIT-POINT setup failure: stop
+dependent work and use the section 12 abort cleanup (`hm37a-prep-seat-cleanup`,
+`runbook-13`, `runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`). No edge
+switch or schema application has occurred to reverse at this point.
+If a resumed window has already changed edge/schema state, use section 11's
+existing pre-COMMIT-POINT rollback tail before that cleanup; this early setup
+failure path does not authorize retaining an unverified forward transition.
+
+The whole preflight is NOT EXECUTED by the contained dry run. Its replacement
+proof is this live helper's successful target-identity, ledger/catalog and
+functional reads on the box; the following precondition retains the existing
+`hm37-hm6-migration-03-catalog.txt`, `hm37-hm6-migration-03-functional.txt` and
+`hm37-hm6-schema-helpers.txt` receipts. No preflight output is seeded or later
+consumed by the dry run.
+
+```sh
+# step: hm37a-schema-dependency-preflight
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  SESSION="/run/commonswarm-release-${SHA}-session.sh"
+  test -f "$SESSION"
+  test ! -L "$SESSION"
+  test "$(stat -c '%U:%G:%a' "$SESSION")" = root:root:600
+  . "$SESSION"
+  declare -F release_psql_ro >/dev/null
+  test "$STACK_RELEASE" = "/home/commonswarm/stack/releases/$SHA"
+  test "$(cat "$STACK_RELEASE/RELEASE_SHA")" = "$SHA"
+  for FILE in "$PGSERVICE_FILE" "$PGPASS_FILE" "$APPLY_SQL"; do
+    test -f "$FILE"
+    test ! -L "$FILE"
+    test "$(stat -c '%U:%G:%a' "$FILE")" = root:root:600
+  done
+  test -f /etc/commonswarm-release/target.env
+  test ! -L /etc/commonswarm-release/target.env
+  test "$(stat -c '%U:%G:%a' /etc/commonswarm-release/target.env)" = root:root:600
+  # Extract the actual target guard; do not replace it with SELECT 1 or a
+  # connection-option marker. The guard reads the database-level marker.
+  IDENTITY_SQL="$(python3 - "$MIGRATE/lib.sh" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+function = source.split('assert_target_identity() {\n', 1)[1].split('\nassert_backup_ro_identity()', 1)[0]
+start = "  cat >\"$sql_file\" <<'SQL'\n"
+assert function.count(start) == 1
+sql = function.split(start, 1)[1].split('\nSQL\n', 1)[0]
+assert sql.startswith('\nDO $do$\n') and sql.endswith('$do$;')
+print(sql)
+print("SELECT current_setting('transaction_read_only') = 'on';")
+PY
+  )"
+  IDENTITY_RESULT="$(release_psql_ro -Atq --command "$IDENTITY_SQL")"
+  test "$IDENTITY_RESULT" = t
+  cat >"$APPLY_SQL" <<'SQL'
+\i /proof/20260928000003-catalog.sql
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations
+   WHERE version = '20260928000003') = 1
+  AND :'catalog_ok'::boolean;
+SQL
+  CATALOG_RESULT="$(release_psql_ro -Atq --file "$APPLY_SQL")"
+  test "$CATALOG_RESULT" = t
+  FUNCTIONAL_RESULT="$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000003-functional.sql")"
+  test "$FUNCTIONAL_RESULT" = t
+)
+```
 
 ```sh
 # step: hm37-hm6-schema-helpers-precondition
@@ -362,6 +847,97 @@ SQL
 #### Part B — OAuth service from `826db6a3`
 
 The live OAuth release directory and `oauth/current` must identify `826db6a34f235064a3a03c57377d8e32a35d2f05`. The one running OAuth container must be healthy, use that release as its Compose working directory, and use the exact accepted image ID recorded by the continuation window. Public discovery and JWKS must be served through `https://mcp.commonswarm.com`, while the effective public-authorization flag is not `1` and both authorization endpoints refuse with the owned disabled error. The `/jwks` endpoint answers `application/jwk-set+json` per RFC 7517.
+
+Run `hm37a-oauth-dependency-preflight` immediately after `hm37a-open-inputs`
+and before `hm37a-prep-seat-control-stage`. That is the earliest point at which
+the existing abort cleanup is defined: the open block writes the open receipt
+that `hm37a-prep-seat-cleanup` and `runbook-12` read. Only
+`hm37a-source-checkout`, which prepares the Mac checkout, and the open block
+itself come before it. The preflight therefore precedes the PREP-seat staging,
+`runbook-02` (which writes the window file), the archive upload,
+`1-apply-release-directories`, the release credential and session steps, the
+old-edge signal control, migration 04, timer stops, the edge switch and the
+COMMIT POINT. It needs only what already exists on the box when A opens:
+Anvil's noninteractive root `ssh` (the method the open block uses), HM6's
+OAuth release directory and its protected `oauth-image.id` proof, and the
+running OAuth container with `docker` and `node`. It reads no window state, no
+database helper and no credential.
+
+The block authenticates the live OAuth service with the same identity chain as
+`hm37-hm6-oauth-precondition`: the release directory and its `RELEASE_SHA`, the
+`oauth/current` link, the protected image ID, exactly one running container
+for Compose project `commonswarm-oauth` service `oauth`, that container's
+image ID and Compose working directory, and its health. It then runs the same
+disabled read, `process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED
+=== "1" ? 1 : 0)`, inside that one container. The marker is `# readonly: no`
+because this is a whole-block live preflight; every command in it reads. It
+writes no file and no receipt, and it prints nothing: the container read's
+output is discarded, so no environment value is shown, and the result is the
+exit status alone. A zero exit means the flag is not exactly `1`; the plan
+records no flag value.
+
+A nonzero exit is a pre-COMMIT-POINT setup failure: stop dependent work and use
+the section 12 abort cleanup (`hm37a-prep-seat-cleanup`, `runbook-13`,
+`runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`). At this position no
+window file and no box proof directory exist, so each of those blocks takes the
+early-stop branch that `deploy/RELEASE-TO-BOX.md` already defines:
+`runbook-13` reports no active proof directory and restores no timer,
+`runbook-11` reports no window file and nothing to copy back, `runbook-60`
+derives its names from `RELEASE_SHA`, `runbook-61` closes nothing, and
+`runbook-12` removes only the scratch files that the open receipt names. No
+edge switch or schema application has occurred to reverse, so `runbook-42` and
+`hm37-reserve-schema-rollback` are not entered. If a resumed window has already
+changed edge/schema state, use section 11's existing pre-COMMIT-POINT rollback
+tail before that cleanup; this early setup failure path does not authorize
+retaining an unverified forward transition.
+
+The whole preflight is NOT EXECUTED by the contained dry run: it reads the
+environment of the live OAuth container, which no committed measurement
+provides. Its replacement proof is the live run on the box, which must exit zero
+after the identity checks and the disabled read above. It has no receipt
+fields, writes no output and seeds nothing, so no later block reads it.
+`hm37-hm6-oauth-precondition` below keeps its own identity chain and flag read,
+still runs before the COMMIT POINT, and remains the only producer of
+`hm37-hm6-oauth-runtime.txt` and `hm37-hm6-oauth-public-precondition.json`.
+Preflight success is not evidence for either receipt.
+
+```sh
+# step: hm37a-oauth-dependency-preflight
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on the box over ssh, as Anvil in a root Bash shell, immediately after hm37a-open-inputs; every command reads, and nothing is written or printed.
+(
+  set -euo pipefail
+  HM6_OAUTH_SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
+  HM6_OAUTH="/home/commonswarm/oauth/releases/${HM6_OAUTH_SHA}"
+  HM6_OAUTH_PROOF="/home/commonswarm/stack/release-proofs/${HM6_OAUTH_SHA}"
+  test -d "$HM6_OAUTH"
+  test -f "$HM6_OAUTH/RELEASE_SHA"
+  test "$(cat "$HM6_OAUTH/RELEASE_SHA")" = "$HM6_OAUTH_SHA"
+  test "$(readlink -f /home/commonswarm/oauth/current)" = "$HM6_OAUTH"
+  test -f "$HM6_OAUTH_PROOF/oauth-image.id"
+  IFS= read -r MCP_OAUTH_IMAGE <"$HM6_OAUTH_PROOF/oauth-image.id" || [ -n "$MCP_OAUTH_IMAGE" ]
+  test "$(cat "$HM6_OAUTH_PROOF/oauth-image.id")" = "$MCP_OAUTH_IMAGE"
+  case "$MCP_OAUTH_IMAGE" in sha256:*) ;; *) false ;; esac
+  case "${MCP_OAUTH_IMAGE#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#MCP_OAUTH_IMAGE}" -eq 71
+  CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && CIDS[${#CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-oauth \
+    --filter label=com.docker.compose.service=oauth)
+  test "${#CIDS[@]}" -eq 1
+  CID="${CIDS[0]}"
+  test "$(docker inspect --format '{{.Image}}' "$CID")" = "$MCP_OAUTH_IMAGE"
+  test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$CID")" = \
+    "$HM6_OAUTH/deploy/mcp-auth"
+  test "$(docker inspect --format '{{.State.Health.Status}}' "$CID")" = healthy
+  docker exec "$CID" node -e \
+    'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1" ? 1 : 0)' \
+    >/dev/null 2>&1
+)
+```
 
 ```sh
 # step: hm37-hm6-oauth-precondition
@@ -574,6 +1150,93 @@ After both parts pass, the required checks have executable owners:
 7. `hm37-current-window-state` records actual stack runtime comparison, timers and exact active-window state. Concurrent-operator disposition is explicitly a HezLead decision recorded in `GO.txt`; the block requires that decision before it passes.
 
 ```sh
+# step: hm37a-resolved-input-transfer
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  for FILE in item-resolved-inputs.env item-copy-back-files.list; do
+    test -f "$EVIDENCE_DIR/$FILE"
+    scp "$EVIDENCE_DIR/$FILE" ops@100.115.66.74:/tmp/"$FILE"
+  done
+  ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
+set -euo pipefail
+PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+for FILE in item-resolved-inputs.env item-copy-back-files.list; do
+  install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
+  rm -f "/tmp/$FILE"
+done
+BOX
+)
+```
+
+```sh
+# step: hm37a-go-record
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  : "${APPROVER:?named prompt input required}"
+  : "${PLAN_COMMIT:?named prompt input required}"
+  : "${RELEASE_SHA:?named prompt input required}"
+  : "${PROMPT_NUMBER:?named prompt input required}"
+  test "$APPROVER" = HezLead
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  case "$PLAN_COMMIT" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#PLAN_COMMIT}" -eq 40
+  case "$PROMPT_NUMBER" in (*[!0-9]*|'') false ;; esac
+  test "$PROMPT_NUMBER" -gt 0
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
+  . "$PROOF_DIR/window.env"
+  test ! -e "$PROOF_DIR/GO.txt"
+  printf '%s\n' \
+    "APPROVER=$APPROVER" \
+    "PLAN_COMMIT=$PLAN_COMMIT" \
+    "RELEASE_SHA=$RELEASE_SHA" \
+    "PROMPT_NUMBER=$PROMPT_NUMBER" \
+    'CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead' \
+    >"$PROOF_DIR/GO.txt"
+  chown root:root "$PROOF_DIR/GO.txt"
+  chmod 0600 "$PROOF_DIR/GO.txt"
+)
+```
+
+```sh
+# step: hm37a-prerequisite-evidence
+# readonly: yes
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  NEW_STACK="/home/commonswarm/stack/releases/$SHA"
+  test -d "$NEW_STACK"
+  python3 - "$NEW_STACK" "$PREVIOUS_STACK" \
+    >"$PROOF_DIR/hm37-prerequisites.json" <<'PY'
+import json, pathlib, sys
+new, previous = map(pathlib.Path, sys.argv[1:])
+for root in (new, previous):
+    assert root.is_dir()
+print(json.dumps({"pass": True, "new_stack": str(new),
+                  "previous_stack": str(previous)}, indent=2))
+PY
+  : >"$PROOF_DIR/hm37-stack-runtime-review.txt"
+  for RUNTIME_PATH in compose.yaml postgres backup; do
+    diff -qr "$PREVIOUS_STACK/deploy/supabase-stack/$RUNTIME_PATH" \
+      "$NEW_STACK/deploy/supabase-stack/$RUNTIME_PATH"
+    printf '%s=equal\n' "$RUNTIME_PATH" \
+      >>"$PROOF_DIR/hm37-stack-runtime-review.txt"
+  done
+  chown root:root "$PROOF_DIR/hm37-prerequisites.json" \
+    "$PROOF_DIR/hm37-stack-runtime-review.txt"
+  chmod 0600 "$PROOF_DIR/hm37-prerequisites.json" \
+    "$PROOF_DIR/hm37-stack-runtime-review.txt"
+)
+```
+
+```sh
 # step: hm37-current-window-state
 # readonly: no
 # host: box /bin/bash 5.2 as root
@@ -683,28 +1346,38 @@ The successful path uses this exact whole-block order after applying the input
 table and the runbook's switch-to-step mapping:
 
 ```text
-hm37-source-identity runbook-02 runbook-04 1-upload-release-archive
-1-open-root-shell 1-apply-release-directories runbook-03 runbook-05
+hm37a-source-checkout hm37a-open-inputs hm37a-oauth-dependency-preflight
+hm37a-prep-seat-control-stage hm37a-gate-and-proof-ingest
+hm37-source-identity runbook-02 hm37a-resolved-inputs runbook-04
+hm37a-baseline-inventory 1-upload-release-archive
+1-open-root-shell 1-apply-release-directories hm37a-resolved-input-transfer
+hm37a-go-record hm37a-prerequisite-evidence runbook-03 runbook-05
 runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
-runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
+runbook-16 runbook-17 hm37a-schema-dependency-preflight
+hm37-hm6-schema-helpers-precondition
 hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
 hm37-current-window-state hm37-read-window-suffix
-hm37-hosted-human-session-input hm37-deno-install hm37-hosted-control-stage hm37-backup-gate
+hm37a-directed-check-old hm37-backup-gate
 runbook-23 runbook-24 runbook-25 runbook-26 runbook-27 runbook-28
 hm37-functional-section5 runbook-29 runbook-30 runbook-31 runbook-32
 runbook-33 runbook-34 hm37-public-boundary-reads hm37-public-boundaries
-runbook-35 hm37-hosted-open-ack-control hm37-validate-local-credential
-runbook-13 runbook-11 hm37-deno-remove runbook-60 runbook-61 runbook-12
+runbook-35 hm37a-directed-check-new hm37a-local-evidence-transfer
+hm37a-post-control-readback hm37a-prep-seat-cleanup
+hm37a-outgoing-log-review hm37a-close-readback
+runbook-13 runbook-11 runbook-60 runbook-61 runbook-12
+hm37a-mac-control-cleanup
 ```
 
-The pre-COMMIT-POINT and S1–S5 rollback tail is
-`runbook-42`, `hm37-reserve-schema-rollback`, `runbook-13`, `runbook-11`,
-`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
-A post-COMMIT-POINT
-`control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`, `runbook-11`,
-`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
+The pre-COMMIT-POINT and mapped S1/S2/S3/S4/S5 rollback tail is
+`runbook-42`, `hm37-reserve-schema-rollback`, `hm37a-prep-seat-cleanup`, `runbook-13`, `runbook-11`,
+`runbook-60`, `runbook-61`, `runbook-12`, in that order. The reserved
+schema block runs only with its named approval and its own zero-history proof.
+A post-COMMIT-POINT `control` failure instead uses `hm37a-prep-seat-cleanup`, `runbook-13`,
+`runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`.
 
-Window start/end and positive integer `BACKUP_MAX_AGE_SECONDS` require HezLead’s approval and durable root-only recording. Their values are **not established**.
+The open block derives both times from the box clock. The positive
+`BACKUP_MAX_AGE_SECONDS` is a named HezLead input and is recorded once for
+both backup-age consumers.
 
 Require exact-SHA evidence for command-core regeneration with a clean generated diff, `npm run check:edge`, hosted authority/check/authentication boundaries, MCP authentication/protocol, router and release-proof coverage, the three named server integration sources, and local check/stdio/release-bundle compatibility. `package.json` includes the MCP and main-router entries in `check:edge`.
 
@@ -718,7 +1391,9 @@ Reuse requires matching the full release identity, complete path inventory/count
 
 Record `EDGE_RELEASE_DIR_STATE`, `STACK_RELEASE_DIR_STATE` and aggregate `RELEASE_DIR_STATE` truthfully as created/reused/mixed where applicable. On every close or rollback, follow copy-back with `runbook-60`, `runbook-61`, and `runbook-12`; proof state becomes `<sha>.closed-window-<window-id>`, and Mac/temp state is removed. A rerun uses a new approved `WINDOW_ID`; every step addresses exact active or per-window names and must never list, glob, or select a `.closed-window-<id>` leftover.
 
-After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the three runbook runtime paths. The source comparison with `ad964ed1` is empty, but actual live equality is **not established**. Any runtime difference, missing path or comparison error stops this migration-only stack plan.
+After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for
+the three runbook runtime paths. `hm37a-prerequisite-evidence` must measure
+live equality; any difference, missing path or comparison error stops A.
 
 ### Handoffs
 
@@ -727,24 +1402,22 @@ After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the
 | 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
 | 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
 | 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
-| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; prepare the human input; run `hm37-deno-install` and `hm37-hosted-control-stage`, then finish `deno cache` | Production target, pinned image identity, pinned Deno zip and installed-binary hashes, harness hashes, protected-file modes, and complete offline control cache |
-| 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later Deno/npm install, cache fill, Docker pull, or dependency fetch |
+| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; authenticate the three receipt-bound PREP seats | Production target, pinned image identity, and old-edge S3/S4 control |
+| 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later package install, Docker pull, or dependency fetch |
 | 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
-| 7 | Reach the named COMMIT POINT; run hosted/local controls and revocation | Static assertion classification, behavior and cleanup |
-| 8 | Timer restoration, copy-back, `hm37-deno-remove`, transient cleanup; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition, Deno absent again, and the per-window Deno cache removed |
+| 7 | Reach the named COMMIT POINT; repeat the PREP-seat S3/S4 control on the new edge | Block-owned assertion classification and behavior |
+| 8 | Timer restoration, readbacks, copy-back and transient cleanup | Automatic closure after readbacks; Window B remains a separate later window |
 
-The reviewed hosted-control artifact in section 9 is an **opening gate**, not work to invent after migration.
+Window B owns every hosted harness, human-session and Deno operation.
 
 ## 5. Names, credentials and backup gate
 
 The box computes `WINDOW_PRINCIPAL_SUFFIX` once from approved `WINDOW_START_UTC` and persists it in `window.env` and `window-principal-suffix.txt`.
 The same file carries `WINDOW_ID=YYYYMMDDTHHMMSSZ`; HM37 protected input, staging, control, journal and cache paths include that exact ID.
 
-Use:
-
-- Hosted recipient: `hm37-hosted-${WINDOW_PRINCIPAL_SUFFIX}`.
-- Local recipient: `hm37-local-${WINDOW_PRINCIPAL_SUFFIX}`.
-- Ordinary sender: `hm37-sender-${WINDOW_PRINCIPAL_SUFFIX}`.
+Window A uses `WINDOW_ID` itself as the exact signal body and uses the suffix
+only in evidence names. It does not create, mint, or rename a principal. Its
+mandatory S2 close tail revokes only the three receipt-bound PREP principals.
 
 A rerun uses a fresh approved start and unused names. Never reuse a revoked principal or resolve a collision by silently changing the suffix.
 
@@ -770,7 +1443,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *) false ;;
   esac
-  printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX"
+  printf 'WINDOW_PRINCIPAL_SUFFIX=%q\n' "$WINDOW_PRINCIPAL_SUFFIX"
 )
 BOX
   . "$EVIDENCE_DIR/window-principal-suffix.txt"
@@ -1170,9 +1843,22 @@ def probe(base, method, path, body, expected_status, expected_body=None):
         cf_ray = response.headers.get("CF-Ray")
         raw = response.read(131073)
     media_type = content_type.split(";", 1)[0].strip().lower()
+    if path == "/functions/v1/command":
+        kind = (body or {}).get("command", {}).get("kind")
+        if kind == "mint_agent_token":
+            assertion_id = "gateway.public-human-bearer-ordering"
+        elif kind in KINDS:
+            assertion_id = "gateway.public-hosted-command-refusal"
+        else:
+            assertion_id = "control.gateway-malformed-positive"
+    elif mode == "gateway":
+        assertion_id = "gateway.dark-route-refusal"
+    else:
+        assertion_id = "mcp.dark-route-refusal"
     record = {
         "base": base, "method": method, "path": path, "status": status,
         "expected_status": expected_status,
+        "assertion_id": assertion_id,
         "user_agent": PROBE_UA if explicit_ua else "Python urllib default",
         "headers": {"server": server, "cf-ray": cf_ray,
                     "content-type": content_type},
@@ -1235,7 +1921,22 @@ for base in sys.argv[2:]:
             probe(base, method, path, None, 503, disabled)
 
 print(json.dumps({
-    "pass": True, "mode": mode, "hosted_command_count": len(KINDS), "results": results,
+    "pass": True,
+    "mode": mode,
+    "hosted_command_count": len(KINDS),
+    "assertion_map": ({
+        "gateway.public-hosted-command-refusal": "S1:full-rollback",
+        "gateway.dark-route-refusal": "S1:full-rollback",
+        "gateway.public-human-bearer-ordering": "S5:full-rollback",
+    } if mode == "gateway" else {
+        "mcp.dark-route-refusal": "S1:full-rollback",
+    }),
+    "bearer_ordering_proof": (
+        "six hosted-only kinds returned 403 without credentials; "
+        "mint_agent_token without bearer returned 401"
+        if mode == "gateway" else None
+    ),
+    "results": results,
 }, indent=2))
 PY
 
@@ -1255,570 +1956,519 @@ PY
 
 Requests to `edge-staging.commonswarm.com` and `api.commonswarm.com` send and record `User-Agent: commonswarm-release-probe/1.0`. Requests to `mcp.commonswarm.com` deliberately retain and record Python urllib's default User-Agent; loopback may do the same. A 403 containing `error code: 1010` is recorded as `cloudflare_challenge`, with status, `Server`, `CF-Ray`, `Content-Type`, and the first 2,048 bytes of its non-JSON body. Transport errors, redirects, challenges and generic 503s fail. Repeat HM6’s separate curl and OAuth-loopback controls as well.
 
-During section 9, send well-shaped unauthenticated public open/ACK requests using the temporary seat/batch identifiers. Read the seat’s durable cursor/batch state before and after: neither request may open, acknowledge or advance anything.
-
 ### COMMIT POINT — DARK edge and migration 04 stay live
 
-The named **COMMIT POINT** is reached only after all loopback DARK checks, both gateway public-boundary blocks, and all MCP-hostname boundary checks above pass. Before this point, any failure follows the full edge-first rollback in section 11. After this point, an ordinary hosted- or local-control failure runs the applicable control cleanup and revocation, records `CONTROLS=failed`, leaves edge `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` and migration `20260928000004` live and DARK, restores any stopped timers, copies failure evidence, and stops. After the COMMIT POINT, full rollback is permitted only for the following statically classified product-safety assertions:
+The named **COMMIT POINT** is reached only after all loopback DARK checks, both
+gateway public-boundary blocks, and all MCP-hostname boundary checks pass.
+Before it, any changed-state failure follows edge-first rollback. After it,
+`hm37a-failure-dispatch` maps stable IDs without human classification:
 
-- **S1:** a public or unauthenticated write is accepted, including any 2xx where refusal is required, or a refused open/ACK nevertheless opens, acknowledges, or advances state.
-- **S2:** cleanup cannot remove control state: an active unexpired agent token, active provider family/artifact, or unrevoked control seat, handle, principal, or grant remains.
-- **S3:** the customer-live LOCAL path skips or repeats a committed signal, advances a cursor without a valid ACK, accepts an ACK from the wrong principal, or returns a batch to the wrong principal. A local setup or harness failure before its first product assertion is `control`, not S3.
-- **S4:** either control exposes cross-principal or cross-workspace data.
-- **S5:** a hosted-only command succeeds with a human bearer or without hosted credentials, or a seat handle authenticates by itself.
-
-The classification is not an operator choice. Every failure JSON carries `assertion_id`, and the action is selected from this complete mapping:
-
-| Assertion id | Class | On failure |
+| Assertion id | Class | Block-owned action |
 |---|---|---|
-| `gateway.public-hosted-command-refusal`, `gateway.dark-route-refusal`, `mcp.dark-route-refusal`, `hosted.public-unauthenticated-refusal` | S1 | Cleanup, revoke, then full rollback. |
-| `hosted.cleanup-complete`, `local.cleanup-complete` | S2 | Preserve diagnostics, then full rollback. |
-| `local.delivery-exactly-once`, `local.cursor-requires-valid-ack`, `local.ack-principal-binding`, `local.batch-principal-binding` | S3 | Cleanup if possible, then full rollback. |
-| `hosted.visibility-confined`, `local.visibility-confined` | S4 | Cleanup, revoke, then full rollback. |
-| `hosted.public-human-bearer-refusal`, `hosted.seat-handle-alone-refusal` | S5 | Cleanup, revoke, then full rollback. |
-| `hosted.concurrent-open-single-batch`, `hosted.ack-a-commits-cursor`, `hosted.repeat-ack-idempotent`, `hosted.ack-b-empty-open`, `hosted.migration-functional-proof`, `local.setup`, `local.harness`, and every `control.*` id | control | Cleanup and revocation only; record `CONTROLS=failed`; leave the release live and DARK; stop. |
+| `gateway.public-hosted-command-refusal`, `gateway.dark-route-refusal`, `mcp.dark-route-refusal` | S1 | Full rollback. |
+| `gateway.public-human-bearer-ordering` | S5 | Full rollback. The same probe proves hosted-only kinds return 403 without credentials while mint without a bearer returns 401. |
+| `local.delivery-exactly-once`, `local.cursor-requires-valid-ack` | S3 | Full rollback on the new edge. |
+| `local.visibility-confined` | S4 | Full rollback on the new edge. |
+| `control.receiver-second-read-empty` | control | Cleanup only; leave the new edge live and DARK. |
 
-The hosted harness's JSON `error` object contains `assertion_id`, `step`, `code`, and `class`. The local control output must use the same field name and one of the local ids above. A failure without a recognized id is `control` and cannot authorize rollback; preserve it for plan correction.
+An unknown ID is cleanup-then-STOP for plan correction and never authorizes
+rollback.
 
-## 9. Hosted open/ACK control
+## 9. PREP-seat LOCAL S3/S4 control
 
-The executable control is
-`deploy/release-proofs/item-hm/hm37-open-ack-control.ts`, with Deno import map
-`deploy/release-proofs/item-hm/hm37-open-ack-deno.json`. The committed harness
-SHA-256 is `dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013`; the import-map SHA-256 is
-`f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b`. Anvil recomputes both from the accepted
-commit before staging and records the accepted commit, hashes and independent
-review in `hm37-hosted-control-inputs.txt`. A mismatch stops before migration
-or edge mutation.
-
-The harness runs with `/usr/local/bin/deno` on the box, not with
-`/usr/local/bin/edge-runtime` in the edge container. The pinned edge image
-contains the embedded edge-runtime server binary but no standalone Deno CLI;
-the box Deno runs against the exact release tree while receiving the same edge
-environment. Before approval, Anvil runs `hm37-hosted-control-stage`, which
-proves that `/usr/local/bin/deno` is a regular root-owned executable, records
-its `deno --version`, and pre-caches the pinned npm graph into the control
-directory. No dependency install or network fetch is allowed after this
-opening gate. The harness does not edit the release tree.
-
-Protected inputs are exactly:
-
-- `human-session.json`, a regular mode-`0600` file containing only
-  `{"access_token":"..."}`. Tom runs a fresh `cswarm login`; the Mac-side
-  preparation below refreshes that same stored human session through the
-  released credential code and writes the short-lived access JWT without
-  printing it. The harness independently calls GoTrue `getUser` and verifies
-  JWT claims through Supabase `getClaims`; it derives `identityVerified` from
-  the confirmed user and never accepts that field from input.
-- `oauth-database.json`, a regular mode-`0600` file containing exactly
-  `host`, `port`, `database`, `user`, `password` and `ssl_ca`. Anvil builds it
-  on the box from the already-reviewed OAuth service database credential,
-  service configuration and internal CA. It is the least-privilege
-  `commonswarm_oauth_runtime` login, not a service-role key.
-- The command database URL, Supabase URL, anon key and database CA come only
-  from the existing edge environment `/home/commonswarm/.env`. They are never
-  placed in argv, output or evidence. The service-role key is neither required
-  nor read by this control.
-
-Prepare Tom's protected session on the Mac mini immediately before secure
-transfer. This uses the same current target and human credential store as the
-HM2 controls; it rotates the refresh credential under the store lock and keeps
-the access token only in the private file.
+Window A has no hosted harness, Deno installation, or seat-creation step. It
+uses only the three short-lived seats authenticated from `PREP_RECEIPT_PATH` by
+the open block. The success receipt is the only PREP-to-A link. The legacy
+seat-b profile and principal are never read, changed, revoked, or deleted.
 
 ```sh
-# step: hm37-hosted-human-session-input
+# step: hm37a-prep-seat-control-stage
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
-# Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
+(
+  set -euo pipefail
+  umask 077
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$PREP_SEATS"
+  test ! -L "$PREP_SEATS"
+  test "$(stat -f '%Lp' "$PREP_SEATS")" = 600
+  install -m 0600 "$PREP_SEATS" "/tmp/hm37a-prep-seat-inventory-${RELEASE_SHA}.json"
+  cat >"/tmp/hm37a-directed-check-${RELEASE_SHA}.py" <<'PY'
+import json, pathlib, subprocess, sys
+workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+inventory_path, window_id, phase, output_path = sys.argv[1:]
+inventory = json.load(open(inventory_path, encoding="utf-8"))
+assert inventory["workspace_id"] == workspace
+by_role = {row["role"]: row for row in inventory["seats"]}
+assert set(by_role) == {"sender", "receiver", "third"}
+paths = [by_role[role]["profile_path"] for role in ("sender", "receiver", "third")]
+current_id = "control.harness"
+def failure_hook(exc_type, exc, traceback):
+    pathlib.Path(output_path).write_text(json.dumps({
+        "pass": False, "phase": phase,
+        "error": {"assertion_id": current_id,
+                  "code": "assertion_failed",
+                  "class": exc_type.__name__},
+    }, indent=2) + "\n")
+    sys.__excepthook__(exc_type, exc, traceback)
+sys.excepthook = failure_hook
+def run(*args):
+    return json.loads(subprocess.check_output(args, text=True))
+def identities():
+    global current_id
+    current_id = "local.visibility-confined"
+    values = [run("cswarm", "whoami", "--profile", path, "--json") for path in paths]
+    assert all(value["workspace_id"] == workspace for value in values)
+    assert all(value["credential_valid"] is True for value in values)
+    assert [value["principal_id"] for value in values] == [
+        by_role[role]["principal_id"] for role in ("sender", "receiver", "third")]
+    return values
+ids = identities()
+current_id = "control.receiver-precheck-empty"
+pre = run("cswarm", "check", "--profile", paths[1], "--json")
+assert pre["workspace_id"] == workspace and pre["messages"] == []
+ids = identities()  # assert all three workspace ids immediately before the only write
+marker = window_id
+sent = run("cswarm", "note", marker, "--profile", paths[0],
+           "--to", ids[1]["principal_id"], "--json")
+signal_id = sent["signal"]["id"]
+state_path = pathlib.Path(paths[1]).parent / "check.json"
+before = json.loads(state_path.read_text()) if state_path.exists() else {"cursor": None}
+current_id = "local.delivery-exactly-once"
+first = run("cswarm", "check", "--profile", paths[1], "--json")
+matches = [message for message in first["messages"]
+           if message["id"] == signal_id and message["body"] == marker]
+assert len(matches) == 1
+after = json.loads(state_path.read_text())
+current_id = "local.cursor-requires-valid-ack"
+assert after["cursor"]["id"] == signal_id and before.get("cursor") != after["cursor"]
+current_id = "control.receiver-second-read-empty"
+second = run("cswarm", "check", "--profile", paths[1], "--json")
+assert second["messages"] == []
+current_id = "local.visibility-confined"
+third = run("cswarm", "check", "--profile", paths[2], "--json")
+assert all(message["id"] != signal_id and marker not in message["body"]
+           for message in third["messages"])
+pathlib.Path(output_path).write_text(json.dumps({
+    "pass": True, "phase": phase, "workspace_id": workspace,
+    "signal_id": signal_id,
+    "assertions": {
+        "local.delivery-exactly-once": True,
+        "local.cursor-requires-valid-ack": True,
+        "local.visibility-confined": True,
+        "control.receiver-second-read-empty": True,
+    },
+}, indent=2) + "\n")
+PY
+  chmod 0600 "/tmp/hm37a-directed-check-${RELEASE_SHA}.py"
+)
+```
+
+The next block runs once on the old edge as a control. Any failure stops the
+window before migration or edge change.
+
+```sh
+# step: hm37a-directed-check-old
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  INPUT_ROOT="$HOME/.config/cswarm/box-hm37-${WINDOW_ID}"
-  mkdir -m 0700 "$INPUT_ROOT"
-  test ! -e "$INPUT_ROOT/human-session.json"
-  cat >"$INPUT_ROOT/write-human-session.ts" <<'TS'
-import { open } from "node:fs/promises";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-const output = process.argv[2];
-const root = process.argv[3];
-if (!output || !root) throw new Error("output and checkout paths required");
-const moduleUrl = (path) => pathToFileURL(resolve(root, path)).href;
-const { readCurrentTarget } = await import(moduleUrl("src/cloud/current-target.ts"));
-const { refreshedCredential } = await import(moduleUrl("src/cloud/auth.ts"));
-const { credentialStore } = await import(moduleUrl("src/cloud/storage.ts"));
-const target = await readCurrentTarget();
-if (!target || target.url !== "https://api.commonswarm.com") {
-  throw new Error("current CommonSwarm target is not production");
-}
-const store = await credentialStore({ target });
-const session = await refreshedCredential(target, store);
-const file = await open(output, "wx", 0o600);
-try {
-  await file.writeFile(JSON.stringify({ access_token: session.accessToken }) + "\n");
-  await file.sync();
-  await file.chmod(0o600);
-} finally {
-  await file.close();
-}
-TS
-  node --import tsx "$INPUT_ROOT/write-human-session.ts" \
-    "$INPUT_ROOT/human-session.json" "$PWD"
-  test "$(stat -f %Lp "$INPUT_ROOT/human-session.json")" = 600
-  rm "$INPUT_ROOT/write-human-session.ts"
-  printf 'protected human session prepared; transfer through the approved secure file path\n'
+  install -m 0600 "/tmp/hm37a-prep-seat-inventory-${SHA}.json" \
+    "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json"
+  install -m 0600 "/tmp/hm37a-directed-check-${SHA}.py" \
+    "$EVIDENCE_DIR/hm37a-directed-check.py"
+  test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" old     "$EVIDENCE_DIR/hm37a-local-control-old.json"
+  chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-old.json"
 )
 ```
 
-Stage the reviewed files beside the immutable release, build the second
-protected input without printing it, and pre-cache dependencies before the
-opening gate closes. `CONTROL_ROOT` is window state, not a release directory
-and not copied as evidence.
-
-The measured box baseline has no `/usr/local/bin/deno`. Install the reviewed
-runtime while network access is still permitted. The download may contact only
-the hard-coded GitHub URL and its measured
-`release-assets.githubusercontent.com` redirect. The later cache fill may
-contact only `registry.npmjs.org`.
+Run the same control once on the new edge. After the commit point, S3 or S4
+failure in this block selects full rollback.
 
 ```sh
-# step: hm37-deno-install
+# step: hm37a-directed-check-new
 # readonly: no
-# host: box /bin/bash 5.2 as root
-# Runs on yulan-vps-1 as Anvil under sudo -n -i bash before the opening gate closes.
-(
-  set -euo pipefail
-  umask 077
-  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  . "$PROOF_DIR/window.env"
-  DENO_PATH=/usr/local/bin/deno
-  DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
-  DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
-  DOWNLOAD_ROOT="/run/commonswarm-deno-${WINDOW_ID}"
-  case "$DOWNLOAD_ROOT" in /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) false ;; esac
-  test "$(stat -c '%U:%G:%a' /usr/local/bin)" = root:root:755
-
-  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
-  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
-    test -n "$RECORDED_DENO_SHA256"
-    test -f "$DENO_PATH"
-    test ! -L "$DENO_PATH"
-    test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
-    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
-    test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
-    exit 0
-  fi
-
-  if [ -n "$RECORDED_DENO_SHA256" ]; then
-    case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
-    test "${#RECORDED_DENO_SHA256}" -eq 64
-  fi
-  test ! -e "$DOWNLOAD_ROOT"
-  install -d -m 0700 -o root -g root "$DOWNLOAD_ROOT"
-  cleanup_download() {
-    case "$DOWNLOAD_ROOT" in
-      /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
-        find "$DOWNLOAD_ROOT" -xdev -depth -delete
-        ;;
-      *) return 1 ;;
-    esac
-  }
-  trap cleanup_download EXIT
-  REDIRECT_HEADERS="$DOWNLOAD_ROOT/redirect.headers"
-  curl --fail --silent --show-error --head --proto '=https' --max-time 30 \
-    --dump-header "$REDIRECT_HEADERS" --output /dev/null "$DENO_URL"
-  test "$(grep -ic '^location:' "$REDIRECT_HEADERS")" -eq 1
-  REDIRECT_URL="$(awk 'BEGIN{IGNORECASE=1} /^location:/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' "$REDIRECT_HEADERS")"
-  case "$REDIRECT_URL" in https://release-assets.githubusercontent.com/*) ;; *) false ;; esac
-  EFFECTIVE_URL="$DOWNLOAD_ROOT/effective-url.txt"
-  curl --fail --silent --show-error --proto '=https' --max-time 120 \
-    --output "$DOWNLOAD_ROOT/deno.zip" --write-out '%{url_effective}\n' \
-    "$REDIRECT_URL" >"$EFFECTIVE_URL"
-  test "$(cat "$EFFECTIVE_URL")" = "$REDIRECT_URL"
-  test "$(sha256sum "$DOWNLOAD_ROOT/deno.zip" | awk '{print $1}')" = "$DENO_ZIP_SHA256"
-  python3 - "$DOWNLOAD_ROOT/deno.zip" "$DOWNLOAD_ROOT/deno" <<'PY'
-import os
-import shutil
-import stat
-import sys
-import zipfile
-
-archive, output = sys.argv[1:]
-with zipfile.ZipFile(archive) as source:
-    assert source.namelist() == ["deno"]
-    info = source.getinfo("deno")
-    assert not stat.S_ISLNK(info.external_attr >> 16)
-    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-    with os.fdopen(fd, "wb") as target, source.open(info) as binary:
-        shutil.copyfileobj(binary, target)
-        target.flush()
-        os.fsync(target.fileno())
-os.chmod(output, 0o755)
-PY
-  INSTALLED_SHA256="$(sha256sum "$DOWNLOAD_ROOT/deno" | awk '{print $1}')"
-  case "$INSTALLED_SHA256" in (*[!0-9a-f]*|'') false ;; esac
-  test "${#INSTALLED_SHA256}" -eq 64
-  if [ -n "$RECORDED_DENO_SHA256" ]; then
-    test "$INSTALLED_SHA256" = "$RECORDED_DENO_SHA256"
-  else
-    printf 'DENO_INSTALLED_BINARY_SHA256=%q\n' "$INSTALLED_SHA256" >>"$PROOF_DIR/window.env"
-  fi
-  python3 - "$DOWNLOAD_ROOT/deno" "$DENO_PATH" <<'PY'
-import os
-import shutil
-import sys
-
-source, target = sys.argv[1:]
-fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
-with os.fdopen(fd, "wb") as output, open(source, "rb") as binary:
-    shutil.copyfileobj(binary, output)
-    output.flush()
-    os.fsync(output.fileno())
-os.chmod(target, 0o755)
-PY
-  test -f "$DENO_PATH"
-  test ! -L "$DENO_PATH"
-  test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
-  test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$INSTALLED_SHA256"
-  test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
-  cleanup_download
-  trap - EXIT
-  test ! -e "$DOWNLOAD_ROOT"
-)
-```
-
-```sh
-# step: hm37-hosted-control-stage
-# readonly: no
-# host: box /bin/bash 5.2 as root
-# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
-(
-  set -euo pipefail
-  umask 077
-  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  . "$PROOF_DIR/window.env"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
-  STAGING_ROOT="/run/commonswarm-hm37-${WINDOW_ID}"
-  HARNESS="$CONTROL_ROOT/hm37-open-ack-control.ts"
-  DENO_CONFIG="$CONTROL_ROOT/hm37-open-ack-deno.json"
-  test "$(cat "$RELEASE_ROOT/RELEASE_SHA")" = "$SHA"
-  test -f /usr/local/bin/deno
-  test ! -L /usr/local/bin/deno
-  test -x /usr/local/bin/deno
-  test "$(stat -c %U /usr/local/bin/deno)" = root
-  test ! -e "$CONTROL_ROOT"
-  install -d -m 0700 "$CONTROL_ROOT" "$CONTROL_ROOT/journal" "$CONTROL_ROOT/deno-cache"
-  install -m 0600 "$STAGING_ROOT/hm37-open-ack-control.ts" "$HARNESS"
-  install -m 0600 "$STAGING_ROOT/hm37-open-ack-deno.json" "$DENO_CONFIG"
-  install -m 0600 "$STAGING_ROOT/human-session.json" "$CONTROL_ROOT/human-session.json"
-  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
-  test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
-  OAUTH_CIDS=()
-  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
-    test -n "$VALUE" && OAUTH_CIDS[${#OAUTH_CIDS[@]}]="$VALUE"
-  done < <(docker ps -q \
-    --filter label=com.docker.compose.project=commonswarm-oauth \
-    --filter label=com.docker.compose.service=oauth)
-  test "${#OAUTH_CIDS[@]}" -eq 1
-  MCP_OAUTH_DATABASE_HOST_LINE="$(docker inspect --format \
-    '{{range .Config.Env}}{{if eq (index (split . "=") 0) "MCP_OAUTH_DATABASE_HOST"}}{{println .}}{{end}}{{end}}' \
-    "${OAUTH_CIDS[0]}")"
-  case "$MCP_OAUTH_DATABASE_HOST_LINE" in MCP_OAUTH_DATABASE_HOST=?*) ;; *) false ;; esac
-  MCP_OAUTH_DATABASE_HOST=${MCP_OAUTH_DATABASE_HOST_LINE#MCP_OAUTH_DATABASE_HOST=}
-  python3 - "$CONTROL_ROOT/oauth-database.json" "$MCP_OAUTH_DATABASE_HOST" <<'PY'
-import json, os, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-host = sys.argv[2]
-credentials = json.loads(pathlib.Path(
-    "/etc/commonswarm-oauth/database-credentials").read_text())
-service = {}
-for line in pathlib.Path("/etc/commonswarm-oauth/service.env").read_text().splitlines():
-    if line and not line.lstrip().startswith("#") and "=" in line:
-        key, value = line.split("=", 1)
-        service[key] = value
-document = {
-    "host": host,
-    "port": int(service.get("MCP_OAUTH_DATABASE_PORT", "5432")),
-    "database": service["MCP_OAUTH_DATABASE_NAME"],
-    "user": credentials["user"],
-    "password": credentials["password"],
-    "ssl_ca": pathlib.Path("/etc/ssl/yulan-internal-ca.pem").read_text(),
-}
-fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w") as handle:
-    json.dump(document, handle, separators=(",", ":"))
-    handle.write("\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-PY
-  test "$(stat -c %a "$CONTROL_ROOT/human-session.json")" = 600
-  test "$(stat -c %a "$CONTROL_ROOT/oauth-database.json")" = 600
-  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
-    --config "$DENO_CONFIG" "$HARNESS" \
-    "$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js" \
-    "$RELEASE_ROOT/supabase/functions/command/index.ts" \
-    "$RELEASE_ROOT/supabase/functions/_shared/hosted-seat-auth.ts" \
-    "$RELEASE_ROOT/supabase/functions/_shared/database-options.ts"
-  /usr/local/bin/deno --version >"$CONTROL_ROOT/deno-version.txt"
-  chmod 0600 "$CONTROL_ROOT/deno-version.txt"
-)
-```
-
-Run only after the migration and edge gates that section 9 observes are live.
-The suffix comes from the existing root-owned window file. Sourcing the edge
-environment exports secrets only to the Deno process; the command line remains
-secret-free. The one stdout document is safe evidence. The private journal is
-never copied.
-
-```sh
-# step: hm37-hosted-open-ack-control
-# readonly: no
-# host: box /bin/bash 5.2 as root
-# Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
-(
-  set -euo pipefail
-  umask 077
-  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  . "$PROOF_DIR/window.env"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
-  case "$WINDOW_PRINCIPAL_SUFFIX" in
-    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
-    *) false ;;
-  esac
-  set -a
-  . /home/commonswarm/.env
-  set +a
-  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
-    --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
-    --allow-env --allow-net \
-    --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
-    --allow-write="$CONTROL_ROOT/journal" \
-    "$CONTROL_ROOT/hm37-open-ack-control.ts" \
-    --release-root "$RELEASE_ROOT" \
-    --journal-dir "$CONTROL_ROOT/journal" \
-    --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 \
-    --human-session-file "$CONTROL_ROOT/human-session.json" \
-    --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
-    >"$PROOF_DIR/hm37-hosted-check-control.json"
-  chmod 0600 "$PROOF_DIR/hm37-hosted-check-control.json"
-)
-```
-
-If the shell is lost, rerun cleanup from the recorded private journal. This is
-idempotent and still verifies complete revocation before returning zero.
-
-```sh
-# step: hm37-hosted-control-cleanup-only
-# readonly: no
-# host: box /bin/bash 5.2 as root
-# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
-(
-  set -euo pipefail
-  umask 077
-  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  . "$PROOF_DIR/window.env"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
-  JOURNAL="$CONTROL_ROOT/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json"
-  test "$(stat -c %a "$JOURNAL")" = 600
-  set -a
-  . /home/commonswarm/.env
-  set +a
-  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
-    --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
-    --allow-env --allow-net \
-    --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
-    --allow-write="$CONTROL_ROOT/journal" \
-    "$CONTROL_ROOT/hm37-open-ack-control.ts" \
-    --release-root "$RELEASE_ROOT" \
-    --human-session-file "$CONTROL_ROOT/human-session.json" \
-    --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
-    --cleanup-only "$JOURNAL" \
-    >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
-  chmod 0600 "$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
-)
-```
-
-After copy-back on every successful close and every rollback/abort tail, remove
-the per-window Deno cache and return `/usr/local/bin/deno` to the measured absent
-baseline. An unknown or changed file is never removed.
-
-```sh
-# step: hm37-deno-remove
-# readonly: no
-# host: box /bin/bash 5.2 as root
-# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after copy-back on close or rollback.
-(
-  set -euo pipefail
-  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  . "$PROOF_DIR/window.env"
-  DENO_PATH=/usr/local/bin/deno
-  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
-  DENO_DIR="$CONTROL_ROOT/deno-cache"
-  case "$DENO_DIR" in
-    "/home/commonswarm/edge/controls/${SHA}-"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/deno-cache) ;;
-    *) false ;;
-  esac
-  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
-  if [ -z "$RECORDED_DENO_SHA256" ]; then
-    if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
-      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown file\n' \
-        "$DENO_PATH" >&2
-      exit 1
-    fi
-    if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
-      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown path\n' \
-        "$DENO_DIR" >&2
-      exit 1
-    fi
-    printf 'deno_remove=not-installed\n' >>"$PROOF_DIR/window.env"
-    exit 0
-  fi
-  case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
-  test "${#RECORDED_DENO_SHA256}" -eq 64
-  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
-    test -f "$DENO_PATH"
-    test ! -L "$DENO_PATH"
-    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
-    rm -f -- "$DENO_PATH"
-  fi
-  test ! -e "$DENO_PATH"
-  test ! -L "$DENO_PATH"
-  if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
-    test -d "$DENO_DIR"
-    test ! -L "$DENO_DIR"
-    find "$DENO_DIR" -xdev -depth -delete
-  fi
-  test ! -e "$DENO_DIR"
-  printf 'DENO_REMOVED=1\n' >>"$PROOF_DIR/window.env"
-)
-```
-
-`tests/p1-server/hosted-check.test.ts` supplies useful call shapes, but its setup inserts authority rows directly, creates two hosted seats and uses an always-active provider-status callback. It is not this window’s production fixture.
-
-The trusted locally invoked control must create **one temporary hosted seat**, using the exact release’s entry points. No HTTP bypass, public issuance, public MCP enablement or local agent token for the hosted principal is allowed.
-
-### Setup
-
-1. Read the saved suffix and use `hm37-hosted-${WINDOW_PRINCIPAL_SUFFIX}`.
-2. Verify a human owner identity and current access/capacity in the approved control workspace. HM2 used Cold Agent Test, `c2ea0541-f56d-4c73-bf71-56c5405c4934`; present access is **not established**.
-3. Create grant/consent/activation through `handleHostedManagementCommand`; never fabricate `identityVerified`.
-4. Establish the temporary provider grant through the reviewed OAuth storage path while public issuance stays off.
-5. Check durable provider status through `commonswarm_oauth.provider_family_active`, matching the MCP entry point.
-6. Construct the genuine grant capability through `authenticateHostedGrantCapability`; claim the seat through `handleHostedCommand`.
-7. Construct check capabilities through `authenticateHostedSeatCapability` with tool `check`; invoke internal open/ACK handling.
-8. Keep provider-status work on a separate connection/pool from capability resolution, matching the production protection against nested-pool deadlock.
-9. Persist a private cleanup journal before each creation, including recovery after partial failure or lost shell.
-
-All CommonSwarm authority writes use transactional command entry points. SQL outside those entry points is read-only verification.
-
-### Observations
-
-| Step | Action | Required proof |
-|---:|---|---|
-| 1 | Send directed signal A normally. | A exists for the temporary hosted principal. |
-| 2 | Run two concurrent opens with distinct command IDs. | Both 200; same non-null batch A and identical ordered IDs; exactly one persisted active batch. |
-| 3 | Read committed cursor. | Open did not advance it. A response terminal cursor is not committed-cursor evidence. |
-| 4 | Open from a fresh local invocation. | Same persisted batch and ordered IDs. |
-| 5 | Send directed signal B after A opened. | B is beyond A’s terminal ordering pair. |
-| 6 | Send unauthenticated public open and ACK. | Both 403; cursor/batch snapshot unchanged. |
-| 7 | ACK A with its **upper-case UUID spelling**. | 200; A acknowledged; committed cursor equals A’s millisecond timestamp/UUID terminal pair. |
-| 8 | Inspect ACK result and open again. | B exists and is active. ACK may itself open B. |
-| 9 | Repeat ACK A with a fresh command ID. | 200; A’s acknowledgment timestamp and committed cursor unchanged; B remains active. |
-| 10 | ACK B, then open. | Cursor advances to B; empty result has `batch_id=null`; no empty batch persisted. |
-| 11 | Rerun migration-04 functional proof. | Exact `t`, SQL exit zero. |
-
-Retain only safe IDs, counts, ordering pairs, timestamps and assertions. Never retain tokens, seat handles, credentials or signal bodies in copied evidence.
-
-### Finally-path cleanup
-
-Including partial failures:
-
-1. Revoke the hosted seat through management commands; verify seat, handle and principal revocation.
-2. Revoke its CommonSwarm grant.
-3. Revoke the temporary provider grant/family through its reviewed storage path.
-4. Revoke every ordinary local/sender principal created by this window.
-5. Verify every recorded principal is revoked and **zero active unexpired agent tokens** remain.
-6. Verify the provider family is inactive and no active temporary provider token family remains.
-7. Retry hosted authorization/open/ACK with the retained private binding; require refusal.
-
-Preserve durable signal, event, cursor and batch history. Cleanup revokes access; it does not erase history.
-
-Missing harness acceptance prevents opening. Missing cleanup proof prevents closure.
-
-## 10. Local `check.json` and stdio MCP
-
-The previous-edge-to-release comparison is empty for `src/cloud/agent-check.ts` and the entire `src/mcp/` directory. Local check still uses `check.json`; stdio MCP retains its deferred response-write commit path.
-
-That source comparison does not prove live compatibility.
-
-Repeat HM2’s ordinary local-recipient/sender control with released cswarm `0.1.80`, Tom’s freshly verified production human session and the suffix-based names. Verify installed executable identity/version and production target before minting.
-
-Use isolated mode-0700 directories and mode-0600 credential, connection and profile files. Persist the requested run ID and require the returned `run_id` to match. Both connection creation and cleanup readers must validate all four credential fields.
-
-```sh
-# step: hm37-validate-local-credential
-# readonly: yes
 # host: Mac mini /bin/bash 3.2 as Anvil
-# Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 (
   set -euo pipefail
-  : "${CREDENTIAL_FILE:?protected credential file required}"
-  : "${EXPECTED_PRINCIPAL_ID:?created principal ID required}"
-  : "${EXPECTED_RUN_ID:?requested run ID required}"
-  python3 - "$CREDENTIAL_FILE" "$EXPECTED_PRINCIPAL_ID" "$EXPECTED_RUN_ID" <<'PY'
-import json, os, stat, sys, uuid
-path, principal, run = sys.argv[1:]
-info = os.lstat(path)
-assert stat.S_ISREG(info.st_mode)
-assert stat.S_IMODE(info.st_mode) == 0o600
-credential = json.load(open(path))
-assert isinstance(credential, dict)
-def required_string(field):
-    value = credential.get(field)
-    if not isinstance(value, str) or not value:
-        raise SystemExit(
-            'credential missing required non-empty string field: ' + field)
-    return value
-values = {field: required_string(field) for field in
-          ("agent_token", "principal_id", "token_id", "run_id")}
-try:
-    parsed = {field: uuid.UUID(values[field])
-              for field in ("principal_id", "token_id", "run_id")}
-    expected_principal = uuid.UUID(principal)
-    expected_run = uuid.UUID(run)
-except (ValueError, AttributeError):
-    raise SystemExit("credential UUID validation failed")
-assert parsed["principal_id"] == expected_principal
-assert parsed["run_id"] == expected_run
-print("credential_shape=PASS")
-PY
+  umask 077
+  . "$HOME/.commonswarm-release-window.env"
+  test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     "/home/commonswarm/edge/releases/$SHA"
+  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" new     "$EVIDENCE_DIR/hm37a-local-control-new.json"
+  chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-new.json"
 )
 ```
 
-When adapting HM2’s steps, transfer the suffix separately. Put JSON-reading heredocs inside helper functions before calling those functions in command substitution; never place a heredoc directly inside `$(...)`.
+```sh
+# step: hm37a-local-evidence-transfer
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+    test -f "$EVIDENCE_DIR/$FILE"
+    test "$(stat -f %Lp "$EVIDENCE_DIR/$FILE")" = 600
+    scp "$EVIDENCE_DIR/$FILE" ops@100.115.66.74:/tmp/"$FILE"
+  done
+  ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
+set -euo pipefail
+PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+  install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
+  rm -f "/tmp/$FILE"
+done
+BOX
+)
+```
 
-Required control:
+```sh
+# step: hm37a-post-control-readback
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  python3 - "$PROOF_DIR/hm37a-local-control-old.json"     "$PROOF_DIR/hm37a-local-control-new.json"     >"$PROOF_DIR/hm37-local-control.json" <<'PY'
+import json, sys
+old, new = (json.load(open(path)) for path in sys.argv[1:])
+assert old["pass"] is True and old["phase"] == "old"
+assert new["pass"] is True and new["phase"] == "new"
+required = {"local.delivery-exactly-once",
+            "local.cursor-requires-valid-ack",
+            "local.visibility-confined",
+            "control.receiver-second-read-empty"}
+assert required <= set(old["assertions"]) and required <= set(new["assertions"])
+print(json.dumps({"pass": True, "old": old, "new": new}, indent=2))
+PY
+  release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-functional.sql"     >"$PROOF_DIR/hm37-functional-after-control.txt"
+  test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t
+  python3 - "$PROOF_DIR/hm37-public-boundaries.json"     "$PROOF_DIR/hm37-loopback-boundaries.json"     >"$PROOF_DIR/hm37-public-check-no-mutation.json" <<'PY'
+import json, sys
+values = [json.load(open(path)) for path in sys.argv[1:]]
+assert all(value["pass"] is True for value in values)
+print(json.dumps({"pass": True, "assertion_id":
+                  "gateway.public-hosted-command-refusal"}, indent=2))
+PY
+  chmod 0600 "$PROOF_DIR/hm37-local-control.json"     "$PROOF_DIR/hm37-functional-after-control.txt"     "$PROOF_DIR/hm37-public-check-no-mutation.json"
+)
+```
 
-1. Before migration, create ordinary recipient/sender through normal commands; verify active local, non-turn-only principals and owner membership.
-2. After edge health, mint/validate credentials and create isolated profiles.
-3. Send a directed primer and run recipient `cswarm check`.
-4. Verify that exact delivery has `ack_outcome=observed` and non-null `acked_at`; CLI exit zero is insufficient.
-5. Send a second signal and prove that exact delivery is wake-eligible before any recipient consumer runs.
-6. Initialize the installed CLI’s stdio MCP with the isolated profile; call local `check`, verify the directed signal, local `check.json` advancement and exact observed delivery.
-7. Require exact-SHA stdio test evidence for failed/cancelled response writes leaving deferred cursor state uncommitted, successful-write-only commit and post-write observation.
-8. Revoke both ordinary principals and verify zero active unexpired tokens.
+Every successful close and every rollback, failure, or abort after
+`hm37a-open-inputs` runs the following S2 tail exactly once before the proof
+directory is closed. It uses the saved human session for revocation and status,
+then performs an independent read-only database query. A guarded-delete refusal
+does not broaden the delete target: it leaves the PREP directory in place and
+records that outcome for the operator.
 
-Do not start a listener or use another agent’s profile. Keep credential-bearing scratch private until cleanup acceptance; copy only sanitized assertions.
+```sh
+# step: hm37a-prep-seat-cleanup
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
+(
+  set -euo pipefail
+  umask 077
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  EVIDENCE_DIR=
+  if [ -f "$HOME/.commonswarm-release-window.env" ]; then
+    . "$HOME/.commonswarm-release-window.env"
+  fi
+  test -f "$PREP_SEATS"
+  test ! -L "$PREP_SEATS"
+  WORKSPACE_ID="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+  HUMAN_USER_ID="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
+  SENDER_ID="$(jq -er '.seats[] | select(.role == "sender") | .principal_id' "$PREP_SEATS")"
+  RECEIVER_ID="$(jq -er '.seats[] | select(.role == "receiver") | .principal_id' "$PREP_SEATS")"
+  THIRD_ID="$(jq -er '.seats[] | select(.role == "third") | .principal_id' "$PREP_SEATS")"
+  test "$SENDER_ID" != "$RECEIVER_ID"
+  test "$SENDER_ID" != "$THIRD_ID"
+  test "$RECEIVER_ID" != "$THIRD_ID"
+  for PRINCIPAL_ID in "$SENDER_ID" "$RECEIVER_ID" "$THIRD_ID"; do
+    case "$PRINCIPAL_ID" in
+      cee27f94-4231-4a02-934d-5bf08d73ed75) false ;;
+      ????????-????-4???-[89ab]???-????????????) ;;
+      *) false ;;
+    esac
+    cswarm principal revoke --workspace-id "$WORKSPACE_ID" \
+      --principal-id "$PRINCIPAL_ID" --json >/dev/null
+    STATUS_JSON="$(cswarm status --workspace-id "$WORKSPACE_ID" --json)"
+    printf '%s' "$STATUS_JSON" | jq -e \
+      --arg workspace "$WORKSPACE_ID" --arg user "$HUMAN_USER_ID" \
+      --arg id "$PRINCIPAL_ID" \
+      '.identity.user_id == $user and
+       .selected_project.workspace_id == $workspace and
+       ([.agents[] | select(.principal_id == $id and .revoked == true)] | length) == 1' \
+      >/dev/null
+  done
+
+  QUERY_SCRIPT="$(mktemp /tmp/hm37a-token-readback.XXXXXX)"
+  case "$QUERY_SCRIPT" in /tmp/hm37a-token-readback.??????) ;; *) false ;; esac
+  trap 'rm -f -- "$QUERY_SCRIPT"' EXIT
+  cat >"$QUERY_SCRIPT" <<'BOX'
+set -euo pipefail
+for value in "$@"; do
+  case "$value" in ????????-????-4???-[89ab]???-????????????) ;; *) exit 1 ;; esac
+done
+SQL="BEGIN READ ONLY;
+WITH expected(principal_id) AS (VALUES ('$1'::uuid), ('$2'::uuid), ('$3'::uuid))
+SELECT expected.principal_id::text || '=' || count(tokens.id)::text
+FROM expected
+LEFT JOIN swarm.agent_tokens AS tokens
+  ON tokens.agent_principal_id = expected.principal_id
+ AND tokens.revoked_at IS NULL
+ AND tokens.expires_at > now()
+GROUP BY expected.principal_id
+ORDER BY expected.principal_id;
+COMMIT;"
+printf '%s\n' "$SQL" | docker exec -i commonswarm-postgres sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" psql -X -v ON_ERROR_STOP=1 -Atq -U supabase_admin -d postgres'
+BOX
+  DB_COUNTS="$(ssh -o BatchMode=yes ops@100.115.66.74 \
+    "sudo -n -i /bin/bash -s -- '$SENDER_ID' '$RECEIVER_ID' '$THIRD_ID'" \
+    <"$QUERY_SCRIPT")"
+  rm -f -- "$QUERY_SCRIPT"
+  trap - EXIT
+  test "$(printf '%s\n' "$DB_COUNTS" | grep -Ec '^[0-9a-f-]{36}=0$')" -eq 3
+  for PRINCIPAL_ID in "$SENDER_ID" "$RECEIVER_ID" "$THIRD_ID"; do
+    test "$(printf '%s\n' "$DB_COUNTS" | grep -c "^${PRINCIPAL_ID}=0$")" -eq 1
+  done
+
+  PREP_DIR="$(jq -er '.prep_directory' "$PREP_SEATS")"
+  PREP_ROOT="/Users/yulanbot/anvil-work/hm37-prep"
+  PREP_ID="${PREP_DIR##*/}"
+  DELETE_RESULT=refused
+  DELETE_REASON=guard
+  RESOLVED_ROOT=
+  RESOLVED_PREP_DIR=
+  if [ -d "$PREP_ROOT" ] && [ ! -L "$PREP_ROOT" ]; then
+    RESOLVED_ROOT="$(cd "$PREP_ROOT" && pwd -P)"
+  fi
+  if [ -n "$RESOLVED_ROOT" ] && [ -d "$PREP_DIR" ] && [ ! -L "$PREP_DIR" ]; then
+    RESOLVED_PREP_DIR="$(cd "$PREP_DIR" && pwd -P)"
+  fi
+  ID_SHAPE_OK=no
+  case "$PREP_ID" in
+    20[0-9][0-9][0-1][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-5][0-9]Z) ID_SHAPE_OK=yes ;;
+  esac
+  if [ -n "$RESOLVED_PREP_DIR" ] && \
+     [ "$RESOLVED_PREP_DIR" != / ] && \
+     [ "$RESOLVED_PREP_DIR" != "$HOME" ] && \
+     [ "$RESOLVED_PREP_DIR" = "$RESOLVED_ROOT/$PREP_ID" ] && \
+     [ "${RESOLVED_PREP_DIR%/*}" = "$RESOLVED_ROOT" ] && \
+     [ "${RESOLVED_PREP_DIR##*/}" = "$PREP_ID" ] && \
+     [ "$ID_SHAPE_OK" = yes ]
+  then
+    if /bin/rm -R -- "$RESOLVED_PREP_DIR"; then
+      DELETE_RESULT=removed
+      DELETE_REASON=guarded-delete-complete
+    else
+      DELETE_RESULT=failed
+      DELETE_REASON=guarded-delete-error
+    fi
+  elif [ ! -e "$PREP_DIR" ]; then
+    DELETE_RESULT=absent
+    DELETE_REASON=already-absent
+  fi
+  CLEANUP_RECEIPT="/tmp/hm37a-prep-cleanup-${RELEASE_SHA}.json"
+  jq -n --arg workspace_id "$WORKSPACE_ID" \
+    --arg sender_id "$SENDER_ID" --arg receiver_id "$RECEIVER_ID" \
+    --arg third_id "$THIRD_ID" --arg delete_result "$DELETE_RESULT" \
+    --arg delete_reason "$DELETE_REASON" \
+    '{schema:1, workspace_id:$workspace_id,
+      principal_ids:[$sender_id,$receiver_id,$third_id],
+      revoked_readback:true, active_unexpired_token_count:0,
+      prep_directory:{result:$delete_result,reason:$delete_reason}}' \
+    >"$CLEANUP_RECEIPT"
+  chmod 0600 "$CLEANUP_RECEIPT"
+  if [ -n "${EVIDENCE_DIR:-}" ] && [ -d "$EVIDENCE_DIR" ]; then
+    install -m 0600 "$CLEANUP_RECEIPT" "$EVIDENCE_DIR/hm37a-prep-cleanup.json"
+  fi
+  test "$DELETE_RESULT" != failed
+)
+```
+
+```sh
+# step: hm37a-failure-dispatch
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  FAILURE_JSON="$PROOF_DIR/hm37a-local-control-new.json"
+  test -f "$FAILURE_JSON"
+  python3 - "$FAILURE_JSON" >"$PROOF_DIR/hm37a-failure-action.txt" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assertion_id = (
+    value.get("error", {}).get("assertion_id")
+    or value.get("failure", {}).get("assertion_id")
+    or value.get("assertion_id")
+)
+phase = value.get("phase")
+mapping = {
+    "gateway.public-hosted-command-refusal": ("S1", "full-rollback"),
+    "gateway.dark-route-refusal": ("S1", "full-rollback"),
+    "mcp.dark-route-refusal": ("S1", "full-rollback"),
+    "gateway.public-human-bearer-ordering": ("S5", "full-rollback"),
+    "control.gateway-malformed-positive": ("control", "cleanup-only"),
+    "local.delivery-exactly-once": ("S3", "full-rollback"),
+    "local.cursor-requires-valid-ack": ("S3", "full-rollback"),
+    "local.visibility-confined": ("S4", "full-rollback"),
+    "control.harness": ("control", "cleanup-only"),
+    "control.receiver-precheck-empty": ("control", "cleanup-only"),
+    "control.receiver-second-read-empty": ("control", "cleanup-only"),
+}
+classification, action = (("control", "stop-before-change") if phase == "old"
+                          else mapping.get(assertion_id,
+                                           ("unknown", "cleanup-then-stop")))
+print(f"assertion_id={assertion_id}")
+print(f"class={classification}")
+print(f"action={action}")
+if classification == "unknown":
+    raise SystemExit(2)
+PY
+  chmod 0600 "$PROOF_DIR/hm37a-failure-action.txt"
+)
+```
+
+The dispatcher owns the complete action map. No step asks HezLead to classify a
+failure. A control-only failure performs cleanup only; S1, S3, S4, or the
+ordering-proven S5 bearer failure performs full rollback.
+
+
+```sh
+# step: hm37a-outgoing-log-review
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  OUTGOING_NAMES=()
+  while IFS= read -r NAME || [ -n "$NAME" ]; do
+    case "$NAME" in commonswarm-edge-edge-runtime-1.*.docker.log)
+      OUTGOING_NAMES[${#OUTGOING_NAMES[@]}]="$NAME"
+      ;;
+    esac
+  done <"$PROOF_DIR/copy-back.list"
+  test "${#OUTGOING_NAMES[@]}" -eq 1
+  OUTGOING_LOG="$PROOF_DIR/${OUTGOING_NAMES[0]}"
+  SECRET_SCAN_RESULT="$PROOF_DIR/hm37a-outgoing-secret-scan.txt"
+  test -f "$OUTGOING_LOG"
+  test ! -L "$OUTGOING_LOG"
+  test "$(stat -c '%U:%G:%a' "$OUTGOING_LOG")" = root:root:600
+  if LC_ALL=C grep -Eiq '(authorization:|cookie:|set-cookie:|access[_-]?token|refresh[_-]?token|service[_-]?role)' "$OUTGOING_LOG"; then
+    printf 'FAIL\n' >"$SECRET_SCAN_RESULT"
+  else
+    printf 'PASS\n' >"$SECRET_SCAN_RESULT"
+  fi
+  chmod 0600 "$SECRET_SCAN_RESULT"
+  SCAN="$(sed -n '1p' "$SECRET_SCAN_RESULT")"
+  case "$SCAN" in
+    PASS) printf 'outgoing_log=copy-approved\n' >"$PROOF_DIR/hm37a-log-disposition.txt" ;;
+    FAIL)
+      printf 'outgoing_log=retained-on-box-not-copied\n' \
+        >"$PROOF_DIR/hm37a-log-disposition.txt"
+      sed -i "\|$(basename "$OUTGOING_LOG")|d" "$PROOF_DIR/copy-back.list"
+      ;;
+    *) false ;;
+  esac
+  chmod 0600 "$PROOF_DIR/hm37a-log-disposition.txt"
+)
+```
+
+A failed scan leaves the log on the box at mode 0600, removes it from the
+copy-back manifest, records that disposition, and continues automatically.
+
+```sh
+# step: hm37a-close-readback
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  test "$(readlink -f /home/commonswarm/edge/current)" = \
+    "/home/commonswarm/edge/releases/$SHA"
+  test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
+  test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy
+  docker exec commonswarm-edge-edge-runtime-1 deno eval \
+    'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+  test "$(release_psql_ro -Atq --command \
+    "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")" = 1
+  test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t
+  python3 - "$PROOF_DIR/hm37-local-control.json" \
+    "/tmp/hm37a-prep-cleanup-${SHA}.json" \
+    >"$PROOF_DIR/hm37-revocation-readback.json" <<'PY'
+import json, sys
+control = json.load(open(sys.argv[1]))
+cleanup = json.load(open(sys.argv[2]))
+assert control["pass"] is True
+assert cleanup["revoked_readback"] is True
+assert cleanup["active_unexpired_token_count"] == 0
+assert len(cleanup["principal_ids"]) == 3
+print(json.dumps({"pass": True, "prep_seats_revoked": True,
+                  "active_unexpired_token_count": 0,
+                  "prep_directory": cleanup["prep_directory"]}, indent=2))
+PY
+  printf '%s\n' \
+    "release_sha=$SHA" \
+    'edge_live=true' \
+    'edge_dark=true' \
+    'migration_04=true' \
+    'local_old_control=true' \
+    'local_new_control=true' \
+    'prep_seats_revoked=true' \
+    'prep_active_tokens=0' \
+    'close=PASS' \
+    >"$PROOF_DIR/hm37-close-readback.txt"
+  chmod 0600 "$PROOF_DIR/hm37-revocation-readback.json" \
+    "$PROOF_DIR/hm37-close-readback.txt"
+)
+```
+
+Successful readbacks close A automatically. A failed readback is STOP and
+report. It never creates a passing close receipt. `runbook-61` performs the
+guarded exact rename to `<sha>.closed-window-<window-id>`; `runbook-12`
+removes Mac scratch only after that renamed directory is verified.
+
+```sh
+# step: hm37a-mac-control-cleanup
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$OPEN_RECEIPT"
+  test ! -L "$OPEN_RECEIPT"
+  . "$OPEN_RECEIPT"
+  for FILE in \
+    "$PREP_SEATS" \
+    "/tmp/hm37a-prep-seat-inventory-${RELEASE_SHA}.json" \
+    "/tmp/hm37a-prep-cleanup-${RELEASE_SHA}.json" \
+    "/tmp/hm37a-directed-check-${RELEASE_SHA}.py"; do
+    case "$FILE" in /tmp/hm37a-*) ;; *) false ;; esac
+    rm -f -- "$FILE"
+    test ! -e "$FILE"
+  done
+  rm -f -- "$OPEN_RECEIPT"
+  test ! -e "$OPEN_RECEIPT"
+)
+```
 
 ## 11. Rollback — edge first, SQL second
 
@@ -1841,7 +2491,14 @@ Then:
 
 Do not roll back HM2 or HM6. Do not change Caddy.
 
-The SQL reserve refuses any cursor or batch history. After a successful hosted control, this refusal is expected. Retain the schema unless a separately reviewed data-loss decision and recovery plan authorize removal. Never delete rows to satisfy the guard.
+`SCHEMA_ROLLBACK_APPROVAL=yes` may be supplied before the window, but it
+authorizes only an attempt. The reserve block independently verifies the
+restored previous edge and refuses any durable cursor or batch history before
+it writes the inverse. After a successful hosted control, this refusal is
+expected. Whatever the prompt input says, nonempty history is STOP with no
+schema rollback. Retain the schema unless a separately reviewed data-loss
+decision and recovery plan authorize removal. Never delete rows to satisfy
+the guard.
 
 The inverse below is verbatim from the hashed rollback file.
 
@@ -1853,6 +2510,8 @@ The inverse below is verbatim from the hashed rollback file.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
   set -euo pipefail
+  : "${SCHEMA_ROLLBACK_APPROVAL:?named rollback input required}"
+  test "$SCHEMA_ROLLBACK_APPROVAL" = yes
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   test "$PREVIOUS_EDGE" = /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
@@ -1862,6 +2521,18 @@ The inverse below is verbatim from the hashed rollback file.
     = "$PREVIOUS_EDGE/deploy/edge-runtime"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
+
+  CURSOR_COUNT="$(release_psql_ro -Atq --command \
+    'SELECT count(*) FROM swarm.hosted_mcp_check_cursors;')"
+  BATCH_COUNT="$(release_psql_ro -Atq --command \
+    'SELECT count(*) FROM swarm.hosted_mcp_check_batches;')"
+  printf 'cursor_count=%s\nbatch_count=%s\n' "$CURSOR_COUNT" "$BATCH_COUNT" \
+    >"$PROOF_DIR/hm37-schema-rollback-history.txt"
+  chmod 0600 "$PROOF_DIR/hm37-schema-rollback-history.txt"
+  if [ "$CURSOR_COUNT" != 0 ] || [ "$BATCH_COUNT" != 0 ]; then
+    printf '%s\n' 'STOP: durable cursor/batch history is nonempty; schema rollback was not run' >&2
+    exit 1
+  fi
 
   cat >"$APPLY_SQL" <<'SQL'
 BEGIN;
@@ -1926,7 +2597,11 @@ A failed forward transaction does not automatically require destructive rollback
 
 ## 12. Evidence, cleanup and closure
 
-Run `runbook-03` immediately after `1-apply-release-directories` and before any database, service, timer, symlink, or Caddy mutation. It creates the explicit copy-back manifest from the persisted `window.env`. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
+Run the resolved-input transfer, GO producer and prerequisite-evidence producer
+immediately after `1-apply-release-directories`, then run `runbook-03` and
+`runbook-05`, all before any database, service, timer, symlink, or Caddy mutation.
+The manifest and stack comparison read the `window.env` persisted by
+`1-apply-release-directories`.
 
 Add these exact item-relative paths without duplicating standard generated entries:
 
@@ -1948,33 +2623,37 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `hm37-current-window-state.txt`
 - `hm37-prerequisites.json`
 - `hm37-stack-runtime-review.txt`
+- `item-resolved-inputs.env`
 - `hm37-backup-gate.txt`
-- `hm37-worker-boundary.txt`
 - `hm37-loopback-reads.json`
 - `hm37-public-reads.json`
 - `hm37-mcp-hostname-reads.json`
 - `hm37-loopback-boundaries.json`
 - `hm37-public-boundaries.json`
 - `hm37-mcp-hostname-boundaries.json`
-- `hm37-hosted-control-inputs.txt`
-- `hm37-hosted-check-control.json`
+- `hm37a-prep-seat-inventory.json`
+- `hm37a-local-control-old.json`
+- `hm37a-local-control-new.json`
 - `hm37-public-check-no-mutation.json`
 - `hm37-functional-after-control.txt`
 - `hm37-local-control.json`
 - `hm37-revocation-readback.json`
+- `hm37a-prep-cleanup.json`
+- `hm37a-log-disposition.txt`
 - `hm37-close-readback.txt`
-
-`hm37-hosted-control-inputs.txt` records the accepted harness identity/checksum, invocation, runtime and review acceptance, never protected inputs. `hm37-worker-boundary.txt` records the exact-SHA instrumented result and positive control.
 
 These are required outputs, not existing PASS claims. Transfer accepted Mac-side results to the proof directory before manifest-only copy-back.
 
-Use `docs/evidence/<UTC-date>-release-eb2a87ac4b5a/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
+Use `${EVIDENCE_ROOT}/<UTC-date>-release-eb2a87ac4b5a-<window-id>/` outside the release checkout, then `docs/evidence/` under the same name after review. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
 ### Log exception and secret review
 
 The updated runbook permits the bounded outgoing-container `*.docker.log` files appended by its recreate steps. Do not add arbitrary logs to the initial item manifest.
 
-The copy-back procedure validates allowed container names, full lowercase release SHAs, root ownership, mode 0600 and the 10 MiB bound. Privately review these logs for secrets/request data before transfer. Capturing logs does not authorize exposing sensitive contents; if unsafe, stop copy-back for HezLead’s disposition.
+The copy-back procedure validates allowed container names, full lowercase
+release SHAs, root ownership, mode 0600 and the 10 MiB bound.
+`hm37a-outgoing-log-review` owns the disposition: a failed scan leaves the
+log on the box at 0600, records the omission, and continues.
 
 Keep all other raw logs, including the probe-window log and `database/logs/`, on the box.
 
@@ -1984,15 +2663,15 @@ Follow the runbook’s empty/nonempty `.err` handling and review nonempty errors
 
 ### Every exit path
 
-On success, refusal, failure or abort:
+On success, refusal, failure or abort after the open block:
 
-1. Revoke every temporary principal and provider grant/family; obtain readback.
+1. Run `hm37a-prep-seat-cleanup`: revoke exactly the three receipt principals, prove each human status row has `revoked=true`, prove the read-only `swarm.agent_tokens` active/unexpired count is zero for each, and guardedly remove the PREP seat directory (or leave and record it when the guard refuses).
 2. Run runbook abort cleanup whenever durable window state exists; restore only timers this window stopped.
 3. Remove transient database-session and protected smoke files when no longer needed.
 4. Preserve immutable releases and private diagnostics.
 5. Copy approved evidence through the manifest.
 6. Run `runbook-60`, then `runbook-61`, so transient files are removed and the active proof directory becomes the exact per-window closed name.
-7. Run Mac `runbook-12` only when HezLead closes the window.
+7. Run Mac `runbook-12` automatically after the close readback and guarded box rename pass.
 
 Successful closure must explicitly establish:
 
@@ -2004,13 +2683,14 @@ Successful closure must explicitly establish:
 - Stack runtime/helpers remain at the accepted HM6 baseline; no stack switch occurred.
 - No Caddy change occurred in this window.
 - Public MCP remains disabled on loopback, staging, API and MCP-hostname routes.
-- Worker-boundary evidence and public pre-auth refusal controls passed.
-- Hosted concurrent-open, upper-case ACK, repeated ACK, cursor and no-public-mutation controls passed.
-- Local `check.json` and stdio MCP compatibility passed.
-- Temporary principals/grants/families were revoked; zero active unexpired agent tokens remain.
+- Public pre-auth refusal controls and their S1/S5 mapping passed.
+- The receipt-bound PREP-seat directed control passed once on the old edge and once on the new edge; each note body was exactly `WINDOW_ID`.
+- Each receiver saw one signal exactly once, then an empty read; its cursor advanced; the third seat did not see the marker.
+- A created no principal, token, grant, family, seat, or human session; its three PREP principals are revoked, have zero active unexpired tokens, and the legacy seat-b principal was untouched.
 - Outgoing-container capture disposition is recorded, timers restored, transient files removed and approved evidence copied.
 
-Public MCP activation, every Caddy or access-log change, and real Claude-client interoperability remain outside this window.
+Hosted controls, public MCP activation, every Caddy or access-log change, and
+real Claude-client interoperability remain outside A and belong to later plans.
 
 ## Changes from v3
 

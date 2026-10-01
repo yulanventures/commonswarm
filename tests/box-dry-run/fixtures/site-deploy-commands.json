@@ -1,0 +1,85 @@
+{
+  "scripts": ["deploy/site/deploy.sh", "deploy/site/finalize-release.sh"],
+  "note": "Lane 8 step site-04 runs the real deploy/site/deploy.sh, and through it the real finalize-release.sh on the fixture box root. This file lists every command those two scripts run and how the dry run answers it: a stub (fail-closed: any other shape exits 69), a real host tool (run for real on the fixture tree), or a shell builtin. tests/box-dry-run.test.ts derives the commands from the script text and fails on one this file does not list; the stubs refuse every shape not listed here.",
+  "builtins": ["cd", "pwd", "printf", "command", "test", "[", "exit", "return", "trap", "set", "shift", "export"],
+  "stubs": {
+    "ssh": {
+      "shapes": [
+        "-o BatchMode=yes <ops|commonswarm>@<100.115.66.74|yulan-vps-1> <command string>",
+        "<host> sh -s -- <temporary-release> <final-release> <site-root>   (standard input is finalize-release.sh)"
+      ],
+      "flags": ["-o BatchMode=yes", "-o ConnectTimeout=10"],
+      "used_at": ["deploy/site/deploy.sh:276", "deploy/site/deploy.sh:280"],
+      "effect": "The command string runs in a shell against the fixture box root (tests/box-dry-run/stubs/dispatch.sh run_in_box). Line 276 creates releases/<release>.tmp in the fixture. Line 280 runs finalize-release.sh there: retention merge, normalized modes, the move to the final name, the atomic switch of current, and the retention pruning. Any other host exits 69.",
+      "evidence": [
+        {"file": "docs/evidence/2026-09-16-n-site/LANDING.md", "line": 34, "shape": "a real deploy.sh run to the box exited 0"},
+        {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the live layout, /srv/commonswarm/site/releases/<UTC>-<sha12>-<16 hex>, current, files mode 644"},
+        {"file": "docs/evidence/2026-09-27-release-9b085c823523/run.log", "line": 2, "shape": "a real release: 20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e is current and serves the site"}
+      ]
+    },
+    "rsync": {
+      "shapes": [
+        "-a --delete <dist>/ <ops|commonswarm>@<host>:<remote-temporary-release>/",
+        "-a --ignore-existing <previous-release>/_astro/ <temporary-release>/_astro/   (on the box)"
+      ],
+      "flags": ["-a", "--delete", "--ignore-existing"],
+      "used_at": ["deploy/site/deploy.sh:279", "deploy/site/finalize-release.sh:140"],
+      "effect": "The first copies the built tree into releases/<release>.tmp in the fixture and removes what the source lacks; the target must be a site release directory in the fixture. The second keeps the previous release's content-hashed assets without overwriting a new file of the same name. Any other flag set, or a source or target outside those places, exits 69.",
+      "evidence": [
+        {"file": "deploy/site/RUNBOOK.md", "line": 30, "shape": "a release directory is uploaded, old /_astro files are carried forward, and current is switched atomically"},
+        {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the five /_astro assets of a real release, readable, mode 644"}
+      ]
+    },
+    "npm": {
+      "shapes": ["ci", "run build"],
+      "flags": [],
+      "used_at": ["deploy/site/deploy.sh:267", "deploy/site/deploy.sh:268"],
+      "effect": "ci checks that package.json and package-lock.json exist and changes nothing. run build lays down the fixture dist tree. The site build is declared non-substitutable (fixtures/non-substitutable.json): the dry run cannot prove a real build, and deploy.sh's own validation and Anvil's live readback prove it. Nothing reaches a registry; any other subcommand exits 69.",
+      "evidence": [
+        {"file": "deploy/site/vercel-reference.json", "shape": "artifacts: the 25 stable files of a real build"},
+        {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the app and download pages and the five /_astro assets"},
+        {"file": "docs/evidence/2026-09-27-release-9b085c823523/run.log", "line": 2, "shape": "the built site serves /guides/grok-bot with 200 and /download with the release version"}
+      ]
+    },
+    "tar": {
+      "shapes": ["-xf - -C <checkout>"],
+      "flags": ["-xf", "-C"],
+      "used_at": ["deploy/site/deploy.sh:261"],
+      "effect": "The stub passes the call to the host's tar after dropping --no-xattrs (a flag the host's tar may lack); the archive is the real git archive of the release checkout.",
+      "evidence": [{"file": "deploy/site/deploy.sh", "line": 261, "shape": "git archive --format=tar HEAD piped to tar -xf - -C"}]
+    },
+    "readlink": {
+      "shapes": ["-f <path>", "<link>"],
+      "flags": ["-f"],
+      "used_at": ["deploy/site/deploy.sh:30", "deploy/site/finalize-release.sh:15", "deploy/site/finalize-release.sh:133"],
+      "effect": "-f resolves every symlink, as GNU readlink -f does on the box (M4: GNU coreutils 9.4). A single operand reads the link. Any other shape exits 69.",
+      "evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M4: the box runs GNU coreutils 9.4 and bash 5.2"}]
+    }
+  },
+  "box_userland": {
+    "mv": {
+      "shapes": ["--help", "<source> <target>", "-f <source> <target>", "-Tf <source> <target>"],
+      "used_at": ["deploy/site/finalize-release.sh:149", "deploy/site/finalize-release.sh:151", "deploy/site/finalize-release.sh:153", "deploy/site/finalize-release.sh:157"],
+      "effect": "GNU behavior the box has and the Mac lacks (tests/box-dry-run/stubs/box-userland.py). -T renames the symlink itself, so current is switched atomically. The fixture keeps the ownership records a real mv would keep. Any other flag exits 69.",
+      "evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M4: GNU coreutils 9.4 on the box"}]
+    }
+  },
+  "local": {
+    "dirname": ["--"],
+    "basename": ["--"],
+    "realpath": [],
+    "mktemp": ["-d <template>"],
+    "rm": ["-rf --", "-f --"],
+    "ln": ["-s", "-sfn"],
+    "mkdir": ["-p"],
+    "grep": ["-Eq"],
+    "od": ["-An -N8 -tx1"],
+    "tr": ["-d"],
+    "date": ["-u +%Y%m%dT%H%M%SZ"],
+    "git": ["-C <repo> archive --format=tar HEAD", "-C <repo> rev-parse --short=12 HEAD"],
+    "node": ["<repo>/deploy/site/validate-site-env.mjs <file>"],
+    "find": ["-type d -exec chmod 755 {} +", "-type f -exec chmod 644 {} +", "-prune -type d -mmin +60 -print"],
+    "chmod": ["755", "644"]
+  },
+  "local_reason": "These run for real: the dry run can execute them honestly on the fixture tree, and their result is the result on the box for the flags used (BSD and GNU agree on each flag listed)."
+}
