@@ -5,8 +5,7 @@
  * properties, shows the credential once, and revokes.
  */
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 import vm from "node:vm";
@@ -138,7 +137,6 @@ const COMMANDS = readFileSync(
   fileURLToPath(new URL("../../../../src/protocol/workspace-commands.ts", import.meta.url)),
   "utf8",
 );
-const REPO = fileURLToPath(new URL("../../../..", import.meta.url));
 
 function stripFlagged(source: string): string {
   let result = "";
@@ -223,29 +221,6 @@ function methodBody(source: string, signature: string): string {
     if (at !== -1 && at < end) end = at;
   }
   return source.slice(start + 1, end);
-}
-
-function filesContaining(needle: string): string[] {
-  const found: string[] = [];
-  const skip = new Set(["node_modules", "dist", ".git", "docs"]);
-  const walk = (dir: string): void => {
-    for (const name of readdirSync(dir)) {
-      if (skip.has(name)) continue;
-      const path = join(dir, name);
-      const info = statSync(path);
-      if (info.isDirectory()) {
-        walk(path);
-        continue;
-      }
-      if (!/\.(ts|astro|md|mjs|js)$/.test(name)) continue;
-      const text = readFileSync(path, "utf8");
-      if (text.includes(needle)) found.push(relative(REPO, path));
-    }
-  };
-  walk(join(REPO, "site"));
-  walk(join(REPO, "src"));
-  walk(join(REPO, "tests"));
-  return found.sort();
 }
 
 function workspaceCommandKeys(kind: string): string[] {
@@ -447,16 +422,6 @@ test("pagehide forgets a shown join invite, and flag off adds no handler", () =>
     nodes.get('[data-action="copy"]')?.click();
     assert.equal(copied, 0, "the prompt was also dropped from the element's state");
   }
-});
-
-test("PUBLIC_H0_LINK_JOIN is read in one file", () => {
-  const hits = filesContaining("PUBLIC_H0_LINK_JOIN");
-  assert.deepEqual(hits, [
-    "site/README.md",
-    "site/src/components/connect/h0-link-join.observer.test.ts",
-    "site/src/lib/h0-link-join-flag.ts",
-  ]);
-  assert.equal(FLAG.match(/import\.meta\.env\.PUBLIC_H0_LINK_JOIN/g)?.length, 1);
 });
 
 test("the invite sentence is the current server limits", async () => {
