@@ -418,7 +418,7 @@ test("every handler shape reads an exported accepted-flag constant", { timeout: 
     };
     visit(source);
   }
-  assert.equal(count, 68, "the enumerated handler shape site count changed");
+  assert.equal(count, 70, "the enumerated handler shape site count changed");
 });
 
 test("every help entry references a handler flag constant instead of a copied list", { timeout: 10_000 }, async () => {
@@ -549,7 +549,7 @@ test("each direct help row names a constant read by its selected handler", { tim
       }
     }
   }
-  assert.equal(checked, 67, "reconcile command table rows; dynamic session and selected variants have dedicated tests");
+  assert.equal(checked, 70, "reconcile command table rows; dynamic session and selected variants have dedicated tests");
 });
 
 test("multi-action handlers select the direct help shape for their branch", { timeout: 10_000 }, async () => {
