@@ -34,7 +34,8 @@ async function grant(full = false, expires = Date.now() + 86400000) {
   check(prepared.status === 200, 'real human consent prepared');
   const grant_id = id();
   const result = await invoke(command, wire({ kind: 'grant_admin_delegation', grant_id, consent_receipt_id: prepared.body.consent_receipt_id, replaces_grant_id: null }));
-  check(result.status === 200 && result.body.ok === true, 'real human grant activated');
+  check(result.status === 200 && result.body.status === 'accepted' && result.body.events.some(event =>
+    event.type === 'AdminDelegationGranted' && event.payload.grant_id === grant_id), 'real human grant activated');
   return grant_id;
 }
 try {
@@ -102,7 +103,8 @@ try {
   check((await invoke(read, view('admin_grants'))).status === 200, 'account recovery survives archived workspace and membership loss');
   const revokeWire = wire({ kind: 'revoke_admin_delegation', grant_id: grants[1], reason_code: 'human_revoked' });
   const revoked = await invoke(command, revokeWire);
-  check(revoked.status === 200 && revoked.body.ok === true, 'offline account revoke accepted');
+  check(revoked.status === 200 && revoked.body.status === 'accepted' && revoked.body.events.some(event =>
+    event.type === 'AdminDelegationRevoked' && event.payload.grant_id === grants[1]), 'offline account revoke accepted');
   const count = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${person.user_id}::uuid`;
   check((await invoke(command, revokeWire)).status === 200, 'same revocation request replays');
   const after = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${person.user_id}::uuid`;

@@ -44,7 +44,7 @@ test("human admin recovery uses bounded read pages and the existing account revo
   const captured: Array<Record<string, unknown>> = [];
   const fetcher: typeof fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>; captured.push(body);
-    return Response.json(body.resource === "admin_history" ? { ...page, grants: [] } : { status: "accepted", ok: true });
+    return Response.json(body.resource === "admin_history" ? { ...page, grants: [] } : { status: "accepted", events: [] });
   };
   const history = await readAdminDelegations(target, "synthetic-human", { resource: "admin_history", limit: 1 }, fetcher);
   assert.equal(history.grants.length, 0);

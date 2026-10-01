@@ -148,7 +148,7 @@ try {
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
     await db.begin(async tx => {
-      await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000003-rollback.sql'));
+      await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000004-rollback.sql')); await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000003-rollback.sql'));
       const [readAbsent] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readAbsent.fn === null, 'rollback removes human recovery function');
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000002-rollback.sql'));
@@ -157,7 +157,7 @@ try {
       check(absent.relation === null, 'rollback removes grants');
       await tx.unsafe(migration);
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000002_admin_routine.sql'));
-      await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000003_admin_recovery_read.sql'));
+      await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000003_admin_recovery_read.sql')); await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000004_admin_worker_read_fence.sql'));
       const [readRestored] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readRestored.fn !== null, 'migration restores human recovery function');
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;

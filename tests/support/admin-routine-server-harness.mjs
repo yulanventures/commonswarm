@@ -46,9 +46,6 @@ const { adminTransaction } = await import(
   "../../supabase/functions/command/admin-delegation.ts"
 );
 const policy = await import("../../supabase/functions/_shared/protocol.js");
-const { loadAgentCredential } = await import(
-  "../../supabase/functions/_shared/agent-auth.ts"
-);
 const { handleRequest: read } = await import("../../supabase/functions/read/index.ts");
 async function recovery(resource, workspace_id = null, before = null) {
   const response = await read(new Request("http://127.0.0.1/functions/v1/read", {
@@ -101,11 +98,6 @@ async function http(input, token) {
     }),
   );
   return { status: response.status, body: await response.json() };
-}
-async function hash(secret) {
-  return new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret)),
-  );
 }
 try {
   const scenario = Deno.args[1], now = Date.now(), connection = id();
@@ -394,11 +386,19 @@ try {
       !JSON.stringify(result).includes(worker.credential),
       "worker secret excluded from result",
     );
-    const auth = async (credential) =>
-      db.begin(async (tx) => {
-        await tx`SELECT set_config('role','swarm_command',true)`;
-        return loadAgentCredential(tx, await hash(credential));
-      });
+    const auth = async (credential) => {
+      const response = await read(new Request("http://127.0.0.1/functions/v1/read", {
+        method: "POST", headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ resource: "members", workspace_id: config.workspace }),
+      }));
+      check([200, 401, 403].includes(response.status), "worker read reaches authentication boundary");
+      if (response.status !== 200) return false;
+      const body = await response.json();
+      check(body.identity?.credential_valid === true && body.identity.principal_id === principal &&
+        body.identity.owner_user_id === config.owner && body.identity.workspace_id === config.workspace,
+        "worker read verifies recipient identity");
+      return true;
+    };
     check(await auth(worker.credential), "worker authenticates positive");
     if (scenario === "history") {
       check((await call({ kind: "admin_revoke_seat_credential", principal_id: principal,

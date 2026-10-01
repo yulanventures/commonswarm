@@ -80,6 +80,7 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${owner}::uuid, 'Lane C owner')`;
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane C', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
+      await sql`INSERT INTO swarm.streams(stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace')`;
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${recipient}::uuid, 'Invitation recipient')`;
       const configPath = join(secretDir, "local.json");
       writeFileSync(
