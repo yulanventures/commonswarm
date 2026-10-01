@@ -742,7 +742,7 @@ consumed by the dry run.
 
 ```sh
 # step: hm37a-schema-dependency-preflight
-# readonly: yes
+# readonly: no
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail

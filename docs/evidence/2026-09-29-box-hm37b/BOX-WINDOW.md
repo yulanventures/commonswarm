@@ -121,7 +121,7 @@ the recorded Deno removal guard, never forge a successful close receipt.
 
 ```sh
 # step: hm37b-hosted-auth-dependency-preflight
-# readonly: yes
+# readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh Python child on box as root
 (
   set -euo pipefail
@@ -210,7 +210,7 @@ PY
 
 ```sh
 # step: hm37b-deno-artifact-dependency-preflight
-# readonly: yes
+# readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box /bin/bash 5.2 as root
 (
   set -euo pipefail
@@ -746,7 +746,7 @@ failure-dispatch tail takes precedence before runtime removal.
 
 ```sh
 # step: hm37b-hosted-runtime-dependency-preflight
-# readonly: yes
+# readonly: no
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
