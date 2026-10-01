@@ -154,7 +154,12 @@ the recorded Deno removal guard, never forge a successful close receipt.
   test "$(stat -f %Su:%Sg:%Lp "$SECRET_ROOT")" = "$(id -un):$(id -gn):700"
   cp "$HUMAN_SESSION_SOURCE" "$SECRET_ROOT/human-session.json"
   chmod 0600 "$SECRET_ROOT/human-session.json"
-  cat >"$SECRET_ROOT/auth-probe.py" <<'PY'
+  # The generated Python stdin is a visible protected transport, never shell code.
+  # No box file or directory is needed; only this owned Mac scratch holds secrets.
+  python3 - "$SECRET_ROOT/human-session.json" >"$SECRET_ROOT/auth-probe-input.py" <<'PY'
+import pathlib, sys
+
+program = r"""
 import json, pathlib, pwd, re, stat, sys, urllib.request
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -178,7 +183,7 @@ def probe():
         values[key] = value
     assert values['SUPABASE_URL'] == 'https://api.commonswarm.com'
     assert values['SUPABASE_ANON_KEY']
-    session = json.load(sys.stdin)
+    session = json.loads(SESSION_JSON)
     assert set(session) == {'access_token'}
     assert isinstance(session['access_token'], str) and len(session['access_token']) >= 32
     request = urllib.request.Request(values['SUPABASE_URL'] + '/auth/v1/user',
@@ -189,6 +194,7 @@ def probe():
         assert response.status == 200
         user = json.loads(response.read(1024 * 1024))
     assert user.get('email_confirmed_at') is not None
+    assert isinstance(user.get('email'), str) and user['email'].strip()
     assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
                         user.get('id', ''), re.I)
 
@@ -197,14 +203,19 @@ try:
 except BaseException:
     print('STOP: live hosted human authentication preflight failed', file=sys.stderr)
     sys.exit(1)
+"""
+try:
+    session_text = pathlib.Path(sys.argv[1]).read_text()
+    sys.stdout.write("SESSION_JSON = " + repr(session_text) + "\n" + program)
+except BaseException:
+    print("STOP: protected authentication transport preparation failed", file=sys.stderr)
+    sys.exit(1)
 PY
-  # Only program text enters argv. The credential document travels on stdin.
-  REMOTE_COMMAND="$(python3 - "$SECRET_ROOT/auth-probe.py" <<'PY'
-import pathlib, shlex, sys
-print('sudo -n -i python3 -c ' + shlex.quote(pathlib.Path(sys.argv[1]).read_text()))
-PY
-  )"
-  ssh ops@100.115.66.74 "$REMOTE_COMMAND" <"$SECRET_ROOT/human-session.json"
+  chmod 0600 "$SECRET_ROOT/auth-probe-input.py"
+  test ! -L "$SECRET_ROOT/auth-probe-input.py"
+  test "$(stat -f %Su:%Sg:%Lp "$SECRET_ROOT/auth-probe-input.py")" = "$(id -un):$(id -gn):600"
+  # Literal executable argv; the same session and probe program travel only on stdin.
+  ssh ops@100.115.66.74 'sudo -n -i python3 -' <"$SECRET_ROOT/auth-probe-input.py"
 )
 ```
 
