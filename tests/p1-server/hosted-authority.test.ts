@@ -39,6 +39,10 @@ const catalogUrl = new URL(
   "../../deploy/release-proofs/item-hm/20260928000002-catalog.sql",
   import.meta.url,
 );
+const rollbackCatalogUrl = new URL(
+  "../../deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql",
+  import.meta.url,
+);
 
 let sql: postgres.Sql;
 let local: LocalEnvironment;
@@ -538,21 +542,63 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
   });
 });
 
-test("catalog proof is search-path independent and false without error before migration", async () => {
-  const [catalog, migrations] = await Promise.all([
+test("catalog rollback preserves every receipt kind and reapply is search-path independent", async () => {
+  const [catalog, rollbackCatalog, migrations] = await Promise.all([
     readFile(catalogUrl, "utf8"),
+    readFile(rollbackCatalogUrl, "utf8"),
     Promise.all(hmMigrationSequence.map(async (entry) => ({
       migration: await readFile(entry.migrationUrl, "utf8"),
       rollback: await readFile(entry.rollbackUrl, "utf8"),
     }))),
   ]);
   const catalogQuery = catalog.replace(/\\gset\s*$/u, "");
+  const rollbackCatalogQuery = rollbackCatalog.replace(/\\gset\s*$/u, "");
   await sql.begin(async (tx) => {
     const [positive] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(positive?.catalog_ok, true, "positive control: applied catalog");
+    // Real durable receipts must survive the inverse, including both HM kinds.
+    // Random identifiers keep the drill independent of earlier server tests.
+    const commandId = randomUUID();
+    for (const kind of ["user", "agent", "join", "hosted_grant", "hosted_seat"]) {
+      await tx`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id, workspace_id, stream_id,
+          request_hash, response
+        ) VALUES (
+          ${kind}, ${randomUUID()}, ${commandId}, ${randomUUID()}, ${randomUUID()},
+          'rollback-receipt-proof', ${tx.json({ status: "accepted", kind })}
+        )
+      `;
+    }
+    const receiptsBefore = await tx`
+      SELECT * FROM swarm.idempotency_keys
+      WHERE command_id = ${commandId} ORDER BY principal_kind
+    `;
+    assert.equal(receiptsBefore.length, 5);
     for (const { rollback } of [...migrations].reverse()) {
       await tx.unsafe(rollback);
     }
+    const [rolledBack] = await tx.unsafe<{ rollback_ok: boolean }[]>(rollbackCatalogQuery);
+    assert.equal(rolledBack?.rollback_ok, true, "rollback catalog accepts exactly the retained kinds");
+    const receiptsAfter = await tx`
+      SELECT * FROM swarm.idempotency_keys
+      WHERE command_id = ${commandId} ORDER BY principal_kind
+    `;
+    assert.deepEqual(receiptsAfter, receiptsBefore, "rollback preserves complete receipt contents");
+    await assert.rejects(tx.savepoint(async (savepoint) => {
+      await savepoint`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id, workspace_id, stream_id,
+          request_hash, response
+        ) VALUES (
+          'unknown_rollback_kind', ${randomUUID()}, ${commandId},
+          ${randomUUID()}, ${randomUUID()}, 'rollback-receipt-proof', '{}'::jsonb
+        )
+      `;
+    }), (error: unknown) => error instanceof postgres.PostgresError &&
+      error.code === "23514" &&
+      error.constraint_name === "idempotency_keys_principal_kind_check",
+    "rollback still rejects an unknown kind through the real check constraint");
     const [before] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(before?.catalog_ok, false, "missing objects return false without throwing");
     for (const { migration } of migrations) {

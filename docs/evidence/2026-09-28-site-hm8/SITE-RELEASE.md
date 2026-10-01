@@ -68,6 +68,8 @@ close=PASS
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-00-source-checkout: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${SITE_RELEASE_REPO:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_BASE_SHA:?named input missing}"
@@ -97,6 +99,8 @@ and derives the ID. Nobody types a time or ID.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${HM37_A_CLOSE_RECEIPT:?named input missing}"
   : "${SITE_RELEASE_REPO:?named input missing}"
   : "${SITE_BASE_SHA:?named input missing}"
@@ -133,6 +137,8 @@ and derives the ID. Nobody types a time or ID.
 
   box_open=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 root=/srv/commonswarm/site
 test "$(id -un)" = commonswarm
 test ! -e /tmp/commonswarm-site-window.env
@@ -220,6 +226,8 @@ PY
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-00-a-close-ingest: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
   test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
@@ -235,6 +243,8 @@ PY
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-00-build-env: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test -z "${OP_SERVICE_ACCOUNT_TOKEN+x}"
@@ -309,6 +319,8 @@ positive controls.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-02: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
@@ -365,6 +377,8 @@ headless process and removes its private profile through guarded rm.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-03-browser-session-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   umask 077
   test "$(command -v rm)" = "$HOME/.local/bin/rm"
@@ -485,6 +499,8 @@ browser branch. No bearer is exported from Chrome and no revoke is exercised.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-03: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
@@ -515,10 +531,14 @@ the switch.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-03-pin-previous: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
     >"$SITE_EVIDENCE/site-03-pin.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-03-pin-previous: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 window_id=${1:-}
 case "$window_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
@@ -577,6 +597,8 @@ These are fixed assertions, not window decisions:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-03-go-record: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   : "${SITE_APPROVER:?named input missing}"
   : "${SITE_PLAN_COMMIT:?named input missing}"
@@ -613,6 +635,8 @@ These are fixed assertions, not window decisions:
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-04: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
@@ -669,6 +693,8 @@ immediate rollback; a third state stops for incident handling.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-04-reconcile-failure: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   previous=$(cat "$SITE_EVIDENCE/previous.original")
   pin=$(cat "$SITE_EVIDENCE/previous.release")
@@ -681,6 +707,8 @@ immediate rollback; a third state stops for incident handling.
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-04-reconcile-failure: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
 test -f "$pin/app/index.html"; test "$(readlink -f "$root/current")" = "$failed"
@@ -709,12 +737,16 @@ the pin.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
   set +e
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
     >"$SITE_EVIDENCE/site-05-public.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 expected=$1
 python3 - "$expected" <<'PY'
 import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
@@ -755,6 +787,8 @@ BOX
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
 test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
@@ -781,6 +815,8 @@ automatically.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child only for automatic rollback
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   export SITE_EVIDENCE SITE_CHROME_ENDPOINT
   set +e
@@ -899,6 +935,8 @@ PY
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
 test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
@@ -921,6 +959,8 @@ bytes through the public boundary and rechecks the appropriate browser branch.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   if test ! -f "$SITE_EVIDENCE/rollback-auto.txt"; then
     printf '%s\n' 'rollback=not-needed' >"$SITE_EVIDENCE/site-06-rollback-verify.txt"
@@ -930,6 +970,8 @@ bytes through the public boundary and rechecks the appropriate browser branch.
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" \
     >"$SITE_EVIDENCE/site-06-rollback-verify.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; test "$(readlink -f /srv/commonswarm/site/current)" = "$pin"
 python3 - "$pin" <<'PY'
 import pathlib,sys,urllib.request
@@ -992,6 +1034,8 @@ temporary build `site/.env` is removed at close.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   pin=$(cat "$SITE_EVIDENCE/previous.release"); previous=$(cat "$SITE_EVIDENCE/previous.original")
   if test -f "$SITE_EVIDENCE/rollback-auto.txt"; then
@@ -1025,6 +1069,8 @@ PY
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" \
     >"$SITE_EVIDENCE/site-07-pin-close.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL site-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; previous=$2; window_id=$3; outcome=$4; root=/srv/commonswarm/site
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
 test "$previous" = "$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
