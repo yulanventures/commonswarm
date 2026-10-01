@@ -2,6 +2,11 @@ import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
+  adminTransaction, adminDigest, recordAdminFailure, isAdminAccessCredential, isAdminRefreshCredential,
+  type AdminAuthentication, type AdminInput, type AdminRuntimeIdentity,
+  type AdminCredentialDelivery,
+} from "./admin-delegation.ts";
+import {
   REGISTRATION_SEAT_REVOKED,
   REGISTRATION_TOKEN_ALREADY_USED,
 } from "./registration-conflicts.ts";
@@ -12935,8 +12940,24 @@ async function handlePostRequest(request: Request): Promise<Response> {
   }
 
   const parsed = await readBody(request);
-  if (!parsed.ok) return parsed.response;
+  if (!parsed.ok) {
+    const malformedCredential = bearer(request);
+    if (malformedCredential !== null && isAdminAccessCredential(malformedCredential)) {
+      await runAdminAccountCommand({ command_id: crypto.randomUUID(), command: { kind: 'invalid_request' } }, { kind: 'access', credential: malformedCredential });
+    }
+    return parsed.response;
+  }
   const body = parsed.body;
+  const credential = bearer(request);
+  // A separate account credential never reaches worker or GoTrue authentication.
+  if (credential !== null && isAdminAccessCredential(credential)) {
+    const result = await runAdminAccountCommand(body, { kind: "access", credential });
+    return json(result.status, result.body);
+  }
+  if (credential !== null && isAdminRefreshCredential(credential)) {
+    return json(403, { error: "credential_runtime_required" });
+  }
+
   const kind = commandKind(body);
   const publicHostedClaim = publicHostedCommandForbidden(kind);
   const bodyClaimsHostedContext = [
@@ -12970,8 +12991,8 @@ async function handlePostRequest(request: Request): Promise<Response> {
   const sessionProofParse = parseAgentSessionProofHeaders(request.headers);
   const acquireProofParse = parseAgentSessionAcquireHeaders(request.headers);
 
-  const credential = bearer(request);
-  let verifiedHuman: VerifiedHuman | null = null;
+let verifiedHuman: VerifiedHuman | null = null;
+  let adminSessionBinding: string | null = null;
   let agentTokenHash: Uint8Array | null = null;
   let joinCredentialHash: Uint8Array | null = null;
   if (kind === REGISTER_AGENT_SEAT_KIND) {
@@ -13052,6 +13073,20 @@ async function handlePostRequest(request: Request): Promise<Response> {
         data.user.email_confirmed_at !== null,
       interactiveAuthAtSeconds: newestInteractiveAmrSeconds(claimsData.claims),
     };
+    if (typeof claimsData.claims.session_id === "string") {
+      adminSessionBinding = await adminDigest({ user_id: data.user.id, session_id: claimsData.claims.session_id });
+    }
+  }
+
+  if (record(body.stream)?.kind === "account") {
+    if (verifiedHuman === null || adminSessionBinding === null) return json(403, { error: "credential_kind_forbidden" });
+    const identity = verifiedHuman;
+    const result = await runAdminAccountCommand(body, { kind: "human", identity: {
+      user_id: identity.userId, session_binding: adminSessionBinding,
+      interactive_at_seconds: identity.interactiveAuthAtSeconds,
+      csrf_verified: allowedCommandOrigins.has(request.headers.get("origin") ?? ""),
+    } }, identity);
+    return json(result.status, result.body);
   }
 
   const requestId = crypto.randomUUID();
@@ -13148,6 +13183,70 @@ export async function handleRequest(request: Request): Promise<Response> {
     allowedCommandOrigins,
     commandEnvironment,
   );
+}
+
+async function runAdminAccountCommand(
+  input: AdminInput,
+  authentication: AdminAuthentication,
+  human: VerifiedHuman | null = null,
+): Promise<HttpResult> {
+  try {
+    const outcome = await db.begin("isolation level read committed", async tx => {
+      await setTransaction(tx);
+      if (human !== null) await authenticateHuman(tx, human);
+      return await adminTransaction(tx, input, authentication);
+    });
+    return outcome.result;
+  } catch {
+    // No SQL/credential material is logged. Account failure auditing is added
+    // by the same adapter in a fresh transaction after rollback.
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
+    catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
+    return { status: 500, body: { error: "admin_command_failed" } };
+  }
+}
+
+/** Private credential-runtime channel. The authorization service must verify
+ * its connection/client identity and distinct admin resource before dispatch.
+ * It must never expose the delivery callback to model-visible tool output.
+ * No public HTTP body/header can select this identity or delivery channel.
+ */
+export async function handleAdminRuntimeCommand(
+  input: AdminInput,
+  identity: AdminRuntimeIdentity,
+  deliver: (credential: AdminCredentialDelivery) => Promise<void>,
+  refreshCredential?: string,
+): Promise<HttpResult> {
+  const authentication: AdminAuthentication = { kind: "runtime", identity,
+    ...(refreshCredential === undefined ? {} : { refresh_credential: refreshCredential }) };
+  let outcome: Awaited<ReturnType<typeof adminTransaction>>;
+  try { outcome = await db.begin("isolation level read committed", async tx => {
+    await setTransaction(tx);
+    return await adminTransaction(tx, input, authentication);
+  }); } catch {
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
+    catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
+    return { status: 500, body: { error: "admin_command_failed" } };
+  }
+  if (outcome.delivery !== undefined) {
+    try { await deliver(outcome.delivery); }
+    catch {
+      // Delivery may have partially succeeded; terminally revoke the uncertain
+      // lineage before returning a failure. The original pending issue remains history.
+      try { await db.begin(async tx => {
+        await setTransaction(tx);
+        await recordAdminFailure(tx, input, authentication);
+        const owners = await tx<{ owner_user_id: string }[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id = ${outcome.delivery!.grant_id}::uuid`;
+        if (owners[0]) await adminTransaction(tx, { command_id: crypto.randomUUID(), stream: { kind: "account" },
+          resource: identity.resource, command: { kind: "revoke_admin_delegation", grant_id: outcome.delivery!.grant_id, reason_code: "credential_delivery_failed" } },
+          { kind: "system", owner_user_id: owners[0].owner_user_id });
+      }); } catch {
+        return { status: 500, body: { error: "admin_delivery_recovery_unavailable" } };
+      }
+      return { status: 503, body: { error: "credential_delivery_failed", next_action: "Approve a new connection before retrying issuance." } };
+    }
+  }
+  return outcome.result;
 }
 
 /** Closed internal wire shape for the durable hosted `check` command path. */

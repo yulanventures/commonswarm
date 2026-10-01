@@ -426,6 +426,9 @@ async function handle(
     return json(403, { error: "forbidden" });
   }
   const token = bearer(request);
+  if (token?.startsWith("swm_adm_") || token?.startsWith("swm_adr_")) {
+    return json(403, { error: "credential_kind_forbidden" });
+  }
   if (token === null) {
     return json(401, { error: "unauthenticated" });
   }
