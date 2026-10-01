@@ -669,6 +669,379 @@
   ]
 },
 {
+  "step": "hm37a-directed-check-old",
+  "scope": "whole-block",
+  "surface": "old-edge directed control over the live hosted workspace: three prep-seat credentials authenticated, then one note delivered, acknowledged once and kept from the third seat",
+  "reason": "needs the live hosted workspace and the old edge: cswarm whoami must have the service confirm each prep seat's credential (credential_valid), and cswarm note and cswarm check must deliver one signal exactly once, advance the receiver's cursor only on a valid acknowledgement and keep the signal from the third seat. The cswarm stub can only answer from a principals table the harness itself holds, so its answer is not an observation of any credential, cursor, acknowledgement or visibility boundary, and no committed measurement provides them",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2073-2087 must exit zero on the old edge: after it installs the PREP seat inventory and the directed program (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2080-2083) and confirms edge/current is the previous release (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2084), the program run at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2085 authenticates the three prep seats (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2022-2027), proves the receiver's empty precheck (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2029-2031), sends the one note (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2034-2036) and asserts local.delivery-exactly-once, local.cursor-requires-valid-ack, control.receiver-second-read-empty and local.visibility-confined (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2039-2053). It then writes hm37a-local-control-old.json with pass true (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2054-2063) and sets mode 0600 (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2086). A failed assertion writes pass false with its assertion_id at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2008-2016 and the block exits non-zero. Any failure stops the window before migration or edge change.",
+  "receipt_fields": [
+    "pass",
+    "phase",
+    "workspace_id",
+    "signal_id",
+    "assertions.local.delivery-exactly-once",
+    "assertions.local.cursor-requires-valid-ack",
+    "assertions.local.visibility-confined",
+    "assertions.control.receiver-second-read-empty"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37a-prep-seat-inventory.json",
+      "path": "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2080-2081",
+      "evidence": null,
+      "reason": "Not seeded. A copy of the PREP_SEATS file that hm37a-prep-seat-control-stage installs at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1997. hm37a-open-inputs derives that file from the operator-supplied PREP receipt (schema, prep_id, prep_directory, workspace_id and one row of role, profile_path, principal_id and token_expires_at per seat, written with sorted keys at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:486-505); it is not a byte copy of the receipt. The plan documents no literal for it and no committed evidence holds it. Deriving it would run the install, a part of the declared block, and a whole-block declaration is never executed in part. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it. Reported by name."
+    },
+    {
+      "output": "hm37a-directed-check.py",
+      "path": "$EVIDENCE_DIR/hm37a-directed-check.py",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2082-2083",
+      "evidence": null,
+      "reason": "Not seeded. A copy of the program that hm37a-prep-seat-control-stage writes at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1998-2065. Deriving it would run the install, a part of the declared block. Only hm37a-directed-check-new reads it, and that block is declared too, so no executed block reads it. Reported by name."
+    },
+    {
+      "output": "hm37a-local-control-old.json",
+      "path": "$EVIDENCE_DIR/hm37a-local-control-old.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2054-2063 written by the program run at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2085",
+      "evidence": null,
+      "reason": "Not seeded. No committed evidence holds the receipt of a passed directed program. The success writer prints signal_id, the id the live cswarm note returned for the signal it created, and phase from the program's argv; the plan documents no literal for either, and a dry run creates no signal. A synthetic id would be a fabricated live observation. The only committed hm37-local-control.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json) is the aborted window's not_run aggregate, an abort and refusal control input and never a success. Reported by name. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it with mode 600 (chmod at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2086)."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json",
+      "shape": "Aborted window's not_run aggregate (pass false); abort and refusal controls only, never the receipt of a passed directed program."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37a-prep-seat-inventory.json",
+      "reason": "Not seeded. A copy of the PREP_SEATS file that hm37a-prep-seat-control-stage installs at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1997. hm37a-open-inputs derives that file from the operator-supplied PREP receipt (schema, prep_id, prep_directory, workspace_id and one row of role, profile_path, principal_id and token_expires_at per seat, written with sorted keys at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:486-505); it is not a byte copy of the receipt. The plan documents no literal for it and no committed evidence holds it. Deriving it would run the install, a part of the declared block, and a whole-block declaration is never executed in part. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it. Reported by name."
+    },
+    {
+      "output": "hm37a-directed-check.py",
+      "reason": "Not seeded. A copy of the program that hm37a-prep-seat-control-stage writes at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1998-2065. Deriving it would run the install, a part of the declared block. Only hm37a-directed-check-new reads it, and that block is declared too, so no executed block reads it. Reported by name."
+    },
+    {
+      "output": "hm37a-local-control-old.json",
+      "reason": "Not seeded. No committed evidence holds the receipt of a passed directed program. The success writer prints signal_id, the id the live cswarm note returned for the signal it created, and phase from the program's argv; the plan documents no literal for either, and a dry run creates no signal. A synthetic id would be a fabricated live observation. The only committed hm37-local-control.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json) is the aborted window's not_run aggregate, an abort and refusal control input and never a success. Reported by name. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it with mode 600 (chmod at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2086)."
+    }
+  ]
+},
+{
+  "step": "hm37a-directed-check-new",
+  "scope": "whole-block",
+  "surface": "new-edge directed control over the live hosted workspace: three prep-seat credentials authenticated, then one note delivered, acknowledged once and kept from the third seat",
+  "reason": "needs the live hosted workspace and the new edge: cswarm whoami must have the service confirm each prep seat's credential (credential_valid), and cswarm note and cswarm check must deliver one signal exactly once, advance the receiver's cursor only on a valid acknowledgement and keep the signal from the third seat. The cswarm stub can only answer from a principals table the harness itself holds, so its answer is not an observation of any credential, cursor, acknowledgement or visibility boundary, and no committed measurement provides them",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2094-2104 must exit zero on the new edge: after it confirms edge/current is the candidate release (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2101), the program run at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2102 authenticates the three prep seats (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2022-2027), proves the receiver's empty precheck (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2029-2031), sends the one note (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2034-2036) and asserts local.delivery-exactly-once, local.cursor-requires-valid-ack, control.receiver-second-read-empty and local.visibility-confined (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2039-2053). It then writes hm37a-local-control-new.json with pass true (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2054-2063) and sets mode 0600 (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2103). A failed assertion writes pass false with its assertion_id at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2008-2016 and the block exits non-zero. After the commit point an S3 or S4 failure here selects full rollback.",
+  "receipt_fields": [
+    "pass",
+    "phase",
+    "workspace_id",
+    "signal_id",
+    "assertions.local.delivery-exactly-once",
+    "assertions.local.cursor-requires-valid-ack",
+    "assertions.local.visibility-confined",
+    "assertions.control.receiver-second-read-empty"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37a-local-control-new.json",
+      "path": "$EVIDENCE_DIR/hm37a-local-control-new.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2054-2063 written by the program run at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2102",
+      "evidence": null,
+      "reason": "Not seeded. No committed evidence holds the receipt of a passed directed program. The success writer prints signal_id, the id the live cswarm note returned for the signal it created, and phase from the program's argv; the plan documents no literal for either, and a dry run creates no signal. A synthetic id would be a fabricated live observation. The only committed hm37-local-control.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json) is the aborted window's not_run aggregate, an abort and refusal control input and never a success. Reported by name. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it with mode 600 (chmod at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2103)."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json",
+      "shape": "Aborted window's not_run aggregate (pass false); abort and refusal controls only, never the receipt of a passed directed program."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37a-local-control-new.json",
+      "reason": "Not seeded. No committed evidence holds the receipt of a passed directed program. The success writer prints signal_id, the id the live cswarm note returned for the signal it created, and phase from the program's argv; the plan documents no literal for either, and a dry run creates no signal. A synthetic id would be a fabricated live observation. The only committed hm37-local-control.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json) is the aborted window's not_run aggregate, an abort and refusal control input and never a success. Reported by name. The local evidence transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2114-2117 requires it with mode 600 (chmod at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2103)."
+    }
+  ]
+},
+{
+  "step": "hm37-public-boundary-reads",
+  "scope": "whole-block",
+  "surface": "live loopback, public gateway and MCP-hostname HTTP reads on the candidate edge",
+  "reason": "needs the live network and the candidate edge: the block reads the loopback gateway over ssh, https://edge-staging.commonswarm.com, https://api.commonswarm.com and https://mcp.commonswarm.com after the edge switch. The dry run's urllib fixture answers from a table the harness writes, including an invented JWKS key set and OAuth discovery document, so its answers are not observations. The committed measurements (M12, M13) are GETs of the previous edge only; none covers the candidate edge, the OAuth discovery bodies or the JWKS keys",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1659-1775 must exit zero after the exact-SHA and hosted-authority source checks (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1668-1670), the loopback h0 read over ssh (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1764-1766), the staging and api h0 reads (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1768-1771) and the MCP-hostname reads (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1773-1774): HTTP 200 with the expected media type, each discovery document naming the base as issuer and its /authorize, /token and /jwks URLs (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1740-1748) and a JWKS of public ES256 P-256 keys only (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1749-1759). Each receipt then carries pass true (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1761). A challenge, redirect or wrong body prints pass false and exits non-zero (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1717-1731).",
+  "receipt_fields": [
+    "pass",
+    "mode",
+    "results[].base",
+    "results[].method",
+    "results[].path",
+    "results[].status",
+    "results[].user_agent",
+    "results[].headers",
+    "results[].assertion_id"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-loopback-reads.json",
+      "path": "$EVIDENCE_DIR/hm37-loopback-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1764-1766",
+      "evidence": null,
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-public-reads.json",
+      "path": "$EVIDENCE_DIR/hm37-public-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1768-1771",
+      "evidence": null,
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-mcp-hostname-reads.json",
+      "path": "$EVIDENCE_DIR/hm37-mcp-hostname-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1773-1774",
+      "evidence": null,
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json",
+      "shape": "M12 and M13: GET statuses of the previous edge's loopback, edge-staging, api and mcp discovery routes; no candidate-edge read, no JWKS keys."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-loopback-reads.json",
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-public-reads.json",
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-mcp-hostname-reads.json",
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    }
+  ]
+},
+{
+  "step": "hm37-public-boundaries",
+  "scope": "whole-block",
+  "surface": "live loopback, public gateway and MCP-hostname refusal probes on the candidate edge",
+  "reason": "needs the live network and the candidate edge: the block sends POST, PUT, PATCH, DELETE and OPTIONS requests to the loopback gateway over ssh, https://edge-staging.commonswarm.com, https://api.commonswarm.com and https://mcp.commonswarm.com and requires exact refusal statuses and bodies. No committed measurement provides them: M12 records that the POST refusal and its body shape were not measured, and the aborted window's public and MCP-hostname boundary receipts are a failure (staging answered 403) and a not_run record. The dry run's urllib fixture would answer from a table the harness writes",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1779-1954 must exit zero after the exact-SHA and hosted-authority source checks (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1788-1790) and the six hosted-only kinds read from source (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1795-1805): gateway POST /functions/v1/command answers 400 invalid_request for an empty body, 403 forbidden for each of the six kinds and 401 unauthenticated for mint_agent_token without a bearer (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1898-1907), the gateway and MCP dark routes answer 503 feature_disabled for every method (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1908-1921), and the MCP hostname answers 503 authorization_service_disabled on /authorize and /token (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1913-1916). Each receipt then carries pass true, the assertion map and the bearer-ordering proof (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940). Any mismatch prints pass false and exits non-zero (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1871-1890).",
+  "receipt_fields": [
+    "pass",
+    "mode",
+    "hosted_command_count",
+    "assertion_map",
+    "bearer_ordering_proof",
+    "results[].base",
+    "results[].method",
+    "results[].path",
+    "results[].status",
+    "results[].expected_status",
+    "results[].assertion_id",
+    "results[].headers",
+    "results[].pass"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-loopback-boundaries.json",
+      "path": "$EVIDENCE_DIR/hm37-loopback-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1943-1945",
+      "evidence": null,
+      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-public-boundaries.json",
+      "path": "$EVIDENCE_DIR/hm37-public-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1947-1950",
+      "evidence": null,
+      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-mcp-hostname-boundaries.json",
+      "path": "$EVIDENCE_DIR/hm37-mcp-hostname-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1952-1953",
+      "evidence": null,
+      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json",
+      "shape": "Aborted window's failure receipt (staging positive control returned 403; pass false); abort and refusal controls only."
+    },
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json",
+      "shape": "Aborted window's not_run receipt (pass false); abort and refusal controls only."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-loopback-boundaries.json",
+      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-public-boundaries.json",
+      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    },
+    {
+      "output": "hm37-mcp-hostname-boundaries.json",
+      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+    }
+  ]
+},
+{
+  "step": "hm37-reserve-schema-rollback",
+  "scope": "whole-block",
+  "surface": "reserved migration 04 schema rollback on the live production PostgreSQL",
+  "reason": "needs the live production database: assert-database-identity.sh authenticates the target, release_psql_ro counts the durable cursor and batch history, and release_psql applies the guarded inverse in one transaction. The database fixture helper refuses every unmeasured call, and no committed measurement holds the production tables' current rows",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2506-2591 must exit zero only when SCHEMA_ROLLBACK_APPROVAL is yes (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2513-2514), the previous edge is restored and healthy (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2517-2521), the target identity assertion passes (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2522-2523) and both durable history counts are zero (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2525-2528, docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2532-2535); it then applies the inverse and its rollback catalog check (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2537-2590). Nonempty history is STOP with no schema rollback (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2532-2535).",
+  "receipt_fields": [
+    "cursor_count",
+    "batch_count"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-schema-rollback-history.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-schema-rollback-history.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2525-2531",
+      "evidence": null,
+      "reason": "Not seeded. The writer prints cursor_count and batch_count, which release_psql_ro read from swarm.hosted_mcp_check_cursors and swarm.hosted_mcp_check_batches (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2525-2528) and prints them at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2529-2531. No committed evidence holds them and the plan documents no literal for either count. No executed block reads the file. Reported by name."
+    },
+    {
+      "output": "APPLY_SQL",
+      "path": "/run/commonswarm-release-{sha}-apply.sql",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2537-2589",
+      "evidence": null,
+      "reason": "Not seeded. The guarded inverse SQL is a scratch file the block writes and then applies at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2590. It is not a success artifact, no committed evidence of it exists, and session cleanup owns its removal."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37-schema-rollback-history.txt",
+      "reason": "Not seeded. The writer prints cursor_count and batch_count, which release_psql_ro read from swarm.hosted_mcp_check_cursors and swarm.hosted_mcp_check_batches (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2525-2528) and prints them at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2529-2531. No committed evidence holds them and the plan documents no literal for either count. No executed block reads the file. Reported by name."
+    },
+    {
+      "output": "APPLY_SQL",
+      "reason": "Not seeded. The guarded inverse SQL is a scratch file the block writes and then applies at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2590. It is not a success artifact, no committed evidence of it exists, and session cleanup owns its removal."
+    }
+  ]
+},
+{
+  "step": "hm37-backup-gate",
+  "scope": "whole-block",
+  "surface": "live production backup service state and backup status receipt",
+  "reason": "needs the live box: the block reads commonswarm-postgres-backup.service from systemd and /var/backups/commonswarm-postgres/status.json, whose ok, database_bytes_verified, object_bytes_verified, verified_at and destination values come from the live backup and its R2 verification. Committed M9 measured the service state (inactive, Result=success) and the status file's keys and value types, not those values, and its own note records required_keys_present=false, so no committed measurement provides them. A status file written by the harness would be an invented backup result, and the age check would compare it with the host clock",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1466-1509 must exit zero: after the window.env source and the HezLead-approved BACKUP_MAX_AGE_SECONDS checks (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1472-1476), the backup service is inactive or failed (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1477-1493) with Result=success (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1494), and the status file shows ok, database_bytes_verified and object_bytes_verified true, a verified_at no more than BACKUP_MAX_AGE_SECONDS old and at most 300 seconds in the future, and an r2:yulan-vps-1-backups/000-commonswarm-postgres/ destination (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1495-1506). It then writes backup_gate=PASS (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1507). Failure stops the window.",
+  "receipt_fields": [
+    "backup_gate=PASS"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-backup-gate.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-backup-gate.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1495-1508",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-backup-gate.txt",
+      "reason": "Historical bytes, not proof that the present block ran. The aborted window's real gate wrote this one line, and the writer prints the same literal on success (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1507). Copy-back reads the file. The plan sets no mode for this file, so the seed uses the proof directory's root:root 0600 convention; no executed block reads its mode."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "hm37-backup-gate.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-backup-gate.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-backup-gate.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1495-1508"
+    }
+  ],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json",
+      "shape": "M9: backup service inactive with Result=success; status.json key names and value types, not its values (required_keys_present=false)."
+    }
+  ],
+  "unproduced": []
+},
+{
+  "step": "runbook-34",
+  "scope": "whole-block",
+  "surface": "live loopback POST to the edge's h0 note route",
+  "reason": "needs the live loopback network and the live edge: the block POSTs a note body without authorization to http://127.0.0.1:9000/functions/v1/h0/note and requires status 401. M12 records that the loopback POST response was not measured, and the dry run's curl stub refuses every loopback POST with exit 69 rather than invent a response",
+  "live_proof": "The live runbook step at deploy/RELEASE-TO-BOX.md:2319-2352 must exit zero on the box: the unauthenticated loopback POST (deploy/RELEASE-TO-BOX.md:2329-2331) returns HTTP 401 (deploy/RELEASE-TO-BOX.md:2344-2350); the status, Server, CF-Ray and Content-Type are recorded in h0-note-unauth-result.json (deploy/RELEASE-TO-BOX.md:2332-2347), the body stays in h0-note-unauth.json and the headers file is removed (deploy/RELEASE-TO-BOX.md:2351).",
+  "receipt_fields": [
+    "pass",
+    "status",
+    "headers.server",
+    "headers.cf-ray",
+    "headers.content-type",
+    "body_prefix (only for a non-JSON body)"
+  ],
+  "written_outputs": [
+    {
+      "output": "h0-note-unauth.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth.json",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2329-2331",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/h0-note-unauth.json",
+      "reason": "Historical bytes, not proof that the present block ran. A real window's unauthenticated h0 note probe wrote this 401 body; the block's curl writes the live response body to the same name. Copy-back reads the file. The plan sets no mode for this file, so the seed uses the proof directory's root:root 0600 convention; no executed block reads its mode."
+    },
+    {
+      "output": "h0-note-unauth-result.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth-result.json",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2332-2349",
+      "evidence": null,
+      "reason": "Not seeded. The writer prints the Server and CF-Ray headers of the live response; the plan documents no literal for them and no committed evidence holds this receipt. No executed block reads it. Reported by name."
+    },
+    {
+      "output": "h0-note-unauth.headers",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth.headers",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2329 removed at deploy/RELEASE-TO-BOX.md:2351",
+      "evidence": null,
+      "reason": "Not seeded. A scratch file the block removes before it ends; no committed output bytes and no later reader. Reported by name."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "h0-note-unauth.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/h0-note-unauth.json",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/h0-note-unauth.json",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2329-2331"
+    }
+  ],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json",
+      "shape": "M12: loopback listen, health GET, H0 GET and DARK MCP GET statuses; the POST refusal and body shape were not measured."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "h0-note-unauth-result.json",
+      "reason": "The writer prints the Server and CF-Ray headers of the live response; the plan documents no literal for them and no committed evidence holds this receipt."
+    },
+    {
+      "output": "h0-note-unauth.headers",
+      "reason": "A scratch file the block removes before it ends; no committed output bytes and no later reader."
+    }
+  ]
+},
+{
   "step": "runbook-23",
   "scope": "whole-block",
   "surface": "live PostgreSQL target identity assertion before the migration apply",

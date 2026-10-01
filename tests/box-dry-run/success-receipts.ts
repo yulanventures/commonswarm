@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 
 // Ruling 12 (HM37 E2E-TASK.md). A declared whole-block producer whose SUCCESS output has no committed live evidence
 // is seeded from that producer's OWN success writer, read from the plan text when the seed is made. The fields,
@@ -68,7 +69,10 @@ function printfLines(source: string, file: string): string {
   return lines.map((line) => `${line}\n`).join("");
 }
 
-// A heredoc Python writer whose print(json.dumps({...}, indent=2)) holds only literals.
+// A heredoc Python writer whose print(json.dumps({...}, indent=2)) holds only literals. Python reads its own
+// literal and prints it with its own json.dumps(indent=2), so quoted text such as "Expected True", string
+// quoting, key order and the escaping of non-ASCII characters are exactly what the writer prints. A name, a call
+// or any other expression is not a literal: ast.literal_eval refuses it and the seed stops.
 function pythonLiteralJson(source: string, file: string): string {
   const redirect = source.indexOf(`>"$PROOF_DIR/${file}" <<'PY'`);
   assert.ok(redirect >= 0, `${file}: the producer has no Python heredoc writer for it`);
@@ -77,13 +81,11 @@ function pythonLiteralJson(source: string, file: string): string {
   assert.ok(bodyEnd > bodyStart, `${file}: its Python heredoc has no terminator`);
   const call = /print\(json\.dumps\(([\s\S]*), indent=2\)\)\s*$/.exec(source.slice(bodyStart, bodyEnd))?.[1];
   assert.ok(call, `${file}: its Python writer does not end in print(json.dumps(..., indent=2))`);
-  let value: unknown;
-  try {
-    value = JSON.parse(call.replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false").replace(/\bNone\b/g, "null"));
-  } catch {
-    assert.fail(`${file}: its Python writer prints more than literals, so it has no plan-documented success value`);
-  }
-  return `${JSON.stringify(value, null, 2)}\n`;
+  const rendered = spawnSync("/usr/bin/python3", ["-c",
+    "import ast, json, sys\nprint(json.dumps(ast.literal_eval(sys.stdin.read().strip()), indent=2))"],
+  { input: call, encoding: "utf8" });
+  assert.equal(rendered.status, 0, `${file}: its Python writer prints more than literals, so it has no plan-documented success value`);
+  return rendered.stdout;
 }
 
 // A file the block fills from a database read and then pins with `test "$(cat "$PROOF_DIR/<file>")" = <literal>`.

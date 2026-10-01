@@ -2197,16 +2197,9 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
     BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
     BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
   });
-  if (env.PREP_RECEIPT_PATH) {
-    const prep = JSON.parse(readFileSync(env.PREP_RECEIPT_PATH, "utf8")) as {
-      workspace_id: string;
-      seats: Array<{ principal_id: string }>;
-    };
-    const cswarmState = `${log}.cswarm-state`;
-    mkdirSync(cswarmState, { mode: 0o700 });
-    writeFileSync(join(cswarmState, "principals.tsv"), prep.seats.map((seat) =>
-      `${prep.workspace_id}\t${seat.principal_id}\tfalse\n`).join(""), { mode: 0o600 });
-  }
+  // The PREP receipt's seats are not marked valid here. Whether a seat's credential is valid is a live observation of
+  // the hosted workspace, and the one executed program that asks (hm37a-directed-check-old/new) is declared NOT
+  // EXECUTED, so no principal table is written for it and no profile is materialized at the receipt's paths.
   const fixture: Fixture = {
     temporary, cwd: checkout, home, bin, log, inventoryDeno,
     prelude: PRELUDE,
@@ -2776,6 +2769,8 @@ function proofArchiveContent(fixture: ProductContext): Buffer {
 
 // The success JSON structure comes from the Mac producer's literal Python writer. Variable values
 // are synthetic labels. This models the producer's output contract, not a successful local control.
+// Only the static handoff coverage reads it: that producer is declared NOT EXECUTED and documents no signal_id,
+// so modelMacProducer refuses to ship these bytes (unproducedMacProduct) and no box block ever reads them.
 function localControlProduct(phase: "old" | "new"): string {
   const stage = planBlock(HM37, "hm37a-prep-seat-control-stage");
   const python = /<<'PY'\n([\s\S]*?)\nPY/.exec(stage.source)?.[1];
@@ -2800,6 +2795,20 @@ function localControlProduct(phase: "old" | "new"): string {
   return result.stdout;
 }
 
+// A transfer source that names a prompt input holding a file: the operator's own bytes, never a model of a producer.
+function suppliedPromptFile(source: string, fixture: ProductContext): string | undefined {
+  const prompt = /^\$([A-Z][A-Z0-9_]*)$/.exec(source)?.[1];
+  return prompt && fixture.env[prompt] && pathExists(fixture.env[prompt]!) ? fixture.env[prompt] : undefined;
+}
+
+// A Mac file that a declared NOT EXECUTED Mac block lists as unproduced has no source in a dry run: that block never
+// ran, so bytes the box lane modeled for it would be the result of an observation nobody made. The Mac lane has no such
+// file either, and its own transfer fails on it.
+function unproducedMacProduct(file: string): NonSubstitutableEntry | undefined {
+  return nonSubstitutableEntries().find((entry) => entry.scope === "whole-block" && entry.step !== undefined &&
+    blockIndex().get(entry.step)?.host.startsWith("Mac ") && (entry.unproduced ?? []).some((missing) => missing.output === file));
+}
+
 function macProductContent(product: TransferProduct, block: Block, fixture: ProductContext): string | Buffer {
   const source = product.source;
   if (source === `/tmp/commonswarm-hm37b-open-{sha}.env`) {
@@ -2814,8 +2823,8 @@ function macProductContent(product: TransferProduct, block: Block, fixture: Prod
   }
   if (source === "$ARCHIVE") return releaseArchiveBytes();
   if (source === "$BOX_WINDOW_INPUT") return uploadWindowContent(fixture, releaseArchiveBytes());
-  const prompt = /^\$([A-Z][A-Z0-9_]*)$/.exec(source)?.[1];
-  if (prompt && fixture.env[prompt] && pathExists(fixture.env[prompt]!)) return readFileSync(fixture.env[prompt]!);
+  const supplied = suppliedPromptFile(source, fixture);
+  if (supplied) return readFileSync(supplied);
   const name = basename(product.path);
   if (name === "commonswarm-release-proofs.tar") return proofArchiveContent(fixture);
   if (/^hm37a-local-control-(old|new)\.json$/.test(name)) {
@@ -3064,6 +3073,12 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
       if (capturedProducts.has(symbolic.source) && !stateSource) {
         return { step: shortStep(block), result: "failed", status: 69, stdout,
           stderr: `UNPRODUCED Mac writer product ${product.source}\n`, seeded };
+      }
+      // The static handoff coverage keeps a field model of the directed receipts; an executed transfer never ships it.
+      const absent = !stateSource && !suppliedPromptFile(symbolic.source, fixture) ? unproducedMacProduct(basename(product.path)) : undefined;
+      if (absent) {
+        return { step: shortStep(block), result: "failed", status: 69, stdout, seeded,
+          stderr: `UNPRODUCED Mac product ${basename(product.path)}: its producer ${absent.step} is NOT EXECUTED and documents no success bytes for it\n` };
       }
       writeFileSync(path, stateSource ? readFileSync(stateSource) : macProductContent(symbolic, block, fixture), { mode: 0o600 });
       const target = handoffPath(product.path);
@@ -6044,8 +6059,10 @@ test("historical controls execute and reproduce the named failures while current
     assert.notEqual(psql.status, 0);
     assert.match(psql.stderr, /bind-mounted container path/);
 
+    // The current plan block of this name is a declared whole-block surface that executeWholeBlock never runs, so
+    // this historical copy carries its own step id; the old text it executes is unchanged.
     const historicalPublic: Block = {
-      file: HM37, step: "hm37-public-boundaries", marker: "probe", host: "Mac mini /bin/bash 3.2",
+      file: HM37, step: "historical-public-boundaries", marker: "probe", host: "Mac mini /bin/bash 3.2",
       line: 1, source: oldPublic,
     };
     writeMode(join(fixture.home, ".commonswarm-release-window.env"),
@@ -6439,6 +6456,30 @@ test("controls: box mode preserves the pre-window abort copy-back guard", {
     unlinkSync(receipt);
     const absent = modelMacProducer(copyback, fixture)!;
     assert.equal(absent.result, "failed", "the guard accepted an absent open receipt");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: the box lane never ships the unproduced receipts of a NOT EXECUTED Mac producer", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const producer = planBlock(HM37, "hm37a-directed-check-old");
+  const transfer = planBlock(HM37, "hm37a-local-evidence-transfer");
+  const fixture = prepareBoxFixture("s2", [producer, transfer]);
+  try {
+    // The directed program needs the live hosted workspace, so its block is declared and seeds nothing the transfer could ship.
+    const declared = executeWholeBlock(producer, fixture, { laterBlocks: [transfer] });
+    assert.equal(declared.result, "not-executed", declared.stderr);
+    assert.deepEqual(declared.seeded, []);
+    // The static handoff coverage keeps a field model of those receipts, but an executed transfer refuses it.
+    const refused = modelMacProducer(transfer, fixture)!;
+    assert.equal(refused.result, "failed", "the box lane shipped bytes for an unproduced Mac product");
+    assert.equal(refused.status, 69, refused.stderr);
+    assert.match(refused.stderr, /^UNPRODUCED Mac product hm37a-[a-z-]+\.json: its producer hm37a-directed-check-(?:old|new) is NOT EXECUTED/);
+    for (const name of ["hm37a-prep-seat-inventory.json", "hm37a-local-control-old.json", "hm37a-local-control-new.json"]) {
+      assert.equal(pathExists(join(PROOF_DIR, name)), false, `${name} reached the box proof directory`);
+    }
   } finally {
     cleanupBoxFixture(fixture);
   }
@@ -7297,6 +7338,40 @@ test("controls: success receipts carry the exact label, a plan writer and an exe
   const pin = 'test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t';
   assert.throws(() => successReceiptBytes(pinned.receipt, mutatedBlock(pinned.producer, [[pin, `${pin}\n  ${pin.replace(/ = t$/, " = f")}`]]).source),
     /pins 2 different literals/);
+});
+
+test("controls: a Python success writer's quoted True, False and None are printed exactly as Python prints them", () => {
+  // A seeded receipt must carry the bytes the plan's writer prints. The expected text is typed from what Python's
+  // json.dumps(indent=2) prints for this literal: the word True inside a quoted value stays True, only the bare
+  // literals become JSON, key order is kept, and a non-ASCII character is escaped.
+  const file = "synthetic-writer.json";
+  const receipt: SuccessReceipt = {
+    file, path: `/home/commonswarm/stack/release-proofs/{sha}/${file}`, mode: "0600", owner: "root:root",
+    label: SUCCESS_RECEIPT_LABEL, writer: { kind: "python-literal-json", source_lines: "synthetic writer" },
+    consumer: { step: "runbook-11", check: "presence" },
+  };
+  const writer = [
+    `python3 - >"$PROOF_DIR/${file}" <<'PY'`, "import json",
+    'print(json.dumps({"message": "Expected True", "state": "False or None", "pass": True, "later": None, ' +
+      '"rows": [1, {"k": False}], "name": "caf\\u00e9"}, indent=2))',
+    "PY", "",
+  ].join("\n");
+  assert.equal(successReceiptBytes(receipt, writer).toString("utf8"), [
+    "{",
+    '  "message": "Expected True",',
+    '  "state": "False or None",',
+    '  "pass": true,',
+    '  "later": null,',
+    '  "rows": [',
+    "    1,",
+    "    {",
+    '      "k": false',
+    "    }",
+    "  ],",
+    '  "name": "caf\\u00e9"',
+    "}",
+    "",
+  ].join("\n"));
 });
 
 test("controls: a success receipt is seeded only for a later read, after its producer's directory", { skip: MAC_ONLY }, () => {
