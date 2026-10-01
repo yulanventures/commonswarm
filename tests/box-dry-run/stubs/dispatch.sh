@@ -662,25 +662,9 @@ case "$name" in
   curl)
     case " $* " in
       *'https://github.com/denoland/deno/releases/download/'*|*'https://release-assets.githubusercontent.com/'*)
-      output=''
-      headers=''
-      head_only=0
-      previous=''
-      for argument in "$@"; do
-        if [ "$previous" = --output ]; then output=$argument; fi
-        if [ "$previous" = --dump-header ]; then headers=$argument; fi
-        if [ "$argument" = --head ]; then head_only=1; fi
-        previous=$argument
-      done
-      test -n "$output"
-      if [ "$head_only" -eq 1 ]; then
-        test -n "$headers"
-        printf '%s\r\n' 'HTTP/2 302' 'location: https://release-assets.githubusercontent.com/dry-run/deno.zip' >"$headers"
-        exit 0
-      fi
-      cp "${BOX_DRY_RUN_DENO_ZIP_FIXTURE:?Deno zip fixture required}" "$output"
-      printf '%s\n' 'https://release-assets.githubusercontent.com/dry-run/deno.zip'
-      exit 0
+      # Official artifact and redirect observations are non-substitutable.
+      # Refuse before opening any caller-supplied output, even on HEAD.
+      fail_unproduced 'official Deno artifact and redirect observation'
       ;;
     esac
     case " $* " in

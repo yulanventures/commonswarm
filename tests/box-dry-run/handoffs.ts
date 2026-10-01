@@ -35,7 +35,7 @@ function expansions(block: HandoffBlock, locals: Record<string, string> = {}): (
   ]);
   for (const match of block.source.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#]+))\s*$/gm)) {
     const value = match[2] ?? match[3] ?? match[4]!;
-    if (!value.includes("$(") && !/^\$[0-9]+$/.test(value) && !["SHA", "RELEASE_SHA", "WINDOW_ID"].includes(match[1]!)) vars.set(match[1]!, [value]);
+    if (!value.includes("$(") && !value.includes("`") && !/^\$[0-9]+$/.test(value) && !["SHA", "RELEASE_SHA", "WINDOW_ID"].includes(match[1]!)) vars.set(match[1]!, [value]);
   }
   // Some blocks inherit PROOF_DIR through sourced state (e.g. runbook-17's generated DB
   // session), without assigning it locally. Their sourced window path identifies that
@@ -340,7 +340,23 @@ function substitutionPrograms(line: string): { outer: string; programs: string[]
     if (char === "'" && quote !== '"') { quote = quote === "'" ? "" : "'"; continue; }
     if (char === '"' && quote !== "'") { quote = quote === '"' ? "" : '"'; continue; }
     if (char === "#" && !quote && (index === 0 || /\s/.test(line[index - 1]!))) break;
-    if (quote === "'" || char !== "$" || line[index + 1] !== "(") continue;
+    if (quote === "'") continue;
+    if (char === "`") {
+      let end = index + 1, program = "";
+      for (; end < line.length && line[end] !== "`"; end++) {
+        // Legacy substitution removes escapes for $, ` and backslash before
+        // interpreting its body. An escaped inner backtick is a nested capture.
+        if (line[end] === "\\" && ["$", "`", "\\"].includes(line[end + 1] ?? "")) end++;
+        program += line[end];
+      }
+      if (end === line.length) { incomplete = true; continue; }
+      programs.push(program);
+      outer += line.slice(start, index) + "CAPTURED_STDOUT";
+      start = end + 1;
+      index = end;
+      continue;
+    }
+    if (char !== "$" || line[index + 1] !== "(") continue;
     let depth = 1, innerQuote = "", innerEscape = false, end = index + 2;
     for (; end < line.length; end++) {
       const next = line[end]!;

@@ -376,6 +376,8 @@ const BASE_SHA = SITE_INPUTS.site_base_sha;
 assert.match(BASE_SHA, /^[0-9a-f]{40}$/);
 assert.match(SITE_SHA, /^[0-9a-f]{40}$/);
 assert.equal(SITE_BASE_RELEASE.split("-")[1], BASE_SHA.slice(0, 12));
+const siteAncestry = spawnSync("git", ["merge-base", "--is-ancestor", BASE_SHA, SITE_SHA], { encoding: "utf8" });
+assert.equal(siteAncestry.status, 0, `task-supplied site baseline must be an ancestor of the release: ${siteAncestry.stderr}`);
 // Package source establishes the fixture's version input. It does not measure
 // the current site's /download bytes; M15's old live observation stays intact.
 const sitePackage = spawnSync("git", ["show", `${BASE_SHA}:package.json`], { encoding: "utf8" });
@@ -1052,15 +1054,7 @@ function selectedHmSequence(): string[] {
 }
 
 function materialize(block: Block): string {
-  let source = block.source;
-  source = source.replaceAll("<sha>", RELEASE_SHA);
-  if (shortStep(block) === "hm37-deno-install") {
-    source = source.replace(
-      `DENO_ZIP_SHA256=${DENO_ZIP_SHA256}`,
-      `DENO_ZIP_SHA256=\${BOX_DRY_RUN_DENO_ZIP_SHA256:-${DENO_ZIP_SHA256}}`,
-    );
-  }
-  return source;
+  return block.source.replaceAll("<sha>", RELEASE_SHA);
 }
 
 interface UnproducedRead {
@@ -1830,9 +1824,6 @@ interface Fixture {
   replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
   model?: BoxFixtureModel;
   inventoryDeno?: { path: string; digest: string; version: string };
-  denoZip?: string;
-  denoZipDigest?: string;
-  denoBinaryDigest?: string;
   seededPaths?: string[];
   boxTransferTargets?: string[];
   macLocalRoot?: string;
@@ -2419,13 +2410,6 @@ function cleanupBoxFixture(fixture: Fixture): void {
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
 }
 
-function produceDenoUnitPrerequisites(fixture: Fixture): void {
-  assert.ok(fixture.denoZip && fixture.denoZipDigest,
-    "NOT EXECUTED: the official Deno installer is a whole-block declaration; no downloaded runtime prerequisite is supplied");
-  mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
-  writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
-}
-
 function produceRunbook18UnitPrerequisites(fixture: Fixture): void {
   mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
   writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
@@ -2469,7 +2453,6 @@ interface Execution {
   seeded?: string[];
   refused?: string[];
   declared?: NonSubstitutableEntry;
-  nativeVersion?: ContainedResult;
 }
 
 // One inventory serves execution routing and the independent coverage test. It is discovered from all
@@ -3167,12 +3150,6 @@ function executeWholeBlock(
   const result = containedSpawn(fixture, script, childEnv);
   const stderr = result.stderr;
   const failure = result.status === 0 ? undefined : /__FIRST_FAIL__:(.*)/.exec(stderr)?.[1];
-  // Preserve native output as separate evidence, even when the plan rejects
-  // its first line. Never execute an unknown or replaced runtime for this probe.
-  const nativeVersion = fixture.part === "box" && step === "hm37-deno-install" &&
-    pathExists(DENO_PATH) && lstatSync(DENO_PATH).isFile() && !lstatSync(DENO_PATH).isSymbolicLink() &&
-    createHash("sha256").update(readFileSync(DENO_PATH)).digest("hex") === fixture.denoBinaryDigest
-    ? containedCommand(fixture, DENO_PATH, ["--version"], { env: fixture.env }) : undefined;
   return {
     step,
     result: result.status === 0 ? "passed" : "failed",
@@ -3180,7 +3157,6 @@ function executeWholeBlock(
     firstFailingCommand: failure,
     stderr,
     stdout: result.stdout,
-    ...(nativeVersion ? { nativeVersion } : {}),
   };
 }
 
@@ -3253,7 +3229,7 @@ function resetSiteFourAttempt(fixture: Fixture, before: SiteBoxState): void {
   const releases = join(fixtureSiteRoot(fixture), "releases");
   for (const name of readdirSync(releases)) {
     if (before.releases.includes(name)) continue;
-    assert.match(name, /^\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}\.tmp$/, `a failed deploy left something other than an upload directory: ${name}`);
+    assert.match(name, new RegExp(`^\\d{8}T\\d{6}Z-${SITE_SHA.slice(0, 12)}-[0-9a-f]{16}\\.tmp$`), `a failed deploy left something other than an upload directory: ${name}`);
     rmSync(join(releases, name), { recursive: true });
   }
   assert.deepEqual(siteBoxState(fixture), before);
@@ -4476,7 +4452,23 @@ test("controls: a gate receipt without its PASS lines fails runbook-02", { skip:
   }
 });
 
-test("controls: window B fails when window A's candidate edge is not live", { skip: MAC_ONLY }, () => {
+// Named synthetic INPUT for the B opening boundary, never an A transition or
+// close receipt. Whole-plan fixtures keep the historical aborted A closure.
+function setBoundaryEdgeInput(fixture: Fixture, target: string): void {
+  assert.ok([PREVIOUS_EDGE, CANDIDATE_EDGE].includes(target));
+  const root = fixture.part === "box" ? "/" : fixture.boxRoot!;
+  const current = join(root, "home/commonswarm/edge/current");
+  const before = fixture.env.BOX_DRY_RUN_EXPECTED_EDGE!;
+  unlinkSync(current);
+  symlinkSync(join(root, target), current);
+  fixture.env.BOX_DRY_RUN_EXPECTED_EDGE = target;
+  for (const key of ["BOX_DRY_RUN_EDGE_WORKDIR", "BOX_DRY_RUN_EDGE_MOUNTS"]) {
+    fixture.env[key] = fixture.env[key]!.replaceAll(before, target);
+  }
+}
+
+test("controls: window B fails when window A's candidate edge is not live", { skip: MAC_ONLY }, (t) => {
+  t.diagnostic("Boundary control only: candidate/previous edge states are named synthetic INPUTS, not outputs from Window A.");
   const plan = resolveSteps("window-b/pass", windowBPaths().get("pass")!);
   const index = plan.findIndex((block) => shortStep(block) === "hm37b-box-open");
   assert.ok(index > 0, "window B has no box-open step");
@@ -4487,12 +4479,10 @@ test("controls: window B fails when window A's candidate edge is not live", { sk
       const current = join(fixture.boxRoot!, "/home/commonswarm/edge/current");
       assert.equal(readlinkSync(current), join(fixture.boxRoot!, windowAFinalEdge()));
       const receipt = readFileSync(fixture.env.HM37_A_CLOSE_RECEIPT!, "utf8");
-      assert.ok(receipt.includes(`release_sha=${basename(windowAFinalEdge())}\n`));
+      // This receipt is a prompt INPUT, not the committed aborted close.
+      assert.ok(receipt.includes(`release_sha=${RELEASE_SHA}\n`));
       assert.match(receipt, /^edge_live=true$/m);
-      if (previousStillLive) {
-        unlinkSync(current);
-        symlinkSync(join(fixture.boxRoot!, PREVIOUS_EDGE), current);
-      }
+      setBoundaryEdgeInput(fixture, previousStillLive ? PREVIOUS_EDGE : CANDIDATE_EDGE);
       if (state === "public-enabled") fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = "1";
       seedControlOpenReceipt(fixture, "b");
       const execution = executeWholeBlock(plan[index]!, fixture);
@@ -4504,7 +4494,7 @@ test("controls: window B fails when window A's candidate edge is not live", { sk
         assert.equal(execution.status, 1, execution.stderr);
         assert.match(execution.stderr, /the box script exited 1[\s\S]*Deno\.env\.get\("SWARM_MCP_PUBLIC_ENABLED"\)/);
       } else {
-        assert.equal(readlinkSync(current), join(fixture.boxRoot!, windowAFinalEdge()));
+        assert.equal(readlinkSync(current), join(fixture.boxRoot!, CANDIDATE_EDGE));
       }
     } finally {
       cleanupMacFixture(fixture);
@@ -4576,48 +4566,66 @@ test("controls: runbook-04's inventory runs the real inventory.ts and fails on a
   }
 });
 
-test("controls: window B abort copy-back fails when an abort-path producer did not run", { skip: MAC_ONLY }, () => {
+test("controls: window B abort copy-back fails when an abort-path producer did not run", { skip: MAC_ONLY }, (t) => {
+  t.diagnostic("Boundary control only: hosted/recovery blocks remain NOT EXECUTED. Transfer inputs are historical committed bytes; dispatcher input is a named synthetic failure.");
   const sequence = resolveSteps("abort producer control", windowBPaths().get("abort")!);
-  const copyback = sequence.findIndex((block) => shortStep(block) === "hm37b-copyback");
-  assert.ok(copyback >= 0);
+  const recovery = planBlock(HM37B, "hm37-hosted-control-cleanup-only");
+  const hosted = planBlock(HM37B, "hm37-hosted-open-ack-control");
+  const dispatcher = planBlock(HM37B, "hm37b-failure-dispatch");
+  const copyback = planBlock(HM37B, "hm37b-copyback");
   for (const omit of [false, true]) {
     const fixture = prepareMacFixture(sequence, { afterWindowA: true });
     try {
-      const path = sequence.slice(0, copyback + 1).filter((block) =>
-        !omit || shortStep(block) !== "hm37-hosted-open-ack-control");
-      const records = executePlanUntilFailure(path, fixture, "mac");
-      const failed = records.find(({ execution }) => execution.result === "failed");
-      const recovery = records.find(({ execution }) => execution.step === "hm37-hosted-control-cleanup-only");
-      assert.ok(recovery, records.map(({ execution }) => `${execution.step}: ${execution.stderr}`).join("\n"));
-      const recoveryReport = notExecutedLine(recovery.block, recovery.execution);
+      const recoveryResult = executeWholeBlock(recovery, fixture, { laterBlocks: [dispatcher] });
+      assert.equal(recoveryResult.result, "not-executed");
+      const recoveryReport = notExecutedLine(recovery, recoveryResult);
       assert.match(recoveryReport, /Seeded from committed evidence: nothing\./);
-      assert.match(recoveryReport, /Plan-documented output: hm37-hosted-cleanup-recovery\.json/);
-      assert.ok(records.some(({ execution }) => execution.step === "hm37b-failure-dispatch" && execution.result === "passed"),
-        records.map(({ execution }) => `${execution.step}: ${execution.stderr}`).join("\n"));
+      assert.match(recoveryReport, /Not produced, by name: hm37-hosted-cleanup-recovery\.json/);
+      assert.doesNotMatch(recoveryReport, /Plan-documented output/);
+      const hostedResult = executeWholeBlock(hosted, fixture, { laterBlocks: [copyback] });
+      assert.equal(hostedResult.result, "not-executed");
       const proof = join(fixture.boxRoot!, PROOF_DIR);
-      assert.match(readFileSync(join(proof, "hm37b-failure-action.txt"), "utf8"), /^action=cleanup-only$/m);
-      assert.ok(pathExists(join(proof, "hm37-hosted-cleanup-recovery.json")));
+      assert.equal(pathExists(join(proof, "hm37-hosted-cleanup-recovery.json")), false);
+      assert.equal(pathExists(join(proof, "hm37-hosted-check-control.json")), false);
+      // Boundary INPUTS only: historical committed copy-back bytes (including
+      // the negative not_run hosted record), plus a synthetic failure input for
+      // the dispatcher. No unavailable block is said to have produced them.
+      seedCopybackProofDirectory(fixture);
+      writeMode(join(proof, "window.env"), windowEnvBody("s2"));
+      seedControlOpenReceipt(fixture, "b");
+      const missingRecovery = executePlanUntilFailure([dispatcher], fixture, "mac")[0]!.execution;
+      assert.equal(missingRecovery.result, "failed", missingRecovery.stderr);
+      assert.match(missingRecovery.stderr, /test -f "\$FAILURE_JSON"/);
+      assert.equal(pathExists(join(proof, "hm37b-failure-action.txt")), false);
+      const DISPATCH_FAILURE_INPUT = { ok: false, error: { assertion_id: "hosted.concurrent-open-single-batch" } };
+      writeMode(join(proof, "hm37-hosted-cleanup-recovery.json"), JSON.stringify(DISPATCH_FAILURE_INPUT));
+      const dispatched = executePlanUntilFailure([dispatcher], fixture, "mac")[0]!.execution;
+      assert.equal(dispatched.result, "passed", dispatched.stderr);
       const action = join(proof, "hm37b-failure-action.txt");
       const actionBefore = readFileSync(action, "utf8");
+      assert.match(actionBefore, /^action=cleanup-only$/m);
       const metadata = containedCommand(fixture, "/usr/bin/python3", [USERLAND, "stat", "-c", "%U:%G:%a", action], {
         env: fixture.env,
       });
       assert.equal(metadata.status, 0, metadata.stderr);
       assert.equal(metadata.stdout.trim(), "root:root:600", "the actual dispatcher product retains box ownership and mode");
       assert.equal(readFileSync(action, "utf8"), actionBefore, "metadata readback cannot replace the produced receipt");
+      if (omit) unlinkSync(join(proof, "hm37-hosted-check-control.json"));
+      const copied = executeWholeBlock(copyback, fixture);
       if (omit) {
-        assert.equal(failed?.execution.step, "hm37b-copyback", failed?.execution.stderr);
-        assert.match(failed!.execution.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$FILE"/);
+        assert.equal(copied.result, "failed", copied.stderr);
+        assert.match(copied.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$FILE"/);
         assert.equal(pathExists(join(proof, "hm37-hosted-check-control.json")), false);
       } else {
-        assert.equal(failed, undefined, failed?.execution.stderr);
-        const copied = records.find(({ execution }) => execution.step === "hm37b-copyback");
-        assert.equal(copied?.execution.result, "passed");
+        assert.equal(copied.result, "passed", copied.stderr);
         assert.ok(pathExists(join(proof, "hm37-hosted-check-control.json")));
-        // Recovery and dispatcher receipts are produced but the plan's exact copy-back list omits them.
+        // The exact copy-back list excludes the synthetic failure INPUT and
+        // actual dispatcher product. Compare each transferred byte to evidence.
         const dirs = readdirSync(join(fixture.cwd, "docs/evidence")).filter((name) => name.includes(`-release-${RELEASE_SHA.slice(0, 12)}-`));
         assert.equal(dirs.length, 1);
-        assert.deepEqual(readdirSync(join(fixture.cwd, "docs/evidence", dirs[0]!)).sort(), [...COPYBACK_MEMBERS, "hm37b-copyback.sha256"].sort());
+        const destination = join(fixture.cwd, "docs/evidence", dirs[0]!);
+        assert.deepEqual(readdirSync(destination).sort(), [...COPYBACK_MEMBERS, "hm37b-copyback.sha256"].sort());
+        for (const member of COPYBACK_MEMBERS) assert.deepEqual(readFileSync(join(destination, member)), readFileSync(join(COPYBACK_EVIDENCE_DIRECTORY, member)));
       }
     } finally {
       cleanupMacFixture(fixture);
@@ -5149,7 +5157,7 @@ test("controls: an unlisted command inside deploy/site/deploy.sh fails closed", 
     assert.equal(positive.result, "passed", positive.stderr);
     assert.equal(siteFourDeployStatus(fixture), "deploy_exit=0\nafter_read_exit=0\n");
     assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8"),
-      /^Deployed release \d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16} to commonswarm@yulan-vps-1\. The five newest releases were kept for rollback\.$/m);
+      new RegExp(`^Deployed release \\d{8}T\\d{6}Z-${SITE_SHA.slice(0, 12)}-[0-9a-f]{16} to commonswarm@yulan-vps-1\\. The five newest releases were kept for rollback\\.$`, "m"));
   } finally {
     cleanupMacFixture(fixture);
   }
@@ -5208,7 +5216,7 @@ test("controls: a fixture dist tree missing a file that deploy.sh validates fail
     const positive = executeWholeBlock(site04, fixture);
     assert.equal(positive.result, "passed", positive.stderr);
     const after = siteBoxState(fixture);
-    assert.match(after.current, /^releases\/\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}$/, "current now names the new release, relative, as finalize-release.sh links it");
+    assert.match(after.current, new RegExp(`^releases/\\d{8}T\\d{6}Z-${SITE_SHA.slice(0, 12)}-[0-9a-f]{16}$`), "current now names the new release, relative, as finalize-release.sh links it");
     const release = join(fixtureSiteRoot(fixture), after.current);
     assert.deepEqual(readFileSync(join(release, "start/index.html")), startBytes, "the uploaded bytes are the built bytes");
     assert.equal(statSync(join(release, "start/index.html")).mode & 0o777, 0o644);
@@ -5414,14 +5422,13 @@ test("every box fixture model is internally consistent with plan comparisons", (
   t.diagnostic(`fixture_comparison_families=${sources.size}; pairs_per_state=${pairCount}; states=${states.length}; all_passed=true; failing_control=1_mismatch`);
 });
 
-test("box runtime stubs are regular root-owned executables and emit accepted Deno shapes", {
+test("box runtime stubs are regular root-owned executables and refuse unobserved Deno/hosted results", {
   skip: process.env.BOX_DRY_RUN_PART !== "box",
 }, () => {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
   const originalUsrLocalBin = lstatSync("/usr/local/bin");
   const fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
   try {
     const preparedUsrLocalBin = lstatSync("/usr/local/bin");
     assert.equal(preparedUsrLocalBin.mode & 0o777, 0o755);
@@ -5436,59 +5443,31 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
       assert.equal(stat.gid, 0, `${command} group`);
     }
     assert.equal(pathExists(DENO_PATH), false);
-    const installBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-install");
-    assert.ok(installBlock);
-    const installed = executeWholeBlock(installBlock, fixture);
-    assert.equal(installed.result, "passed", installed.stderr + "\nnative --version:\n" + (installed.nativeVersion?.stdout ?? "not observed"));
-    const denoStat = lstatSync(DENO_PATH);
-    assert.equal(denoStat.isFile(), true);
-    assert.equal(denoStat.isSymbolicLink(), false);
-    assert.equal(denoStat.mode & 0o777, 0o755);
-    assert.equal(denoStat.uid, 0);
-    assert.equal(denoStat.gid, 0);
-    const version = spawnSync(DENO_PATH, ["--version"], { encoding: "utf8", env: fixture.env });
-    assert.equal(version.status, 0, version.stderr);
-    assert.match(version.stdout, /^deno 2\.9\.7/m);
-    const controlRoot = `/home/commonswarm/edge/controls/${RELEASE_SHA}-${WINDOW_ID}`;
-    const runtimeEnv = { ...fixture.env, DENO_NO_UPDATE_CHECK: "1", DENO_DIR: join(controlRoot, "deno-cache") };
-    const probe = join(fixture.supportRoot!, "fixture.ts");
-    writeRootMode(probe, 'console.log(JSON.stringify({fixture: "runtime-only", version: Deno.version.deno, args: Deno.args}));\n');
-    const cache = spawnSync(DENO_PATH, ["cache", "--no-lock", probe], { encoding: "utf8", env: runtimeEnv });
-    assert.equal(cache.status, 0, cache.stderr);
-    const run = spawnSync(DENO_PATH, ["run", join(fixture.supportRoot!, "missing-control.ts")], { encoding: "utf8", env: runtimeEnv });
-    assert.notEqual(run.status, 0, "missing Deno program was replaced by a synthetic success result");
-    assert.match(run.stderr, /Module not found/);
-    assert.doesNotMatch(run.stderr, /UNPRODUCED|unhandled dry-run stub/);
-    // Exercise the whole plan command with an explicitly labeled runtime-only
-    // program. This proves argv and executable behavior, not live hosted ACKs.
-    // No credentials, network calls, hosted PASS receipt, or journal is invented.
-    writeRootMode(join(controlRoot, "hm37-open-ack-deno.json"), "{}\n");
-    const program = join(controlRoot, "hm37-open-ack-control.ts");
-    copyRootFixture(probe, program, 0o600);
-    const hosted = planBlock(HM37B, "hm37-hosted-open-ack-control");
-    const acceptedHosted = executeWholeBlock(hosted, fixture);
-    assert.equal(acceptedHosted.result, "passed", acceptedHosted.stderr);
-    const output = join(PROOF_DIR, "hm37-hosted-check-control.json");
-    const document = JSON.parse(readFileSync(output, "utf8"));
-    assert.equal(document.fixture, "runtime-only");
-    assert.equal(document.version, "2.9.7");
-    assert.deepEqual(document.args, ["--release-root", CANDIDATE_EDGE, "--journal-dir", join(controlRoot, "journal"),
-      "--workspace-id", "c2ea0541-f56d-4c73-bf71-56c5405c4934", "--human-session-file", join(controlRoot, "human-session.json"),
-      "--oauth-database-config-file", join(controlRoot, "oauth-database.json")]);
-    assert.equal(lstatSync(output).mode & 0o777, 0o600);
+    // Call the executable boundary directly. Whole-block declarations cannot
+    // install a substitute runtime, execute a hosted program, or write receipts.
+    const program = join(fixture.supportRoot!, "runtime-refusal-input.ts");
     writeRootMode(program, 'throw new Error("runtime-canary-refusal");\n');
-    const refusedHosted = executeWholeBlock(hosted, fixture);
-    assert.equal(refusedHosted.result, "failed");
-    assert.equal(refusedHosted.status, 1, refusedHosted.stderr);
-    assert.match(refusedHosted.stderr, /runtime-canary-refusal/);
-    assert.doesNotMatch(refusedHosted.stderr, /UNPRODUCED|No such file or directory|CONTAINMENT UNAVAILABLE/);
-    assert.match(failureDetail(hosted, refusedHosted), /deno run/);
-    assert.equal(readFileSync(output, "utf8"), "", "failure kept a success-shaped runtime receipt");
-    const removeBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-remove");
-    assert.ok(removeBlock);
-    const removed = executeWholeBlock(removeBlock, fixture);
-    assert.equal(removed.result, "passed", removed.stderr);
+    const stub = join(fixture.bin, "deno");
+    const run = (args: string[], env = fixture.env) => containedCommand(fixture, stub, args, { env });
+    const positive = run(["run", program], { ...fixture.env,
+      BOX_DRY_RUN_STEP: "runtime-boundary-input", BOX_DRY_RUN_FAIL_STEP: "runtime-boundary-input" });
+    assert.equal(positive.status, 41, positive.stderr);
+    assert.equal(positive.stdout, "");
+    assert.match(positive.stderr, /injected dry-run failure: runtime-boundary-input/);
+    for (const args of [["--version"], ["cache", "--no-lock", program],
+      ["run", program, "--release-root", CANDIDATE_EDGE, "--journal-dir", join(fixture.supportRoot!, "journal-input")],
+      ["run", join(fixture.supportRoot!, "missing-control.ts")]]) {
+      const refused = run(args);
+      assert.equal(refused.status, 69, refused.stderr);
+      assert.equal(refused.stdout, "");
+      assert.match(refused.stderr, /UNPRODUCED Deno executable observation/);
+      assert.doesNotMatch(refused.stderr, /runtime-canary-refusal|Module not found/);
+    }
     assert.equal(pathExists(DENO_PATH), false);
+    for (const output of ["hm37-hosted-check-control.json", "hm37-hosted-cleanup-recovery.json"])
+      assert.equal(pathExists(join(PROOF_DIR, output)), false);
+    assert.equal(pathExists(join(fixture.supportRoot!, "journal-input")), false);
+    assert.match(readFileSync(fixture.log, "utf8"), /^deno run /m);
   } finally {
     cleanupBoxFixture(fixture);
     const restoredUsrLocalBin = lstatSync("/usr/local/bin");
@@ -5498,87 +5477,63 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
   }
 });
 
-test("pinned Deno install and rollback removal fail closed", {
+test("box artifact and runtime boundaries fail closed without installing or removing unknown files", {
   skip: process.env.BOX_DRY_RUN_PART !== "box",
 }, () => {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
-  const installBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-install");
-  const removeBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-remove");
-  assert.ok(installBlock);
-  assert.ok(removeBlock);
-
-  let fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
+  const fixture = prepareBoxFixture("s2");
   try {
-    fixture.env.BOX_DRY_RUN_DENO_ZIP_SHA256 = "0".repeat(64);
-    const wrongZip = executeWholeBlock(installBlock, fixture);
-    assert.equal(wrongZip.result, "failed");
-    assert.equal(pathExists(DENO_PATH), false, "wrong zip installed Deno");
-    assert.doesNotMatch(readFileSync(fixture.log, "utf8"), /python3 .*deno\.zip/, "wrong zip reached extraction");
-  } finally {
-    cleanupBoxFixture(fixture);
-  }
-
-  fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
-  try {
-    const installed = executeWholeBlock(installBlock, fixture);
-    assert.equal(installed.result, "passed", installed.stderr + "\nnative --version:\n" + (installed.nativeVersion?.stdout ?? "not observed"));
-    writeRootMode(DENO_PATH, "different binary\n", 0o755);
-    const refused = executeWholeBlock(removeBlock, fixture);
-    assert.equal(refused.result, "failed");
-    assert.equal(readFileSync(DENO_PATH, "utf8"), "different binary\n", "unknown Deno file was changed");
-  } finally {
-    cleanupBoxFixture(fixture);
-  }
-
-  fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
-  try {
-    writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
-    const refused = executeWholeBlock(installBlock, fixture);
-    assert.equal(refused.result, "failed");
-    assert.equal(readFileSync(DENO_PATH, "utf8"), "pre-existing unknown binary\n",
-      "install overwrote an unknown Deno file");
-  } finally {
-    cleanupBoxFixture(fixture);
-  }
-
-  fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
-  try {
-    writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
-    const refused = executeWholeBlock(removeBlock, fixture);
-    assert.equal(refused.result, "failed");
-    assert.match(refused.stderr, /refusing to remove an unknown file/);
-    assert.equal(readFileSync(DENO_PATH, "utf8"), "pre-existing unknown binary\n",
-      "removal without a recorded digest changed an unknown Deno file");
-  } finally {
-    cleanupBoxFixture(fixture);
-  }
-
-  fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
-  try {
-    const notInstalled = executeWholeBlock(removeBlock, fixture);
-    assert.equal(notInstalled.result, "passed", notInstalled.stderr);
-    assert.equal(pathExists(DENO_PATH), false);
-    assert.match(readFileSync(join(PROOF_DIR, "window.env"), "utf8"), /^deno_remove=not-installed$/m);
-  } finally {
-    cleanupBoxFixture(fixture);
-  }
-
-  fixture = prepareBoxFixture("s2");
-  produceDenoUnitPrerequisites(fixture);
-  try {
-    const installed = executeWholeBlock(installBlock, fixture);
-    assert.equal(installed.result, "passed", installed.stderr);
-    const removed = executeWholeBlock(removeBlock, fixture);
-    assert.equal(removed.result, "passed", removed.stderr);
-    assert.equal(pathExists(DENO_PATH), false, "rollback did not remove recorded Deno binary");
-    const cache = `/home/commonswarm/edge/controls/${RELEASE_SHA}-${WINDOW_ID}/deno-cache`;
-    assert.equal(pathExists(cache), false, "rollback did not remove per-window Deno cache");
+    const archive = join(fixture.temporary!, "deno-archive-output");
+    const headers = join(fixture.temporary!, "redirect-headers-output");
+    const curl = join(fixture.bin, "curl");
+    // Positive request admission through the same executable, using its owned
+    // loopback fixture contract. This is not a hosted or download observation.
+    const positive = containedCommand(fixture, curl, ["--silent", "http://127.0.0.1:9000/health"], { env: fixture.env });
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.deepEqual(JSON.parse(positive.stdout), { status: "ok" });
+    for (const url of ["https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
+      "https://release-assets.githubusercontent.com/artifact-input"]) {
+      for (const head of [true, false]) {
+        for (const existing of [false, true]) {
+          if (existing) {
+            writeRootMode(archive, "unknown archive INPUT\n");
+            writeRootMode(headers, "unknown headers INPUT\n");
+          }
+          const args = ["--fail", "--silent", "--show-error", ...(head ? ["--head"] : []),
+            "--dump-header", headers, "--output", archive, url];
+          const refused = containedCommand(fixture, curl, args, { env: fixture.env });
+          assert.equal(refused.status, 69, refused.stderr);
+          assert.equal(refused.stdout, "");
+          assert.match(refused.stderr, /UNPRODUCED official Deno artifact and redirect observation/);
+          assert.equal(pathExists(archive), existing);
+          assert.equal(pathExists(headers), existing);
+          if (existing) {
+            assert.equal(readFileSync(archive, "utf8"), "unknown archive INPUT\n");
+            assert.equal(readFileSync(headers, "utf8"), "unknown headers INPUT\n");
+            unlinkSync(archive);
+            unlinkSync(headers);
+          }
+        }
+      }
+    }
+    // A digest is computed from actual bytes, never substituted for the M19
+    // artifact hash or used to admit a runtime. Unknown files stay untouched.
+    writeRootMode(DENO_PATH, "unknown runtime INPUT\n", 0o755);
+    const checksum = containedCommand(fixture, "/usr/bin/sha256sum", [DENO_PATH], { env: fixture.env });
+    assert.equal(checksum.status, 0, checksum.stderr);
+    const digest = createHash("sha256").update(readFileSync(DENO_PATH)).digest("hex");
+    assert.equal(checksum.stdout.split(/\s/)[0], digest);
+    assert.notEqual(digest, DENO_ZIP_SHA256);
+    for (const args of [["--version"], ["cache", "unobserved.ts"], ["run", "unobserved.ts"]]) {
+      const refused = containedCommand(fixture, join(fixture.bin, "deno"), args, { env: fixture.env });
+      assert.equal(refused.status, 69, refused.stderr);
+      assert.match(refused.stderr, /UNPRODUCED Deno executable observation/);
+      assert.equal(readFileSync(DENO_PATH, "utf8"), "unknown runtime INPUT\n");
+      assert.equal(lstatSync(DENO_PATH).mode & 0o777, 0o755);
+    }
+    assert.equal(pathExists(join(PROOF_DIR, "window.env")), false, "boundary refusals invented install/removal state");
+    assert.doesNotMatch(readFileSync(fixture.log, "utf8"), /^python3 .*deno.*zip/m, "artifact refusal reached extraction");
   } finally {
     cleanupBoxFixture(fixture);
   }
@@ -5926,7 +5881,6 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
         }
         if (execution.result === "failed") {
           t.diagnostic(`Execution.stderr ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}]:\n${execution.stderr}`);
-          if (execution.nativeVersion) t.diagnostic(`native --version status=${execution.nativeVersion.status}:\n${execution.nativeVersion.stdout}${execution.nativeVersion.stderr}`);
           const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`;
           if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
             failed.push(line);
@@ -6239,7 +6193,7 @@ test("controls: the box lane writes resolved prompt inputs by name", {
   }
 });
 
-test("controls: box window B handoff accepts A's dark final state and refuses mismatched state", {
+test("controls: box window B handoff accepts a dark candidate INPUT and refuses mismatched state", {
   skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
 }, () => {
   const block = planBlock(HM37B, "hm37b-box-open");
@@ -6248,20 +6202,19 @@ test("controls: box window B handoff accepts A's dark final state and refuses mi
   try {
     assert.equal(realpathSync(current), windowAFinalEdge());
     assert.equal(pathExists(PROOF_DIR), false);
+    setBoundaryEdgeInput(fixture, CANDIDATE_EDGE);
     fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = "1";
     const publicOpen = modelMacProducer(block, fixture)!;
     assert.equal(publicOpen.result, "failed");
     assert.match(publicOpen.stderr, /docker exec/);
     rmSync(PROOF_DIR, { recursive: true });
     fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = EDGE_PUBLIC_ENABLED;
-    unlinkSync(current);
-    symlinkSync(PREVIOUS_EDGE, current);
+    setBoundaryEdgeInput(fixture, PREVIOUS_EDGE);
     const wrongEdge = modelMacProducer(block, fixture)!;
     assert.equal(wrongEdge.result, "failed");
     assert.match(wrongEdge.stderr, /readlink/);
     rmSync(PROOF_DIR, { recursive: true });
-    unlinkSync(current);
-    symlinkSync(windowAFinalEdge(), current);
+    setBoundaryEdgeInput(fixture, CANDIDATE_EDGE);
     const record = modelMacProducer(block, fixture)!;
     assert.equal(record?.result, "not-executed", "modeled Mac bytes were reported as an executed Mac transfer");
     assert.ok(record.seeded?.includes(join(PROOF_DIR, "window.env")));
@@ -6413,6 +6366,8 @@ test("controls: a missing cross-host handoff fails its consumer in box mode", {
   const opening = planBlock(HM37B, "hm37b-box-open");
   const fixture = prepareBoxFixture("s2", [opening, producer, consumer]);
   try {
+    // Boundary INPUT only; the whole-plan fixture retains A's aborted closure.
+    setBoundaryEdgeInput(fixture, CANDIDATE_EDGE);
     const session = handoffPath(transferProducts(producer).find((product) => product.path.endsWith("/human-session.json"))!.path);
     assert.equal(pathExists(session), false, "staged session was supplied before its producer boundary");
     const boundary = executePlanUntilFailure([opening, producer], fixture, "box");
@@ -6761,6 +6716,12 @@ test("controls: command substitutions retain writers and executable eval refuses
   const path = "/home/commonswarm/stack/release-proofs/capture-writer/proof.txt";
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
   for (const source of [`BYTES="$(printf actual | /usr/bin/tee "${path}")"`,
+    `BYTES=\`printf actual | /usr/bin/tee "${path}"\``,
+    `BYTES="\`printf actual | /usr/bin/tee '${path}'\`"`,
+    `BYTES=\`printf actual | /usr/bin/tee "${path}"\n\``,
+    `BYTES="$(printf '%s' "\`printf actual | /usr/bin/tee '${path}'\`")"`,
+    `BYTES=\`printf '%s' \\\`printf actual | /usr/bin/tee '${path}'\\\`\``,
+    `WRITER=/usr/bin/tee\nBYTES=\`"$WRITER" "${path}"\``,
     `BYTES=$(printf actual | sudo -n /usr/bin/tee "${path}")`,
     `BYTES="$(printf actual | /usr/bin/tee "${path}"\n)"`,
     `BYTES="$(printf '%s' "$(printf actual | /usr/bin/tee "${path}")")"`,
@@ -6780,8 +6741,9 @@ test("controls: command substitutions retain writers and executable eval refuses
       source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` }), /unknown writer executable form/);
   }
   const data = { ...planBlock(RUNBOOK, "runbook-23"),
-    source: `printf 'eval tee ${path}; $(tee ${path})'\ncat <<'DATA'\neval 'tee ${path}'\nBYTES="$(tee ${path})"\nDATA` };
+    source: `printf 'eval tee ${path}; $(tee ${path}); \`tee ${path}\`'\nprintf "%s" "\\\`tee ${path}\\\`"\ncat <<'DATA'\neval 'tee ${path}'\nBYTES="$(tee ${path})"\nBYTES=\`tee ${path}\`\nDATA` };
   assert.deepEqual(crossHostHandoffs([data, consumer]), []);
+  assert.throws(() => crossHostHandoffs([{ ...data, source: `BYTES=\`tee ${path}` }, consumer]), /unterminated command substitution/);
 });
 
 test("controls: SSH positional arguments resolve in their outer scope without lending it to a quoted heredoc", () => {

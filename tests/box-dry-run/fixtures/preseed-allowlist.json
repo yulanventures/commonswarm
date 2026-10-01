@@ -26,8 +26,6 @@
   {"kind":"env","name":"BOX_DRY_RUN_CONTROL","source":"harness:HARNESS_CONTROL","value":"dry-run-control"},
   {"kind":"env","name":"BOX_DRY_RUN_PART","source":"harness:HARNESS_PART","value":"dry-run-part"},
   {"kind":"env","name":"BOX_DRY_RUN_DENO_VERSION","source":"harness:UNIT_DENO_VERSION","value":"dry-run Deno version"},
-  {"kind":"env","name":"BOX_DRY_RUN_DENO_ZIP_FIXTURE","source":"harness:UNIT_DENO_ZIP","value":"<temporary>/deno.zip"},
-  {"kind":"env","name":"BOX_DRY_RUN_DENO_ZIP_SHA256","source":"harness:UNIT_DENO_ZIP_SHA256","value":"dry-run generated digest"},
   {"kind":"env","name":"BOX_DRY_RUN_EXPECTED_EDGE","source":"M5","evidence":"/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20"},
   {"kind":"env","name":"BOX_DRY_RUN_CANDIDATE_EDGE","source":"M5","evidence":"/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922"},
   {"kind":"env","name":"BOX_DRY_RUN_RELEASE_SHA","source":"M5","evidence":"release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922"},
