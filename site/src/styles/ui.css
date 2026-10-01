@@ -182,18 +182,19 @@
 
 /* Surface + border. This is the ONLY definition of that look now — global.css's
    lookalike single-dash `.btn-ghost` was deleted at integration, unused. */
+/* Daylight Orbs secondary: transparent, 1px control border, ink label. Hover fills with
+   the soft surface and darkens the edge to ink. */
 .btn--secondary {
-  background: var(--surface);
-  color: var(--text); /* 16.88:1 on --elev-2 */
-  border-color: var(--border);
-  box-shadow: var(--ring-top);
+  background: transparent;
+  color: var(--text); /* 13.59:1 on --elev-0, 14.42:1 on white */
+  border-color: var(--border-interactive);
+  box-shadow: none;
 }
 
 .btn--secondary:hover {
-  color: var(--text); /* 15.93:1 on --elev-3 */
+  color: var(--text); /* 12.55:1 on --elev-3 */
   background: var(--surface-2);
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+  border-color: var(--text);
 }
 
 .btn--secondary:active {
@@ -213,15 +214,18 @@
  * the flip and break the hover fade that is the only reason this variant transitions colour
  * at all (--text-muted -> --text). Fixing it properly means pairing the ink with the page
  * background, not with the button, and that is a bigger change than this one. */
+/* Ghost action: accent text at rest, underline on hover; the 44px hit area stays. */
 .btn--ghost {
   background: transparent;
-  color: var(--text-muted);
+  color: var(--accent-bright);
   border-color: transparent;
 }
 
 .btn--ghost:hover {
-  background: var(--surface); /* --text 16.88:1 */
-  color: var(--text);
+  background: transparent;
+  color: var(--accent-bright);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }
 
 .btn--ghost:active {
