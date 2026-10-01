@@ -6755,9 +6755,10 @@ test("controls: command substitutions retain writers and executable eval refuses
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
   // Captured stdout used as a destination cannot disappear at the absolute-path
   // filter. Each row owns a distinct writer operand grammar, in both directions.
-  for (const destination of [`$(echo ${path})`, `\`echo ${path}\``, `"${dirname(path)}/$(echo proof.txt)"`]) {
+  for (const destination of [`$(echo ${path})`, `\`echo ${path}\``, `"${dirname(path)}/$(echo proof.txt)"`,
+    `>(tee ${path})`]) {
     for (const source of [`printf actual | tee ${destination}`, `printf actual >${destination}`,
-      `cp /tmp/input ${destination}`, `curl --output=${destination} https://example.invalid`]) {
+      `printf actual >|${destination}`, `cp /tmp/input ${destination}`, `curl --output=${destination} https://example.invalid`]) {
       const producer = { ...planBlock(RUNBOOK, "runbook-23"), source };
       const remote = { ...consumer, source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` };
       assert.throws(() => crossHostHandoffs([producer, consumer]), /unknown writer destination form/);
@@ -6776,6 +6777,9 @@ test("controls: command substitutions retain writers and executable eval refuses
     `BYTES="$(printf actual | /usr/bin/tee "${path}"\n)"`,
     `BYTES="$(printf '%s' "$(printf actual | /usr/bin/tee "${path}")")"`,
     `WRITER=/usr/bin/tee\nBYTES="$("$WRITER" "${path}")"`,
+    `cat <(printf actual | /usr/bin/tee "${path}")`,
+    `BYTES="$((1 + $(printf 1 | /usr/bin/tee "${path}")))"`,
+    `((1 + $(printf 1 | /usr/bin/tee "${path}")))`,
     `PROOF_DIR=${dirname(path)}\ncat <<'DATA'\nPROOF_DIR=/home/not-shell\nDATA\nprintf actual | /usr/bin/tee "$PROOF_DIR/proof.txt"`,
     `printf '%s' "$(printf actual | /usr/bin/tee "${path}")"`]) {
     const producer = { ...planBlock(RUNBOOK, "runbook-23"), source };
@@ -6793,6 +6797,18 @@ test("controls: command substitutions retain writers and executable eval refuses
   const data = { ...planBlock(RUNBOOK, "runbook-23"),
     source: `printf 'eval tee ${path}; $(tee ${path}); \`tee ${path}\`'\nprintf "%s" "\\\`tee ${path}\\\`"\ncat <<'DATA'\neval 'tee ${path}'\nBYTES="$(tee ${path})"\nBYTES=\`tee ${path}\`\nDATA` };
   assert.deepEqual(crossHostHandoffs([data, consumer]), []);
+  for (const source of [`cat <(ssh ops@yulan-vps-1 "tee ${path}")`, `cat <(scp /tmp/input ops@yulan-vps-1:${path})`]) {
+    assert.throws(() => crossHostHandoffs([{ ...data, source }, consumer]), /unknown transfer form: nested transport/);
+    assert.throws(() => transferProducts({ ...consumer,
+      source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` }), /unknown transfer form: nested transport/);
+  }
+  for (const source of ["test 2 -gt 1", 'BYTES="$((1 + 2))"', "BYTES=$((1<(nice)))", "((1<(nice)))",
+    "cat <(cat /tmp/read-only)", `printf 'tee >(${path})'`,
+    `cat <<'DATA'\ntee >(tee ${path})\nDATA`]) {
+    assert.deepEqual(crossHostHandoffs([{ ...data, source }, consumer]), [], source);
+    assert.deepEqual(transferProducts({ ...consumer,
+      source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` }), [], source);
+  }
   assert.throws(() => crossHostHandoffs([{ ...data, source: `BYTES=\`tee ${path}` }, consumer]), /unterminated command substitution/);
 });
 
@@ -6992,6 +7008,7 @@ mv /tmp/input "$DEST/moved"
 printf data | tee -a "$DEST/teed"
 printf a > "$DEST/redirected"
 printf b >> "$DEST/appended"
+printf c >| "$DEST/clobbered"
 printf 'quoted > /tmp/not-a-write | tee /tmp/not-a-pipe'
 mkdir -p "$DEST/directory"
 ln -s /tmp/input "$DEST/link"
@@ -7003,7 +7020,7 @@ DATA` };
   const consumer: Block = { ...producer, host: "box /bin/bash 5.2 as root", step: "read", source: "cat /tmp/target/installed" };
   const paths = new Set(crossHostHandoffs([producer, consumer]).map((item) => item.path));
   for (const path of ["/tmp/transferred", "/srv/commonswarm/site/releases/control/", "/tmp/cat-input", ...[
-    "installed", "copied", "moved", "teed", "redirected", "appended", "directory", "link", "extracted",
+    "installed", "copied", "moved", "teed", "redirected", "appended", "clobbered", "directory", "link", "extracted",
   ].map((name) => `/tmp/target/${name}`)]) assert.ok(paths.has(path), `missing remote product ${path}`);
   assert.equal(paths.has("/tmp/not-shell-code"), false, "cat stdin was inventoried as shell commands");
   assert.equal(paths.has("/tmp/not-a-write"), false, "quoted payload became a redirection");
@@ -7021,6 +7038,64 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
   const reordered = { ...fileFed, source: fileFed.source.replace('cat >"$SCRIPT" <<\'SCRIPT\'', 'cat <<\'SCRIPT\' >"$SCRIPT"') };
   assert.ok(crossHostHandoffs([reordered, consumer]).some((item) => item.path === "/tmp/file-fed-product"),
     "a file-fed script disappeared when its redirection moved");
+  for (const quote of ["'", '"']) {
+    const remote = { ...producer, source: `ssh ops@100.115.66.74 ${quote}printf start\ntee /tmp/multiline-product${quote}` };
+    const reader = { ...consumer, source: "cat /tmp/multiline-product" };
+    assert.deepEqual(crossHostHandoffs([remote, reader]).map((item) => [item.producer, item.consumer, item.path, item.direction]),
+      [[remote, reader, "/tmp/multiline-product", "mac-to-box"]]);
+    assert.deepEqual(transferProducts(remote), [{ path: "/tmp/multiline-product", source: "", mode: "0600",
+      owner: "root:root", remote: true, kind: "file" }]);
+  }
+  for (const redirect of [">", ">>", ">|", "2>"]) {
+    const local = { ...producer, source: `MAC_ROOT=/tmp/mac-output\nssh ops@100.115.66.74 'tee /tmp/remote-output' ${redirect}"$MAC_ROOT/stdout"\n` +
+      'scp "$MAC_ROOT/stdout" ops@100.115.66.74:/tmp/transferred-output' };
+    const operation = macBoundaryOperations(local).find((item) => "remote" in item)!;
+    assert.ok("remote" in operation);
+    assert.deepEqual(operation.remote.localOutputPaths, ["/tmp/mac-output/stdout"]);
+    assert.deepEqual(capturedMacProductPaths(local), ["/tmp/mac-output/stdout"]);
+    assert.deepEqual(transferProducts(local), [
+      { path: "/tmp/remote-output", source: "", mode: "0600", owner: "root:root", remote: true, kind: "file" },
+      { path: "/tmp/transferred-output", source: "/tmp/mac-output/stdout", mode: "0600", owner: "ops:ops" },
+    ]);
+    const reader = { ...consumer, source: "cat /tmp/remote-output /tmp/transferred-output" };
+    assert.deepEqual(crossHostHandoffs([local, reader]).map((item) => [item.producer, item.consumer, item.path]),
+      [[local, reader, "/tmp/remote-output"], [local, reader, "/tmp/transferred-output"]]);
+    for (const target of ["$(echo /tmp/opaque)", ">(/usr/bin/tee /tmp/opaque)"]) {
+      assert.throws(() => macBoundaryOperations({ ...local,
+        source: `ssh ops@100.115.66.74 'printf actual' ${redirect}${target}` }), /unknown writer destination form/);
+    }
+  }
+  for (const transport of ["scp", "rsync -a"]) {
+    for (const source of [
+      `for FILE in /tmp/one /tmp/two; do\n${transport} "$FILE" ops@100.115.66.74:/tmp/destination/\ndone`,
+      `FILES="/tmp/one /tmp/two"\n${transport} $FILES ops@100.115.66.74:/tmp/destination/`,
+      `${transport} /tmp/one /tmp/two ops@100.115.66.74:/tmp/destination/`,
+    ]) {
+      const expanded = { ...producer, source };
+      assert.deepEqual(transferProducts(expanded), ["one", "two"].map((name) => ({
+        path: `/tmp/destination/${name}`, source: `/tmp/${name}`, mode: "0600", owner: "ops:ops",
+      })));
+      const reader = { ...consumer, source: "cat /tmp/destination/one /tmp/destination/two" };
+      assert.deepEqual(crossHostHandoffs([expanded, reader]).map((item) => [item.producer, item.consumer, item.path]),
+        ["one", "two"].map((name) => [expanded, reader, `/tmp/destination/${name}`]));
+    }
+    const quoted = { ...producer, source: `${transport} "file1 file2" ops@100.115.66.74:/tmp/destination/` };
+    assert.deepEqual(transferProducts(quoted), [{ path: "/tmp/destination/file1 file2", source: "file1 file2", mode: "0600", owner: "ops:ops" }]);
+    const paired = { ...producer, source: `for FILE in one two; do\n${transport} "/tmp/input/$FILE" ops@100.115.66.74:/tmp/"$FILE"\ndone` };
+    assert.deepEqual(transferProducts(paired), ["one", "two"].map((name) => ({
+      path: `/tmp/${name}`, source: `/tmp/input/${name}`, mode: "0600", owner: "ops:ops",
+    })));
+    for (const source of [
+      `${transport} /tmp/one /tmp/two ops@100.115.66.74:/tmp/ambiguous-directory`,
+      `for FILE in /tmp/one /tmp/two; do\nfor DIR in /tmp/first /tmp/second; do\n${transport} "$FILE" "ops@100.115.66.74:$DIR/"\ndone\ndone`,
+    ]) assert.throws(() => transferProducts({ ...producer, source }), /unknown transfer form/);
+    for (const operand of ["/tmp/{one,two}", "/tmp/*", "$(printf /tmp/one)", '"${FILES[@]}"']) {
+      assert.throws(() => transferProducts({ ...producer,
+        source: `${transport} ${operand} ops@100.115.66.74:/tmp/destination/` }), /unknown transfer form/);
+      assert.throws(() => transferProducts({ ...producer,
+        source: `${transport} /tmp/input ops@100.115.66.74:${operand}` }), /unknown transfer form/);
+    }
+  }
 });
 
 test("controls: box userland install accepts /dev/null and refuses other device sources", () => {

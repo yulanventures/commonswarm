@@ -15,8 +15,26 @@ const UNKNOWN_TRANSPORT = /\b(?:sftp|ftp|lftp|rcp|rclone|bbcp|unison|sshpass)\b/
 // An impossible shell argv byte distinguishes captured data from literal text.
 // Its meaning must survive projection until the executable/destination boundary.
 const CAPTURED_STDOUT = "\0captured-stdout\0";
-const tokens = (line: string): string[] => (line.match(/(?:"[^"\n]*"|'[^'\n]*'|[^\s;"']+)+/g) ?? [])
+const shellTokens = (line: string): string[] => line.match(/(?:"[^"]*"|'[^']*'|[^\s;"']+)+/g) ?? [];
+const tokens = (line: string): string[] => shellTokens(line)
   .map((word) => word.replace(/["']/g, ""));
+
+function unclosedShellQuote(source: string): boolean {
+  let quote = "", escaped = false;
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]!;
+    if (escaped) { escaped = false; continue; }
+    if (char === "\\" && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (char === quote) quote = ""; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === "#" && (index === 0 || /\s/.test(source[index - 1]!))) {
+      const newline = source.indexOf("\n", index);
+      if (newline < 0) break;
+      index = newline;
+    }
+  }
+  return Boolean(quote);
+}
 
 // Here-document bodies belong to stdin, not the Mac shell's assignment scope.
 function outsideHeredocs(source: string): string {
@@ -83,6 +101,8 @@ export interface RemoteOperation {
   stdinProducer?: { path: string; writers: string[] };
   // A Mac command substitution owns this output, not the remote environment.
   capture?: { name: string; localStateSource?: string };
+  // These sinks belong to the Mac SSH executable, never to the remote shell.
+  localOutputPaths?: string[];
 }
 export type BoundaryOperation = { transfer: TransferProduct; transport: "scp" | "rsync"; flags: string[] } | { remote: RemoteOperation };
 
@@ -120,6 +140,12 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
     let line = lines[i]!;
     if (/^\s*#/.test(line)) continue;
     while (line.endsWith("\\") && i + 1 < lines.length) line = line.slice(0, -1) + " " + lines[++i]!.trimStart();
+    if (/\bssh\s/.test(line) || /^\s*(?:scp|rsync)\s/.test(line)) {
+      // A heredoc in an enclosing capture is read by the stdin scanner below;
+      // its body must not be swallowed while joining a quoted SSH argv.
+      while (unclosedShellQuote(line) && !/<<-?['"]?[A-Za-z_]/.test(line) && i + 1 < lines.length) line += "\n" + lines[++i]!;
+      if (unclosedShellQuote(line) && !/<<-?['"]?[A-Za-z_]/.test(line)) unknown(line);
+    }
     const here = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(line);
     let script: string | undefined;
     if (here) {
@@ -148,31 +174,88 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
     // are not transfers; upload flags and remote-copy tools are host-boundary operations.
     if (UNKNOWN_TRANSPORT.test(line) ||
         /\bcurl\b.*(?:--upload-file|--data-binary|-T)\b/.test(line)) unknown(line);
-    const words = tokens(line.trim());
+    const words = shellTokens(line.trim());
     if (["scp", "rsync"].includes(words[0] ?? "")) {
       const command = words.shift()! as "scp" | "rsync";
       const flags: string[] = [];
       while (words[0]?.startsWith("-")) {
-        const flag = words.shift()!;
+        const flag = tokens(words.shift()!)[0]!;
         flags.push(flag);
         const known = command === "scp" ? /^-[prqCv]+$/.test(flag) : /^-[avzhn]+$/.test(flag) || ["--delete", "--ignore-existing", "--relative"].includes(flag);
         if (!known && !["-e", "--rsh", "--exclude", "--include", "-o", "-P", "-i"].includes(flag)) unknown(line);
         if (["-e", "--rsh", "--exclude", "--include", "-o", "-P", "-i"].includes(flag)) {
           if (!words.length) unknown(line);
-          flags.push(words.shift()!);
+          flags.push(tokens(words.shift()!)[0]!);
         }
       }
       const operands = words.filter((word) => !word.startsWith(">") && !/^[0-9]+>/.test(word));
       const destination = operands.pop();
-      const remote = /^(ops|commonswarm)@[^:]+:(\/.*)$/.exec(destination ?? "");
-      if (!remote || !operands.length || operands.some((word) => /^[^/]+@[^:]+:/.test(word))) unknown(line);
+      const remote = /^(ops|commonswarm)@[^:]+:(\/.*)$/.exec(tokens(destination ?? "")[0] ?? "");
+      if (!remote || !operands.length || operands.some((word) => /^[^/]+@[^:]+:/.test(tokens(word)[0]!))) unknown(line);
+      const segments = (raw: string): Array<{ value: string; quote: string }> => {
+        const result: Array<{ value: string; quote: string }> = [];
+        let quote = "", value = "";
+        for (const char of raw) {
+          if (char === "\\" && quote !== "'") unknown(line);
+          if ((char === "'" || char === '"') && (!quote || quote === char)) {
+            if (value) result.push({ value, quote });
+            value = ""; quote = quote ? "" : char;
+          } else value += char;
+        }
+        if (quote) unknown(line);
+        if (value) result.push({ value, quote });
+        return result;
+      };
+      const values = (raw: string): string[] => {
+        const parts = segments(raw);
+        let words = [""];
+        for (const part of parts) {
+          if (part.quote !== "'" && /\$\(|`/.test(part.value)) unknown(line);
+          if (part.quote !== "'" && /\$\{|\$[@*]/.test(part.value.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, ""))) unknown(line);
+          const resolved = part.quote === "'" ? [part.value] : expand(part.value);
+          if (!part.quote && (/[{}*?\[\]]/.test(part.value.replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, "")) ||
+            resolved.some((value) => /[*?\[\]]/.test(value)))) unknown(line);
+          const fields = resolved.flatMap((value) => {
+            if (part.quote || !/\$/.test(part.value) || !/\s/.test(value)) return [value];
+            // Prefix/suffix concatenation across split fields needs a fuller
+            // grammar. A bare variable has unambiguous shell field splitting.
+            if (parts.length !== 1 || !/^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(raw)) unknown(line);
+            return value.split(/\s+/).filter(Boolean);
+          });
+          words = words.flatMap((prefix) => fields.map((field) => prefix + field));
+        }
+        return words;
+      };
+      const iterationNames = (raw: string): string[] => [...new Set(segments(raw).filter((part) => part.quote !== "'")
+        .flatMap((part) => [...part.value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+          .map((match) => match[1] ?? match[2]!)).filter((name) => expand(`$${name}`).length > 1))];
+      const destinations = values(destination!);
+      const paths = destinations.map((value) => /^(?:ops|commonswarm)@[^:]+:(\/.*)$/.exec(value)?.[1] ?? unknown(line));
+      if (!paths.length || (operands.length > 1 && paths.some((path) => !path.endsWith("/")))) unknown(line);
       for (const operand of operands) {
-        const sources = expand(operand);
-        const paths = expand(remote![2]!);
-        for (let n = 0; n < paths.length; n++) operations.push({ transport: command, flags, transfer: {
-          path: paths[n]!.endsWith("/") && !operand.endsWith("/") ? paths[n]! + (sources[n] ?? sources[0]!).split("/").at(-1)! : paths[n]!, source: sources[n] ?? sources[0]!, mode: "0600", owner: `${remote![1]}:${remote![1]}`,
-          ...(command === "rsync" && operand.endsWith("/") ? { kind: "directory" as const } : {}),
-        } });
+        // A quoted literal containing spaces is one argv. An unquoted variable
+        // can split into several. Brace/glob/array forms require a grammar we
+        // do not own: refuse them instead of inventing one symbolic filename.
+        const sources = values(operand);
+        // Two independently expanded sides need their iteration relationship,
+        // not an index zip that can silently omit a source/destination pair.
+        if (!sources.length || sources.some((source) => !source)) unknown(line);
+        if (paths.length > 1 && sources.length > 1) {
+          const sourceNames = iterationNames(operand), destinationNames = iterationNames(destination!);
+          if (sources.length !== paths.length || sourceNames.length !== 1 || destinationNames.length !== 1 ||
+            sourceNames[0] !== destinationNames[0]) unknown(line);
+        }
+        if (sources.length > 1 && paths.length === 1 && !paths[0]!.endsWith("/")) unknown(line);
+        for (let n = 0; n < Math.max(paths.length, sources.length); n++) {
+          const path = paths[n] ?? paths[0]!;
+          const source = sources[n] ?? sources[0]!;
+          assertWriterDestination(path);
+          operations.push({ transport: command, flags, transfer: {
+            path: path.endsWith("/") && !source.endsWith("/") ? path + source.split("/").at(-1)! : path,
+            source, mode: "0600", owner: `${remote![1]}:${remote![1]}`,
+            ...(command === "rsync" && source.endsWith("/") ? { kind: "directory" as const } : {}),
+          } });
+        }
       }
       continue;
     }
@@ -196,7 +279,7 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
     // A close of the enclosing Mac command substitution ends ssh too. Any
     // redirections after it belong to the outer command, not the remote stdin.
     let substitutionQuote = "", substitutionEscape = false;
-    for (let n = 0; n < sshText.length; n++) {
+    for (let n = 0; line.slice(0, ssh.index).includes("$(") && n < sshText.length; n++) {
       const c = sshText[n]!;
       if (substitutionEscape) { substitutionEscape = false; continue; }
       if (c === "\\" && substitutionQuote !== "'") { substitutionEscape = true; continue; }
@@ -216,21 +299,28 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
       if (c === "\\" && quote !== "'") { escaped = true; continue; }
       if (quote) { if (c === quote) quote = ""; continue; }
       if (c === "'" || c === '"') { quote = c; continue; }
-      if (["<", ">", "|", ")", ";"].includes(c)) { end = n; break; }
+      if (["<", ">", "|", ")", ";"].includes(c)) {
+        const descriptor = ["<", ">"].includes(c) ? /\s([0-9]+)$/.exec(command.slice(0, n))?.[1] : undefined;
+        end = n - (descriptor?.length ?? 0);
+        break;
+      }
     }
     command = command.slice(0, end).trim();
+    const localOutputPaths = outputPaths(sshText.slice(end), expand).flatMap(expand)
+      .filter((path) => path !== "/dev/null");
+    const localOutputs = localOutputPaths.length ? { localOutputPaths } : {};
     if (!/\b(?:ops|commonswarm)@(?:100\.115\.66\.74|yulan-vps-1)\b/.test(command)) unknown(line);
     if (!sshHere) {
       const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(sshText.slice(end));
       if (input) {
         const found = scripts.get(tokens(input[1]!)[0]!);
         if (!found) unknown(line);
-        operations.push({ remote: { command: commandExpansion(command), ...found!, ...(capture ? { capture } : {}) } });
+        operations.push({ remote: { command: commandExpansion(command), ...found!, ...localOutputs, ...(capture ? { capture } : {}) } });
         continue;
       }
       if (/\bbash\s+-s\b/.test(command)) unknown(line);
     }
-    operations.push({ remote: { command: commandExpansion(command), ...(capture ? { capture } : {}), ...(sshHere && script !== undefined
+    operations.push({ remote: { command: commandExpansion(command), ...localOutputs, ...(capture ? { capture } : {}), ...(sshHere && script !== undefined
       ? { script, delimiter: `${sshHere[1]}${sshHere[2]}${sshHere[3]}${sshHere[2]}` } : {}) } });
   }
   return operations;
@@ -251,7 +341,7 @@ function shellCommands(line: string): string[] {
       commands.push(line.slice(start, index));
       return commands.filter((command) => command.trim());
     }
-    if (char === "\n" || char === ";" || char === "|" || (char === "&" && !/[<>]/.test(line[index - 1] ?? ""))) {
+    if (char === "\n" || char === ";" || (char === "|" && line[index - 1] !== ">") || (char === "&" && !/[<>]/.test(line[index - 1] ?? ""))) {
       commands.push(line.slice(start, index));
       start = index + 1;
     }
@@ -355,7 +445,7 @@ function executableWords(command: string): string[] {
 // complete programs out before splitting pipelines; single-quoted prose and
 // escaped dollars remain data. Replacing only the capture keeps its stdout
 // from masquerading as an executable or a writer operand in the outer command.
-function substitutionPrograms(line: string): { outer: string; programs: string[]; incomplete: boolean } {
+function substitutionPrograms(line: string, arithmetic = false): { outer: string; programs: string[]; incomplete: boolean } {
   let quote = "", escaped = false, start = 0, outer = "";
   let incomplete = false;
   const programs: string[] = [];
@@ -382,8 +472,10 @@ function substitutionPrograms(line: string): { outer: string; programs: string[]
       index = end;
       continue;
     }
-    if (char !== "$" || line[index + 1] !== "(") continue;
-    let depth = 1, innerQuote = "", innerEscape = false, end = index + 2;
+    const process = !arithmetic && !quote && ["<", ">"].includes(char) && line[index + 1] === "(";
+    const arithmeticCommand = !arithmetic && !quote && char === "(" && line[index + 1] === "(";
+    if (!process && !arithmeticCommand && (char !== "$" || line[index + 1] !== "(")) continue;
+    let depth = arithmeticCommand ? 2 : 1, innerQuote = "", innerEscape = false, end = index + 2;
     for (; end < line.length; end++) {
       const next = line[end]!;
       if (innerEscape) { innerEscape = false; continue; }
@@ -396,9 +488,10 @@ function substitutionPrograms(line: string): { outer: string; programs: string[]
     if (depth !== 0) { incomplete = true; continue; }
     const program = line.slice(index + 2, end);
     // Arithmetic is data, but any nested command substitutions still execute.
-    if (program.startsWith("(")) programs.push(...substitutionPrograms(program.slice(1, -1)).programs);
+    if (arithmeticCommand) programs.push(...substitutionPrograms(program.slice(0, -1), true).programs);
+    else if (!process && program.startsWith("(")) programs.push(...substitutionPrograms(program.slice(1, -1), true).programs);
     else programs.push(program);
-    outer += line.slice(start, index) + CAPTURED_STDOUT;
+    outer += line.slice(start, index) + (arithmeticCommand ? ":" : CAPTURED_STDOUT);
     start = end + 1;
     index = end;
   }
@@ -410,8 +503,9 @@ function writerSourceLines(source: string): string[] {
   const logical: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     let line = lines[index]!;
-    while (substitutionPrograms(line).incomplete && index + 1 < lines.length) line += "\n" + lines[++index]!;
+    while ((substitutionPrograms(line).incomplete || unclosedShellQuote(line)) && index + 1 < lines.length) line += "\n" + lines[++index]!;
     if (substitutionPrograms(line).incomplete) throw new Error(`unknown writer shell form: unterminated command substitution: ${line.trim()}`);
+    if (unclosedShellQuote(line)) throw new Error(`unknown writer shell form: unterminated quote: ${line.trim()}`);
     logical.push(line);
   }
   return logical;
@@ -423,6 +517,7 @@ function writerSourceLines(source: string): string[] {
 function writerCommands(line: string, depth = 0, expand?: (value: string) => string[], captured = false): string[] {
   if (depth > 12) throw new Error("unknown writer executable form: nested shell depth");
   const substitutions = substitutionPrograms(line);
+  if (substitutions.incomplete) throw new Error(`unknown writer shell form: unterminated command substitution: ${line.trim()}`);
   return [...substitutions.programs.flatMap((program) => writerCommands(program, depth + 1, expand, true)),
     ...shellCommands(substitutions.outer).flatMap((command) => {
     // A captured runtime query can use a path assigned in the owning block.
@@ -439,6 +534,9 @@ function writerCommands(line: string, depth = 0, expand?: (value: string) => str
     }
     const words = executableWords(command);
     if (words[0] === "eval") throw new Error(`unknown writer executable form: ${command.trim()}`);
+    if (depth > 0 && ["ssh", "scp"].includes(words[0] ?? "")) {
+      throw new Error(`unknown transfer form: nested transport ${command.trim()}`);
+    }
     // The contained literal-script projection supports simple commands and
     // pipelines. Control flow/functions need a shell grammar; never silently
     // mistake their keywords or delimiters for a non-writing executable.
@@ -453,7 +551,7 @@ function writerCommands(line: string, depth = 0, expand?: (value: string) => str
     if (at !== 1 || !/^-[eluc]+$/.test(option) || words.length !== 3 || /[$`]/.test(words[2]!)) {
       throw new Error(`unknown writer shell form: ${command.trim()}`);
     }
-    return outsideHeredocs(words[2]!).replace(/\\\n\s*/g, " ").split("\n")
+    return writerSourceLines(words[2]!)
       .flatMap((body) => writerCommands(body, depth + 1, expand));
   })];
 }
@@ -470,6 +568,7 @@ function redirectedOutputPaths(line: string): string[] {
     if (char === "'" || char === '"') { quote = char; continue; }
     if (char !== ">" || line[index - 1] === "<") continue;
     if (line[index + 1] === ">") index++;
+    if (line[index + 1] === "|") index++;
     if (line[index + 1] === "&") continue;
     const target = /^\s*("[^"]+"|'[^']+'|[^\s;|&]+)/.exec(line.slice(index + 1));
     if (target) {
@@ -529,17 +628,19 @@ function assertWriterDestination(path: string): void {
   }
 }
 
-// These are Mac-local files written after an SSH command substitution. Keep
-// their names tied to that writer, so an unrelated transfer cannot borrow its
-// coverage. The boundary executes the writer only after receiving SSH output.
+// Mac-local SSH sinks and post-capture writers keep their producing operation,
+// so an unrelated transfer cannot borrow their coverage. Discovery supplies no
+// bytes: a later transfer still requires the writer's actual retained file.
 export function capturedMacProductPaths(block: HandoffBlock): string[] {
   return macBoundaryOperations(block).flatMap((operation) => {
-    if (!("remote" in operation) || !operation.remote.capture?.localStateSource) return [];
+    if (!("remote" in operation)) return [];
+    const local = operation.remote.localOutputPaths ?? [];
+    if (!operation.remote.capture?.localStateSource) return local;
     const source = outsideHeredocs(operation.remote.capture.localStateSource);
     const expand = expansions({ ...block, source });
     // /dev/null discards a probe's stdout; it is not a retained writer product
     // that a later transfer can consume or use to claim producer coverage.
-    return source.split("\n").flatMap((line) => outputPaths(line, expand).flatMap(expand))
+    return [...local, ...writerSourceLines(source).flatMap((line) => outputPaths(line, expand).flatMap(expand))]
       .filter((path) => path !== "/dev/null");
   });
 }
