@@ -371,7 +371,10 @@ install -m 0600 -o root -g root /tmp/commonswarm-hm37b-open.env "$PROOF_DIR/wind
 rm -f /tmp/commonswarm-hm37b-open.env
 test "$(readlink -f /home/commonswarm/edge/current)" =   "/home/commonswarm/edge/releases/$SHA"
 test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
-docker exec commonswarm-edge-edge-runtime-1 deno eval   'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+# Inspect failure stops here; an absent flag remains DARK. Print no env values.
+MCP_PUBLIC_STATE="$(docker inspect --format \
+  '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}' commonswarm-edge-edge-runtime-1)"
+test -z "$MCP_PUBLIC_STATE"
 BOX
 )
 ```
@@ -1221,7 +1224,10 @@ container and skips it.
   test "$(readlink -f /home/commonswarm/edge/current)" =     "/home/commonswarm/edge/releases/$SHA"
   test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
   test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy
-  docker exec commonswarm-edge-edge-runtime-1 deno eval     'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+  # Inspect failure stops here; an absent flag remains DARK. Print no env values.
+  MCP_PUBLIC_STATE="$(docker inspect --format \
+    '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}' commonswarm-edge-edge-runtime-1)"
+  test -z "$MCP_PUBLIC_STATE"
   test ! -e /usr/local/bin/deno
   test ! -e "/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
   test ! -e "/run/commonswarm-hm37-${WINDOW_ID}"
