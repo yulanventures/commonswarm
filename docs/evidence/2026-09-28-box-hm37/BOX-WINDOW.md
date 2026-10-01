@@ -118,6 +118,8 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-source-identity: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_REPO:?absolute release checkout required}"
   cd "$RELEASE_REPO"
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -376,6 +378,8 @@ task-owned directories; no credential value is present in the prompt.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-source-checkout: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
   : "${PROOF_SQL_MANIFEST:?absolute proof SQL manifest required}"
   : "${RELEASE_REPO:?absolute release checkout required}"
@@ -410,6 +414,8 @@ task-owned directories; no credential value is present in the prompt.
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-open-inputs: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${APPROVER:?named prompt input required}"
   : "${PLAN_COMMIT:?named prompt input required}"
@@ -434,6 +440,8 @@ task-owned directories; no credential value is present in the prompt.
   trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
   cat >"$CLOCK_SCRIPT" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37a-open-inputs: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 RELEASE_SHA="${1:?named release SHA required}"
 case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
 test "${#RELEASE_SHA}" -eq 40
@@ -538,6 +546,8 @@ it, as the runbook's copy-back section requires of the evidence it reviews.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-gate-and-proof-ingest: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
   : "${PROOF_SQL_MANIFEST:?absolute SQL manifest required}"
@@ -591,6 +601,8 @@ it, as the runbook's copy-back section requires of the evidence it reviews.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-resolved-inputs: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   : "${KIND_LIST:?named input required}"
   : "${H0_LEDGER_BACKFILL:?named input required}"
@@ -685,10 +697,14 @@ FILES
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-baseline-inventory: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' \
     >"$EVIDENCE_DIR/hm37a-baseline-inventory.txt" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37a-baseline-inventory: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 OVERRIDE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml
 OAUTH_IMAGE=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id
 for FILE in "$OVERRIDE" "$OAUTH_IMAGE"; do
@@ -746,6 +762,8 @@ consumed by the dry run.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-schema-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -802,6 +820,8 @@ SQL
 # Runs on the box over ssh, as Anvil in a root Bash shell, after runbook sections 1–3 and proof transfer; production checks are read only.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hm6-schema-helpers-precondition: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   HM6_STACK_SHA=ad964ed158181ba1692dd05895f36fa7a1f87d3f
   HM6_STACK="/home/commonswarm/stack/releases/${HM6_STACK_SHA}"
@@ -908,6 +928,8 @@ Preflight success is not evidence for either receipt.
 # Runs on the box over ssh, as Anvil in a root Bash shell, immediately after hm37a-open-inputs; every command reads, and nothing is written or printed.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-oauth-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   HM6_OAUTH_SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
   HM6_OAUTH="/home/commonswarm/oauth/releases/${HM6_OAUTH_SHA}"
   HM6_OAUTH_PROOF="/home/commonswarm/stack/release-proofs/${HM6_OAUTH_SHA}"
@@ -946,6 +968,8 @@ Preflight success is not evidence for either receipt.
 # Runs on the box over ssh, as Anvil in a root Bash shell; all production checks are read only.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hm6-oauth-precondition: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   HM6_OAUTH_SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
   HM6_OAUTH="/home/commonswarm/oauth/releases/${HM6_OAUTH_SHA}"
@@ -1072,6 +1096,8 @@ resource ID, credential, Authorization header or Cookie header.
 # Runs on the box over ssh, as Anvil in a root Bash shell; every request must refuse.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hm6-oauth-refusal-probe: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -1155,6 +1181,8 @@ After both parts pass, the required checks have executable owners:
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-resolved-input-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   for FILE in item-resolved-inputs.env item-copy-back-files.list; do
     test -f "$EVIDENCE_DIR/$FILE"
@@ -1162,6 +1190,8 @@ After both parts pass, the required checks have executable owners:
   done
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37a-resolved-input-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
 for FILE in item-resolved-inputs.env item-copy-back-files.list; do
   install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
@@ -1177,6 +1207,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-go-record: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${APPROVER:?named prompt input required}"
   : "${PLAN_COMMIT:?named prompt input required}"
   : "${RELEASE_SHA:?named prompt input required}"
@@ -1208,6 +1240,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-prerequisite-evidence: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1242,6 +1276,8 @@ PY
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-current-window-state: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   . "/run/commonswarm-release-${SHA}-session.sh"
@@ -1288,7 +1324,12 @@ SQL
   LEDGER_04="$(release_psql_ro -Atq --command \
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")"
   test "$LEDGER_04" = 0
-  CATALOG_04="$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-catalog.sql")"
+  # Catalog proofs save catalog_ok with \gset; emit it explicitly for the shell.
+  cat >"$APPLY_SQL" <<'SQL'
+\i /proof/20260928000004-catalog.sql
+SELECT :'catalog_ok'::boolean;
+SQL
+  CATALOG_04="$(release_psql_ro -Atq --file "$APPLY_SQL")"
   test "$CATALOG_04" = f
 
   find "$NEW_STACK/supabase/migrations" -maxdepth 1 -type f -name '*.sql' -print \
@@ -1432,6 +1473,8 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
 # The ssh subprocess reads state on the box as root.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-read-window-suffix: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -1440,6 +1483,8 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
     >"$EVIDENCE_DIR/window-principal-suffix.txt" <<'BOX'
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-read-window-suffix: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA="$1"
   . "/home/commonswarm/stack/release-proofs/${SHA}/window.env"
   case "$WINDOW_PRINCIPAL_SUFFIX" in
@@ -1472,6 +1517,8 @@ Wait for the existing backup service **before** reading status. Active, activati
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-backup-gate: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   : "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"
@@ -1557,6 +1604,8 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-functional-section5: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro --file "$PROOF_DIR/20260928000004-functional.sql" \
@@ -1666,6 +1715,8 @@ repeat their Mac and box execution context so either can run alone.
 # Its ssh subprocess runs only the gateway loopback read on the box as root.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-public-boundary-reads: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -1787,6 +1838,8 @@ PY
 # Its ssh subprocess runs only the gateway loopback probes on the box as root.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-public-boundaries: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -1992,6 +2045,8 @@ seat-b profile and principal are never read, changed, revoked, or deleted.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-prep-seat-control-stage: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${RELEASE_SHA:?named release SHA required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -2080,6 +2135,8 @@ window before migration or edge change.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-directed-check-old: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   install -m 0600 "/tmp/hm37a-prep-seat-inventory-${SHA}.json" \
@@ -2101,6 +2158,8 @@ failure in this block selects full rollback.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-directed-check-new: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$(ssh -o BatchMode=yes ops@100.115.66.74 'sudo -n readlink -f /home/commonswarm/edge/current')" =     "/home/commonswarm/edge/releases/$SHA"
@@ -2115,6 +2174,8 @@ failure in this block selects full rollback.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-local-evidence-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-reads.json hm37-public-reads.json hm37-mcp-hostname-reads.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
     test -f "$EVIDENCE_DIR/$FILE"
@@ -2123,6 +2184,8 @@ failure in this block selects full rollback.
   done
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37a-local-evidence-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
 for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-reads.json hm37-public-reads.json hm37-mcp-hostname-reads.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
   install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
@@ -2138,6 +2201,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-post-control-readback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   . "/run/commonswarm-release-${SHA}-session.sh"
@@ -2179,6 +2244,8 @@ records that outcome for the operator.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box for token readback and safe receipt copy
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-prep-seat-cleanup: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${RELEASE_SHA:?named release SHA required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -2220,6 +2287,8 @@ records that outcome for the operator.
   trap 'rm -f -- "$QUERY_SCRIPT"' EXIT
   cat >"$QUERY_SCRIPT" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37a-prep-seat-cleanup: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 for value in "$@"; do
   case "$value" in ????????-????-4???-[89ab]???-????????????) ;; *) exit 1 ;; esac
 done
@@ -2314,6 +2383,8 @@ BOX
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-failure-evidence-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   for FILE in hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
     if [ -f "$EVIDENCE_DIR/$FILE" ] && [ ! -L "$EVIDENCE_DIR/$FILE" ]; then
@@ -2332,6 +2403,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-failure-dispatch: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   FAILURE_JSON="$(python3 - "$PROOF_DIR" <<'PY'
@@ -2396,6 +2469,8 @@ ordering-proven S5 bearer failure performs full rollback.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-outgoing-log-review: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
   OUTGOING_NAMES=()
@@ -2441,6 +2516,8 @@ copy-back manifest, records that disposition, and continues automatically.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-close-readback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -2497,6 +2574,8 @@ removes Mac scratch only after that renamed directory is verified.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37a-mac-control-cleanup: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
@@ -2557,6 +2636,8 @@ The inverse below is verbatim from the hashed rollback file.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-reserve-schema-rollback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${SCHEMA_ROLLBACK_APPROVAL:?named rollback input required}"
   test "$SCHEMA_ROLLBACK_APPROVAL" = yes
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env

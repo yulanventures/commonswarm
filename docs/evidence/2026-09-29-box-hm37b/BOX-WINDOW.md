@@ -66,6 +66,8 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-human-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${HUMAN_LOGIN_PREFLIGHT:?absolute protected receipt required}"
   case "$HUMAN_LOGIN_PREFLIGHT" in /*) ;; *) false ;; esac
   test -f "$HUMAN_LOGIN_PREFLIGHT"
@@ -125,6 +127,8 @@ the recorded Deno removal guard, never forge a successful close receipt.
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh Python child on box as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-hosted-auth-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${HUMAN_SESSION_SOURCE:?absolute protected session path required}"
   test "$(command -v rm)" = "$HOME/.local/bin/rm"
@@ -225,8 +229,12 @@ PY
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-deno-artifact-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37b-deno-artifact-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 umask 077
 DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
 DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
@@ -272,6 +280,8 @@ BOX
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-open-inputs: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${APPROVER:?named prompt input required}"
   : "${PLAN_COMMIT:?named prompt input required}"
@@ -303,6 +313,8 @@ BOX
   trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
   cat >"$CLOCK_SCRIPT" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37b-open-inputs: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 RELEASE_SHA="${1:?named release SHA required}"
 case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
 test "${#RELEASE_SHA}" -eq 40
@@ -348,12 +360,16 @@ is the box clock to the second and the second is exactly four hours later.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child opens B state on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-box-open: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named prompt input required}"
   OPEN_RECEIPT="/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env"
   test -f "$OPEN_RECEIPT"
   scp "$OPEN_RECEIPT" ops@100.115.66.74:/tmp/commonswarm-hm37b-open.env
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37b-box-open: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 . /tmp/commonswarm-hm37b-open.env
 test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
 PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
@@ -387,6 +403,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-go-record: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${APPROVER:?named prompt input required}"
   : "${PLAN_COMMIT:?named prompt input required}"
   : "${RELEASE_SHA:?named prompt input required}"
@@ -414,6 +432,8 @@ BOX
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-control-review: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${HARNESS_SOURCE:?absolute reviewed harness path required}"
   : "${IMPORT_MAP_SOURCE:?absolute reviewed import-map path required}"
@@ -439,6 +459,8 @@ BOX
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-stage-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${HUMAN_SESSION_SOURCE:?absolute protected session path required}"
   : "${HARNESS_SOURCE:?absolute harness path required}"
@@ -461,6 +483,8 @@ BOX
   scp "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt" ops@100.115.66.74:/tmp/hm37-hosted-control-inputs.txt
   ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$STAGING_ROOT'" <<'BOX'
 set -euo pipefail
+set -E
+trap 'printf "FAIL hm37b-stage-transfer: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 STAGING_ROOT="$1"
 install -m 0600 -o root -g root /tmp/hm37-open-ack-control.ts   "$STAGING_ROOT/hm37-open-ack-control.ts"
 install -m 0600 -o root -g root /tmp/hm37-open-ack-deno.json   "$STAGING_ROOT/hm37-open-ack-deno.json"
@@ -494,6 +518,8 @@ failure runs `hm37-hosted-control-cleanup-only` when a journal exists and then
 # Legacy step id retained: B validates the staged protected human credential.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-validate-local-credential: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -518,6 +544,8 @@ PY
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, before protected transfer.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hosted-human-session-input: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   : "${HUMAN_SESSION_SOURCE:?absolute protected session input required}"
   case "$HUMAN_SESSION_SOURCE" in /*) ;; *) false ;; esac
@@ -556,6 +584,8 @@ contact only `registry.npmjs.org`.
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash before the opening gate closes.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-deno-install: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
@@ -666,6 +696,8 @@ PY
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hosted-control-stage: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
@@ -774,6 +806,8 @@ failure-dispatch tail takes precedence before runtime removal.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-hosted-runtime-dependency-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -925,6 +959,8 @@ never copied.
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hosted-open-ack-control: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
@@ -992,6 +1028,8 @@ idempotent and still verifies complete revocation before returning zero.
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-hosted-control-cleanup-only: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
@@ -1057,6 +1095,8 @@ baseline. An unknown or changed file is never removed.
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after copy-back on close or rollback.
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37-deno-remove: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1117,6 +1157,8 @@ must pass before any customer can have a connection.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-live-revoke-readback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1170,6 +1212,8 @@ PY
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-failure-dispatch: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1232,6 +1276,8 @@ classification is requested during B.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-outgoing-log-review: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1275,6 +1321,8 @@ container and skips it.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-protected-cleanup: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1309,6 +1357,8 @@ container and skips it.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-close-readback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1350,6 +1400,8 @@ readback is STOP and report; it never produces a success-shaped receipt.
 # host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-copyback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   umask 077
   : "${RELEASE_SHA:?named release SHA required}"
   . "/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env"
@@ -1365,6 +1417,8 @@ readback is STOP and report; it never produces a success-shaped receipt.
     >"$COPYBACK_ARCHIVE" <<'BOX'
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-copyback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   RELEASE_SHA="$1"
   case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
   test "${#RELEASE_SHA}" -eq 40
@@ -1401,6 +1455,8 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
@@ -1418,6 +1474,8 @@ BOX
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL hm37b-mac-cleanup: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   : "${HUMAN_SESSION_SOURCE:?exact protected session path required}"
   OPEN_RECEIPT="/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env"

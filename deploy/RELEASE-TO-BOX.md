@@ -171,6 +171,8 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 rm -f "$HOME/.commonswarm-release-window.env"
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-02: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   SHA="$RELEASE_SHA"
   WINDOW_OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
@@ -311,6 +313,8 @@ initial manifest is built only from the explicit arrays below, never from
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-03: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -480,6 +484,8 @@ the dark `mcp` name:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-04: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   : "${RELEASE_SHA:?named release SHA required}"
   test "$SHA" = "$RELEASE_SHA"
@@ -557,6 +563,8 @@ persisted `window.env`. Compare them on the box before deciding:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -612,6 +620,8 @@ block reads them from `window.env`.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL 1-upload-release-archive: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-release-window.env"
   : "${RELEASE_SHA:?named release SHA required}"
   test "$SHA" = "$RELEASE_SHA"
@@ -634,9 +644,13 @@ blocks load their own persisted state.
 # host: Mac mini /bin/bash 3.2 as Anvil; box /bin/bash 5.2 as root via ssh
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL 1-open-root-shell: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL 1-open-root-shell: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   test "$(id -u)" -eq 0
 )
 BOX
@@ -652,6 +666,8 @@ window state:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL 1-apply-release-directories: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . /tmp/commonswarm-release-window.env
   test "$SHA" = "$RELEASE_SHA"
@@ -978,6 +994,8 @@ inventory. HezLead reviews this exact list for secrets before transfer:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-07: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -999,6 +1017,8 @@ Mac mini:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-08: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1019,6 +1039,8 @@ HezLead confirms their list contains no secret:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-09: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1043,6 +1065,8 @@ HezLead confirms their list contains no secret:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-10: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1112,6 +1136,8 @@ window file exists reads it as before.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-11: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   if [ ! -f "$HOME/.commonswarm-release-window.env" ]; then
     # runbook-02 writes the window file, then the box window input, and no box
@@ -1134,6 +1160,8 @@ window file exists reads it as before.
   ssh ops@100.115.66.74 "sudo -n -i bash -s -- '$RELEASE_SHA'" <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-11: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   RELEASE_SHA="$1"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -1193,6 +1221,8 @@ distinct.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-12: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   if [ -f "$HOME/.commonswarm-release-window.env" ]; then
     . "$HOME/.commonswarm-release-window.env"
@@ -1227,6 +1257,8 @@ A proof directory whose `window.env` is missing still stops the block.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-13: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   ACTIVE_PROOF="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
   if [ ! -e "$ACTIVE_PROOF" ] && [ ! -L "$ACTIVE_PROOF" ]; then
@@ -1275,6 +1307,8 @@ print it:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-14: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1306,6 +1340,8 @@ This checks names and shape without printing the URL.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-15: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1329,6 +1365,8 @@ Then use the repository identity gate against the exact stack release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-16: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1363,6 +1401,8 @@ all other file arguments.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-17: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1508,6 +1548,8 @@ H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-18: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1547,6 +1589,8 @@ release checksum manifest before using its verifier.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-19: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1595,6 +1639,8 @@ column rolls the transaction back.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-20: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1665,6 +1711,8 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-21: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1720,6 +1768,8 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-22: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1759,6 +1809,8 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-23: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1783,6 +1835,8 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-24: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1805,6 +1859,8 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-25: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1825,6 +1881,8 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-26: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1905,6 +1963,8 @@ missing, false, or malformed values. Any failure rolls the transaction back.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-27: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -1974,6 +2034,8 @@ transaction.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-28: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2029,6 +2091,8 @@ name per line; empty when none). The lead supplies both lists with the release; 
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-29: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2102,6 +2166,8 @@ timer and start it after verification.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-30: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2147,6 +2213,8 @@ approved times overlap a protected interval.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-31: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2240,6 +2308,8 @@ URL alias satisfies the database requirement. The check never prints a value.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-32: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2287,6 +2357,8 @@ runtime cannot reach `db.commonswarm.internal`.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-33: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2330,6 +2402,8 @@ the box:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-34: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2379,6 +2453,8 @@ both loopback and staging probes finish, capture the log window that began at
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-35: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2406,6 +2482,8 @@ Anvil runs `runbook-36` and saves its proof output as section 5 does:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-36: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   SEED_NOTE_ID='<uuid-from-HezLead>'
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
@@ -2429,6 +2507,8 @@ of the last successful renew. Within three minutes of that renew, Anvil runs
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-37: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
@@ -2451,6 +2531,8 @@ reply, and author user ids, then run:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-38: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
   ITEM_G3C_SIGNAL_ID='<signal-uuid>'
   ITEM_G3C_REPLY_ID='<reply-uuid>'
@@ -2483,6 +2565,8 @@ outer transaction:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-39: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
   ITEM_G3D_WORKSPACE_ID='<workspace-uuid>'
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2511,6 +2595,8 @@ settings, performs only reads, and has no outer transaction:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-40: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
   ITEM_T3_ROOT_SIGNAL_ID='<root-signal-uuid>'
   ITEM_T3_HOP1_SIGNAL_ID='<first-child-signal-uuid>'
@@ -2542,6 +2628,8 @@ successful release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-41: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2562,6 +2650,8 @@ successful release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-42: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2615,6 +2705,8 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-43: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2639,6 +2731,8 @@ statement from the Git object on the Mac mini. No operator types a version:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-44: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2658,6 +2752,8 @@ section 5 and apply the statement only through the write helper:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-45: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2688,6 +2784,8 @@ section 5 and Tom's explicit approval before pull or recreate.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-46: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2707,6 +2805,8 @@ For an edge image bump, first carry and validate the box override as in section
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-47: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2752,6 +2852,8 @@ the installed unit copies saved before the forward switch.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-48: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2878,6 +2980,8 @@ time**. Do not issue a full-stack `up` for an image-only release.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-49: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2928,6 +3032,8 @@ time**. Do not issue a full-stack `up` for an image-only release.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-50: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2950,6 +3056,8 @@ applicable:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-51: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -2974,6 +3082,8 @@ probe supplied by the lead. Put authorization only in the root-owned
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-52: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3002,6 +3112,8 @@ the only reverse symlink switch and restores the saved installed units.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-53: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3063,6 +3175,8 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-54: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3096,6 +3210,8 @@ and record:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-55: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3151,6 +3267,8 @@ releases compare each installed file to its own previous-release source.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-56: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3214,6 +3332,8 @@ configuration until that rollback completes.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-57: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3330,6 +3450,8 @@ configuration until that rollback completes.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-58: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3359,6 +3481,8 @@ preflight backups, validates once, and reloads once.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-59: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3481,6 +3605,8 @@ a stop.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-mcp-caddy-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3518,6 +3644,8 @@ runs once only after both checks pass.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-mcp-caddy-apply: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3641,6 +3769,8 @@ PY
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-mcp-caddy-verify: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3668,6 +3798,8 @@ the one validation and one reload.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-mcp-caddy-rollback: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
@@ -3896,6 +4028,8 @@ named release SHA and the same files are removed:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-60: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   ACTIVE_PROOF="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
   if [ -e "$ACTIVE_PROOF" ] || [ -L "$ACTIVE_PROOF" ]; then
@@ -3929,6 +4063,8 @@ the block says so and closes nothing.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  set -E
+  trap 'printf "FAIL runbook-61: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${RELEASE_SHA:?named release SHA required}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
   if [ ! -e "$PROOF_DIR" ] && [ ! -L "$PROOF_DIR" ]; then
