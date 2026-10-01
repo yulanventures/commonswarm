@@ -152,6 +152,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <button class="dashboard__text-button" type="button" data-create-cancel hidden>
         Back to workspace
       </button>
+      <button class="dashboard__text-button" type="button" data-admin-access-open>Admin access and history</button>
       <button class="dashboard__text-button dashboard__signout-link" type="button" data-signout>
         Sign out
       </button>
@@ -283,6 +284,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <span aria-hidden="true">⚙</span>
                   <span>Workspace settings</span>
                 </button>
+                <button class="dashboard__workspace-create-button" type="button" role="menuitem" data-admin-access-open data-admin-access-scope="workspace">Admin history and access</button>
               </div>
             </div>
           </div>
@@ -444,6 +446,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <span data-theme-toggle-label>System</span>
               </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-admin-access-open>Admin access and history</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
@@ -936,6 +939,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </button>
     </header>
     <div class="dashboard__workspace-details-dialog-body" data-workspace-details-content></div>
+    <button class="dashboard__text-button" type="button" data-admin-access-open data-admin-access-scope="workspace">Admin history and access</button>
   </dialog>
 
   {/* Channels: switch, create, rename, archive. A native <dialog> for the same reasons the
@@ -1030,6 +1034,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </button>
     </header>
     <p class="dashboard__connected-apps-intro">Connections can create hosted seats in the workspaces you approved. Revoking a connection stops all of its seats; revoking one seat leaves the others available.</p>
+    <button class="dashboard__text-button" type="button" data-admin-access-open>Admin access and history</button>
     <p class="dashboard__connected-apps-status" data-connected-apps-status role="status" aria-live="polite"></p>
     <div data-connected-apps-list></div>
     <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
@@ -5929,6 +5934,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       connectFocusObserver?.disconnect();
       connectFocusObserver = null;
       activeWorkspaceId = "";
+      delete app.dataset.adminWorkspace;
+      window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
       restoredComposerKey = "";
       focusedComposerWorkspaceId = "";
       pendingWorkspaceId = "";
@@ -6329,6 +6336,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             return;
           }
           activeWorkspaceId = "";
+          delete app.dataset.adminWorkspace;
+          window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null } }));
           one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
           const next = closed.nextWorkspace;
           if (next) {
@@ -6455,6 +6464,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const keepShell = app.dataset.state === "channel";
       stopPendingPoll();
       activeWorkspaceId = selected.id;
+      app.dataset.adminWorkspace = selected.id;
+      window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: selected.id } }));
       syncConnectWorkspace(selected);
       const version = ++requestVersion;
       startAgentActivity(selected.id, version);
@@ -7649,6 +7660,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         },
       ];
       activeWorkspaceId = workspaces[0]?.id ?? "";
+      delete app.dataset.adminWorkspace;
+      window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: null, sample: true } }));
       channels = sampleChannelsFor(activeWorkspaceId, now);
       signals = sampleSignalsFor(activeWorkspaceId, now);
       sampleSignals = [...signals];
