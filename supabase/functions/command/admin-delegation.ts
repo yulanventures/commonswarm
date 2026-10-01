@@ -1,3 +1,4 @@
+import { AdminRuntimeJwtVerifier, type VerifiedAdminRuntime } from './admin-runtime-auth.ts';
 import type postgres from 'npm:postgres@3.4.9';
 import { hasFreshInteractiveAuth } from './fresh-auth.ts';
 import {
@@ -18,9 +19,6 @@ export interface AdminInput {
 export interface AdminHumanIdentity {
   user_id: string; session_binding: string; interactive_at_seconds: number | null; csrf_verified: boolean;
 }
-export interface AdminRuntimeIdentity {
-  connection_id: string; client_id: string; resource: typeof ADMIN_RESOURCE;
-}
 export interface AdminCredentialDelivery {
   access_credential: string; refresh_credential: string; resource: typeof ADMIN_RESOURCE;
   grant_id: string; connection_id: string; credential_lineage_id: string;
@@ -29,13 +27,14 @@ export interface AdminCredentialDelivery {
 export type AdminAuthentication =
   | { kind: 'human'; identity: AdminHumanIdentity }
   | { kind: 'access'; credential: string }
-  | { kind: 'runtime'; identity: AdminRuntimeIdentity; refresh_credential?: string }
+  | { kind: 'runtime'; credential: string; refresh_credential?: string }
   | { kind: 'system'; owner_user_id: string };
 interface CredentialRow extends Record<string, unknown> {
   grant_id: string; owner_user_id: string; credential_lineage_id: string;
   generation: number; scope_names: AdminScope[];
   access_expires_at: Date; refresh_deadline: Date; revoked_at: Date | null;
 }
+const runtimeVerifier = new AdminRuntimeJwtVerifier();
 const ACCESS_RE = /^swm_adm_[A-Za-z0-9_-]{43}$/u;
 const REFRESH_RE = /^swm_adr_[A-Za-z0-9_-]{43}$/u;
 const id = (v: unknown): v is string => typeof v === 'string' && ADMIN_UUID_RE.test(v);
@@ -145,6 +144,17 @@ async function persistEvents(tx: Sql, owner: string, state: AdminAccountState, e
  * Credential material is returned privately to its runtime caller, never in result.body.
  */
 export async function adminTransaction(tx: Sql, input: AdminInput, authentication: AdminAuthentication): Promise<{ result: Result; delivery?: AdminCredentialDelivery }> {
+  // Verify at the transaction boundary too: importing this adapter cannot
+  // bypass proof by fabricating an identity object or using the private wrapper.
+  let runtime: VerifiedAdminRuntime | undefined;
+  if (authentication.kind === 'runtime') {
+    try { runtime = await runtimeVerifier.verify(authentication.credential); }
+    catch { return { result: errorResult(401, 'credential_runtime_required') }; }
+    const command = adminRecord(input.command);
+    if (input.resource !== runtime.resource || command?.grant_id !== runtime.grant_id) {
+      return { result: errorResult(403, 'runtime_binding_mismatch') };
+    }
+  }
   const stream = adminRecord(input.stream), raw = adminRecord(input.command);
   const validCommandId = typeof input.command_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(input.command_id);
   const commandId = validCommandId ? input.command_id as string : crypto.randomUUID();
@@ -186,7 +196,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     owner = withdrawal[0]?.owner_user_id;
   }
   if (authentication.kind === 'runtime' && !credential && proposed && 'grant_id' in proposed) {
-    const rows = await tx<{ owner_user_id: string }[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id = ${proposed.grant_id}::uuid AND connection_id = ${authentication.identity.connection_id}::uuid AND client_id = ${authentication.identity.client_id}`;
+    const rows = await tx<{ owner_user_id: string }[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id = ${runtime!.grant_id}::uuid AND owner_user_id = ${runtime!.owner_user_id}::uuid AND connection_id = ${runtime!.connection_id}::uuid AND client_id = ${runtime!.client_id} AND resource = ${runtime!.resource}`;
     owner = rows[0]?.owner_user_id;
   }
   if (!owner || !id(owner)) return { result: errorResult(403, 'forbidden') };
@@ -216,10 +226,19 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     credential = refreshed[0];
     if (!credential) throw new Error('admin credential missing');
   }
+  if (runtime) {
+    const bound = state.grants[runtime.grant_id];
+    if (runtime.expires_at <= now || owner !== runtime.owner_user_id || !bound ||
+        bound.owner_user_id !== runtime.owner_user_id || bound.connection_id !== runtime.connection_id ||
+        bound.client_id !== runtime.client_id || bound.resource !== runtime.resource ||
+        credential && credential.grant_id !== runtime.grant_id) {
+      return { result: errorResult(403, 'runtime_binding_mismatch') };
+    }
+  }
   let actor: AdminActor;
   if (authentication.kind === 'human') actor = { kind: 'human', user_id: authentication.identity.user_id, session_binding: authentication.identity.session_binding };
   else if (authentication.kind === 'system') actor = { kind: 'system' };
-  else if (authentication.kind === 'runtime') actor = { kind: 'credential_runtime', ...authentication.identity };
+  else if (authentication.kind === 'runtime') actor = { kind: 'credential_runtime', connection_id: runtime!.connection_id, client_id: runtime!.client_id, resource: runtime!.resource };
   else {
     const grant = state.grants[credential!.grant_id];
     if (!grant) return { result: errorResult(403, 'grant_unavailable') };
@@ -361,6 +380,15 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
  * No exception message, SQL parameter, secret or success event is copied here.
  */
 export async function recordAdminFailure(tx: Sql, input: AdminInput, authentication: AdminAuthentication): Promise<void> {
+  let runtime: VerifiedAdminRuntime | undefined;
+  if (authentication.kind === 'runtime') {
+    try { runtime = await runtimeVerifier.verify(authentication.credential); }
+    catch {
+      await tx`INSERT INTO swarm.admin_security_audit(audit_id, occurred_at, reason_code) VALUES (${crypto.randomUUID()}::uuid, statement_timestamp(), 'unauthenticated_admin_runtime')`;
+      return;
+    }
+    if (input.resource !== runtime.resource || adminRecord(input.command)?.grant_id !== runtime.grant_id) return;
+  }
   const raw = adminRecord(input.command);
   let owner: string | undefined, grantId: string | undefined;
   let failedCredential: CredentialRow | undefined;
@@ -377,9 +405,18 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
   } else if (id(raw?.grant_id)) {
     const rows = await tx<{ owner_user_id: string; grant_id: string }[]>`
       SELECT owner_user_id, grant_id FROM swarm.admin_grants WHERE grant_id = ${raw.grant_id}::uuid
-        AND connection_id = ${authentication.identity.connection_id}::uuid AND client_id = ${authentication.identity.client_id}
+        AND owner_user_id = ${runtime!.owner_user_id}::uuid AND resource = ${runtime!.resource}
+        AND connection_id = ${runtime!.connection_id}::uuid AND client_id = ${runtime!.client_id}
     `;
     owner = rows[0]?.owner_user_id; grantId = rows[0]?.grant_id;
+  }
+  if (runtime) {
+    if (owner !== runtime.owner_user_id || grantId !== runtime.grant_id) return;
+    const bound = await tx`SELECT grant_id FROM swarm.admin_grants
+      WHERE grant_id = ${runtime.grant_id}::uuid AND owner_user_id = ${runtime.owner_user_id}::uuid
+        AND connection_id = ${runtime.connection_id}::uuid AND client_id = ${runtime.client_id}
+        AND resource = ${runtime.resource}`;
+    if (bound.length !== 1) return;
   }
   const rows = owner ? await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`
     SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE
@@ -393,7 +430,7 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
   const clock = await tx<{ now: number }[]>`SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::float8 AS now`;
   const actor: AdminActor = authentication.kind === 'human' ? { kind: 'human', user_id: authentication.identity.user_id, session_binding: authentication.identity.session_binding }
     : authentication.kind === 'system' ? { kind: 'system' }
-    : authentication.kind === 'runtime' ? { kind: 'credential_runtime', ...authentication.identity }
+    : authentication.kind === 'runtime' ? { kind: 'credential_runtime', connection_id: runtime!.connection_id, client_id: runtime!.client_id, resource: runtime!.resource }
     : { kind: 'delegated_admin', grant_id: grant?.grant_id ?? '', admin_identity_id: grant?.admin_identity_id ?? '',
       connection_id: grant?.connection_id ?? '', resource: ADMIN_RESOURCE, scope_names: failedCredential?.scope_names ?? [], access_expires_at: failedCredential?.access_expires_at.getTime() ?? 0 };
   const allowance = grant ? await charge(tx, adminRatePolicy(actor, grant, String(raw?.kind), id(raw?.workspace_id) ? raw.workspace_id : null,

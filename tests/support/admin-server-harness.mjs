@@ -9,6 +9,27 @@ Deno.env.set('SWARM_DATABASE_URL', config.local.DB_URL);
 Deno.env.set('SUPABASE_URL', config.local.API_URL);
 Deno.env.set('SUPABASE_ANON_KEY', config.local.ANON_KEY);
 Deno.env.set('SWARM_COMMAND_ALLOWED_ORIGINS', 'https://commonswarm.com');
+// A local test signing authority serves only the pinned JWKS URL. All API
+// traffic still reaches the local stack; no production service is contacted.
+const signing = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+const publicJwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), kid: 'local-admin-runtime', alg: 'ES256', use: 'sig' };
+const upstreamFetch = globalThis.fetch;
+globalThis.fetch = async (...args) => {
+  const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+  if (url === 'https://mcp.commonswarm.com/jwks') return new Response(JSON.stringify({ keys: [publicJwk] }));
+  return await upstreamFetch(...args);
+};
+const base64url = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+const encoded = value => base64url(new TextEncoder().encode(JSON.stringify(value)));
+async function runtimeProof(grant, overrides = {}, key = signing.privateKey) {
+  const now = Math.floor(Date.now() / 1000);
+  const head = encoded({ alg: 'ES256', typ: 'at+jwt', kid: publicJwk.kid });
+  const body = encoded({ iss: 'https://mcp.commonswarm.com', aud: 'https://api.commonswarm.com/admin',
+    sub: config.owner, grant_id: grant.grantId, connection_id: grant.manifest.connection_id,
+    client_id: grant.manifest.client_id, iat: now, exp: now + 300, ...overrides });
+  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(`${head}.${body}`));
+  return `${head}.${body}.${base64url(new Uint8Array(signature))}`;
+}
 const { db, handleRequest, handleAdminRuntimeCommand } = await import('../../supabase/functions/command/index.ts');
 const { adminTransaction, adminDigest, recordAdminFailure } = await import('../../supabase/functions/command/admin-delegation.ts');
 const policy = await import('../../supabase/functions/_shared/protocol.js');
@@ -54,11 +75,11 @@ async function activate(full = false) {
 }
 async function issue(grant) {
   let delivery;
-  const identity = { connection_id: grant.manifest.connection_id, client_id: grant.manifest.client_id, resource: policy.ADMIN_RESOURCE };
-  const result = await handleAdminRuntimeCommand(wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() }), identity, async value => { delivery = value; });
+  const credential = await runtimeProof(grant);
+  const result = await handleAdminRuntimeCommand(wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() }), credential, async value => { delivery = value; });
   check(result.status === 200 && delivery, 'private credential delivery');
   check(!JSON.stringify(result).includes(delivery.access_credential) && !JSON.stringify(result).includes(delivery.refresh_credential), 'no replayable credentials');
-  return { identity, delivery };
+  return { credential, delivery };
 }
 const readWire = grant => wire({ kind: 'admin_read_metadata', grant_id: grant.grantId, resource_kind: 'grant', workspace_id: null });
 async function count(owner = config.owner) {
@@ -68,7 +89,34 @@ async function count(owner = config.owner) {
 try {
   const scenario = Deno.args[1];
   const grant = await activate();
-  if (scenario === 'consent') {
+  if (scenario === 'runtime') {
+    const issueInput = wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() });
+    let deliveries = 0;
+    const deliver = async () => { deliveries++; };
+    const forged = { connection_id: grant.manifest.connection_id, client_id: grant.manifest.client_id, resource: policy.ADMIN_RESOURCE };
+    const before = await count();
+    check((await handleAdminRuntimeCommand(issueInput, forged, deliver)).status === 401, 'caller identity is not runtime proof');
+    const direct = await transact(issueInput, { kind: 'runtime', identity: forged });
+    check(direct.result.status === 401, 'direct transaction cannot bypass runtime proof');
+    const attacker = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const badProofs = [
+      await runtimeProof(grant, {}, attacker.privateKey),
+      await runtimeProof(grant, { aud: 'https://mcp.commonswarm.com/mcp' }),
+      await runtimeProof(grant, { exp: Math.floor(Date.now() / 1000) - 1 }),
+      await runtimeProof(grant, { sub: id() }),
+      await runtimeProof(grant, { connection_id: id() }),
+      await runtimeProof(grant, { client_id: 'different-client' }),
+      await runtimeProof(grant, { grant_id: id() }),
+    ];
+    for (const proof of badProofs) check((await handleAdminRuntimeCommand(issueInput, proof, deliver)).status >= 400, 'unverified or foreign runtime refused');
+    check(deliveries === 0 && await count() === before, 'runtime proof denials deliver nothing and cannot charge victim');
+    // Positive control exercises the same command, adapter, database, and delivery.
+    const runtime = await issue(grant);
+    const rotate = wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] });
+    check((await handleAdminRuntimeCommand(rotate, forged, deliver, runtime.delivery.refresh_credential)).status === 401, 'refresh possession cannot replace runtime proof');
+    check((await handleAdminRuntimeCommand(rotate, await runtimeProof(grant, { connection_id: id() }), deliver, runtime.delivery.refresh_credential)).status === 403, 'refresh bound to signed connection');
+    check((await handleAdminRuntimeCommand(rotate, runtime.credential, deliver, runtime.delivery.refresh_credential)).status === 200 && deliveries === 1, 'authenticated rotation control');
+  } else if (scenario === 'consent') {
     const defaults = manifest();
     delete defaults.mode; delete defaults.workspace_selector; delete defaults.scope_names;
     const defaulted = await http(wire({ kind: 'prepare_admin_consent', manifest: defaults, full_account_selected: false }));
@@ -124,7 +172,7 @@ try {
       check((await http(readWire(grant), token)).status === 200, 'narrowed positive read');
       await new Promise(resolve => setTimeout(resolve, 2200));
       check((await http(readWire(grant), token)).status === 403, 'expiry enforced before lazy event');
-      const refresh = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] }), runtime.identity, async () => {}, runtime.delivery.refresh_credential);
+      const refresh = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] }), runtime.credential, async () => {}, runtime.delivery.refresh_credential);
       check(refresh.status === 403, 'expired refresh refused');
       check((await http(wire({ kind: 'revoke_admin_delegation', grant_id: grant.grantId, reason_code: 'human_revoked' }))).status === 200, 'human recovery after expiry');
     } else if (scenario === 'failure') {
@@ -171,7 +219,7 @@ try {
       check(ordinary.status === 403, 'worker read endpoint rejects admin');
       check((await http(readWire(grant), runtime.delivery.refresh_credential)).status === 403, 'refresh cannot be public bearer');
       check((await http(readWire(grant), 'swm_agt_' + 'a'.repeat(43))).status === 403, 'worker cannot use account endpoint');
-      const widened = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read', 'seats:create'] }), runtime.identity, async () => {}, runtime.delivery.refresh_credential);
+      const widened = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read', 'seats:create'] }), runtime.credential, async () => {}, runtime.delivery.refresh_credential);
       check(widened.status === 403, 'refresh cannot widen');
       await db`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid AND user_id = ${config.owner}::uuid`;
       check((await http(wire({ ...read.command, workspace_id: config.workspace }), token)).status === 403, 'current membership checked');
@@ -179,15 +227,15 @@ try {
     } else if (scenario === 'lifecycle') {
       const rotate = wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] });
       let successor;
-      const rotated = await handleAdminRuntimeCommand(rotate, runtime.identity, async value => { successor = value; }, runtime.delivery.refresh_credential);
+      const rotated = await handleAdminRuntimeCommand(rotate, runtime.credential, async value => { successor = value; }, runtime.delivery.refresh_credential);
       check(rotated.status === 200 && successor.generation === 1 && successor.refresh_deadline === runtime.delivery.refresh_deadline, 'atomic rotation retains deadline');
       const beforeRetry = await count();
       let deliveredAgain = false;
-      check((await handleAdminRuntimeCommand(rotate, runtime.identity, async () => { deliveredAgain = true; }, runtime.delivery.refresh_credential)).status === 200 && !deliveredAgain, 'rotation retry has no secret delivery');
+      check((await handleAdminRuntimeCommand(rotate, runtime.credential, async () => { deliveredAgain = true; }, runtime.delivery.refresh_credential)).status === 200 && !deliveredAgain, 'rotation retry has no secret delivery');
       check(await count() === beforeRetry, 'rotation retry has no extra events');
       const responses = await Promise.all([
-        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.identity, async () => {}, successor.refresh_credential),
-        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.identity, async () => {}, successor.refresh_credential),
+        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.credential, async () => {}, successor.refresh_credential),
+        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.credential, async () => {}, successor.refresh_credential),
       ]);
       check(responses.filter(r => r.status === 200).length === 1 && responses.filter(r => r.status === 403).length === 1, 'concurrent refresh replay fences lineage');
       check((await http(read, token)).status === 403, 'revoked read retry refused');
@@ -195,7 +243,7 @@ try {
       check(row.state === 'revoked', 'replay tombstone persisted');
       const another = await activate();
       const uncertain = await handleAdminRuntimeCommand(wire({ kind: 'issue_admin_credential', grant_id: another.grantId, credential_lineage_id: id() }),
-        { connection_id: another.manifest.connection_id, client_id: another.manifest.client_id, resource: policy.ADMIN_RESOURCE }, async () => { throw new Error('delivery failed'); });
+        await runtimeProof(another), async () => { throw new Error('delivery failed'); });
       check(uncertain.status === 503, 'delivery failure reported');
       const [ended] = await db`SELECT state FROM swarm.admin_grants WHERE grant_id = ${another.grantId}::uuid`;
       check(ended.state === 'revoked', 'uncertain delivery terminally revoked');

@@ -9,6 +9,7 @@ import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
 
 const scenarios = {
+  runtime: 'admin credential issuance and rotation require signed, resource-bound runtime proof even through direct adapter calls',
   boundary: 'admin HTTP credentials stay separate from humans/workers and refuse foreign targets and widened requests',
   lifecycle: 'admin refresh rotates atomically, replay revokes, and revocation fences stored read retries',
   consent: 'admin human consent is CSRF/session-bound, single-use, and full-account must be selected',

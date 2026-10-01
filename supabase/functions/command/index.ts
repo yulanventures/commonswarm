@@ -3,7 +3,7 @@ import postgres from "npm:postgres@3.4.9";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
   adminTransaction, adminDigest, recordAdminFailure, isAdminAccessCredential, isAdminRefreshCredential,
-  type AdminAuthentication, type AdminInput, type AdminRuntimeIdentity,
+  type AdminAuthentication, type AdminInput,
   type AdminCredentialDelivery,
 } from "./admin-delegation.ts";
 import {
@@ -13206,18 +13206,18 @@ async function runAdminAccountCommand(
   }
 }
 
-/** Private credential-runtime channel. The authorization service must verify
- * its connection/client identity and distinct admin resource before dispatch.
+/** Private credential-runtime channel. The transactional adapter verifies the
+ * signed runtime credential against the pinned issuer and exact admin audience.
  * It must never expose the delivery callback to model-visible tool output.
  * No public HTTP body/header can select this identity or delivery channel.
  */
 export async function handleAdminRuntimeCommand(
   input: AdminInput,
-  identity: AdminRuntimeIdentity,
+  runtimeCredential: string,
   deliver: (credential: AdminCredentialDelivery) => Promise<void>,
   refreshCredential?: string,
 ): Promise<HttpResult> {
-  const authentication: AdminAuthentication = { kind: "runtime", identity,
+  const authentication: AdminAuthentication = { kind: "runtime", credential: runtimeCredential,
     ...(refreshCredential === undefined ? {} : { refresh_credential: refreshCredential }) };
   let outcome: Awaited<ReturnType<typeof adminTransaction>>;
   try { outcome = await db.begin("isolation level read committed", async tx => {
@@ -13238,7 +13238,7 @@ export async function handleAdminRuntimeCommand(
         await recordAdminFailure(tx, input, authentication);
         const owners = await tx<{ owner_user_id: string }[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id = ${outcome.delivery!.grant_id}::uuid`;
         if (owners[0]) await adminTransaction(tx, { command_id: crypto.randomUUID(), stream: { kind: "account" },
-          resource: identity.resource, command: { kind: "revoke_admin_delegation", grant_id: outcome.delivery!.grant_id, reason_code: "credential_delivery_failed" } },
+          resource: outcome.delivery!.resource, command: { kind: "revoke_admin_delegation", grant_id: outcome.delivery!.grant_id, reason_code: "credential_delivery_failed" } },
           { kind: "system", owner_user_id: owners[0].owner_user_id });
       }); } catch {
         return { status: 500, body: { error: "admin_delivery_recovery_unavailable" } };
