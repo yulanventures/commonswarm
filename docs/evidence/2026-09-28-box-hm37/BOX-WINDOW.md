@@ -2368,11 +2368,32 @@ BOX
   if [ -n "${EVIDENCE_DIR:-}" ] && [ -d "$EVIDENCE_DIR" ]; then
     install -m 0600 "$CLEANUP_RECEIPT" "$EVIDENCE_DIR/hm37a-prep-cleanup.json"
   fi
-  # Copy the non-secret revocation receipt into the exact active box proof.
-  # Early aborts with no box proof retain the Mac receipt only.
+  # Do not use sudo -i bash -c here: its extra shell expands $proof early.
+  # A missing active proof is allowed only on an early abort without window state.
+  REQUIRE_PROOF=no
+  if [ -n "$EVIDENCE_DIR" ]; then REQUIRE_PROOF=yes; fi
+  TRANSFER_PY="$(cat <<'PYTRANSFER'
+import os, pathlib, sys
+proof = pathlib.Path("/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922")
+required = sys.argv[1] == "yes"
+exists = proof.is_dir() and not proof.is_symlink()
+assert exists or (not required and not proof.exists() and not proof.is_symlink()), "FAIL hm37a-prep-cleanup-transfer: active proof missing or unsafe"
+data = sys.stdin.buffer.read()
+if exists:
+    dest = proof / "hm37a-prep-cleanup.json"
+    assert not dest.is_symlink(), "FAIL hm37a-prep-cleanup-transfer: receipt symlink"
+    dest.write_bytes(data)
+    os.chown(dest, 0, 0)
+    os.chmod(dest, 0o600)
+    state = dest.stat()
+    assert dest.is_file() and dest.read_bytes() == data and (state.st_uid, state.st_gid, state.st_mode & 0o777) == (0, 0, 0o600), "FAIL hm37a-prep-cleanup-transfer: destination verification"
+    print("hm37a-prep-cleanup-transfer: verified")
+else:
+    print("hm37a-prep-cleanup-transfer: early abort; Mac receipt retained")
+PYTRANSFER
+  )"
   ssh -o BatchMode=yes ops@100.115.66.74 \
-    "sudo -n -i /bin/bash -c 'set -euo pipefail; proof=/home/commonswarm/stack/release-proofs/$RELEASE_SHA; if test -d \"\$proof\" && test ! -L \"\$proof\"; then umask 077; cat >\"\$proof/hm37a-prep-cleanup.json\"; chmod 0600 \"\$proof/hm37a-prep-cleanup.json\"; fi'" \
-    <"$CLEANUP_RECEIPT"
+    "sudo -n python3 -c '$TRANSFER_PY' '$REQUIRE_PROOF'" <"$CLEANUP_RECEIPT"
   test "$DELETE_RESULT" != failed
 )
 ```
@@ -2521,7 +2542,14 @@ copy-back manifest, records that disposition, and continues automatically.
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
-  . "/run/commonswarm-release-${SHA}-session.sh"
+  if [ -n "${HM37_CLOSE_SESSION:-}" ]; then
+    case "$HM37_CLOSE_SESSION" in /private/tmp/anvil-secret.??????/session.sh) ;; *) false ;; esac
+    test "$HM37_CLOSE_SESSION" = "$SECRET_ROOT/session.sh"
+    test ! -L "$SECRET_ROOT" && test ! -L "$HM37_CLOSE_SESSION"
+    test "$(stat -c '%U:%G:%a' "$SECRET_ROOT")" = root:root:700
+    test "$(stat -c '%U:%G:%a' "$HM37_CLOSE_SESSION")" = root:root:600
+  fi
+  . "${HM37_CLOSE_SESSION:-/run/commonswarm-release-${SHA}-session.sh}"
   test "$(readlink -f /home/commonswarm/edge/current)" = \
     "/home/commonswarm/edge/releases/$SHA"
   test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
@@ -2595,6 +2623,305 @@ removes Mac scratch only after that renamed directory is verified.
   test ! -e "$OPEN_RECEIPT"
 )
 ```
+
+### Window A close resume (after a failed close gate)
+
+This is a continuation of **the same** window `20261001T211656Z`, not a new
+A window. Migration 04 and edge `eb2a87ac` stay committed. The abort closures
+already restored timers, removed database-session files and Mac scratch, and
+renamed the proofs. Never run A's open, PREP, migration, switch, or directed
+control steps again. Never recreate or revoke seats again.
+
+HezLead supplies `RELEASE_SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`,
+`PLAN_COMMIT` (the reviewed full commit containing this section), and
+`HM37_RESUME_REPO` (an absolute clean checkout of that commit on the Mac).
+The evidence input is fixed to
+`$HOME/.commonswarm-release-evidence/2026-10-01-release-eb2a87ac4b5a-20261001T211656Z`.
+No human login, PREP receipt, credential value, new window ID, or release archive
+is an input. The box steps below run as root through SSH stdin. Mac steps run
+under `/bin/bash`, from `HM37_RESUME_REPO`. Execute the seven steps in order.
+Only this approved resume may select the exact closed-window directory; no
+glob, latest-directory selection, or other closed window is permitted.
+
+```sh
+# step: hm37a-close-resume-inputs
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  set -E
+  CHECK=inputs
+  trap 'printf "FAIL hm37a-close-resume-inputs/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  : "${RELEASE_SHA:?named release SHA required}"
+  : "${PLAN_COMMIT:?reviewed resume plan commit required}"
+  : "${HM37_RESUME_REPO:?absolute clean reviewed checkout required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  case "$PLAN_COMMIT" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#PLAN_COMMIT}" -eq 40
+  case "$HM37_RESUME_REPO" in /*) ;; *) false ;; esac
+  cd "$HM37_RESUME_REPO"
+  CHECK=reviewed-plan; test "$(git rev-parse HEAD)" = "$PLAN_COMMIT"
+  test -z "$(git status --porcelain)"
+  CHECK=no-active-mac-window
+  test ! -e "$HOME/.commonswarm-release-window.env"
+  test ! -L "$HOME/.commonswarm-release-window.env"
+  CHECK=guarded-rm; test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  CHECK=retained-cleanup
+  FILE="$HOME/.commonswarm-release-evidence/2026-10-01-release-eb2a87ac4b5a-20261001T211656Z/hm37a-prep-cleanup.json"
+  test -f "$FILE" && test ! -L "$FILE"
+  test "$(stat -f %Su:%Sg:%Lp "$FILE")" = "$(id -un):$(id -gn):600"
+  jq -e '.schema == 1 and .workspace_id == "c2ea0541-f56d-4c73-bf71-56c5405c4934" and .revoked_readback == true and .active_unexpired_token_count == 0 and (.principal_ids | length) == 3 and (.principal_ids | unique | length) == 3 and .prep_directory.result == "removed"' "$FILE" >/dev/null
+)
+```
+
+```sh
+# step: hm37a-close-resume-state
+# readonly: no
+# host: box /bin/bash 5.2 as root; only ephemeral credentials, read-only DB/service checks
+(
+  set -euo pipefail
+  set -E
+  umask 077
+  CHECK=closed-proof
+  trap 'printf "FAIL hm37a-close-resume-state/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA.closed-window-20261001T211656Z"
+  test -d "$PROOF_DIR" && test ! -L "$PROOF_DIR"
+  test ! -e "/home/commonswarm/stack/release-proofs/$SHA"
+  test ! -L "/home/commonswarm/stack/release-proofs/$SHA"
+  test "$(stat -c '%U:%G:%a' "$PROOF_DIR/window.env")" = root:root:600
+  test ! -L "$PROOF_DIR/window.env"
+  . "$PROOF_DIR/window.env"
+  CHECK=window-identity
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test "$WINDOW_ID" = 20261001T211656Z
+  test "$RECYCLE_TIMER_STOPPED" = 0 && test "$BACKUP_TIMERS_STOPPED" = 0
+  CHECK=edge-current
+  test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$SHA"
+  test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
+  CHECK=edge-health
+  test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy
+  CHECK=edge-dark
+  test -z "$(docker inspect --format '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}' commonswarm-edge-edge-runtime-1)"
+  CHECK=session-absent; test ! -e /run/hm37a-close-resume.env
+  test ! -L /run/hm37a-close-resume.env
+  CHECK=secret-root
+  install -d -m 0755 /private/tmp
+  SECRET_ROOT="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
+  chmod 0700 "$SECRET_ROOT"
+  cleanup_failed_resume() {
+    STATUS=$?
+    trap - EXIT
+    if [ "$STATUS" -ne 0 ]; then
+      case "$SECRET_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+      if ! rm -r -- "$SECRET_ROOT"; then
+        printf 'FAIL hm37a-close-resume-state/guarded-cleanup: %s retained\n' "$SECRET_ROOT" >&2
+        exit 1
+      fi
+    fi
+    exit "$STATUS"
+  }
+  trap cleanup_failed_resume EXIT
+  CHECK=target-credential-source
+  test "$(stat -c '%U:%G:%a' /etc/commonswarm-release/target.env)" = root:root:600
+  test ! -L /etc/commonswarm-release/target.env
+  CHECK=read-only-db-session
+  unset SOURCE_DATABASE_URL TARGET_DATABASE_URL COMMONSWARM_LOCAL_REHEARSAL COMMONSWARM_LOCAL_TARGET_HOSTS COMMONSWARM_LOCAL_TARGET_ADDRESS
+  PG_SERVICE_OUTPUT="$SECRET_ROOT/service.conf" PG_PASS_OUTPUT="$SECRET_ROOT/pass" \
+    COMMONSWARM_ENV_FILE=/home/commonswarm/.env \
+    COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
+    node "/home/commonswarm/stack/releases/$SHA/deploy/supabase-stack/migrate/make-pg-service.mjs" >/dev/null 2>&1
+  cat >"$SECRET_ROOT/session.sh" <<'BASH'
+release_psql_ro() {
+  # Match runbook-17's pinned db address while retaining the service TLS hostname.
+  PGSERVICE=target PGHOSTADDR=172.31.0.10 PGSERVICEFILE="$SECRET_ROOT/service.conf" PGPASSFILE="$SECRET_ROOT/pass" \
+    PGOPTIONS='-c default_transaction_read_only=on' \
+    /usr/bin/psql -X --set=ON_ERROR_STOP=1 "$@" 2>/dev/null
+}
+BASH
+  chmod 0600 "$SECRET_ROOT/session.sh"
+  . "$SECRET_ROOT/session.sh"
+  CHECK=migration-04-ledger
+  test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20260928000004';")" = 1
+  CHECK=migration-04-catalog
+  test "$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-catalog.sql")" = t
+  CHECK=migration-04-functional
+  test "$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-functional.sql")" = t
+  CHECK=prep-revoked-and-zero-active-tokens
+  SQL="$(python3 - "$PROOF_DIR/hm37a-prep-seat-inventory.json" <<'PYSQL'
+import json, sys, uuid
+v=json.load(open(sys.argv[1])); ids=[s['principal_id'] for s in v['seats']]
+assert len(ids)==len(set(ids))==3, 'FAIL resume-state/prep-id-count'
+assert set(s['role'] for s in v['seats'])=={'sender','receiver','third'}, 'FAIL resume-state/prep-roles'
+assert all(str(uuid.UUID(i))==i and i!='cee27f94-4231-4a02-934d-5bf08d73ed75' for i in ids), 'FAIL resume-state/prep-ids'
+values=','.join("('%s'::uuid)" % i for i in ids)
+print("WITH expected(id) AS (VALUES %s) SELECT count(*)=3 AND bool_and(p.revoked_at IS NOT NULL AND p.workspace_id='c2ea0541-f56d-4c73-bf71-56c5405c4934'::uuid AND NOT EXISTS (SELECT 1 FROM swarm.agent_tokens t WHERE t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>now())) FROM expected e JOIN swarm.agent_principals p ON p.principal_id=e.id;" % values)
+PYSQL
+  )"
+  test "$(release_psql_ro -Atq --command "$SQL")" = t
+  CHECK=persist-session-pointer
+  printf 'SECRET_ROOT=%q\nHM37_CLOSE_SESSION=%q\n' "$SECRET_ROOT" "$SECRET_ROOT/session.sh" >/run/hm37a-close-resume.env
+  chmod 0600 /run/hm37a-close-resume.env
+  printf 'hm37a-close-resume-state: PASS (ledger/catalog, edge healthy/DARK, three revoked, zero active tokens)\n'
+)
+```
+
+```sh
+# step: hm37a-close-resume-proof
+# readonly: no
+# host: box /bin/bash 5.2 as root; exact evidence rename only
+(
+  set -euo pipefail
+  set -E
+  CHECK=session
+  trap 'printf "FAIL hm37a-close-resume-proof/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  test -f /run/hm37a-close-resume.env && test ! -L /run/hm37a-close-resume.env
+  test "$(stat -c '%U:%G:%a' /run/hm37a-close-resume.env)" = root:root:600
+  . /run/hm37a-close-resume.env
+  test -f "$HM37_CLOSE_SESSION" && test ! -L "$HM37_CLOSE_SESSION"
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  CLOSED="${PROOF_DIR}.closed-window-20261001T211656Z"
+  CHECK=exact-source; test -d "$CLOSED" && test ! -L "$CLOSED"
+  . "$CLOSED/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test "$WINDOW_ID" = 20261001T211656Z
+  CHECK=no-active-proof; test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
+  mv -- "$CLOSED" "$PROOF_DIR"
+  CHECK=restored-proof; test "$(stat -c '%U:%G:%a' "$PROOF_DIR")" = root:root:700
+  # Non-secret paths let the unchanged close logic use the temporary RO session.
+  printf 'SECRET_ROOT=%q\nHM37_CLOSE_SESSION=%q\n' "$SECRET_ROOT" "$HM37_CLOSE_SESSION" >>"$PROOF_DIR/window.env"
+)
+```
+
+```sh
+# step: hm37a-close-resume-transfer
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; non-login SSH Python child
+(
+  set -euo pipefail
+  set -E
+  CHECK=source
+  trap 'printf "FAIL hm37a-close-resume-transfer/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  FILE="$HOME/.commonswarm-release-evidence/2026-10-01-release-eb2a87ac4b5a-20261001T211656Z/hm37a-prep-cleanup.json"
+  test -f "$FILE" && test ! -L "$FILE"
+  test "$(stat -f %Lp "$FILE")" = 600
+  CHECK=receipt-destination
+  ssh -o BatchMode=yes ops@100.115.66.74 'sudo -n python3 -c '\''import json,os,pathlib,sys; p=pathlib.Path("/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922"); assert p.is_dir() and not p.is_symlink(), "FAIL resume-transfer/proof"; data=sys.stdin.buffer.read(); v=json.loads(data); inv=json.loads((p/"hm37a-prep-seat-inventory.json").read_text()); assert len(v["principal_ids"])==len(set(v["principal_ids"]))==3 and set(v["principal_ids"])==set(s["principal_id"] for s in inv["seats"]), "FAIL resume-transfer/receipt-principals"; assert v["workspace_id"]=="c2ea0541-f56d-4c73-bf71-56c5405c4934" and v["revoked_readback"] is True and v["active_unexpired_token_count"]==0, "FAIL resume-transfer/receipt-state"; f=p/"hm37a-prep-cleanup.json"; assert not f.is_symlink(), "FAIL resume-transfer/symlink"; f.write_bytes(data); os.chown(f,0,0); os.chmod(f,0o600); assert f.read_bytes()==data and f.stat().st_uid==0 and f.stat().st_gid==0 and f.stat().st_mode & 0o777==0o600, "FAIL resume-transfer/destination"'\''' <"$FILE"
+)
+```
+
+```sh
+# step: hm37a-close-resume-readback
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; existing close block on box
+(
+  set -euo pipefail
+  set -E
+  CHECK=existing-close-block
+  trap 'printf "FAIL hm37a-close-resume-readback/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  : "${HM37_RESUME_REPO:?reviewed resume checkout required}"
+  python3 - "$HM37_RESUME_REPO/docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md" <<'PYBLOCK' | ssh -o BatchMode=yes ops@100.115.66.74 'sudo -n /bin/bash -s'
+import pathlib,re,sys
+blocks=re.findall(r'```sh\n(.*?)\n```',pathlib.Path(sys.argv[1]).read_text(),re.S)
+matches=[b for b in blocks if b.splitlines()[0]=='# step: hm37a-close-readback']
+assert len(matches)==1, 'FAIL resume-readback/unique-close-block'
+print(matches[0])
+PYBLOCK
+)
+```
+
+This runs the **same** `hm37a-close-readback`, including its A receipt writer
+(`hm37-close-readback.txt`), without repeating directed controls. A failure is
+STOP: run `hm37a-close-resume-secret-cleanup`, preserve evidence and report;
+do not unlock lane 8 or B. The close result is not yet a Mac handoff until
+normal manifest-only copy-back succeeds.
+
+```sh
+# step: hm37a-close-resume-secret-cleanup
+# readonly: no
+# host: box /bin/bash 5.2 as root; also mandatory on any resume failure after state
+(
+  set -euo pipefail
+  set -E
+  CHECK=pointer
+  trap 'printf "FAIL hm37a-close-resume-secret-cleanup/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  test -f /run/hm37a-close-resume.env && test ! -L /run/hm37a-close-resume.env
+  test "$(stat -c '%U:%G:%a' /run/hm37a-close-resume.env)" = root:root:600
+  . /run/hm37a-close-resume.env
+  CHECK=owned-secret-root
+  case "$SECRET_ROOT" in /private/tmp/anvil-secret.??????) ;; *) false ;; esac
+  test "$HM37_CLOSE_SESSION" = "$SECRET_ROOT/session.sh"
+  test -d "$SECRET_ROOT" && test ! -L "$SECRET_ROOT"
+  test "$(readlink -f "$SECRET_ROOT")" = "$SECRET_ROOT"
+  test "$(stat -c '%U:%G:%a' "$SECRET_ROOT")" = root:root:700
+  CHECK=guarded-secret-removal
+  if ! rm -r -- "$SECRET_ROOT"; then
+    printf 'FAIL hm37a-close-resume-secret-cleanup/guarded-rm: %s retained\n' "$SECRET_ROOT" >&2
+    exit 1
+  fi
+  test ! -e "$SECRET_ROOT"
+  rm -f -- /run/hm37a-close-resume.env
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  if [ -f "$PROOF_DIR/window.env" ]; then
+    sed -i '/^SECRET_ROOT=/d; /^HM37_CLOSE_SESSION=/d' "$PROOF_DIR/window.env"
+  fi
+)
+```
+
+```sh
+# step: hm37a-close-resume-finalize
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; normal A closure blocks on their original hosts
+(
+  set -euo pipefail
+  set -E
+  CHECK=mac-state
+  trap 'printf "FAIL hm37a-close-resume-finalize/%s: line %s\n" "$CHECK" "$LINENO" >&2' ERR
+  : "${RELEASE_SHA:?named release SHA required}"
+  : "${HM37_RESUME_REPO:?reviewed resume checkout required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  test ! -e "$HOME/.commonswarm-release-window.env" && test ! -L "$HOME/.commonswarm-release-window.env"
+  SHA="$RELEASE_SHA"
+  WINDOW_ID=20261001T211656Z
+  EVIDENCE_DIR="$HOME/.commonswarm-release-evidence/2026-10-01-release-eb2a87ac4b5a-$WINDOW_ID"
+  test -d "$EVIDENCE_DIR" && test ! -L "$EVIDENCE_DIR"
+  umask 077
+  printf 'SHA=%q\nWINDOW_ID=%q\nEVIDENCE_DIR=%q\nARCHIVE=%q\nBOX_WINDOW_INPUT=%q\n' \
+    "$SHA" "$WINDOW_ID" "$EVIDENCE_DIR" \
+    "/tmp/commonswarm-${SHA}-${WINDOW_ID}.tar" "/tmp/commonswarm-${SHA}-${WINDOW_ID}.window.env" \
+    >"$HOME/.commonswarm-release-window.env"
+  chmod 0600 "$HOME/.commonswarm-release-window.env"
+  CHECK=normal-closure
+  python3 - "$HM37_RESUME_REPO/deploy/RELEASE-TO-BOX.md" "$RELEASE_SHA" <<'PYCLOSE'
+import os,pathlib,re,subprocess,sys
+blocks=re.findall(r'```sh\n(.*?)\n```',pathlib.Path(sys.argv[1]).read_text(),re.S)
+for step,box in [('runbook-13',True),('runbook-11',False),('runbook-60',True),('runbook-61',True),('runbook-12',False)]:
+    matches=[b for b in blocks if b.splitlines()[0]=='# step: '+step]
+    assert len(matches)==1, 'FAIL resume-finalize/unique-'+step
+    code='export RELEASE_SHA='+sys.argv[2]+'\n'+matches[0]+'\n'
+    argv=['ssh','-o','BatchMode=yes','ops@100.115.66.74','sudo -n /bin/bash -s'] if box else ['/bin/bash']
+    result=subprocess.run(argv,input=code.encode())
+    if result.returncode: raise SystemExit('FAIL resume-finalize/'+step)
+PYCLOSE
+  CHECK=copied-close-receipt
+  test "$(stat -f %Lp "$EVIDENCE_DIR/hm37-close-readback.txt")" = 600
+  test ! -L "$EVIDENCE_DIR/hm37-close-readback.txt"
+  for EXPECTED in "release_sha=$RELEASE_SHA" edge_live=true edge_dark=true prep_seats_revoked=true prep_active_tokens=0 close=PASS; do
+    grep -qFx "$EXPECTED" "$EVIDENCE_DIR/hm37-close-readback.txt"
+  done
+  printf 'HM37_A_CLOSE_RECEIPT=%s\n' "$EVIDENCE_DIR/hm37-close-readback.txt"
+)
+```
+
+Order: `hm37a-close-resume-inputs`, `hm37a-close-resume-state`,
+`hm37a-close-resume-proof`, `hm37a-close-resume-transfer`,
+`hm37a-close-resume-readback`, `hm37a-close-resume-secret-cleanup`,
+`hm37a-close-resume-finalize`. The final step reuses `runbook-13`, `runbook-11`,
+`runbook-60`, `runbook-61`, `runbook-12` in order. The old PREP revocation and
+Mac control cleanup already passed and must not be replayed. Only the receipt
+printed after successful finalization may be supplied to lane 8 and Window B.
 
 ## 11. Rollback — edge first, SQL second
 
