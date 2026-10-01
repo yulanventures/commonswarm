@@ -58,7 +58,7 @@ const { signedIn = false, path = "/" } = Astro.props;
  * not "/". */
 const MARKETING_NAV = [
   { href: "/#how-it-works", label: "How it works" },
-  { href: "/#install", label: "See the prompt" },
+  { href: "/#life-and-work", label: "For life & work" },
   { href: "/download", label: "Install" },
 ];
 
@@ -334,8 +334,11 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
 
   .hdr__link {
     position: relative;
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
     color: var(--text-muted);
-    font-size: var(--t-sm);
+    font-size: 0.9375rem;
     font-weight: var(--weight-medium);
     letter-spacing: -0.004em;
     text-decoration: none;
@@ -394,9 +397,10 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
      match. :global is the correct tool, and the class is namespaced so it cannot leak. */
   .hdr__actions :global(.hdr__login),
   .hdr__actions :global(.hdr__cta) {
-    --btn-h: 2.25rem;
+    --btn-h: 2.75rem;
     flex: none;
-    padding-inline: 0.875rem;
+    padding-inline: 1.125rem;
+    font-size: 0.9375rem;
   }
 
   .hdr__burger {
@@ -521,6 +525,15 @@ const isCurrent = (href: string) => !href.includes("#") && href === path;
 
   @media (max-width: 22rem) {
     .hdr:not([data-menu-ready]) .hdr__link {
+      display: none;
+    }
+  }
+
+  /* Under 368px the full lockup, the CTA and the menu button do not all fit, and the word
+     is the brand. The CTA steps out of the bar here; the same action is the first thing in
+     the menu sheet and in the hero. */
+  @media (max-width: 22.999rem) {
+    .hdr[data-menu-ready] .hdr__actions :global(.hdr__cta) {
       display: none;
     }
   }

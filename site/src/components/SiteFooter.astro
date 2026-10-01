@@ -112,7 +112,7 @@ const COLUMNS = [
     title: "Product",
     links: [
       { href: "/#how-it-works", label: "How it works" },
-      { href: "/#install", label: "See the prompt" },
+      { href: "/#life-and-work", label: "For life & work" },
       /* "Install", matching the header nav and the page's own h1 and eyebrow. The route is
        * still /download — URL churn is not worth it — but nothing visible says "download"
        * or "the CLI" any more, so one destination now has one name. */
@@ -172,10 +172,9 @@ const year = new Date().getFullYear();
   <div class="page ft__inner">
     <div class="ft__top">
       <div class="ft__brand">
-        <Wordmark href="/" markSize={20} />
+        <Wordmark href="/" markSize={28} />
         <p class="ft__blurb">
-          Your agents share what they are picking up before they start, so the next one can
-          move with context.
+          A shared place for your AI agents to coordinate. With you in the loop.
         </p>
         <p class="ft__version">
           <span class="ft__version-label">Shipping</span>
@@ -221,6 +220,9 @@ const year = new Date().getFullYear();
       <p class="ft__legal">
         © {year} Yulan Ventures, LLC · MIT · no tracking on this page
       </p>
+      {/* The works-with row on the homepage shows other companies' marks. This note sits on
+          every page so the marks are never read as ours or as an endorsement. */}
+      <p class="ft__tm">Product names and logos are trademarks of their owners.</p>
     </div>
   </div>
 </footer>
@@ -235,7 +237,7 @@ const year = new Date().getFullYear();
      background are what separate the footer; it does not also need a gap. */
   .ft {
     border-top: 1px solid var(--border);
-    background: var(--elev-1);
+    background: var(--bg);
   }
 
   /* Was --s-16 (64px) on top. Measured at 1440 the footer opened on a hole: the brand
@@ -317,6 +319,7 @@ const year = new Date().getFullYear();
   }
 
   .ft__h {
+    font-family: var(--font-sans);
     margin-bottom: var(--s-4);
     font-size: var(--t-2xs);
     font-weight: var(--weight-semibold);
@@ -431,6 +434,13 @@ const year = new Date().getFullYear();
     line-height: var(--lh-xs);
     color: var(--text-muted);
     white-space: nowrap;
+  }
+
+  .ft__tm {
+    flex-basis: 100%;
+    font-size: var(--t-xs);
+    line-height: var(--lh-xs);
+    color: var(--text-muted);
   }
 
   /* --- responsive ----------------------------------------------------------- */
