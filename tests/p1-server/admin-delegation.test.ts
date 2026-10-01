@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
@@ -28,8 +29,8 @@ for (const [scenario, label] of Object.entries(scenarios)) {
     for (const target of [local.API_URL, local.DB_URL]) {
       assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(target).hostname), 'local stack required');
     }
-    const root = '/private/tmp/';
-    const secretDir = mkdtempSync(join(root, 'anvil-secret.'));
+    const root = realpathSync(tmpdir());
+    const secretDir = mkdtempSync(join(root, 'cswarm-admin-'));
     chmodSync(secretDir, 0o700);
     const sql = postgres(local.DB_URL, { prepare: false });
     try {
@@ -55,7 +56,7 @@ for (const [scenario, label] of Object.entries(scenarios)) {
     } finally {
       await sql.end();
       const resolved = realpathSync(secretDir);
-      assert.ok(resolved.startsWith(root + 'anvil-secret.') && resolved !== process.env.HOME, 'unsafe cleanup path');
+      assert.ok(dirname(resolved) === root && basename(resolved).startsWith('cswarm-admin-') && resolved !== process.env.HOME, 'unsafe cleanup path');
       execFileSync('rm', ['-r', resolved], { stdio: 'pipe' });
     }
   });
