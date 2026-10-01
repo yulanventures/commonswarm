@@ -81,6 +81,180 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
 )
 ```
 
+Before `hm37b-open-inputs` creates its first window receipt, run both live
+dependency preflights below. They write no durable output. The human session
+comes from the same protected `HUMAN_SESSION_SOURCE` prepared through the
+documented noninteractive 1Password service-account/token-file workflow; this
+block never reads a keychain, starts a login, refreshes a session or invokes
+`op`. Its fresh mode-0700 `/private/tmp/anvil-secret.XXXXXX` directory is removed
+through guarded `rm` on success, failure or interruption. A guard refusal is
+STOP with the directory left for HezLead, never a reason to bypass the guard.
+
+`hm37b-hosted-auth-dependency-preflight` sends that session only on SSH stdin to
+a root Python process on the box. That process reads the actual control's
+`/home/commonswarm/.env` in memory and makes the authenticated GET used by
+`verifiedHuman()` in `deploy/release-proofs/item-hm/hm37-open-ack-control.ts`.
+It requires the production URL, a confirmed human user and a UUID identity;
+it does not accept the earlier PASS receipt as proof of current authentication.
+The exact cached Deno `getUser`/`getClaims` and database clients are checked
+again after runtime staging, before the control journal or any authority
+mutation. Tokens, keys, user documents and connection errors are never printed
+or placed in argv or exported to the shell environment.
+
+`hm37b-deno-artifact-dependency-preflight` downloads the official Linux Deno
+2.9.7 ZIP on the box and compares its bytes to M19's measured digest in
+`docs/evidence/2026-09-29-box-facts/box-facts-measured.json`. It preserves the
+install block's exact URL, single measured HTTPS redirect host and hash; it
+neither installs nor executes the downloaded binary. The existing install
+block independently repeats the download/hash and owner/mode checks, so a
+preflight success cannot authorize changed bytes later.
+
+Both whole blocks are NOT EXECUTED by the contained dry run: they require the
+live production authentication endpoint or official artifact and box runtime.
+Replacement proof is their zero exit in the live window after the stated
+assertions; there is no receipt to seed or later consume. Failure is a setup
+failure under the existing cleanup-only map: stop before opening B, run the
+owning temporary-directory trap, and leave the closed A release live. No
+journal, installed Deno or B proof state exists to roll back yet. If durable
+window state exists on a resumed failure, use the existing abort cleanup and
+the recorded Deno removal guard, never forge a successful close receipt.
+
+```sh
+# step: hm37b-hosted-auth-dependency-preflight
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh Python child on box as root
+(
+  set -euo pipefail
+  umask 077
+  : "${HUMAN_SESSION_SOURCE:?absolute protected session path required}"
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  case "$HUMAN_SESSION_SOURCE" in /*) ;; *) false ;; esac
+  test -f "$HUMAN_SESSION_SOURCE"
+  test ! -L "$HUMAN_SESSION_SOURCE"
+  test "$(stat -f %Su:%Sg:%Lp "$HUMAN_SESSION_SOURCE")" = "$(id -un):$(id -gn):600"
+  SECRET_ROOT="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
+  cleanup_secret_preflight() {
+    STATUS=$?
+    trap - EXIT
+    case "$SECRET_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test -d "$SECRET_ROOT" && test ! -L "$SECRET_ROOT" || exit 1
+    test "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SECRET_ROOT")" = "$SECRET_ROOT" || exit 1
+    if ! rm -r -- "$SECRET_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SECRET_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SECRET_ROOT" || exit 1
+    exit "$STATUS"
+  }
+  trap cleanup_secret_preflight EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  case "$SECRET_ROOT" in /private/tmp/anvil-secret.??????) ;; *) false ;; esac
+  chmod 0700 "$SECRET_ROOT"
+  test "$(stat -f %Su:%Sg:%Lp "$SECRET_ROOT")" = "$(id -un):$(id -gn):700"
+  cp "$HUMAN_SESSION_SOURCE" "$SECRET_ROOT/human-session.json"
+  chmod 0600 "$SECRET_ROOT/human-session.json"
+  cat >"$SECRET_ROOT/auth-probe.py" <<'PY'
+import json, pathlib, pwd, re, stat, sys, urllib.request
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+def probe():
+    path = pathlib.Path('/home/commonswarm/.env')
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+    assert info.st_uid == pwd.getpwnam('commonswarm').pw_uid
+    values = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        key, value = line.split('=', 1)
+        key, value = key.strip(), value.strip()
+        assert re.fullmatch(r'[A-Z][A-Z0-9_]*', key)
+        assert not value.startswith(('"', "'"))
+        values[key] = value
+    assert values['SUPABASE_URL'] == 'https://api.commonswarm.com'
+    assert values['SUPABASE_ANON_KEY']
+    session = json.load(sys.stdin)
+    assert set(session) == {'access_token'}
+    assert isinstance(session['access_token'], str) and len(session['access_token']) >= 32
+    request = urllib.request.Request(values['SUPABASE_URL'] + '/auth/v1/user',
+        headers={'apikey': values['SUPABASE_ANON_KEY'],
+                 'Authorization': 'Bearer ' + session['access_token'],
+                 'User-Agent': 'commonswarm-release-probe/1.0'}, method='GET')
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+        assert response.status == 200
+        user = json.loads(response.read(1024 * 1024))
+    assert user.get('email_confirmed_at') is not None
+    assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
+                        user.get('id', ''), re.I)
+
+try:
+    probe()
+except BaseException:
+    print('STOP: live hosted human authentication preflight failed', file=sys.stderr)
+    sys.exit(1)
+PY
+  # Only program text enters argv. The credential document travels on stdin.
+  REMOTE_COMMAND="$(python3 - "$SECRET_ROOT/auth-probe.py" <<'PY'
+import pathlib, shlex, sys
+print('sudo -n -i python3 -c ' + shlex.quote(pathlib.Path(sys.argv[1]).read_text()))
+PY
+  )"
+  ssh ops@100.115.66.74 "$REMOTE_COMMAND" <"$SECRET_ROOT/human-session.json"
+)
+```
+
+```sh
+# step: hm37b-deno-artifact-dependency-preflight
+# readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
+set -euo pipefail
+umask 077
+DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
+DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
+test "$(stat -c '%U:%G:%a' /usr/local/bin)" = root:root:755
+test ! -e /usr/local/bin/deno
+test ! -L /usr/local/bin/deno
+DOWNLOAD_ROOT="$(mktemp -d /tmp/commonswarm-deno-preflight.XXXXXX)"
+cleanup_artifact_preflight() {
+  STATUS=$?
+  trap - EXIT
+  case "$DOWNLOAD_ROOT" in /tmp/commonswarm-deno-preflight.??????) ;; *) exit 1 ;; esac
+  test -d "$DOWNLOAD_ROOT" && test ! -L "$DOWNLOAD_ROOT" || exit 1
+  test "$(readlink -f "$DOWNLOAD_ROOT")" = "$DOWNLOAD_ROOT" || exit 1
+  if ! rm -r -- "$DOWNLOAD_ROOT"; then
+    printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$DOWNLOAD_ROOT" >&2
+    exit 1
+  fi
+  test ! -e "$DOWNLOAD_ROOT" || exit 1
+  exit "$STATUS"
+}
+trap cleanup_artifact_preflight EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+chmod 0700 "$DOWNLOAD_ROOT"
+test "$(stat -c '%U:%G:%a' "$DOWNLOAD_ROOT")" = root:root:700
+curl --fail --silent --head --proto '=https' --max-time 30 \
+  --dump-header "$DOWNLOAD_ROOT/redirect.headers" --output /dev/null "$DENO_URL"
+test "$(grep -ic '^location:' "$DOWNLOAD_ROOT/redirect.headers")" -eq 1
+REDIRECT_URL="$(awk 'BEGIN{IGNORECASE=1} /^location:/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' "$DOWNLOAD_ROOT/redirect.headers")"
+case "$REDIRECT_URL" in https://release-assets.githubusercontent.com/*) ;; *) false ;; esac
+curl --fail --silent --proto '=https' --max-time 120 \
+  --output "$DOWNLOAD_ROOT/deno.zip" --write-out '%{url_effective}\n' \
+  "$REDIRECT_URL" >"$DOWNLOAD_ROOT/effective-url.txt"
+test "$(cat "$DOWNLOAD_ROOT/effective-url.txt")" = "$REDIRECT_URL"
+test "$(sha256sum "$DOWNLOAD_ROOT/deno.zip" | awk '{print $1}')" = "$DENO_ZIP_SHA256"
+BOX
+)
+```
+
 ```sh
 # step: hm37b-open-inputs
 # readonly: no
@@ -292,7 +466,7 @@ BOX
 
 The runtime order is fixed:
 `hm37-deno-install` → `hm37-hosted-control-stage` →
-`hm37-hosted-open-ack-control` → result/readback blocks →
+`hm37b-hosted-runtime-dependency-preflight` → `hm37-hosted-open-ack-control` → result/readback blocks →
 `hm37-deno-remove`. A failure before install completes runs its trap. Any later
 failure runs `hm37-hosted-control-cleanup-only` when a journal exists and then
 `hm37-deno-remove`.
@@ -545,6 +719,166 @@ PY
     "$RELEASE_ROOT/supabase/functions/_shared/database-options.ts"
   /usr/local/bin/deno --version >"$CONTROL_ROOT/deno-version.txt"
   chmod 0600 "$CONTROL_ROOT/deno-version.txt"
+)
+```
+
+The HTTP preflight above runs before B creates any durable state. The following
+additional check must wait until `hm37-hosted-control-stage`: the measured box
+has no host Deno, and that block supplies the cached pinned Supabase/postgres
+imports and the protected OAuth database config from the running container.
+These are the actual inputs read by `verifiedHuman()`, `oauthPoolConfig()` and
+`execute()` in the reviewed control source, not a replacement role or target.
+The probe repeats `getUser`/`getClaims`, verifies the confirmed human identity,
+authenticates both database clients and reads the exact workspace membership,
+capacity and fresh-name precondition. Both database transactions explicitly
+become read only before any query. It creates no journal, grant, seat, token,
+signal or receipt, and runs before the hosted control's first durable mutation.
+
+This whole block is also NOT EXECUTED by the contained dry run: the replacement
+proof is the live zero exit from these authentication and read-only database
+checks. It has no output to seed or consume. Failure takes the existing
+setup/cleanup-only path: do not start the control; remove the recorded Deno
+through `hm37-deno-remove`, run `runbook-60` and `hm37b-protected-cleanup`, and
+retain the failed window for the existing abort/manifest closure procedure.
+Never write `close=PASS` or roll back A for a dependency/setup failure. If a
+journal already exists on an interrupted run, the existing journal cleanup and
+failure-dispatch tail takes precedence before runtime removal.
+
+```sh
+# step: hm37b-hosted-runtime-dependency-preflight
+# readonly: yes
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
+  test "$(cat "$RELEASE_ROOT/RELEASE_SHA")" = "$SHA"
+  test -f /home/commonswarm/.env
+  test ! -L /home/commonswarm/.env
+  test "$(stat -c '%U:%G:%a' /home/commonswarm/.env)" = commonswarm:commonswarm:600
+  test -f /usr/local/bin/deno
+  test ! -L /usr/local/bin/deno
+  test "$(stat -c '%U:%G:%a' /usr/local/bin/deno)" = root:root:755
+  test "$(sha256sum /usr/local/bin/deno | awk '{print $1}')" = "${DENO_INSTALLED_BINARY_SHA256:?recorded installed hash required}"
+  for FILE in "$CONTROL_ROOT/human-session.json" "$CONTROL_ROOT/oauth-database.json"; do
+    test -f "$FILE"
+    test ! -L "$FILE"
+    test "$(stat -c '%U:%G:%a' "$FILE")" = root:root:600
+  done
+  # Read the environment file inside the process. No secret is exported.
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
+    --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
+    --allow-env --allow-net \
+    --allow-read="/home/commonswarm/.env,$RELEASE_ROOT,$CONTROL_ROOT" \
+    - "$RELEASE_ROOT" "$CONTROL_ROOT" "$WINDOW_PRINCIPAL_SUFFIX" <<'TS'
+import { createClient } from "npm:@supabase/supabase-js@2.110.8";
+import postgres from "npm:postgres@3.4.9";
+
+const pools: ReturnType<typeof postgres>[] = [];
+let failed = false;
+function require(value: unknown): asserts value {
+  if (!value) throw new Error("dependency preflight refused");
+}
+try {
+  const [releaseRoot, controlRoot, suffix] = Deno.args;
+  require(releaseRoot && controlRoot && suffix && /^[0-9]{6}$/.test(suffix));
+  const env: Record<string, string> = {};
+  for (const raw of Deno.readTextFileSync("/home/commonswarm/.env").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const split = line.indexOf("=");
+    require(split > 0);
+    const name = line.slice(0, split).trim(), value = line.slice(split + 1).trim();
+    require(/^[A-Z][A-Z0-9_]*$/.test(name) && !/^["']/.test(value));
+    env[name] = value;
+  }
+  require(env.SUPABASE_URL === "https://api.commonswarm.com" && env.SUPABASE_ANON_KEY);
+  const session = JSON.parse(Deno.readTextFileSync(`${controlRoot}/human-session.json`));
+  require(Object.keys(session).sort().join(",") === "access_token");
+  require(typeof session.access_token === "string" && session.access_token.length >= 32);
+  const client = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { fetch: (input, init) => fetch(input, {
+      ...init, redirect: "error", signal: AbortSignal.timeout(30_000),
+    }) },
+  });
+  const [userResult, claimsResult] = await Promise.all([
+    client.auth.getUser(session.access_token), client.auth.getClaims(session.access_token),
+  ]);
+  const user = userResult.data.user, claims = claimsResult.data?.claims;
+  require(!userResult.error && !claimsResult.error && user && claims);
+  require(user.email_confirmed_at != null && claims.sub === user.id);
+  require(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(user.id));
+  const { withDatabaseTls } = await import(`${releaseRoot}/supabase/functions/_shared/database-options.ts`);
+  const url = env.SWARM_DATABASE_URL ?? env.SUPABASE_DB_URL;
+  require(url);
+  const tls = withDatabaseTls({ prepare: false, max: 1, idle_timeout: 3, connect_timeout: 5,
+    statement_timeout: 10_000, query_timeout: 10_000 },
+    env.SWARM_DATABASE_TLS_CA_B64);
+  const edge = postgres(url, tls);
+  pools.push(edge);
+  const oauth = JSON.parse(Deno.readTextFileSync(`${controlRoot}/oauth-database.json`));
+  require(Object.keys(oauth).sort().join(",") === "database,host,password,port,ssl_ca,user");
+  for (const name of ["host", "database", "user", "password"]) {
+    require(typeof oauth[name] === "string" && oauth[name]);
+  }
+  require(Number.isSafeInteger(oauth.port) && oauth.port >= 1 && oauth.port <= 65535);
+  require(typeof oauth.ssl_ca === "string" && oauth.ssl_ca.includes("-----BEGIN CERTIFICATE-----"));
+  const provider = postgres({ host: oauth.host, port: oauth.port, database: oauth.database,
+    username: oauth.user, password: oauth.password,
+    ssl: { ca: oauth.ssl_ca, rejectUnauthorized: true },
+    application_name: "commonswarm-hm37-control", max: 2,
+    statement_timeout: 10_000, query_timeout: 10_000, connect_timeout: 5 });
+  pools.push(provider);
+  const workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934";
+  await edge.begin(async (tx) => {
+    await tx`SET TRANSACTION READ ONLY`;
+    const [identity] = await tx`SELECT inet_server_addr() = inet '172.31.0.10'
+      AND current_setting('transaction_read_only') = 'on'
+      AND NOT pg_is_in_recovery()
+      AND (SELECT count(*) FROM pg_db_role_setting AS setting
+        CROSS JOIN LATERAL unnest(setting.setconfig) AS item
+        WHERE setting.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND setting.setrole = 0 AND item = 'commonswarm.stack_identity=n-db-target-v1') = 1 AS ok`;
+    require(identity?.ok === true);
+    await tx`SELECT set_config('role', 'swarm_command', true),
+      set_config('search_path', 'swarm, commonswarm_oauth, pg_catalog', true),
+      set_config('lock_timeout', '5s', true), set_config('statement_timeout', '10s', true)`;
+    const [access] = await tx`SELECT EXISTS (
+      SELECT 1 FROM swarm.workspaces w JOIN swarm.memberships m ON m.workspace_id = w.workspace_id
+      WHERE w.workspace_id = ${workspace}::uuid AND w.archived_at IS NULL
+        AND m.user_id = ${user.id}::uuid AND m.revoked_at IS NULL) AS allowed,
+      (SELECT count(*)::int FROM swarm.agent_principals
+        WHERE workspace_id = ${workspace}::uuid AND revoked_at IS NULL) AS live_principals,
+      EXISTS (SELECT 1 FROM swarm.agent_principals WHERE workspace_id = ${workspace}::uuid
+        AND name = ${"hm37-hosted-" + suffix}) AS name_taken`;
+    require(access?.allowed === true && access.live_principals < 50 && access.name_taken === false);
+  });
+  await provider.begin(async (tx) => {
+    await tx`SET TRANSACTION READ ONLY`;
+    const [identity] = await tx`SELECT inet_server_addr() = inet '172.31.0.10'
+      AND current_user = ${oauth.user} AND current_database() = ${oauth.database}
+      AND current_setting('transaction_read_only') = 'on'
+      AND EXISTS (SELECT 1 FROM pg_stat_ssl WHERE pid = pg_backend_pid() AND ssl) AS ok`;
+    require(identity?.ok === true);
+    await tx`SELECT model, artifact_id_hash, payload, consumed_at, grant_id, expires_at
+      FROM commonswarm_oauth.provider_artifacts WHERE false`;
+  });
+} catch {
+  failed = true;
+} finally {
+  const closed = await Promise.allSettled(pools.map((pool) => pool.end({ timeout: 2 })));
+  if (closed.some((result) => result.status === "rejected")) failed = true;
+}
+if (failed) {
+  console.error("STOP: live hosted runtime dependency preflight failed");
+  Deno.exit(1);
+}
+TS
 )
 ```
 
@@ -993,10 +1327,12 @@ BOX
 The successful order is:
 
 ```text
-hm37b-human-preflight hm37b-open-inputs hm37b-box-open hm37b-go-record
+hm37b-human-preflight hm37b-hosted-auth-dependency-preflight
+hm37b-deno-artifact-dependency-preflight hm37b-open-inputs hm37b-box-open hm37b-go-record
 runbook-14 runbook-15 runbook-16 runbook-17
 hm37b-control-review hm37-hosted-human-session-input hm37b-stage-transfer
 hm37-validate-local-credential hm37-deno-install hm37-hosted-control-stage
+hm37b-hosted-runtime-dependency-preflight
 hm37-hosted-open-ack-control hm37b-live-revoke-readback hm37-deno-remove
 runbook-60 hm37b-protected-cleanup hm37b-close-readback hm37b-copyback
 hm37b-manifest-close

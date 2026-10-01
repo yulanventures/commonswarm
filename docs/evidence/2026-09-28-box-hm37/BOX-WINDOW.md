@@ -715,6 +715,86 @@ HM6 is a two-part opening precondition. Both release commits are local ancestors
 
 Migration `20260928000003` must have exactly one ledger row, and its corrected catalog and functional proofs must return true without SQL error. `stack/current` and the effective backup/restore helper paths must resolve through `ad964ed158181ba1692dd05895f36fa7a1f87d3f`. The post-apply backup and active timers remain opening evidence. A version-only ledger row or an inactive archive is insufficient.
 
+Run `hm37a-schema-dependency-preflight` immediately after `runbook-17`.
+That is the earliest point at which the actual `release_psql_ro` helper exists:
+`deploy/RELEASE-TO-BOX.md` section 3 creates its protected libpq files and
+session script, and `runbook-09` supplies the catalog/functional files it
+mounts. Earlier archive or credential-shape checks do not authenticate this
+helper. This preflight precedes the old-edge signal control, migration 04,
+timer stops and the COMMIT POINT. It uses the same target identity guard from
+`deploy/supabase-stack/migrate/lib.sh:assert_target_identity`, then performs
+the exact migration-03 reads below. It applies no SQL migration and writes no
+new receipt; the existing transient `APPLY_SQL` is overwritten by the next
+precondition block. A nonzero exit is a pre-COMMIT-POINT setup failure: stop
+dependent work and use the section 12 abort cleanup (`hm37a-prep-seat-cleanup`,
+`runbook-13`, `runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`). No edge
+switch or schema application has occurred to reverse at this point.
+If a resumed window has already changed edge/schema state, use section 11's
+existing pre-COMMIT-POINT rollback tail before that cleanup; this early setup
+failure path does not authorize retaining an unverified forward transition.
+
+The whole preflight is NOT EXECUTED by the contained dry run. Its replacement
+proof is this live helper's successful target-identity, ledger/catalog and
+functional reads on the box; the following precondition retains the existing
+`hm37-hm6-migration-03-catalog.txt`, `hm37-hm6-migration-03-functional.txt` and
+`hm37-hm6-schema-helpers.txt` receipts. No preflight output is seeded or later
+consumed by the dry run.
+
+```sh
+# step: hm37a-schema-dependency-preflight
+# readonly: yes
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  SESSION="/run/commonswarm-release-${SHA}-session.sh"
+  test -f "$SESSION"
+  test ! -L "$SESSION"
+  test "$(stat -c '%U:%G:%a' "$SESSION")" = root:root:600
+  . "$SESSION"
+  declare -F release_psql_ro >/dev/null
+  test "$STACK_RELEASE" = "/home/commonswarm/stack/releases/$SHA"
+  test "$(cat "$STACK_RELEASE/RELEASE_SHA")" = "$SHA"
+  for FILE in "$PGSERVICE_FILE" "$PGPASS_FILE" "$APPLY_SQL"; do
+    test -f "$FILE"
+    test ! -L "$FILE"
+    test "$(stat -c '%U:%G:%a' "$FILE")" = root:root:600
+  done
+  test -f /etc/commonswarm-release/target.env
+  test ! -L /etc/commonswarm-release/target.env
+  test "$(stat -c '%U:%G:%a' /etc/commonswarm-release/target.env)" = root:root:600
+  # Extract the actual target guard; do not replace it with SELECT 1 or a
+  # connection-option marker. The guard reads the database-level marker.
+  IDENTITY_SQL="$(python3 - "$MIGRATE/lib.sh" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+function = source.split('assert_target_identity() {\n', 1)[1].split('\nassert_backup_ro_identity()', 1)[0]
+start = "  cat >\"$sql_file\" <<'SQL'\n"
+assert function.count(start) == 1
+sql = function.split(start, 1)[1].split('\nSQL\n', 1)[0]
+assert sql.startswith('\nDO $do$\n') and sql.endswith('$do$;')
+print(sql)
+print("SELECT current_setting('transaction_read_only') = 'on';")
+PY
+  )"
+  IDENTITY_RESULT="$(release_psql_ro -Atq --command "$IDENTITY_SQL")"
+  test "$IDENTITY_RESULT" = t
+  cat >"$APPLY_SQL" <<'SQL'
+\i /proof/20260928000003-catalog.sql
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations
+   WHERE version = '20260928000003') = 1
+  AND :'catalog_ok'::boolean;
+SQL
+  CATALOG_RESULT="$(release_psql_ro -Atq --file "$APPLY_SQL")"
+  test "$CATALOG_RESULT" = t
+  FUNCTIONAL_RESULT="$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000003-functional.sql")"
+  test "$FUNCTIONAL_RESULT" = t
+)
+```
+
 ```sh
 # step: hm37-hm6-schema-helpers-precondition
 # readonly: no
@@ -1182,7 +1262,8 @@ hm37a-baseline-inventory 1-upload-release-archive
 1-open-root-shell 1-apply-release-directories hm37a-resolved-input-transfer
 hm37a-go-record hm37a-prerequisite-evidence runbook-03 runbook-05
 runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
-runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
+runbook-16 runbook-17 hm37a-schema-dependency-preflight
+hm37-hm6-schema-helpers-precondition
 hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
 hm37-current-window-state hm37-read-window-suffix
 hm37a-directed-check-old hm37-backup-gate
