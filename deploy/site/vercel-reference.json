@@ -15,8 +15,8 @@
     "permissions-policy",
     "location"
   ],
-  "artifactCount": 39,
-  "stableArtifactCount": 25,
+  "artifactCount": 37,
+  "stableArtifactCount": 23,
   "artifacts": [
     "acceptable-use/index.html",
     "alternatives/crewai/index.html",
@@ -26,8 +26,6 @@
     "apple-touch-icon.png",
     "download/index.html",
     "favicon.svg",
-    "fonts/inter-latin-ext.woff2",
-    "fonts/inter-latin.woff2",
     "fonts/jetbrains-mono-latin-ext.woff2",
     "fonts/jetbrains-mono-latin.woff2",
     "guides/claude-code-subagents/index.html",
@@ -105,7 +103,7 @@
       "observedFileCount": 6
     }
   ],
-  "routeCount": 83,
+  "routeCount": 79,
   "routes": [
     {
       "path": "/",
@@ -805,86 +803,6 @@
         ],
         "finalLine": "non-empty-request-id",
         "hasTerminalNewline": true
-      }
-    },
-    {
-      "path": "/fonts/inter-latin-ext.woff2",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "fonts/inter-latin-ext.woff2"
-        }
-      ],
-      "status": 200,
-      "contentType": "font/woff2",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/fonts/inter-latin-ext.woff2/",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "fonts/inter-latin-ext.woff2"
-        }
-      ],
-      "status": 200,
-      "contentType": "font/woff2",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/fonts/inter-latin.woff2",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "fonts/inter-latin.woff2"
-        }
-      ],
-      "status": 200,
-      "contentType": "font/woff2",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/fonts/inter-latin.woff2/",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "fonts/inter-latin.woff2"
-        }
-      ],
-      "status": 200,
-      "contentType": "font/woff2",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
       }
     },
     {
