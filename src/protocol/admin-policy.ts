@@ -140,3 +140,8 @@ export function canonicalAdminJson(value: unknown): string {
   if (r) return `{${Object.keys(r).sort().map(key => `${JSON.stringify(key)}:${canonicalAdminJson(r[key])}`).join(',')}}`;
   return JSON.stringify(value);
 }
+
+/** Project exactly the consent fields from a durable grant/event projection. */
+export function adminGrantManifest(value: AdminManifest): AdminManifest {
+  return Object.fromEntries(MANIFEST_KEYS.map(key => [key, value[key]])) as unknown as AdminManifest;
+}

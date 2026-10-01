@@ -148,10 +148,12 @@ try {
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
     await db.begin(async tx => {
+      await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000002-rollback.sql'));
       await tx.unsafe(rollback);
       const [absent] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;
       check(absent.relation === null, 'rollback removes grants');
       await tx.unsafe(migration);
+      await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000002_admin_routine.sql'));
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;
       check(restored.relation !== null, 'migration restores grants');
       control = true;

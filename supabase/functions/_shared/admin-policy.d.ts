@@ -127,3 +127,5 @@ export interface AdminManifest {
 export declare function adminManifestValid(value: unknown, now: number, initial?: boolean): value is AdminManifest;
 /** The adapter hashes this canonical manifest; ordering never changes its meaning. */
 export declare function canonicalAdminJson(value: unknown): string;
+/** Project exactly the consent fields from a durable grant/event projection. */
+export declare function adminGrantManifest(value: AdminManifest): AdminManifest;

@@ -46,6 +46,10 @@ export interface EventEnvelope<P = unknown, T extends string = EventType> {
   actor_run: string | null;
   /** Server time (ms epoch). Never client-supplied (§2.1/§4 honest-liveness). */
   occurred_at_server: number;
+  /** Present only on server-derived delegated administration events. */
+  admin_identity_id?: string | null;
+  grant_id?: string | null;
+  grant_manifest_digest?: string | null;
   payload: P;
 }
 
