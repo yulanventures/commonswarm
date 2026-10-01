@@ -1,123 +1,79 @@
 ---
 /*
- * Wordmark — the CommonSwarm mark and word, in one place.
+ * Wordmark — the CommonSwarm mark and word, in one place (Daylight Orbs, 2026-10-01).
  *
- * WHY THIS EXISTS. Integration found the same mark drawn three times, in SiteHeader,
- * SiteFooter and start/StartHeader, and the three copies did not agree:
+ * The mark is five disjoint circles on a 48 x 48 grid, radius 5.5 each: an ink centre at
+ * (24,24) and four satellites — lavender north, peach east, sage south, cobalt west — with a
+ * 5-unit gap to the centre. It is drawn here and nowhere else; favicon.svg, the app icon and
+ * the social card copy the same geometry, so change all four together.
  *
- *   - StartHeader hard-coded the brand colours as hex — #7c6cff, #9b8fff, #34d399. They
- *     equalled --accent, --accent-bright and --success AT THAT MOMENT, so the drift was
- *     invisible; the next edit to tokens.css would have changed the logo on three pages and
- *     not on /start. That is precisely the failure tokens.css exists to prevent, and the
- *     comment above it named the reason: the mark lived inside a file that pass did not own.
- *     It is owned here now.
+ * The four satellite hues are brand literals (they do not change by mode). The centre and
+ * the west satellite read --mark-center and --mark-west, which tokens.css flips in dark mode
+ * to the light ink and the pale cobalt, as the brand's monochrome rule asks. No outlines,
+ * orbit lines or blur inside the mark, at any size.
  *
- *     THAT EDIT HAS NOW ARRIVED, which retires the "so the drift was invisible" clause: the
- *     palette is being taken light-first, and those three literals are no longer equal to the
- *     tokens they were copied from. The three hexes above survive as a record of what was
- *     removed. They are dead values. Do not paste them back into a template.
+ * Lockups: 32px mark, 10px gap, 22/28 Plus Jakarta Sans 600 at -0.04em in the bar; 26px
+ * mark, 8px gap, 18/24 on phones. `markSize` sets a fixed mark size for other placements.
  *
- * THE MARK IS TOKEN-DRIVEN IN BOTH MODES, AND NO COLOUR HERE TAKES A BRAND-LITERAL
- * EXEMPTION. The tempting exemption — "the brand is the brand, pin it" — is the wrong call
- * for this mark, and each of the three is worth stating separately:
+ * Accessible name: when this is a link, the visible word "CommonSwarm" names it and the SVG
+ * is hidden. A mark-only link must pass `label` (e.g. "CommonSwarm home").
  *
- *   - The trusses use var(--accent). The token's job is fills and strokes, which is exactly
- *     what they are. Pinning it would be actively wrong in light mode: tokens.css records
- *     that the accent has to darken for light, and a stroke frozen at the dark-mode value
- *     would sit on a pale page as the faintest thing in the header.
- *   - The two base nodes use var(--accent-bright). That token means "the accent at the
- *     weight that reads as foreground", so it tracks whichever direction the page moves.
- *     Frozen, it is the worst case in the set: the dark-mode value of this token is the
- *     LIGHTEST colour in the mark, and on a light page it would very nearly vanish.
- *   - The apex node uses var(--success). It is the node that has landed, which is what the
- *     token means everywhere else on the site; the mark and the feed should not disagree
- *     about what green signifies.
- *
- * So the mark rides the palette. What makes it the same brand in both modes is the geometry
- * and the two-hue relationship (indigo structure, one green apex), not a frozen sRGB triple.
- * A future light palette must keep --accent-bright and --success legible as FOREGROUND
- * colours; if that stops being true the mark degrades, and the fix belongs in tokens.css
- * rather than in a literal here.
- *
- * The stroke group's opacity="0.6" was reviewed in this pass and deliberately kept. It is
- * hierarchy, not a dark-mode depth trick: it pushes the edges behind the nodes by the same
- * proportion whichever way the background goes. NOT MEASURED against a light palette, which
- * does not exist yet — if the trusses read as too faint on white, lift this number, do not
- * swap the token.
- *   - SiteFooter set the word at --t-base (16px) / -0.024em / 0.5rem gap while both header
- *     copies set 17px / -0.028em / 0.55rem. The same wordmark rendered two ways on one page.
- *
- * The settings below are the header's, which were the most considered of the three.
- *
- * `href` is optional: pass it for a link (every current caller does, all to "/"), omit it for
- * a plain label. The <svg> is aria-hidden and the word is real text, so the accessible name
- * is just "CommonSwarm" — no alt, no duplicate announcement.
- *
- * THE WORD GOT LONGER. The rename from "coswarm" (7 glyphs) to "CommonSwarm" (11) widens this
- * box by roughly two thirds at the same size, and every caller puts it in a flex row that has
- * other things to fit. Two rules below exist only because of that: `white-space: nowrap` on
- * the word, so a squeezed row can never break the brand across two lines, and a second
- * font-size step at 22rem. Neither was needed at the old length.
+ * 320px: the bar holds the lockup, a compact CTA and the menu button. SiteHeader drops the
+ * CTA (it is repeated in the menu sheet) before this word is ever allowed to wrap or shrink
+ * below the mobile lockup; `white-space: nowrap` keeps "CommonSwarm" one word.
  */
 
 interface Props {
-  /** Renders an <a> when set, a <span> when not. */
   href?: string;
-  /** Pixel size of the mark. The word does not scale with it. */
   markSize?: number;
+  /** Accessible name for a mark-only placement. */
+  label?: string;
+  /** Render the mark alone (no visible word). */
+  markOnly?: boolean;
   class?: string;
 }
 
-const { href, markSize = 22, class: klass = "" } = Astro.props;
+const { href, markSize, label, markOnly = false, class: klass = "" } = Astro.props;
 
 const Tag = href ? "a" : "span";
+const sized = typeof markSize === "number";
 ---
 
-<Tag class:list={["wm", klass]} href={href}>
-  <svg
-    class="wm__mark"
-    viewBox="0 0 32 32"
-    width={markSize}
-    height={markSize}
-    aria-hidden="true"
-    focusable="false"
-  >
-    <g
-      stroke="var(--accent)"
-      stroke-width="2"
-      stroke-linecap="round"
-      opacity="0.6"
-      fill="none"
-    >
-      <path d="M16 10.2 9.2 22"></path>
-      <path d="M16 10.2 22.8 22"></path>
-      <path d="M9.2 22h13.6"></path>
-    </g>
-    <circle cx="9.2" cy="22" r="3.5" fill="var(--accent-bright)"></circle>
-    <circle cx="22.8" cy="22" r="3.5" fill="var(--accent-bright)"></circle>
-    <circle cx="16" cy="10.2" r="4" fill="var(--success)"></circle>
+<Tag
+  class:list={["wm", { "wm--sized": sized, "wm--mark-only": markOnly }, klass]}
+  href={href}
+  aria-label={markOnly ? (label ?? "CommonSwarm home") : undefined}
+  style={sized ? `--wm-mark: ${markSize}px` : undefined}
+>
+  <svg class="wm__mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+    <circle cx="24" cy="24" r="5.5" style="fill: var(--mark-center)"></circle>
+    <circle cx="24" cy="8" r="5.5" fill="#B8ADF2"></circle>
+    <circle cx="40" cy="24" r="5.5" fill="#F3B89D"></circle>
+    <circle cx="24" cy="40" r="5.5" fill="#AACBB7"></circle>
+    <circle cx="8" cy="24" r="5.5" style="fill: var(--mark-west)"></circle>
   </svg>
-  <span class="wm__word">CommonSwarm</span>
+  {!markOnly && <span class="wm__word">CommonSwarm</span>}
 </Tag>
 
 <style>
   .wm {
+    --wm-mark: 32px;
     display: inline-flex;
     flex: none;
     align-items: center;
-    gap: 0.55rem;
+    gap: 10px;
     color: var(--text);
-    font-size: 1.0625rem;
-    font-weight: 640;
-    letter-spacing: -0.028em;
+    font-family: var(--font-display);
+    font-size: 1.375rem;
+    line-height: 1.75rem;
+    font-weight: 600;
+    letter-spacing: -0.04em;
     text-decoration: none;
     border-radius: var(--radius-sm);
     transition: opacity var(--dur-2) var(--ease-standard);
   }
 
-  /* Hover dims rather than recolours: the mark is three tokens deep and a colour change
-     would have to restate all of them. Only an <a> is interactive, so a plain <span>
-     wordmark cannot pick this up. */
+  /* Only an <a> is interactive, so a plain <span> wordmark never picks up a hover. */
   a.wm:hover {
     color: var(--text);
     opacity: 0.8;
@@ -125,67 +81,24 @@ const Tag = href ? "a" : "span";
 
   .wm__mark {
     flex: none;
+    inline-size: var(--wm-mark);
+    block-size: var(--wm-mark);
   }
 
-  /* The brand is one word and must render as one line. At the old 7-glyph length it never
-     came close to wrapping; at 11 it is wide enough that a flex parent under pressure can
-     hand this span a box narrower than the text, and "Common" over "Swarm" is not the mark. */
   .wm__word {
     white-space: nowrap;
   }
 
-  /* SiteHeader used to carry this step as `@media (max-width: 26rem) { .hdr__brand }`.
-     When the brand became a component, that rule SILENTLY STOPPED APPLYING: Astro scopes a
-     parent's styles with the parent's cid attribute, and the class passed down lands on this
-     component's root, which does not carry it. Measured after the extraction and before this
-     fix — 17px at a 400px viewport where it should have been 16px. It lives here now, where
-     the element it styles actually is, and it is correct for the footer mark too. */
-  @media (max-width: 26rem) {
+  /* Phone lockup. A fixed markSize (the footer) keeps its own size. */
+  @media (max-width: 47.999rem) {
     .wm {
-      font-size: 1rem;
-    }
-  }
-
-  /* A second step the 7-glyph word did not need. Below 22rem the header bar is wordmark +
-     burger + the filled CTA, and at 1rem the longer word leaves the CTA nothing to sit in.
-     The gap closes with it — at this size the mark and the word read as one lockup anyway. */
-  @media (max-width: 22rem) {
-    .wm {
-      font-size: 0.9375rem;
-      gap: 0.45rem;
-    }
-  }
-
-  /* BELOW 24rem THE WORD IS DROPPED AND THE MARK CARRIES THE BRAND ALONE.
-     Measured on the deployed font, not reasoned: at a 320px viewport the header lockup
-     forced document.scrollWidth to 362px — 42px of page-level horizontal scroll — and
-     clipped "Create a workspace" off the right edge. 360px overflowed by 11px; 375px fit
-     by 4px, which is less than one glyph and not margin.
-
-     The cause is structural, so no font step fixes it. "CommonSwarm" is ~48px wider than
-     the 7-glyph name it replaced, `.wm` is `flex: none` so the brand cannot be squeezed,
-     and the `white-space: nowrap` above guarantees it cannot reflow — every pixel of the
-     extra width becomes page scroll. Closing 48px by shrinking type would take the mark
-     under 11px, which is not a brand, it is a defect.
-
-     Hidden VISUALLY ONLY. The span is the link's entire accessible name, so display:none
-     would leave a nav link that screen readers announce as nothing. This is the
-     global.css .visually-hidden recipe, inlined because the class sits on a component
-     root this file does not own. */
-  @media (max-width: 24rem) {
-    .wm__word {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      margin: -1px;
-      padding: 0;
-      overflow: hidden;
-      clip-path: inset(50%);
-      border: 0;
+      gap: 8px;
+      font-size: 1.125rem;
+      line-height: 1.5rem;
     }
 
-    .wm {
-      gap: 0;
+    .wm:not(.wm--sized) {
+      --wm-mark: 26px;
     }
   }
 </style>

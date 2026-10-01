@@ -5,20 +5,25 @@
  * homepage. Rendering through sharp keeps the result deterministic and removes the old
  * browser-window recipe, whose screenshot could tile when the real window was too narrow.
  *
- * The colours below mirror the landed light tokens. SVG cannot import tokens.css, so this
- * explicit map is the sync boundary:
- *   background #f4f6fa  --elev-0
- *   surface    #eef1f7  --elev-3
- *   border     #dde3ec  --border
- *   text       #10142a  --text
- *   muted      #4f5769  --text-muted
- *   accent     #4633b8  --accent
- *   accent ink #5b4ada  --accent-bright
- *   success    #056f52  --success
+ * Daylight Orbs (2026-10-01). The colours below mirror tokens.css and the brand spec. SVG
+ * cannot import tokens.css, so this explicit map is the sync boundary:
+ *   canvas     #faf8f3  --elev-0 / --canvas
+ *   surface    #ffffff  --surface
+ *   border     #dedcd6  --border
+ *   ink        #252a32  --text / --ink
+ *   muted      #626773  --text-muted
+ *   orbs       lavender #b8adf2, peach #f3b89d, sage #aacbb7, sky #a8cbed, pearl centre
+ *   mark       ink centre, lavender N, peach E, sage S, cobalt #315cff W (Wordmark.astro)
  *
  * Usage:
  *   node scripts/og-card.mjs public/og.png
  *   node scripts/og-card.mjs /tmp/og-card.svg
+ *
+ * KNOWN LIMIT (2026-10-01): sharp's bundled librsvg ignores the @font-face data URIs below,
+ * so the PNG's text renders in the "Helvetica Neue" fallback rather than Plus Jakarta Sans /
+ * DM Sans. Pango text with `fontfile` and a FONTCONFIG_FILE pointing at TTF copies were both
+ * tried and also fell back. Colours, geometry and copy are on brand; only the face differs.
+ * The SVG output (opened in a browser) shows the intended faces.
  *
  * The SVG output is useful for review. The PNG is the shipping artifact and must be opened
  * and inspected after every regeneration. Base.astro's ogImageAlt describes these pixels.
@@ -31,15 +36,19 @@ import sharp from "sharp";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fonts = join(root, "public", "fonts");
-const inter = readFileSync(join(fonts, "inter-latin.woff2")).toString("base64");
-const mono = readFileSync(join(fonts, "jetbrains-mono-latin.woff2")).toString("base64");
+const display = readFileSync(join(fonts, "plus-jakarta-sans-latin.woff2")).toString("base64");
+const body = readFileSync(join(fonts, "dm-sans-latin.woff2")).toString("base64");
 
-const fraunces = readFileSync(join(fonts, "fraunces-latin.woff2")).toString("base64");
-const frauncesItalic = readFileSync(join(fonts, "fraunces-italic-latin.woff2")).toString("base64");
+/* One radial-gradient orb, lit from the upper left like the homepage's CSS orbs. */
+const orb = (id, light, mid, hue, edge) => `
+    <radialGradient id="${id}" cx=".3" cy=".22" r=".85">
+      <stop offset="0" stop-color="${light}"/>
+      <stop offset=".27" stop-color="${mid}"/>
+      <stop offset=".64" stop-color="${hue}"/>
+      <stop offset="1" stop-color="${edge}"/>
+    </radialGradient>`;
 
-/* 2026-10 homepage redesign, "the common thread": four agent threads (coral, teal, blue,
- * gold — the homepage's light thread colours in src/styles/home.css) cross behind one
- * workspace card. The headline is the homepage h1, word for word. */
+/* The headline is the homepage h1, word for word. */
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <title>CommonSwarm</title>
@@ -47,113 +56,106 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
   <defs>
     <style>
       @font-face {
-        font-family: "InterVariable";
-        font-weight: 100 900;
-        src: url("data:font/woff2;base64,${inter}") format("woff2");
+        font-family: "Plus Jakarta Sans";
+        font-weight: 200 800;
+        src: url("data:font/woff2;base64,${display}") format("woff2");
       }
       @font-face {
-        font-family: "JetBrains Mono";
-        font-weight: 100 800;
-        src: url("data:font/woff2;base64,${mono}") format("woff2");
+        font-family: "DM Sans";
+        font-weight: 100 1000;
+        src: url("data:font/woff2;base64,${body}") format("woff2");
       }
-      @font-face {
-        font-family: "Fraunces";
-        font-style: normal;
-        font-weight: 300 800;
-        src: url("data:font/woff2;base64,${fraunces}") format("woff2");
-      }
-      @font-face {
-        font-family: "Fraunces";
-        font-style: italic;
-        font-weight: 300 800;
-        src: url("data:font/woff2;base64,${frauncesItalic}") format("woff2");
-      }
-      .sans { font-family: "InterVariable", "Helvetica Neue", Arial, sans-serif; }
-      .serif { font-family: "Fraunces", Georgia, serif; }
-      .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+      .display { font-family: "Plus Jakarta Sans", "Helvetica Neue", Arial, sans-serif; }
+      .body { font-family: "DM Sans", "Helvetica Neue", Arial, sans-serif; }
     </style>
-    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f8f9fc"/>
-      <stop offset="1" stop-color="#eef1f7"/>
-    </linearGradient>
-    <radialGradient id="glow-coral" cx=".1" cy=".05" r=".6">
-      <stop offset="0" stop-color="#e2683c" stop-opacity=".16"/>
-      <stop offset="1" stop-color="#e2683c" stop-opacity="0"/>
+    <radialGradient id="glow-lav" cx=".62" cy=".38" r=".42">
+      <stop offset="0" stop-color="#b8adf2" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#b8adf2" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="glow-blue" cx=".9" cy=".2" r=".55">
-      <stop offset="0" stop-color="#3a72f0" stop-opacity=".16"/>
-      <stop offset="1" stop-color="#3a72f0" stop-opacity="0"/>
+    <radialGradient id="glow-peach" cx=".92" cy=".5" r=".4">
+      <stop offset="0" stop-color="#f3b89d" stop-opacity=".24"/>
+      <stop offset="1" stop-color="#f3b89d" stop-opacity="0"/>
     </radialGradient>
-    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#10142a" flood-opacity=".12"/>
+    <radialGradient id="glow-sage" cx=".8" cy=".95" r=".38">
+      <stop offset="0" stop-color="#aacbb7" stop-opacity=".2"/>
+      <stop offset="1" stop-color="#aacbb7" stop-opacity="0"/>
+    </radialGradient>${orb("orb-lav", "#f6f0ff", "#ded1ff", "#b8adf2", "#9387ce")}${orb("orb-peach", "#fff5e9", "#ffe0c8", "#f3b89d", "#dca088")}${orb("orb-sage", "#f0f8ec", "#d2e4d3", "#aacbb7", "#85aa96")}${orb("orb-sky", "#eff8ff", "#d0e8fb", "#a8cbed", "#81add8")}${orb("orb-pearl", "#ffffff", "#fcfaf4", "#e8e7e0", "#d3d7d8")}
+    <filter id="card-shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#252a32" flood-opacity=".1"/>
+    </filter>
+    <filter id="orb-shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="12" stdDeviation="9" flood-color="#252a32" flood-opacity=".12"/>
     </filter>
   </defs>
 
-  <rect width="1200" height="630" fill="url(#page)"/>
-  <rect width="1200" height="630" fill="url(#glow-coral)"/>
-  <rect width="1200" height="630" fill="url(#glow-blue)"/>
+  <rect width="1200" height="630" fill="#faf8f3"/>
+  <rect width="1200" height="630" fill="url(#glow-lav)"/>
+  <rect width="1200" height="630" fill="url(#glow-peach)"/>
+  <rect width="1200" height="630" fill="url(#glow-sage)"/>
 
-  <g transform="translate(72 58)">
-    <g transform="translate(0 2)">
-      <path d="M15 5 5 23M15 5l10 18M5 23h20" fill="none" stroke="#4633b8"
-        stroke-width="2.2" stroke-linecap="round" opacity=".72"/>
-      <circle cx="5" cy="23" r="4.3" fill="#4633b8"/>
-      <circle cx="25" cy="23" r="4.3" fill="#4633b8"/>
-      <circle cx="15" cy="5" r="4.8" fill="#056f52"/>
+  <g transform="translate(72 60)">
+    <g transform="scale(.75)">
+      <circle cx="24" cy="24" r="5.5" fill="#252a32"/>
+      <circle cx="24" cy="8" r="5.5" fill="#b8adf2"/>
+      <circle cx="40" cy="24" r="5.5" fill="#f3b89d"/>
+      <circle cx="24" cy="40" r="5.5" fill="#aacbb7"/>
+      <circle cx="8" cy="24" r="5.5" fill="#315cff"/>
     </g>
-    <text class="sans" x="46" y="26" font-size="27" font-weight="670"
-      letter-spacing="-.7" fill="#10142a">CommonSwarm</text>
+    <text class="display" x="48" y="27" font-size="27" font-weight="600"
+      letter-spacing="-1.08" fill="#252a32">CommonSwarm</text>
   </g>
 
-  <text class="serif" x="72" y="250" font-size="72" font-weight="560"
-    letter-spacing="-2" fill="#10142a">
+  <text class="display" x="72" y="252" font-size="68" font-weight="600"
+    letter-spacing="-3" fill="#252a32">
     <tspan x="72" dy="0">Every agent.</tspan>
-    <tspan x="72" dy="80">One common <tspan font-style="italic" font-weight="480" fill="#c2410c">thread.</tspan></tspan>
+    <tspan x="72" dy="76">One common thread.</tspan>
   </text>
 
-  <g transform="translate(72 430)">
-    <rect width="640" height="58" rx="29" fill="#ffffff" stroke="#dde3ec"/>
-    <circle cx="30" cy="29" r="6" fill="#e2683c"/>
-    <circle cx="46" cy="29" r="6" fill="#0f9d8a"/>
-    <circle cx="62" cy="29" r="6" fill="#3a72f0"/>
-    <circle cx="78" cy="29" r="6" fill="#d99a0b"/>
-    <text class="sans" x="100" y="35" font-size="17" font-weight="620"
-      fill="#10142a">Your agents talk, share files, and keep notes in one workspace</text>
+  <text class="body" x="72" y="402" font-size="23" font-weight="400" fill="#626773">
+    <tspan x="72" dy="0">Your agents talk, share files, and keep notes</tspan>
+    <tspan x="72" dy="32">in one workspace</tspan>
+  </text>
+
+  <g transform="translate(72 506)">
+    <rect width="272" height="52" rx="26" fill="#315cff"/>
+    <text class="body" x="136" y="33" text-anchor="middle" font-size="19" font-weight="500"
+      fill="#ffffff">Start a workspace</text>
+    <text class="body" x="300" y="33" font-size="17" font-weight="500"
+      fill="#626773">Free · 10 workspaces · no card</text>
   </g>
 
-  <g transform="translate(72 520)">
-    <circle cx="7" cy="17" r="5" fill="#056f52"/>
-    <text class="sans" x="24" y="23" font-size="17" font-weight="520"
-      fill="#4f5769">Free · 10 workspaces · no card</text>
-  </g>
-
-  <g transform="translate(840 150)">
-    <g fill="none" stroke-width="5" stroke-linecap="round">
-      <path d="M-20 60 C 60 60, 80 150, 180 150 S 300 260, 400 260" stroke="#e2683c"/>
-      <path d="M-20 260 C 60 260, 80 170, 180 170 S 300 60, 400 60" stroke="#0f9d8a"/>
-      <path d="M-20 160 C 60 160, 100 110, 180 120 S 320 160, 400 160" stroke="#3a72f0"/>
-      <path d="M0 340 C 80 320, 120 200, 180 200 S 300 300, 400 330" stroke="#d99a0b"/>
+  <g transform="translate(700 70)">
+    <ellipse cx="230" cy="250" rx="235" ry="96" fill="none" stroke="#d8d5e2" stroke-opacity=".8" stroke-width="1.5"/>
+    <g filter="url(#orb-shadow)">
+      <circle cx="230" cy="78" r="50" fill="url(#orb-pearl)"/>
+      <circle cx="70" cy="110" r="66" fill="url(#orb-lav)"/>
+      <circle cx="392" cy="116" r="62" fill="url(#orb-peach)"/>
+      <circle cx="60" cy="384" r="64" fill="url(#orb-sky)"/>
+      <circle cx="404" cy="380" r="60" fill="url(#orb-sage)"/>
     </g>
-    <g filter="url(#soft-shadow)">
-      <rect x="70" y="40" width="230" height="250" rx="22" fill="#ffffff" stroke="#dde3ec"/>
+    <g filter="url(#card-shadow)">
+      <rect x="85" y="150" width="290" height="250" rx="24" fill="#ffffff" stroke="#dedcd6"/>
     </g>
-    <rect x="70" y="40" width="230" height="44" rx="22" fill="#eef1f7"/>
-    <rect x="70" y="62" width="230" height="22" fill="#eef1f7"/>
-    <text class="sans" x="92" y="68" font-size="15" font-weight="680" fill="#10142a">Home base</text>
-    <g>
-      <circle cx="100" cy="114" r="11" fill="#ffffff" stroke="#e2683c" stroke-width="3"/>
-      <rect x="122" y="106" width="88" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
-      <rect x="122" y="119" width="150" height="6" rx="3" fill="#4f5769" opacity=".35"/>
-      <circle cx="100" cy="164" r="11" fill="#ffffff" stroke="#3a72f0" stroke-width="3"/>
-      <rect x="122" y="156" width="70" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
-      <rect x="122" y="169" width="132" height="6" rx="3" fill="#4f5769" opacity=".35"/>
-      <circle cx="100" cy="214" r="11" fill="#ffffff" stroke="#d99a0b" stroke-width="3"/>
-      <rect x="122" y="206" width="80" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
-      <rect x="122" y="219" width="110" height="6" rx="3" fill="#4f5769" opacity=".35"/>
-      <circle cx="100" cy="262" r="11" fill="#ffffff" stroke="#0f9d8a" stroke-width="3"/>
-      <rect x="122" y="254" width="96" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
-      <rect x="122" y="267" width="60" height="6" rx="3" fill="#4f5769" opacity=".35"/>
+    <g transform="translate(109 174) scale(.6)">
+      <circle cx="24" cy="24" r="5.5" fill="#252a32"/>
+      <circle cx="24" cy="8" r="5.5" fill="#b8adf2"/>
+      <circle cx="40" cy="24" r="5.5" fill="#f3b89d"/>
+      <circle cx="24" cy="40" r="5.5" fill="#aacbb7"/>
+      <circle cx="8" cy="24" r="5.5" fill="#315cff"/>
     </g>
+    <text class="display" x="149" y="192" font-size="18" font-weight="600" letter-spacing="-.4" fill="#252a32">Home base</text>
+    <text class="body" x="149" y="211" font-size="13" fill="#626773">Example workspace</text>
+    <rect x="109" y="232" width="242" height="1" fill="#dedcd6"/>
+    <rect x="109" y="230" width="58" height="3" rx="1.5" fill="#315cff"/>
+    <circle cx="124" cy="266" r="14" fill="url(#orb-lav)"/>
+    <rect x="148" y="258" width="150" height="8" rx="4" fill="#252a32" opacity=".78"/>
+    <rect x="148" y="272" width="96" height="6" rx="3" fill="#626773" opacity=".3"/>
+    <circle cx="124" cy="314" r="14" fill="url(#orb-peach)"/>
+    <rect x="148" y="306" width="170" height="8" rx="4" fill="#252a32" opacity=".78"/>
+    <rect x="148" y="320" width="120" height="6" rx="3" fill="#626773" opacity=".3"/>
+    <rect x="109" y="346" width="242" height="34" rx="10" fill="#ffffff" stroke="#dedcd6"/>
+    <rect x="123" y="355" width="12" height="16" rx="3" fill="none" stroke="#626773" stroke-width="1.6"/>
+    <rect x="145" y="360" width="104" height="7" rx="3.5" fill="#252a32" opacity=".7"/>
   </g>
 </svg>`;
 
