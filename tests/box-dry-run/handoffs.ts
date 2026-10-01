@@ -19,6 +19,19 @@ const shellTokens = (line: string): string[] => line.match(/(?:"[^"]*"|'[^']*'|[
 const tokens = (line: string): string[] => shellTokens(line)
   .map((word) => word.replace(/["']/g, ""));
 
+// Call only outside quotes/escapes. A comment starts a token, not just after
+// any whitespace byte: escaped whitespace/operators still belong to a word.
+function shellCommentStart(source: string, index: number): boolean {
+  const escapedAt = (at: number): boolean => {
+    let backslashes = 0;
+    while (at > 0 && source[--at] === "\\") backslashes++;
+    return backslashes % 2 === 1;
+  };
+  // An unquoted backslash-newline contributes neither data nor a boundary.
+  while (index >= 2 && source[index - 1] === "\n" && source[index - 2] === "\\" && !escapedAt(index - 2)) index -= 2;
+  return index === 0 || (/[\s;|&()<>]/.test(source[index - 1]!) && !escapedAt(index - 1));
+}
+
 function unclosedShellQuote(source: string): boolean {
   let quote = "", escaped = false;
   for (let index = 0; index < source.length; index++) {
@@ -27,7 +40,7 @@ function unclosedShellQuote(source: string): boolean {
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
     if (quote) { if (char === quote) quote = ""; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
-    if (char === "#" && (index === 0 || /\s/.test(source[index - 1]!))) {
+    if (char === "#" && shellCommentStart(source, index)) {
       const newline = source.indexOf("\n", index);
       if (newline < 0) break;
       index = newline;
@@ -358,9 +371,13 @@ function shellCommands(line: string, retainPipeline = false): string[] {
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
     if (quote) { if (char === quote) quote = ""; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
-    if (char === "#" && (index === 0 || /\s/.test(line[index - 1]!))) {
+    if (char === "#" && shellCommentStart(line, index)) {
       commands.push(line.slice(start, index));
-      return commands.filter((command) => command.trim());
+      const newline = line.indexOf("\n", index);
+      if (newline < 0) return commands.filter((command) => command.trim());
+      index = newline;
+      start = index + 1;
+      continue;
     }
     if (char === "\n" || char === ";" || (char === "|" && line[index - 1] !== ">" &&
         (!retainPipeline || line[index + 1] === "|" || line[index - 1] === "|")) ||
@@ -478,7 +495,12 @@ function substitutionPrograms(line: string, arithmetic = false): { outer: string
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
     if (char === "'" && quote !== '"') { quote = quote === "'" ? "" : "'"; continue; }
     if (char === '"' && quote !== "'") { quote = quote === '"' ? "" : '"'; continue; }
-    if (char === "#" && !quote && (index === 0 || /\s/.test(line[index - 1]!))) break;
+    if (char === "#" && !quote && shellCommentStart(line, index)) {
+      const newline = line.indexOf("\n", index);
+      if (newline < 0) break;
+      index = newline;
+      continue;
+    }
     if (quote === "'") continue;
     if (char === "`") {
       let end = index + 1, program = "";
@@ -505,6 +527,12 @@ function substitutionPrograms(line: string, arithmetic = false): { outer: string
       if (next === "\\" && innerQuote !== "'") { innerEscape = true; continue; }
       if (innerQuote) { if (next === innerQuote) innerQuote = ""; continue; }
       if (next === "'" || next === '"') { innerQuote = next; continue; }
+      if (next === "#" && shellCommentStart(line.slice(index + 2), end - index - 2)) {
+        const newline = line.indexOf("\n", end);
+        if (newline < 0) { end = line.length; break; }
+        end = newline;
+        continue;
+      }
       if (next === "(") depth++;
       if (next === ")" && --depth === 0) break;
     }
@@ -589,6 +617,12 @@ function redirectedOutputPaths(line: string): string[] {
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
     if (quote) { if (char === quote) quote = ""; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === "#" && shellCommentStart(line, index)) {
+      const newline = line.indexOf("\n", index);
+      if (newline < 0) break;
+      index = newline;
+      continue;
+    }
     if (char !== ">" || line[index - 1] === "<") continue;
     if (line[index + 1] === ">") index++;
     if (line[index + 1] === "|") index++;

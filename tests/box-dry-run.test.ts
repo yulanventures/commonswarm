@@ -7105,9 +7105,25 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
     }
   }
   for (const tail of ["|", "|&", "| curl --output /tmp/curl-body https://example.invalid",
-    "| /usr/bin/tee --unknown-writer /tmp/product", "| tee >(tee /tmp/dynamic)"]) {
-    assert.throws(() => macBoundaryOperations({ ...producer,
-      source: `ssh ops@100.115.66.74 'printf actual' ${tail}` }), /write-forms-control:1 writes: unsupported Mac SSH pipeline/);
+    "| /usr/bin/tee --unknown-writer /tmp/product", "| tee >(tee /tmp/dynamic)",
+    "| echo \\ # | tee /tmp/hidden", "| echo \\\t# | tee /tmp/hidden",
+    "| echo \\# | tee /tmp/hidden", "| echo word# | tee /tmp/hidden",
+    "| echo \\ # $(tee /tmp/hidden)", "| echo \\ # > /tmp/hidden",
+    '| echo \\ # "first\nsecond" | tee /tmp/hidden']) {
+    for (const discover of [macBoundaryOperations, capturedMacProductPaths, transferProducts]) {
+      assert.throws(() => discover({ ...producer,
+        source: `ssh ops@100.115.66.74 'printf actual' ${tail}` }), /write-forms-control:1 writes: unsupported Mac SSH pipeline/);
+    }
+  }
+  for (const prefix of ["echo \\ #", "echo \\\t#", "echo word#"]) {
+    for (const writer of ["| tee /tmp/comment-data", "$(tee /tmp/comment-data)", "> /tmp/comment-data"]) {
+      assert.deepEqual(transferProducts({ ...producer,
+        source: `ssh ops@100.115.66.74 '${prefix} ${writer}'` }).map((item) => item.path), ["/tmp/comment-data"]);
+    }
+  }
+  for (const prefix of ["printf actual #", "printf actual;#", "printf actual \\\\ #"]) {
+    assert.deepEqual(transferProducts({ ...producer,
+      source: `ssh ops@100.115.66.74 '${prefix} $(tee /tmp/comment-only) > /tmp/comment-only'` }), []);
   }
   for (const transport of ["scp", "rsync -a"]) {
     for (const source of [
