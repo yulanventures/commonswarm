@@ -1,7 +1,7 @@
 {
-  "site_base_sha": "3fbd5b7686d8c10e848bf8a59bf4e66639143f01",
-  "site_release_sha": "1e68e4853564b3cf796587801699ec63a550eae5",
-  "baseline_release": "20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2",
+  "site_base_sha": "109e4db75f673ddd8003662dc1882159dd72b1b2",
+  "site_release_sha": "4d6a06509f9abf1aefac8c88ec00280d025df673",
+  "baseline_release": "20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5",
   "provenance": {
     "kind": "task-supplied release input pins; not a new live measurement",
     "task": "hm37live/E2E-TASK.md rulings 5 and 6; laneH27-worker15.txt repair 3",
