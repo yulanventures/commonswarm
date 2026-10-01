@@ -336,7 +336,13 @@ BOX
   test -n "$WINDOW_START_UTC"
   test -n "$WINDOW_END_UTC"
   WINDOW_ID="$(printf '%s' "$WINDOW_START_UTC" | tr -d ':-')"
-  WINDOW_PRINCIPAL_SUFFIX="$(printf '%s' "$WINDOW_START_UTC" | sed -E 's/.*T([0-9]{6})Z/\1/')"
+  # WINDOW_START_UTC carries colons (HH:MM:SS); take the six digits from the colon-free WINDOW_ID.
+  WINDOW_PRINCIPAL_SUFFIX="${WINDOW_ID#*T}"
+  WINDOW_PRINCIPAL_SUFFIX="${WINDOW_PRINCIPAL_SUFFIX%Z}"
+  case "$WINDOW_PRINCIPAL_SUFFIX" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) echo "FAIL hm37b-open-inputs: WINDOW_PRINCIPAL_SUFFIX is not six digits" >&2; exit 1 ;;
+  esac
   case "$WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
     *) false ;;
