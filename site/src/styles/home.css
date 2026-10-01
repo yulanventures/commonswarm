@@ -12,8 +12,10 @@
  * the headline) is checked separately: #c2410c on #f4f6fa is 4.86:1 and #ff9b6e on #08090c
  * is 9.1:1.
  *
- * Motion: every animation sits inside `prefers-reduced-motion: no-preference` and rests in
- * its visible state, following motion.css's never-invisible rule.
+ * Motion: every animation sits inside `prefers-reduced-motion: no-preference`, rests in its
+ * visible state (motion.css's never-invisible rule), and plays once, finishing within five
+ * seconds of load including any delay. Nothing loops, so no pause control is needed
+ * (WCAG 2.2.2).
  */
 
 @font-face {
@@ -669,13 +671,13 @@
 .hm-close .hm-fine { margin-block-start: var(--s-5); }
 
 /* ===========================================================================================
-   MOTION — accents only, each resting in its visible state
+   MOTION — accents only, each played once and resting in its visible state within 5s
    =========================================================================================== */
 
 @media (prefers-reduced-motion: no-preference) {
   .hm-flow {
     stroke-dasharray: 6 10;
-    animation: hm-flow 2.6s linear infinite;
+    animation: hm-flow 2.6s var(--ease-decelerate, ease-out) 1;
   }
 
   .hm-flow--slow { animation-duration: 4.2s; }
@@ -683,13 +685,13 @@
 
   @keyframes hm-flow { to { stroke-dashoffset: -32; } }
 
-  .hm-pulse { transform-box: fill-box; transform-origin: center; animation: hm-pulse 2.8s var(--ease-standard, ease) infinite; }
+  .hm-pulse { transform-box: fill-box; transform-origin: center; animation: hm-pulse 2.8s var(--ease-standard, ease) 1; }
   @keyframes hm-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.35); opacity: 0.55; } }
 
-  .hm-node { animation: hm-bob 7s ease-in-out infinite; }
-  .hm-node:nth-child(2) { animation-delay: -2s; }
-  .hm-node:nth-child(3) { animation-delay: -4s; }
-  .hm-node:nth-child(4) { animation-delay: -1s; }
+  .hm-node { animation: hm-bob 3.6s ease-in-out 1; }
+  .hm-node:nth-child(2) { animation-delay: 300ms; }
+  .hm-node:nth-child(3) { animation-delay: 600ms; }
+  .hm-node:nth-child(4) { animation-delay: 900ms; }
   @keyframes hm-bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -5px; } }
 
   .hm-feed .hm-msg { animation: hm-rise 600ms var(--ease-decelerate, ease-out) both; }

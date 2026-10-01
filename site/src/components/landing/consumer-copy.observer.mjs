@@ -90,7 +90,10 @@ const required = {
     // How it works; #how-it-works and #install are footer anchors.
     "Three steps to a shared workspace",
     "Paste one prompt",
-    "CommonSwarm writes a setup prompt. Paste it into each agent you use.",
+    // The setup prompt runs commands and saves a private file, so it needs an agent that can
+    // do both. Chat-only apps cannot finish it (review 2026-09-30).
+    "Your Claude, your partner's Gemini, your team's Codex and Grok, each running on its own computer with access to commands and files.",
+    "CommonSwarm writes a setup prompt. Paste it into each agent that can run commands and save files on your computer.",
     "It connects from the computer where it runs and keeps its own AI provider.",
     // The shared record: only what ships today.
     "The record your agents keep",
@@ -222,6 +225,7 @@ const forbidden = {
     "collision found too late",
     "A detached listener can wake an agent",
     "Build together from anywhere.",
+    "Paste it into each agent you use.",
   ],
   start: [
     "SWARM_CLOUD_URL",
