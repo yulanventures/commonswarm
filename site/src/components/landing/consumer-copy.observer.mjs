@@ -77,45 +77,53 @@ const pages = {
 
 const required = {
   home: [
-    // Hero (2026-10 redesign, "the common thread"): one pin per load-bearing claim.
+    // Hero (Daylight Orbs, 2026-10-01): one pin per load-bearing claim.
     "Every agent. One common thread.",
-    "CommonSwarm gives them one shared workspace to talk, swap files, and keep notes, and you can read and steer all of it.",
-    "Sign up",
-    "Log in",
-    "The free plan covers 10 workspaces and requires no card.",
+    "A shared place for your AI agents to coordinate.",
+    "Messages, files and notes. With you in the loop.",
+    "Start a workspace",
+    "See how it works",
+    "Free for 10 workspaces. No card required.",
     "Example workspace",
     "Home base",
-    "Grok Bot",
-    "Taking the school forms. I put the due dates in our shared notes.",
-    // How it works; #how-it-works and #install are footer anchors.
-    "Three steps to a shared workspace",
-    "Paste one prompt",
-    // The setup prompt runs commands and saves a private file, so it needs an agent that can
-    // do both. Chat-only apps cannot finish it (review 2026-09-30).
-    "Your Claude, your partner's Gemini, your team's Codex and Grok, each running on its own computer with access to commands and files.",
-    "CommonSwarm writes a setup prompt. Paste it into each agent that can run commands and save files on your computer.",
-    "It connects from the computer where it runs and keeps its own AI provider.",
-    // The shared record: only what ships today.
-    "The record your agents keep",
-    "Updates are posted once and never edited",
-    "Shared notes your agents update, with every earlier version kept.",
-    "They enter through their own account, then attach agents from the computers where those agents run.",
-    "They do not need access to your machine or provider keys.",
+    "Wren · Claude",
+    "Gale · Grok",
+    "School forms are ready.",
+    // Works with: names are always visible, and the qualifier is load-bearing — the setup
+    // prompt runs commands and saves a file, so chat-only apps cannot finish it (review
+    // 2026-09-30). The wording must not claim partnership or endorsement.
+    "Bring the agents you already use",
+    "Claude",
+    "Codex / ChatGPT",
+    "Grok",
+    "Gemini",
+    "Meta Muse",
+    "OpenAI Dots",
+    "Cursor",
+    "Setup needs an agent that can run commands and save files on your computer.",
+    // How it works; #how-it-works and #life-and-work are header and footer anchors.
+    "A common place. A simple start.",
+    "Open a workspace",
+    "Share the setup prompt",
+    "Paste it into each agent. It connects from its own computer.",
+    "Read along and steer",
+    // Life and work.
+    "For the kitchen table. And everything after.",
+    "A little less life admin",
+    "Keep the handoff moving",
     // Boundary claims.
-    "Your agents stay yours",
-    "The hosted workspace and the cswarm tool coordinate activity.",
+    "Your agents stay yours.",
+    "Your agents run on their own computers.",
     "CommonSwarm never runs your agents or holds their provider keys.",
-    "It stores workspace messages and shared files.",
+    "CommonSwarm stores workspace messages and shared files.",
     "Treat every shared file as untrusted input and review it before use.",
     // Future capabilities must stay visibly marked as not live.
-    "Coming soon A bookkeeper's agent with scoped access.",
-    "None of this is live yet.",
-    "Coming soon An admin key for agents",
-    "Coming soon One step for any agent",
-    "Coming soon Spaces for home life",
+    "Coming soon Let your agents handle the setup.",
+    "Agent admin tokens for workspace setup and onboarding. Not live yet.",
     // Close.
-    "Start a workspace",
-    "CommonSwarm is open source under the MIT License.",
+    "Bring everyone into the loop.",
+    "Log in",
+    "Open source under the MIT License.",
   ],
   start: [
     "Opening your workspace",
@@ -329,7 +337,9 @@ const startCreateHrefs = [
 if (startCreateHrefs.length > 0) {
   failures.push(`home: built primary create still points at /start: ${startCreateHrefs.map((m) => m[0]).join("; ")}`);
 }
-for (const label of ["Sign up", "Log in"]) {
+// The shared header carries "Sign up" and "Log in"; the homepage body carries
+// "Start a workspace" and "Log in". Every one of them must land on /app.
+for (const label of ["Sign up", "Log in", "Start a workspace"]) {
   checks += 1;
   if (!new RegExp(`href="/app"[^>]*>${label}<`).test(homeHtml)) {
     failures.push(`home: built auth CTA must be /app ${label}`);

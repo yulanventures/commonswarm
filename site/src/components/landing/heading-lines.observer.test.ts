@@ -174,7 +174,7 @@ test("story svgs are labeled and retired surfaces stay gone", () => {
   }
 });
 
-test("every homepage heading stays within two rendered lines", async () => {
+test("every homepage heading stays within two rendered lines (the phone hero within three)", async () => {
   const chrome = await findChrome();
   const server = await startDistServer();
   try {
@@ -187,7 +187,11 @@ test("every homepage heading stays within two rendered lines", async () => {
       );
       const { headings } = measurement;
       assert.ok(headings.length > 0, `${width}px: no headings found in main`);
-      const failures = headings.filter((heading) => heading.lines > 2);
+      // BRAND.md sets the phone hero at 40/44px, which wraps "thread." to a third line as
+      // homepage-mobile.png shows. That one heading may take three lines on a phone.
+      const maxLines = (heading: HeadingMeasurement) =>
+        width <= 390 && heading.level === "H1" && heading.text === "Every agent. One common thread." ? 3 : 2;
+      const failures = headings.filter((heading) => heading.lines > maxLines(heading));
       assert.deepEqual(
         failures,
         [],

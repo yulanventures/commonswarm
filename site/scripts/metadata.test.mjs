@@ -176,12 +176,12 @@ test("L4: every built route publishes coherent, route-specific social metadata",
     assert.deepEqual(themeColors, [
       {
         name: "theme-color",
-        content: "#f4f6fa",
+        content: "#faf8f3",
         media: "(prefers-color-scheme: light)",
       },
       {
         name: "theme-color",
-        content: "#08090c",
+        content: "#171b22",
         media: "(prefers-color-scheme: dark)",
       },
     ]);
@@ -215,8 +215,9 @@ test("L4: linked icon, manifest, and social-card assets agree with their metadat
   assert.equal(manifest.short_name, "CommonSwarm");
   assert.equal(manifest.start_url, "/");
   assert.equal(manifest.scope, "/");
-  assert.equal(manifest.background_color, "#f4f6fa");
-  assert.equal(manifest.theme_color, "#f4f6fa");
+  // Daylight Orbs canvas (tokens.css --elev-0), the same literal as Base.astro's light theme-color.
+  assert.equal(manifest.background_color, "#faf8f3");
+  assert.equal(manifest.theme_color, "#faf8f3");
   assert.ok(
     manifest.icons.some(
       (icon) =>

@@ -76,11 +76,11 @@
      which is exactly why light mode needs --border and the shadows to do work
      that dark mode could hand to luminance.
      ====================================================================== */
-  --elev-0: #f4f6fa; /* page           --text 16.80:1  --text-muted 6.69:1  --text-faint 5.26:1 */
-  --elev-1: #ffffff; /* raised panel   --text 18.17:1  --text-muted 7.24:1  --text-faint 5.69:1 */
-  --elev-2: #ffffff; /* card           --text 18.17:1  --text-muted 7.24:1  --text-faint 5.69:1 */
-  --elev-3: #eef1f7; /* inside a card  --text 16.06:1  --text-muted 6.40:1  --text-faint 5.03:1  <- worst case */
-  --elev-4: #ffffff; /* popover        --text 18.17:1  --text-muted 7.24:1  --text-faint 5.69:1 */
+  --elev-0: #faf8f3; /* page (Daylight canvas)  --text 13.59:1  --text-muted 5.34:1 */
+  --elev-1: #ffffff; /* raised panel   --text 14.42:1  --text-muted 5.66:1 */
+  --elev-2: #ffffff; /* card           --text 14.42:1  --text-muted 5.66:1 */
+  --elev-3: #f1efea; /* inside a card  --text 12.55:1  --text-muted 4.93:1  <- worst case */
+  --elev-4: #ffffff; /* popover        --text 14.42:1  --text-muted 5.66:1 */
 
   /* Existing names, kept as the public surface API. These are aliases, so they
      follow whichever branch is active and never need remapping. */
@@ -99,11 +99,11 @@
      give, because they now have a job.
      --border-interactive is the one to use when a border IS the control edge,
      e.g. an input or a checkbox — it is the only one that clears 3:1. */
-  --border-base: #dde3ec;
+  --border-base: #dedcd6;
   --border: var(--border-base); /* structural hairline — 1.29:1 on white, 1.19:1 on --elev-0 */
-  --border-strong-base: #c6cfdc;
+  --border-strong-base: #cbc8c0;
   --border-strong: var(--border-strong-base); /* emphasis edge — 1.57:1 on white, 1.45:1 on --elev-0 */
-  --border-interactive-base: #7c8697;
+  --border-interactive-base: #80848d;
   --border-interactive: var(--border-interactive-base); /* control edges — 3.68:1 on white, 3.25:1 on --elev-3 (worst). Clears 1.4.11 on all five. */
 
   /* ======================================================================
@@ -111,8 +111,8 @@
      Ratios are the MINIMUM across all five surfaces, which for dark ink on
      light means the value measured on --elev-3. AA body text is 4.5:1.
      ====================================================================== */
-  --text: #10142a; /* body.      min 16.06:1 (on --elev-3), 18.17:1 on white */
-  --text-muted-base: #4f5769;
+  --text: #252a32; /* body (Daylight ink). min 12.55:1 (on --elev-3), 14.42:1 on white */
+  --text-muted-base: #626773;
   --text-muted: var(--text-muted-base); /* secondary. min  6.40:1 (on --elev-3),  7.24:1 on white */
 
   /* --text-faint IS TEXT, and that rule survives the flip unchanged. It was established by
@@ -136,7 +136,7 @@
    * to --text-faint is a small step, so the two do not separate on colour alone at a glance.
    * Below tertiary, use size, weight or position to demote something — not a fourth, paler
    * grey. There is deliberately no token for that. */
-  --text-faint-base: #5e6779;
+  --text-faint-base: #626773;
   --text-faint: var(--text-faint-base); /* tertiary.  min  5.03:1 (on --elev-3),  5.69:1 on white */
 
   /* THERE IS NO FOURTH GREY, AND THAT IS THE WHOLE RULE — see the paragraph above.
@@ -175,10 +175,10 @@
      HowItWorks.astro:323). In dark that was off-label — the old comment said
      "not text on dark". In light it is legitimate: 7.65:1 at worst.
      ====================================================================== */
-  --accent: #4633b8; /* fills, strokes, and legible as text: min 7.65:1 (on --elev-3), 8.66:1 on white */
-  --accent-bright: #5b4ada; /* accent AS TEXT + gradient top stop: min 5.40:1, 6.11:1 on white */
-  --accent-dim: rgba(70, 51, 184, 0.08); /* badge fill. --accent-bright on it: min 4.75:1 — see section 4 note */
-  --accent-ink: #ffffff; /* ink ON an accent fill. 8.66:1 on --accent, 6.11:1 on --accent-bright.
+  --accent: #315cff; /* Daylight cobalt. Fills and strokes; as text 5.12:1 on white, 4.82:1 on --elev-0 (4.45:1 on --elev-3, so text on soft fills uses --accent-bright) */
+  --accent-bright: #2446cc; /* accent AS TEXT and hover fill: min 6.47:1 (on --elev-3), 7.44:1 on white */
+  --accent-dim: rgba(49, 92, 255, 0.1); /* badge fill. --accent-bright on it stays above 5.5:1 */
+  --accent-ink: #ffffff; /* ink ON an accent fill. 5.12:1 on --accent, 7.44:1 on --accent-bright.
                           * This is the flip the old file predicted: near-black ink on the dark
                           * accent, white ink on the light one. Near-black on --accent would be
                           * 2.42:1 here, so there is no reusing the dark value. */
@@ -214,7 +214,7 @@
   --warning-dim: rgba(143, 84, 6, 0.11); /* --warning on it: min 4.64:1 */
   --warning-ink: #ffffff; /* on --warning: 6.11:1 */
 
-  --danger: #bf1f1f; /* as text: min 5.41:1 (on --elev-3), 6.12:1 on white */
+  --danger: #b43a3a; /* as text: min 5.07:1 (on --elev-3), 5.82:1 on white */
   --danger-dim: rgba(191, 31, 31, 0.09); /* --danger on it: min 4.68:1 */
   --danger-ink: #ffffff; /* on --danger: 6.12:1 */
 
@@ -247,15 +247,16 @@
                                        --focus-halo on --info     5.93:1
      Worst case across the whole light palette is 5.93:1, against 1.4.11's 3:1.
      ====================================================================== */
-  --focus: #3f2fbe;
+  --focus: #315cff;
   --focus-halo: #ffffff;
   --focus-ring: 0 0 0 2px var(--focus-halo), 0 0 0 4px var(--focus);
 
   /* ======================================================================
-     6. TYPE — mode-independent, unchanged by this pass
+     6. TYPE — mode-independent; retuned to the Daylight Orbs scale 2026-10-01
      ====================================================================== */
-  --font-sans: "InterVariable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Roboto, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
 
   /* A 1.25 minor third through the reading sizes, opening to ~1.45 across the
@@ -268,7 +269,7 @@
   --t-lg: 1.125rem; /* 18px */
   --t-xl: clamp(1.25rem, 0.5vw + 1.1rem, 1.5rem);
   --t-2xl: clamp(1.6rem, 1.2vw + 1.3rem, 2.1rem);
-  --t-3xl: clamp(1.6875rem, 2.4vw + 1.5rem, 3.1rem);
+  --t-3xl: clamp(1.75rem, 2.2vw + 1rem, 2.75rem); /* section heading 28 -> 44 */
   /* INTEGRATION — ONE DISPLAY SIZE FOR THE WHOLE SITE. This was
      clamp(2.9rem, 6.2vw + 1rem, 5.6rem), which resolves to 89.6px at 1440 and 46.4px at 375.
      The landing hero overrode it down to the ramp below because that size sets two words a
@@ -277,7 +278,7 @@
      (89.6px vs 64.8px) — the loudest type on the site was on the install page. The landing's
      measured ramp is now the token, so .h-display is one size everywhere and the override it
      replaced is deleted rather than duplicated. At 1440 this is 64.8px, at 375 it is 40px. */
-  --t-display: clamp(2.5rem, 4.4vw + 0.9rem, 4.05rem);
+  --t-display: clamp(2.5rem, 4.4vw + 0.9rem, 4.5rem); /* hero 40 -> 72 */
 
   /* Line-height PER SIZE, not one global value. Small text needs air to stay
      scannable; display text needs to close up or the lines drift apart. */
@@ -288,8 +289,8 @@
   --lh-lg: 1.55;
   --lh-xl: 1.45;
   --lh-2xl: 1.28;
-  --lh-3xl: 1.16;
-  --lh-display: 1.04;
+  --lh-3xl: 1.2;
+  --lh-display: 1.09;
 
   /* Legacy line-height names, still consumed by the dashboard and seo surfaces. */
   --lh-tight: var(--lh-display);
@@ -298,8 +299,8 @@
 
   /* Optical tracking. Large type tightens, small uppercase opens up. The rule
      is: tracking moves opposite to size. */
-  --track-display: -0.035em;
-  --track-3xl: -0.028em;
+  --track-display: -0.045em;
+  --track-3xl: -0.035em;
   --track-head: -0.022em;
   --track-xl: -0.014em;
   --track-base: 0em;
@@ -308,10 +309,10 @@
   --track-eyebrow: 0.14em; /* uppercase micro-labels */
 
   --weight-body: 400;
-  --weight-medium: 520;
+  --weight-medium: 500;
   --weight-semibold: 600;
-  --weight-head: 660;
-  --weight-display: 700;
+  --weight-head: 600;
+  --weight-display: 600;
 
   /* ======================================================================
      7. SPACE — one 4px rhythm; everything below is derived from it
@@ -362,8 +363,8 @@
 
   --radius-sm: 6px;
   --radius: 10px;
-  --radius-lg: 16px;
-  --radius-xl: 22px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
   --radius-pill: 999px;
 
   --measure: 34rem;
@@ -404,11 +405,11 @@
      (global.css .btn--primary-ish) actually want — "this is the
      accent surface, and it is raised".
      ====================================================================== */
-  --ring-top: 0 1px 2px rgba(16, 22, 48, 0.07), 0 1px 1px rgba(16, 22, 48, 0.04);
-  --shadow-sm: 0 1px 2px rgba(16, 22, 48, 0.08);
-  --shadow-md: 0 10px 24px -14px rgba(16, 22, 48, 0.26), 0 2px 6px -2px rgba(16, 22, 48, 0.07);
-  --shadow-lg: 0 24px 56px -24px rgba(16, 22, 48, 0.3), 0 6px 16px -8px rgba(16, 22, 48, 0.1);
-  --shadow-glow: 0 0 0 1px rgba(70, 51, 184, 0.2), 0 20px 44px -20px rgba(70, 51, 184, 0.28);
+  --ring-top: 0 1px 2px rgba(37, 42, 50, 0.06), 0 1px 1px rgba(37, 42, 50, 0.03);
+  --shadow-sm: 0 1px 2px rgba(37, 42, 50, 0.06);
+  --shadow-md: 0 4px 16px rgba(37, 42, 50, 0.04), 0 16px 36px rgba(37, 42, 50, 0.035);
+  --shadow-lg: 0 16px 48px rgba(37, 42, 50, 0.1), 0 3px 8px rgba(37, 42, 50, 0.04);
+  --shadow-glow: 0 0 0 1px rgba(49, 92, 255, 0.18), 0 20px 44px -20px rgba(49, 92, 255, 0.24);
 
   /* ======================================================================
      9. MOTION — full definitions and utilities live in motion.css
@@ -444,25 +445,25 @@
      --surface-2, --verified, --focus-ring …) resolve through whichever branch is
      active on their own, and adding them here would create a second, silent
      source of truth. Type, space and motion are mode-independent. */
-  --d-elev-0: #08090c; /* page            --text 18.40:1  --text-muted 7.66:1 */
-  --d-elev-1: #0d0f14; /* raised/sunken   --text 17.72:1  --text-muted 7.38:1 */
-  --d-elev-2: #12151c; /* card            --text 16.88:1  --text-muted 7.03:1 */
-  --d-elev-3: #171b24; /* card-on-card    --text 15.93:1  --text-muted 6.63:1 */
-  --d-elev-4: #1e232f; /* popover/menu    --text 14.52:1  --text-muted 6.05:1 */
+  --d-elev-0: #171b22; /* page            --text 15.43:1  --text-muted 9.41:1 */
+  --d-elev-1: #1c2129; /* raised/sunken */
+  --d-elev-2: #222832; /* card */
+  --d-elev-3: #2b323e; /* card-on-card    --text 11.53:1  --text-muted 7.03:1  <- worst case */
+  --d-elev-4: #262c37; /* popover/menu */
 
-  --d-border: #232837; /* decorative — 1.36:1 on --d-elev-0, by design */
-  --d-border-strong: #313849; /* decorative — 1.70:1 on --d-elev-0, by design */
-  --d-border-interactive: #737d92; /* 4.81:1 on --d-elev-0, 4.42:1 on --d-elev-2 */
+  --d-border: #353d4a; /* decorative, by design */
+  --d-border-strong: #46505e; /* decorative, by design */
+  --d-border-interactive: #7f8b9c; /* 5.00:1 on --d-elev-0, 3.73:1 on --d-elev-3 */
 
-  --d-text: #f4f6fa; /* 18.40:1 on --d-elev-0, 14.52:1 on --d-elev-4 */
-  --d-text-muted: #98a1b3; /* 7.66:1 on --d-elev-0, 6.05:1 on --d-elev-4 */
-  --d-text-faint: #8b93a6; /* 6.47:1 on --d-elev-0, 5.10:1 on --d-elev-4 — AA on all five */
+  --d-text: #f4f2ed; /* 15.43:1 on --d-elev-0, 11.53:1 on --d-elev-3 */
+  --d-text-muted: #b8c0cc; /* 9.41:1 on --d-elev-0, 7.03:1 on --d-elev-3 */
+  --d-text-faint: #a3abb8; /* 7.46:1 on --d-elev-0, 5.57:1 on --d-elev-3 — AA on all five */
 
-  --d-accent: #7c6cff; /* fills and strokes, not text on dark — 3.86:1 on white, which is why light retunes it */
-  --d-accent-bright: #9b8fff; /* accent AS TEXT. 7.36:1 on --d-elev-0, 5.81:1 on --d-elev-4 */
-  --d-accent-dim: rgba(124, 108, 255, 0.14);
-  --d-accent-ink: #0a0b14; /* 5.09:1 on --d-accent, 7.25:1 on --d-accent-bright.
-                            * #ffffff on --d-accent is 3.86:1 — under AA, which is why the
+  --d-accent: #a8bbff; /* pale cobalt: 9.22:1 on --d-elev-0, 6.89:1 on --d-elev-3 */
+  --d-accent-bright: #c2cfff; /* accent AS TEXT and hover fill. 11.23:1 on --d-elev-0, 8.39:1 on --d-elev-3 */
+  --d-accent-dim: rgba(168, 187, 255, 0.14);
+  --d-accent-ink: #182343; /* 8.25:1 on --d-accent, 10.04:1 on --d-accent-bright.
+                            * #ffffff on --d-accent is under 2:1, far below AA, which is why the
                             * dark branch cannot simply reuse the light --accent-ink. */
 
   --d-success: #34d399; /* as text: 10.36:1 on --d-elev-0, 8.17:1 on --d-elev-4 */
@@ -473,7 +474,7 @@
   --d-warning-dim: rgba(251, 191, 36, 0.13);
   --d-warning-ink: #1a1200; /* on --d-warning: 11.13:1 */
 
-  --d-danger: #f87171; /* as text: 7.20:1 on --d-elev-0, 5.68:1 on --d-elev-4 */
+  --d-danger: #ffb4ab; /* as text: 8.73:1 on --d-elev-2 */
   --d-danger-dim: rgba(248, 113, 113, 0.14);
   --d-danger-ink: #1a0505; /* on --d-danger: 7.11:1 */
 
@@ -486,16 +487,70 @@
        --d-focus-halo on --d-success 10.54:1     --d-focus on --d-elev-4   7.91:1
        --d-focus-halo on --d-warning 12.13:1     --d-focus on --d-elev-2   9.20:1
        --d-focus-halo on --d-danger   7.32:1 */
-  --d-focus: #a5b4ff;
-  --d-focus-halo: #05060a;
+  --d-focus: #a8bbff;
+  --d-focus-halo: #171b22;
 
   /* Dark depth: a light top edge and an indigo glow — the model section 8
      explains cannot be carried over to light. */
   --d-ring-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --d-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --d-shadow-md: 0 8px 24px -12px rgba(0, 0, 0, 0.6);
-  --d-shadow-lg: 0 24px 60px -18px rgba(0, 0, 0, 0.75);
-  --d-shadow-glow: 0 0 0 1px rgba(124, 108, 255, 0.28), 0 18px 50px -14px rgba(124, 108, 255, 0.3);
+  --d-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --d-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.28);
+  --d-shadow-glow: 0 0 0 1px rgba(168, 187, 255, 0.24), 0 18px 50px -14px rgba(168, 187, 255, 0.22);
+
+  /* ======================================================================
+     DAYLIGHT ORBS — brand tokens (2026-10-01)
+     From the Daylight Orbs brand spec. The frozen names above were re-valued to
+     this palette; the names below are new and are what marketing surfaces read.
+     Pastels identify participants and decorate; they are never link colours,
+     button fills or status signals. Cobalt is the one saturated action colour.
+     Dark values live as --d-* in section 10 and are mapped by both dark branches.
+     ====================================================================== */
+  --canvas: var(--elev-0);
+  --ink: var(--text);
+  --cobalt: #315cff;
+  --cobalt-hover: #2446cc;
+  --surface-soft: var(--elev-3);
+  --lavender: #b8adf2;
+  --peach: #f3b89d;
+  --sage: #aacbb7;
+  --sky: #a8cbed;
+  --life-tint: #fff1e9;
+  --work-tint: #eaf5ff;
+  --future-tint: #f0eaff;
+  --chip-active-bg: #e7f3e9;
+  --chip-active-ink: #31583e; /* 7.09:1 */
+  --chip-review-bg: #fff4d6;
+  --chip-review-ink: #655019; /* 7.06:1 */
+  --placeholder: #c4c7cc;
+  --orbit-line: rgba(216, 213, 226, 0.75);
+  --glow-strength: 1;
+  --shadow-card: 0 4px 16px rgba(37, 42, 50, 0.04), 0 16px 36px rgba(37, 42, 50, 0.035);
+  --shadow-floating: 0 16px 48px rgba(37, 42, 50, 0.1), 0 3px 8px rgba(37, 42, 50, 0.04);
+  --shadow-orb: 0 18px 24px -14px rgba(37, 42, 50, 0.2);
+  /* The four logo hues. The flat mark keeps cobalt west in both modes except the
+     monochrome dark rule: the centre becomes the light ink and west the pale cobalt. */
+  --mark-center: #252a32;
+  --mark-west: #315cff;
+
+  /* Daylight Orbs dark values (see the brand block in :root). */
+  --d-life-tint: #302820;
+  --d-work-tint: #202e3b;
+  --d-future-tint: #2c263e;
+  --d-chip-active-bg: #203b30;
+  --d-chip-active-ink: #b8ddc4;
+  --d-chip-review-bg: #40351d;
+  --d-chip-review-ink: #efda98;
+  --d-placeholder: #647080;
+  --d-orbit-line: rgba(120, 128, 150, 0.45);
+  --d-glow-strength: 0.5;
+  --d-cobalt: #a8bbff;
+  --d-cobalt-hover: #c2cfff;
+  --d-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --d-shadow-floating: 0 16px 48px rgba(0, 0, 0, 0.28);
+  --d-shadow-orb: 0 18px 24px -14px rgba(0, 0, 0, 0.45);
+  --d-mark-center: #f4f2ed;
+  --d-mark-west: #a8bbff;
 }
 
 /* ==========================================================================
@@ -545,6 +600,23 @@
     --shadow-md: var(--d-shadow-md);
     --shadow-lg: var(--d-shadow-lg);
     --shadow-glow: var(--d-shadow-glow);
+    --life-tint: var(--d-life-tint);
+    --work-tint: var(--d-work-tint);
+    --future-tint: var(--d-future-tint);
+    --chip-active-bg: var(--d-chip-active-bg);
+    --chip-active-ink: var(--d-chip-active-ink);
+    --chip-review-bg: var(--d-chip-review-bg);
+    --chip-review-ink: var(--d-chip-review-ink);
+    --placeholder: var(--d-placeholder);
+    --orbit-line: var(--d-orbit-line);
+    --glow-strength: var(--d-glow-strength);
+    --cobalt: var(--d-cobalt);
+    --cobalt-hover: var(--d-cobalt-hover);
+    --shadow-card: var(--d-shadow-card);
+    --shadow-floating: var(--d-shadow-floating);
+    --shadow-orb: var(--d-shadow-orb);
+    --mark-center: var(--d-mark-center);
+    --mark-west: var(--d-mark-west);
   }
 }
 
@@ -591,6 +663,23 @@
   --shadow-md: var(--d-shadow-md);
   --shadow-lg: var(--d-shadow-lg);
   --shadow-glow: var(--d-shadow-glow);
+  --life-tint: var(--d-life-tint);
+  --work-tint: var(--d-work-tint);
+  --future-tint: var(--d-future-tint);
+  --chip-active-bg: var(--d-chip-active-bg);
+  --chip-active-ink: var(--d-chip-active-ink);
+  --chip-review-bg: var(--d-chip-review-bg);
+  --chip-review-ink: var(--d-chip-review-ink);
+  --placeholder: var(--d-placeholder);
+  --orbit-line: var(--d-orbit-line);
+  --glow-strength: var(--d-glow-strength);
+  --cobalt: var(--d-cobalt);
+  --cobalt-hover: var(--d-cobalt-hover);
+  --shadow-card: var(--d-shadow-card);
+  --shadow-floating: var(--d-shadow-floating);
+  --shadow-orb: var(--d-shadow-orb);
+  --mark-center: var(--d-mark-center);
+  --mark-west: var(--d-mark-west);
 }
 
 /* ==========================================================================

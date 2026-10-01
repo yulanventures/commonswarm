@@ -14,13 +14,15 @@ const PRIMARY_CTAS = [
     path: "../SiteFooter.astro",
     patterns: [/href: "\/app", label: "Sign up"/],
   },
+  // Daylight Orbs (2026-10-01): the homepage's primary action reads "Start a workspace";
+  // the header keeps "Sign up" and "Log in". The destination stays /app either way.
   {
     path: "./ConsumerHero.astro",
-    patterns: [/href="\/app">Sign up</, /href="\/app">Log in</],
+    patterns: [/href="\/app">Start a workspace</],
   },
   {
     path: "./ConsumerStory.astro",
-    patterns: [/href="\/app">Sign up</, /href="\/app">Log in</],
+    patterns: [/href="\/app">Start a workspace</, /href="\/app">Log in</],
   },
   {
     path: "../download/AfterInstall.astro",

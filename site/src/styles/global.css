@@ -4,7 +4,7 @@
 /* CommonSwarm — global stylesheet
  *
  * Layers, in order:
- *   1. @font-face      self-hosted variable Inter + JetBrains Mono, zero third-party requests
+ *   1. @font-face      self-hosted DM Sans, Plus Jakarta Sans + JetBrains Mono, zero third-party requests
  *   2. reset           modern, minimal, opinionated where it buys us something
  *   3. base            element defaults so unclassed markup already looks right
  *   4. primitives      .page .eyebrow .h-display .h-section .lede .btn .card .mono .stack
@@ -22,26 +22,50 @@
 /* ==========================================================================
    1. Fonts — self-hosted, split latin / latin-ext by unicode-range so the
       accented subset is only fetched by pages that actually need it.
-      Both files are the variable builds: one request covers 100–900.
+      Daylight Orbs (2026-10-01): DM Sans for body and UI, Plus Jakarta Sans for
+      display and the wordmark. Both are SIL OFL 1.1 variable builds; the license
+      texts sit beside the files in public/fonts/.
    ========================================================================== */
 
 @font-face {
-  font-family: "InterVariable";
+  font-family: "DM Sans";
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 100 1000;
   font-display: swap;
-  src: url("/fonts/inter-latin.woff2") format("woff2");
+  src: url("/fonts/dm-sans-latin.woff2") format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
     U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
     U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "InterVariable";
+  font-family: "DM Sans";
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 100 1000;
   font-display: swap;
-  src: url("/fonts/inter-latin-ext.woff2") format("woff2");
+  src: url("/fonts/dm-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/fonts/plus-jakarta-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("/fonts/plus-jakarta-sans-latin-ext.woff2") format("woff2");
   unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
     U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
     U+2113, U+2C60-2C7F, U+A720-A7FF;
@@ -134,9 +158,6 @@ body {
   font-weight: 400;
   line-height: var(--lh-body);
   font-optical-sizing: auto;
-  /* Inter's disambiguation alternates: open digits, tailed l, straight-legged a.
-   * Ignored silently by any fallback face that lacks them. */
-  font-feature-settings: "cv02" 1, "cv03" 1, "cv04" 1, "cv11" 1;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   /* clip, not hidden: `hidden` on body silently kills position:sticky on the header. */
@@ -226,6 +247,16 @@ h2,
 h3,
 h4 {
   font-weight: var(--weight-head);
+}
+
+/* Daylight Orbs: headings and the wordmark are Plus Jakarta Sans; everything from hero
+   body downward is DM Sans (the body face). */
+h1,
+h2,
+h3,
+.h-display,
+.h-section {
+  font-family: var(--font-display);
 }
 
 h1 {
@@ -406,7 +437,7 @@ kbd {
   line-height: 1.2;
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;
-  color: var(--accent-bright);
+  color: var(--text-muted);
   /* Uppercase tracking adds trailing space on the right; pull it back so the eyebrow
    * optically aligns with the heading beneath it. */
   margin-right: calc(var(--track-eyebrow) * -1);
@@ -787,11 +818,11 @@ kbd {
   min-height: var(--btn-h);
   padding-inline: 1.05rem;
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: var(--radius-pill);
   font-size: var(--t-sm);
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1;
-  letter-spacing: -0.006em;
+  letter-spacing: 0;
   white-space: nowrap;
   text-decoration: none;
   cursor: pointer;
@@ -818,11 +849,12 @@ kbd {
   text-decoration: none;
 }
 
+/* The brand primary: 48px tall, 24px inline padding, 15/20 type. */
 .btn--lg {
-  --btn-h: 3.25rem;
+  --btn-h: 3rem;
   padding-inline: 1.5rem;
-  font-size: var(--t-base);
-  border-radius: var(--radius);
+  font-size: 0.9375rem;
+  line-height: 1.25rem;
 }
 
 .btn svg {
@@ -833,14 +865,13 @@ kbd {
   /* The gradient fill cannot interpolate, so it snaps on a colour-scheme change; the ink has
      to snap with it or the two disagree for --dur-1. See the note above `.btn`. */
   --btn-ink-dur: 0s;
-  background: linear-gradient(180deg, var(--accent-bright), var(--accent));
+  background: var(--accent);
   color: var(--accent-ink);
-  border-color: color-mix(in oklab, var(--accent-bright) 70%, transparent);
+  border-color: var(--accent);
   /* rgba(124,108,255) here was the DARK accent, frozen. On a light page it painted a violet
      glow under the primary CTA that no longer matched the button above it. Derived from the
      token so it tracks the palette in both modes. */
-  box-shadow: var(--ring-top), 0 8px 24px -12px
-    color-mix(in oklab, var(--accent) 65%, transparent);
+  box-shadow: none;
 }
 
 /* HOVER MOVES TOWARD --text, NOT TOWARD WHITE, AND THAT IS THE WHOLE FIX.
@@ -852,20 +883,24 @@ kbd {
    Mixing toward --text is correct in BOTH directions: --text is near-black in light, so the
    fill darkens and contrast against white ink RISES; it is near-white in dark, so the fill
    lightens and keeps the original "lifts under the cursor" feel. */
+/* Daylight Orbs: hover is the flat --accent-bright (#2446CC light, 7.44:1 with white ink;
+   #C2CFFF dark, 10.04:1 with its dark ink). The 1px lift is fine-pointer only, and only
+   when the reader has not asked for reduced motion: the lift is opt-in, not reset after. */
 .btn--primary:hover {
   color: var(--accent-ink);
-  background: linear-gradient(
-    180deg,
-    var(--accent-bright),
-    color-mix(in oklab, var(--accent) 80%, var(--text) 20%)
-  );
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-glow);
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
+}
+
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .btn--primary:hover {
+    transform: translateY(-1px);
+  }
 }
 
 .btn--primary:active {
   transform: translateY(0);
-  box-shadow: var(--ring-top);
+  background: var(--accent-bright);
 }
 
 /* A single-dash `.btn-ghost` USED TO BE HERE AND IS DELETED. It was a surface-plus-border
@@ -889,8 +924,8 @@ kbd {
   padding: var(--pad-card);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--ring-top);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
 }
 
 .card--sm {
@@ -928,7 +963,13 @@ a.card:hover,
   color: inherit;
   background: var(--surface-2);
   border-color: var(--border-strong);
-  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a.card:hover,
+  .card--link:hover {
+    transform: translateY(-2px);
+  }
 }
 
 /* --- misc utilities ----------------------------------------------------- */
@@ -984,8 +1025,8 @@ a.card:hover,
  * Never remove this ring — narrow the offset if it clips.
  */
 :focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
   box-shadow: 0 0 0 2px var(--focus-halo);
   border-radius: var(--radius-sm);
 }
@@ -995,12 +1036,12 @@ a.card:hover,
 .card:focus-visible,
 a.card:focus-visible,
 .card--link:focus-visible {
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   box-shadow: 0 0 0 2px var(--focus-halo), var(--ring-top);
 }
 
 .btn:focus-visible {
-  border-radius: var(--radius);
+  border-radius: var(--radius-pill);
   box-shadow: 0 0 0 2px var(--focus-halo), var(--ring-top);
 }
 
@@ -1094,5 +1135,16 @@ a.card:focus-visible,
   /* At this setting the ring should read as a hard edge, not a soft one. */
   :focus-visible {
     outline-width: 3px;
+  }
+}
+
+/* ==========================================================================
+   Daylight Orbs layout constants
+   The header is 80px on wide screens and 64px on phones; anchor offsets and the
+   sticky legal/SEO rails read --header-h, so they follow it.
+   ========================================================================== */
+@media (min-width: 52rem) {
+  :root {
+    --header-h: 5rem;
   }
 }
