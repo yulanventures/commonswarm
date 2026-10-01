@@ -247,7 +247,7 @@
   "scope": "whole-block",
   "surface": "live OAuth container effective-authorization readback and public discovery probe",
   "reason": "needs the live OAuth container and the public mcp.commonswarm.com network; no committed measurement is a container-program result for the effective MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED value",
-  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:852-970 must exit zero after the one-container, image, working-directory and health checks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:874-885 and the docker exec read of MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:886-887, which exits nonzero when the effective value is exactly 1. It must then record the five oauth runtime fields at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894 and a passing public discovery and JWKS probe at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969. The effective flag is never invented or computed by the dry run. The following refusal probe owns hm37-hm6-oauth-refusals.json separately at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:978.",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:943-1061 must exit zero after the one-container, image, working-directory and health checks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:965-976 and the docker exec read of MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:977-978, which exits nonzero when the effective value is exactly 1. It must then record the five oauth runtime fields at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:979-985 and a passing public discovery and JWKS probe at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:987-1060. The effective flag is never invented or computed by the dry run. The following refusal probe owns hm37-hm6-oauth-refusals.json separately at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1069.",
   "receipt_fields": [
     "oauth_release",
     "oauth_current_matches",
@@ -260,14 +260,14 @@
     {
       "output": "hm37-hm6-oauth-runtime.txt",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-runtime.txt",
-      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:979-985",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-runtime.txt",
-      "reason": "Historical Window A prerequisite readback, not proof that the present block ran. The real run wrote public_authorization_effective_disabled=true only after the docker exec at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:886-887 exited zero; these committed bytes are copied because copy-back reads the file, and the harness never evaluates, answers or replaces that read."
+      "reason": "Historical Window A prerequisite readback, not proof that the present block ran. The real run wrote public_authorization_effective_disabled=true only after the docker exec at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:977-978 exited zero; these committed bytes are copied because copy-back reads the file, and the harness never evaluates, answers or replaces that read."
     },
     {
       "output": "hm37-hm6-oauth-public-precondition.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-public-precondition.json",
-      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:987-1060",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-public-precondition.json",
       "reason": "Historical Window A prerequisite readback of the public discovery and JWKS probe, not proof that the present block ran. The committed bytes are copied because copy-back reads the file; the harness does not make the network request."
     }
@@ -280,7 +280,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-runtime.txt",
-      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894"
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:979-985"
     },
     {
       "file": "hm37-hm6-oauth-public-precondition.json",
@@ -289,7 +289,7 @@
       "mode": "0600",
       "branch": "all",
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-public-precondition.json",
-      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969"
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:987-1060"
     }
   ],
   "shape_evidence": [],
@@ -305,7 +305,7 @@
   "scope": "whole-block",
   "surface": "Window A pass/abort cleanup and independent agent-token database counts",
   "reason": "needs the live production database",
-  "live_proof": "The live Window A cleanup tail at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2081-2205 must record principal_ids, revoked_readback, active_unexpired_token_count and prep_directory.result/reason. docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2322-2332 and 2370-2377 consume the protected receipt; the DB readback must precede deletion.",
+  "live_proof": "The live Window A cleanup tail at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2172-2296 must record principal_ids, revoked_readback, active_unexpired_token_count and prep_directory.result/reason. docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2413-2423 and 2461-2468 consume the protected receipt; the DB readback must precede deletion.",
   "receipt_fields": [
     "schema",
     "workspace_id",
@@ -319,21 +319,21 @@
     {
       "output": "QUERY_SCRIPT",
       "path": "/tmp/hm37a-token-readback.XXXXXX",
-      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2122-2147",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2213-2238",
       "evidence": null,
       "reason": "Task-local generated read-only SQL script is removed within the block; no committed output bytes and no later reader."
     },
     {
       "output": "hm37a-prep-cleanup-{sha}.json",
       "path": "/tmp/hm37a-prep-cleanup-{sha}.json",
-      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2190-2200",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2281-2291",
       "evidence": null,
       "reason": "No committed receipt has the three principal_ids, independent DB readback and prep_directory fields of this writer. The older hm37-revocation-readback.json is an aborted window aggregate, not this receipt."
     },
     {
       "output": "hm37a-prep-cleanup.json",
       "path": "$EVIDENCE_DIR/hm37a-prep-cleanup.json",
-      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2201-2202",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2292-2293",
       "evidence": null,
       "reason": "Optional copy of the same missing cleanup receipt. The curated copy-back list names it, but naming it is not evidence."
     }
@@ -359,6 +359,666 @@
       "reason": "Optional copy of the same missing cleanup receipt. The curated copy-back list names it, but naming it is not evidence."
     }
   ]
+},
+{
+  "step": "hm37a-oauth-dependency-preflight",
+  "scope": "whole-block",
+  "surface": "live OAuth container effective-authorization preflight",
+  "reason": "needs the live OAuth container: its identity chain (release directory, oauth/current, protected image ID, one container, image, working directory, health) and the docker exec read of MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED, which no committed measurement provides",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:905-939 must exit zero after the identity checks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:914-935 and the disabled read at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:936-939, before hm37a-prep-seat-control-stage. The block writes no file, prints nothing and records no flag value. hm37-hm6-oauth-precondition keeps its own identity chain and stays the only producer of hm37-hm6-oauth-runtime.txt and hm37-hm6-oauth-public-precondition.json; preflight success is not evidence for either receipt.",
+  "receipt_fields": [
+    "none: no durable receipt fields and no later-consumed output; replacement proof is the live zero exit described above"
+  ],
+  "written_outputs": [],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "docker exec MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED container-program result",
+      "reason": "No committed measurement records the effective flag as the result of a program run inside the OAuth container, and the plan records no value (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:936-939). The dry run has no container to ask, so it neither answers the read nor computes the flag."
+    }
+  ]
+},
+{
+  "step": "hm37-current-window-state",
+  "scope": "whole-block",
+  "surface": "live migration ledger and catalog readbacks for Window A's current state",
+  "reason": "needs the live production database: release_psql_ro reads the migration 02, roster, migration 03/04 catalog and ledger rows and the complete ledger",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1240-1322 must exit zero after the GO.txt decision at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1249-1250, the edge release, compose and mount identity at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1252-1261, the database readbacks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1271-1293 (migration 04 ledger 0 and catalog f, exactly 20260928000004 pending), the runtime comparison and the three active timers at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1302-1307, and then write its four outputs at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1291-1321.",
+  "receipt_fields": [
+    "edge_release",
+    "edge_public_mcp_disabled",
+    "migration_02_ledger_catalog_functional",
+    "roster_transport_presence_wake",
+    "migration_03_hash",
+    "migration_04_ledger",
+    "migration_04_catalog",
+    "pending_versions",
+    "stack_runtime_comparison",
+    "timers",
+    "concurrent_operator_activity"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-all-migration-files.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-all-migration-files.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1291-1292",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
+      "reason": "Historical bytes, not proof that the present block ran. The real window's runbook-23 wrote the same find over the same release's supabase/migrations directory with the same LC_ALL=C sort; those committed bytes are the cited shape. Copy-back reads the file."
+    },
+    {
+      "output": "hm37-ledger-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-ledger-before.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1293-1295",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
+      "reason": "Historical bytes, not proof that the present block ran. The real window's runbook-24 wrote the same ORDER BY version query over the same ledger before migration 04, 61 rows against 62 files. Copy-back reads the file."
+    },
+    {
+      "output": "hm37-pending-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-pending-before.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1296-1298",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
+      "reason": "Historical bytes, not proof that the present block ran. The real window's pending-versions.txt is the same comm -23 result, exactly 20260928000004, which is what this block's own test requires. Copy-back reads the file."
+    },
+    {
+      "output": "hm37-current-window-state.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-current-window-state.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1309-1321",
+      "evidence": null,
+      "reason": "No committed receipt of this block's success exists. plan-documented success shape; no live evidence yet; replaced by the live window receipt; the bytes are the block's own printf list with the values its own tests pin (EXPECTED_EDGE, migration_04_ledger 0, migration_04_catalog f). Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "hm37-all-migration-files.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-all-migration-files.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1291-1292"
+    },
+    {
+      "file": "hm37-ledger-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-ledger-before.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1293-1295"
+    },
+    {
+      "file": "hm37-pending-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-pending-before.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1296-1298"
+    }
+  ],
+  "success_receipts": [
+    {
+      "file": "hm37-current-window-state.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-current-window-state.txt",
+      "mode": "0600",
+      "owner": "root:root",
+      "label": "plan-documented success shape; no live evidence yet; replaced by the live window receipt",
+      "writer": {
+        "kind": "printf-lines",
+        "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1309-1321"
+      },
+      "consumer": {
+        "step": "runbook-11",
+        "check": "presence"
+      }
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "hm37-functional-section5",
+  "scope": "whole-block",
+  "surface": "live migration 04 functional proof on production PostgreSQL",
+  "reason": "needs the live production database: release_psql_ro runs the migration 04 functional SQL",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1551-1562 must exit zero after the functional proof at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1559-1560 writes t to 20260928000004-functional.txt and the block reads back exactly t.",
+  "receipt_fields": [
+    "20260928000004-functional.txt equals t"
+  ],
+  "written_outputs": [
+    {
+      "output": "20260928000004-functional.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/20260928000004-functional.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1559-1560",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/20260928000004-functional.txt",
+      "reason": "Historical real-window readback of the same functional proof (t), not proof that the present block ran. Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "20260928000004-functional.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/20260928000004-functional.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/20260928000004-functional.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1559-1560"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "hm37a-post-control-readback",
+  "scope": "whole-block",
+  "surface": "post-control database functional readback and control-result aggregation",
+  "reason": "needs the live production database: release_psql_ro re-runs the migration 04 functional proof after the controls",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2131-2161 must exit zero after both local control receipts pass with the four required assertions (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2139-2150), the post-control functional proof prints exactly t (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2151-2152) and both boundary receipts pass (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2153-2159), and then write its three outputs.",
+  "receipt_fields": [
+    "hm37-local-control.json: pass true with the old and the new local control results",
+    "hm37-functional-after-control.txt equals t",
+    "hm37-public-check-no-mutation.json: pass true, assertion_id gateway.public-hosted-command-refusal"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-local-control.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-local-control.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2139-2150",
+      "evidence": null,
+      "reason": "Not seeded. The only committed hm37-local-control.json is the aborted window's not_run receipt (pass false), an abort-control input and never a success. The success writer embeds this run's own old and new control receipts, which the plan does not document as a literal. Deriving it would run a part of the declared block (its Python writer over the transferred control receipts), and a whole-block declaration is never executed in part. Reported by name."
+    },
+    {
+      "output": "hm37-functional-after-control.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-functional-after-control.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2151-2152",
+      "evidence": null,
+      "reason": "The committed receipt is the aborted window's not_run receipt, an abort-control input only. plan-documented success shape; no live evidence yet; replaced by the live window receipt; the value is the one this block's own test pins. Copy-back reads the file."
+    },
+    {
+      "output": "hm37-public-check-no-mutation.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-public-check-no-mutation.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2153-2159",
+      "evidence": null,
+      "reason": "The committed receipt is the aborted window's not_run receipt, an abort-control input only. plan-documented success shape; no live evidence yet; replaced by the live window receipt; the bytes are the literal dictionary the block's own print writes. Copy-back reads the file."
+    }
+  ],
+  "outputs": [],
+  "success_receipts": [
+    {
+      "file": "hm37-functional-after-control.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-functional-after-control.txt",
+      "mode": "0600",
+      "owner": "root:root",
+      "label": "plan-documented success shape; no live evidence yet; replaced by the live window receipt",
+      "writer": {
+        "kind": "asserted-literal",
+        "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2151-2152"
+      },
+      "consumer": {
+        "step": "runbook-11",
+        "check": "presence"
+      },
+      "abort_evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-functional-after-control.txt"
+    },
+    {
+      "file": "hm37-public-check-no-mutation.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-public-check-no-mutation.json",
+      "mode": "0600",
+      "owner": "root:root",
+      "label": "plan-documented success shape; no live evidence yet; replaced by the live window receipt",
+      "writer": {
+        "kind": "python-literal-json",
+        "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2153-2159"
+      },
+      "consumer": {
+        "step": "runbook-11",
+        "check": "presence"
+      },
+      "abort_evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-check-no-mutation.json"
+    }
+  ],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-local-control.json",
+      "shape": "Aborted window's not_run receipt (pass false); abort and refusal controls only, never a success receipt."
+    },
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-functional-after-control.txt",
+      "shape": "Aborted window's not_run receipt; abort and refusal controls only."
+    },
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-check-no-mutation.json",
+      "shape": "Aborted window's not_run receipt (pass false); abort and refusal controls only."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-local-control.json",
+      "reason": "The success writer embeds this run's old and new control receipts; the plan documents no literal for them, and the committed receipt is the aborted window's not_run result. Deriving it would run a part of the declared block (its Python writer over the transferred control receipts), and a whole-block declaration is never executed in part. Not seeded."
+    }
+  ]
+},
+{
+  "step": "hm37a-close-readback",
+  "scope": "whole-block",
+  "surface": "close readback of the live edge container and the production database",
+  "reason": "needs the live production database and the live edge container: release_psql_ro reads migration 04's ledger row, and docker inspect and docker exec read the edge container's health and public flag",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2394-2439 must exit zero after the edge release, container health and public-flag checks and the migration 04 ledger count at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2406-2409, then the control and cleanup receipt checks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2412-2425, and only then write hm37-revocation-readback.json and the close receipt hm37-close-readback.txt at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2426-2436. A failed readback never creates a passing close receipt.",
+  "receipt_fields": [
+    "release_sha",
+    "edge_live",
+    "edge_dark",
+    "migration_04",
+    "local_old_control",
+    "local_new_control",
+    "prep_seats_revoked",
+    "prep_active_tokens",
+    "close=PASS"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-revocation-readback.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-revocation-readback.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2412-2425",
+      "evidence": null,
+      "reason": "Not seeded. The committed hm37-revocation-readback.json is the aborted window's different aggregate (window_principal_suffix, nothing to revoke). The success writer's prep_directory value is copied from the cleanup receipt, whose result is one of several documented branches, so no single literal is the plan's success shape. Deriving it would run a part of the declared block (its Python writer over the control and cleanup receipts), and a whole-block declaration is never executed in part. Reported by name."
+    },
+    {
+      "output": "hm37-close-readback.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-close-readback.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2426-2436",
+      "evidence": null,
+      "reason": "The committed receipt is the aborted window's ABORTED_ROLLED_BACK close, an abort and refusal control input that must never supply close=PASS. plan-documented success shape; no live evidence yet; replaced by the live window receipt; the bytes are the block's own printf list."
+    }
+  ],
+  "outputs": [],
+  "success_receipts": [
+    {
+      "file": "hm37-close-readback.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-close-readback.txt",
+      "mode": "0600",
+      "owner": "root:root",
+      "label": "plan-documented success shape; no live evidence yet; replaced by the live window receipt",
+      "writer": {
+        "kind": "printf-lines",
+        "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2426-2436"
+      },
+      "consumer": {
+        "step": "hm37b-open-inputs",
+        "check": "content"
+      },
+      "abort_evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt"
+    }
+  ],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt",
+      "shape": "Aborted window's ABORTED_ROLLED_BACK close; refusal controls only, never a source of close=PASS."
+    },
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-revocation-readback.json",
+      "shape": "Aborted window's aggregate with different fields; does not support the success writer's receipt."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-revocation-readback.json",
+      "reason": "prep_directory is copied from the cleanup receipt; its documented success branches differ (removed, absent, refused), the cleanup receipt has no committed evidence, and the committed aggregate is the aborted window's different shape. Deriving it would run a part of the declared block (its Python writer over the control and cleanup receipts), and a whole-block declaration is never executed in part. Not seeded."
+    }
+  ]
+},
+{
+  "step": "runbook-23",
+  "scope": "whole-block",
+  "surface": "live PostgreSQL target identity assertion before the migration apply",
+  "reason": "needs the live production database: run-db-tool.sh assert-database-identity.sh authenticates the target identity; runbook-16 is declared for the same reason and its database artifact directory is not produced",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1748-1763 must exit zero after the two proof writes at deploy/RELEASE-TO-BOX.md:1757-1760 and the target identity assertion at deploy/RELEASE-TO-BOX.md:1762.",
+  "receipt_fields": [
+    "migration-files.txt: sorted migration file paths",
+    "migration-files.sha256: sha256 of each migration file",
+    "target database identity assertion exits zero"
+  ],
+  "written_outputs": [
+    {
+      "output": "migration-files.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1757-1758",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "migration-files.sha256",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.sha256",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1759-1760",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.sha256",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "migration-files.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1757-1758"
+    },
+    {
+      "file": "migration-files.sha256",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-files.sha256",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-files.sha256",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1759-1760"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "runbook-24",
+  "scope": "whole-block",
+  "surface": "live migration ledger readback",
+  "reason": "needs the live production database: release_psql_ro reads supabase_migrations.schema_migrations",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1772-1786 must exit zero after the ledger query at deploy/RELEASE-TO-BOX.md:1781-1783 and the pending-version comparison at deploy/RELEASE-TO-BOX.md:1784-1785.",
+  "receipt_fields": [
+    "ledger-before.txt: one version per line in ledger order",
+    "pending-versions.txt: versions without a ledger row"
+  ],
+  "written_outputs": [
+    {
+      "output": "ledger-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/ledger-before.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1781-1783",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "pending-versions.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/pending-versions.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1784-1785",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "ledger-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/ledger-before.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/ledger-before.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1781-1783"
+    },
+    {
+      "file": "pending-versions.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/pending-versions.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/pending-versions.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1784-1785"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "runbook-25",
+  "scope": "whole-block",
+  "surface": "live pg_cron job-name readback before the migration",
+  "reason": "needs the live production database: release_psql_ro reads cron.job",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1794-1805 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:1803-1804.",
+  "receipt_fields": [
+    "cron-before.txt: job names in database order"
+  ],
+  "written_outputs": [
+    {
+      "output": "cron-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1803-1804",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "cron-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1803-1804"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "runbook-26",
+  "scope": "whole-block",
+  "surface": "live pre-migration ledger and catalog state",
+  "reason": "needs the live production database: release_psql_ro reads the version's ledger count and runs its catalog proof",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1814-1872 must exit zero after the ledger count and catalog proof at deploy/RELEASE-TO-BOX.md:1845-1865 record ledger 0 and catalog f at deploy/RELEASE-TO-BOX.md:1866-1867.",
+  "receipt_fields": [
+    "migration-state-before.txt: version=20260928000004 ledger=0 catalog=f",
+    "current-migration.env: VERSION and MIGRATION_FILE"
+  ],
+  "written_outputs": [
+    {
+      "output": "migration-state-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-before.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1866-1867",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-before.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "current-migration.env",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/current-migration.env",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1842-1843",
+      "evidence": null,
+      "reason": "Written before the database reads and consumed only by runbook-27 and runbook-28, both declared whole blocks. No committed receipt carries it, no executed block reads it and it is not in the curated copy-back list, so it is not seeded."
+    },
+    {
+      "output": "box-run.log",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/box-run.log",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1867",
+      "evidence": null,
+      "reason": "Appended log; no executed block reads it and no committed success receipt exists. Not seeded."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "migration-state-before.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-before.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-before.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1866-1867"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "current-migration.env",
+      "reason": "Consumed only by declared whole blocks; no committed receipt; not seeded."
+    },
+    {
+      "output": "box-run.log",
+      "reason": "No executed reader and no committed success receipt; not seeded."
+    }
+  ]
+},
+{
+  "step": "runbook-27",
+  "scope": "whole-block",
+  "surface": "live migration apply on the production database",
+  "reason": "needs the live production database: it asserts the target identity and applies one migration file, its ledger row and catalog proof in one transaction with release_psql",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1894-1953 must exit zero after the scratch SQL at deploy/RELEASE-TO-BOX.md:1906-1948, the target identity assertion at deploy/RELEASE-TO-BOX.md:1951 and release_psql --file at deploy/RELEASE-TO-BOX.md:1952; Anvil reads the exit code before continuing.",
+  "receipt_fields": [
+    "none: no durable receipt; replacement proof is the live zero exit and the following runbook-28 readback"
+  ],
+  "written_outputs": [
+    {
+      "output": "APPLY_SQL",
+      "path": "/run/commonswarm-release-{sha}-apply.sql",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1906-1948",
+      "evidence": null,
+      "reason": "Scratch migration SQL rewritten before each database use; no committed evidence, no executed reader. Never seeded."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "APPLY_SQL",
+      "reason": "Scratch migration SQL rewritten before each database use; no committed evidence and no executed reader. Never seeded."
+    }
+  ]
+},
+{
+  "step": "runbook-28",
+  "scope": "whole-block",
+  "surface": "live post-migration ledger, catalog and functional readback",
+  "reason": "needs the live production database: release_psql_ro reads the ledger count, the catalog proof and the functional proof",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1963-2006 must exit zero after the ledger and catalog readbacks at deploy/RELEASE-TO-BOX.md:1973-1993 record ledger 1 and catalog t at deploy/RELEASE-TO-BOX.md:1994-1995 and the functional proof at deploy/RELEASE-TO-BOX.md:2003-2004.",
+  "receipt_fields": [
+    "migration-state-after.txt: version=20260928000004 ledger=1 catalog=t",
+    "20260928000004-functional.txt equals t"
+  ],
+  "written_outputs": [
+    {
+      "output": "migration-state-after.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-after.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:1994-1995",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-after.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "20260928000004-functional.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/20260928000004-functional.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2003-2004",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/20260928000004-functional.txt",
+      "reason": "Historical real-window readback of this functional proof (t). hm37-functional-section5 declares and seeds the same copy-back member at its own plan position; this block does not seed it."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "migration-state-after.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/migration-state-after.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/migration-state-after.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:1994-1995"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
+},
+{
+  "step": "runbook-29",
+  "scope": "whole-block",
+  "surface": "live pg_cron job-name readback after the migration and reconciliation",
+  "reason": "needs the live production database: release_psql_ro reads cron.job after the migration",
+  "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:2018-2058 must exit zero after the cron query at deploy/RELEASE-TO-BOX.md:2048-2049 and both comparisons at deploy/RELEASE-TO-BOX.md:2050-2055 show zero additions and zero removals.",
+  "receipt_fields": [
+    "cron-after.txt: job names in database order",
+    "cron-before-sorted.txt and cron-after-sorted.txt: bytewise sorted names",
+    "cron-added.txt and cron-removed.txt: empty"
+  ],
+  "written_outputs": [
+    {
+      "output": "cron-after.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2048-2049",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "cron-before-sorted.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before-sorted.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2050",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before-sorted.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "cron-after-sorted.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after-sorted.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2051",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after-sorted.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "cron-added.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-added.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2052-2053",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-added.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    },
+    {
+      "output": "cron-removed.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-removed.txt",
+      "producer_lines": "deploy/RELEASE-TO-BOX.md:2054-2055",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-removed.txt",
+      "reason": "Historical real-window output of this block, not proof that the present block ran. Copy-back reads the file."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "cron-after.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2048-2049"
+    },
+    {
+      "file": "cron-before-sorted.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-before-sorted.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-before-sorted.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2050"
+    },
+    {
+      "file": "cron-after-sorted.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-after-sorted.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-after-sorted.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2051"
+    },
+    {
+      "file": "cron-added.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-added.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-added.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2052-2053"
+    },
+    {
+      "file": "cron-removed.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/cron-removed.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/cron-removed.txt",
+      "source_lines": "deploy/RELEASE-TO-BOX.md:2054-2055"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": []
 },
 {
   "step": "hm37-deno-install",

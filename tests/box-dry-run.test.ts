@@ -26,6 +26,7 @@ import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, capturedMacProducts, localCopyProducts, blockPathReferences, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
 import { consumedEvidenceProducts, type EvidenceProduct } from "./box-dry-run/evidence-products.js";
+import { SUCCESS_RECEIPT_LABEL, successReceiptBytes, type SuccessReceipt } from "./box-dry-run/success-receipts.js";
 import { createTemporary as mkdtempSync, removeTemporary, withTemporarySetup } from "./box-dry-run/temporary.js";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
@@ -61,7 +62,7 @@ const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
 const EDGE_PUBLIC_ENABLED_EVIDENCE = "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-closure.txt";
 // Committed readback at hm37-closure.txt:12; A's final check preserves this dark state
-// (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2227-2228). This is the only committed measurement of the
+// (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2407-2408). This is the only committed measurement of the
 // edge's public flag, so it answers the container program for every fixture, including window B after a passed
 // window A: the dry run has no container to observe it. It is not a window A transition and supplies no edge.
 const EDGE_PUBLIC_ENABLED = /^mcp_public_enabled=(.+)$/m.exec(readFileSync(EDGE_PUBLIC_ENABLED_EVIDENCE, "utf8"))?.[1];
@@ -929,6 +930,10 @@ function removeOwnedTemporary(path: string, prefix: string): void {
   removeTemporary(path, prefix);
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function shortStep(block: Block): string {
   return block.step.split(" — ")[0] ?? block.step;
 }
@@ -1707,7 +1712,12 @@ function seedBoxProducts(fixture: Fixture, step: string): string[] {
 // not with a canned answer. The harness seeds only the output files the declaration lists, and only from the
 // committed evidence the declaration cites. The older browser contract fixtures also support explicitly
 // labeled plan-documented shapes; these do not prove browser results. Ruling 7 whole-block declarations
-// forbid that route, seed only actual later reads, and leave unsupported outputs absent by name.
+// forbid that route for `outputs`, seed only actual later reads, and leave unsupported outputs absent by name.
+// Ruling 12 adds one narrow, separate route: a whole-block declaration's `success_receipts` hold the SUCCESS
+// output of that producer when no committed live success evidence exists. The seed is made at the producer's own
+// encountered NOT EXECUTED step, only for a path a later block actually reads, only after its directory producer
+// ran, and its bytes are whatever the producer's own success writer prints (success-receipts.ts), labeled in the
+// declaration and the report. A historical aborted receipt stays an abort and refusal control input.
 // ---------------------------------------------------------------------------------------------------------
 
 interface EvidenceRef {
@@ -1754,6 +1764,8 @@ interface NonSubstitutableEntry {
   scope?: "whole-block";
   receipt_fields?: string[];
   written_outputs?: Array<{ output: string; path: string; producer_lines: string; evidence: string | null; reason?: string }>;
+  // Ruling 12: success receipts with no committed live evidence, seeded from this block's own writer.
+  success_receipts?: SuccessReceipt[];
 }
 
 function nonSubstitutableEntries(): NonSubstitutableEntry[] {
@@ -1836,6 +1848,28 @@ function seedDeclaredOutputs(entry: NonSubstitutableEntry, fixture: Fixture, ove
       chmodSync(target, Number.parseInt(output.mode, 8));
       if (fixture.part === "box") chownSync(target, 0, 0);
       else recordBoxOwner(fixture.boxRoot!, path, "root:root");
+      result.seeded.push(target);
+    }
+    // Ruling 12. Same gates as an evidence product: the producer is this encountered NOT EXECUTED block, a later
+    // block actually reads the path, and the earlier directory producer ran. The bytes are the producer's own
+    // success writer, never a fixture copy, and the receipt is labeled where the report reads it.
+    for (const receipt of entry.success_receipts ?? []) {
+      assert.equal(receipt.label, SUCCESS_RECEIPT_LABEL, `${entry.step}/${receipt.file}: a success receipt carries the exact provenance label`);
+      assert.equal(receipt.owner, "root:root", `${entry.step}/${receipt.file}: unsupported owner`);
+      assert.match(receipt.mode, /^0[0-7]{3}$/);
+      if (!reads.has(receipt.path)) continue;
+      assert.ok(fixture.part === "box" ? guardedBoxFixtures.has(fixture) : admittedMacFixtures.has(fixture),
+        "success receipts require the existing runner guard or canary admission");
+      const path = handoffPath(receipt.path);
+      const target = fixture.part === "box" ? path : join(fixture.boxRoot!, path);
+      if (!pathExists(dirname(target))) {
+        result.refused.push(`UNPRODUCED ${path}: its producer directory is absent`);
+        continue;
+      }
+      writeFileSync(target, successReceiptBytes(receipt, block.source), { mode: Number.parseInt(receipt.mode, 8) });
+      chmodSync(target, Number.parseInt(receipt.mode, 8));
+      if (fixture.part === "box") chownSync(target, 0, 0);
+      else recordBoxOwner(fixture.boxRoot!, path, receipt.owner);
       result.seeded.push(target);
     }
     return result;
@@ -3422,7 +3456,7 @@ function siteFourDeployStatus(fixture: Fixture): string {
 test("all scoped fences and host declarations are executable or explicitly text", (t) => {
   const parsed = SCOPED.flatMap(blocks);
   assert.equal(blocks(PREP).length, 5);
-  assert.equal(blocks(HM37).length, 30);
+  assert.equal(blocks(HM37).length, 31);
   assert.equal(blocks(HM37B).length, 24);
   assert.equal(blocks(RUNBOOK).length, 67);
   assert.equal(blocks(SITE).length, 15);
@@ -3438,7 +3472,7 @@ test("all scoped fences and host declarations are executable or explicitly text"
     const syntax = spawnSync("/bin/bash", ["-n"], { input: block.source, encoding: "utf8" });
     assert.equal(syntax.status, 0, `${block.file}:${block.line} [${block.step}] ${syntax.stderr}`);
   }
-  t.diagnostic(`blocks=${parsed.length}; prep=5 hm37a=30 hm37b=24 runbook=67 site=15 template=3`);
+  t.diagnostic(`blocks=${parsed.length}; prep=5 hm37a=31 hm37b=24 runbook=67 site=15 template=3`);
 });
 
 test("operator requirements name an executing step or an explicit HezLead decision", () => {
@@ -6150,17 +6184,23 @@ function notExecutedLine(block: Block, execution: Execution): string {
   const declared = execution.declared!;
   const outputs = declared.outputs ?? [];
   const seeded = (execution.seeded ?? []).map((path) => basename(path));
-  const observed = seeded.filter((file) => !outputs.find((output) => output.file === file)?.plan_documented).map((file) => {
+  const receipts = declared.success_receipts ?? [];
+  const observed = seeded.filter((file) => !outputs.find((output) => output.file === file)?.plan_documented &&
+    !receipts.some((receipt) => receipt.file === file)).map((file) => {
     const evidence = outputs.find((output) => output.file === file)?.evidence;
     return evidence ? `${file} (${evidence}; historical bytes, not this window's result)` : file;
   }).join(", ") || "nothing";
   const planShapes = seeded.flatMap((file) => {
     const shape = outputs.find((output) => output.file === file)?.plan_documented;
     return shape ? [` Plan-documented output: ${file} (${shape.label}; source: ${shape.evidence}:${shape.source_lines}).`] : [];
+  }).join("") + seeded.flatMap((file) => {
+    const receipt = receipts.find((candidate) => candidate.file === file);
+    return receipt ? [` Plan-documented success receipt: ${file} (${receipt.label}; writer ${receipt.writer.source_lines}; read by ${receipt.consumer.step}).`] : [];
   }).join("");
   const missing = [...new Set([
     ...(declared.unproduced ?? []).map((item) => item.output),
     ...(declared.scope === "whole-block" ? outputs.filter((output) => !seeded.includes(output.file)).map((output) => output.file) : []),
+    ...(declared.scope === "whole-block" ? receipts.filter((receipt) => !seeded.includes(receipt.file)).map((receipt) => receipt.file) : []),
   ])].join(", ") || "none";
   const items = (declared.plan_items ?? []).map((item) => ` Plan item: ${item}.`).join("") +
     (declared.receipt_fields?.length ? ` Live receipt fields: ${declared.receipt_fields.join(", ")}.` : "") +
@@ -7184,6 +7224,231 @@ test("controls: whole-block declarations cannot execute or seed plan-only and un
   for (const output of selected) assert.ok(output.bytes.equals(readFileSync(output.evidence)));
   assert.deepEqual(consumedEvidenceProducts(outputs, new Set()), []);
   assert.deepEqual(consumedEvidenceProducts([{ file: "missing.json", path: "/tmp/missing.json", mode: "0600" }], new Set(["/tmp/missing.json"])), []);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Ruling 12 controls. A declared whole-block producer whose SUCCESS receipt has no committed live evidence is
+// seeded from its own writer. Each such receipt has an executed consumer, and that consumer fails through
+// executeWholeBlock when the receipt is missing or, where it reads content, wrong. The receipt table comes from
+// the declarations; no receipt name, field or count is copied here.
+// ---------------------------------------------------------------------------------------------------------
+
+interface SuccessReceiptRow {
+  entry: NonSubstitutableEntry;
+  receipt: SuccessReceipt;
+  producer: Block;
+}
+
+function successReceiptRows(): SuccessReceiptRow[] {
+  return nonSubstitutableEntries().flatMap((entry) => (entry.success_receipts ?? []).map((receipt) => {
+    const producer = blockIndex().get(entry.step!);
+    assert.ok(producer, `${entry.step}: the declared producer is not a plan step`);
+    return { entry, receipt, producer };
+  }));
+}
+
+test("controls: success receipts carry the exact label, a plan writer and an executed consumer", () => {
+  const rows = successReceiptRows();
+  assert.ok(rows.length > 0, "no success receipt is declared");
+  assert.equal(new Set(rows.map(({ receipt }) => receipt.path)).size, rows.length, "a success receipt is declared twice");
+  for (const { entry, receipt, producer } of rows) {
+    const label = `${entry.step}/${receipt.file}`;
+    assert.equal(entry.scope, "whole-block", label);
+    assert.equal(receipt.label, SUCCESS_RECEIPT_LABEL, label);
+    assert.equal(receipt.path, `/home/commonswarm/stack/release-proofs/{sha}/${receipt.file}`, label);
+    // Evidence and plan-documented shapes are disjoint: a receipt with committed live evidence is not declared here.
+    assert.equal((entry.outputs ?? []).some((output) => output.file === receipt.file), false, `${label}: also an evidence output`);
+    const written = (entry.written_outputs ?? []).find((output) => output.path === receipt.path);
+    assert.ok(written, `${label}: not listed beside the producer's other outputs`);
+    assert.equal(written.evidence, null, `${label}: a receipt with committed evidence is seeded from it, not from the writer`);
+    assert.match(written.reason ?? "", new RegExp(escapeRegExp(SUCCESS_RECEIPT_LABEL)), label);
+    assert.ok(blockIndex().has(receipt.consumer.step), `${label}: consumer ${receipt.consumer.step} is not a plan step`);
+    assert.equal(declaredNonSubstitutable(receipt.consumer.step), undefined, `${label}: the consumer is itself declared, so it never reads the receipt`);
+    if (receipt.consumer.check === "presence") {
+      assert.ok(handoffInventory().some((handoff) => handoff.producer.step === entry.step && handoff.consumer.step === receipt.consumer.step &&
+        handoff.path === receipt.path), `${label}: ${receipt.consumer.step} is not a cross-host reader of it`);
+    }
+    // A historical aborted receipt of the same name is an abort and refusal input only. It is never the bytes.
+    if (receipt.abort_evidence) {
+      assert.equal(existsSync(receipt.abort_evidence), true, `${label}: missing abort evidence`);
+      assert.notDeepEqual(readFileSync(receipt.abort_evidence), successReceiptBytes(receipt, producer.source), `${label}: the success shape equals the aborted receipt`);
+    }
+    const bytes = successReceiptBytes(receipt, producer.source);
+    assert.ok(bytes.length > 0 && bytes.at(-1) === 0x0a, `${label}: a receipt ends in a newline`);
+  }
+
+  // The bytes are read from the writer, never guessed: a changed or unreadable writer is refused.
+  const byFile = (file: string): SuccessReceiptRow => {
+    const row = rows.find(({ receipt }) => receipt.file === file);
+    assert.ok(row, `no declared success receipt ${file}`);
+    return row;
+  };
+  const close = byFile("hm37-close-readback.txt");
+  assert.throws(() => successReceiptBytes(close.receipt, mutatedBlock(close.producer, [['"release_sha=$SHA"', '"release_sha=$UNBOUND"']]).source),
+    /\$UNBOUND has no plan-documented success value/);
+  assert.throws(() => successReceiptBytes(close.receipt, mutatedBlock(close.producer, [["'close=PASS' \\", "'close=PASS' && \\"]]).source),
+    /printf has a word this reader does not model/);
+  assert.throws(() => successReceiptBytes(close.receipt, mutatedBlock(close.producer, [['>"$PROOF_DIR/hm37-close-readback.txt"', '>"$PROOF_DIR/other.txt"']]).source),
+    /does not write it/);
+  const literal = byFile("hm37-public-check-no-mutation.json");
+  assert.throws(() => successReceiptBytes(literal.receipt, mutatedBlock(literal.producer, [['"gateway.public-hosted-command-refusal"}, indent=2', 'values}, indent=2']]).source),
+    /prints more than literals/);
+  const pinned = byFile("hm37-functional-after-control.txt");
+  const pin = 'test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t';
+  assert.throws(() => successReceiptBytes(pinned.receipt, mutatedBlock(pinned.producer, [[pin, `${pin}\n  ${pin.replace(/ = t$/, " = f")}`]]).source),
+    /pins 2 different literals/);
+});
+
+test("controls: a success receipt is seeded only for a later read, after its producer's directory", { skip: MAC_ONLY }, () => {
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const producers = new Map(successReceiptRows().map(({ entry, producer }): [string, { entry: NonSubstitutableEntry; producer: Block }] =>
+    [entry.step!, { entry, producer }]));
+  for (const { entry, producer } of producers.values()) {
+    const fixture = prepareMacFixture([apply, producer, copyback], { state: "s5" });
+    try {
+      const receipts = entry.success_receipts!;
+      const target = (receipt: SuccessReceipt): string => join(fixture.boxRoot!, handoffPath(receipt.path));
+      // The producer is encountered with no later reader: nothing is seeded, and the directory is not made for it.
+      const unread = executeWholeBlock(producer, fixture);
+      assert.equal(unread.result, "not-executed", unread.stderr);
+      assert.deepEqual(unread.seeded, [], `${entry.step} seeded without a later read`);
+      // A later reader but no directory producer: refused by name, never repaired.
+      const early = executeWholeBlock(producer, fixture, { laterBlocks: [copyback] });
+      assert.equal(early.result, "failed", `${entry.step} seeded into a directory its producer never made`);
+      for (const receipt of receipts) {
+        assert.match(early.stderr, new RegExp(`UNPRODUCED .*${escapeRegExp(receipt.file)}: its producer directory is absent`));
+        assert.equal(pathExists(target(receipt)), false);
+      }
+      assert.equal(pathExists(dirname(target(receipts[0]!))), false, "the harness made the directory itself");
+      // The directory producer runs, then the actual later read selects the receipt.
+      const boundary = executePlanUntilFailure([apply], fixture, "mac");
+      assert.equal(boundary[0]!.execution.result, "not-executed");
+      const seeded = executeWholeBlock(producer, fixture, { laterBlocks: [copyback] });
+      assert.equal(seeded.result, "not-executed", seeded.stderr);
+      for (const receipt of receipts) {
+        assert.ok(seeded.seeded!.includes(target(receipt)), `${entry.step} did not seed ${receipt.file}`);
+        assert.deepEqual(readFileSync(target(receipt)), successReceiptBytes(receipt, producer.source));
+        assert.equal(lstatSync(target(receipt)).mode & 0o777, Number.parseInt(receipt.mode, 8));
+        assert.equal(readBoxOwners(fixture.boxRoot!)[relative(fixture.boxRoot!, target(receipt))], receipt.owner);
+        // The report names the receipt with the exact provenance label.
+        assert.match(notExecutedLine(producer, seeded), new RegExp(`Plan-documented success receipt: ${escapeRegExp(receipt.file)} \\(${escapeRegExp(SUCCESS_RECEIPT_LABEL)};`));
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
+test("controls: a missing or wrong close-receipt field fails window B's opening block", { skip: MAC_ONLY }, () => {
+  const row = successReceiptRows().find(({ receipt }) => receipt.consumer.check === "content");
+  assert.ok(row, "no success receipt has a content consumer");
+  const { receipt, producer } = row;
+  // Window A's side: the bytes window B reads are the ones the seeding path writes for a later read.
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const side = prepareMacFixture([apply, producer, copyback], { state: "s5" });
+  let documented: Buffer;
+  try {
+    executePlanUntilFailure([apply], side, "mac");
+    const seeded = executeWholeBlock(producer, side, { laterBlocks: [copyback] });
+    assert.equal(seeded.result, "not-executed", seeded.stderr);
+    documented = readFileSync(join(side.boxRoot!, handoffPath(receipt.path)));
+  } finally {
+    cleanupMacFixture(side);
+  }
+  const lines = documented.toString("utf8").split("\n");
+  // Window B's own committed input shape is an independent source: every line it carries is one the writer prints.
+  let from = 0;
+  for (const line of promptSchemaContent("hm37-a-close-receipt").split("\n").filter(Boolean)) {
+    const at = lines.indexOf(line, from);
+    assert.ok(at >= from, `window A's writer does not print ${line}, which window B's receipt schema carries`);
+    from = at + 1;
+  }
+
+  const plan = resolveSteps("window-b/pass", windowBPaths().get("pass")!);
+  const consumer = plan.find((block) => shortStep(block) === receipt.consumer.step);
+  assert.ok(consumer, `${receipt.consumer.step} is not in window B's successful order`);
+  // The fields the consumer requires come from its own text; each must be a line the producer's writer prints.
+  const required = [...consumer.source.matchAll(/^[ \t]*(grep -qFx (?:"([^"]*)"|'([^']*)') "\$HM37_A_CLOSE_RECEIPT")[ \t]*$/gm)]
+    .map((match) => ({ command: match[1]!, line: (match[2] ?? match[3]!).replaceAll("$RELEASE_SHA", RELEASE_SHA) }));
+  const everyRead = consumer.source.match(/^[ \t]*grep .*"\$HM37_A_CLOSE_RECEIPT".*$/gm) ?? [];
+  assert.ok(required.length > 0, "the consumer checks no receipt line");
+  assert.equal(required.length, everyRead.length, "the consumer reads the receipt in a form this control does not model");
+  for (const { line } of required) assert.ok(lines.includes(line), `the documented receipt does not print ${line}, which window B requires`);
+
+  const variants: Array<{ name: string; bytes: Buffer; command: string; key: string }> = [];
+  for (const { command, line } of required) {
+    const at = lines.indexOf(line);
+    const key = line.split("=")[0]!;
+    variants.push({ name: `missing ${key}`, command, key, bytes: Buffer.from(lines.filter((_, index) => index !== at).join("\n")) });
+    variants.push({ name: `wrong ${key}`, command, key, bytes: Buffer.from(lines.map((value, index) => index === at ? `${value}-wrong` : value).join("\n")) });
+  }
+  const fixture = prepareMacFixture(plan, { state: "s5", fromWindowA: { edge: CANDIDATE_EDGE, closeReceipt: documented, closeReceiptPath: "window-a-control" } });
+  try {
+    const path = fixture.env.HM37_A_CLOSE_RECEIPT!;
+    assert.ok(path, "window B's fixture has no close-receipt input");
+    for (const variant of variants) {
+      writeFileSync(path, variant.bytes, { mode: 0o600 });
+      chmodSync(path, 0o600);
+      const execution = executeWholeBlock(consumer, fixture);
+      assert.equal(execution.result, "failed", `${variant.name} was accepted`);
+      assert.equal(execution.status, 1, `${variant.name}: ${execution.stderr}`);
+      // It fails on the grep for that field, not on an unrelated check.
+      assert.match(execution.firstFailingCommand ?? "", /^grep -qFx /, `${variant.name}: ${execution.stderr}`);
+      assert.ok((execution.firstFailingCommand ?? "").includes(variant.key), `${variant.name} failed on ${execution.firstFailingCommand}`);
+      assert.doesNotMatch(execution.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
+    }
+    // Positive control last: the complete documented receipt passes the same block.
+    writeFileSync(path, documented, { mode: 0o600 });
+    chmodSync(path, 0o600);
+    const accepted = executeWholeBlock(consumer, fixture);
+    assert.equal(accepted.result, "passed", accepted.stderr);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: runbook-11 copies a seeded success receipt back and fails when the receipt is missing", { skip: MAC_ONLY }, () => {
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const rows = successReceiptRows().filter(({ receipt }) => receipt.consumer.check === "presence");
+  assert.ok(rows.length > 0, "no success receipt has a presence consumer");
+  // One fixture per producer: the producer's NOT EXECUTED step seeds every receipt it owns for the same later read.
+  const producers = [...new Set(rows.map(({ entry }) => entry.step!))];
+  for (const step of producers) {
+    const owned = rows.filter(({ entry }) => entry.step === step);
+    const producer = owned[0]!.producer;
+    const fixture = prepareMacFixture([apply, producer, copyback], { state: "s5" });
+    try {
+      const evidence = join(fixture.temporary!, "copy-back-evidence");
+      mkdirSync(evidence, { mode: 0o700 });
+      writeMode(join(fixture.home, ".commonswarm-release-window.env"), shellAssignments({ SHA: RELEASE_SHA, EVIDENCE_DIR: evidence }));
+      assert.equal(executePlanUntilFailure([apply], fixture, "mac")[0]!.execution.result, "not-executed");
+      const seeded = executeWholeBlock(producer, fixture, { laterBlocks: [copyback] });
+      assert.equal(seeded.result, "not-executed", seeded.stderr);
+      const proof = join(fixture.boxRoot!, PROOF_DIR);
+      for (const { receipt } of owned) {
+        assert.equal(receipt.consumer.step, shortStep(copyback));
+        assert.equal(pathExists(join(proof, receipt.file)), true, `${step} did not seed ${receipt.file}`);
+        // The box's copy-back manifest names the receipt; the manifest is a box input that the earlier runbook-03 writes.
+        writeMode(join(proof, "copy-back.list"), `copy-back.list\n${receipt.file}\n`);
+        recordBoxOwner(fixture.boxRoot!, join(PROOF_DIR, "copy-back.list"), "root:root");
+        const positive = executeWholeBlock(copyback, fixture);
+        assert.equal(positive.result, "passed", `${receipt.file}: ${positive.stderr}`);
+        assert.deepEqual(readFileSync(join(evidence, receipt.file)), readFileSync(join(proof, receipt.file)));
+        // The member is gone from the box: the box half's own existence check refuses it.
+        rmSync(join(proof, receipt.file));
+        rmSync(join(evidence, receipt.file));
+        const missing = executeWholeBlock(copyback, fixture);
+        assert.equal(missing.result, "failed", `${receipt.file} missing was accepted`);
+        assert.match(missing.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$path"/);
+        assert.equal(pathExists(join(evidence, receipt.file)), false);
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
 });
 
 test("controls: missing interpreters cannot produce Deno or database observations", () => {

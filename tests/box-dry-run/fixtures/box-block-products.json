@@ -8,7 +8,7 @@
       "mode": "0700",
       "plan_documented": {
         "evidence": "deploy/RELEASE-TO-BOX.md",
-        "source_lines": "627-935; directory: 667; Python box identity: 716-717; consumer: docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:982-1001",
+        "source_lines": "627-935; directory: 667; Python box identity: 716-717; consumer: docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1073-1092",
         "label": "Synthetic target-directory product only, at the box producer's plan position. The whole producer requires the Linux commonswarm account and real uid/gid stat metadata (716-717, 795-801, 847-848), unavailable in the Mac fixture's Python boundary. Committed window state at docs/evidence/2026-09-29-release-eb2a87ac4b5a/window.env and hm37-closure.txt records this proof directory's window. This does not prove the directory verifier or the box apply ran.",
         "json": {}
       }
