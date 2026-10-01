@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -30,7 +31,7 @@ test("PUBLIC_H0_LINK_JOIN occurs in exactly one non-exempt tracked file", () => 
 });
 
 test("the flag guard applies only the allowed exemptions across the entire tracked tree", () => {
-  const root = mkdtempSync("/private/tmp/commonswarm-flag-guard-");
+  const root = mkdtempSync(join(tmpdir(), "commonswarm-flag-guard-"));
   try {
     execFileSync("git", ["init", "--quiet", root]);
     for (const directory of ["site/src", "src", "supabase/functions", "deploy"]) mkdirSync(join(root, directory), { recursive: true });

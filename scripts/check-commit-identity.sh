@@ -24,6 +24,8 @@ if [ -z "$RANGE" ]; then
 fi
 
 # Measured on commonswarm main, 2026-08-11: these six cover 1792/1792 address-fields.
+# 2026-10-01: tlangridge@gmail.com added. It is the GitHub default author of the deploy account (tlangridge) for
+# web/API squash merges; one such commit (fdce0cba, #29) is on main. Prefer local --no-ff merges as yulanbot.
 ALLOWED='
 yulanbot@gmail.com
 tom@ridge.io
@@ -31,6 +33,7 @@ noreply@github.com
 quarry3@cloud-swarm.local
 ferry@cloud-swarm.local
 newel@cloud-swarm.local
+tlangridge@gmail.com
 '
 
 # Non-routable agent-seat identities. A .local address cannot name an employer, so allowing the
