@@ -365,7 +365,14 @@ test("CONTROL: with the scroll rule reverted the same table widens its document"
       "above is not attributable to the scroll rule",
   );
   assert.ok(control.container.scrollWidth > control.container.clientWidth);
-  assert.equal(control.table.scrollWidth, control.table.clientWidth);
+  /* Not its own scroller: the table's content is its box. `scrollWidth` and `clientWidth` are
+   * rounded separately, so a fractional table width reads 729 against 730 on Linux Chrome; one
+   * pixel of rounding is not scrolling, a real scroller is wider by the whole overflow. */
+  assert.ok(
+    Math.abs(control.table.scrollWidth - control.table.clientWidth) <= 1,
+    `with the scroll rule reverted the table is still a scroller: ${JSON.stringify(control)}`,
+  );
+  assert.equal(control.tableOverflowX, "visible");
 });
 
 test("CONTROL: with the cell wrap rule reverted the table squeezes instead of scrolling", async () => {
