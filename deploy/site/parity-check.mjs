@@ -147,7 +147,9 @@ function collectFingerprintedAssets(source, documentPath, paths) {
     for (const match of source.matchAll(pattern)) {
       let url;
       try {
-        url = new URL(match[1], documentUrl);
+        // Vite preload lists use paths from the site root, while imports use module-relative paths.
+        const assetPath = requireKnownExtension && match[1].startsWith("_astro/") ? `/${match[1]}` : match[1];
+        url = new URL(assetPath, documentUrl);
       } catch {
         continue;
       }
