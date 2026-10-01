@@ -1,4 +1,4 @@
-"""Offline urllib fixture for the whole-block dry run.
+"""Offline urllib fixture and fixture-ownership adapter for the whole-block dry run.
 
 The response shapes come from the committed release evidence.  Every request
 is recorded without headers or credential values.
@@ -6,10 +6,14 @@ is recorded without headers or credential values.
 from __future__ import annotations
 
 import email.message
+import grp
+import importlib.util
 import io
 import json
 import os
 import pathlib
+import pwd
+import sys
 import urllib.error
 import urllib.request
 
@@ -158,3 +162,161 @@ def build_opener(*_handlers):
 
 urllib.request.urlopen = urlopen
 urllib.request.build_opener = build_opener
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Fixture ownership.
+#
+# The Mac lane's fixture box root holds files the Mac user owns. The ownership the box holds for them (measured
+# in M6/M18: commonswarm:commonswarm on the edge environment file) is kept in the sidecar the box userland
+# writes, `.fixture/owners.json`, which `stat -c %U` already reads. A plan's Python that asks the same question
+# through pathlib/os.stat and pwd.getpwuid must get the same answer, and nothing more:
+#
+#   * only a path that resolves inside BOX_DRY_RUN_BOX_ROOT is adapted, and only its st_uid and st_gid; mode,
+#     type, size, times and symlink behavior are the real ones;
+#   * a recorded owner is answered with the box's own account ids (the table of the box userland, M3), and
+#     pwd.getpwuid/grp.getgrgid answer only an id this adapter issued for a recorded path;
+#   * a fixture path nothing recorded gets an id that the lookup refuses (69), the way `stat -c %U` does;
+#   * every other path and every other lookup is the host's, unchanged;
+#   * the adapter is inactive unless the Mac lane's own variables name a fixture box root other than "/": the box
+#     lane runs real Linux metadata and is not touched.
+# Path-based stat/lstat and pathlib.Path.stat/lstat are adapted; file-descriptor and directory-entry stats are
+# not, so they keep the host's metadata and never claim a recorded owner.
+# ---------------------------------------------------------------------------------------------------------
+
+_USERLAND = None
+_OWNERS_CACHE = (None, {})
+_ISSUED = {"user": {}, "group": {}}
+_UNRECORDED = {}
+_ADAPTING = []
+_UNRECORDED_BASE = 0x7F000000
+_STAT_EXTRAS = (
+    "st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns", "st_ctime_ns",
+    "st_blksize", "st_blocks", "st_rdev", "st_flags", "st_gen", "st_birthtime",
+)
+# Measured passwd fields of the same accounts (M3); the group members list is empty there.
+_ACCOUNT_HOMES = {"root": "/root", "ops": "/home/ops", "commonswarm": "/home/commonswarm"}
+
+
+def _load_userland():
+    if os.environ.get("BOX_DRY_RUN_PART") != "mac":
+        return None
+    root = os.environ.get("BOX_DRY_RUN_BOX_ROOT", "")
+    userland = os.environ.get("BOX_DRY_RUN_USERLAND", "")
+    if not root or not os.path.isdir(root) or os.path.realpath(root) == "/" or not os.path.isfile(userland):
+        return None
+    spec = importlib.util.spec_from_file_location("box_userland", userland)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_USERLAND = _load_userland()
+_real_os_stat = os.stat
+_real_os_lstat = os.lstat
+_real_path_stat = pathlib.Path.stat
+_real_path_lstat = pathlib.Path.lstat
+_real_getpwuid = pwd.getpwuid
+_real_getgrgid = grp.getgrgid
+
+
+def _owners():
+    global _OWNERS_CACHE
+    sidecar = _USERLAND.owners_path()
+    try:
+        info = _real_os_stat(sidecar)
+        signature = (info.st_ino, info.st_size, info.st_mtime_ns)
+    except FileNotFoundError:
+        signature = None
+    if _OWNERS_CACHE[0] != signature or signature is None:
+        _OWNERS_CACHE = (signature, _USERLAND.load_owners())
+    return _OWNERS_CACHE[1]
+
+
+def _unrecorded(path):
+    for identifier, named in _UNRECORDED.items():
+        if named == path:
+            return identifier
+    identifier = _UNRECORDED_BASE + len(_UNRECORDED)
+    _UNRECORDED[identifier] = path
+    return identifier
+
+
+def _refuse_unrecorded(identifier):
+    sys.stderr.write("UNPRODUCED owner of %s: nothing in the fixture recorded it\n" % _UNRECORDED[identifier])
+    raise SystemExit(69)
+
+
+def _adapt(result, path, follow):
+    # Resolving a path and reading the sidecar stat their parts. Those stats are the host's own, never adapted again.
+    if _ADAPTING:
+        return result
+    _ADAPTING.append(path)
+    try:
+        return _adapted(result, os.fsdecode(path), follow)
+    finally:
+        _ADAPTING.pop()
+
+
+def _adapted(result, path, follow):
+    key = _USERLAND.fixture_key(path, follow)
+    if key is None:
+        return result
+    owner, _, group = _owners().get(key, "").partition(":")
+    if owner in _USERLAND.USERS and group in _USERLAND.USERS:
+        uid, gid = _USERLAND.USERS[owner], _USERLAND.USERS[group]
+        _ISSUED["user"][uid] = owner
+        _ISSUED["group"][gid] = group
+    else:
+        uid = gid = _unrecorded(path)
+    fields = list(result)
+    fields[4], fields[5] = uid, gid
+    return os.stat_result(fields, {name: getattr(result, name) for name in _STAT_EXTRAS if hasattr(result, name)})
+
+
+def _path_argument(path, dir_fd):
+    return dir_fd is None and isinstance(path, (str, bytes, os.PathLike))
+
+
+def _os_stat(path, *, dir_fd=None, follow_symlinks=True):
+    result = _real_os_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+    return _adapt(result, path, follow_symlinks) if _path_argument(path, dir_fd) else result
+
+
+def _os_lstat(path, *, dir_fd=None):
+    result = _real_os_lstat(path, dir_fd=dir_fd)
+    return _adapt(result, path, False) if _path_argument(path, dir_fd) else result
+
+
+def _path_stat(self, *args, **kwargs):
+    return _adapt(_real_path_stat(self, *args, **kwargs), self, kwargs.get("follow_symlinks", True))
+
+
+def _path_lstat(self):
+    return _adapt(_real_path_lstat(self), self, False)
+
+
+def _getpwuid(uid):
+    if uid in _UNRECORDED:
+        _refuse_unrecorded(uid)
+    if uid in _ISSUED["user"]:
+        name = _ISSUED["user"][uid]
+        return pwd.struct_passwd((name, "*", uid, uid, "", _ACCOUNT_HOMES[name], "/bin/bash"))
+    return _real_getpwuid(uid)
+
+
+def _getgrgid(gid):
+    if gid in _UNRECORDED:
+        _refuse_unrecorded(gid)
+    if gid in _ISSUED["group"]:
+        return grp.struct_group((_ISSUED["group"][gid], "*", gid, []))
+    return _real_getgrgid(gid)
+
+
+if _USERLAND is not None:
+    os.stat = _os_stat
+    os.lstat = _os_lstat
+    pathlib.Path.stat = _path_stat
+    pathlib.Path.lstat = _path_lstat
+    pwd.getpwuid = _getpwuid
+    grp.getgrgid = _getgrgid

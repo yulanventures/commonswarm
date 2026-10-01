@@ -2773,7 +2773,32 @@ function proofArchiveContent(fixture: ProductContext): Buffer {
 // clock's, the same input the writer's expiry assertion reads in a Mac run. This is a pure file derivation for static
 // handoff coverage: the executed transfer still refuses the file, because the install that puts it in the evidence
 // directory belongs to the declared directed-check block and is not added to any execution.
-function prepSeatInventory(fixture: ProductContext): Buffer {
+//
+// The writer is plan text, so it never runs raw on the host. It runs only where a plan block runs: the caller's own
+// admitted fixture, or a disposable one admitted the same way (the Mac jail after its outside-root canary, or the
+// guarded box runner) and removed afterwards. Without that boundary nothing runs and nothing is derived.
+function withWriterBoundary<T>(context: ProductContext, run: (boundary: Fixture) => T): T {
+  const own = context as Fixture;
+  if (admittedMacFixtures.has(own) || guardedBoxFixtures.has(own)) return run(own);
+  const box = process.env.BOX_DRY_RUN_PART === "box";
+  const boundary = box ? prepareBoxFixture("s2") : prepareMacFixture();
+  try {
+    return run(boundary);
+  } finally {
+    if (box) cleanupBoxFixture(boundary);
+    else cleanupMacFixture(boundary);
+  }
+}
+
+interface PrepSeatWriterRun {
+  status: number | null;
+  stderr: string;
+  bytes?: Buffer;
+}
+
+let prepSeatWriterRuns = 0;
+
+function runPrepSeatWriter(fixture: ProductContext, mutate: (writer: string) => string = (writer) => writer): PrepSeatWriterRun {
   const open = planBlock(HM37, "hm37a-open-inputs");
   const writer = /python3 - "\$PREP_RECEIPT_PATH" "\$WINDOW_END_UTC" "\$PREP_SEATS" <<'PY'\n([\s\S]*?)\nPY\n/.exec(open.source)?.[1];
   assert.ok(writer, "window A's open block has no PREP_SEATS writer");
@@ -2781,15 +2806,20 @@ function prepSeatInventory(fixture: ProductContext): Buffer {
   assert.ok(receipt && pathExists(receipt), "the PREP_SEATS writer needs the supplied PREP receipt");
   const windowEnd = applyWindowValues(planBlock(RUNBOOK, "1-apply-release-directories"), "s2").WINDOW_END_UTC;
   assert.ok(windowEnd, "the fixture clock has no window end");
-  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-prep-seats-"));
-  try {
-    const output = join(temporary, "prep-seats.json");
-    const run = spawnSync("/usr/bin/python3", ["-", receipt, windowEnd, output], { input: `${writer}\n`, encoding: "utf8" });
-    assert.equal(run.status, 0, `the PREP_SEATS writer did not run on the supplied receipt: ${run.error?.message ?? run.stderr}`);
-    return readFileSync(output);
-  } finally {
-    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-prep-seats-");
-  }
+  return withWriterBoundary(fixture, (boundary) => {
+    const directory = join(boundary.temporary!, "prep-seat-writer");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const output = join(directory, `prep-seats-${++prepSeatWriterRuns}.json`);
+    const run = containedCommand(boundary, "/usr/bin/python3", ["-", receipt, windowEnd, output], { input: `${mutate(writer)}\n`, env: boundary.env });
+    return { status: run.status, stderr: run.stderr, bytes: run.status === 0 && pathExists(output) ? readFileSync(output) : undefined };
+  });
+}
+
+function prepSeatInventory(fixture: ProductContext): Buffer {
+  const run = runPrepSeatWriter(fixture);
+  assert.equal(run.status, 0, `the PREP_SEATS writer did not run on the supplied receipt inside its boundary (exit ${run.status}):\n${run.stderr}`);
+  assert.ok(run.bytes, "the PREP_SEATS writer wrote no inventory file");
+  return run.bytes;
 }
 
 // A transfer source that names a prompt input holding a file: the operator's own bytes, never a model of a producer.
@@ -5172,6 +5202,110 @@ test("controls: box userland diff compares fixture bytes and refuses host paths"
   }
 });
 
+// runbook-31's own Python reads the edge environment file's metadata through pathlib and pwd. On the Mac the fixture file
+// is owned by the Mac user; the box owner (M6/M18: commonswarm:commonswarm, mode 600, regular file) is the fixture's
+// recorded one, which the python fixture adapter reflects for fixture paths only. The plan's text is the consumer and is
+// carried verbatim; only its inventory file is supplied, built as the proof transfer builds it. The lane's own checks
+// (mode, type, owner set) stay the plan's, and an owner nothing recorded is refused instead of guessed.
+test("controls: runbook-31's owner assertion reads the recorded fixture owner and nothing else", { skip: MAC_ONLY }, () => {
+  const consumer = planBlock(RUNBOOK, "runbook-31");
+  const program = /^ *python3 - "\$PROOF_DIR\/required-edge-env\.json" \/home\/commonswarm\/\.env <<'PY'\n[\s\S]*?\nPY\n/m.exec(consumer.source)?.[0];
+  assert.ok(program, "runbook-31 no longer carries the edge environment owner check");
+  assert.match(program, /pwd\.getpwuid\(env_stat\.st_uid\)\.pw_name in \{'root', 'commonswarm'\}/);
+  const header = consumer.source.split("\n").slice(0, 3).join("\n");
+  const block: Block = { ...consumer, source: `${header}\n(\n  set -euo pipefail\n  PROOF_DIR='${PROOF_DIR}'\n${program})\n` };
+  const fixture = prepareMacFixture();
+  try {
+    const root = fixture.boxRoot!;
+    const environment = join(root, "home/commonswarm/.env");
+    const key = "/home/commonswarm/.env";
+    writeMode(join(root, PROOF_DIR, "required-edge-env.json"), JSON.stringify({ required: fixture.model!.requiredEnvNames, optional: [] }) + "\n");
+    assert.equal(readBoxOwners(root)[key.slice(1)], "commonswarm:commonswarm", "the fixture does not record the measured owner");
+    const run = () => {
+      const records = executePlanUntilFailure([block], fixture, "mac");
+      assert.equal(records.length, 1);
+      return records[0]!.execution;
+    };
+    const refusedAs = (execution: Execution, status: number, message: RegExp) => {
+      assert.equal(execution.result, "failed");
+      assert.equal(execution.status, status, execution.stderr);
+      assert.match(execution.stderr, message);
+    };
+    const owner = /AssertionError: edge environment owner must be root or commonswarm/;
+    const unrecorded = /UNPRODUCED owner of .*\/home\/commonswarm\/\.env: nothing in the fixture recorded it/;
+
+    const positive = run();
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.match(positive.stdout, /required edge environment names are present and non-empty; values not shown/);
+    recordBoxOwner(root, key, "root:root");
+    assert.equal(run().result, "passed", "the plan accepts root as the owner");
+
+    // The owner the sidecar records is the owner the plan sees: a wrong one fails the plan's own assertion.
+    recordBoxOwner(root, key, "ops:ops");
+    refusedAs(run(), 1, owner);
+    // An owner nothing recorded, or a name that is not a box account, is refused (69), never guessed or defaulted.
+    const owners = readBoxOwners(root);
+    delete owners[key.slice(1)];
+    writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
+    const missing = run();
+    refusedAs(missing, 69, unrecorded);
+    assert.doesNotMatch(missing.stderr, owner);
+    recordBoxOwner(root, key, "mallory:mallory");
+    refusedAs(run(), 69, unrecorded);
+    recordBoxOwner(root, key, "commonswarm:commonswarm");
+    assert.equal(run().result, "passed");
+
+    // The metadata that is not ownership is the real file's: mode and type keep failing the plan's own assertions.
+    chmodSync(environment, 0o644);
+    refusedAs(run(), 1, /AssertionError: edge environment must be mode 0600/);
+    chmodSync(environment, 0o600);
+    renameSync(environment, `${environment}.target`);
+    mkdirSync(environment, { mode: 0o700 });
+    refusedAs(run(), 1, /AssertionError: edge environment must be a regular file/);
+    rmdirSync(environment);
+
+    // stat follows a symlink, so the owner read is the target's: the link's own record does not stand in for it.
+    symlinkSync(`${environment}.target`, environment);
+    recordBoxOwner(root, `${key}.target`, "ops:ops");
+    refusedAs(run(), 1, owner);
+    const owned = readBoxOwners(root);
+    delete owned[`${key}.target`.slice(1)];
+    writeFileSync(boxOwnersFile(root), JSON.stringify(owned));
+    refusedAs(run(), 69, unrecorded);
+    unlinkSync(environment);
+    renameSync(`${environment}.target`, environment);
+    assert.equal(run().result, "passed", "the restored fixture no longer passes");
+
+    // The adapter is bounded. Before a recorded fixture path is stat'ed no box account id is answered, a path outside the
+    // fixture root keeps its real owner, and the box lane (adapter inactive) sees the real metadata of the same file.
+    const outside = join(fixture.temporary!, "outside-owner.txt");
+    writeMode(outside, "outside the fixture box root\n");
+    const probe = [
+      "import os, pwd, sys",
+      "try: print('before=' + pwd.getpwuid(1002).pw_name)",
+      "except KeyError: print('before=KeyError')",
+      "print('outside=' + str(pwd.getpwuid(os.stat(sys.argv[1]).st_uid).pw_name == pwd.getpwuid(os.getuid()).pw_name))",
+      "print('inside=' + pwd.getpwuid(os.stat(sys.argv[2]).st_uid).pw_name)",
+      "print('native=' + pwd.getpwuid(os.getuid()).pw_name)",
+    ].join("\n");
+    const python = (extra: NodeJS.ProcessEnv) => containedCommand(fixture, "/usr/bin/python3", ["-c", probe, outside, environment], {
+      env: { ...fixture.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONPATH: fixture.env.BOX_DRY_RUN_PYTHON_FIXTURE, ...extra },
+    });
+    const adapted = python({});
+    assert.equal(adapted.status, 0, adapted.stderr);
+    const inactive = python({ BOX_DRY_RUN_PART: "box" });
+    assert.equal(inactive.status, 0, inactive.stderr);
+    const fields = (text: string) => Object.fromEntries(text.trim().split("\n").map((line) => line.split("=", 2) as [string, string]));
+    assert.equal(fields(adapted.stdout).inside, "commonswarm");
+    assert.equal(fields(adapted.stdout).outside, "True", "an outside path lost its real owner");
+    assert.equal(fields(adapted.stdout).before, fields(inactive.stdout).before, "an account id was answered before a fixture path was stat'ed");
+    assert.equal(fields(inactive.stdout).inside, fields(inactive.stdout).native, "the inactive adapter changed the real metadata");
+    assert.notEqual(fields(inactive.stdout).inside, "commonswarm");
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 // runbook-31 first verifies the archive-derived edge manifest against the release directory. The box userland answers
 // `sha256sum --strict --check` by hashing the fixture's own bytes, so a changed, a missing or a malformed entry has to
 // fail the plan's own check. The block is carried up to and including that check: its `test -f` lines run first, and
@@ -5187,7 +5321,12 @@ test("controls: runbook-31 manifest verification fails on a changed, a missing a
     assert.ok(head.includes(earlier), `the carried text lost its earlier check: ${earlier}`);
   }
   const prefix: Block = { ...consumer, source: `${head})\n` };
-  const fixture = prepareMacFixture([apply, prefix], { state: "s1" });
+  // RELEASE_SHA is a prompt input of the window plan that carries runbook-31, which the runbook itself does not declare.
+  // The fixture names that window's own block, so this control is supplied the same inputs the window supplies; only
+  // [apply] and then [prefix] execute.
+  const window = planBlock(HM37, "hm37a-open-inputs");
+  assert.ok(promptInputs(HM37).some((input) => input.name === "RELEASE_SHA"), "window A no longer supplies RELEASE_SHA");
+  const fixture = prepareMacFixture([window, apply, prefix], { state: "s1" });
   try {
     // The apply producer is declared: the proof directory, the committed manifest and the extracted release
     // directory arrive through the plan's real seeding path, as in every plan run.
@@ -5251,6 +5390,65 @@ test("controls: runbook-31 manifest verification fails on a changed, a missing a
     assert.equal(escaping.result, "failed");
     assert.equal(escaping.status, 69, escaping.stderr);
     assert.match(escaping.stderr, /REFUSE sha256sum listed path outside the fixture box root/);
+
+    // GNU coreutils 9.4 reads a manifest this way: a comment line and an empty line are not checksum lines, one trailing
+    // carriage return is a line ending, a name's own carriage return is the \r escape, and a name keeps its whitespace.
+    // Every manifest below still verifies the same files under --strict.
+    const manifestText = manifestBytes.toString("utf8");
+    const withManifest = (text: string): Execution => {
+      writeFileSync(manifest, Buffer.from(text));
+      try { return run(); } finally { writeFileSync(manifest, manifestBytes); }
+    };
+    const framed = withManifest(`# a comment line\n\n${manifestText}\n# trailing comment\n`);
+    assert.equal(framed.result, "passed", framed.stderr);
+    assert.doesNotMatch(framed.stderr, /improperly formatted/);
+    const crlfText = `# a comment line\r\n\r\n${manifestText.replaceAll("\n", "\r\n")}`;
+    const crlf = withManifest(crlfText);
+    assert.equal(crlf.result, "passed", crlf.stderr);
+    assert.doesNotMatch(crlf.stderr, /improperly formatted/);
+    // The line ending is not part of the name: a changed file is still found by its own name, not by a missing one.
+    writeFileSync(changedFile, Buffer.concat([original, Buffer.from("changed for the CRLF control\n")]));
+    writeFileSync(manifest, Buffer.from(crlfText));
+    const crlfChanged = run();
+    writeFileSync(changedFile, original);
+    writeFileSync(manifest, manifestBytes);
+    assert.equal(crlfChanged.result, "failed");
+    assert.equal(crlfChanged.status, 1, crlfChanged.stderr);
+    assert.match(crlfChanged.stdout, /^\.\/package\.json: FAILED$/m);
+    assert.doesNotMatch(crlfChanged.stdout, /FAILED open or read/);
+    // A manifest with nothing but comments and empty lines has no checksum line, as on the box.
+    const commentsOnly = withManifest("# only a comment\n\n# another\n");
+    assert.equal(commentsOnly.result, "failed");
+    assert.equal(commentsOnly.status, 1, commentsOnly.stderr);
+    assert.match(commentsOnly.stderr, /no properly formatted checksum lines found/);
+
+    const digestOf = (bytes: string): string => createHash("sha256").update(bytes).digest("hex");
+    const carriageName = "carriage\rreturn.txt";
+    const spacedName = "spaced name ";
+    for (const [name, body] of [[carriageName, "carriage return in the name\n"], [spacedName, "whitespace is part of the name\n"]]) {
+      writeFileSync(join(release, name!), body!);
+    }
+    const carriageLine = (digest: string): string => `\\${digest}  ./carriage\\rreturn.txt\n`;
+    const spacedLine = (digest: string): string => `${digest}  ./${spacedName}\n`;
+    const named = withManifest(`${manifestText}${carriageLine(digestOf("carriage return in the name\n"))}${spacedLine(digestOf("whitespace is part of the name\n"))}`);
+    assert.equal(named.result, "passed", named.stderr);
+    assert.doesNotMatch(named.stderr, /improperly formatted/);
+    // Both entries are verified by their real names: a wrong digest fails each by that name.
+    const wrongCarriage = withManifest(`${manifestText}${carriageLine("0".repeat(64))}`);
+    assert.equal(wrongCarriage.result, "failed");
+    assert.equal(wrongCarriage.status, 1, wrongCarriage.stderr);
+    assert.ok(wrongCarriage.stdout.includes(`./${carriageName}: FAILED\n`), "the escaped carriage return was not decoded to the file's real name");
+    assert.doesNotMatch(wrongCarriage.stdout, /FAILED open or read/);
+    const wrongSpaced = withManifest(`${manifestText}${spacedLine("0".repeat(64))}`);
+    assert.equal(wrongSpaced.result, "failed");
+    assert.equal(wrongSpaced.status, 1, wrongSpaced.stderr);
+    assert.ok(wrongSpaced.stdout.includes(`./${spacedName}: FAILED\n`), "the name's trailing space was lost");
+    // An escape GNU does not define is a malformed line, which --strict refuses; the file is not read.
+    const badEscape = withManifest(`${manifestText}\\${"0".repeat(64)}  ./bad\\xescape\n`);
+    assert.equal(badEscape.result, "failed");
+    assert.equal(badEscape.status, 1, badEscape.stderr);
+    assert.match(badEscape.stderr, /WARNING: 1 line is improperly formatted/);
+    for (const name of [carriageName, spacedName]) unlinkSync(join(release, name));
 
     // An option the plan does not use is refused (69) instead of answered, so no unreviewed shape passes for the reviewed one.
     const unreviewed = executePlanUntilFailure([mutatedBlock(prefix, [["sha256sum --quiet --strict --check", "sha256sum --quiet --strict --status --check"]])], fixture, "mac");
@@ -6791,10 +6989,28 @@ test("controls: box window B handoff accepts a dark candidate INPUT and refuses 
 // A Mac product is covered by the bytes its own producer's writer and the supplied inputs give, or by a declared
 // NOT EXECUTED Mac producer that enumerates it as unavailable, by name and with its reason, and seeds nothing under
 // that name. Invented success bytes are neither.
-function assertEnumeratedUnavailable(product: TransferProduct, label: string): string {
+//
+// The declaration is bound to this exact product, never to its basename: the declaring block must be a Mac block of the
+// same plan, list the name as unproduced, record the product's own source path as a file it writes, and carry that path
+// as an operand of its own text. A transfer is the boundary that ships a file; it need not be the block that writes it,
+// so the declaring block is never required to be the transfer's own producer.
+function declaredUnavailableProducer(product: TransferProduct, transfer: { file: string }): NonSubstitutableEntry | undefined {
   const name = basename(product.path);
-  const producer = unproducedMacProduct(name);
-  assert.ok(producer, `box mode has no producer bytes for handoff ${label}, and no declared NOT EXECUTED Mac producer enumerates ${name} as unavailable`);
+  const index = blockIndex();
+  return nonSubstitutableEntries().find((entry) => {
+    if (entry.scope !== "whole-block" || entry.step === undefined) return false;
+    const origin = index.get(entry.step);
+    if (!origin?.host.startsWith("Mac ") || origin.file !== transfer.file) return false;
+    return (entry.unproduced ?? []).some((missing) => missing.output === name) &&
+      (entry.written_outputs ?? []).some((written) => written.output === name && written.path === product.source) &&
+      origin.source.includes(`"${product.source}"`);
+  });
+}
+
+function assertEnumeratedUnavailable(product: TransferProduct, label: string, transfer: { file: string }): string {
+  const name = basename(product.path);
+  const producer = declaredUnavailableProducer(product, transfer);
+  assert.ok(producer, `box mode has no producer bytes for handoff ${label}, and no declared NOT EXECUTED Mac producer of ${transfer.file} enumerates ${name} as unavailable from ${product.source}`);
   const missing = (producer.unproduced ?? []).find((item) => item.output === name);
   assert.ok(missing && missing.reason.length > 40, `${producer.step}: ${name} is unavailable without a stated reason`);
   const seeded = [...(producer.outputs ?? []).filter((output) => output.file === name),
@@ -6806,6 +7022,7 @@ function assertEnumeratedUnavailable(product: TransferProduct, label: string): s
 // Returns the Mac products no executed or modeled writer can give bytes for, each named with its declaring producer.
 function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, ProductContext>): string[] {
   const unavailable: string[] = [];
+  const unavailableProducts = new Map<string, string>();
   for (const handoff of inventory) {
     const label = `${handoff.direction} ${handoff.producer.file}:${handoff.producer.line} ${handoff.producer.step} -> ${handoff.consumer.step} ${handoff.path}`;
     if (handoff.direction === "mac-to-box") {
@@ -6819,7 +7036,14 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
         const content = capturedMacProductPaths(handoff.producer).includes(product.source)
           ? macCapturedWriterContract(handoff.producer as Block, product.source)
           : macProductModel(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!);
-        if (content === undefined) unavailable.push(assertEnumeratedUnavailable(product, label));
+        if (content === undefined) {
+          const reported = assertEnumeratedUnavailable(product, label, handoff.producer);
+          // One report name stands for one exact product: a second product under the same name is a different handoff.
+          const exact = `${product.source} -> ${product.path.replaceAll(RELEASE_SHA, "{sha}")}`;
+          assert.equal(unavailableProducts.get(reported) ?? exact, exact, `two different Mac products are reported as ${reported}`);
+          unavailableProducts.set(reported, exact);
+          unavailable.push(reported);
+        }
         else assert.ok(content.length,
           `box mode has no producer bytes for handoff ${label}`);
       } else if (product.remote) {
@@ -6865,6 +7089,67 @@ test("controls: the PREP seat inventory model is the open block's writer output 
   } finally {
     removeOwnedTemporary(temporary, prefix);
   }
+});
+
+// The PREP_SEATS writer is plan text. Its derivation runs inside the admitted jail, so a writer that tried to leave it
+// would be refused by the kernel and not by a scan of its text. An outside write and a network call are the two ways out;
+// both are refused, nothing is derived from the refused run, and the unmutated writer still derives the same inventory.
+test("controls: the PREP seat writer runs inside the jail: an outside write and a network call are refused", { skip: MAC_ONLY }, () => {
+  const fixture = prepareMacFixture([planBlock(HM37, "hm37a-open-inputs")]);
+  const prefix = "commonswarm-box-dry-run-commonswarm-prep-seats-outside-";
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  try {
+    const positive = runPrepSeatWriter(fixture);
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.ok(positive.bytes, "the unmutated writer derived nothing inside the jail");
+    assert.equal(positive.bytes.toString("utf8"), JSON.stringify(JSON.parse(positive.bytes.toString("utf8")), null, 2) + "\n");
+    const denied = /Traceback[\s\S]*(?:PermissionError|Operation not permitted)/;
+
+    const escape = join(outside, "escape.txt");
+    const write = runPrepSeatWriter(fixture, (writer) => `open(${JSON.stringify(escape)}, "w").write("outside the run root")\n${writer}`);
+    assert.notEqual(write.status, 0, "the jail let the writer write outside the run root");
+    assert.match(write.stderr, denied);
+    assert.equal(write.bytes, undefined, "an inventory was derived from a refused run");
+    assert.equal(pathExists(escape), false, "the refused writer left a file outside the run root");
+
+    const connect = runPrepSeatWriter(fixture, (writer) => `import socket\nsocket.create_connection(("127.0.0.1", 9), timeout=2)\n${writer}`);
+    assert.notEqual(connect.status, 0, "the jail let the writer open a network connection");
+    assert.match(connect.stderr, denied);
+    assert.doesNotMatch(connect.stderr, /ConnectionRefusedError/, "the connection reached the network stack instead of the jail");
+    assert.equal(connect.bytes, undefined, "an inventory was derived from a refused run");
+
+    const again = runPrepSeatWriter(fixture);
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(again.bytes, positive.bytes, "the derived inventory changed after the refused runs");
+  } finally {
+    cleanupMacFixture(fixture);
+    removeOwnedTemporary(outside, prefix);
+  }
+});
+
+// The report that a Mac receipt is unavailable rests on a declaration for that exact product. A different source, another
+// plan's transfer, or a name no declaration enumerates is not covered by it.
+test("controls: an unavailable-receipt declaration is bound to the exact product and its writer, not to a basename", () => {
+  const transfer = planBlock(HM37, "hm37a-local-evidence-transfer");
+  const local = transferProducts(transfer).filter((product) => !product.remote);
+  const receipt = (name: string): TransferProduct => {
+    const found = local.find((product) => basename(product.path) === name);
+    assert.ok(found, `the evidence transfer no longer ships ${name}`);
+    return found;
+  };
+  const old = receipt("hm37a-local-control-old.json");
+  const next = receipt("hm37a-local-control-new.json");
+  // Positive: each genuine receipt is reported by the producer that declares it.
+  assert.equal(assertEnumeratedUnavailable(old, "genuine old", transfer), "hm37a-local-control-old.json (hm37a-directed-check-old)");
+  assert.equal(assertEnumeratedUnavailable(next, "genuine new", transfer), "hm37a-local-control-new.json (hm37a-directed-check-new)");
+  // Negative: every borrowed declaration fails with the unbound message, and the genuine ones above still hold.
+  const unbound = /no declared NOT EXECUTED Mac producer of .* enumerates hm37a-[a-z-]+\.json as unavailable from /;
+  assert.throws(() => assertEnumeratedUnavailable({ ...old, source: "/tmp/h42-foreign/hm37a-local-control-old.json" }, "foreign source", transfer), unbound);
+  assert.throws(() => assertEnumeratedUnavailable({ ...old, source: "$H42_FOREIGN_SOURCE" }, "foreign variable", transfer), unbound);
+  assert.throws(() => assertEnumeratedUnavailable({ ...old, source: next.source }, "the other receipt's source", transfer), unbound);
+  assert.throws(() => assertEnumeratedUnavailable(old, "another plan's transfer", { file: SITE }), unbound);
+  // A name no declaration enumerates is not unavailable, whatever the declaring block writes beside it.
+  assert.throws(() => assertEnumeratedUnavailable({ ...old, path: "/tmp/hm37a-unlisted.json", source: "$EVIDENCE_DIR/hm37a-unlisted.json" }, "unlisted name", transfer), unbound);
 });
 
 test("every cross-host handoff is covered in both modes", (t) => {
@@ -6926,6 +7211,17 @@ test("every cross-host handoff is covered in both modes", (t) => {
     assert.ok(siteDiscovered.some((handoff) => handoff.path === "/tmp/h21-unmodeled-handoff.txt"));
     assert.throws(() => assertHandoffCoverage(siteDiscovered, fixtures), /h21-unmodeled-handoff\.txt/,
       "an unrelated transfer borrowed the captured Mac writer's coverage");
+    // A transfer from a source nothing declares, under the basename of a declared directed receipt, is another handoff:
+    // it fails beside the genuine receipts, and the closed report does not fold it into theirs.
+    const foreignBlock = { ...siteWriter, source: siteWriter.source +
+      '\nscp "$H42_FOREIGN_SOURCE" ops@100.115.66.74:/tmp/hm37a-local-control-old.json\n' };
+    const foreignDiscovered = crossHostHandoffs([foreignBlock, {
+      ...planBlock(RUNBOOK, "1-apply-release-directories"), source: "cat /tmp/hm37a-local-control-old.json",
+    }]);
+    assert.ok(foreignDiscovered.some((handoff) => handoff.path === "/tmp/hm37a-local-control-old.json" && handoff.producer.file === SITE));
+    assert.throws(() => assertHandoffCoverage([...inventory, ...foreignDiscovered], fixtures),
+      /enumerates hm37a-local-control-old\.json as unavailable from \$H42_FOREIGN_SOURCE/,
+      "a foreign source borrowed the declared directed receipt's coverage");
   } finally {
     removeOwnedTemporary(temporary, "commonswarm-box-dry-run-commonswarm-handoff-inventory-");
   }

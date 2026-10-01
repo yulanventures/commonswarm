@@ -127,7 +127,9 @@ def strip(data: bytes) -> bytes:
 # Identity and ownership.
 # ---------------------------------------------------------------------------------------------------------
 
-USERS = {"root": 0, "ops": 1001, "commonswarm": 1002}
+# The box's own account ids, as measured (M3: getent passwd/group root commonswarm caddy ops). A same-named group
+# holds the same number, so one table serves owners and groups.
+USERS = {"root": 0, "ops": 1000, "commonswarm": 1002}
 
 
 def remote_user() -> str:
@@ -156,15 +158,30 @@ def save_owners(owners: dict[str, str]) -> None:
         json.dump(owners, handle, sort_keys=True)
 
 
-def owner_key(path: str) -> str:
+def fixture_key(path: str, follow: bool = False) -> str | None:
+    """The sidecar key of a path inside the fixture box root, or None for a path outside it.
+
+    The key names the entry itself (its parent is resolved, its own name is not), the way lstat sees it; follow=True
+    resolves the entry too, the way stat sees it. A path that resolves outside the root has no key.
+    """
     root = box_root()
     absolute = os.path.abspath(path)
-    parent = os.path.realpath(os.path.dirname(absolute))
-    joined = os.path.join(parent, os.path.basename(absolute))
+    if follow:
+        joined = os.path.realpath(absolute)
+    else:
+        parent = os.path.realpath(os.path.dirname(absolute))
+        joined = os.path.join(parent, os.path.basename(absolute))
     if joined != root and not joined.startswith(root + "/"):
+        return None
+    return os.path.relpath(joined, root)
+
+
+def owner_key(path: str) -> str:
+    key = fixture_key(path)
+    if key is None:
         sys.stderr.write("REFUSE path outside the fixture box root: " + path + "\n")
         raise SystemExit(69)
-    return os.path.relpath(joined, root)
+    return key
 
 
 def record_owner(path: str, owner: str, group: str, recursive: bool = False) -> None:
@@ -323,7 +340,7 @@ def inside_box(path: str) -> bool:
 
 
 def unescape_checksum_name(name: bytes) -> bytes | None:
-    """GNU escapes a backslash as \\\\ and a newline as \\n in an escaped line; any other escape is malformed."""
+    """GNU escapes a backslash as \\\\, a newline as \\n and a carriage return as \\r in an escaped line; any other escape is malformed."""
     out = bytearray()
     index = 0
     while index < len(name):
@@ -337,6 +354,8 @@ def unescape_checksum_name(name: bytes) -> bytes | None:
             out += b"\\"
         elif following == b"n":
             out += b"\n"
+        elif following == b"r":
+            out += b"\r"
         else:
             return None
         index += 2
@@ -360,8 +379,10 @@ def check_sha256sum(argv: list[str]) -> None:
 
     Every listed file is hashed from the fixture's own bytes and compared with the listed digest: a digest that
     differs, a file that cannot be read, a line that is not a checksum line under --strict, and a manifest with no
-    checksum line at all each exit 1, as on the box. A manifest or a listed path that leaves the fixture box root is
-    refused (69) before anything outside it is read; the operand shapes this accepts are the only ones the plan uses.
+    checksum line at all each exit 1, as on the box. Comment and empty lines and a trailing carriage return are not
+    part of a checksum line, and a name's own carriage return is the \\r escape. A manifest or a listed path that
+    leaves the fixture box root is refused (69) before anything outside it is read; the operand shapes this accepts
+    are the only ones the plan uses.
     """
     options = [item for item in argv if item.startswith("-")]
     operands = [item for item in argv if not item.startswith("-")]
@@ -388,6 +409,15 @@ def check_sha256sum(argv: list[str]) -> None:
     err = sys.stderr.buffer
     formatted = malformed = mismatched = unreadable = 0
     for raw in lines:
+        # GNU coreutils 9.4 digest_check: a line that starts with '#' is a comment, one trailing carriage return is
+        # a line ending, not a name byte (a name's own CR is written \\r), and an empty line is skipped. None of
+        # these is a checksum line or an improperly formatted one.
+        if raw.startswith(b"#"):
+            continue
+        if raw.endswith(b"\r"):
+            raw = raw[:-1]
+        if raw == b"":
+            continue
         found = SHA256_LINE.match(raw)
         name = found.group(3) if found else None
         if found and found.group(1):
