@@ -1557,7 +1557,7 @@
     {
       "output": "private open/ACK journal",
       "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
-      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:297-308,798-819",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:297-308,808-829",
       "evidence": null,
       "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
     }
@@ -1585,7 +1585,7 @@
   "scope": "whole-block",
   "surface": "hosted control recovery on an interrupted/abort path",
   "reason": "needs network and the hosted database",
-  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1125-1184 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1138-1161; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1310-1365 must consume that real receipt before classifying the failure.",
+  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1125-1184 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1148-1171; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1310-1365 must consume that real receipt before classifying the failure.",
   "receipt_fields": [
     "ok",
     "mode=cleanup-only",
@@ -1607,7 +1607,7 @@
     {
       "output": "private open/ACK journal update",
       "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
-      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:648-758",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:656-766",
       "evidence": null,
       "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
     }

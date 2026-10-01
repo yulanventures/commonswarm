@@ -448,12 +448,12 @@ BOX
     test -f "$SOURCE"
     test ! -L "$SOURCE"
   done
-  test "$(shasum -a 256 "$HARNESS_SOURCE" | awk '{print $1}')" =     cc4ec38444104c188808bd844e20b407e11077df7a41969a39d67152b65d2a7d
+  test "$(shasum -a 256 "$HARNESS_SOURCE" | awk '{print $1}')" =     6c8c61cda868ec9fbeacad8545d62ab3345787d26161fec851076537a9737c6b
   test "$(shasum -a 256 "$IMPORT_MAP_SOURCE" | awk '{print $1}')" =     f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   . "/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env"
   EVIDENCE_DIR="$PWD/docs/evidence/$(date -u +%F)-release-${RELEASE_SHA:0:12}-${WINDOW_ID}"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
-  printf '%s\n'     "release_sha=$RELEASE_SHA"     'worker_boundary_review=PASS'     'harness_sha256=cc4ec38444104c188808bd844e20b407e11077df7a41969a39d67152b65d2a7d'     'import_map_sha256=f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b'     >"$EVIDENCE_DIR/hm37-worker-boundary.txt"
+  printf '%s\n'     "release_sha=$RELEASE_SHA"     'worker_boundary_review=PASS'     'harness_sha256=6c8c61cda868ec9fbeacad8545d62ab3345787d26161fec851076537a9737c6b'     'import_map_sha256=f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b'     >"$EVIDENCE_DIR/hm37-worker-boundary.txt"
   cp "$EVIDENCE_DIR/hm37-worker-boundary.txt"     "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt"
   chmod 0600 "$EVIDENCE_DIR/hm37-worker-boundary.txt"     "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt"
 )
@@ -504,7 +504,7 @@ test "$(stat -c '%U:%G:%a' "$STAGING_ROOT")" = root:root:700
 for FILE in hm37-open-ack-control.ts hm37-open-ack-deno.json human-session.json; do
   test "$(stat -c '%U:%G:%a' "$STAGING_ROOT/$FILE")" = root:root:600
 done
-test "$(sha256sum "$STAGING_ROOT/hm37-open-ack-control.ts" | awk '{print $1}')" =   cc4ec38444104c188808bd844e20b407e11077df7a41969a39d67152b65d2a7d
+test "$(sha256sum "$STAGING_ROOT/hm37-open-ack-control.ts" | awk '{print $1}')" =   6c8c61cda868ec9fbeacad8545d62ab3345787d26161fec851076537a9737c6b
 test "$(sha256sum "$STAGING_ROOT/hm37-open-ack-deno.json" | awk '{print $1}')" =   f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
 BOX
 )
@@ -723,7 +723,7 @@ PY
   install -m 0600 "$STAGING_ROOT/hm37-open-ack-control.ts" "$HARNESS"
   install -m 0600 "$STAGING_ROOT/hm37-open-ack-deno.json" "$DENO_CONFIG"
   install -m 0600 "$STAGING_ROOT/human-session.json" "$CONTROL_ROOT/human-session.json"
-  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = cc4ec38444104c188808bd844e20b407e11077df7a41969a39d67152b65d2a7d
+  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = 6c8c61cda868ec9fbeacad8545d62ab3345787d26161fec851076537a9737c6b
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   OAUTH_CIDS=()
   while IFS= read -r VALUE || [ -n "$VALUE" ]; do
