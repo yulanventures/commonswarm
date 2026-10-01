@@ -395,7 +395,9 @@ def cmd_install(argv: list[str]) -> None:
     source, target = operands
     if os.path.isdir(target):
         target = os.path.join(target, os.path.basename(source))
-    if not os.path.isfile(source):
+    # install /dev/null creates an empty regular file on the real box. It is a
+    # character device, so the ordinary-file check alone falsely rejects it.
+    if source != "/dev/null" and not os.path.isfile(source):
         sys.stderr.write("install: cannot stat '%s': No such file or directory\n" % source)
         raise SystemExit(1)
     require_ownership_right("install", owner, group, target)
@@ -603,13 +605,54 @@ def cmd_rsync(argv: list[str]) -> None:
     if not source.endswith("/") or not target.endswith("/") or not os.path.isdir(source):
         refuse("rsync", argv)
     source, target = os.path.realpath(source), os.path.abspath(target)
-    if not (os.path.realpath(os.path.dirname(target)) + "/").startswith(root + "/"):
+    if not (os.path.realpath(os.path.dirname(target)) + "/").startswith(root.rstrip("/") + "/"):
         sys.stderr.write("REFUSE rsync target outside the fixture box root: " + target + "\n")
         raise SystemExit(69)
     site_releases = os.path.join(root, "srv", "commonswarm", "site", "releases") + "/"
     if not in_remote and not (os.path.realpath(target) + "/").startswith(site_releases):
         refuse("rsync", argv)
     sync_tree(source, target, "--delete" in flags, "--ignore-existing" in flags)
+    if root == "/" and not in_remote:
+        # A guarded Linux upload is performed by the SSH destination account,
+        # even though this local adapter starts as root. Preserve real Linux
+        # ownership, just as native rsync through that login would do.
+        import pwd
+        match = HOSTS.match(operands[1])
+        if not match:
+            refuse("rsync", argv)
+        account = pwd.getpwnam(match.group(1))
+        for directory, children, files in os.walk(target):
+            for path in [directory, *[os.path.join(directory, name) for name in children + files]]:
+                os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+
+
+def cmd_tee(argv: list[str]) -> None:
+    operands: list[str] = []
+    options = True
+    for item in argv:
+        if options and item == "--":
+            options = False
+        elif options and item in ("-a", "--append", "-i", "--ignore-interrupts"):
+            continue
+        elif options and item.startswith("-"):
+            refuse("tee", argv)
+        else:
+            operands.append(item)
+    user = remote_user()
+    root = box_root()
+    created = []
+    for path in operands:
+        if os.path.commonpath([root, os.path.realpath(path)]) != root:
+            refuse("tee", argv)
+        if not os.path.lexists(path):
+            created.append(path)
+    # Run the native stream writer on real stdin. Keep actual bytes, mode,
+    # append/truncate behavior and exit status; model only creation identity.
+    status = subprocess.run(["/usr/bin/tee", *argv], check=False).returncode
+    for path in created:
+        if os.path.isfile(path):
+            record_owner(path, user, user)
+    raise SystemExit(status)
 
 
 def cmd_diff(argv: list[str]) -> None:
@@ -626,7 +669,7 @@ def cmd_diff(argv: list[str]) -> None:
 COMMANDS = {
     "source-file": cmd_source_file,
     "record-owner": cmd_record_owner, "rsync": cmd_rsync, "date": cmd_date, "stat": cmd_stat, "sha256sum": cmd_sha256sum, "id": cmd_id, "install": cmd_install,
-    "chown": cmd_chown, "mv": cmd_mv, "cp": cmd_cp, "ps": cmd_ps, "pgrep": cmd_pgrep, "diff": cmd_diff,
+    "chown": cmd_chown, "mv": cmd_mv, "cp": cmd_cp, "ps": cmd_ps, "pgrep": cmd_pgrep, "diff": cmd_diff, "tee": cmd_tee,
 }
 
 

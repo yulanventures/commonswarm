@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -8,7 +8,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -25,7 +24,8 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
-import { crossHostHandoffs, transferProducts, macBoundaryOperations, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
+import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
+import { createTemporary as mkdtempSync, removeTemporary, withTemporarySetup } from "./box-dry-run/temporary.js";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
 const PREP = "docs/evidence/2026-09-29-hm37-prep/BOX-WINDOW.md";
@@ -396,7 +396,7 @@ const STUB_COMMANDS = [
   "open", "osascript", "launchctl", "security",
 ];
 // GNU behavior the box has and the Mac lacks. These names exist only on a box script's PATH, never on a Mac block's.
-const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep", "diff"];
+const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep", "diff", "tee"];
 // The Linux runner uses real GNU userland and real ownership; all box stub consumers share this inventory.
 const BOX_STUB_COMMANDS = STUB_COMMANDS.filter((command) => !BOX_USERLAND_COMMANDS.includes(command));
 // Host state a Mac block would otherwise read from the real Mac: its process table. These stub the Mac lane only;
@@ -898,7 +898,7 @@ function removeOwnedTemporary(path: string, prefix: string): void {
   const resolved = resolve(path);
   assert.equal(realpathSync(dirname(resolved)), realpathSync(tmpdir()));
   assert.ok(basename(resolved).startsWith(prefix));
-  rmSync(resolved, { recursive: true, force: true });
+  removeTemporary(path, prefix);
 }
 
 function shortStep(block: Block): string {
@@ -1777,6 +1777,7 @@ interface Fixture {
   containment?: string;
   browserBranch?: "FULL-CONTROL" | "REDUCED-CONTROL";
   supportRoot?: string;
+  sudoPolicy?: string;
   rootDirectories?: RootDirectoryFixture[];
   replacedRuntime?: { path: string; backup?: string };
   replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
@@ -1784,8 +1785,11 @@ interface Fixture {
   inventoryDeno?: { path: string; digest: string; version: string };
   denoZip?: string;
   denoZipDigest?: string;
+  denoBinaryDigest?: string;
   seededPaths?: string[];
   boxTransferTargets?: string[];
+  macLocalRoot?: string;
+  macSiteSequence?: boolean;
   promptInputs: PromptInput[];
 }
 
@@ -1915,6 +1919,13 @@ function prepareMacFixture(
   planBlocks: Block[] = [],
   options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean } = {},
 ): Fixture {
+  return withTemporarySetup(() => prepareMacFixtureSetup(planBlocks, options));
+}
+
+function prepareMacFixtureSetup(
+  planBlocks: Block[],
+  options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean },
+): Fixture {
   const state = options.state ?? "s5";
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-mac-"));
   chmodSync(temporary, 0o700);
@@ -1988,6 +1999,8 @@ function prepareMacFixture(
     BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
     BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
     BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
+    BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
+    BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
   });
   if (env.PREP_RECEIPT_PATH) {
     const prep = JSON.parse(readFileSync(env.PREP_RECEIPT_PATH, "utf8")) as {
@@ -1999,7 +2012,7 @@ function prepareMacFixture(
     writeFileSync(join(cswarmState, "principals.tsv"), prep.seats.map((seat) =>
       `${prep.workspace_id}\t${seat.principal_id}\tfalse\n`).join(""), { mode: 0o600 });
   }
-  return {
+  const fixture: Fixture = {
     temporary, cwd: checkout, home, bin, log, inventoryDeno,
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
@@ -2010,6 +2023,13 @@ function prepareMacFixture(
     env,
     promptInputs: declaredPromptInputs,
   };
+  try {
+    admitMacFixture(fixture);
+    return fixture;
+  } catch (error) {
+    cleanupMacFixture(fixture);
+    throw error;
+  }
 }
 
 // Everything a Mac fixture wrote is under its own temporary directory; removing that directory is the whole
@@ -2071,6 +2091,34 @@ function windowEnvBody(state: string): string {
 }
 
 const guardedBoxFixtures = new WeakSet<Fixture>();
+let pinnedBoxDenoZip: Buffer | undefined;
+
+function boxDenoZip(): Buffer {
+  // This is runner preparation, never a plan command or a production operation.
+  // Preserve M1's absent baseline; the plan installs these verified bytes later.
+  assert.ok(boxRunnerGuard(process.env).available, "pinned Deno requires the guarded box runner");
+  if (pinnedBoxDenoZip) return pinnedBoxDenoZip;
+  const root = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-box-deno-"));
+  try {
+    const zip = join(root, "deno.zip");
+    const probe = measuredFact("M16").checks?.find((check) => check.id === "a1")?.command;
+    assert.equal(typeof probe, "string", "M16 has no measured Deno asset probe");
+    const url = /(https:\/\/github\.com\/denoland\/deno\/releases\/download\/v[0-9.]+\/deno-x86_64-unknown-linux-gnu\.zip)\.sha256sum/.exec(probe as string)?.[1];
+    assert.ok(url, "M16's Deno asset URL is missing");
+    const downloaded = spawnSync("/usr/bin/curl", ["--fail", "--silent", "--show-error", "--location",
+      "--proto", "=https", "--proto-redir", "=https", "--max-time", "120", "--output", zip, url], {
+      encoding: "utf8", env: explicitEnvironment(), timeout: 125_000,
+    });
+    assert.equal(downloaded.status, 0, "could not obtain the measured pinned Deno archive");
+    const bytes = readFileSync(zip);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), DENO_ZIP_SHA256,
+      "runner Deno archive differs from M19's independently measured checksum");
+    pinnedBoxDenoZip = bytes;
+    return bytes;
+  } finally {
+    removeOwnedTemporary(root, "commonswarm-box-dry-run-commonswarm-box-deno-");
+  }
+}
 
 function boxRunnerGuard(env: NodeJS.ProcessEnv): ContainmentAvailability {
   const result = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env });
@@ -2080,19 +2128,43 @@ function boxRunnerGuard(env: NodeJS.ProcessEnv): ContainmentAvailability {
 }
 
 function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
+  return withTemporarySetup(() => prepareBoxFixtureSetup(state, planBlocks));
+}
+
+function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
   // Run before creating real-path fixtures: the guard requires those paths to be absent.
   const guard = boxRunnerGuard(process.env);
   assert.ok(guard.available, `CONTAINMENT UNAVAILABLE: ${guard.detail}. The fixture was not created.`);
+  const runtimeZip = boxDenoZip();
   const finalEdge = planBlocks.some((block) => block.file === HM37B) ? windowAFinalEdge() : undefined;
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const model = buildBoxFixtureModel(state);
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
   chownSync(temporary, 0, 0);
   chmodSync(temporary, 0o700);
-  const bin = join(temporary, "bin");
+  // Login users traverse the public runtime support, while prompt files and the
+  // root log stay in the private 0700 fixture directory.
+  const supportRoot = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-box-support-"));
+  const bin = join(supportRoot, "bin");
   const log = join(temporary, "stub.log");
-  const supportRoot = join(temporary, "support");
+  const macLocalRoot = join(temporary, "mac-local");
+  for (const path of [macLocalRoot, join(macLocalRoot, "home"), join(macLocalRoot, "tmp")]) {
+    makeRootDirectory(path, 0o700);
+  }
+  // The site plan has local writers between SSH calls (pin readback, GO,
+  // deployment receipt). Model that complete causal sequence when its actual
+  // checkout producer is present, rather than extracting unrelated SSH calls.
+  const macSiteSequence = planBlocks.some((block) => block.file === SITE &&
+    block.source.includes("git clone --no-checkout https://github.com/yulanventures/commonswarm.git"));
+  const macSiteSource = macSiteSequence ? checkoutFixture(temporary, "site-source", "HEAD") : undefined;
+  const macSiteDist = macSiteSequence ? join(temporary, "site-dist") : undefined;
+  if (macSiteDist) { mkdirSync(macSiteDist, { mode: 0o700 }); prepareDistFixture(macSiteDist); }
+  const sudoPolicy = `/etc/sudoers.d/${basename(temporary)}`;
+  assert.equal(pathExists(sudoPolicy), false, "fixture sudo policy already exists");
+  writeRootMode(sudoPolicy, "ops ALL=(root,commonswarm) NOPASSWD: /usr/bin/env\ncommonswarm ALL=(root,commonswarm) NOPASSWD: /usr/bin/env\n", 0o440);
+  const policyCheck = spawnSync("/usr/sbin/visudo", ["-cf", sudoPolicy], { encoding: "utf8" });
+  assert.equal(policyCheck.status, 0, policyCheck.stderr);
   const prelude = join(supportRoot, "prelude.sh");
   const pythonFixture = join(supportRoot, "python");
   const sourceRoot = join(supportRoot, "source");
@@ -2109,18 +2181,16 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     0o644,
   );
   const denoZip = join(supportRoot, "deno-v2.9.7.zip");
-  const zipResult = spawnSync("/usr/bin/python3", ["-c", [
-    "import pathlib, sys, zipfile",
-    "target, source = sys.argv[1:]",
-    "info = zipfile.ZipInfo('deno')",
-    "info.external_attr = 0o100755 << 16",
-    "with zipfile.ZipFile(target, 'w', zipfile.ZIP_STORED) as archive:",
-    "    archive.writestr(info, pathlib.Path(source).read_bytes())",
-  ].join("\n"), denoZip, resolve(STUB)], { encoding: "utf8" });
-  assert.equal(zipResult.status, 0, zipResult.stderr);
+  writeFileSync(denoZip, runtimeZip, { mode: 0o644 });
   chownSync(denoZip, 0, 0);
   chmodSync(denoZip, 0o644);
   const denoZipDigest = createHash("sha256").update(readFileSync(denoZip)).digest("hex");
+  const binaryDigest = spawnSync("/usr/bin/python3", ["-c",
+    "import hashlib,sys,zipfile; print(hashlib.sha256(zipfile.ZipFile(sys.argv[1]).read('deno')).hexdigest())", denoZip],
+  { encoding: "utf8", env: explicitEnvironment() });
+  assert.equal(binaryDigest.status, 0, binaryDigest.stderr);
+  const denoBinaryDigest = binaryDigest.stdout.trim();
+  assert.match(denoBinaryDigest, /^[0-9a-f]{64}$/);
   makeStubBin(bin, true);
   writeRootMode(log, "", 0o600);
   const originalDeno = pathExists(DENO_PATH)
@@ -2259,17 +2329,18 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     join(measuredSiteRelease, "app/index.html"), join(measuredSiteRelease, "download/index.html"),
   ].filter(pathExists).map(normalizeSeededPath).filter((path, index, paths) => paths.indexOf(path) === index).sort();
 
+  const boxPromptEnvironment = syntheticPromptEnvironment(temporary, declaredPromptInputs);
   const fixture: Fixture = {
-    temporary, cwd: process.cwd(), home: "/root", bin, log, model,
-    prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
-    denoZip, denoZipDigest, seededPaths,
+    temporary, cwd: process.cwd(), home: join(macLocalRoot, "home"), bin, log, model,
+    prelude, pythonFixture, sourceRoot, supportRoot, sudoPolicy, rootDirectories,
+    denoZip, denoZipDigest, denoBinaryDigest, seededPaths, macLocalRoot, macSiteSequence,
     replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
     replacedDirectory: {
       path: "/usr/local/bin", mode: originalUsrLocalBin.mode & 0o777,
       uid: originalUsrLocalBin.uid, gid: originalUsrLocalBin.gid,
     },
     env: explicitEnvironment({
-      ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
+      ...boxPromptEnvironment,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_PART: "box",
       BOX_DRY_RUN_BOX_ROOT: "/",
@@ -2277,7 +2348,6 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
       BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
-      BOX_DRY_RUN_DENO_VERSION: "deno 2.9.7\nv8 dry-run\ntypescript dry-run",
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
       BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
@@ -2290,6 +2360,15 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_EDGE_NETWORK: model.containers.candidateEdge.network,
       BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
       BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
+      ...(macSiteSource && macSiteDist ? {
+        BOX_DRY_RUN_SOURCE_CLONE: macSiteSource,
+        BOX_DRY_RUN_DIST_FIXTURE: macSiteDist,
+        BOX_DRY_RUN_USERLAND: USERLAND,
+        BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: boxPromptEnvironment.OP_SERVICE_ACCOUNT_TOKEN_FILE,
+      } : {}),
+      BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
+      BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
+      BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
     }),
     promptInputs: declaredPromptInputs,
     part: "box",
@@ -2331,6 +2410,8 @@ function cleanupBoxFixture(fixture: Fixture): void {
   for (const directory of [...(fixture.rootDirectories ?? [])].reverse()) {
     if (directory.created && pathExists(directory.path)) rmdirSync(directory.path);
   }
+  if (fixture.sudoPolicy) rmSync(fixture.sudoPolicy);
+  if (fixture.supportRoot) removeOwnedTemporary(fixture.supportRoot, "commonswarm-box-dry-run-commonswarm-box-support-");
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
 }
 
@@ -2383,6 +2464,7 @@ interface Execution {
   seeded?: string[];
   refused?: string[];
   declared?: NonSubstitutableEntry;
+  nativeVersion?: ContainedResult;
 }
 
 // One inventory serves execution routing and the independent coverage test. It is discovered from all
@@ -2594,13 +2676,6 @@ function macProductContent(product: TransferProduct, block: Block, fixture: Prod
     assert.ok(fixture.env.PREP_RECEIPT_PATH, "local inventory needs the synthetic PREP producer product");
     return readFileSync(fixture.env.PREP_RECEIPT_PATH);
   }
-  if (name === "commonswarm-site-window.env") {
-    const writer = block.source.slice(block.source.indexOf("  {"), block.source.indexOf('>"$SITE_WINDOW_FILE"'));
-    const names = [...writer.matchAll(/printf '([A-Z][A-Z0-9_]*)=%q/g)].map((match) => match[1]!);
-    const values = Object.fromEntries(names.map((name) => [name, fixture.env[name] ?? `SYNTHETIC-${name}`]));
-    Object.assign(values, { SITE_WINDOW_START_UTC: WINDOW_START, SITE_WINDOW_END_UTC: "2026-09-28T05:02:03Z", SITE_WINDOW_ID: WINDOW_ID });
-    return "# SYNTHETIC Mac site-window product; not an open receipt\n" + shellAssignments(values);
-  }
   if (name === "item-resolved-inputs.env") {
     const values = Object.fromEntries(resolvedTransferNames().map((name) => {
       const value = name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
@@ -2630,24 +2705,179 @@ function shellWord(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function macLocalExecution(block: Block, fixture: Fixture, source: string): Execution {
+  assert.ok(fixture.macLocalRoot, "Mac-local products require their own private root");
+  const token = "@@MAC_LOCAL_ROOT@@";
+  let projected = mapMacTmp(source.replaceAll(fixture.macLocalRoot, token), join(fixture.macLocalRoot, "tmp"))
+    .replaceAll(token, fixture.macLocalRoot);
+  // Only the Mac-local metadata probe differs on the Linux model host. It
+  // still measures the real synthetic file; the remote plan text is unchanged.
+  if (process.platform === "linux") projected = projected.replace(/stat -f (?:'%Lp'|%Lp)/g, "stat -c %a");
+  const environment = { ...fixture.env, HOME: join(fixture.macLocalRoot, "home"),
+    TMPDIR: join(fixture.macLocalRoot, "tmp"), BOX_DRY_RUN_STEP: shortStep(block) };
+  assertChildEnvironmentAllowed(environment, fixture.promptInputs);
+  const result = containedSpawn(fixture, `set -euo pipefail\nsource ${shellWord(fixture.prelude)}\n${projected}`, environment);
+  return { ...result, step: shortStep(block), result: result.status === 0 ? "not-executed" : "failed", seeded: [],
+    declared: { surface: "Mac-local producer contract", reason: "Mac-local shell calculations, sourced state, and writer bytes modeled at the producer boundary; remote commands execute separately.",
+      live_proof: `${block.file}:${block.line} requires the real Mac producer.` } };
+}
+
+// runbook-02's Mac product is a shell writer, not an observation of the box.
+// Execute its literal writers at their producer position using the open
+// receipt's actual modeled clock output. Never supply a window to an abort.
+function modelMacWindowWriter(block: Block, fixture: Fixture): Execution | undefined {
+  const windowWriter = /\( umask 077; printf '[\s\S]*?>"\$HOME\/\.commonswarm-release-window\.env" \)/.exec(block.source)?.[0];
+  if (!windowWriter) return undefined;
+  const inputWriter = /\( umask 077; printf '[^']*' \\\n[\s\S]*?>"\$BOX_WINDOW_INPUT" \)/.exec(block.source.slice(block.source.indexOf(windowWriter) + windowWriter.length))?.[0];
+  const receipt = /^\s*WINDOW_OPEN_RECEIPT="[^"\n]+"/m.exec(block.source)?.[0];
+  const start = block.source.indexOf('  SHORT_SHA=');
+  const end = block.source.indexOf('  GATE_EVIDENCE=', start);
+  const archiveWriter = /^\s*check 'exact-SHA archive' (.+)$/m.exec(block.source)?.[1];
+  const archiveDigest = /^\s*shasum -a 256 "\$ARCHIVE" >"\$EVIDENCE_DIR\/archive\.sha256"$/m.exec(block.source)?.[0];
+  assert.ok(inputWriter && receipt && archiveWriter && archiveDigest && start >= 0 && end > start,
+    "unrecognized Mac window producer");
+  return macLocalExecution(block, fixture, [
+    receipt, '. "$WINDOW_OPEN_RECEIPT"', block.source.slice(start, end),
+    'mkdir -p -m 0700 "$EVIDENCE_DIR"', archiveWriter, archiveDigest, windowWriter, inputWriter,
+    'chmod 0600 "$HOME/.commonswarm-release-window.env" "$BOX_WINDOW_INPUT"',
+  ].join("\n"));
+}
+
+// The earlier resolved-input writer appends the archive digest to the very
+// upload file runbook-02 retained. Execute that producer's local bytes instead
+// of copying the stale, pre-append file at the later scp boundary.
+function modelMacWindowAppend(block: Block, fixture: Fixture): Execution | undefined {
+  if (!/printf '[^'\n]*EXPECTED_ARCHIVE_SHA256=%q/.test(block.source) ||
+      !block.source.includes('>>"$BOX_WINDOW_INPUT"')) return undefined;
+  return macLocalExecution(block, fixture, block.source);
+}
+
+function macNoWindowGuard(block: Block, fixture: Fixture): Execution | undefined {
+  const guard = /if \[ ! -f "\$HOME\/[^"\n]+\.env" \]; then\n[\s\S]*?\n  fi/.exec(block.source)?.[0];
+  if (!guard) return undefined;
+  const marker = "__MAC_LOCAL_GUARD_CONTINUES__";
+  const execution = macLocalExecution(block, fixture, `${guard}\nprintf '%s\\n' '${marker}'`);
+  return execution.status !== 0 || !execution.stdout.endsWith(marker + "\n") ? execution : undefined;
+}
+
+// Model only Mac-local jq assignments used in SSH argv, from the synthetic
+// prompt bytes. Do not export these values into the remote script environment.
+function macBoundaryInputs(block: Block, fixture: Fixture, operations: ReturnType<typeof macBoundaryOperations>):
+  { inputs: Record<string, string> } | { failure: Execution } {
+  const inputs = Object.fromEntries(Object.entries(fixture.env)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined));
+  inputs.HOME = join(fixture.macLocalRoot!, "home");
+  // A sourced Mac product stays in Mac scope. Read the actual earlier writer's
+  // file and pass only referenced values through the original SSH quoting.
+  // A transfer's synthetic source contract is handled by macProductContent.
+  // Only remote argv needs values from Mac state here; stdout destinations
+  // discarded by this adapter do not create an argv dependency either.
+  const remoteReferences = operations.flatMap((operation) =>
+    [...("remote" in operation ? operation.remote.command : "")
+      .matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+      .map((match) => match[1] ?? match[2]!));
+  const transferReferences = operations.flatMap((operation) =>
+    [...("transfer" in operation ? operation.transfer.source : "")
+      .matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+      .map((match) => match[1] ?? match[2]!));
+  for (const match of block.source.matchAll(/^\s*\. "\$HOME\/([^"\n]+\.env)"\s*$/gm)) {
+    const path = join(fixture.macLocalRoot!, "home", match[1]!);
+    // Prefer the earlier retained writer's actual file in a full sequence.
+    // Isolated transfer controls use the declared synthetic producer contract.
+    const references = [...new Set([...remoteReferences, ...(pathExists(path) ? transferReferences : [])])];
+    if (!references.length) continue;
+    if (pathExists(path)) assert.ok(realpathSync(path).startsWith(realpathSync(fixture.macLocalRoot!) + "/"));
+    // Cleanup deliberately sources window state only after the window file
+    // exists. Preserve that predicate on the pre-window abort path.
+    const previous = block.source.slice(0, match.index).trimEnd().split("\n").at(-1)?.trim();
+    const conditional = previous === `if [ -f "$HOME/${match[1]}" ]; then`;
+    const source = conditional ? `if [ -f ${shellWord(path)} ]; then . ${shellWord(path)}; fi` : `. ${shellWord(path)}`;
+    const values = macLocalExecution(block, fixture, source + "\n" + references.map((name) =>
+      `printf '%s\\0%s\\0' "\${${name}+x}" "\${${name}-}"`).join("\n"));
+    if (values.status !== 0) return { failure: values };
+    const fields = values.stdout.split("\0").slice(0, -1);
+    references.forEach((name, index) => {
+      if (fields[2 * index] === "x") inputs[name] = fields[2 * index + 1]!;
+      else delete inputs[name];
+    });
+  }
+  // The open-inputs writer copies role/principal_id unchanged from this receipt
+  // (HM37:494-498). The box lane does not execute that Mac-only private writer.
+  if (inputs.PREP_RECEIPT_PATH) inputs.PREP_SEATS = inputs.PREP_RECEIPT_PATH;
+  const referenced = new Set(operations.flatMap((operation) => "remote" in operation
+    ? [...operation.remote.command.matchAll(/\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g)]
+      .map((match) => match[1] ?? match[2]!) : []));
+  for (const match of block.source.matchAll(
+    /^\s*([A-Z][A-Z0-9_]*)="\$\(jq -er '([^'\n]+)' "\$([A-Z][A-Z0-9_]*)"\)"\s*$/gm,
+  )) {
+    if (!referenced.has(match[1]!)) continue;
+    const path = inputs[match[3]!];
+    assert.ok(path, `unresolved Mac jq input: ${match[3]}`);
+    const resolved = realpathSync(path);
+    assert.ok(resolved.startsWith(realpathSync(fixture.temporary!) + "/"),
+      `Mac jq input is outside the synthetic fixture: ${match[3]}`);
+    const value = spawnSync("jq", ["-er", match[2]!, resolved], {
+      encoding: "utf8", env: explicitEnvironment(),
+    });
+    assert.equal(value.status, 0, `Mac jq assignment ${match[1]}: ${value.stderr}`);
+    inputs[match[1]!] = value.stdout.replace(/\n$/, "");
+  }
+  return { inputs };
+}
+
 function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined {
-  const operations = macBoundaryOperations(block);
-  if (!operations.length) return undefined;
   assert.ok(guardedBoxFixtures.has(fixture), "cross-host products require a guarded box fixture");
-  // Resolve all local products before executing anything, so a missing named input
-  // fails before changing the box. Only transferred Mac bytes are synthetic.
-  const local = operations.flatMap((op) => "transfer" in op ? [op.transfer] : []);
-  const bodies = local.map((product) => macProductContent(product, block, fixture));
+  if (fixture.macSiteSequence && block.file === SITE) {
+    // SSH remains the same guarded login-user boundary. Only BSD's local mode
+    // probe is translated to GNU syntax; no argv, output, or assertion changes.
+    const execution = executeWholeBlock({ ...block,
+      source: block.source.replace(/stat -f (?:'%Lp'|%Lp)/g, "stat -c %a") }, fixture, {
+      env: { HOME: fixture.home, TMPDIR: join(fixture.macLocalRoot!, "tmp") },
+    });
+    if (execution.result !== "passed") return execution;
+    return { ...execution, result: "not-executed", seeded: [], declared: {
+      surface: "Mac site producer contract on Linux",
+      reason: "Complete local writer sequence modeled on the guarded Linux runner; SSH scripts execute as their declared login users. Build and browser surfaces retain their existing declarations.",
+      live_proof: `${block.file}:${block.line} requires the real Mac producer.`,
+    } };
+  }
+  const discovered = macBoundaryOperations(block);
+  if (!discovered.length) return modelMacWindowWriter(block, fixture) ?? modelMacWindowAppend(block, fixture);
+  const early = macNoWindowGuard(block, fixture);
+  if (early) return early;
+  const resolved = macBoundaryInputs(block, fixture, discovered);
+  if ("failure" in resolved) return resolved.failure;
+  const operations = macBoundaryOperations(block, resolved.inputs);
+  const capturedProducts = new Set(capturedMacProductPaths(block));
+  // Keep transfer order: a writer can depend on an earlier SSH result in this
+  // block. Only Mac-local bytes are modeled; remote commands execute unchanged.
+  // Source models use the symbolic Mac input names discovered in the plan.
+  // Resolved values belong to execution argv, not source-model dispatch (e.g.
+  // expanding RELEASE_SHA must not make the B opening receipt unrecognizable).
+  const local = discovered.flatMap((op) => "transfer" in op ? [op.transfer] : []);
+  assert.equal(operations.filter((op) => "transfer" in op).length, local.length,
+    "resolving SSH arguments changed the transfer inventory");
   const localRoot = join(fixture.temporary!, "mac-products", shortStep(block));
   mkdirSync(localRoot, { recursive: true, mode: 0o700 });
   const seeded: string[] = [];
   let index = 0;
+  let stdout = "";
   for (const operation of operations) {
     let source: string;
     if ("transfer" in operation) {
       const product = operation.transfer;
       const path = join(localRoot, String(index));
-      writeFileSync(path, bodies[index++]!, { mode: 0o600 });
+      const symbolic = local[index++]!;
+      // A preceding SSH result can be an input to the Mac writer. In that case
+      // transfer the writer's retained file, after it ran, rather than guessed fields.
+      const stateSource = isAbsolute(product.source) && pathExists(product.source) &&
+        realpathSync(product.source).startsWith(realpathSync(fixture.macLocalRoot!) + "/")
+        ? product.source : undefined;
+      if (capturedProducts.has(symbolic.source) && !stateSource) {
+        return { step: shortStep(block), result: "failed", status: 69, stdout,
+          stderr: `UNPRODUCED Mac writer product ${product.source}\n`, seeded };
+      }
+      writeFileSync(path, stateSource ? readFileSync(stateSource) : macProductContent(symbolic, block, fixture), { mode: 0o600 });
       const target = handoffPath(product.path);
       source = `${operation.transport} ${operation.flags.map(shellWord).join(" ")} ${shellWord(path)} ${shellWord(`${product.owner.split(":")[0]}@100.115.66.74:${target}`)}`;
     } else {
@@ -2661,8 +2891,15 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
       }
       if (remote.script !== undefined) source += ` <<${remote.delimiter}\n${remote.script}${remote.delimiter!.replace(/^-/, "").replace(/["']/g, "")}\n`;
     }
-    const execution = executeWholeBlock({ ...block, source, step: `${shortStep(block)}-box-child` }, fixture);
+    const execution = executeWholeBlock({ ...block, source }, fixture);
     if (execution.result === "failed") return { ...execution, step: shortStep(block), seeded };
+    stdout += execution.stdout;
+    if ("remote" in operation && operation.remote.capture?.localStateSource) {
+      const capture = operation.remote.capture;
+      const produced = macLocalExecution(block, fixture,
+        shellAssignments({ [capture.name]: execution.stdout.replace(/\n+$/, "") }) + capture.localStateSource);
+      if (produced.result === "failed") return produced;
+    }
     if ("transfer" in operation && operation.transfer.path.startsWith("/tmp/") && operation.transfer.kind !== "directory") {
       (fixture.boxTransferTargets ??= []).push(handoffPath(operation.transfer.path));
     }
@@ -2675,7 +2912,7 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
     if (pathExists(path)) seeded.push(path);
   }
   return {
-    step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded,
+    step: shortStep(block), result: "not-executed", status: null, stdout, stderr: "", seeded,
     declared: { surface: "Mac-to-box handoff", reason: "Mac-local bytes modeled; remote commands and stdin executed on the guarded box runner.",
       live_proof: `${block.file}:${block.line} requires the real Mac producer.`,
       outputs: transferProducts(block).filter((product) => !product.path.includes("$") && seeded.includes(handoffPath(product.path))).map((product) => ({ file: basename(product.path), location: "box-proof", mode: product.mode,
@@ -2769,6 +3006,54 @@ interface ContainedResult {
 // tree; a second sandbox-exec inside it is refused by the kernel, so nothing below the top applies its own. The
 // marker tells an ssh stub that the tree it is in was contained by this function. When the profile cannot be
 // applied the result says so and the program's text never reaches a shell.
+const admittedMacFixtures = new WeakMap<Fixture, { profile: string; root: string }>();
+
+// Admission uses the exact block profile, not a weaker probe. No plan text reaches
+// a shell until both positive controls and the outside-root deletion denial pass.
+function admitMacFixture(fixture: Fixture): void {
+  assert.equal(process.platform, "darwin", "Mac fixture admission requires macOS");
+  const created = spawnSync("/usr/bin/mktemp", ["-d", "/private/tmp/commonswarm-jail-canary.XXXXXX"], {
+    encoding: "utf8", env: process.env,
+  });
+  assert.equal(created.status, 0, created.stderr);
+  const outside = realpathSync(created.stdout.trim());
+  assert.equal(dirname(outside), "/private/tmp");
+  assert.match(basename(outside), /^commonswarm-jail-canary\.[A-Za-z0-9]+$/);
+  assert.ok(!outside.startsWith(realpathSync(fixture.temporary!) + "/"));
+  const canary = join(outside, "canary");
+  const inside = join(fixture.temporary!, "jail-removal-control");
+  writeFileSync(canary, "outside canary\n", { mode: 0o600 });
+  mkdirSync(inside, { mode: 0o700 });
+  writeFileSync(join(inside, "canary"), "inside canary\n");
+  try {
+    const run = (command: string, args: string[]) => spawnSync(SANDBOX_EXEC,
+      ["-p", fixture.containment!, command, ...args], {
+        cwd: fixture.cwd, encoding: "utf8", env: fixture.env,
+      });
+    const executed = run("/bin/echo", ["jail-executes"]);
+    assert.equal(executed.status, 0, `jail did not execute: ${executed.stderr}`);
+    assert.equal(executed.stdout, "jail-executes\n");
+    const allowed = run("/bin/rm", ["-R", inside]);
+    assert.equal(allowed.status, 0, `jail refused in-root removal: ${allowed.stderr}`);
+    assert.equal(existsSync(inside), false);
+    const denied = run("/bin/rm", ["-R", outside]);
+    assert.notEqual(denied.status, 0, "jail allowed outside-root rm -R");
+    assert.match(denied.stderr, /Operation not permitted|Permission denied/);
+    assert.equal(readFileSync(canary, "utf8"), "outside canary\n");
+    admittedMacFixtures.set(fixture, { profile: fixture.containment!, root: fixture.temporary! });
+  } finally {
+    // The test parent retains its original HOME and guarded PATH. Only this newly
+    // created, resolved directory is eligible for cleanup outside the jail.
+    assert.equal(realpathSync(outside), outside);
+    assert.equal(dirname(outside), "/private/tmp");
+    assert.match(basename(outside), /^commonswarm-jail-canary\.[A-Za-z0-9]+$/);
+    assert.notEqual(outside, userInfo().homedir);
+    const removed = spawnSync("rm", ["-R", "--", outside], { encoding: "utf8", env: process.env });
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(existsSync(outside), false);
+  }
+}
+
 function containedCommand(
   fixture: Fixture,
   command: string,
@@ -2784,6 +3069,10 @@ function containedCommand(
       cwd: fixture.cwd, input: options.input, encoding: "utf8", env: options.env, timeout: options.timeout ?? 120_000,
     });
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+  const admission = admittedMacFixtures.get(fixture);
+  if (!admission || admission.profile !== fixture.containment || admission.root !== fixture.temporary) {
+    return { status: 71, stdout: "", stderr: "CONTAINMENT UNAVAILABLE: outside-root rm canary admission is missing. The program was not run.\n" };
   }
   const env = { ...options.env, BOX_DRY_RUN_CONTAINED: "1" };
   const availability = containmentAvailability();
@@ -2850,6 +3139,12 @@ function executeWholeBlock(
   const result = containedSpawn(fixture, script, childEnv);
   const stderr = result.stderr;
   const failure = result.status === 0 ? undefined : /__FIRST_FAIL__:(.*)/.exec(stderr)?.[1];
+  // Preserve native output as separate evidence, even when the plan rejects
+  // its first line. Never execute an unknown or replaced runtime for this probe.
+  const nativeVersion = fixture.part === "box" && step === "hm37-deno-install" &&
+    pathExists(DENO_PATH) && lstatSync(DENO_PATH).isFile() && !lstatSync(DENO_PATH).isSymbolicLink() &&
+    createHash("sha256").update(readFileSync(DENO_PATH)).digest("hex") === fixture.denoBinaryDigest
+    ? containedCommand(fixture, DENO_PATH, ["--version"], { env: fixture.env }) : undefined;
   return {
     step,
     result: result.status === 0 ? "passed" : "failed",
@@ -2857,6 +3152,7 @@ function executeWholeBlock(
     firstFailingCommand: failure,
     stderr,
     stdout: result.stdout,
+    ...(nativeVersion ? { nativeVersion } : {}),
   };
 }
 
@@ -3383,6 +3679,21 @@ test("deploy/site/deploy.sh and finalize-release.sh run only commands the site d
   assert.deepEqual([...sshOptions], [], "deploy.sh passes no ssh option the stub would need to list");
 });
 
+test("controls: the jail denies rm -R of a canary outside the run root before any plan block", { skip: MAC_ONLY }, () => {
+  const fixture = prepareMacFixture();
+  try {
+    const positive = containedCommand(fixture, "/bin/echo", ["admitted"], { env: fixture.env });
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.equal(positive.stdout, "admitted\n");
+    const refused = containedCommand({ ...fixture }, "/bin/echo", ["must-not-run"], { env: fixture.env });
+    assert.equal(refused.status, 71);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /canary admission is missing/);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("the containment profiles compile and carry every denial the dry run's containment names", { skip: MAC_ONLY }, (t) => {
   const fixture = prepareMacFixture();
   try {
@@ -3747,13 +4058,14 @@ test("pre-seed allowlist contains only harness variables or cited measured facts
       assert.match(item.source, /^harness:[A-Z][A-Z0-9_]+$/);
       continue;
     }
-    assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-(?:[1-9]|1[0-2]))$/);
+    assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-(?:[1-9]|1[0-2])|production_recheck)$/);
     assert.ok(item.evidence, `${item.source}/${item.name} has no evidence needle`);
-    const fact = citedFact(item.source);
+    const fact = item.source === "production_recheck"
+      ? MEASURED_FACTS.production_recheck : citedFact(item.source);
     const measuredText = JSON.stringify(fact);
     assert.ok(measuredText.includes(item.evidence),
       `${item.source} does not measure allowlisted ${item.kind} ${item.name}: missing ${item.evidence}`);
-    if (["K4-10", "K4-11", "K4-12"].includes(item.source)) {
+    if (["K4-10", "K4-11", "K4-12", "production_recheck"].includes(item.source)) {
       assert.ok(item.evidence_file, `${item.source}/${item.name} has no evidence file citation`);
       assert.equal(existsSync(item.evidence_file), true, `${item.source}/${item.name} evidence file is missing`);
     }
@@ -3860,12 +4172,12 @@ test("prompt-input tables are strict and synthetic values follow their declared 
     if (input.format.startsWith("abs-file:")) promptSchemaContent(input.format.slice("abs-file:".length));
     const pinned = pinnedPromptValue(input);
     if (pinned !== undefined) {
-      const temporary = mkdtempSync(join(tmpdir(), "commonswarm-prompt-pin-"));
+      const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-prompt-pin-"));
       try {
         assert.equal(syntheticPromptValue(input, temporary), pinned,
           `${input.plan}: ${input.name} synthetic value does not honor its plan-pinned literal`);
       } finally {
-        removeOwnedTemporary(temporary, "commonswarm-prompt-pin-");
+        removeOwnedTemporary(temporary, "commonswarm-box-dry-run-commonswarm-prompt-pin-");
       }
       t.diagnostic(`plan_pinned_prompt=${input.plan}:${input.name}`);
     }
@@ -3883,7 +4195,7 @@ test("prompt-input tables are strict and synthetic values follow their declared 
     "```", "",
   ].join("\n"));
   assert.equal(valid.length, 9);
-  const temporary = mkdtempSync(join(tmpdir(), "commonswarm-prompt-format-"));
+  const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-prompt-format-"));
   try {
     const fixtureInputs = valid.map((input) => ({ ...input, plan: TEMPLATE }));
     const environment = syntheticPromptEnvironment(temporary, fixtureInputs);
@@ -3898,7 +4210,7 @@ test("prompt-input tables are strict and synthetic values follow their declared 
     assert.equal(lstatSync(environment.RECEIPT!).mode & 0o777, 0o600);
     assert.equal(readFileSync(environment.RECEIPT!, "utf8"), promptSchemaContent("gate-receipt"));
   } finally {
-    removeOwnedTemporary(temporary, "commonswarm-prompt-format-");
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-commonswarm-prompt-format-");
   }
 
   assert.deepEqual(promptInputsFromMarkdown("none.md", "# no table\n"), []);
@@ -5099,7 +5411,7 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     const installBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-install");
     assert.ok(installBlock);
     const installed = executeWholeBlock(installBlock, fixture);
-    assert.equal(installed.result, "passed", installed.stderr);
+    assert.equal(installed.result, "passed", installed.stderr + "\nnative --version:\n" + (installed.nativeVersion?.stdout ?? "not observed"));
     const denoStat = lstatSync(DENO_PATH);
     assert.equal(denoStat.isFile(), true);
     assert.equal(denoStat.isSymbolicLink(), false);
@@ -5109,22 +5421,41 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     const version = spawnSync(DENO_PATH, ["--version"], { encoding: "utf8", env: fixture.env });
     assert.equal(version.status, 0, version.stderr);
     assert.match(version.stdout, /^deno 2\.9\.7/m);
-    const cache = spawnSync(DENO_PATH, ["cache", "--no-lock", "fixture.ts"], { encoding: "utf8", env: fixture.env });
+    const controlRoot = `/home/commonswarm/edge/controls/${RELEASE_SHA}-${WINDOW_ID}`;
+    const runtimeEnv = { ...fixture.env, DENO_NO_UPDATE_CHECK: "1", DENO_DIR: join(controlRoot, "deno-cache") };
+    const probe = join(fixture.supportRoot!, "fixture.ts");
+    writeRootMode(probe, 'console.log(JSON.stringify({fixture: "runtime-only", version: Deno.version.deno, args: Deno.args}));\n');
+    const cache = spawnSync(DENO_PATH, ["cache", "--no-lock", probe], { encoding: "utf8", env: runtimeEnv });
     assert.equal(cache.status, 0, cache.stderr);
-    const run = spawnSync(DENO_PATH, ["run", "hm37-open-ack-control.ts"], { encoding: "utf8", env: fixture.env });
-    assert.notEqual(run.status, 0, "embedded Deno program was replaced by a synthetic success result");
-    assert.match(run.stderr, /UNPRODUCED embedded Deno program result/);
+    const run = spawnSync(DENO_PATH, ["run", join(fixture.supportRoot!, "missing-control.ts")], { encoding: "utf8", env: runtimeEnv });
+    assert.notEqual(run.status, 0, "missing Deno program was replaced by a synthetic success result");
+    assert.match(run.stderr, /Module not found/);
+    assert.doesNotMatch(run.stderr, /UNPRODUCED|unhandled dry-run stub/);
+    // Exercise the whole plan command with an explicitly labeled runtime-only
+    // program. This proves argv and executable behavior, not live hosted ACKs.
+    // No credentials, network calls, hosted PASS receipt, or journal is invented.
+    writeRootMode(join(controlRoot, "hm37-open-ack-deno.json"), "{}\n");
+    const program = join(controlRoot, "hm37-open-ack-control.ts");
+    copyRootFixture(probe, program, 0o600);
     const hosted = planBlock(HM37B, "hm37-hosted-open-ack-control");
+    const acceptedHosted = executeWholeBlock(hosted, fixture);
+    assert.equal(acceptedHosted.result, "passed", acceptedHosted.stderr);
+    const output = join(PROOF_DIR, "hm37-hosted-check-control.json");
+    const document = JSON.parse(readFileSync(output, "utf8"));
+    assert.equal(document.fixture, "runtime-only");
+    assert.equal(document.version, "2.9.7");
+    assert.deepEqual(document.args, ["--release-root", CANDIDATE_EDGE, "--journal-dir", join(controlRoot, "journal"),
+      "--workspace-id", "c2ea0541-f56d-4c73-bf71-56c5405c4934", "--human-session-file", join(controlRoot, "human-session.json"),
+      "--oauth-database-config-file", join(controlRoot, "oauth-database.json")]);
+    assert.equal(lstatSync(output).mode & 0o777, 0o600);
+    writeRootMode(program, 'throw new Error("runtime-canary-refusal");\n');
     const refusedHosted = executeWholeBlock(hosted, fixture);
     assert.equal(refusedHosted.result, "failed");
-    assert.equal(refusedHosted.status, 69, refusedHosted.stderr);
-    assert.match(refusedHosted.stderr, /UNPRODUCED embedded Deno program result/);
-    assert.doesNotMatch(refusedHosted.stderr, /No such file or directory|CONTAINMENT UNAVAILABLE/);
-    assert.match(failureDetail(hosted, refusedHosted), /UNPRODUCED embedded Deno program result/);
-    const calls = readFileSync(fixture.log, "utf8");
-    assert.match(calls, /^deno --version$/m);
-    assert.match(calls, /^deno cache --no-lock fixture\.ts$/m);
-    assert.match(calls, /^deno run hm37-open-ack-control\.ts$/m);
+    assert.equal(refusedHosted.status, 1, refusedHosted.stderr);
+    assert.match(refusedHosted.stderr, /runtime-canary-refusal/);
+    assert.doesNotMatch(refusedHosted.stderr, /UNPRODUCED|No such file or directory|CONTAINMENT UNAVAILABLE/);
+    assert.match(failureDetail(hosted, refusedHosted), /deno run/);
+    assert.equal(readFileSync(output, "utf8"), "", "failure kept a success-shaped runtime receipt");
     const removeBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-remove");
     assert.ok(removeBlock);
     const removed = executeWholeBlock(removeBlock, fixture);
@@ -5164,7 +5495,8 @@ test("pinned Deno install and rollback removal fail closed", {
   fixture = prepareBoxFixture("s2");
   produceDenoUnitPrerequisites(fixture);
   try {
-    assert.equal(executeWholeBlock(installBlock, fixture).result, "passed");
+    const installed = executeWholeBlock(installBlock, fixture);
+    assert.equal(installed.result, "passed", installed.stderr + "\nnative --version:\n" + (installed.nativeVersion?.stdout ?? "not observed"));
     writeRootMode(DENO_PATH, "different binary\n", 0o755);
     const refused = executeWholeBlock(removeBlock, fixture);
     assert.equal(refused.result, "failed");
@@ -5347,6 +5679,7 @@ test("historical controls execute and reproduce the named failures while current
       cwd: checkoutFixture(fixture.temporary!, "historical-checkout", RELEASE_SHA),
       env: { ...fixture.env },
     };
+    admitMacFixture(historicalFixture);
     const readFailure = executeWholeBlock(historicalOauth, historicalFixture, { control: "historical-oauth-read" });
     assert.equal(readFailure.result, "failed");
     assert.match(readFailure.firstFailingCommand ?? readFailure.stderr, /read -r MCP_OAUTH_IMAGE/);
@@ -5555,6 +5888,8 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
             : `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] Mac-only box-opening transfer; seeded plan-documented synthetic window shape: ${execution.seeded!.join(", ")}`);
         }
         if (execution.result === "failed") {
+          t.diagnostic(`Execution.stderr ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}]:\n${execution.stderr}`);
+          if (execution.nativeVersion) t.diagnostic(`native --version status=${execution.nativeVersion.status}:\n${execution.nativeVersion.stdout}${execution.nativeVersion.stderr}`);
           const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`;
           if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
             failed.push(line);
@@ -5637,6 +5972,157 @@ test("CI box mode is guarded before real-path whole-block fixtures", { skip: pro
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) assert.equal(existsSync(path), false);
   assert.equal(existsSync("/home/commonswarm"), false);
   assert.equal(existsSync("/srv/commonswarm"), false);
+});
+
+test("controls: the box boundary keeps the producer's step identity", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const block = planBlock(HM37, "hm37a-baseline-inventory");
+  const fixture = prepareBoxFixture("s1", [block]);
+  try {
+    const positive = modelMacProducer(block, fixture)!;
+    assert.equal(positive.result, "not-executed", positive.stderr);
+    assert.match(positive.stdout, /^oauth_running_image_match=true$/m);
+    const negative = modelMacProducer({ ...block, step: `${shortStep(block)}-box-child` }, fixture)!;
+    assert.equal(negative.result, "failed");
+    assert.match(negative.stderr, /unhandled dry-run stub: docker inspect/);
+    assert.doesNotMatch(negative.stderr, /Permission denied|CONTAINMENT UNAVAILABLE/);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: box pin argv comes from the earlier Mac writer and stays out of the remote environment", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const open = planBlock(SITE, "site-01");
+  const pin = planBlock(SITE, "site-03-pin-previous");
+  const fixture = prepareBoxFixture("s2", [open, pin]);
+  try {
+    assert.equal(fixture.env.SITE_WINDOW_ID, undefined);
+    const opened = modelMacProducer(open, fixture)!;
+    assert.equal(opened.result, "not-executed", opened.stderr);
+    const state = join(fixture.macLocalRoot!, "home/.commonswarm-site-window.env");
+    assert.equal(pathExists(state), true, "the Mac writer did not retain its product");
+    const original = readFileSync(state, "utf8");
+    const resolved = macBoundaryInputs(pin, fixture, macBoundaryOperations(pin));
+    assert.ok("inputs" in resolved, "the earlier Mac writer's state could not be sourced");
+    const inputs = resolved.inputs;
+    const start = /^SITE_WINDOW_START_UTC=(.+)$/m.exec(original)?.[1];
+    assert.ok(start);
+    assert.equal(inputs.SITE_WINDOW_ID, start.replace(/[:-]/g, ""));
+    const positive = modelMacProducer(pin, fixture)!;
+    assert.equal(positive.result, "not-executed", positive.stderr);
+    assert.match(positive.stdout, /^PIN=PASS$/m);
+    assert.equal(readFileSync(state, "utf8"), original);
+    assert.equal(fixture.env.SITE_WINDOW_ID, undefined, "Mac state leaked into the box block environment");
+    writeMode(state, original + "SITE_WINDOW_ID=''\n");
+    const empty = modelMacProducer(pin, fixture)!;
+    assert.equal(empty.result, "failed", "the adapter replaced an empty sourced id with a guessed value");
+    assert.doesNotMatch(empty.stderr, /unbound variable|CONTAINMENT UNAVAILABLE|Permission denied/);
+    unlinkSync(state);
+    const beforeMissing = readFileSync(fixture.log, "utf8");
+    const missing = modelMacProducer(pin, fixture)!;
+    assert.equal(missing.result, "failed");
+    assert.match(missing.stderr, /\.commonswarm-site-window\.env: No such file or directory/);
+    assert.equal(readFileSync(fixture.log, "utf8"), beforeMissing, "a missing Mac source still ran SSH");
+    assert.doesNotMatch(missing.stderr, /CONTAINMENT UNAVAILABLE|Permission denied/);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: box mode preserves the pre-window abort copy-back guard", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const open = planBlock(HM37, "hm37a-open-inputs");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const fixture = prepareBoxFixture("s1", [open, copyback]);
+  try {
+    const opening = modelMacProducer(open, fixture)!;
+    assert.equal(opening.result, "not-executed", opening.stderr);
+    const receipt = join(fixture.macLocalRoot!, "tmp", `commonswarm-release-open-${RELEASE_SHA}.env`);
+    assert.equal(pathExists(receipt), true);
+    const before = readFileSync(fixture.log, "utf8");
+    const positive = modelMacProducer(copyback, fixture)!;
+    assert.equal(positive.result, "not-executed", positive.stderr);
+    assert.match(positive.stdout, /no window file and no box window input.*nothing to copy back/);
+    assert.equal(readFileSync(fixture.log, "utf8"), before, "the early abort ran a remote copy-back");
+    assert.equal(pathExists(join(PROOF_DIR, "window.env")), false);
+    const inputs = macLocalExecution(open, fixture,
+      `. ${shellWord(receipt)}\nprintf '%s' "$WINDOW_ID"`);
+    assert.equal(inputs.status, 0, inputs.stderr);
+    const orphan = join(fixture.macLocalRoot!, "tmp", `commonswarm-${RELEASE_SHA}-${inputs.stdout}.window.env`);
+    writeMode(orphan, "orphaned box-window input\n");
+    const lost = modelMacProducer(copyback, fixture)!;
+    assert.equal(lost.result, "failed", "a lost Mac window was mistaken for a pre-window abort");
+    unlinkSync(orphan);
+    unlinkSync(receipt);
+    const absent = modelMacProducer(copyback, fixture)!;
+    assert.equal(absent.result, "failed", "the guard accepted an absent open receipt");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: the box-mode remote script runs as the plan's ssh login user", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const fixture = prepareBoxFixture("s2");
+  try {
+    for (const user of ["commonswarm", "ops"]) {
+      const block: Block = { ...planBlock(SITE, "site-01"), step: "ssh-login-user",
+        source: `set -euo pipefail
+ssh ${user}@yulan-vps-1 /bin/bash -s <<'BOX'
+set -euo pipefail
+test "$(id -un)" = ${user}
+test "$(id -u)" = "$(id -u ${user})"
+printf '%s\\n' login-user-accepted
+BOX` };
+      const positive = modelMacProducer(block, fixture)!;
+      assert.notEqual(positive.result, "failed", positive.stderr);
+      const negative = modelMacProducer({ ...block, source: block.source.replace(
+        `test "$(id -un)" = ${user}`, 'test "$(id -un)" = root') }, fixture)!;
+      assert.equal(negative.result, "failed");
+      assert.doesNotMatch(negative.stderr, /Permission denied|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
+    }
+    const elevated: Block = { ...planBlock(SITE, "site-01"), step: "ssh-login-sudo",
+      source: "" };
+    // The inner shell receives literal code; privilege changes only at sudo.
+    elevated.source = `ssh ops@yulan-vps-1 'sudo -n -i /bin/bash -s' <<'BOX'
+set -euo pipefail
+test "$(id -un)" = root
+BOX`;
+    const root = modelMacProducer(elevated, fixture)!;
+    assert.notEqual(root.result, "failed", root.stderr);
+  } finally { cleanupBoxFixture(fixture); }
+});
+
+test("controls: box mode resolves cleanup SSH arguments from the Mac receipt", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const cleanup = planBlock(HM37, "hm37a-prep-seat-cleanup");
+  const fixture = prepareBoxFixture("s1", [cleanup]);
+  try {
+    const receipt = JSON.parse(readFileSync(fixture.env.PREP_RECEIPT_PATH!, "utf8")) as {
+      seats: Array<{ principal_id: string }>;
+    };
+    const before = checkoutSnapshot(process.cwd());
+    const accepted = modelMacProducer(cleanup, fixture)!;
+    assert.notEqual(accepted.result, "failed", accepted.stderr);
+    assert.deepEqual(accepted.stdout.trim().split("\n").sort(),
+      receipt.seats.map((seat) => `${seat.principal_id}=0`).sort());
+    assertCheckoutUnchanged(process.cwd(), before);
+    const bad = { ...cleanup, source: cleanup.source.replace(
+      `SENDER_ID="$(jq -er '.seats[] | select(.role == "sender") | .principal_id' "$PREP_SEATS")"`,
+      `SENDER_ID=invalid-principal`) };
+    assert.notEqual(bad.source, cleanup.source);
+    const refused = modelMacProducer(bad, fixture)!;
+    assert.equal(refused.result, "failed");
+    assert.doesNotMatch(refused.stderr, /unbound variable|Permission denied|CONTAINMENT UNAVAILABLE/);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
 });
 
 test("controls: box mode refuses to run a block when the runner guard is not satisfied", {
@@ -5774,10 +6260,10 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
       assert.ok(product, `Mac mode has no transfer for handoff ${label}`);
       assert.match(product.mode, /^0[0-7]{3}$/, `box mode has no exact mode for handoff ${label}`);
       assert.match(product.owner, /^(?:root:root|ops:ops|commonswarm:commonswarm)$/, `box mode has no owner for handoff ${label}`);
-      if (!product.remote) {
+      if (!product.remote && !capturedMacProductPaths(handoff.producer).includes(product.source)) {
         assert.ok(macProductContent(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!).length,
           `box mode has no producer bytes for handoff ${label}`);
-      } else {
+      } else if (product.remote) {
         assert.ok(macBoundaryOperations(handoff.producer).some((op) => "remote" in op), `box mode has no executable remote producer for ${label}`);
       }
     } else {
@@ -5806,7 +6292,7 @@ test("every cross-host handoff is covered in both modes", (t) => {
     `missing sourced-window handoff: ${step} -> runbook-11 ${file}`);
   }
   const fixtures = new Map<string, ProductContext>();
-  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-handoff-inventory-"));
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-commonswarm-handoff-inventory-"));
   try {
     for (const [index, file] of [PREP, HM37, HM37B, SITE, RUNBOOK].entries()) {
       // This static check needs only the same prompt bytes and state model used by
@@ -5841,8 +6327,17 @@ test("every cross-host handoff is covered in both modes", (t) => {
     }]);
     assert.ok(discovered.some((handoff) => handoff.path === "/tmp/h17-unmodeled-handoff.txt"));
     assert.throws(() => assertHandoffCoverage(discovered, fixtures), /h17-unmodeled-handoff\.txt/);
+    const siteWriter = planBlock(SITE, "site-01");
+    const unrelated = { ...siteWriter, source: siteWriter.source +
+      '\nscp "$UNMODELED_SOURCE" commonswarm@yulan-vps-1:/tmp/h21-unmodeled-handoff.txt\n' };
+    const siteDiscovered = crossHostHandoffs([unrelated, {
+      ...planBlock(RUNBOOK, "1-apply-release-directories"), source: "cat /tmp/h21-unmodeled-handoff.txt",
+    }]);
+    assert.ok(siteDiscovered.some((handoff) => handoff.path === "/tmp/h21-unmodeled-handoff.txt"));
+    assert.throws(() => assertHandoffCoverage(siteDiscovered, fixtures), /h21-unmodeled-handoff\.txt/,
+      "an unrelated transfer borrowed the captured Mac writer's coverage");
   } finally {
-    removeOwnedTemporary(temporary, "commonswarm-handoff-inventory-");
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-commonswarm-handoff-inventory-");
   }
 });
 
@@ -5902,7 +6397,7 @@ test("controls: a missing cross-host handoff fails its consumer in box mode", {
 });
 
 test("controls: sourced box paths share the ssh mapping and preserve source bytes", () => {
-  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "h18-source-"));
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-h18-source-"));
   const root = join(temporary, "box");
   const directory = join(root, "home/commonswarm/releases/previous");
   mkdirSync(directory, { recursive: true });
@@ -5932,7 +6427,80 @@ test("controls: sourced box paths share the ssh mapping and preserve source byte
     writeMode(window, bytes);
     assert.equal(run().status, 0);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-h18-source-");
+  }
+});
+
+test("controls: a generated database session is a producer input, never a successful helper result", (t) => {
+  const producer = planBlock(RUNBOOK, "runbook-17");
+  const body = /cat >"\$DB_SESSION" <<'BASH'\n([\s\S]*?)\nBASH/.exec(producer.source)?.[1];
+  assert.ok(body, "database session has no literal source writer");
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-h21-session-"));
+  const root = join(temporary, "box");
+  try {
+    seedMacBoxRoot(root, "s1");
+    for (const name of ["run-backup.sh", "restore-drill.py"]) {
+      const path = `deploy/supabase-stack/backup/${name}`;
+      const actual = realpathSync(join(root, "/home/commonswarm/stack/current", path));
+      assert.equal(actual, join(root, PREVIOUS_STACK, path));
+      assert.equal(readFileSync(actual, "utf8"), gitShow(basename(PREVIOUS_STACK), path));
+    }
+    const session = join(root, `/run/commonswarm-release-${RELEASE_SHA}-session.sh`);
+    const environment = explicitEnvironment({ BOX_DRY_RUN_BOX_ROOT: root, BOX_DRY_RUN_USERLAND: USERLAND,
+      SHA: RELEASE_SHA, NEW_STACK: join(root, CANDIDATE_STACK),
+      BASH_ENV: resolve("tests/box-dry-run/stubs/box-source.sh") });
+    const source = (): ReturnType<typeof spawnSync> => spawnSync("/bin/bash", ["-ec",
+      'builtin source "$BASH_ENV"; . "$1"; declare -F release_psql_ro', "session-input", session],
+    { encoding: "utf8", env: environment });
+    const missing = source();
+    t.diagnostic(`missing session source stderr:\n${missing.stderr}`);
+    assert.notEqual(missing.status, 0);
+    assert.match(String(missing.stderr), /FileNotFoundError/);
+    assert.ok(String(missing.stderr).includes(basename(session)), String(missing.stderr));
+    writeMode(session, body + "\n");
+    const positive = source();
+    assert.equal(positive.status, 0, String(positive.stderr));
+    assert.equal(positive.stdout, "release_psql_ro\n");
+    assert.equal(readFileSync(session, "utf8"), body + "\n");
+    assert.equal(executesBoxProducerOnMac(producer), true, "the Mac lane omitted the session's real producer");
+    // No database call or catalog/functional PASS product was supplied here.
+    for (const name of ["hm37-hm6-migration-03-catalog.txt", "hm37-hm6-migration-03-functional.txt", "hm37-hm6-schema-helpers.txt"]) {
+      assert.equal(pathExists(join(root, PROOF_DIR, name)), false);
+    }
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-h21-session-");
+  }
+});
+
+test("controls: the Mac site writer derives pin argv from captured clock bytes", () => {
+  const open = planBlock(SITE, "site-01");
+  const consumer = planBlock(SITE, "site-03-pin-previous");
+  const capture = macBoundaryOperations(open).flatMap((operation) =>
+    "remote" in operation && operation.remote.capture?.localStateSource ? [operation.remote.capture] : []).at(0);
+  assert.ok(capture, "the boundary dropped the Mac clock capture and its local writer");
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-h21-mac-writer-"));
+  const home = join(temporary, "home");
+  mkdirSync(home, { mode: 0o700 });
+  const environment = explicitEnvironment({ ...syntheticPromptEnvironment(temporary, promptInputs(SITE)), HOME: home });
+  try {
+    for (const [start, end] of [["2031-04-05T06:07:08Z", "2031-04-05T10:07:08Z"],
+      ["2032-11-12T13:14:15Z", "2032-11-12T17:14:15Z"]]) {
+      const output = `SITE_WINDOW_START_UTC=${start}\nSITE_WINDOW_END_UTC=${end}\nPREVIOUS_RELEASE=/srv/commonswarm/site/releases/${SITE_BASE_RELEASE}\n`;
+      const produced: ReturnType<typeof spawnSync> = spawnSync("/bin/bash", ["-eu"], { encoding: "utf8", env: environment,
+        input: shellAssignments({ [capture.name]: output }) + capture.localStateSource });
+      assert.equal(produced.status, 0, String(produced.stderr));
+      const state = join(home, ".commonswarm-site-window.env");
+      assert.equal(lstatSync(state).mode & 0o777, 0o600);
+      const remote = macBoundaryOperations(consumer)[0]!;
+      assert.ok("remote" in remote);
+      const probe = spawnSync("/bin/bash", ["-eu"], { encoding: "utf8", env: environment,
+        input: `. ${shellWord(state)}\nssh() { /bin/bash -uc 'test "\${SITE_WINDOW_ID+x}" != x'; printf '%s\\n' "$@"; }\n` +
+          remote.remote.command + "\n" });
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.equal(probe.stdout.trim().split("\n").at(-1), start!.replace(/[:-]/g, ""));
+    }
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-h21-mac-writer-");
   }
 });
 
@@ -5960,6 +6528,343 @@ test("controls: a sourced box path outside the fixture box root fails the Mac bl
   } finally {
     cleanupMacFixture(fixture);
   }
+});
+
+test("controls: the dry run removes its own temporary directories on pass fail and interrupt", async () => {
+  const root = realpathSync(tmpdir());
+  const prefix = `commonswarm-box-dry-run-lifecycle-${process.pid}-`;
+  const canary = mkdtempSync(join(root, prefix + "unrelated-"));
+  writeFileSync(join(canary, "canary"), "unrelated invocation\n");
+  const module = new URL("./box-dry-run/temporary.ts", import.meta.url).href;
+  try {
+    for (const outcome of ["pass", "fail", "setup-failure", "SIGINT", "SIGTERM"]) {
+      const childPrefix = prefix + outcome + "-";
+      assert.deepEqual(readdirSync(root).filter((name) => name.startsWith(childPrefix)), []);
+      const source = `
+        import assert from 'node:assert/strict';
+        import {writeFileSync, readFileSync, existsSync} from 'node:fs';
+        import {createTemporary, removeTemporary, withTemporarySetup} from ${JSON.stringify(module)};
+        const prefix = ${JSON.stringify(join(root, childPrefix))};
+        const paths = [];
+        try { withTemporarySetup(() => {
+        paths.push(createTemporary(prefix), createTemporary(prefix));
+        process.stdout.write(JSON.stringify({allocated: paths}) + '\\n');
+        assert.throws(() => removeTemporary(${JSON.stringify(canary)}, ${JSON.stringify(prefix)}), /unowned temporary/);
+        if (${JSON.stringify(outcome)} === 'setup-failure') throw new Error('setup failed before fixture return');
+        for (const path of paths) writeFileSync(path + '/setup-witness', 'actual setup bytes');
+        assert.ok(paths.every(path => readFileSync(path + '/setup-witness', 'utf8') === 'actual setup bytes'));
+        }); } catch (error) {
+          assert.ok(paths.every(path => !existsSync(path)), 'caught setup failure retained an owned directory');
+          throw error;
+        }
+        process.stdout.write(JSON.stringify({ready: paths}) + '\\n');
+        if (${JSON.stringify(outcome)} === 'pass') {
+          removeTemporary(paths[0], ${JSON.stringify(childPrefix)});
+          assert.equal(existsSync(paths[0]), false);
+        } else if (${JSON.stringify(outcome)} === 'fail') throw new Error('failure after setup');
+        else setInterval(() => {}, 1000);
+      `;
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+        env: process.env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "", stderr = "", interrupted = false;
+      const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolveExit({ code, signal }));
+      });
+      child.stdout.on("data", (bytes: Buffer) => {
+        stdout += bytes.toString();
+        if (!interrupted && outcome.startsWith("SIG") && stdout.split("\n").some((line) => line.startsWith('{"ready":'))) {
+          interrupted = true;
+          child.kill(outcome as NodeJS.Signals);
+        }
+      });
+      child.stderr.on("data", (bytes: Buffer) => { stderr += bytes.toString(); });
+      const timeout = setTimeout(() => child.kill("SIGTERM"), 15_000);
+      let result: Awaited<typeof closed>;
+      try { result = await closed; } finally { clearTimeout(timeout); }
+      const records = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { allocated?: string[]; ready?: string[] });
+      const paths = records.find((record) => record.allocated)?.allocated;
+      assert.equal(paths?.length, 2, `${outcome}: no allocation witness; ${stderr}`);
+      for (const path of paths!) {
+        assert.equal(dirname(path), root);
+        assert.ok(basename(path).startsWith(childPrefix));
+        assert.equal(existsSync(path), false, `${outcome} leaked owned temporary ${path}`);
+      }
+      assert.deepEqual(readdirSync(root).filter((name) => name.startsWith(childPrefix)), [], `${outcome} left matching directories`);
+      assert.equal(readFileSync(join(canary, "canary"), "utf8"), "unrelated invocation\n");
+      if (outcome === "setup-failure") {
+        assert.equal(result!.code, 1, stderr);
+        assert.match(stderr, /setup failed before fixture return/);
+      } else {
+        assert.deepEqual(records.find((record) => record.ready)?.ready, paths, `${outcome}: no positive setup witness`);
+        if (outcome.startsWith("SIG")) {
+          assert.equal(interrupted, true);
+          assert.equal(result!.signal, outcome, stderr);
+        } else {
+          assert.equal(result!.code, outcome === "pass" ? 0 : 1, stderr);
+          if (outcome === "fail") assert.match(stderr, /failure after setup/);
+        }
+      }
+      assert.doesNotMatch(stderr, /guarded cleanup refused|REFUSE replaced temporary/);
+    }
+  } finally { removeOwnedTemporary(canary, prefix); }
+});
+
+test("controls: tee writers retain their producer and cannot borrow modeled COPY_BACK coverage", () => {
+  const root = "/home/commonswarm/stack/release-proofs/tee-control";
+  const producer: Block = { ...planBlock(RUNBOOK, "runbook-23"), step: "tee-output-control",
+    source: `PROOF_DIR=${root}\nprintf one | tee "$PROOF_DIR/one.txt" "$PROOF_DIR/two.txt"\n` +
+      `printf two | LC_ALL=C tee --append -- "$PROOF_DIR/three.txt"\n` +
+      `printf three | sudo -n tee -a "$PROOF_DIR/four.txt" >/dev/null\n` +
+      `printf 'quoted | tee /home/not-a-writer'\ncat <<'DATA'\ntee /home/not-shell\nDATA\n` };
+  const names = ["one.txt", "two.txt", "three.txt", "four.txt"];
+  const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat ${names.map((name) => `${root}/${name}`).join(" ")}` };
+  const discovered = crossHostHandoffs([producer, consumer]);
+  assert.deepEqual(discovered.map((item) => [item.producer.step, item.path]).sort(),
+    names.map((name) => [producer.step, `${root}/${name}`]).sort());
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const manifest = planBlock(RUNBOOK, "runbook-03");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const fixtures = new Map<string, ProductContext>([[HM37, { env: {}, model: cachedBoxModel("s2") }]]);
+  const positive = crossHostHandoffs([apply, manifest, copyback]);
+  assert.ok(positive.some((item) => item.producer === apply));
+  assertHandoffCoverage(positive, fixtures);
+  const writer = { ...apply, source: apply.source + '\nprintf real-input | tee "$PROOF_DIR/h25-new-tee.txt"\n' };
+  const selection = { ...manifest, source: manifest.source + '\nCOPY_BACK_FILES+=(h25-new-tee.txt)\n' };
+  const inventory = crossHostHandoffs([writer, selection, copyback]);
+  const added = inventory.filter((item) => item.path.endsWith("/h25-new-tee.txt"));
+  assert.deepEqual(added.map((item) => [item.producer.step, item.consumer.step, item.path]),
+    [[writer.step, copyback.step, "/home/commonswarm/stack/release-proofs/{sha}/h25-new-tee.txt"]]);
+  assert.throws(() => assertHandoffCoverage(inventory, fixtures), /Mac mode has no producer coverage for handoff .*h25-new-tee\.txt/);
+  assert.throws(() => crossHostHandoffs([{ ...producer, source: 'tee --unknown-writer /home/product' }, consumer]), /unknown tee writer option/);
+  assert.throws(() => crossHostHandoffs([{ ...producer, source: 'sftp /tmp/local box:/tmp/remote' }, consumer]), /unknown transfer form/);
+});
+
+test("controls: executable-qualified tee writers cannot evade producer discovery in either host direction", () => {
+  const path = "/home/commonswarm/stack/release-proofs/qualified-writer/new-proof.json";
+  const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
+  for (const executable of ["tee", "/usr/bin/tee", '"/usr/bin/tee"', "/usr/bin/t\\ee",
+    "LC_ALL=C /usr/bin/tee", "sudo -n /usr/bin/tee", "env LC_ALL=C /usr/bin/tee", "command /usr/bin/tee"]) {
+    const producer: Block = { ...planBlock(RUNBOOK, "runbook-23"), source: `printf actual | ${executable} "${path}"` };
+    const discovered = crossHostHandoffs([producer, consumer]);
+    assert.deepEqual(discovered.map((item) => [item.path, item.direction]), [[path, "box-to-mac"]], executable);
+    assert.equal(discovered[0]!.producer, producer);
+    assert.equal(discovered[0]!.consumer, consumer);
+    const remote: Block = { ...consumer, step: "qualified-remote-writer",
+      source: `ssh ops@yulan-vps-1 'printf actual | ${executable} "${path}"'` };
+    const box: Block = { ...producer, source: `cat "${path}"` };
+    const reverse = crossHostHandoffs([remote, box]);
+    assert.deepEqual(reverse.map((item) => [item.path, item.direction]), [[path, "mac-to-box"]], executable);
+    assert.equal(reverse[0]!.producer, remote);
+    assert.equal(reverse[0]!.consumer, box);
+    assert.deepEqual(transferProducts(remote), [{ path, source: "", mode: "0600", owner: "root:root", remote: true, kind: "file" }]);
+    const unknown = { ...producer, source: `printf actual | ${executable} --unknown-writer "${path}"` };
+    assert.throws(() => crossHostHandoffs([unknown, consumer]), /unknown tee writer option/);
+    assert.throws(() => transferProducts({ ...remote,
+      source: `ssh ops@yulan-vps-1 'printf actual | ${executable} --unknown-writer "${path}"'` }), /unknown tee writer option/);
+  }
+  const quoted = { ...planBlock(RUNBOOK, "runbook-23"),
+    source: `printf 'data | /usr/bin/tee ${path}'\nprintf actual # data | /usr/bin/tee ${path}\ncat <<'DATA'\n/usr/bin/tee ${path}\nDATA\n` };
+  assert.deepEqual(crossHostHandoffs([quoted, consumer]), []);
+  for (const data of ["'LC_ALL=C'", "command LC_ALL=C", "exec LC_ALL=C"]) {
+    assert.deepEqual(crossHostHandoffs([{ ...quoted, source: `${data} /usr/bin/tee "${path}"` }, consumer]), []);
+  }
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const manifest = planBlock(RUNBOOK, "runbook-03");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const fixtures = new Map<string, ProductContext>([[HM37, { env: {}, model: cachedBoxModel("s2") }]]);
+  const positive = crossHostHandoffs([apply, manifest, copyback]);
+  assert.ok(positive.some((item) => item.producer === apply));
+  assertHandoffCoverage(positive, fixtures);
+  const writer = { ...apply, source: apply.source + '\nprintf actual | /usr/bin/tee "$PROOF_DIR/qualified-new-proof.json"\n' };
+  const selection = { ...manifest, source: manifest.source + '\nCOPY_BACK_FILES+=(qualified-new-proof.json)\n' };
+  const added = crossHostHandoffs([writer, selection, copyback]);
+  assert.ok(added.some((item) => item.producer === writer && item.consumer === copyback && item.path.endsWith("/qualified-new-proof.json")));
+  assert.throws(() => assertHandoffCoverage(added, fixtures), /Mac mode has no producer coverage for handoff .*qualified-new-proof\.json/);
+});
+
+test("controls: opaque writer executables cannot silently omit cross-host products", () => {
+  const path = "/home/commonswarm/stack/release-proofs/opaque-writer/proof.txt";
+  const producer: Block = { ...planBlock(RUNBOOK, "runbook-23"), source: `printf actual | /usr/bin/tee "${path}"` };
+  const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
+  const positive = crossHostHandoffs([producer, consumer]);
+  assert.deepEqual(positive.map((item) => [item.path, item.producer, item.consumer]), [[path, producer, consumer]]);
+  for (const executable of ["$T", '"${T}"', "env LC_ALL=C $T", "sudo -n $T", "command $T"]) {
+    const source = `T=/usr/bin/tee\nprintf actual | ${executable} "${path}"`;
+    assert.throws(() => crossHostHandoffs([{ ...producer, source }, consumer]), /unknown writer executable form/);
+    assert.throws(() => transferProducts({ ...consumer,
+      source: `ssh ops@yulan-vps-1 'T=/usr/bin/tee; printf actual | ${executable} "${path}"'` }), /unknown writer executable form/);
+  }
+  for (const executable of ["sh", "/bin/bash", "sudo -n /bin/bash"]) {
+    const script = `printf actual | tee "${path}"`;
+    const wrapped = { ...producer, source: `${executable} -c '${script}'` };
+    const discovered = crossHostHandoffs([wrapped, consumer]);
+    assert.deepEqual(discovered.map((item) => [item.path, item.producer]), [[path, wrapped]]);
+    const remote = { ...consumer, source: `ssh ops@yulan-vps-1 "${executable} -c 'tee ${path}'"` };
+    assert.deepEqual(transferProducts(remote).map((item) => item.path), [path]);
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `${executable} -c 'tee --unknown-writer ${path}'` }, consumer]), /unknown tee writer option/);
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `${executable} -c '$PROGRAM ${path}'` }, consumer]), /unknown writer shell form/);
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `${executable} -c 'tee ${path}' ignored-shell-argv` }, consumer]), /unknown writer shell form/);
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `${executable} --noprofile -c 'tee ${path}'` }, consumer]), /unknown writer shell form/);
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `${executable} -c 'if true; then tee ${path}; fi'` }, consumer]), /unknown writer shell form/);
+  }
+  const payload = { ...producer,
+    source: `printf 'sh -c tee ${path}'\ncat <<'DATA'\nsh -c 'tee ${path}'\nDATA\n` };
+  assert.deepEqual(crossHostHandoffs([payload, consumer]), []);
+});
+
+test("controls: missing interpreters cannot produce Deno or database observations", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-interpreter-refusal-"));
+  try {
+    for (const name of ["deno", "docker"]) {
+      copyFileSync(STUB, join(temporary, name));
+      chmodSync(join(temporary, name), 0o755);
+    }
+    const log = join(temporary, "stub.log");
+    const env = explicitEnvironment({ BOX_DRY_RUN_STUB_LOG: log });
+    // Positive execution witness: the same executable reaches the generic
+    // fault boundary. It changes status without supplying a consumer product.
+    const injected = spawnSync(join(temporary, "deno"), ["run", "missing.ts"], {
+      encoding: "utf8", env: { ...env, BOX_DRY_RUN_STEP: "unobserved-program", BOX_DRY_RUN_FAIL_STEP: "unobserved-program" },
+    });
+    assert.equal(injected.status, 41, injected.stderr);
+    assert.equal(injected.stdout, "");
+    assert.match(injected.stderr, /injected dry-run failure: unobserved-program/);
+    for (const args of [["--version"], ["cache", "missing.ts"], ["run", "missing.ts"]]) {
+      const result = spawnSync(join(temporary, "deno"), args, { encoding: "utf8", env });
+      assert.equal(result.status, 69, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /UNPRODUCED Deno executable observation/);
+    }
+    // A nonexistent relation cannot prove that a principal has no live tokens.
+    // No actual container or PostgreSQL interpreter exists at this boundary.
+    const sql = "BEGIN READ ONLY; SELECT nonexistent_column FROM nonexistent_table WHERE revoked_at IS NULL " +
+      "AND principal_id = '11111111-1111-1111-1111-111111111111';\n";
+    const database = spawnSync(join(temporary, "docker"), ["exec", "-i", "fixture-container", "sh", "-c", "psql"], {
+      encoding: "utf8", input: sql, env,
+    });
+    assert.equal(database.status, 69, database.stderr);
+    assert.equal(database.stdout, "");
+    assert.match(database.stderr, /UNPRODUCED container database observation/);
+    assert.match(readFileSync(log, "utf8"), /^docker exec /m);
+    assert.deepEqual(readdirSync(temporary).sort(), ["deno", "docker", "stub.log"]);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-interpreter-refusal-"); }
+});
+
+test("controls: tee streams actual bytes and records only created file ownership", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-tee-"));
+  try {
+    const root = join(temporary, "box");
+    mkdirSync(root);
+    const target = join(root, "proof.txt");
+    const env = explicitEnvironment({ BOX_DRY_RUN_BOX_ROOT: root, BOX_DRY_RUN_REMOTE_USER: "root" });
+    const run = (args: string[], input: Buffer) => spawnSync("/usr/bin/python3", [USERLAND, "tee", ...args], { env, input });
+    const first = Buffer.from([0, 255, 10, 97]);
+    const positive = run([target], first);
+    assert.equal(positive.status, 0, positive.stderr.toString());
+    assert.deepEqual(positive.stdout, first);
+    assert.deepEqual(readFileSync(target), first);
+    assert.equal(readBoxOwners(root)["proof.txt"], "root:root");
+    recordBoxOwner(root, "/proof.txt", "commonswarm:commonswarm");
+    chmodSync(target, 0o640);
+    const second = Buffer.from("append\n");
+    const appended = run(["-a", target], second);
+    assert.equal(appended.status, 0, appended.stderr.toString());
+    assert.deepEqual(appended.stdout, second);
+    assert.deepEqual(readFileSync(target), Buffer.concat([first, second]));
+    assert.equal(lstatSync(target).mode & 0o777, 0o640);
+    assert.equal(readBoxOwners(root)["proof.txt"], "commonswarm:commonswarm", "append changed existing creation identity");
+    const canary = join(temporary, "unrelated");
+    writeFileSync(canary, "preserved");
+    const negative = run([canary], Buffer.from("overwrite"));
+    assert.equal(negative.status, 69);
+    assert.match(negative.stderr.toString(), /unhandled dry-run stub: tee/);
+    assert.equal(readFileSync(canary, "utf8"), "preserved");
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-tee-"); }
+});
+
+test("controls: curl body and header writers enter the cross-host inventory", () => {
+  const root = "/home/commonswarm/stack/release-proofs/curl-control";
+  const producer: Block = { ...planBlock(RUNBOOK, "runbook-34"), step: "curl-output-control",
+    source: `PROOF_DIR=${root}\nHEADERS="$PROOF_DIR/headers.txt"\n` +
+      `STATUS="$(curl -sS -D "$HEADERS" -o "$PROOF_DIR/body.json" -w '%{http_code}' https://example.invalid)"\n` +
+      `curl --dump-header="$PROOF_DIR/long.headers" --output "$PROOF_DIR/long.json" https://example.invalid\n` +
+      `curl -D"$PROOF_DIR/joined.headers" -o"$PROOF_DIR/joined.json" https://example.invalid\n` +
+      `printf '%s\\n' 'curl -o ${root}/quoted.json https://example.invalid'\n` +
+      `cat <<'DATA'\ncurl -o ${root}/heredoc.json https://example.invalid\nDATA\n` };
+  const names = ["headers.txt", "body.json", "long.headers", "long.json", "joined.headers", "joined.json"];
+  const consumer: Block = { ...producer, step: "curl-output-read", host: "Mac mini /bin/bash 3.2",
+    source: "cat " + [...names, "quoted.json", "heredoc.json"].map((name) => `${root}/${name}`).join(" ") };
+  const paths = crossHostHandoffs([producer, consumer]).map((handoff) => handoff.path).sort();
+  assert.deepEqual(paths, names.map((name) => `${root}/${name}`).sort());
+  const actual = handoffInventory();
+  assert.ok(actual.some((handoff) => handoff.producer.file === RUNBOOK && handoff.producer.step === "runbook-34" &&
+    handoff.consumer.step === "runbook-11" && handoff.path.endsWith("/h0-note-unauth.json")),
+  "the real curl-only COPY_BACK member was omitted");
+});
+
+test("controls: qualified curl file writers retain their producer in both directions", () => {
+  const root = "/home/commonswarm/stack/release-proofs/qualified-curl";
+  const paths = [`${root}/body.json`, `${root}/headers.txt`];
+  const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat ${paths.join(" ")}` };
+  for (const executable of ["curl", "/usr/bin/curl", '"/usr/bin/curl"', "/usr/bin/c\\url",
+    "LC_ALL=C /usr/bin/curl", "sudo -n /usr/bin/curl", "env LC_ALL=C /usr/bin/curl", "command /usr/bin/curl"]) {
+    for (const captured of [false, true]) {
+      const invocation = `${executable} --output "${paths[0]}" --dump-header="${paths[1]}" https://example.invalid`;
+      const source = captured ? `STATUS="$(${invocation})"` : invocation;
+      const producer = { ...planBlock(RUNBOOK, "runbook-34"), source };
+      const forward = crossHostHandoffs([producer, consumer]);
+      assert.deepEqual(forward.map((item) => [item.path, item.direction]).sort(), paths.map((path) => [path, "box-to-mac"]).sort());
+      assert.ok(forward.every((item) => item.producer === producer && item.consumer === consumer), executable);
+      const remote = { ...consumer, source: `ssh ops@yulan-vps-1 '${source}'` };
+      const box = { ...producer, source: consumer.source };
+      const reverse = crossHostHandoffs([remote, box]);
+      assert.deepEqual(reverse.map((item) => [item.path, item.direction]).sort(), paths.map((path) => [path, "mac-to-box"]).sort());
+      assert.ok(reverse.every((item) => item.producer === remote && item.consumer === box), executable);
+      assert.deepEqual(transferProducts(remote).map((item) => [item.path, item.owner, item.mode]).sort(),
+        paths.map((path) => [path, "root:root", "0600"]).sort());
+      assert.throws(() => crossHostHandoffs([{ ...producer, source: `${executable} --output` }, consumer]), /unknown curl writer form/);
+    }
+  }
+  const data = { ...planBlock(RUNBOOK, "runbook-34"),
+    source: `printf '/usr/bin/curl --output ${paths[0]}'\ncat <<'DATA'\n/usr/bin/curl --output ${paths[1]}\nDATA\n` };
+  assert.deepEqual(crossHostHandoffs([data, consumer]), []);
+  // The post-curl pipeline is another executable, not extra curl operands.
+  const captured = { ...data, source: `STATUS="$(/usr/bin/curl --output '${paths[0]}' https://example.invalid | printf '%s' '--output ${paths[1]}')"` };
+  assert.deepEqual(crossHostHandoffs([captured, consumer]).map((item) => item.path), [paths[0]]);
+});
+
+test("controls: a new curl COPY_BACK member cannot borrow the modeled apply writer's coverage", () => {
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const manifest = planBlock(RUNBOOK, "runbook-03");
+  const copyback = planBlock(RUNBOOK, "runbook-11");
+  const fixtures = new Map<string, ProductContext>([
+    [HM37, { env: {}, model: cachedBoxModel("s2") }],
+  ]);
+  const original = crossHostHandoffs([apply, manifest, copyback]);
+  assert.ok(original.some((handoff) => handoff.producer === apply), "positive apply inventory is empty");
+  assertHandoffCoverage(original, fixtures);
+  // Mutate the producer and selection boundary, leaving the actual tar -T
+  // consumer intact. Apply is modeled on Mac, so newly selected curl products
+  // need their own coverage; existing window products cannot admit them.
+  const writer = { ...apply, source: apply.source +
+    '\ncurl --output "$PROOF_DIR/h24-new-body.json" --dump-header "$PROOF_DIR/h24-new-headers.txt" https://example.invalid\n' };
+  const selection = { ...manifest, source: manifest.source +
+    '\nCOPY_BACK_FILES+=(h24-new-body.json h24-new-headers.txt)\n' };
+  const inventory = crossHostHandoffs([writer, selection, copyback]);
+  const added = inventory.filter((handoff) => handoff.producer === writer && /\/h24-new-/.test(handoff.path));
+  assert.deepEqual(added.map((handoff) => [handoff.path, handoff.consumer.step]).sort(), [
+    ["/home/commonswarm/stack/release-proofs/{sha}/h24-new-body.json", "runbook-11"],
+    ["/home/commonswarm/stack/release-proofs/{sha}/h24-new-headers.txt", "runbook-11"],
+  ]);
+  assert.throws(() => assertHandoffCoverage(inventory, fixtures),
+    /Mac mode has no producer coverage for handoff .*h24-new-body\.json/);
 });
 
 test("cross-host inventory finds remote writes and known transfer forms", () => {
@@ -6003,6 +6908,76 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
   const reordered = { ...fileFed, source: fileFed.source.replace('cat >"$SCRIPT" <<\'SCRIPT\'', 'cat <<\'SCRIPT\' >"$SCRIPT"') };
   assert.ok(crossHostHandoffs([reordered, consumer]).some((item) => item.path === "/tmp/file-fed-product"),
     "a file-fed script disappeared when its redirection moved");
+});
+
+test("controls: box userland install accepts /dev/null and refuses other device sources", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  const target = join(temporary, "empty");
+  const env = explicitEnvironment({ BOX_DRY_RUN_BOX_ROOT: temporary, BOX_DRY_RUN_REMOTE_USER: "root",
+    BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log") });
+  const install = (source: string) => spawnSync("/usr/bin/python3", [USERLAND, "install",
+    "-m", "0600", "-o", "root", "-g", "root", source, target], { encoding: "utf8", env });
+  try {
+    const positive = install("/dev/null");
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.equal(lstatSync(target).isFile(), true);
+    assert.equal(lstatSync(target).mode & 0o777, 0o600);
+    assert.equal(readFileSync(target).length, 0);
+    writeFileSync(target, "preserved\n");
+    const negative = install("/dev/zero");
+    assert.equal(negative.status, 1, negative.stderr);
+    assert.match(negative.stderr, /install: cannot stat '\/dev\/zero'/);
+    assert.equal(readFileSync(target, "utf8"), "preserved\n");
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
+  }
+});
+
+test("controls: ssh stdin belongs to its own command on a compound line", () => {
+  const block: Block = { ...planBlock(HM37B, "hm37b-box-open"), step: "stdin-scope",
+    source: `SCRIPT=/tmp/local-script
+cat >"$SCRIPT" <<'SCRIPT'
+printf '%s\\n' scoped >/tmp/ssh-scoped-output
+SCRIPT
+cat </tmp/unrelated; ssh ops@100.115.66.74 'printf ready'
+cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s' <"$SCRIPT"; cat </tmp/later` };
+  const operations = macBoundaryOperations(block).filter((op) => "remote" in op);
+  assert.equal(operations.length, 2);
+  assert.equal(operations[0]!.remote.script, undefined);
+  assert.equal(operations[1]!.remote.script, "printf '%s\\n' scoped >/tmp/ssh-scoped-output\n");
+  const missing = { ...block, source: "cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s'; cat </tmp/later" };
+  assert.throws(() => macBoundaryOperations(missing), /unknown transfer form/);
+  for (const source of [
+    `cat "$(ssh ops@100.115.66.74 'printf ready')" </tmp/unrelated`,
+    "cat <<'LOCAL'; ssh ops@100.115.66.74 'printf ready'\nlocal stdin\nLOCAL",
+  ]) {
+    const own = macBoundaryOperations({ ...block, source });
+    assert.equal(own.length, 1);
+    assert.ok("remote" in own[0]!);
+    assert.equal(own[0].remote.script, undefined, "a neighboring command's stdin was sent to ssh");
+  }
+});
+
+test("controls: a quoted heredoc does not see Mac-local variables", () => {
+  const block: Block = { ...planBlock(HM37B, "hm37b-box-open"), step: "quoted-scope",
+    source: `MAC_LOCAL=/tmp/mac-only-directory
+ssh ops@100.115.66.74 'bash -s -- /tmp/real-argument' <<'BOX'
+REMOTE_ROOT="$1"
+printf '%s\\n' remote >"$REMOTE_ROOT/remote.txt"
+printf '%s\\n' missing >"$MAC_LOCAL/hidden.txt"
+BOX` };
+  const products = transferProducts(block);
+  assert.ok(products.some((product) => product.path === "/tmp/real-argument/remote.txt"));
+  assert.equal(products.some((product) => product.path === "/tmp/mac-only-directory/hidden.txt"), false);
+  assert.ok(products.some((product) => product.path === "$MAC_LOCAL/hidden.txt"), "unresolved box variable was hidden");
+  const unquoted = transferProducts({ ...block, source: block.source.replace("<<'BOX'", "<<BOX") });
+  assert.ok(unquoted.some((product) => product.path === "/tmp/mac-only-directory/hidden.txt"));
+  const actual = spawnSync("/bin/bash", ["-c", `MAC_LOCAL=/tmp/mac-only-directory
+bash -s -- /tmp/real-argument <<'BOX'
+test "$1" = /tmp/real-argument
+test -z "\${MAC_LOCAL+x}"
+BOX`], { encoding: "utf8", env: explicitEnvironment() });
+  assert.equal(actual.status, 0, actual.stderr);
 });
 
 test("controls: an unknown transfer form fails the inventory test", () => {
@@ -6109,7 +7084,7 @@ test("controls: the OAuth database host line comes only from a measured fact", (
   assert.deepEqual(entry.outputs, [], "unmeasured host must not supply a staging result");
   assert.match(measuredFact("M7").note, /does not contain MCP_OAUTH_DATABASE_HOST/);
   assert.doesNotMatch(MEASURED_FACTS.production_recheck.output, /^MCP_OAUTH_DATABASE_HOST=/m);
-  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "h18-oauth-"));
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-h18-oauth-"));
   const bin = join(temporary, "bin");
   mkdirSync(bin);
   copyFileSync(STUB, join(bin, "docker"));
@@ -6129,6 +7104,6 @@ test("controls: the OAuth database host line comes only from a measured fact", (
       assert.equal(negative.stdout, "", "stub emitted an unmeasured host");
     }
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-h18-oauth-");
   }
 });

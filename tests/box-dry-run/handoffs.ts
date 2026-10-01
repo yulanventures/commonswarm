@@ -15,7 +15,21 @@ const UNKNOWN_TRANSPORT = /\b(?:sftp|ftp|lftp|rcp|rclone|bbcp|unison|sshpass)\b/
 const tokens = (line: string): string[] => (line.match(/(?:"[^"\n]*"|'[^'\n]*'|[^\s;"']+)+/g) ?? [])
   .map((word) => word.replace(/["']/g, ""));
 
-function expansions(block: HandoffBlock): (value: string) => string[] {
+// Here-document bodies belong to stdin, not the Mac shell's assignment scope.
+function outsideHeredocs(source: string): string {
+  const lines = source.split("\n");
+  const outer: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    outer.push(line);
+    const here = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(line);
+    if (here) while (++index < lines.length &&
+      (here[1] ? lines[index]!.replace(/^\t+/, "") : lines[index]) !== here[3]) { /* stdin */ }
+  }
+  return outer.join("\n");
+}
+
+function expansions(block: HandoffBlock, locals: Record<string, string> = {}): (value: string) => string[] {
   const vars = new Map<string, string[]>([
     ["SHA", ["{sha}"]], ["RELEASE_SHA", ["{sha}"]], ["WINDOW_ID", ["{window}"]],
   ]);
@@ -48,6 +62,7 @@ function expansions(block: HandoffBlock): (value: string) => string[] {
       if (accepted) vars.set(name, accepted.split("|"));
     }
   }
+  for (const [name, value] of Object.entries(locals)) vars.set(name, [value]);
   const expand = (value: string, depth = 0): string[] => {
     if (depth > 12) return [value];
     const match = [...value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)].find((item) => vars.has(item[1] ?? item[2]!));
@@ -58,14 +73,21 @@ function expansions(block: HandoffBlock): (value: string) => string[] {
   return (value) => expand(value);
 }
 
-export interface RemoteOperation { command: string; script?: string; delimiter?: string; stdinProducer?: { path: string; writers: string[] } }
+export interface RemoteOperation {
+  command: string;
+  script?: string;
+  delimiter?: string;
+  stdinProducer?: { path: string; writers: string[] };
+  // A Mac command substitution owns this output, not the remote environment.
+  capture?: { name: string; localStateSource?: string };
+}
 export type BoundaryOperation = { transfer: TransferProduct; transport: "scp" | "rsync"; flags: string[] } | { remote: RemoteOperation };
 
 // Keep the remote command's shell quoting and here-document bytes. Only the Mac stdout
 // sink is removed; it is not a box product. File-fed scripts must have a visible writer.
-export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] {
+export function macBoundaryOperations(block: HandoffBlock, locals: Record<string, string> = {}): BoundaryOperation[] {
   if (block.host.startsWith("box ")) return [];
-  const expand = expansions(block);
+  const expand = expansions({ ...block, source: outsideHeredocs(block.source) }, locals);
   const lines = block.source.split("\n");
   const scripts = new Map<string, { script?: string; delimiter?: string; stdinProducer?: { path: string; writers: string[] } }>();
   const operations: BoundaryOperation[] = [];
@@ -154,7 +176,34 @@ export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] 
     if (!/\bssh\s/.test(line) && /[A-Za-z_][A-Za-z0-9_-]*@[^\s:]+:/.test(line)) unknown(line);
     const ssh = /\bssh\s/.exec(line);
     if (!ssh) continue;
-    let command = line.slice(ssh.index).trim();
+    const captured = /([A-Za-z_][A-Za-z0-9_]*)="?\$\($/.exec(line.slice(0, ssh.index).trim());
+    let capture: RemoteOperation["capture"];
+    if (captured) {
+      let tail = lines.slice(i + 1).join("\n");
+      // Preserve the producer's actual local calculations and writer after its
+      // SSH output arrives. Transfers remain separate ordered operations.
+      const assignment = /^\s*[A-Za-z_][A-Za-z0-9_]*=/m.exec(tail);
+      if (assignment) tail = tail.slice(assignment.index);
+      tail = tail.split(/^\s*(?:scp|rsync|ssh)\s/m)[0]!.replace(/\n\)\s*$/, "");
+      capture = { name: captured[1]!,
+        ...(/\.env["']/.test(tail) && /printf '[^'\n]*%q/.test(tail)
+          ? { localStateSource: tail } : {}) };
+    }
+    let sshText = shellCommands(line.slice(ssh.index))[0]!.trim();
+    // A close of the enclosing Mac command substitution ends ssh too. Any
+    // redirections after it belong to the outer command, not the remote stdin.
+    let substitutionQuote = "", substitutionEscape = false;
+    for (let n = 0; n < sshText.length; n++) {
+      const c = sshText[n]!;
+      if (substitutionEscape) { substitutionEscape = false; continue; }
+      if (c === "\\" && substitutionQuote !== "'") { substitutionEscape = true; continue; }
+      if (substitutionQuote) { if (c === substitutionQuote) substitutionQuote = ""; continue; }
+      if (c === "'" || c === '"') { substitutionQuote = c; continue; }
+      if (c === ")") { sshText = sshText.slice(0, n); break; }
+    }
+    const sshHere = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(sshText);
+    if (sshHere && here?.[3] !== sshHere[3]) unknown(line);
+    let command = sshText;
     // Stop at the Mac redirection, pipeline or command-substitution close, while
     // respecting quotes and escapes inside the remote command string.
     let quote = "", escaped = false, end = command.length;
@@ -168,17 +217,18 @@ export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] 
     }
     command = command.slice(0, end).trim();
     if (!/\b(?:ops|commonswarm)@(?:100\.115\.66\.74|yulan-vps-1)\b/.test(command)) unknown(line);
-    if (!here) {
-      const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(line);
+    if (!sshHere) {
+      const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(sshText.slice(end));
       if (input) {
         const found = scripts.get(tokens(input[1]!)[0]!);
         if (!found) unknown(line);
-        operations.push({ remote: { command: commandExpansion(command), ...found! } });
+        operations.push({ remote: { command: commandExpansion(command), ...found!, ...(capture ? { capture } : {}) } });
         continue;
       }
       if (/\bbash\s+-s\b/.test(command)) unknown(line);
     }
-    operations.push({ remote: { command: commandExpansion(command), ...(script !== undefined ? { script, delimiter: `${here![1]}${here![2]}${here![3]}${here![2]}` } : {}) } });
+    operations.push({ remote: { command: commandExpansion(command), ...(capture ? { capture } : {}), ...(sshHere && script !== undefined
+      ? { script, delimiter: `${sshHere[1]}${sshHere[2]}${sshHere[3]}${sshHere[2]}` } : {}) } });
   }
   return operations;
 }
@@ -194,6 +244,10 @@ function shellCommands(line: string): string[] {
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
     if (quote) { if (char === quote) quote = ""; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1]!))) {
+      commands.push(line.slice(start, index));
+      return commands.filter((command) => command.trim());
+    }
     if (char === ";" || char === "|" || (char === "&" && !/[<>]/.test(line[index - 1] ?? ""))) {
       commands.push(line.slice(start, index));
       start = index + 1;
@@ -203,7 +257,102 @@ function shellCommands(line: string): string[] {
   return commands.filter((command) => command.trim());
 }
 
-function outputPaths(line: string): string[] {
+// Read shell words at the executable boundary, rather than matching a bare
+// command spelling anywhere in the line. Quoting and escapes may spell an
+// executable path; they do not make quoted payloads into executable tokens.
+function executableWords(command: string): string[] {
+  const words: string[] = [];
+  const rawWords: string[] = [];
+  let word = "", raw = "", started = false, quote = "", escaped = false;
+  const flush = (): void => {
+    if (started) { words.push(word); rawWords.push(raw); }
+    word = ""; raw = ""; started = false;
+  };
+  for (const char of command.trimStart()) {
+    if (escaped) {
+      raw += char;
+      // In double quotes a backslash only quotes these shell characters.
+      if (quote === '"' && !['$', '`', '"', '\\', '\n'].includes(char)) word += "\\";
+      word += char; started = true; escaped = false; continue;
+    }
+    if (char === "\\" && quote !== "'") { raw += char; escaped = true; started = true; continue; }
+    if (quote) { raw += char; if (char === quote) quote = ""; else word += char; continue; }
+    if (char === "'" || char === '"') { raw += char; quote = char; started = true; continue; }
+    if (/\s/.test(char)) { flush(); continue; }
+    if (char === "#" && !started) break;
+    // Redirection targets are inventoried separately. Do not split a quoted
+    // operand containing an operator, or count a descriptor as a file operand.
+    if (char === "<" || char === ">") { if (!/^\d*$/.test(word)) flush(); else { word = ""; raw = ""; started = false; } break; }
+    raw += char; word += char; started = true;
+  }
+  flush();
+  const name = (value: string | undefined): string => value?.split("/").at(-1) ?? "";
+  const shift = (): string | undefined => { rawWords.shift(); return words.shift(); };
+  // Shell assignment names must be unquoted. env/sudo instead receive ordinary
+  // argv, where a quoted NAME=value word still defines their environment.
+  while (/^[A-Za-z_][A-Za-z0-9_]*(?:\[.*\])?=/.test(rawWords[0] ?? "")) {
+    // Arithmetic/command substitutions contain whitespace that is not an
+    // executable argv boundary. Their outer assignment is not a command.
+    if (rawWords[0]!.includes("$(")) return [];
+    shift();
+  }
+  while (["sudo", "env", "command", "exec"].includes(name(words[0]))) {
+    const wrapper = name(shift());
+    while (words[0]?.startsWith("-")) {
+      const option = shift()!;
+      if (option === "--") break;
+      if (wrapper === "sudo" && ["-u", "-g", "--user", "--group"].includes(option)) {
+        if (!shift()) throw new Error(`unknown writer executable form: ${command.trim()}`);
+      } else if (!(wrapper === "sudo" ? /^-[niH]+$/.test(option) || ["--non-interactive", "--login"].includes(option)
+        : wrapper === "env" ? ["-i", "--ignore-environment"].includes(option)
+        : wrapper === "command" && option === "-p")) {
+        throw new Error(`unknown writer executable option: ${option}`);
+      }
+    }
+    if (["env", "sudo"].includes(wrapper)) {
+      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0] ?? "")) shift();
+    }
+  }
+  if (words.length) {
+    words[0] = name(words[0]);
+    // An unresolved executable can be a writer. Its directory may be symbolic
+    // when its basename is literal, but guessing a variable basename loses
+    // ownership silently (e.g. T=/usr/bin/tee followed by $T).
+    if (/^[$`]/.test(words[0]!) && words.length > 1 && !words[0]!.endsWith(")")) {
+      throw new Error(`unknown writer executable form: ${command.trim()}`);
+    }
+  }
+  return words;
+}
+
+// Shell -c is an interpreter boundary, not quoted data. Inspect its literal
+// script recursively; positional argv, dynamic scripts and unsupported flags
+// refuse visibly rather than returning an incomplete writer inventory.
+function writerCommands(line: string, depth = 0): string[] {
+  if (depth > 12) throw new Error("unknown writer executable form: nested shell depth");
+  return shellCommands(line).flatMap((command) => {
+    const words = executableWords(command);
+    // The contained literal-script projection supports simple commands and
+    // pipelines. Control flow/functions need a shell grammar; never silently
+    // mistake their keywords or delimiters for a non-writing executable.
+    if (depth > 0 && (/[(){}]/.test(words[0] ?? "") ||
+        ["if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac", "function", "!"].includes(words[0] ?? ""))) {
+      throw new Error(`unknown writer shell form: ${command.trim()}`);
+    }
+    if (!["sh", "bash"].includes(words[0] ?? "")) return [command];
+    const at = words.findIndex((word, index) => index > 0 && (/^-[^-]*c/.test(word) || word === "--command"));
+    if (at < 0) return [command];
+    const option = words[at]!;
+    if (at !== 1 || !/^-[eluc]+$/.test(option) || words.length !== 3 || /[$`]/.test(words[2]!)) {
+      throw new Error(`unknown writer shell form: ${command.trim()}`);
+    }
+    return outsideHeredocs(words[2]!).replace(/\\\n\s*/g, " ").split("\n")
+      .flatMap((body) => writerCommands(body, depth + 1));
+  });
+}
+
+function redirectedOutputPaths(line: string): string[] {
+  if (/^\s*#/.test(line)) return [];
   const paths: string[] = [];
   let quote = "", escaped = false;
   for (let index = 0; index < line.length; index++) {
@@ -222,6 +371,69 @@ function outputPaths(line: string): string[] {
     }
   }
   return paths;
+}
+
+function outputPaths(line: string): string[] {
+  const paths = redirectedOutputPaths(line);
+  // curl owns both its response body and header file even when stdout is
+  // captured for the status code. Parse command operands, not quoted prose or
+  // the response URL. These paths have the same producer/consumer contract as
+  // shell redirections.
+  for (const command of writerCommands(line)) {
+    // Redirections inside a shell script belong to that script's producer too.
+    if (command !== line) paths.push(...redirectedOutputPaths(command));
+    // tee is a writer even in a pipeline, with an environment assignment, or
+    // behind sudo. Inspect command operands so quoted prose and stdin bodies
+    // cannot invent products. Both standalone box and SSH writers use this.
+    const executable = executableWords(command);
+    if (executable[0] === "tee") {
+      const words = executable.slice(1);
+      let operands = false;
+      for (const word of words) {
+        if (!operands && word === "--") { operands = true; continue; }
+        if (!operands && ["-a", "--append", "-i", "--ignore-interrupts"].includes(word)) continue;
+        if (!operands && word.startsWith("-")) throw new Error(`unknown tee writer option: ${word}`);
+        paths.push(word);
+      }
+    }
+    // A captured response code still leaves curl owning its file operands.
+    // Unwrap only the shell assignment's command substitution, then use the
+    // same executable parser as tee (including qualified paths and wrappers).
+    // Strip the capture delimiter before parsing, never from a file operand.
+    const capture = /^\s*[A-Za-z_][A-Za-z0-9_]*="?\$\(\s*/.exec(command);
+    const curl = capture
+      ? executableWords(shellCommands(command.slice(capture[0].length).replace(/\)"?\s*$/, ""))[0] ?? "")
+      : executable;
+    if (curl[0] !== "curl") continue;
+    const words = curl.slice(1);
+    for (let index = 0; index < words.length; index++) {
+      const word = words[index]!;
+      if (["-o", "--output", "-D", "--dump-header"].includes(word)) {
+        const path = words[++index];
+        if (!path) throw new Error(`unknown curl writer form: ${command.trim()}`);
+        paths.push(path);
+      } else {
+        const joined = /^(?:--output=|--dump-header=|-o(?=.)|-D(?=.))(.+)$/.exec(word);
+        if (joined) paths.push(joined[1]!);
+      }
+    }
+  }
+  return paths;
+}
+
+// These are Mac-local files written after an SSH command substitution. Keep
+// their names tied to that writer, so an unrelated transfer cannot borrow its
+// coverage. The boundary executes the writer only after receiving SSH output.
+export function capturedMacProductPaths(block: HandoffBlock): string[] {
+  return macBoundaryOperations(block).flatMap((operation) => {
+    if (!("remote" in operation) || !operation.remote.capture?.localStateSource) return [];
+    const source = outsideHeredocs(operation.remote.capture.localStateSource);
+    const expand = expansions({ ...block, source });
+    // /dev/null discards a probe's stdout; it is not a retained writer product
+    // that a later transfer can consume or use to claim producer coverage.
+    return source.split("\n").flatMap((line) => outputPaths(line).flatMap(expand))
+      .filter((path) => path !== "/dev/null");
+  });
 }
 
 function shellWrites(block: HandoffBlock): TransferProduct[] {
@@ -243,10 +455,9 @@ function shellWrites(block: HandoffBlock): TransferProduct[] {
       throw new Error(`${block.file}:${block.line}: unknown transfer form: ${line.trim()}`);
     }
     for (const path of outputPaths(line)) add(path);
-    for (const commandText of shellCommands(line)) {
+    for (const commandText of writerCommands(line)) {
       // Strip stdin/stdout redirections before taking a destination operand.
-      const words = tokens(commandText.replace(/\s+[0-9]*[<>].*$/, "").trim());
-      if (words[0] === "sudo") words.splice(0, words.findIndex((word) => ["install", "cp", "mv", "tee", "mkdir", "ln", "tar"].includes(word)));
+      const words = executableWords(commandText);
       const command = words[0];
       if (["scp", "ssh"].includes(command ?? "")) {
         throw new Error(`${block.file}:${block.line}: unknown transfer form: ${line.trim()}`);
@@ -265,8 +476,6 @@ function shellWrites(block: HandoffBlock): TransferProduct[] {
           throw new Error(`${block.file}:${block.line}: unknown transfer form: ${line.trim()}`);
         }
         add(operands[1]!, "0755", "directory", operands[0]);
-      } else if (command === "tee") {
-        for (const operand of words.slice(1).filter((word) => !word.startsWith("-"))) add(operand);
       } else if (command === "tar" && words.some((word) => /^-[^-]*x/.test(word) || word === "--extract")) {
         const at = words.findIndex((word) => word === "-C" || word === "--directory");
         if (at >= 0) add(words[at + 1]!, "0755", "directory");
@@ -291,20 +500,21 @@ export function transferProducts(block: HandoffBlock): TransferProduct[] {
     if (enclosingQuote) command = enclosingQuote[2]!;
     // Outer assignments resolve argv such as STAGING_ROOT. Do not treat the Mac's
     // local writes as remote; only this SSH command and its stdin are inspected.
-    const outer = expansions(block);
+    const outer = expansions({ ...block, source: outsideHeredocs(block.source) });
     const argv = /\bbash -s -- (.*)/.exec(command)?.[1];
     if (/\bbash\s+-s\b/.test(command) && remote.stdinProducer) {
       throw new Error(`${block.file}:${block.line}: unknown transfer form: generated bash stdin from ${remote.stdinProducer.path}`);
     }
     let body = /\bbash\s+-s\b/.test(command) ? remote.script ?? "" : command;
+    // A quoted delimiter suppresses expansion by the Mac shell. An unquoted
+    // heredoc expands there before ssh sends the bytes to the remote shell.
+    if (remote.script !== undefined && !/["']/.test(remote.delimiter ?? "")) body = outer(body)[0]!;
     if (argv) {
-      const args = tokens(argv).map((arg) => outer(arg)[0]!);
+      const args = tokens(argv);
       body = body.replace(/\$\{([1-9][0-9]*)\}|\$([1-9])(?![0-9])/g,
         (original, braced: string | undefined, plain: string | undefined) => args[Number(braced ?? plain) - 1] ?? original);
     }
-    const assignments = block.source.split("\n").filter((line) => !line.includes("$(") &&
-      (/^\s*[A-Za-z_][A-Za-z0-9_]*=/.test(line) || /^\s*for [A-Z]/.test(line))).join("\n");
-    for (const product of shellWrites({ ...block, source: assignments + "\n" + command + "\n" + body })) {
+    for (const product of shellWrites({ ...block, source: command + "\n" + body })) {
       if (!products.has(product.path) || product.path.startsWith("/home/") || product.kind === "directory") products.set(product.path, product);
     }
   }
@@ -350,11 +560,18 @@ export function crossHostHandoffs(blocks: HandoffBlock[]): Handoff[] {
       continue;
     }
     const expand = expansions(producer);
-    const writes = [...producer.source.matchAll(/(?:(?<!>)>(?!>)\s*|install\s+[^\n]*?\/dev\/null\s+)["']?(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?(?:\/[a-zA-Z0-9_./${}*-]+)?|\/(?:home|run|tmp|srv)\/[a-zA-Z0-9_./${}*-]+)/g)]
-      .flatMap((match) => expand(match[1]!)).map(normalize);
+    const writes = outsideHeredocs(producer.source).replace(/\\\n\s*/g, " ").split("\n")
+      .flatMap((line) => {
+        if (!/^\s*#/.test(line) && UNKNOWN_TRANSPORT.test(line)) {
+          throw new Error(`${producer.file}:${producer.line}: unknown transfer form: ${line.trim()}`);
+        }
+        return outputPaths(line).flatMap(expand);
+      }).map(normalize)
+      .filter((path) => /^\/(?:home|run|tmp|srv)\//.test(path));
     // A handoff can be a copied file or a switched symlink as well as redirected stdout.
-    for (const line of producer.source.replace(/\\\n\s*/g, " ").split("\n")) {
-      const words = tokens(line);
+    for (const line of outsideHeredocs(producer.source).replace(/\\\n\s*/g, " ").split("\n").flatMap((line) => writerCommands(line))) {
+      if (/^\s*#/.test(line)) continue;
+      const words = executableWords(line);
       if (!["cp", "mv", "ln", "install"].includes(words[0] ?? "") || words.includes("-d")) continue;
       const destination = words.filter((word) => !word.startsWith(">") && !/^[0-9]+>/.test(word)).at(-1);
       if (destination) writes.push(...expand(destination).map(normalize).filter((path) => /^\/(?:home|run|tmp|srv)\//.test(path)));

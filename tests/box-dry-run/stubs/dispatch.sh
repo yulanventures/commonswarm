@@ -57,18 +57,34 @@ run_in_box() {
     [ "${BOX_DRY_RUN_BOX_ROOT:-}" = / ] && [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] || unhandled_stub
     remote_prelude="${BOX_DRY_RUN_PYTHON_FIXTURE:?box fixture required}/../prelude.sh"
     [ -f "$remote_prelude" ] || fail_unproduced 'box remote prelude'
-    remote_trap=$(mktemp "${BOX_DRY_RUN_STUB_LOG}.remote.XXXXXX")
+    case "$login_user" in ops|commonswarm) ;; *) unhandled_stub ;; esac
+    /usr/bin/id -u "$login_user" >/dev/null || fail_unproduced 'box ssh login user'
+    remote_home=$(/usr/bin/getent passwd "$login_user" | /usr/bin/cut -d: -f6)
+    case "$remote_home" in /*) ;; *) fail_unproduced 'box ssh login home' ;; esac
+    remote_support="${BOX_DRY_RUN_PYTHON_FIXTURE%/*}"
+    remote_trap=$(mktemp "$remote_support/remote-trap.XXXXXX")
+    remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
+    /usr/bin/chown "$login_user:$login_user" "$remote_log"
+    chmod 0600 "$remote_log"
     printf 'source %q\n' "$remote_prelude" >"$remote_trap"
     printf '%s\n' 'set -E' \
       'trap '\''block_status=$?; case $- in *e*) printf "__FIRST_FAIL__:%s\n" "$BASH_COMMAND" >&2; exit "$block_status" ;; esac'\'' ERR' >>"$remote_trap"
+    chmod 0644 "$remote_trap"
     remote_env=()
     for variable_name in $(compgen -e); do
-      case "$variable_name" in BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;; esac
+      case "$variable_name" in
+        BOX_DRY_RUN_STUB_LOG) ;;
+        BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;;
+      esac
     done
     status=0
-    /usr/bin/env -i PATH="$PATH" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+    /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
+      PATH="$PATH" HOME="$remote_home" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+      BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
+      BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
       ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
-    rm -f -- "$remote_trap"
+    cat "$remote_log" >>"$BOX_DRY_RUN_STUB_LOG"
+    rm -f -- "$remote_trap" "$remote_log"
     exit "$status"
   fi
   [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
@@ -285,6 +301,19 @@ case "$name" in
       case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
       export BOX_DRY_RUN_REMOTE_USER="$sudo_user"
     fi
+    if [ "${BOX_DRY_RUN_PART:-}" = box ]; then
+      [ "${BOX_DRY_RUN_BOX_ROOT:-}" = / ] && [ "$(uname -s)" = Linux ] || unhandled_stub
+      sudo_env=()
+      for variable_name in $(compgen -e); do
+        case "$variable_name" in BOX_DRY_RUN_*) sudo_env+=("$variable_name=${!variable_name}") ;; esac
+      done
+      case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
+      root_log=$BOX_DRY_RUN_STUB_LOG
+      if [ "$sudo_user" = root ]; then root_log=${BOX_DRY_RUN_ROOT_STUB_LOG:-$BOX_DRY_RUN_STUB_LOG}; fi
+      exec /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
+        PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
+        ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$root_log" "$@"
+    fi
     exec "$@"
     ;;
   op)
@@ -430,7 +459,8 @@ case "$name" in
     fi
     ;;
   docker)
-    mkdir -p "$stub_state_dir/docker"
+    # Read-only probes and refused programs do not own a Docker state product.
+    # Allocate state only when a modeled mutation actually writes it.
     docker_command=${1:-}
     [ -n "$docker_command" ] || unhandled_stub
     shift
@@ -552,6 +582,7 @@ case "$name" in
           config) [ "$#" -eq 1 ] && [ "$1" = -q ] || unhandled_stub ;;
           pull)
             [ "$#" -eq 1 ] || unhandled_stub
+            mkdir -p "$stub_state_dir/docker"
             printf '%s\n' "$project:$1" >"$stub_state_dir/docker/last-pulled"
             ;;
           ps)
@@ -570,8 +601,12 @@ case "$name" in
             done
             [ "$detached" -eq 1 ] && [ "$#" -eq 1 ] || unhandled_stub
             case "$project:$1" in
-              commonswarm-edge:edge-runtime) : >"$stub_state_dir/docker/edge-runtime-up" ;;
-              commonswarm-supabase-stack:*) printf '%s\n' "$1" >"$stub_state_dir/docker/stack-service-up" ;;
+              commonswarm-edge:edge-runtime)
+                mkdir -p "$stub_state_dir/docker"
+                : >"$stub_state_dir/docker/edge-runtime-up" ;;
+              commonswarm-supabase-stack:*)
+                mkdir -p "$stub_state_dir/docker"
+                printf '%s\n' "$1" >"$stub_state_dir/docker/stack-service-up" ;;
               *) unhandled_stub ;;
             esac
             ;;
@@ -614,15 +649,9 @@ case "$name" in
             ;;
           sh:-c)
             [ "$interactive" -eq 1 ] && [ "$#" -eq 2 ] || unhandled_stub
-            sql=$(cat)
-            case "$sql" in
-              *'BEGIN READ ONLY;'*'revoked_at IS NULL'*)
-                printf '%s\n' "$sql" | grep -Eo "[0-9a-f]{8}-[0-9a-f-]{27}" | sort -u | while IFS= read -r principal; do
-                  printf '%s=0\n' "$principal"
-                done
-                ;;
-              *) unhandled_stub ;;
-            esac
+            # No container/database interpreter ran. SQL-shaped stdin cannot
+            # establish zero live tokens or any other catalog/functional fact.
+            fail_unproduced 'container database observation'
             ;;
           *) unhandled_stub ;;
         esac
@@ -720,22 +749,13 @@ case "$name" in
       exec "$inventory_deno" run --no-prompt --cached-only --no-lock --no-code-cache --no-check "$2" "$3" "$4" "$5" "$6" "$7"
     fi
     if [ -n "${BOX_DRY_RUN_FAIL_STEP:-}" ] && [ "${BOX_DRY_RUN_FAIL_STEP}" = "${BOX_DRY_RUN_STEP:-}" ]; then
-      if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = hm37-hosted-open-ack-control ]; then
-        journal="/home/commonswarm/edge/controls/${BOX_DRY_RUN_RELEASE_SHA:?release SHA required}-${BOX_DRY_RUN_WINDOW_ID:?window ID required}/journal/hm37-open-ack-010203.journal.json"
-        mkdir -p "${journal%/*}"
-        printf '%s\n' '{}' >"$journal"
-        chmod 0600 "$journal"
-      fi
       printf 'injected dry-run failure: %s\n' "${BOX_DRY_RUN_STEP:-}" >&2
       exit 41
     fi
-    case " $* " in
-      *' --version '*) printf '%s\n' "${BOX_DRY_RUN_DENO_VERSION:-deno 2.4.5
-v8 13.7.152.14-rusty
-typescript 5.8.3}" ;;
-      *' cache '*) ;;
-      *) printf '%s\n' 'UNPRODUCED embedded Deno program result' >&2; exit 69 ;;
-    esac
+    # Without the actual executable there is no observed version, cache, or
+    # program result. Fault injection above changes only status; journals and
+    # consumer receipts must be written by the program that owns them.
+    fail_unproduced 'Deno executable observation'
     ;;
   sleep)
     ;;

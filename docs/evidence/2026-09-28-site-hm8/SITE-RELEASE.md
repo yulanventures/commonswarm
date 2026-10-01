@@ -1,10 +1,10 @@
 # CommonSwarm site release — HM lane 8
 
-**Release:** `8b8989f2b29e440a317a2cdedf11195901c8342c`
+**Release:** `1e68e4853564b3cf796587801699ec63a550eae5`
 
-**Baseline source:** `9b085c82352390cf8f0fe515c02b3ccff423476a`
+**Baseline source:** `3fbd5b7686d8c10e848bf8a59bf4e66639143f01`
 
-**Baseline release:** `20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e`
+**Baseline release:** `20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2`
 **Status:** executable plan; no operation recorded here has run.
 
 Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
@@ -29,8 +29,8 @@ by an absolute path and is read without printing it.
 | `HM37_A_CLOSE_RECEIPT` | Anvil, produced only by WINDOW A | absolute regular non-symlink mode-`0600` WINDOW A close receipt; the only A-to-lane-8 handoff |
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
-| `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `8b8989f2b29e440a317a2cdedf11195901c8342c` |
-| `SITE_BASE_SHA` | Anvil, full SHA from baseline receipt | `9b085c82352390cf8f0fe515c02b3ccff423476a` |
+| `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `1e68e4853564b3cf796587801699ec63a550eae5` |
+| `SITE_BASE_SHA` | Anvil, full SHA from baseline receipt | `3fbd5b7686d8c10e848bf8a59bf4e66639143f01` |
 | `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
 | `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute task-owned empty directory before `site-00-source-checkout` |
 | `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute task-owned empty mode-`0700` directory before `site-01` |
@@ -41,8 +41,8 @@ by an absolute path and is read without printing it.
 {"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
 {"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for the lane 8 release."}
 {"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing the lane 8 plan."}
-{"name":"SITE_RELEASE_SHA","format":"literal:8b8989f2b29e440a317a2cdedf11195901c8342c","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
-{"name":"SITE_BASE_SHA","format":"literal:9b085c82352390cf8f0fe515c02b3ccff423476a","supplier":"Anvil","meaning":"Measured full baseline source commit."}
+{"name":"SITE_RELEASE_SHA","format":"literal:1e68e4853564b3cf796587801699ec63a550eae5","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
+{"name":"SITE_BASE_SHA","format":"literal:3fbd5b7686d8c10e848bf8a59bf4e66639143f01","supplier":"Anvil","meaning":"Measured full baseline source commit."}
 {"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
 {"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
 {"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
@@ -72,8 +72,8 @@ close=PASS
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_BASE_SHA:?named input missing}"
   case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
-  test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
+  test "$SITE_RELEASE_SHA" = 1e68e4853564b3cf796587801699ec63a550eae5
+  test "$SITE_BASE_SHA" = 3fbd5b7686d8c10e848bf8a59bf4e66639143f01
   test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
   test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
   git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
@@ -104,8 +104,8 @@ and derives the ID. Nobody types a time or ID.
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
   : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
-  test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
+  test "$SITE_RELEASE_SHA" = 1e68e4853564b3cf796587801699ec63a550eae5
+  test "$SITE_BASE_SHA" = 3fbd5b7686d8c10e848bf8a59bf4e66639143f01
   for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
@@ -144,7 +144,7 @@ if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; the
 fi
 test -w "$root" && test -w "$root/releases"
 previous=$(readlink -f "$root/current")
-test "$previous" = "$root/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e"
+test "$previous" = "$root/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2"
 test -f "$previous/app/index.html" && test -f "$previous/download/index.html"
 start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 end=$(date -u -d "$start + 4 hours" '+%Y-%m-%dT%H:%M:%SZ')
@@ -185,7 +185,7 @@ start = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
 end = datetime.datetime.strptime(sys.argv[2], "%Y-%m-%dT%H:%M:%SZ")
 assert (end - start).total_seconds() == 14400
 PY
-  test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
+  test "$previous" = /srv/commonswarm/site/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2
   SITE_WINDOW_ID=$(printf '%s' "$start" | tr -d ':-')
   case "$SITE_WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
@@ -299,8 +299,8 @@ positive controls.
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
-  test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
+  test "$SITE_RELEASE_SHA" = 1e68e4853564b3cf796587801699ec63a550eae5
+  test "$SITE_BASE_SHA" = 3fbd5b7686d8c10e848bf8a59bf4e66639143f01
   git merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
   git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
@@ -488,7 +488,7 @@ case "$window_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
 esac
 root=/srv/commonswarm/site
-previous="$root/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e"
+previous="$root/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2"
 pin="$root/releases/.site-window-pin-$window_id"
 test "$(readlink -f "$root/current")" = "$previous"
 test -d "$previous" && test ! -L "$previous"
@@ -515,7 +515,7 @@ BOX
   chmod 0600 "$SITE_EVIDENCE/site-03-pin.txt"
   previous=$(sed -n 's/^previous_original=//p' "$SITE_EVIDENCE/site-03-pin.txt")
   pin=$(sed -n 's/^previous_pin=//p' "$SITE_EVIDENCE/site-03-pin.txt")
-  test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
+  test "$previous" = /srv/commonswarm/site/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2
   test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
   printf '%s\n' "$previous" >"$SITE_EVIDENCE/previous.original"
   printf '%s\n' "$pin" >"$SITE_EVIDENCE/previous.release"
@@ -549,8 +549,8 @@ These are fixed assertions, not window decisions:
   test "${#SITE_PLAN_COMMIT}" -eq 40
   case "$SITE_PLAN_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
   case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
-  test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
-  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
+  test "$SITE_RELEASE_SHA" = 1e68e4853564b3cf796587801699ec63a550eae5
+  test "$SITE_BASE_SHA" = 3fbd5b7686d8c10e848bf8a59bf4e66639143f01
   grep -qFx 'close=PASS' "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
   grep -qFx 'PIN=PASS' "$SITE_EVIDENCE/site-03-pin.txt"
   grep -qFx 'DELETE_GUARDS=PASS' "$SITE_EVIDENCE/site-02-summary.txt"
@@ -594,7 +594,7 @@ assert now < end
 PY
   previous=$(cat "$SITE_EVIDENCE/previous.original")
   pin=$(cat "$SITE_EVIDENCE/previous.release")
-  test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
+  test "$previous" = /srv/commonswarm/site/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2
   test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
     "test \"\$(readlink -f /srv/commonswarm/site/current)\" = '$previous' && test -f '$pin/app/index.html'"
@@ -616,7 +616,7 @@ PY
   chmod 0600 "$SITE_EVIDENCE/after.release"
   if test "$deploy_status" -ne 0 || test "$read_status" -ne 0; then exit 70; fi
   after=$(cat "$SITE_EVIDENCE/after.release")
-  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-8b8989f2b29e-????????????????) ;; *) exit 1 ;; esac
+  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-1e68e4853564-????????????????) ;; *) exit 1 ;; esac
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "test -f '$pin/app/index.html'"
   printf '%s\n' 'PIN_AFTER_DEPLOY=PASS' >"$SITE_EVIDENCE/pin-after-deploy.txt"
   chmod 0600 "$SITE_EVIDENCE/pin-after-deploy.txt"
@@ -641,7 +641,7 @@ immediate rollback; a third state stops for incident handling.
     printf '%s\n' 'DEPLOYMENT=failed-before-switch' 'RETRY=forbidden' \
       >"$SITE_EVIDENCE/site-04-reconciliation.txt"
   else
-    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-8b8989f2b29e-????????????????) ;; *) exit 1 ;; esac
+    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-1e68e4853564-????????????????) ;; *) exit 1 ;; esac
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
@@ -684,7 +684,7 @@ python3 - "$expected" <<'PY'
 import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
 UA="commonswarm-release-probe/1.0"; root=pathlib.Path("/srv/commonswarm/site")
 release=(root/"current").resolve(strict=True); assert str(release)==sys.argv[1]
-assert re.fullmatch(r"\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}",release.name)
+assert re.fullmatch(r"\d{8}T\d{6}Z-1e68e4853564-[0-9a-f]{16}",release.name)
 def fetch(path,media):
     request=urllib.request.Request("https://commonswarm.com"+path,headers={
       "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
@@ -991,7 +991,7 @@ PY
 set -euo pipefail
 pin=$1; previous=$2; window_id=$3; outcome=$4; root=/srv/commonswarm/site
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
-test "$previous" = "$root/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e"
+test "$previous" = "$root/releases/20261001T042711Z-3fbd5b7686d8-a9c6d7c490c597a2"
 current=$(readlink -f "$root/current")
 if test "$current" = "$pin"; then
   if test -d "$previous" && test ! -L "$previous"; then target="$previous"

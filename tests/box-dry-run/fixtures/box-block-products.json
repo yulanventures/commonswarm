@@ -73,5 +73,13 @@
       "owner": "root:root",
       "mode": "0600"
     }
+  ],
+  "runbook-17": [
+    {
+      "path": "/run/commonswarm-release-{sha}-session.sh",
+      "execute": "local",
+      "owner": "root:root",
+      "mode": "0600"
+    }
   ]
 }
