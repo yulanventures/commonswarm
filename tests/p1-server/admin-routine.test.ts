@@ -16,6 +16,8 @@ const scenarios = {
     "routine invitations bind recipients, record pending authorization and revoke without budget refunds",
   renewal:
     "routine worker delivery, renewal and bounded replacement exclude secrets from replay and preserve ancestry",
+  history:
+    "human history retains minimal linked cards for routine seat and credential revocation",
   expiry:
     "parent expiry refuses child authentication before a lazy expiration event",
   concurrency:

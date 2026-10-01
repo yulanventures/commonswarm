@@ -49,6 +49,26 @@ const policy = await import("../../supabase/functions/_shared/protocol.js");
 const { loadAgentCredential } = await import(
   "../../supabase/functions/_shared/agent-auth.ts"
 );
+const { handleRequest: read } = await import("../../supabase/functions/read/index.ts");
+async function recovery(resource, workspace_id = null, before = null) {
+  const response = await read(new Request("http://127.0.0.1/functions/v1/read", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.jwt}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ resource, workspace_id, before, limit: 1 }),
+  }));
+  check(response.status === 200, "human routine recovery positive control");
+  return response.json();
+}
+async function history(workspace = null) {
+  const actions = [];
+  let before = null;
+  do {
+    const page = await recovery("admin_history", workspace, before);
+    actions.push(...page.actions);
+    before = page.next_before;
+  } while (before);
+  return actions;
+}
 const wire = (command, command_id = id()) => ({
   command_id,
   stream: { kind: "account" },
@@ -214,6 +234,13 @@ try {
     const [stream] =
       await db`SELECT head_seq FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND kind='workspace'`;
     check(Number(stream.head_seq) === 2, "reducer complete workspace event");
+    const access = await recovery("admin_grants", workspace);
+    check(access.grants.length === 1 && access.grants[0].grant_id === grant &&
+      access.active.grant_count === 1, "granular created workspace has visible grant and indicator");
+    check(!access.grants[0].workspace_ids.includes(workspace), "created association does not widen selected manifest");
+    const cards = await history(workspace);
+    check(cards.length === 1 && cards[0].action === "admin_create_workspace" &&
+      cards[0].outcome === "accepted", "created workspace history shows minimal action card");
     const before = await events();
     check(
       (await http(input, admin.access_credential)).status === 200 &&
@@ -248,6 +275,22 @@ try {
       )).status === 403,
       "new workspace limited inheritance",
     );
+    const narrowed = (await transact(wire({ kind: "prepare_admin_consent",
+      manifest: { ...prepared.body.manifest, created_workspace_policy: { scope_names: [] } },
+      full_account_selected: false }), human)).result;
+    check(narrowed.status === 200, "created scope narrowing consent");
+    check((await transact(wire({ kind: "narrow_admin_delegation", grant_id: grant,
+      manifest: narrowed.body.manifest, manifest_digest: narrowed.body.manifest_digest,
+      consent_receipt_id: narrowed.body.consent_receipt_id }), human)).result.status === 200,
+      "created scope narrowing accepted");
+    const narrowedAccess = await recovery("admin_grants", workspace);
+    check(narrowedAccess.grants[0]?.grant_id === grant && narrowedAccess.active.grant_count === 0,
+      "narrowed created scopes remove active indicator but retain grant history");
+    await db`UPDATE swarm.memberships SET revoked_at=statement_timestamp() WHERE workspace_id=${workspace}::uuid AND user_id=${config.owner}::uuid`;
+    await db`UPDATE swarm.workspaces SET archived_at=statement_timestamp() WHERE workspace_id=${workspace}::uuid`;
+    check((await recovery("admin_grants", workspace)).grants[0]?.grant_id === grant &&
+      (await history(workspace)).some(card => card.action === "admin_create_workspace"),
+      "created workspace grantor recovery survives archive and membership loss");
   } else if (scenario === "invites") {
     const input = wire({
       kind: "admin_invite_member",
@@ -357,7 +400,14 @@ try {
         return loadAgentCredential(tx, await hash(credential));
       });
     check(await auth(worker.credential), "worker authenticates positive");
-    if (scenario === "renewal") {
+    if (scenario === "history") {
+      check((await call({ kind: "admin_revoke_seat_credential", principal_id: principal,
+        credential_id: worker.credential_id, reason_code: "human_requested" })).status === 200,
+        "routine credential revoke accepted");
+      check(!await auth(worker.credential), "revoked credential cannot authenticate");
+      check((await call({ kind: "admin_revoke_seat", principal_id: principal,
+        reason_code: "human_requested" })).status === 200, "routine seat revoke accepted");
+    } else if (scenario === "renewal") {
       const input = wire({
         kind: "admin_renew_seat",
         grant_id: grant,
@@ -583,6 +633,31 @@ try {
         "human recovery after rights loss",
       );
     }
+  }
+  // Reconcile pages against durable attempts for each real routine scenario.
+  // Raw domain events contain recipient/credential fields and must not be cards.
+  const cards = await history();
+  const stored = await db`SELECT event_id, event FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid ORDER BY seq`;
+  const audits = stored.filter(row => row.event.type === "AdminActionRecorded");
+  check(cards.length === audits.length && new Set(cards.map(card => card.event_id)).size === audits.length &&
+    audits.every(row => cards.some(card => card.event_id === row.event_id)), "routine audit pagination has no gaps or duplicates");
+  const byId = new Map(stored.map(row => [row.event_id, row.event]));
+  for (const card of cards) {
+    const event = byId.get(card.event_id);
+    check(card.action === event.payload.action && card.outcome === event.payload.outcome &&
+      card.workspace_id === event.payload.workspace_id && card.actor_user === event.actor_user &&
+      card.grant_id === event.grant_id && card.admin_identity_id === event.admin_identity_id &&
+      JSON.stringify(card.related_event_ids) === JSON.stringify(event.payload.related_event_ids),
+      "routine history retains action outcome actor and linked domain event IDs");
+  }
+  check(stored.filter(row => policy.ADMIN_ROUTINE_EVENT_TYPES.includes(row.event.type)).every(row =>
+    cards.some(card => card.related_event_ids.includes(row.event_id))), "all routine domain events have a visible linked card");
+  check(!/request_digest|manifest_digest|policy_check|recipient_user_id|recipient_connection_id|worker_scope_names|access_hash|refresh_hash/.test(JSON.stringify(cards)),
+    "routine cards exclude private payload fields");
+  if (scenario === "history") {
+    check(cards.some(card => card.action === "admin_revoke_seat" && card.outcome === "accepted") &&
+      cards.some(card => card.action === "admin_revoke_seat_credential" && card.outcome === "accepted"),
+      "human history shows accepted seat and credential revoke");
   }
   console.log("ADMIN_ROUTINE_SERVER_OK");
 } catch {

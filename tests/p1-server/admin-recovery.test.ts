@@ -1,4 +1,4 @@
-/** Requires lane C to install read/admin-recovery.sql in the real migration. */
+/** Real human read adapter and integrated migrations; server suite only. */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";

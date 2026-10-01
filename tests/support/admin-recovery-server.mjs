@@ -39,7 +39,26 @@ async function grant(full = false, expires = Date.now() + 86400000) {
 }
 try {
   const catalog = await db`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)')::text AS function`;
-  check(catalog[0]?.function, 'lane C read adapter migration required');
+  check(catalog[0]?.function, 'integrated read adapter migration required');
+  const [permissions] = await db`SELECT p.prosecdef, p.proconfig,
+    pg_get_userbyid(p.proowner) AS owner,
+    has_function_privilege('swarm_read', p.oid, 'EXECUTE') AS read_execute,
+    has_function_privilege('anon', p.oid, 'EXECUTE') AS anon_execute,
+    has_function_privilege('authenticated', p.oid, 'EXECUTE') AS human_execute,
+    has_function_privilege('swarm_command', p.oid, 'EXECUTE') AS command_execute
+    FROM pg_proc p WHERE p.oid = 'swarm_read.admin_recovery_page(text,uuid,integer,text)'::regprocedure`;
+  check(permissions?.prosecdef && permissions.owner === 'swarm_admin' &&
+    permissions.proconfig.includes('search_path=pg_catalog') && permissions.read_execute &&
+    !permissions.anon_execute && !permissions.human_execute && !permissions.command_execute,
+    'human recovery function has pinned definer and narrow execute grant');
+  const privateTables = ['admin_grants', 'admin_events', 'admin_created_workspaces', 'admin_routine_invitations'];
+  const tables = await db`SELECT c.relname, c.relrowsecurity,
+    has_table_privilege('swarm_read', c.oid, 'SELECT') AS read_select,
+    has_table_privilege('authenticated', c.oid, 'SELECT') AS human_select
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='swarm' AND c.relname=ANY(${privateTables})`;
+  check(tables.length === privateTables.length && tables.every(t => t.relrowsecurity && !t.read_select && !t.human_select),
+    'recovery migration retains private table RLS and no direct reads');
   const grants = [await grant(), await grant(true), await grant()];
   let page = await invoke(read, view('admin_grants'));
   check(page.status === 200 && page.body.grants.length === 1 && page.body.active.grant_count === 3 && page.body.active.full_account_count === 1, 'active summary independent of page');
