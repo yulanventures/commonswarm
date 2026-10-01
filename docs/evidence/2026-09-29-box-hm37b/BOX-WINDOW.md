@@ -373,6 +373,9 @@ contact only `registry.npmjs.org`.
   DENO_PATH=/usr/local/bin/deno
   DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
   DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
+  # v2.9.7 render_version includes channel, build profile and target:
+  # https://github.com/denoland/deno/blob/0c071246a412575e07423263404a5d13e7ed6aa2/cli/args/flags.rs#L759-L773
+  DENO_VERSION_PATTERN='^deno 2\.9\.7( \(stable, release, x86_64-unknown-linux-gnu\))?$'
   DOWNLOAD_ROOT="/run/commonswarm-deno-${WINDOW_ID}"
   case "$DOWNLOAD_ROOT" in /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) false ;; esac
   test "$(stat -c '%U:%G:%a' /usr/local/bin)" = root:root:755
@@ -384,7 +387,7 @@ contact only `registry.npmjs.org`.
     test ! -L "$DENO_PATH"
     test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
     test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
-    test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+    [[ "$("$DENO_PATH" --version | sed -n '1p')" =~ $DENO_VERSION_PATTERN ]]
     exit 0
   fi
 
@@ -459,7 +462,7 @@ PY
   test ! -L "$DENO_PATH"
   test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
   test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$INSTALLED_SHA256"
-  test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+  [[ "$("$DENO_PATH" --version | sed -n '1p')" =~ $DENO_VERSION_PATTERN ]]
   cleanup_download
   trap - EXIT
   test ! -e "$DOWNLOAD_ROOT"
