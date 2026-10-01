@@ -844,59 +844,101 @@ import postgres from "npm:postgres@3.4.9";
 
 const pools: ReturnType<typeof postgres>[] = [];
 let failed = false;
+let requirement: [number, string] = [1, "arguments and six-digit suffix"];
+let failure: [number, string, string] | undefined;
+function at(number: number, description: string): void {
+  requirement = [number, description];
+}
+function errorName(error: unknown): string {
+  // Never print arbitrary names: dependency errors may contain input values.
+  const name = error instanceof Error ? error.name : "Error";
+  return ["Error", "TypeError", "SyntaxError", "RangeError", "URIError", "EvalError",
+    "ReferenceError", "NotFound", "PermissionDenied", "InvalidData", "TimedOut",
+    "ConnectionRefused", "ConnectionReset", "BadResource", "AbortError", "TimeoutError",
+    "PostgresError", "AuthApiError", "AuthSessionMissingError", "AuthInvalidJwtError",
+    "AuthRetryableFetchError", "AuthUnknownError"].includes(name) ? name : "Error";
+}
 function require(value: unknown): asserts value {
   if (!value) throw new Error("dependency preflight refused");
 }
 try {
+  at(1, "arguments and six-digit suffix");
   const [releaseRoot, controlRoot, suffix] = Deno.args;
   require(releaseRoot && controlRoot && suffix && /^[0-9]{6}$/.test(suffix));
   const env: Record<string, string> = {};
+  at(2, "protected environment file readable");
   for (const raw of Deno.readTextFileSync("/home/commonswarm/.env").split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const split = line.indexOf("=");
+    at(3, "environment lines contain assignments");
     require(split > 0);
     const name = line.slice(0, split).trim(), value = line.slice(split + 1).trim();
+    at(4, "environment names and unquoted values");
     require(/^[A-Z][A-Z0-9_]*$/.test(name) && !/^["']/.test(value));
     env[name] = value;
   }
+  at(5, "canonical API URL and anon key present");
   require(env.SUPABASE_URL === "https://api.commonswarm.com" && env.SUPABASE_ANON_KEY);
+  at(6, "human session readable and valid JSON");
   const session = JSON.parse(Deno.readTextFileSync(`${controlRoot}/human-session.json`));
+  at(7, "human session exact key set");
   require(Object.keys(session).sort().join(",") === "access_token");
+  at(8, "access token string and minimum length");
   require(typeof session.access_token === "string" && session.access_token.length >= 32);
+  at(9, "Supabase client initialization");
   const client = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     global: { fetch: (input, init) => fetch(input, {
       ...init, redirect: "error", signal: AbortSignal.timeout(30_000),
     }) },
   });
+  at(10, "getUser and getClaims requests complete");
   const [userResult, claimsResult] = await Promise.all([
     client.auth.getUser(session.access_token), client.auth.getClaims(session.access_token),
   ]);
   const user = userResult.data.user, claims = claimsResult.data?.claims;
+  at(11, "getUser and getClaims accept the token");
   require(!userResult.error && !claimsResult.error && user && claims);
+  at(12, "confirmed email and matching subject");
   require(user.email_confirmed_at != null && claims.sub === user.id);
+  at(13, "human user ID is a UUID");
   require(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(user.id));
+  at(14, "database TLS helper import");
   const { withDatabaseTls } = await import(`${releaseRoot}/supabase/functions/_shared/database-options.ts`);
+  at(15, "edge database URL present");
   const url = env.SWARM_DATABASE_URL ?? env.SUPABASE_DB_URL;
   require(url);
+  at(16, "edge database TLS options");
   const tls = withDatabaseTls({ prepare: false, max: 1, idle_timeout: 3, connect_timeout: 5,
     statement_timeout: 10_000, query_timeout: 10_000 },
     env.SWARM_DATABASE_TLS_CA_B64);
+  at(17, "edge database URL parses");
   const hostUrl = new URL(url);
+  at(18, "edge database URL protocol");
   require(["postgres:", "postgresql:"].includes(hostUrl.protocol));
+  at(19, "edge database URL host allowlist");
   require(["db.commonswarm.internal", "172.31.0.10"].includes(hostUrl.hostname));
+  at(20, "edge database URL port");
   require(!hostUrl.port || hostUrl.port === "5432");
+  at(21, "edge database client initialization");
   hostUrl.hostname = "172.31.0.10";
   const edge = postgres(hostUrl.toString(), tls);
   pools.push(edge);
+  at(22, "OAuth database config readable and valid JSON");
   const oauth = JSON.parse(Deno.readTextFileSync(`${controlRoot}/oauth-database.json`));
+  at(23, "OAuth database exact key set");
   require(Object.keys(oauth).sort().join(",") === "database,host,password,port,ssl_ca,user");
   for (const name of ["host", "database", "user", "password"]) {
+    at(24 + ["host", "database", "user", "password"].indexOf(name),
+      `OAuth database ${name === "database" ? "name" : name} present`);
     require(typeof oauth[name] === "string" && oauth[name]);
   }
+  at(28, "OAuth database port range");
   require(Number.isSafeInteger(oauth.port) && oauth.port >= 1 && oauth.port <= 65535);
+  at(29, "OAuth database CA certificate shape");
   require(typeof oauth.ssl_ca === "string" && oauth.ssl_ca.includes("-----BEGIN CERTIFICATE-----"));
+  at(30, "OAuth database client initialization");
   const provider = postgres({ host: oauth.host, port: oauth.port, database: oauth.database,
     username: oauth.user, password: oauth.password,
     ssl: { ca: oauth.ssl_ca, rejectUnauthorized: true },
@@ -904,8 +946,10 @@ try {
     statement_timeout: 10_000, query_timeout: 10_000, connect_timeout: 5 });
   pools.push(provider);
   const workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934";
+  at(31, "edge connection and read-only transaction");
   await edge.begin(async (tx) => {
     await tx`SET TRANSACTION READ ONLY`;
+    at(32, "edge server and stack identity");
     const [identity] = await tx`SELECT inet_server_addr() = inet '172.31.0.10'
       AND current_setting('transaction_read_only') = 'on'
       AND NOT pg_is_in_recovery()
@@ -914,9 +958,11 @@ try {
         WHERE setting.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
           AND setting.setrole = 0 AND item = 'commonswarm.stack_identity=n-db-target-v1') = 1 AS ok`;
     require(identity?.ok === true);
+    at(33, "edge command role and transaction settings");
     await tx`SELECT set_config('role', 'swarm_command', true),
       set_config('search_path', 'swarm, commonswarm_oauth, pg_catalog', true),
       set_config('lock_timeout', '5s', true), set_config('statement_timeout', '10s', true)`;
+    at(34, "workspace membership capacity and fresh seat name");
     const [access] = await tx`SELECT EXISTS (
       SELECT 1 FROM swarm.workspaces w JOIN swarm.memberships m ON m.workspace_id = w.workspace_id
       WHERE w.workspace_id = ${workspace}::uuid AND w.archived_at IS NULL
@@ -927,24 +973,34 @@ try {
         AND name = ${"hm37-hosted-" + suffix}) AS name_taken`;
     require(access?.allowed === true && access.live_principals < 50 && access.name_taken === false);
   });
+  at(35, "OAuth connection and read-only transaction");
   await provider.begin(async (tx) => {
     await tx`SET TRANSACTION READ ONLY`;
+    at(36, "OAuth server user database and TLS identity");
     const [identity] = await tx`SELECT inet_server_addr() = inet '172.31.0.10'
       AND current_user = ${oauth.user} AND current_database() = ${oauth.database}
       AND current_setting('transaction_read_only') = 'on'
       AND EXISTS (SELECT 1 FROM pg_stat_ssl WHERE pid = pg_backend_pid() AND ssl) AS ok`;
     require(identity?.ok === true);
+    at(37, "OAuth artifact table readable");
     await tx`SELECT model, artifact_id_hash, payload, consumed_at, grant_id, expires_at
       FROM commonswarm_oauth.provider_artifacts WHERE false`;
   });
-} catch {
+} catch (error) {
   failed = true;
+  failure = [...requirement, errorName(error)];
 } finally {
   const closed = await Promise.allSettled(pools.map((pool) => pool.end({ timeout: 2 })));
-  if (closed.some((result) => result.status === "rejected")) failed = true;
+  for (const [index, result] of closed.entries()) {
+    if (result.status !== "rejected") continue;
+    failed = true;
+    failure ??= [38 + index, index === 0 ? "edge database pool closes" : "OAuth database pool closes",
+      errorName(result.reason)];
+  }
 }
 if (failed) {
-  console.error("STOP: live hosted runtime dependency preflight failed");
+  const [number, description, name] = failure!;
+  console.error(`STOP: hosted runtime preflight REQ ${number} failed: ${description}: ${name}`);
   Deno.exit(1);
 }
 TS
