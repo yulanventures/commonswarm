@@ -1,9 +1,59 @@
 import { randomBytes } from "node:crypto";
+import { isIP } from "node:net";
 import { errors } from "oidc-provider";
+
+import { metadataUrlAllowed } from "./metadata-fetch.js";
 
 export const REGISTRATION_IDLE_SECONDS = 30 * 24 * 60 * 60;
 export const CLIENT_SCOPES = Object.freeze(["openid", "offline_access", "mcp"]);
 const LOOPBACKS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const GENERIC_CC_SLD = new Set(["co", "com", "net", "org", "gov", "edu", "ac"]);
+const HOSTNAME_IN_TEXT = /\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)\b/giu;
+
+export function registrableDomain(hostname) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  if (host === "localhost" || isIP(host)) return host;
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  const tld = labels.at(-1);
+  const sld = labels.at(-2);
+  if (tld.length === 2 && GENERIC_CC_SLD.has(sld) && labels.length >= 3) {
+    return labels.slice(-3).join(".");
+  }
+  return labels.slice(-2).join(".");
+}
+
+function redirectRegistrableDomains(metadata) {
+  const domains = new Set();
+  for (const uri of metadata.redirect_uris ?? []) {
+    domains.add(registrableDomain(new URL(uri).hostname));
+  }
+  return domains;
+}
+
+function hostnamesInText(value) {
+  if (typeof value !== "string" || value.length === 0) return [];
+  return [...new Set([...value.matchAll(HOSTNAME_IN_TEXT)].map((match) => match[1].toLowerCase()))];
+}
+
+function validateDcrBranding(metadata) {
+  if (metadata.client_id && metadataUrlAllowed(metadata.client_id)) return;
+  if (metadata.logo_uri !== undefined) {
+    throw new errors.InvalidClientMetadata("registered clients cannot declare logo_uri");
+  }
+  const allowed = redirectRegistrableDomains(metadata);
+  for (const host of hostnamesInText(metadata.client_name)) {
+    if (!allowed.has(registrableDomain(host))) {
+      throw new errors.InvalidClientMetadata("client_name cannot claim a different host than redirect_uris");
+    }
+  }
+  if (metadata.client_uri !== undefined) {
+    const host = registrableDomain(new URL(metadata.client_uri).hostname);
+    if (!allowed.has(host)) {
+      throw new errors.InvalidClientMetadata("client_uri must stay on the redirect host");
+    }
+  }
+}
 
 // Applied to both CIMD and registered metadata, after the provider's schema
 // checks. The provider independently restricts grants, responses and algorithms.
@@ -23,6 +73,7 @@ export function validateClientPolicy(metadata, nativeLoopbackEnabled) {
       throw new errors.InvalidClientMetadata("redirect URIs require HTTPS or enabled native loopback");
     }
   }
+  validateDcrBranding(metadata);
 }
 
 // One container: fixed windows bound memory and registration write pressure.
@@ -45,8 +96,9 @@ export function createRegistrationLimiter({ perIp = 10, perHost = 30,
       throw new errors.InvalidClientMetadata("register between one and ten redirect URIs");
     }
     let hosts;
-    try { hosts = [...new Set(uris.map((uri) => new URL(uri).hostname.toLowerCase()))]; }
-    catch { throw new errors.InvalidClientMetadata("invalid redirect URI"); }
+    try {
+      hosts = [...new Set(uris.map((uri) => registrableDomain(new URL(uri).hostname)))];
+    } catch { throw new errors.InvalidClientMetadata("invalid redirect URI"); }
     const keys = [[`ip:${ctx.ip}`, perIp], ...hosts.map((host) => [`host:${host}`, perHost])];
     const until = Math.min(...keys.map(([key]) => buckets.get(key)?.until ?? now + windowMs));
     if (buckets.size + keys.filter(([key]) => !buckets.has(key)).length > maxKeys ||

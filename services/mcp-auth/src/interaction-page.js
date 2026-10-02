@@ -18,9 +18,32 @@ function stepLabel(step, names) {
   return "Connection update recorded";
 }
 
+function renderClientIdentity(clientDisplay) {
+  if (clientDisplay.verified) {
+    const primary = escapeHtml(clientDisplay.primary);
+    return {
+      eyebrow: "CommonSwarm connected app",
+      heading: `Choose workspaces for ${primary}`,
+      meta: `<p>Signed in as <strong>${escapeHtml(clientDisplay.identityLabel)}</strong></p><p>Client: <strong>${primary}</strong></p>`,
+      warning: "",
+    };
+  }
+  const primary = escapeHtml(clientDisplay.primary);
+  const declared = clientDisplay.declaredName
+    ? `<p>It calls itself &ldquo;${escapeHtml(clientDisplay.declaredName)}&rdquo;.</p>`
+    : "";
+  return {
+    eyebrow: "CommonSwarm connected app · Unverified app",
+    heading: `Choose workspaces for ${primary}`,
+    meta: `<p>Signed in as <strong>${escapeHtml(clientDisplay.identityLabel)}</strong></p>
+      <p>Authorization will return to <strong>${primary}</strong>.</p>${declared}`,
+    warning: `<p class="warning unverified-warning"><strong>Not verified:</strong> CommonSwarm has not checked who runs this app. Only continue if you trust <strong>${primary}</strong> to receive your authorization code and access your workspaces.</p>`,
+  };
+}
+
 export function renderConsentPage({
   interactionUid,
-  clientHost,
+  clientDisplay,
   identity,
   workspaces,
   selectedWorkspaceIds = [],
@@ -59,14 +82,15 @@ export function renderConsentPage({
       </section>`
     : "";
   const identityLabel = identity.displayName || identity.email || identity.userId;
+  const client = renderClientIdentity({ ...clientDisplay, identityLabel });
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Connect Claude to CommonSwarm</title>
 <style>
-  :root{color-scheme:light dark;font-family:ui-sans-serif,system-ui,sans-serif}body{margin:0;background:#f4f1ea;color:#17211b}.card{box-sizing:border-box;max-width:44rem;margin:4rem auto;padding:2rem;border:1px solid #c8cec7;border-radius:1rem;background:#fff}.eyebrow{color:#53645a;font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase}h1{font-size:1.8rem;margin:.4rem 0 1rem}h2{font-size:1rem}.meta,.notice,.progress{padding:1rem;border-radius:.7rem;background:#eef3ef}.meta p{margin:.2rem 0}.workspace-list{list-style:none;padding:0}.workspace-choice{display:grid;grid-template-columns:1fr auto;gap:1rem;padding:.9rem 0;border-bottom:1px solid #dde2dd}.home-choice{font-size:.88rem;color:#53645a}.warning{border-left:4px solid #af741b;padding:.8rem 1rem;background:#fff6df}.error{color:#8a261f}.actions{display:flex;gap:1rem;align-items:center;margin-top:1.5rem}button{border:0;border-radius:999px;background:#173f2e;color:#fff;font:inherit;font-weight:700;padding:.75rem 1.15rem}a{color:#245c45}@media(prefers-color-scheme:dark){body{background:#111713;color:#edf2ee}.card{background:#1b241e;border-color:#425047}.meta,.notice,.progress{background:#263229}.warning{background:#3a301b}}
+  :root{color-scheme:light dark;font-family:ui-sans-serif,system-ui,sans-serif}body{margin:0;background:#f4f1ea;color:#17211b}.card{box-sizing:border-box;max-width:44rem;margin:4rem auto;padding:2rem;border:1px solid #c8cec7;border-radius:1rem;background:#fff}.eyebrow{color:#53645a;font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase}h1{font-size:1.8rem;margin:.4rem 0 1rem}h2{font-size:1rem}.meta,.notice,.progress{padding:1rem;border-radius:.7rem;background:#eef3ef}.meta p{margin:.2rem 0}.workspace-list{list-style:none;padding:0}.workspace-choice{display:grid;grid-template-columns:1fr auto;gap:1rem;padding:.9rem 0;border-bottom:1px solid #dde2dd}.home-choice{font-size:.88rem;color:#53645a}.warning{border-left:4px solid #af741b;padding:.8rem 1rem;background:#fff6df}.unverified-warning{margin-top:1rem}.error{color:#8a261f}.actions{display:flex;gap:1rem;align-items:center;margin-top:1.5rem}button{border:0;border-radius:999px;background:#173f2e;color:#fff;font:inherit;font-weight:700;padding:.75rem 1.15rem}a{color:#245c45}@media(prefers-color-scheme:dark){body{background:#111713;color:#edf2ee}.card{background:#1b241e;border-color:#425047}.meta,.notice,.progress{background:#263229}.warning{background:#3a301b}}
 </style></head><body><main class="card">
-  <p class="eyebrow">CommonSwarm connected app</p><h1>Choose workspaces for ${escapeHtml(clientHost)}</h1>
-  <div class="meta"><p>Signed in as <strong>${escapeHtml(identityLabel)}</strong></p><p>Client: <strong>${escapeHtml(clientHost)}</strong></p></div>
+  <p class="eyebrow">${client.eyebrow}</p><h1>${client.heading}</h1>
+  <div class="meta">${client.meta}${client.warning}</div>
   ${progressMarkup}
   ${validationError ? `<p class="error" role="alert">${escapeHtml(validationError)}</p>` : ""}
   <form method="post" action="/interaction/${encodeURIComponent(interactionUid)}/consent">

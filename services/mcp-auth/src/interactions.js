@@ -88,11 +88,17 @@ function identity(session) {
   };
 }
 
-async function clientLabel(provider, clientId) {
+async function clientConsentDisplay(provider, clientId, redirectUri) {
   const client = await provider.Client.find(clientId);
-  // CIMD keeps its established host label; DCR uses validated display metadata.
-  if (client?.clientIdMetadataDocument) return new URL(clientId).host;
-  return client?.clientName || "Registered app";
+  if (client?.clientIdMetadataDocument) {
+    return { verified: true, primary: new URL(clientId).host };
+  }
+  const redirect = new URL(redirectUri);
+  return {
+    verified: false,
+    primary: redirect.hostname.toLowerCase(),
+    declaredName: client?.clientName ?? null,
+  };
 }
 
 async function ensureSession(request, response, store) {
@@ -257,7 +263,7 @@ export function createInteractionHandler({
       const csrf = await store.issueConsentToken(interactionUid, browser.id, session.user_id);
       respondHtml(response, 200, renderConsentPage({
         interactionUid,
-        clientHost: await clientLabel(provider, details.params.client_id),
+        clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: currentIdentity,
         workspaces,
         selectedWorkspaceIds: bound.selected_workspace_ids ?? [],
@@ -302,7 +308,7 @@ export function createInteractionHandler({
         : { selectionVersion: body.selection_version, token: csrfToken };
       respondHtml(response, 400, renderConsentPage({
         interactionUid,
-        clientHost: await clientLabel(provider, details.params.client_id),
+        clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces: workspaces ?? await workspaceReader(identity(session)),
         selectedWorkspaceIds,
@@ -442,7 +448,7 @@ export function createInteractionHandler({
       const workspaces = await workspaceReader(identity(session));
       respondHtml(response, 502, renderConsentPage({
         interactionUid,
-        clientHost: await clientLabel(provider, consent.client_id),
+        clientDisplay: await clientConsentDisplay(provider, consent.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces,
         selectedWorkspaceIds: consent.selected_workspace_ids,

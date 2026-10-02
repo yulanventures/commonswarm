@@ -99,7 +99,7 @@ test("consent interaction serves HTML from the bound browser identity and owner 
 test("consent page escapes every untrusted label and contains the complete disclosure", () => {
   const html = renderConsentPage({
     interactionUid: "interaction-1",
-    clientHost: "client.example<script>alert(1)</script>",
+    clientDisplay: { verified: true, primary: "client.example<script>alert(1)</script>" },
     identity: { ...identity, displayName: "Human <img src=x>" },
     workspaces: [{ id: W1, name: "Workspace <script>bad()</script>" }],
     selectionVersion: 0,
@@ -162,7 +162,7 @@ test("partial consent reports completed steps, stays inactive, and retries stabl
 
   const partialPage = renderConsentPage({
     interactionUid: input.interactionRef,
-    clientHost: "client.example",
+    clientDisplay: { verified: true, primary: "client.example" },
     identity,
     workspaces: [{ id: W1, name: "One" }, { id: W2, name: "Two" }],
     selectedWorkspaceIds: [W1, W2],

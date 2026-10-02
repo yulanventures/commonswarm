@@ -556,7 +556,10 @@ test("DCR registration completes the same workspace consent and PKCE token flow 
   const path = start.getHeader("location");
   const page = await h.run(path);
   assert.equal(page.statusCode, 200);
-  assert.ok(page.body.includes("Registered &lt;app&gt;"));
+  assert.match(page.body, /Unverified app/u);
+  assert.match(page.body, /Choose workspaces for claude\.ai/u);
+  assert.match(page.body, /calls itself &ldquo;Registered &lt;app&gt;&rdquo;/u);
+  assert.doesNotMatch(page.body, /<h1>Choose workspaces for Registered/u);
   assertConsentPolicy(page);
   const form = new URLSearchParams({
     csrf_token: /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1],
@@ -631,6 +634,58 @@ test("DCR refuses IP and redirect-host floods, including host reuse across ports
       assert.equal((await h.provider.Client.adapter.list()).length, limit);
     });
   }
+});
+
+test("DCR per-host rate limit keys on the registrable domain, not subdomains", async (t) => {
+  await t.test("sibling subdomains share one bucket", async () => {
+    const { h } = await registeredHarness();
+    for (let i = 1; i <= 30; i += 1) {
+      const { response } = await register(h, {
+        redirect_uris: [`https://a${i}.evil.com/callback`],
+      }, { ip: `203.0.113.${i + 10}` });
+      assert.equal(response.statusCode, 201, response.body);
+    }
+    const refused = await register(h, { redirect_uris: ["https://b.evil.com/callback"] }, { ip: "203.0.113.200" });
+    assert.equal(refused.response.statusCode, 429);
+    assert.equal((await h.provider.Client.adapter.list()).length, 31);
+  });
+  await t.test("distinct registrable domains stay separate", async () => {
+    const { h } = await registeredHarness();
+    const first = await register(h, { redirect_uris: ["https://foo.co.uk/callback"] }, { ip: "203.0.113.30" });
+    const second = await register(h, { redirect_uris: ["https://bar.co.uk/callback"] }, { ip: "203.0.113.31" });
+    assert.equal(first.response.statusCode, 201);
+    assert.equal(second.response.statusCode, 201);
+    assert.equal((await h.provider.Client.adapter.list()).length, 3);
+  });
+});
+
+test("DCR registration rejects impersonating client_name and logo_uri", async () => {
+  const h = await harness();
+  const phishing = await register(h, {
+    client_name: "claude.ai",
+    redirect_uris: ["https://evil.example/callback"],
+  });
+  assert.equal(phishing.response.statusCode, 400);
+  assert.equal(phishing.metadata.error, "invalid_client_metadata");
+  const logo = await register(h, {
+    client_name: "Honest app",
+    logo_uri: "https://evil.example/logo.png",
+    redirect_uris: ["https://evil.example/callback"],
+  }, { ip: "203.0.113.40" });
+  assert.equal(logo.response.statusCode, 400);
+  assert.equal(logo.metadata.error, "invalid_client_metadata");
+  assert.equal((await h.provider.Client.adapter.list()).length, 0);
+});
+
+test("CIMD Claude consent still labels the verified metadata host", async () => {
+  const h = await harness();
+  await h.completedLogin();
+  const start = await h.run(authorize("consent"));
+  const page = await h.run(start.getHeader("location"));
+  assert.equal(page.statusCode, 200);
+  assert.match(page.body, /Choose workspaces for claude\.ai/u);
+  assert.doesNotMatch(page.body, /Unverified app/u);
+  assert.match(page.body, /Client: <strong>claude\.ai<\/strong>/u);
 });
 
 test("DCR rejects scope escalation, confidential auth and unsafe web redirects before storing", async () => {
