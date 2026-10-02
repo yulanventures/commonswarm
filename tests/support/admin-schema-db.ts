@@ -50,7 +50,10 @@ export function dbAssert(expression: string, label: string): string {
 }
 export function refuses(statement: string, sqlstate: string): string {
   assert.match(sqlstate, /^[A-Z0-9]{5}$/);
-  return `DO $deny$ BEGIN BEGIN ${statement}; RAISE EXCEPTION 'negative control admitted' USING ERRCODE='ZX001';
+  // Callers pass both bare statements and complete migration/insert scripts.
+  // PL/pgSQL rejects the empty statement produced by appending a second ';'.
+  const body = statement.trimEnd().replace(/;$/, '');
+  return `DO $deny$ BEGIN BEGIN ${body}; RAISE EXCEPTION 'negative control admitted' USING ERRCODE='ZX001';
     EXCEPTION WHEN SQLSTATE '${sqlstate}' THEN NULL; END; END $deny$;`;
 }
 export function catalog(version: string, rollback = false, expect = true): string {

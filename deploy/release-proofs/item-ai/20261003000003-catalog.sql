@@ -125,7 +125,13 @@ SELECT COALESCE((
   AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('commonswarm_oauth.issuer_key_denials') AND tgname='issuer_denial_admin_fence' AND tgenabled='O' AND NOT tgisinternal AND tgtype=5 AND tgfoid=to_regprocedure('commonswarm_oauth.deny_issuer_admin_families()'))
   AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('swarm.admin_credentials') AND tgname='admin_credentials_legacy_guard' AND tgenabled='O' AND NOT tgisinternal AND tgtype=31 AND tgfoid=to_regprocedure('commonswarm_oauth.guard_legacy_admin_write()'))
   AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('swarm.admin_grants') AND tgname='admin_grants_legacy_guard' AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgfoid=to_regprocedure('commonswarm_oauth.guard_legacy_admin_write()'))
-  AND (SELECT count(*)=1 FROM commonswarm_oauth.admin_cutover_state)
+  -- Resolve the relation before parsing its row-count query. A static FROM is
+  -- parsed even when another AND is false, so it aborts the post-inverse proof.
+  -- Keep the exact live singleton count and one-query psql/postgres.js contract.
+  AND CASE WHEN to_regclass('commonswarm_oauth.admin_cutover_state') IS NULL THEN false
+    ELSE (xpath('/row/row_count/text()', query_to_xml(
+      'SELECT count(*) AS row_count FROM commonswarm_oauth.admin_cutover_state',
+      false,true,'')))[1]::text::bigint=1 END
   AND NOT has_table_privilege('commonswarm_oauth_runtime','swarm.admin_events','INSERT') AND NOT has_table_privilege('commonswarm_oauth_runtime','swarm.admin_grants','UPDATE')
   AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('commonswarm_oauth.refresh_family_tombstones') AND tgname='oauth_tombstones_append_only' AND tgenabled='O' AND NOT tgisinternal AND tgtype=27 AND tgfoid=to_regprocedure('swarm.prevent_append_only_mutation()'))
   AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('commonswarm_oauth.admin_oauth_audit') AND attname='audit_id' AND NOT attisdropped AND atttypid='uuid'::regtype AND attnotnull=true)

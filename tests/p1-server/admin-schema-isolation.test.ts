@@ -80,7 +80,16 @@ ${refuses(`INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant
 SET LOCAL ROLE swarm_command;
 ${refuses(`INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,approval_event_id,approval_command_id)
  SELECT '${f.foreign}',client_id,verification_version,approval_event_id,approval_command_id FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id='${f.owner}'`, '23514')}
+${refuses(`UPDATE swarm.admin_events SET command_id='edited' WHERE owner_user_id='${f.owner}'`, '42501')}
+${refuses(`DELETE FROM swarm.admin_events WHERE owner_user_id='${f.owner}'`, '42501')}
+RESET ROLE;
+-- Prove the trigger separately from the runtime role's lack of mutation ACLs.
+-- The fixture already inserted this row successfully through swarm_command.
+SET LOCAL ROLE swarm_admin;
+${dbAssert(`SELECT count(*)=1 FROM swarm.admin_events WHERE owner_user_id='${f.owner}'`, 'append-only probe reaches an existing row')}
 ${refuses(`UPDATE swarm.admin_events SET command_id='edited' WHERE owner_user_id='${f.owner}'`, '55000')}
+${refuses(`DELETE FROM swarm.admin_events WHERE owner_user_id='${f.owner}'`, '55000')}
+${dbAssert(`SELECT count(*)=1 AND bool_and(command_id='approval-command') FROM swarm.admin_events WHERE owner_user_id='${f.owner}'`, 'append-only history unchanged')}
 RESET ROLE;
 SET LOCAL ROLE commonswarm_admin_release;
 ${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='unseeded-client'`, 'no assumed verification')}
@@ -234,6 +243,11 @@ ${dbAssert(`SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_oauth_audit WHER
 
 test('admin-schema-isolation: catalog negative control catches ACL drift alongside intact positive proofs', () => {
   runSql(`${versions.map(v => catalog(v)).join('\n')}
+SAVEPOINT intact_cutover_catalog;
+ALTER TABLE commonswarm_oauth.admin_cutover_state RENAME TO schema_test_missing_cutover;
+${catalog(versions[2], false, false)}
+ROLLBACK TO SAVEPOINT intact_cutover_catalog;
+${catalog(versions[2])}
 GRANT SELECT ON commonswarm_oauth.admin_access_issuances TO authenticated;
 ${catalog(versions[2], false, false)}
 REVOKE SELECT ON commonswarm_oauth.admin_access_issuances FROM authenticated;
