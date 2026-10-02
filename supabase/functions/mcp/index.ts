@@ -2,7 +2,6 @@ import postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
-  authenticateHostedGrantCapability,
   authenticateHostedSeatCapability,
   type HostedCapability,
   type HostedSeatCapability,
@@ -17,6 +16,7 @@ import {
   McpJwtVerifier,
   type VerifiedMcpToken,
 } from "./auth.ts";
+import { executeClaimSeat } from "./claim-seat.ts";
 import {
   createMcpProtocolHandler,
   WWW_AUTHENTICATE,
@@ -151,22 +151,6 @@ async function handleHostedRead(
   return await read.handleHostedRead(input, capability);
 }
 
-async function resolveGrantBinding(
-  tx: Sql,
-  token: VerifiedMcpToken,
-): Promise<GrantBinding | null> {
-  const rows = await tx<{ grant_id: string; owner_user_id: string }[]>`
-    SELECT grant_id, owner_user_id
-    FROM swarm.hosted_mcp_grants
-    WHERE provider_grant_id = ${token.providerGrantId}
-      AND owner_user_id = ${token.subject}::uuid
-    LIMIT 2
-  `;
-  return rows.length === 1
-    ? { grantId: rows[0]!.grant_id, ownerUserId: rows[0]!.owner_user_id }
-    : null;
-}
-
 async function resolveSeatBinding(
   token: VerifiedMcpToken,
   handle: string,
@@ -195,24 +179,6 @@ async function resolveSeatBinding(
       handle: row.handle,
     };
   }) as unknown as SeatBinding | null;
-}
-
-async function grantCapability(
-  token: VerifiedMcpToken,
-  workspaceId: string,
-): Promise<HostedCapability | null> {
-  return await authDb.begin("isolation level read committed", async (tx) => {
-    await setRole(tx, "swarm_command");
-    const binding = await resolveGrantBinding(tx, token);
-    if (binding === null) return null;
-    return await authenticateHostedGrantCapability(tx, {
-      ...binding,
-      providerGrantId: token.providerGrantId,
-      workspaceId,
-      tool: "claim_hosted_seat",
-      providerStatus,
-    });
-  }) as unknown as HostedCapability | null;
 }
 
 async function seatCapability(
@@ -302,17 +268,15 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
   if (call.name === "claim_seat") {
-    const workspaceId = String(args.workspace_id);
-    const capability = await grantCapability(call.token, workspaceId);
-    if (capability === null) throw new Error("hosted_grant_forbidden");
-    const result = await handleHostedCommand({
-      command_id: args.request_id,
-      client_version: "0.1.80",
-      workspace_id: workspaceId,
-      stream: { kind: "workspace" },
-      command: { kind: "claim_hosted_seat", name: args.name },
-    }, capability);
-    return commandOutput(result);
+    return commandOutput(await executeClaimSeat(call, {
+      withAuthTransaction: async <T>(run: (tx: Sql) => Promise<T>): Promise<T> =>
+        await authDb.begin("isolation level read committed", async (tx) => {
+          await setRole(tx, "swarm_command");
+          return await run(tx);
+        }) as unknown as T,
+      providerStatus,
+      handleCommand: handleHostedCommand,
+    }));
   }
   const handle = String(args.seat);
   const binding = await resolveSeatBinding(call.token, handle);

@@ -20,13 +20,14 @@ const objectSchema = (
   type: "object", properties, required: [...required], additionalProperties: false,
 });
 const uuid = text(36, 36, UUID_PATTERN);
+const claimWorkspace = { ...uuid, not: { enum: ["00000000-0000-0000-0000-000000000000", "00000000-0000-4000-8000-000000000000"] } };
 const handle = text(27, 69, HANDLE_PATTERN);
 const requestId = text(8, 72, REQUEST_ID_PATTERN);
 const recipient = objectSchema({ kind: { type: "string", enum: ["user", "agent"] }, id: uuid }, ["kind", "id"]);
 const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 };
 
 export const HOSTED_TOOL_TABLE = [
-  { name: "claim_seat", description: "Create or reuse a named hosted seat in a consented workspace. Retry with the same request_id.", inputSchema: objectSchema({ workspace_id: uuid, name: text(1, 80), request_id: requestId }, ["workspace_id", "name", "request_id"]) },
+  { name: "claim_seat", description: "Create or reuse a named hosted seat. Omit workspace_id to use the grant's home workspace chosen at consent, or provide another consented workspace ID. Retry with the same request_id.", inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]) },
   { name: "whoami", description: "Show the selected hosted seat identity.", inputSchema: objectSchema({ seat: handle }, ["seat"]) },
   { name: "check", description: "Read a durable batch of directed messages, optionally acknowledging the prior batch.", inputSchema: objectSchema({ seat: handle, ack: uuid }, ["seat"]) },
   { name: "ask", description: "Ask one or more workspace participants. Retry with the same request_id.", inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "recipients", "body", "request_id"]) },
@@ -96,7 +97,7 @@ function validRecipients(value: unknown): boolean {
 }
 
 const KEYS: Record<HostedToolName, { allowed: readonly string[]; required: readonly string[] }> = {
-  claim_seat: { allowed: ["workspace_id", "name", "request_id"], required: ["workspace_id", "name", "request_id"] },
+  claim_seat: { allowed: ["workspace_id", "name", "request_id"], required: ["name", "request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
   ask: { allowed: ["seat", "recipients", "body", "request_id"], required: ["seat", "recipients", "body", "request_id"] },
@@ -131,7 +132,12 @@ export function validateHostedToolArguments(
     throw new HostedToolInputError("Missing required tool argument.");
   }
   if (name === "claim_seat") {
-    if (!validUuid(args.workspace_id) || !validSeatName(args.name) ||
+    if (Object.hasOwn(args, "workspace_id") &&
+        (!validUuid(args.workspace_id) ||
+          claimWorkspace.not.enum.includes(args.workspace_id))) {
+      throw new HostedToolInputError("Invalid workspace_id: provide a real workspace UUID or omit it to use the grant's home workspace.");
+    }
+    if (!validSeatName(args.name) ||
         !validRequestId(args.request_id)) throw new HostedToolInputError("Invalid tool argument.");
     return args;
   }

@@ -6,7 +6,7 @@ import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
-import { HOSTED_TOOL_TABLE, validateHostedToolArguments } from "../supabase/functions/mcp/tools.ts";
+import { HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
 
 const verified = {
   providerGrantId: "provider-grant",
@@ -14,7 +14,7 @@ const verified = {
   expiresAt: 1_900_000_000,
 };
 
-function handler(overrides: { publicEnabled?: boolean; allowedOrigins?: string[] } = {}) {
+function handler(overrides: { publicEnabled?: boolean; allowedOrigins?: string[]; executeTool?: HostedToolExecutor } = {}) {
   return createMcpProtocolHandler({
     issuer: MCP_ISSUER,
     resource: MCP_RESOURCE,
@@ -27,7 +27,7 @@ function handler(overrides: { publicEnabled?: boolean; allowedOrigins?: string[]
       maxConcurrentRequests: 2,
     },
     verifyToken: async () => verified,
-    executeTool: async ({ name }) => ({ called: name }),
+    executeTool: overrides.executeTool ?? (async ({ name }) => ({ called: name })),
   });
 }
 
@@ -282,6 +282,122 @@ test("hosted tool table is closed and exposes no local or credential operations"
   );
 });
 
+test("claim_seat advertises and accepts an omitted workspace_id beside an explicit control", async () => {
+  const serve = handler();
+  const base = { name: "Claim regression", request_id: "claim_request_123" };
+  const call = (arguments_: Record<string, unknown>) => serve(post({
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "claim_seat", arguments: arguments_ },
+  }));
+  const explicit = await call({ ...base, workspace_id: verified.subject });
+  assert.equal(explicit.status, 200, "explicit UUID positive control");
+  assert.equal((await explicit.json()).result.isError, undefined);
+  const omitted = await call(base);
+  assert.equal(omitted.status, 200, "omitted workspace reaches the executor");
+  assert.equal((await omitted.json()).result.isError, undefined);
+  const listed = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }));
+  const claim = (await listed.json()).result.tools.find((tool: { name: string }) => tool.name === "claim_seat");
+  assert.deepEqual(claim.inputSchema.required, ["name", "request_id"]);
+  assert.equal(claim.inputSchema.properties.workspace_id.type, "string");
+  assert.match(claim.description, /omit workspace_id.*home workspace/iu);
+});
+
+test("claim_seat routes through the grant home and preserves explicit consent checks", async () => {
+  // Load the production claim path lazily so the schema regression can run on main.
+  // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
+  const { executeClaimSeat } = await import("../supabase/functions/mcp/claim-seat.ts");
+  // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
+  const { revalidateHostedGrantCommand } = await import("../supabase/functions/_shared/hosted-seat-auth.ts");
+  type Dependencies = Parameters<typeof executeClaimSeat>[1];
+  type Sql = Parameters<Parameters<Dependencies["withAuthTransaction"]>[0]>[0];
+  const home = "22222222-2222-4222-8222-222222222222";
+  const other = "33333333-3333-4333-8333-333333333333";
+  const forbidden = "44444444-4444-4444-8444-444444444444";
+  const grantId = "55555555-5555-4555-8555-555555555555";
+  // Database fixtures provide consented rows; the production auth module still
+  // constructs and revalidates the opaque capability used by the command path.
+  const authorizationRows = [home, other].map((workspace_id) => ({
+    grant_id: grantId, owner_user_id: verified.subject,
+    provider_grant_id: verified.providerGrantId, workspace_id,
+    stream_id: "66666666-6666-4666-8666-666666666666", manifest_digest: "a".repeat(64),
+  }));
+  const authorizedWorkspaces: unknown[] = [];
+  const commands: unknown[] = [];
+  let grantLookups = 0;
+  let providerActive = true;
+  const tx = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join("?");
+    if (query.includes("FROM swarm.hosted_mcp_grants")) {
+      grantLookups += 1;
+      assert.deepEqual(values, [verified.providerGrantId, verified.subject]);
+      assert.match(query, /SELECT grant_id, owner_user_id, home_workspace_id/u);
+      return [{ grant_id: grantId, owner_user_id: verified.subject, home_workspace_id: home }];
+    }
+    assert.match(query, /swarm.resolve_hosted_grant_authorization/u);
+    assert.equal(values[3], "claim_hosted_seat");
+    authorizedWorkspaces.push(values[2]);
+    return authorizationRows.filter((row) =>
+      row.grant_id === values[0] && row.owner_user_id === values[1] && row.workspace_id === values[2]);
+  }) as unknown as Sql;
+  const serve = handler({
+    executeTool: async (call) => {
+      const result = await executeClaimSeat(call, {
+        withAuthTransaction: async (run) => await run(tx),
+        providerStatus: async () => ({ active: providerActive }),
+        handleCommand: async (input, capability) => {
+          const authorization = await revalidateHostedGrantCommand(tx, capability);
+          assert.ok(authorization, "command revalidates the real opaque capability");
+          assert.equal(input.workspace_id, authorization.workspace_id);
+          commands.push(input);
+          return { status: 200, body: { workspace_id: input.workspace_id } };
+        },
+      });
+      return result.body;
+    },
+  });
+  const base = { name: "Claim regression", request_id: "claim_request_123" };
+  for (const [workspace_id, expected] of [[undefined, home], [other, other], [forbidden, "hosted_grant_forbidden"]]) {
+    const response = await serve(post({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "claim_seat", arguments: { ...base, ...(workspace_id === undefined ? {} : { workspace_id }) } },
+    }));
+    assert.equal(response.status, 200);
+    const result = (await response.json()).result;
+    const output = JSON.parse(result.content[0].text);
+    if (expected === "hosted_grant_forbidden") {
+      assert.equal(result.isError, true);
+      assert.deepEqual(output, { error: expected });
+    } else {
+      assert.equal(result.isError, undefined);
+      assert.deepEqual(output, { workspace_id: expected });
+    }
+  }
+  assert.deepEqual(authorizedWorkspaces, [home, home, other, other, forbidden]);
+  assert.deepEqual(commands, [home, other].map((workspace_id) => ({
+    command_id: base.request_id, client_version: "0.1.80", workspace_id,
+    stream: { kind: "workspace" }, command: { kind: "claim_hosted_seat", name: base.name },
+  })));
+  providerActive = false;
+  const revoked = await serve(post({
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "claim_seat", arguments: base },
+  }));
+  assert.deepEqual(JSON.parse((await revoked.json()).result.content[0].text), { error: "hosted_grant_forbidden" });
+  assert.equal(commands.length, 2, "inactive provider never issues a command");
+  const lookupsBeforeInvalidInput = grantLookups;
+  for (const workspace_id of ["00000000-0000-4000-8000-000000000000", "00000000-0000-0000-0000-000000000000", null, "invalid"]) {
+    const response = await serve(post({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "claim_seat", arguments: { ...base, workspace_id } },
+    }));
+    assert.equal(response.status, 400);
+    const error = (await response.json()).error;
+    assert.equal(error.code, -32602);
+    assert.match(error.message, /Invalid workspace_id.*omit.*home workspace/u);
+  }
+  assert.equal(grantLookups, lookupsBeforeInvalidInput, "invalid IDs never reach grant authorization");
+});
+
 test("signal bodies accept multiline whitespace and refuse other control characters", () => {
   const base = {
     seat: "seat_ABCDEFGHIJKLMNOPQRSTUV",
@@ -420,7 +536,9 @@ test("runtime dispatch stays in process and names both durable revocation bounda
     "utf8",
   );
   assert.match(source, /commonswarm_oauth\.provider_family_active/);
-  assert.match(source, /authenticateHostedGrantCapability/);
+  const claimSource = await readFile(new URL("../supabase/functions/mcp/claim-seat.ts", import.meta.url), "utf8");
+  assert.match(source, /executeClaimSeat/);
+  assert.match(claimSource, /authenticateHostedGrantCapability/);
   assert.match(source, /authenticateHostedSeatCapability/);
   assert.match(source, /handleHostedCommand/);
   assert.match(source, /handleHostedRead/);
