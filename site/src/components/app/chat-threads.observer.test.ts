@@ -27,7 +27,7 @@ import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { browserSignalCommand, browserSignalKind } from "../../lib/commonswarm.js";
 import { BROADCAST_CHIP_LABEL } from "../../lib/composer-address.js";

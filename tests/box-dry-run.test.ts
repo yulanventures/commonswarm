@@ -1355,7 +1355,7 @@ function containmentProfile(scope: ContainmentScope): string {
     "(allow default)",
     "(deny network*)",
     `(deny file-write* (require-all ${notWritable.join(" ")}))`,
-    `(deny process-exec ${applications})`,
+    `(deny process-exec ${applications} (regex #"/Applications/"))`,
     ...homes.map((home) => `(deny process-exec (require-all (subpath ${sbplPath(home)}) ${notExecutable.join(" ")}))`),
     `(deny file-read* ${privateState})`,
     "",
@@ -5590,42 +5590,41 @@ test("controls: a Mac block that starts an absolute-path application is denied a
   const preflight = planBlock(SITE, "site-03-browser-session-preflight");
   const chromeLine = "chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'";
   assert.ok(preflight.source.includes(chromeLine), "the plan names the absolute Chrome path");
-  assert.equal(existsSync("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), true,
-    "this control starts the Chrome binary the plan names, with --version, and needs it installed");
   const fixture = prepareMacFixture([preflight]);
   try {
     writeMode(join(fixture.home, ".commonswarm-site-window.env"), `SITE_EVIDENCE=${fixture.env.SITE_EVIDENCE}\n`);
     const launch = preflight.source.indexOf("  chrome_port=9335\n");
     assert.ok(launch > 0);
-    // The block up to the launch, with a scratch profile, and one foreground `--version` call in place of the
-    // launch. Nothing here starts a browser or reads Anvil's profile. If containment failed, --version would print
-    // and exit. The call carries no redirection: bash 3.2 reports 1, not 126, for a refused exec that has one.
+    // Exercise an Applications path using only a fixture-owned executable. Even if the sandbox
+    // regresses, this harmless stand-in cannot start an installed browser or read a real profile.
+    const fakeApplication = join(fixture.home, "Applications", "ChromeGuardFake.app", "chrome");
+    writeMode(fakeApplication, "#!/bin/sh\nprintf 'CHROME_GUARD_FAKE_RAN\\n'\n", 0o755);
     const head = preflight.source.slice(0, launch)
-      .replace('profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"', 'profile="$SITE_EVIDENCE/control-profile"; mkdir -p "$profile"');
+      .replace('profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"', 'profile="$SITE_EVIDENCE/control-profile"; mkdir -p "$profile"')
+      .replace(chromeLine, `chrome='${fakeApplication}'`);
     const versionCall = '  "$chrome" --version\n)\n';
     const executableCheck = '  test -x "$chrome"\n';
     assert.ok(head.includes(executableCheck), "the plan checks that the Chrome binary is executable");
 
     // Positive: the same block with an absolute-path program that is allowed (/usr/bin/true).
-    const positive = executeWholeBlock({ ...preflight, source: head.replace(chromeLine, "chrome='/usr/bin/true'") + versionCall }, fixture, { executeDeclared: true });
+    const positive = executeWholeBlock({ ...preflight, source: head.replace(`chrome='${fakeApplication}'`, "chrome='/usr/bin/true'") + versionCall }, fixture, { executeDeclared: true });
     assert.equal(positive.result, "passed", positive.stderr);
 
-    // Negative 1: the block with the plan's own executable check removed reaches the exec of the absolute Chrome
-    // path, and the exec is refused: "Operation not permitted", reported as the failing command.
+    // Negative 1: the fake absolute Applications path reaches exec and is denied by containment.
     const denied = executeWholeBlock({ ...preflight, source: head.replace(executableCheck, "") + versionCall }, fixture, { executeDeclared: true });
     assert.equal(denied.result, "failed", "a Mac block started an application under /Applications");
     // bash 3.2 reports 126 for a refused exec, and 1 when errexit ends the subshell that made it.
     assert.ok([1, 126].includes(denied.status ?? -1), `status ${denied.status}: ${denied.stderr}`);
     assert.match(denied.stderr, /Operation not permitted/);
     assert.match(denied.firstFailingCommand ?? "", /"\$chrome" --version/);
-    assert.doesNotMatch(denied.stdout, /Google Chrome/, "the application ran");
+    assert.doesNotMatch(denied.stdout, /CHROME_GUARD_FAKE_RAN/, "the application ran");
 
     // Negative 2: the block with the plan's own check kept. Whether the kernel refuses the executable check on
     // that path or only the exec, the block fails and the application does not run.
     const checked = executeWholeBlock({ ...preflight, source: head + versionCall }, fixture, { executeDeclared: true });
     assert.equal(checked.result, "failed");
     assert.notEqual(checked.status, 0);
-    assert.doesNotMatch(checked.stdout, /Google Chrome/, "the application ran");
+    assert.doesNotMatch(checked.stdout, /CHROME_GUARD_FAKE_RAN/, "the application ran");
   } finally {
     cleanupMacFixture(fixture);
   }

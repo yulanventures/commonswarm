@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { FILE_CONTENT_WARNING } from "../../lib/commonswarm.js";
 import type { DisplayFile } from "../../lib/file-list.js";
 import { renderFileListFixtures } from "./file-list.fixture.js";
@@ -21,7 +21,8 @@ const file = (overrides: Partial<DisplayFile> = {}): DisplayFile => ({
   ...overrides,
 });
 
-const scenariosPromise = renderFileListFixtures(
+let scenariosPromise: ReturnType<typeof renderFileListFixtures> | undefined;
+const scenarios = (): ReturnType<typeof renderFileListFixtures> => scenariosPromise ??= renderFileListFixtures(
   {
     rows: [
       file(),
@@ -51,7 +52,7 @@ const scenariosPromise = renderFileListFixtures(
 );
 
 test("file rows render name, human size, version, uploader, age, and one warning", async () => {
-  const snapshot = (await scenariosPromise).rows!;
+  const snapshot = (await scenarios()).rows!;
   assert.equal(snapshot.rowCount, 3);
   assert.equal(snapshot.downloadButtonCount, 3);
   assert.deepEqual(snapshot.sizes, ["1.5 KB", "24 KB", "842 B"]);
@@ -63,14 +64,14 @@ test("file rows render name, human size, version, uploader, age, and one warning
 });
 
 test("tombstoned files stay visible and name their restore deadline", async () => {
-  const snapshot = (await scenariosPromise).rows!;
+  const snapshot = (await scenarios()).rows!;
   assert.equal(snapshot.removedNotes.length, 1);
   assert.match(snapshot.removedNotes[0]!, /^Removed · restorable until /);
   assert.match(snapshot.innerHtml, /dashboard__file-row--removed/);
 });
 
 test("an empty workspace renders one quiet line without a file list", async () => {
-  const snapshot = (await scenariosPromise).empty!;
+  const snapshot = (await scenarios()).empty!;
   assert.equal(snapshot.rowCount, 0);
   assert.equal(snapshot.emptyHidden, false);
   assert.equal(snapshot.emptyText, "No files shared yet.");
@@ -78,7 +79,7 @@ test("an empty workspace renders one quiet line without a file list", async () =
 });
 
 test("hostile file names land as textContent, never markup", async () => {
-  const snapshot = (await scenariosPromise).rows!;
+  const snapshot = (await scenarios()).rows!;
   assert.equal(snapshot.names[2], HOSTILE_NAME);
   assert.equal(snapshot.dangerousElementCount, 0);
   assert.match(snapshot.innerHtml, /&lt;em data-hostile="true"&gt;owned&lt;\/em&gt;\.md/);

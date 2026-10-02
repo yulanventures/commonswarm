@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { MESSAGE_MARKDOWN_LIMITS } from "../../lib/message-markdown.js";
 import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.js";
 
 /* Reached by site/package.json's recursive component observer-test glob. */
 
-const snapshotPromise = runBrainViewFixture();
+let snapshotPromise: ReturnType<typeof runBrainViewFixture> | undefined;
+const getSnapshot = (): ReturnType<typeof runBrainViewFixture> => snapshotPromise ??= runBrainViewFixture();
 
 test("the dashboard wires a Brain tab to the existing file read and put paths", () => {
   const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
@@ -27,7 +28,7 @@ test("the dashboard wires a Brain tab to the existing file read and put paths", 
 });
 
 test("Brain lists only reserved topics with updater, age, and version count", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.deepEqual(snapshot.listTopics, ["architecture"]);
   assert.match(snapshot.listDetails[0]!, /2 versions/);
   assert.match(snapshot.listDetails[0]!, /2 hours ago/);
@@ -35,7 +36,7 @@ test("Brain lists only reserved topics with updater, age, and version count", as
 });
 
 test("Brain renders headings, lists, code, and safe links with the transcript sanitizer", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.title, "architecture");
   assert.match(snapshot.renderedHtml, /<h2>Architecture<\/h2>/);
   assert.match(snapshot.renderedHtml, /<h3>Working agreement<\/h3>/);
@@ -66,7 +67,7 @@ test("Brain renders headings, lists, code, and safe links with the transcript sa
 });
 
 test("hostile feed fixture stays inert through the Brain render path", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.dangerousElementCount, 0);
   assert.match(snapshot.renderedHtml, /Before &lt;b&gt;raw&lt;\/b&gt;/u);
   assert.match(snapshot.renderedHtml, /\[click\]\(javascript:alert\(1\)\)/u);
@@ -75,7 +76,7 @@ test("hostile feed fixture stays inert through the Brain render path", async () 
 });
 
 test("the Raw toggle shows the stored topic text byte-for-byte", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.panelLabel, "Rendered from markdown · Raw");
   assert.equal(snapshot.defaultRendered, true);
   assert.equal(snapshot.rawModeShown, true);
@@ -90,7 +91,7 @@ test("the Raw toggle shows the stored topic text byte-for-byte", async () => {
    ORDINARY topic. Raw for a SHORTENED topic is the same code path — Raw reads the file, not the
    rendered HTML — but no fixture exercises it, so that half is design, not measurement. */
 test("Brain rendering renders a large topic whole and still bounds nesting", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.boundedShortened, false);
   assert.equal(snapshot.boundedBlockquoteCount, MESSAGE_MARKDOWN_LIMITS.nestingDepth);
   assert.ok(snapshot.boundedBreakCount < MESSAGE_MARKDOWN_LIMITS.lines);
@@ -98,7 +99,7 @@ test("Brain rendering renders a large topic whole and still bounds nesting", asy
 });
 
 test("Brain edit submits Markdown and returns the confirmed new file version", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.saveCount, 1);
   assert.equal(
     snapshot.savedMarkdown,
@@ -110,7 +111,7 @@ test("Brain edit submits Markdown and returns the confirmed new file version", a
 });
 
 test("Brain binds the open pane to the file, not the slug — a workspace switch cannot leak content", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.paneClosedOnForeignFile, true, "the pane survived a same-slug foreign file");
   assert.equal(snapshot.staleSaveRefused, true, "a stale-pane save reached the foreign file");
 });

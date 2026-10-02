@@ -12,12 +12,12 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { browserTest as test } from "../../site/tests/chrome.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient } from "@supabase/supabase-js";
 import { build } from "esbuild";
 import postgres from "postgres";
-import { findChrome } from "../../site/tests/chrome.js";
+import { findChrome, buildChromeArgs, requireBrowserTests, resolveChromePath } from "../../site/tests/chrome.js";
 import { seedDogfood } from "../../src/cloud/seed.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 
@@ -130,18 +130,17 @@ async function launchChrome(chrome: string): Promise<{
   close(): Promise<void>;
   page: CdpPage;
 }> {
+  requireBrowserTests();
+  chrome = await resolveChromePath(chrome);
   const { mkdtemp, rm } = await import("node:fs/promises");
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-human-seen-chrome-"));
-  const child = spawn(chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  const child = spawn(chrome, buildChromeArgs([
     "--no-first-run",
     "--no-default-browser-check",
     "--remote-debugging-port=0",
     `--user-data-dir=${directory}`,
     "about:blank",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
+  ], directory, process.env.GITHUB_ACTIONS === "true"), { stdio: ["ignore", "pipe", "pipe"] });
   let logs = "";
   const capture = (chunk: Buffer) => {
     logs = (logs + chunk.toString("utf8")).slice(-8_000);
