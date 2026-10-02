@@ -8,6 +8,7 @@ import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
+import { emptyApplicationSchema } from '../support/admin-schema-db.js';
 
 const scenarios = {
   runtime: 'admin credential issuance and rotation require signed, resource-bound runtime proof even through direct adapter calls',
@@ -45,7 +46,8 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane B', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
       const configPath = join(secretDir, 'local.json');
-      writeFileSync(configPath, JSON.stringify({ local, owner, workspace, jwt: signed.data.session.access_token }), { mode: 0o600 });
+      writeFileSync(configPath, JSON.stringify({ local, owner, workspace, jwt: signed.data.session.access_token,
+        ...(scenario === 'storage' ? { rollbackSchema: emptyApplicationSchema() } : {}) }), { mode: 0o600 });
       const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
         '--allow-read', '--allow-env', '--allow-net', 'tests/support/admin-server-harness.mjs', configPath, scenario], {
         encoding: 'utf8', timeout: 150000, env: { PATH: process.env.PATH ?? '', ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}) },

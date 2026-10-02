@@ -241,7 +241,12 @@ try {
     const rollback = await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000001-rollback.sql');
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
+    const rollbackDrill = new Error('rollback drill');
+    stage = 'rollback round trip';
     await db.begin(async tx => {
+      // Exercise the inverse against empty copies of the real DDL. The original
+      // versioned grants/history remain intact and the transaction restores names.
+      await tx.unsafe(config.rollbackSchema);
       // Additive OAuth schema depends on these predecessor tables. Its reserves
       // refuse if artifacts exist; this isolated legacy drill has none.
       for (const version of ['20261003000003','20261003000002','20261003000001']) {
@@ -271,8 +276,8 @@ try {
         await tx.unsafe(await Deno.readTextFile(`supabase/migrations/${name}`));
       }
       control = true;
-      throw new Error('rollback drill');
-    }).catch(() => {});
+      throw rollbackDrill;
+    }).catch(error => { if (error !== rollbackDrill) throw error; });
     check(control, 'rollback round trip');
     await db`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid AND user_id = ${config.owner}::uuid`;
     check((await http(wire({ kind: 'revoke_admin_delegation', grant_id: grant.grantId, reason_code: 'human_revoked' }))).status === 200, 'human recovery without workspace membership');

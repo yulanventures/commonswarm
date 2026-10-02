@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { emptyApplicationSchema, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 
 const commandUrl = new URL("../../supabase/functions/command/index.ts", import.meta.url);
 const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
@@ -553,7 +554,15 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
   ]);
   const catalogQuery = catalog.replace(/\\gset\s*$/u, "");
   const rollbackCatalogQuery = rollbackCatalog.replace(/\\gset\s*$/u, "");
+  const emptySchema = emptyApplicationSchema();
+  const rollbackDrill = new Error("ROLLBACK_HM_PROOF_DRILL");
   await sql.begin(async (tx) => {
+    // M1 adds a real FK to hosted grants. Reverse newer, data-free schema first
+    // in an empty DDL snapshot; retain every original grant/artifact/receipt.
+    await tx.unsafe(emptySchema);
+    for (const version of [...adminVersions].reverse()) {
+      await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
+    }
     const [positive] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(positive?.catalog_ok, true, "positive control: applied catalog");
     // Real durable receipts must survive the inverse, including both HM kinds.
@@ -613,9 +622,17 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       true,
       "production-like search_path does not change the catalog proof",
     );
-    throw new Error("ROLLBACK_HM_PROOF_DRILL");
+    for (const name of adminMigrationNames) {
+      await tx.unsafe(repoSql(`supabase/migrations/${name}`));
+    }
+    for (const version of adminVersions) {
+      const query = repoSql(`deploy/release-proofs/item-ai/${version}-catalog.sql`).replace(/\\gset\s*$/u, "");
+      const [restored] = await tx.unsafe<{ catalog_ok: boolean }[]>(query);
+      assert.equal(restored?.catalog_ok, true, `reapplied admin catalog ${version}`);
+    }
+    throw rollbackDrill;
   }).catch((error) => {
-    if (!(error instanceof Error) || error.message !== "ROLLBACK_HM_PROOF_DRILL") throw error;
+    if (error !== rollbackDrill) throw error;
   });
 });
 
