@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { generateKeyPair, exportJWK } from "jose";
-import Provider, { errors } from "oidc-provider";
+import Provider, { errors, interactionPolicy } from "oidc-provider";
 
 import {
   createMetadataFetch,
@@ -50,6 +50,14 @@ export async function createMcpProvider({
       cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
     throw new TypeError("CIMD cache duration must have bounded min and max seconds");
   }
+  const policy = interactionPolicy.base();
+  // A provider session can outlive the authenticated browser session. The
+  // default no_session check only tests accountId; without an Account,
+  // loadGrant creates no Grant and the subsequent consent checks would throw.
+  policy.get("login").checks.add(new interactionPolicy.Check(
+    "account_unavailable", "End-User authentication is required", "login_required",
+    (ctx) => Boolean(ctx.oidc.session.accountId && !ctx.oidc.account),
+  ));
   const provider = new Provider(ISSUER, {
     adapter,
     clientAuthMethods: ["none"],
@@ -117,6 +125,7 @@ export async function createMcpProvider({
       claims: async () => ({ sub: accountId }),
     })),
     grantTypes: ["authorization_code", "refresh_token"],
+    interactions: { policy },
     jwks: jwks ?? { keys: [await signingJwk()] },
     pkce: { required: () => true },
     responseTypes: ["code"],
