@@ -41,12 +41,16 @@ that table. Hosted file/wiki/admin/task CRUD is absent. Local stdio's file and
 brain tools are a different surface at `src/mcp/tools.ts:38`. Version `0.1.80`
 is current main at `package.json:3`, not an older CLI version.
 
-The drafts report infrastructure PASS but failed completed Claude consumer
-attempts. Their HezLead evidence is message
-`71e78be4-b403-44d9-98f3-7c33435d61bf`, server time
-2026-10-02 03:42:07 UTC. Run 4 was still ongoing at that cutoff.
-This lane does not establish its terminal result or current live revisions.
-Hold public submissions and announcements until the relevant gates pass.
+Hosted MCP is live and on since about 2026-10-02 02:05Z, per HezLead's Fold 2
+correction and CSwarmStrategist's 2026-10-02 measurement: POST
+`https://mcp.commonswarm.com/mcp` returns 401 with an OAuth challenge; GET
+returns 405; discovery, JWKS, and protected-resource metadata return 200.
+OAuth has been re-released twice from an ON baseline. Four Claude.ai retests
+found integration bugs that were fixed; retest 5 runs after the latest release.
+HM37 hosted done-test section 10 (Claude.ai consumer acceptance) has not passed.
+Lane 8's "Connected apps" site release in `/app` is queued, not released.
+Hold public submissions and announcements until the relevant gates pass;
+the consumer done-test remains a gate before any announcement.
 
 ## Channels and their acceptance gates
 
@@ -260,8 +264,8 @@ does not need a directory listing, but must say which route was measured.
 
 | Gate | What must be true and measured | Current evidence limit |
 |---|---|---|
-| Coherent hosted release | Record live auth, edge, schema, site, CLI/package where applicable, and endpoint revisions. Resolve artifacts and URLs before comparing. Approved release and rollback evidence agree. | Reported auth fixes and site rollback do not establish a coherent consumer release. |
-| Hosted done-test | Fresh eligible user completes consent and host return; exactly eight tools appear; claim/reuse and `whoami` match; authorized ask/check/reply completes. | Claude consumer acceptance incomplete. Infrastructure PASS cannot close it. |
+| Coherent hosted release | Record live auth, edge, schema, site, CLI/package where applicable, and endpoint revisions. Resolve artifacts and URLs before comparing. Approved release and rollback evidence agree. | Hosted MCP is live and on. Lane 8's "Connected apps" site release is queued, not released; coherent consumer release evidence remains outstanding. |
+| Hosted done-test | Fresh eligible user completes consent and host return; exactly eight tools appear; claim/reuse and `whoami` match; authorized ask/check/reply completes. | HM37 section 10 Claude.ai consumer acceptance has not passed; retest 5 follows the latest release. The done-test remains a gate before any announcement. Infrastructure PASS cannot close it. |
 | Tool contract and annotations | Names/schemas come from the hosted table. Titles, errors, retry behavior, security schemes, and all required hints match actual side effects. | Current table at `supabase/functions/mcp/tools.ts:28` has no explicit titles or safety annotations. `check` is a command at `supabase/functions/_shared/hosted-seat-auth.ts:6`, so it cannot be labeled read-only. |
 | Auth and isolation | Actual deployed scopes, resource/audience, client registration, consent, seat reuse/limits, expiry, and rotating refresh are recorded. Wrong workspace/audience, shared credentials, removed membership, and expired access are tested with positive controls. | Source enforces the exact MCP resource at `services/mcp-auth/src/provider.js:91` and pins the `mcp` scope at `:100`. This is not granular read-only/admin consent. Names do not isolate shared chats. |
 | Revocation and recovery | Disconnect, seat/grant revoke, membership removal, cancelled consent, uncertain retry, and reconnect have observed outcomes. New access after revoke fails. No data recall is promised. | Built C/D recovery needs deployment/server evidence. Tool-only launch must prove its own hosted revoke path. |
@@ -270,7 +274,7 @@ does not need a directory listing, but must say which route was measured.
 | Rate limits and failures | Pin limits from actual enforcement constants. Measure boundary refusals, safe retry, overload, timeout, and auth failure. No successful response conceals unfinished work. | Admin limits are in `src/protocol/admin-policy.ts:8`; transport body, response, timeout, and concurrency bounds are wired at `supabase/functions/mcp/index.ts:82`, `:83`, `:84`, and `:85`. Neither source presence proves live behavior. |
 | Reviewer and host access | Synthetic reviewer data, private credential delivery, stable access/reset, and evidence for each advertised host/plan/region/version. Exercise all eight tools. | `/app` human workspace creation is live. Reviewer auth convenience and complete vendor-host access still need proof. |
 | Listing truth | Correct legal publisher, approved/public status where required, real listing URL/version, and fresh install through the named route. | No CommonSwarm directory acceptance is established by these drafts. Submission is not approval. |
-| Claim accuracy | Every announced surface and receive mode has evidence. Distinguish built, landed, applied, and live. No hosted files/admin/task CRUD, per-chat privacy, universal support, or wake claim beyond proof. | B/C/D are merged, undeployed. `working_on` is a signal. Version `0.1.80` does not erase local/hosted differences. |
+| Claim accuracy | Every announced surface and receive mode has evidence. Distinguish built, landed, applied, and live. No hosted files/admin/task CRUD, per-chat privacy, universal support, or wake claim beyond proof. | Hosted MCP is live and on; consumer acceptance has not passed. Lane 8's site release is queued, not released. B/C/D are merged, undeployed. `working_on` is a signal. Version `0.1.80` does not erase local/hosted differences. |
 | Optional OpenAI Events | New protocol/event methods, durable scoped subscriptions, callback verification, signed delivery, replay, restart, expiry/refresh, unsubscribe, revoke, and duplicate handling pass. Actual subscribed cloud root responds while idle. | Vendor route is documented; CommonSwarm route is not verified in production and idle Dot wake is unproved. Current server advertises tools only at `supabase/functions/mcp/protocol.ts:267`. |
 
 Events are a separate launch gate under the sourced
@@ -283,8 +287,10 @@ child poll or completion callback is not an idle-root wake.
 
 ## Go-to-market sequence
 
-1. Close the terminal Claude result and HM37 done-test. Freeze a coherent release
-   and the eight-tool contract. Repair annotations and policy mismatches before
+1. Close Claude.ai retest 5 and HM37 done-test section 10 on the live, ON hosted
+   MCP service before any announcement. Retain separate release evidence for
+   lane 8's queued "Connected apps" site change. Freeze a coherent release and
+   the eight-tool contract. Repair annotations and policy mismatches before
    any public submission.
 2. Assemble one shared packet with exact tools, actual scopes, data flow,
    isolation/revoke results, support path, synthetic reviewer access, release
@@ -319,7 +325,7 @@ for HezLead to assign. The ordered lanes match the onboarding plan.
 
 | Order | Lane | Size | Owner type | Dependencies | Acceptance gate |
 |---|---|---|---|---|---|
-| 1 | Close HM37 hosted onboarding | Uncertain | Auth engineer, authorized release owner, host QA | Reviewed hosted artifacts and terminal Claude result | Coherent live revisions; fresh consent, eight tools, identity/exchange, refresh and revoke pass. |
+| 1 | Close HM37 consumer acceptance on live MCP | Uncertain | Auth engineer, authorized release owner, host QA | Reviewed hosted artifacts and terminal Claude.ai retest 5 result | Section 10 passes before any announcement; coherent live revisions, fresh consent, eight tools, identity/exchange, refresh and revoke pass. Lane 8's queued site release needs separate release evidence. |
 | 2 | Verify and release B/C/D | Medium | Backend engineer and authorized release owner | Lane 1; merged inputs | Server/migration/RLS/history/rollback proof and live human grant list/history/revoke. No claim that pending invitation delivery works. |
 | 3 | Complete recipient delivery and enrollment | Large | Runtime/auth engineer | Lane 2; canonical grant contract | Protected hosted delivery and recipient redemption, bounded retries/expiry/revoke, and real recipient proof. Secrets stay outside model output. |
 | 4 | Add common receipt and host guides | Medium | Product engineer, documentation owner, host QA | Lane 1; lane 3 for delegated flows | Second remote host and local CLI pass; advertised state, permission, receive mode, and route match evidence. |
