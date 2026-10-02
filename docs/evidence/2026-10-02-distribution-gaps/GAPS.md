@@ -250,3 +250,17 @@ transport/auth terms are verified.
 
 This audit neither creates those packages nor requests publication. Remaining
 vendor/account uncertainties stay visible instead of becoming invented requirements.
+
+## Live metadata measured by the lead (2026-10-02, public GET, `User-Agent: curl/8.7.1`)
+
+The lane worker could not resolve the host from its sandbox. These values are measured from the live service.
+
+| Field | Live value | Status for directory submission |
+|---|---|---|
+| Protected-resource metadata (`/.well-known/oauth-protected-resource/mcp`) | resource `https://mcp.commonswarm.com/mcp`, authorization_servers `https://mcp.commonswarm.com`, scopes_supported `mcp`, bearer_methods_supported `header`, resource_name `CommonSwarm hosted MCP` | MET |
+| Issuer / endpoints | issuer `https://mcp.commonswarm.com`; authorize `/authorize`; token `/token`; jwks `/jwks` (one EC P-256 ES256 `sig` key with kid) | MET |
+| PKCE / grants / client auth | code_challenge_methods `S256`; grant_types `authorization_code,refresh_token`; token_endpoint_auth_methods `none`; response_types `code` | MET |
+| Client registration | `client_id_metadata_document_supported: true`; **no `registration_endpoint` advertised**; `/reg` and `/register` return 404 | GAP for any channel that requires RFC 7591 DCR (Claude used CIMD). Fix owner: code + Caddy + release, or document CIMD-only per channel |
+| Advertised but unreachable endpoints | `pushed_authorization_request_endpoint` `/request`, `userinfo_endpoint` `/me`, `end_session_endpoint` `/session/end` are advertised; all three return **404** (Caddy does not route them) | GAP: metadata advertises endpoints that do not work. A PAR-capable client could fail. Fix owner: code (disable the features or stop advertising them) or Caddy (route them) |
+| Scopes | `scopes_supported` `openid,offline_access,mcp` (AS) vs `mcp` (resource) | NOT VERIFIED against each channel's scope rules |
+| DPoP | `dpop_signing_alg_values_supported` `ES256,Ed25519,EdDSA` advertised | NOT VERIFIED whether DPoP-bound tokens work end to end; remove if not supported |
