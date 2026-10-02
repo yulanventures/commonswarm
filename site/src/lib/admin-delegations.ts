@@ -1,5 +1,5 @@
 import type { Session } from "@supabase/supabase-js";
-import { deployment, postCommand } from "./commonswarm";
+import { CommandOutcomeUnknown, deployment, postCommand } from "./commonswarm";
 import {
   ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage,
   type AdminReadRequest, type AdminRecoveryPage,
@@ -28,8 +28,8 @@ export async function revokeAdminGrant(session: Session, grantId: string, comman
   const result = await postCommand(session, commandId,
     { kind: "revoke_admin_delegation", grant_id: grantId, reason_code: "human_revoked" },
     { stream: { kind: "account" }, resource: ADMIN_RECOVERY_RESOURCE },
-    "The revocation result did not return. Refresh admin access before retrying. The Revoke button retries the same request.",
+    "The revocation result is unavailable. Refresh admin access before retrying. The Revoke button retries the same request.",
   );
-  if (result.status >= 500) throw new Error("The revocation result is unavailable. Refresh admin access before retrying.");
-  if (result.status !== 200 || result.body.status !== "accepted" || result.body.ok !== true) throw new AdminGrantRevokeRefused("The grant was not revoked. Sign in as the granting person and retry.");
+  if (result.status >= 500 || (result.status === 200 && (!result.body || result.body.status !== "accepted"))) throw new CommandOutcomeUnknown("The revocation result is unavailable. Refresh admin access before retrying. The Revoke button retries the same request.");
+  if (result.status !== 200) throw new AdminGrantRevokeRefused("The grant was not revoked. Sign in as the granting person and retry.");
 }

@@ -51,6 +51,7 @@
       status("");
     };
     const text = (tag: string, content: string): HTMLElement => {
+      // Server labels remain literal text, including markup supplied by users or agents.
       const element = document.createElement(tag); element.textContent = content; return element;
     };
     const state = (g: AdminGrantView): string => g.state === "active" && Date.parse(g.expires_at) <= Date.now() ? "expired" : g.state;

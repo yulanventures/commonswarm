@@ -94,6 +94,7 @@ test("the client build helper owns the source and every command envelope uses it
   }
   assert.deepEqual(violations, []);
   assert.deepEqual(constructors.sort(), [
+    "src/cloud/admin-delegations.ts",
     "src/cloud/agent-signal-receipts.ts",
     "src/cloud/auth.ts",
     "src/cloud/command-client.ts",

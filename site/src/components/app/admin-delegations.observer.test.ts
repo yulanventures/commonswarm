@@ -41,7 +41,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       if (request.url().endsWith("/command")) {
         requests.push(body);
         if (requests.length === 1) { await route.fulfill({ status: 502, json: { error: "internal_error" } }); return; }
-        revoked = true; await route.fulfill({ json: { status: "accepted", ok: true } }); return;
+        revoked = true; await route.fulfill({ json: { status: "accepted", events: [] } }); return;
       }
       const action = { seq: "1", event_id: id, occurred_at_server: "2026-10-01T00:00:00.000Z", grant_id: id, admin_identity_id: id, actor_user: null,
         action: "admin_prepare_connection", target_kind: "connection", target_id: id, workspace_id: null, outcome: "refused", reason_code: "human_confirmation_required",

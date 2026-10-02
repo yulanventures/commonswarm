@@ -79,7 +79,7 @@ test("a real flag missing its value still says so — the two must stay distingu
 
 test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10_000 }, () => {
   /* These advertised flags retain the historical bare-form "unknown option" refusal.
-   * runLogout refuses --device; runTaskCommand handles --to-owner, --grant-id,
+   * runLogout refuses --device; runTaskCommand handles --to-owner,
    * --disposition and --repo-mapping-id; runSeed handles --display-name,
    * --workspace-name and --agent-name. The recorded dispatcher rows control wording. */
   const help = run(["--help", "--url", "http://127.0.0.1:9"]);
@@ -89,10 +89,9 @@ test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10
   assert.ok(advertised.length > 40, `usage parse looks wrong: ${advertised.length} flags`);
 
   const missing = advertised.filter((f) => !KNOWN_FLAGS.has(f));
-  assert.deepEqual(missing.sort(), ["to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name", "repo-mapping-id"].sort());
+  assert.deepEqual(missing.sort(), ["to-owner", "disposition", "display-name", "workspace-name", "agent-name", "repo-mapping-id"].sort());
   const refusingHandler: Record<string, { command: string; symbol: string }> = {
     "to-owner": { command: "command", symbol: "runTaskCommand" },
-    "grant-id": { command: "command", symbol: "runTaskCommand" },
     disposition: { command: "command", symbol: "runTaskCommand" },
     "repo-mapping-id": { command: "command", symbol: "runTaskCommand" },
     "display-name": { command: "seed-fixture", symbol: "runSeed" },
@@ -100,6 +99,10 @@ test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10
     "agent-name": { command: "seed-fixture", symbol: "runSeed" },
   };
   assert.deepEqual(Object.keys(refusingHandler).sort(), missing);
+  for (const [command, flag] of [["history", "before"], ["revoke", "grant-id"]] as const) {
+    assert.ok(KNOWN_FLAGS.has(flag));
+    assert.match(run(["admin", command, `--${flag}`]), new RegExp(`--${flag} requires a value`));
+  }
   for (const flag of missing) {
     const { command, symbol } = refusingHandler[flag]!;
     assert.match(run([command, `--${flag}`]), new RegExp(`unknown option --${flag}(?:;|\\s)`), symbol);

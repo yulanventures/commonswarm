@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withClientBuild } from "./client-build.js";
 import { commandEndpoint, readEndpoint, CLIENT_PROTOCOL_VERSION, type CloudTarget } from "./config.js";
 import { ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage, type AdminReadRequest, type AdminRecoveryPage } from "./admin-delegations-contract.js";
 
@@ -35,8 +36,8 @@ export async function revokeAdminDelegation(
   try {
     response = await fetcher(commandEndpoint(target), {
       method: "POST", headers: { authorization: `Bearer ${accessToken}`, apikey: target.anonKey, "content-type": "application/json" },
-      body: JSON.stringify({ command_id: requestId, client_version: CLIENT_PROTOCOL_VERSION, stream: { kind: "account" }, resource: ADMIN_RECOVERY_RESOURCE,
-        command: { kind: "revoke_admin_delegation", grant_id: grantId, reason_code: "human_revoked" } }), signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify(withClientBuild({ command_id: requestId, client_version: CLIENT_PROTOCOL_VERSION, stream: { kind: "account" }, resource: ADMIN_RECOVERY_RESOURCE,
+        command: { kind: "revoke_admin_delegation", grant_id: grantId, reason_code: "human_revoked" } })), signal: AbortSignal.timeout(15_000),
     });
     body = await response.json() as Record<string, unknown>;
   } catch { throw new AdminRevokeUncertain(requestId); }

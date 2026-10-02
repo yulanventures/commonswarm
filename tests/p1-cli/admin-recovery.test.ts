@@ -7,6 +7,7 @@ import { agentToolsForTransport } from "../../src/cli.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { ADMIN_PAGE_MAX, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage } from "../../src/cloud/admin-delegations-contract.js";
 import { AdminRevokeUncertain, readAdminDelegations, revokeAdminDelegation } from "../../src/cloud/admin-delegations.js";
+import { CLI_BUILD_VERSION } from "../../src/cloud/client-build.js";
 import { ADMIN_RESOURCE } from "../../src/protocol/admin-policy.js";
 
 const id = randomUUID(), time = "2026-10-01T00:00:00.000Z";
@@ -52,6 +53,7 @@ test("human admin recovery uses bounded read pages and the existing account revo
   assert.equal(receipt.state, "revoked");
   assert.deepEqual(captured[0], { resource: "admin_history", workspace_id: null, limit: 1, before: null });
   assert.deepEqual(captured[1]?.stream, { kind: "account" });
+  assert.equal(captured[1]?.client_build, CLI_BUILD_VERSION);
   assert.equal(Object.hasOwn(captured[1]!, "workspace_id"), false);
   assert.deepEqual(captured[1]?.command, { kind: "revoke_admin_delegation", grant_id: id, reason_code: "human_revoked" });
   for (const fetchFailure of [async () => { throw new TypeError("transport"); }, async () => new Response("unreadable", { status: 502 })]) {
