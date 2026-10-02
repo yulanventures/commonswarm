@@ -8,9 +8,9 @@ import {
   ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, ADMIN_GRANT_TTL_SECONDS,
   ADMIN_MUTATION_RATE_PER_HOUR, ADMIN_SCOPE_REGISTRY, adminRatePolicy,
   ADMIN_UUID_RE, adminRecord, adminExactKeys, adminManifestValid, adminScopes,
-  canonicalAdminJson, parseAdminRoutineCommand, decideAdminRoutine, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
+  canonicalAdminJson, parseAdminClientApprovalCommand, parseAdminRoutineCommand, decideAdminRoutine, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
 } from '../_shared/protocol.js';
-import type { AdminActor, AdminCommand, AdminAccountState, AdminAccountEvent, AdminConsent } from '../_shared/admin-authority.d.ts';
+import type { AdminActor, AdminCommand, AdminAccountState, AdminAccountEvent, AdminConsent, AdminClientApproval, AdminDecisionContext } from '../_shared/admin-authority.d.ts';
 import type { AdminScope } from '../_shared/admin-policy.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
@@ -63,6 +63,7 @@ function opaque(prefix: string): string {
     .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 function parseCommand(input: unknown): AdminCommand | AdminRoutineCommand | null {
+  const approval = parseAdminClientApprovalCommand(input); if (approval) return approval;
   const routine = parseAdminRoutineCommand(input); if (routine) return routine;
   const c = adminRecord(input);
   if (!c || !id(c.grant_id)) return null;
@@ -104,7 +105,7 @@ async function charge(tx: Sql, keys: { key: string; limit: number }[], now: numb
   }
   return { allowed, buckets };
 }
-async function persistEvents(tx: Sql, owner: string, state: AdminAccountState, events: readonly AdminAccountEvent[]): Promise<AdminAccountState> {
+async function persistEvents(tx: Sql, owner: string, state: AdminAccountState, events: readonly AdminAccountEvent[], revokeLegacyCredentials = true): Promise<AdminAccountState> {
   let next = state;
   for (const event of events) {
     next = reduceAdminAuthority(next, event);
@@ -133,7 +134,7 @@ async function persistEvents(tx: Sql, owner: string, state: AdminAccountState, e
         suspended_at = EXCLUDED.suspended_at, revoked_at = EXCLUDED.revoked_at,
         reason_code = EXCLUDED.reason_code, withdrawn_workspace_ids = EXCLUDED.withdrawn_workspace_ids
     `;
-    if (g.state !== 'active') await tx`UPDATE swarm.admin_credentials SET revoked_at = coalesce(revoked_at, statement_timestamp()) WHERE grant_id = ${g.grant_id}::uuid`;
+    if (g.state !== 'active' && revokeLegacyCredentials) await tx`UPDATE swarm.admin_credentials SET revoked_at = coalesce(revoked_at, statement_timestamp()) WHERE grant_id = ${g.grant_id}::uuid`;
   }
   for (const c of Object.values(next.consents)) {
     if (c.consumed_at !== null) await tx`UPDATE swarm.admin_consents SET consumed_at = ${new Date(c.consumed_at)} WHERE consent_receipt_id = ${c.consent_receipt_id}::uuid`;
@@ -204,6 +205,21 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     owner = rows[0]?.owner_user_id;
   }
   if (!owner || !id(owner)) return { result: errorResult(403, 'forbidden') };
+  const approvalCommand = proposed?.kind === 'approve_admin_client' || proposed?.kind === 'withdraw_admin_client_approval' ? proposed : null;
+  // Match lane-2 resolver/fence lock order: verification, then account, grants and bindings.
+  // Non-human commands never acquire verification facts or write approvals.
+  let verification: { active: boolean; withdrawn_at: Date | null }[] = [];
+  if (authentication.kind === 'human' && approvalCommand) {
+    try {
+      // Keep successful locks through the outer command transaction. A missing
+      // exact version is a policy refusal, without aborting its audit writes.
+      verification = await tx.savepoint(scope => scope<{ active: boolean; withdrawn_at: Date | null }[]>`
+        SELECT active, withdrawn_at FROM commonswarm_oauth.lock_admin_client_verification(
+          ${approvalCommand.client_id}, ${approvalCommand.verification_version})`);
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'P0001') throw error;
+    }
+  }
   await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR UPDATE`;
   // Only humans create account streams. No grant ID chosen by an admin creates state.
   if (authentication.kind === 'human') await tx`INSERT INTO swarm.admin_accounts(owner_user_id, stream_id) VALUES (${owner}::uuid, ${crypto.randomUUID()}::uuid) ON CONFLICT(owner_user_id) DO NOTHING`;
@@ -297,10 +313,26 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     return { result: prior[0].response };
   }
   let seq = Number(account.seq);
-  const context = { actor, owner_user_id: owner, now, command_id: commandId,
+  const context: AdminDecisionContext = { actor, owner_user_id: owner, now, command_id: commandId,
     stream_id: account.stream_id, request_digest: requestDigest, nextSeq: () => ++seq,
     nextEventId: () => crypto.randomUUID(), current_workspace_rights: false,
     withdrawing_workspace_owner: false, target_workspace_owned_by_grantor: false, presenting_refresh_generation: credential?.generation ?? null, presenting_refresh_lineage_id: credential?.credential_lineage_id ?? null };
+  if (approvalCommand && authentication.kind === 'human') {
+    const rows = await tx<(Omit<AdminClientApproval, 'approved_at' | 'withdrawn_at'> & { approved_at: Date; withdrawn_at: Date | null })[]>`
+      SELECT * FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id = ${owner}::uuid
+      AND client_id = ${approvalCommand.client_id} AND verification_version = ${approvalCommand.verification_version} FOR UPDATE`;
+    const row = rows[0];
+    const approval: AdminClientApproval | null = row ? { ...row, approved_at: row.approved_at.getTime(), withdrawn_at: row.withdrawn_at?.getTime() ?? null } : null;
+    if (approval) state.client_approvals = { ...state.client_approvals,
+      [canonicalAdminJson([owner, approvalCommand.client_id, approvalCommand.verification_version])]: approval };
+    const bindings = approvalCommand.kind === 'withdraw_admin_client_approval' ? await tx<{ admin_grant_id: string }[]>`
+      SELECT admin_grant_id FROM commonswarm_oauth.admin_grant_bindings WHERE owner_user_id = ${owner}::uuid
+      AND client_id = ${approvalCommand.client_id} AND verification_version = ${approvalCommand.verification_version}
+      ORDER BY admin_grant_id` : [];
+    context.client_policy = { client_id: approvalCommand.client_id, verification_version: approvalCommand.verification_version,
+      verification_active: verification[0]?.active === true && verification[0].withdrawn_at === null,
+      approval, linked_grant_ids: bindings.map(b => b.admin_grant_id) };
+  }
   let command = proposed;
   if (prepare && authentication.kind === 'human' && raw && adminExactKeys(raw, ['kind', 'manifest', 'full_account_selected'])) {
     // Defaults are server-computed, then included in the exact summary returned for confirmation.
@@ -355,7 +387,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   const routineContext = routineCommand && routineRefusal === null ? await prepareAdminRoutine(tx, routineCommand, state, context, recipientRuntime?.connection_id ?? null) : null;
   let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal;
   let allowance: Awaited<ReturnType<typeof charge>> | null = null;
-  if (authentication.kind === 'human' && (prepare || command?.kind === 'grant_admin_delegation' || command?.kind === 'narrow_admin_delegation') && (!hasFreshInteractiveAuth(authentication.identity.interactive_at_seconds, now) || !authentication.identity.csrf_verified || !/^[0-9a-f]{64}$/u.test(authentication.identity.session_binding))) refusal = 'human_confirmation_required';
+  if (authentication.kind === 'human' && (prepare || approvalCommand || command?.kind === 'grant_admin_delegation' || command?.kind === 'narrow_admin_delegation') && (!hasFreshInteractiveAuth(authentication.identity.interactive_at_seconds, now) || !authentication.identity.csrf_verified || !/^[0-9a-f]{64}$/u.test(authentication.identity.session_binding))) refusal = 'human_confirmation_required';
   if (authentication.kind === 'access' && (credential!.revoked_at !== null || credential!.access_expires_at.getTime() <= now || state.lineages[credential!.credential_lineage_id]?.generation !== credential!.generation)) refusal = 'credential_expired';
   if (authentication.kind === 'runtime' && credential && command && 'grant_id' in command &&
       (command.grant_id !== credential.grant_id || ('credential_lineage_id' in command && command.credential_lineage_id !== credential.credential_lineage_id))) refusal = 'refresh_binding_mismatch';
@@ -390,7 +422,8 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     payload: { audit_record_id: crypto.randomUUID(), grant_id: grant?.grant_id ?? null,
       admin_identity_id: grant?.admin_identity_id ?? null, connection_id: grant?.connection_id ?? null,
       action: auditAction(raw),
-      target_kind: 'admin_grant', target_id: grant?.grant_id ?? null, workspace_id: null,
+      target_kind: approvalCommand ? 'admin_client' : 'admin_grant', target_id: approvalCommand?.client_id ?? grant?.grant_id ?? null,
+      ...(approvalCommand ? { client_id: approvalCommand.client_id, verification_version: approvalCommand.verification_version } : {}), workspace_id: null,
       manifest_digest: grant?.manifest_digest ?? null, request_digest: requestDigest,
       outcome: 'refused', reason_code: decision.reason, policy_check: decision.reason,
       related_event_ids: [], next_action: 'Ask the granting person to review this connection.', recovery_kind: 'human' },
@@ -407,7 +440,22 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     }
   }
   const workerDelivery = routineCommand && routineContext ? await applyAdminRoutine(tx, routineCommand, routineContext, decision as AdminRoutineDecision) : undefined;
-  const next = await persistEvents(tx, owner, state, decision.events);
+  // The OAuth approval trigger fences linked families; the retired opaque table is inaccessible after M3.
+  const next = await persistEvents(tx, owner, state, decision.events, approvalCommand === null);
+  for (const event of decision.events) {
+    if (event.type === 'AdminClientApproved') {
+      await tx`INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id, client_id, verification_version,
+        approved_at, approval_event_id, approval_command_id)
+        VALUES (${owner}::uuid, ${event.payload.client_id as string}, ${event.payload.verification_version as number},
+          ${new Date(now)}, ${event.event_id}::uuid, ${commandId})`;
+    } else if (event.type === 'AdminClientApprovalWithdrawn') {
+      // Invoker guard validates this committed-in-transaction human event and calls fence_admin_family for every linked binding.
+      await tx`UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at = ${new Date(now)},
+        withdrawal_event_id = ${event.event_id}::uuid, withdrawal_reason = ${event.payload.reason_code as string}
+        WHERE owner_user_id = ${owner}::uuid AND client_id = ${event.payload.client_id as string}
+          AND verification_version = ${event.payload.verification_version as number}`;
+    }
+  }
   if (command?.kind === 'prepare_admin_consent' && decision.ok) {
     const c = command.consent;
     await tx`INSERT INTO swarm.admin_consents(consent_receipt_id, owner_user_id, session_binding, manifest_digest, manifest, full_account_selected, expires_at)

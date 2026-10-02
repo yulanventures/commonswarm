@@ -1494,10 +1494,19 @@ var ADMIN_EVENT_TYPES = [
   "AdminMetadataRead",
   "AdminActionRecorded",
   "AdminConnectionPrepared",
-  "AdminConnectionCancelled"
+  "AdminConnectionCancelled",
+  "AdminClientApproved",
+  "AdminClientApprovalWithdrawn"
 ];
 function emptyAdminAccount() {
   return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} };
+}
+function parseAdminClientApprovalCommand(input) {
+  const c = adminRecord(input);
+  if (!c || typeof c.client_id !== "string" || new TextEncoder().encode(c.client_id).length < 1 || new TextEncoder().encode(c.client_id).length > 2048 || typeof c.verification_version !== "number" || !Number.isSafeInteger(c.verification_version) || c.verification_version < 1 || c.verification_version > 2147483647) return null;
+  if (c.kind === "approve_admin_client" && adminExactKeys(c, ["kind", "client_id", "verification_version"])) return c;
+  if (c.kind === "withdraw_admin_client_approval" && adminExactKeys(c, ["kind", "client_id", "verification_version", "reason_code"]) && typeof c.reason_code === "string" && /^[a-z][a-z0-9_]{0,79}$/u.test(c.reason_code)) return c;
+  return null;
 }
 function adminRatePolicy(actor, grant, action, workspaceId, lineageId, requestedGrantId) {
   if (actor.kind === "human" || actor.kind === "system" || action === "surrender_admin_delegation" && actor.kind === "delegated_admin" && actor.grant_id === grant.grant_id && requestedGrantId === actor.grant_id) return [];
@@ -1574,8 +1583,9 @@ function decideAdminAuthority(command, state, ctx) {
       admin_identity_id: auditGrant?.admin_identity_id ?? null,
       connection_id: auditGrant?.connection_id ?? null,
       action: command.kind,
-      target_kind: "admin_grant",
-      target_id: auditGrant?.grant_id ?? null,
+      target_kind: "client_id" in command ? "admin_client" : "admin_grant",
+      target_id: "client_id" in command ? command.client_id : auditGrant?.grant_id ?? null,
+      ..."client_id" in command ? { client_id: command.client_id, verification_version: command.verification_version } : {},
       workspace_id: "workspace_id" in command ? command.workspace_id : null,
       manifest_digest: auditGrant?.manifest_digest ?? null,
       request_digest: ctx.request_digest,
@@ -1590,6 +1600,39 @@ function decideAdminAuthority(command, state, ctx) {
   };
   const humanOwner = actor.kind === "human" && actor.user_id === ctx.owner_user_id;
   if (actor.kind === "worker" || actor.kind === "hosted_seat") return finish("credential_kind_forbidden");
+  if (command.kind === "approve_admin_client" || command.kind === "withdraw_admin_client_approval") {
+    if (!humanOwner) return finish("human_confirmation_required");
+    if (!parseAdminClientApprovalCommand(command)) return finish("invalid_request");
+    const policy = ctx.client_policy;
+    if (!policy || policy.client_id !== command.client_id || policy.verification_version !== command.verification_version || policy.approval && (policy.approval.owner_user_id !== ctx.owner_user_id || policy.approval.client_id !== command.client_id || policy.approval.verification_version !== command.verification_version)) return finish("client_approval_unavailable");
+    const approval = policy.approval;
+    if (command.kind === "approve_admin_client") {
+      if (!policy.verification_active) return finish("client_verification_required");
+      if (approval && approval.withdrawn_at !== null) return finish("client_approval_withdrawn");
+      if (!approval) emit("AdminClientApproved", {
+        owner_user_id: ctx.owner_user_id,
+        client_id: command.client_id,
+        verification_version: command.verification_version,
+        approved_at: ctx.now
+      });
+    } else {
+      if (!approval) return finish("client_approval_unavailable");
+      if (approval.withdrawn_at !== null) return finish(null);
+      if (policy.linked_grant_ids.some((id) => !state.grants[id] || state.grants[id].owner_user_id !== ctx.owner_user_id || state.grants[id].client_id !== command.client_id)) return finish("grant_unavailable");
+      emit("AdminClientApprovalWithdrawn", {
+        owner_user_id: ctx.owner_user_id,
+        client_id: command.client_id,
+        verification_version: command.verification_version,
+        reason_code: command.reason_code,
+        effective_at: ctx.now
+      });
+      for (const id of policy.linked_grant_ids) {
+        const linked = state.grants[id];
+        if (linked.state === "active" || linked.state === "suspended") emit("AdminDelegationRevoked", terminalPayload(linked, state, ctx.now, command.reason_code));
+      }
+    }
+    return finish(null);
+  }
   const replayLineage = "credential_lineage_id" in command ? state.lineages[command.credential_lineage_id] : void 0;
   const verifiedReplay = actor.kind === "credential_runtime" && grant && replayLineage?.grant_id === grant.grant_id && (command.kind === "rotate_admin_credential" || command.kind === "record_admin_credential_replay") && ctx.presenting_refresh_lineage_id === command.credential_lineage_id && ctx.presenting_refresh_generation === command.generation && command.generation < replayLineage.generation && actor.connection_id === grant.connection_id && actor.client_id === grant.client_id && actor.resource === ADMIN_RESOURCE;
   if (!verifiedReplay && buckets.some((bucket) => !Number.isSafeInteger(bucket.attempts) || bucket.attempts < 1 || bucket.attempts > bucket.limit)) return finish("rate_limited");
@@ -1772,6 +1815,23 @@ function terminalPayload(grant, state, now, reason) {
 function reduceAdminAuthority(previous, event2) {
   if (event2.schema_version !== 1 || event2.stream_kind !== "account" || !ADMIN_EVENT_TYPES.includes(event2.type) && !ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) throw new Error("unsupported admin event");
   const state = previous ?? emptyAdminAccount(), p = event2.payload;
+  if (event2.type === "AdminClientApproved" || event2.type === "AdminClientApprovalWithdrawn") {
+    const key2 = canonicalAdminJson([event2.owner_user_id, p.client_id, p.verification_version]);
+    const prior = state.client_approvals?.[key2];
+    const approval = event2.type === "AdminClientApproved" ? {
+      owner_user_id: event2.owner_user_id,
+      client_id: String(p.client_id),
+      verification_version: Number(p.verification_version),
+      approved_at: event2.occurred_at_server,
+      approval_event_id: event2.event_id,
+      approval_command_id: event2.command_id,
+      withdrawn_at: null,
+      withdrawal_event_id: null,
+      withdrawal_reason: null
+    } : { ...prior, withdrawn_at: event2.occurred_at_server, withdrawal_event_id: event2.event_id, withdrawal_reason: String(p.reason_code) };
+    if (event2.type === "AdminClientApprovalWithdrawn" && !prior) throw new Error("unknown admin client approval");
+    return { ...state, client_approvals: { ...state.client_approvals, [key2]: approval } };
+  }
   if (event2.type === "AdminConnectionPrepared") {
     const attempt = p;
     if (!event2.grant_id || attempt.parent_admin_grant_id !== event2.grant_id || !state.grants[event2.grant_id] || state.connections?.[attempt.attempt_id] || attempt.state !== "awaiting_authorization" || attempt.cancelled_at !== null || !Number.isSafeInteger(attempt.expires_at) || attempt.expires_at <= event2.occurred_at_server) {
@@ -3663,6 +3723,7 @@ export {
   leaseLive,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
+  parseAdminClientApprovalCommand,
   parseAdminRoutineCommand,
   planFileVersionWindow,
   publicHostedCommandForbidden,
