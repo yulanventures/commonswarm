@@ -74,9 +74,18 @@ for (const [scenario, label] of Object.entries(scenarios)) {
         !signed.error && signed.data.session,
         "local human sign-in failed",
       );
+      const invited = await auth.auth.admin.createUser({
+        email: `admin-c-recipient-${randomUUID()}@example.test`,
+        password: randomBytes(32).toString("base64url"),
+        email_confirm: true,
+      });
+      assert.ok(
+        !invited.error && invited.data.user,
+        "local invitation recipient creation failed",
+      );
       const owner = created.data.user.id,
         workspace = randomUUID(),
-        recipient = randomUUID();
+        recipient = invited.data.user.id;
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${owner}::uuid, 'Lane C owner')`;
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane C', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
