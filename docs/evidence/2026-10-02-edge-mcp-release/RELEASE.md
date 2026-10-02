@@ -94,6 +94,7 @@ test "${#RELEASE_SHA}" = 40
 test "$BASELINE_EDGE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
 test "$RELEASE_SHA" != "$BASELINE_EDGE_SHA"
 test -z "$(git status --porcelain)"
+git fetch origin main
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
 git remote get-url origin | python3 -c 'import sys; s=sys.stdin.read().strip(); assert s in ("git@github.com:yulanventures/commonswarm.git", "https://github.com/yulanventures/commonswarm.git")'
 ARCHIVE_DIR=$(mktemp -d /private/tmp/hm37-edge-archive.XXXXXX)
@@ -119,7 +120,15 @@ nonsecret input. Reject unknown step IDs; the Mac archive remains public.
 # host: Mac /bin/bash 3.2
 set -euo pipefail
 trap 'echo "FAIL edge-mcp-transport: line $LINENO; STOP" >&2' ERR
-: "${BOX_STEP:?}" "${PLAN_FILE:?}" "${RELEASE_SHA:?}" "${WINDOW_ID:?}"
+: "${BOX_STEP:?}" "${PLAN_FILE:?}" "${RELEASE_SHA:?}" "${WINDOW_ID:?}" "${ARCHIVE_DIR:?}"
+python3 - "$ARCHIVE_DIR" "$WINDOW_ID" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1])
+assert re.fullmatch(r'/private/tmp/hm37-edge-archive\.[A-Za-z0-9]{6}',str(p))
+assert str(p).rsplit('.',1)[1]==sys.argv[2]
+assert not p.is_symlink() and p.resolve(strict=True)==p and p.is_dir()
+assert p.stat().st_mode & 0o777==0o700
+PY
 case "$BOX_STEP" in
   edge-mcp-preflight-open|edge-mcp-stage|edge-mcp-transition-503|edge-mcp-apply|edge-mcp-restore-on|edge-mcp-probes|edge-mcp-rollback|edge-mcp-close|edge-mcp-timer-recover|edge-mcp-open-abort) ;;
   *) echo 'FAIL edge-mcp-transport: unknown box step; STOP' >&2; exit 1;;
@@ -202,12 +211,14 @@ except Exception: raise SystemExit('FAIL edge-mcp-config: new Compose changes ef
 PY
 }
 edge_check() {
-python3 - "$EDGE_DIR" <<'PY'
+python3 - "$EDGE_DIR" "${1:-on}" "${2:-$EDGE_DIR}" "$PROOF_DIR" <<'PY'
 import json,pathlib,subprocess,sys,os
 def need(ok):
     if not ok: raise SystemExit('FAIL edge-mcp-runtime: baseline/ON/network/override/env mismatch; STOP')
 def inspect(n): return json.loads(subprocess.check_output(['docker','inspect',n]))[0]
 p=pathlib.Path(sys.argv[1]); need(p.resolve()==p and p.is_dir())
+need((p/'RELEASE_SHA').read_text().strip()==p.name)
+need(pathlib.Path('/home/commonswarm/edge/current').resolve(strict=True)==pathlib.Path(sys.argv[3]))
 env=pathlib.Path('/home/commonswarm/.env'); st=env.stat()
 need(not env.is_symlink() and st.st_mode & 0o777==0o600 and st.st_uid in (0,p.stat().st_uid))
 edge=inspect('commonswarm-edge-edge-runtime-1'); oauth=inspect('commonswarm-oauth-oauth-1')
@@ -225,23 +236,33 @@ need(all(effective.get(k)==str(v) for k,v in expected['environment'].items()))
 need(effective.get('SWARM_SELF_SERVE')=='1' and not any(k.startswith('SWARM_CMD_TEST_') for k in effective))
 need(dict(x.split('=',1) for x in oauth['Config']['Env']).get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED')=='1')
 site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
-need(site.count('import mcp_resource_active')==1 and '@mcp_unavailable' not in site)
+if sys.argv[2]=='dark':
+    proof=pathlib.Path(sys.argv[4])
+    need(pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_bytes()==(proof/'mcp.off.caddy').read_bytes())
+    need((p/'deploy/edge-runtime/compose.override.yaml').read_bytes()==(proof/'compose.override.yaml').read_bytes())
+else:
+    need(sys.argv[2]=='on')
+    need(site.count('import mcp_resource_active')==1 and '@mcp_unavailable' not in site)
 need(site.count('import mcp_oauth_active')==1)
 need(pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').stat().st_mode & 0o777==0o644)
 print('PASS edge-mcp-runtime: env values withheld; both public flags 1, healthy, commonswarm-net, 2 GiB, exact mounts')
 PY
 }
 edge_probes() {
-python3 - <<'PY'
-import json,urllib.request,urllib.error
+python3 - "${1:-all}" <<'PY'
+import json,sys,urllib.request,urllib.error
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs): return None
 opener=urllib.request.build_opener(NoRedirect())
-checks=[('http://127.0.0.1:9000/health','GET',200),('http://127.0.0.1:3490/health','GET',200),
- ('https://mcp.commonswarm.com/health','GET',200),('https://mcp.commonswarm.com/mcp','POST',401),
+internal=[('http://127.0.0.1:9000/health','GET',200),('http://127.0.0.1:3490/health','GET',200),
+ ('http://127.0.0.1:9000/functions/v1/mcp','POST',401),
+ ('http://127.0.0.1:9000/functions/v1/mcp/.well-known/oauth-protected-resource/mcp','GET',200)]
+public=[('https://mcp.commonswarm.com/health','GET',200),('https://mcp.commonswarm.com/mcp','POST',401),
  ('https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp','GET',200),
  ('https://mcp.commonswarm.com/.well-known/oauth-authorization-server','GET',200),
  ('https://mcp.commonswarm.com/.well-known/openid-configuration','GET',200)]
+assert sys.argv[1] in ('all','internal','public'), 'FAIL edge-mcp-probes: unknown scope; STOP'
+checks=internal if sys.argv[1]=='internal' else public if sys.argv[1]=='public' else internal+public
 for url,method,status in checks:
     req=urllib.request.Request(url,data=b'{}' if method=='POST' else None,method=method,
         headers={'Accept':'application/json','Content-Type':'application/json','User-Agent':'curl/8.7.1'})
@@ -483,7 +504,8 @@ until test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edg
   test "$(date -u +%s)" -lt "$deadline"
   sleep 2
 done
-# Switch current only after the container is healthy. Rollback uses captured path.
+# Verify the live container before switching current; ingress remains dark.
+edge_check dark "$PREVIOUS_EDGE"
 ln -sfn "$NEW_EDGE" /home/commonswarm/edge/current
 touch "$PROOF_DIR/applied.txt"
 ```
@@ -497,13 +519,17 @@ trap 'echo "FAIL edge-mcp-restore-on: line $LINENO; run rollback immediately; ST
 window_check
 test -f "$PROOF_DIR/applied.txt"
 test "$(readlink -f /home/commonswarm/edge/current)" = "$NEW_EDGE"
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.off.caddy"
+EDGE_DIR=$NEW_EDGE
+edge_check dark
+edge_probes internal >"$PROOF_DIR/pre-on-probes.txt"
+# Only verified runtime and internal probes permit public ingress restoration.
 install -o root -g root -m 0644 "$PROOF_DIR/mcp.on.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
 runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1
 systemctl reload caddy
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
-EDGE_DIR=$NEW_EDGE
 edge_check
-edge_probes >"$PROOF_DIR/on-probes.txt"
+edge_probes public >"$PROOF_DIR/on-probes.txt"
 receipt
 ```
 
@@ -512,6 +538,9 @@ unchanged ON env, then restores the original Caddy site. It works if the new
 container was recreated but current never moved. It does not depend on a
 successful apply marker or unexpired forward window. The runtime pattern is
 §6 rollback (`deploy/RELEASE-TO-BOX.md:2648`), with added ON gates.
+Baseline runtime and internal probes must pass while ingress is dark before
+restoring ON. After baseline ON verification, rollback restores and verifies
+the recycle timer itself; timer-recover remains the failed-rollback path.
 
 ```sh
 # step: edge-mcp-rollback
@@ -542,6 +571,8 @@ if test -f "$PROOF_DIR/mcp-503-start.epoch"; then
     sleep 2
   done
   ln -sfn "$PREVIOUS_EDGE" /home/commonswarm/edge/current
+  edge_check dark
+  edge_probes internal >"$PROOF_DIR/rollback-pre-on-probes.txt"
   install -o root -g root -m 0644 "$PROOF_DIR/mcp.on.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1
   systemctl reload caddy
@@ -551,6 +582,12 @@ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 edge_check
 edge_probes >"$PROOF_DIR/rollback-probes.txt"
 external_check
+if test -f "$PROOF_DIR/timer-restore-required.txt"; then
+  systemctl start commonswarm-edge-recycle.timer
+  systemctl is-active --quiet commonswarm-edge-recycle.timer
+  touch "$PROOF_DIR/timer-restored.txt"
+fi
+systemctl is-active --quiet commonswarm-edge-recycle.timer
 touch "$PROOF_DIR/rollback.txt"
 receipt
 ```
