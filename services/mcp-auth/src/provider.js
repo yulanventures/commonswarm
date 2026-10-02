@@ -53,6 +53,12 @@ export async function createMcpProvider({
   const provider = new Provider(ISSUER, {
     adapter,
     clientAuthMethods: ["none"],
+    // Match omitted client algorithms to the provider's ES256 signing key.
+    clientDefaults: {
+      id_token_signed_response_alg: "ES256",
+      authorization_signed_response_alg: "ES256",
+      introspection_signed_response_alg: "ES256",
+    },
     cookies: {
       keys: cookieKeys,
       long: { httpOnly: true, sameSite: "lax", secure: true, signed: true },
