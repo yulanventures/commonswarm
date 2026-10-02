@@ -100,8 +100,11 @@ test("real node src/server.js entrypoint starts enabled and leaves disabled mode
       if (!enabled) delete env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE;
       const root = await entrypoint(t, env);
       if (root === null) return;
-      const response = await fetch(`${root}/authorize`, { redirect: "manual" });
+      const response = await fetch(`${root}/authorize`, {
+        redirect: "manual", headers: { accept: "application/json" },
+      });
       assert.equal(response.status, enabled ? 400 : 503);
+      if (enabled) assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
       await response.body.cancel();
     });
   }
