@@ -298,16 +298,41 @@ test("admin consent refuses origin/body errors; flags cannot enable completion o
 });
 
 test("resource dispatcher sends only scalar admin to its separate handler", async () => {
-  const f = fixture(); let mcp = 0, admin = 0;
-  const dispatch = createResourceInteractionHandler({ provider: f.provider,
-    mcpHandler: async () => { mcp++; return true; }, adminHandler: async () => { admin++; return true; } });
-  await dispatch(request(), response(), url());
-  assert.equal(admin, 1);
+  const f = fixture(); let bindings = 0;
+  f.provider.interactionFinished = async (_req, res) => {
+    f.state.finishes++; res.writeHead(204); res.end();
+  };
+  const dispatch = createResourceInteractionHandler({
+    mcpHandler: createInteractionHandler({ provider: f.provider,
+      store: { requireSession: async () => f.state.session,
+        bindInteraction: async () => { bindings++; return { user_id: ALICE }; } },
+      gotrue: {}, allowedOrigins: new Set([ORIGIN]) }), adminHandler: f.handler });
+  const body = new URLSearchParams({ selection_version: "0", csrf_token: CSRF,
+    mode: "granular", scope_names: "admin:read" }).toString();
+  const selection = Readable.from([Buffer.from(body)]);
+  selection.method = "POST";
+  selection.headers = { cookie: `__Host-cswarm-oauth=${SESSION}`, origin: ORIGIN,
+    "content-type": "application/x-www-form-urlencoded" };
+  const admin = response();
+  await dispatch(selection, admin, url("/selection"));
+  assert.equal(admin.status, 200);
+  assert.equal(f.state.stages, 1);
+  assert.equal(bindings, 0, "admin never binds through the MCP authority handler");
+  assert.equal(f.state.finishes + f.state.grants + f.state.grantFinds, 0);
   f.state.details.params.resource = [MCP, ADMIN];
-  await dispatch(request(), response(), url());
+  const multiple = response();
+  await dispatch(request(), multiple, url());
+  assert.equal(multiple.status, 400);
+  assert.deepEqual(JSON.parse(multiple.body), { error: "invalid_target" });
+  assert.equal(bindings, 0);
   f.state.details.params.resource = MCP;
-  await dispatch(request(), response(), url());
-  assert.equal(mcp, 2);
+  f.state.details.prompt.name = "login";
+  const mcp = response();
+  await dispatch(request(), mcp, url());
+  assert.equal(mcp.status, 204);
+  assert.equal(bindings, 1);
+  assert.equal(f.state.finishes, 1);
+  assert.equal(f.state.stages, 1);
 });
 
 test("mcp-interaction-refuses-admin: refusal precedes grant lookup/mutation and hosted activation; MCP succeeds", async () => {

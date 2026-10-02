@@ -179,7 +179,7 @@ export function createInteractionHandler({
   maxBodyBytes = 64 * 1024,
   bodyReadTimeoutMs = 10_000,
 }) {
-  return async function handleInteraction(request, response, url, suppliedDetails) {
+  return async function handleInteraction(request, response, url, routeResource) {
     if (url.pathname === "/oauth/callback/gotrue") {
       const interactionUid = url.searchParams.get("interaction");
       const state = url.searchParams.get("state");
@@ -227,7 +227,7 @@ export function createInteractionHandler({
     const browser = await ensureSession(request, response, store);
     let details;
     try {
-      details = suppliedDetails ?? await provider.interactionDetails(request, response);
+      details = await provider.interactionDetails(request, response);
     } catch (error) {
       // The pinned provider uses this class for missing/expired interactions,
       // missing interaction cookies, and unavailable/changed provider sessions.
@@ -237,6 +237,9 @@ export function createInteractionHandler({
     if (details.uid !== interactionUid) {
       throw new InteractionStateError("interaction_mismatch");
     }
+    // Dispatch after the existing body/session checks so ordinary MCP keeps
+    // its error precedence, including 413 for oversized completed submissions.
+    if (routeResource && await routeResource(details, { browser, parsed })) return true;
     // Permanent defense: this handler can only create hosted MCP authority.
     // Never rely on resource metadata or an issuance flag to enforce this.
     const resources = Array.isArray(details.params?.resource)

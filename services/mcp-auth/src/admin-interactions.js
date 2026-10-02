@@ -1,4 +1,3 @@
-import { errors } from "oidc-provider";
 import { assertAllowedOrigin, consentSecurityHeaders, INTERACTION_SECURITY_HEADERS, randomOpaque } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
 import { bindingFromDetails, ensureSession, identity, readBody, respond } from "./interactions.js";
@@ -6,27 +5,20 @@ import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
 import { renderAdminConsentPage } from "./admin-interaction-page.js";
 
-export function createResourceInteractionHandler({ provider, mcpHandler, adminHandler }) {
+export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
   return async (request, response, url) => {
-    if (!/^\/interaction\/[^/]+(?:\/(?:selection|consent))?$/u.test(url.pathname)) {
-      return mcpHandler(request, response, url);
-    }
-    let details;
-    try { details = await provider.interactionDetails(request, response); }
-    catch (error) {
-      if (!(error instanceof errors.SessionNotFound)) throw error;
-      throw new InteractionStateError("interaction_expired", undefined, { cause: error });
-    }
-    // Multi-resource requests still reach the MCP refusal, never the admin branch.
-    return details.params?.resource === ADMIN_RESOURCE
-      ? adminHandler(request, response, url, details)
-      : mcpHandler(request, response, url, details);
+    // The MCP preflight owns body bounds, browser session and provider lookup.
+    // Multi-resource requests reach its permanent refusal, never the admin branch.
+    return mcpHandler(request, response, url, async (details, context) =>
+      details.params?.resource === ADMIN_RESOURCE
+        ? adminHandler(request, response, url, details, context)
+        : false);
   };
 }
 
 export function createAdminInteractionHandler({ provider, store, service, gotrue, workspaceReader,
   allowedOrigins, callbackUrl, maxBodyBytes = 64 * 1024, bodyReadTimeoutMs = 10_000 }) {
-  return async (request, response, url, suppliedDetails) => {
+  return async (request, response, url, suppliedDetails, context) => {
     const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
     if (!match) return false;
     let uid;
@@ -36,7 +28,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     const details = suppliedDetails ?? await provider.interactionDetails(request, response);
     if (details.uid !== uid) throw new InteractionStateError("interaction_mismatch");
     if (details.params?.resource !== ADMIN_RESOURCE) throw new AdminConsentError("invalid_target", 400);
-    const browser = await ensureSession(request, response, store);
+    const browser = context?.browser ?? await ensureSession(request, response, store);
     const bound = await store.bindInteraction(bindingFromDetails(uid, browser.id, details, browser.session));
     try {
       requireFreshAdminSession(browser.session);
@@ -99,7 +91,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     if (details.prompt?.name !== "consent" || bound.user_id !== input.ownerUserId) {
       throw new AdminConsentError("authentication_required");
     }
-    const parsed = await readBody(request, maxBodyBytes, bodyReadTimeoutMs);
+    const parsed = context?.parsed ?? await readBody(request, maxBodyBytes, bodyReadTimeoutMs);
     const body = parsed.value;
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new ClientError(400);
     input.csrfToken = parsed.format === "form" ? body.csrf_token : request.headers["x-cswarm-csrf"];

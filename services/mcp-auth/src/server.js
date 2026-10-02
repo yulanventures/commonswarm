@@ -177,7 +177,7 @@ export async function startServer({
   const provider = await createMcpProvider({
     adapter: createPostgresAdapter(pool),
     ...(registrationStore ? { registrationStore } : {}),
-    registrationEnabled: false, // v1 admin policy: DCR is closed in the production provider.
+    registrationEnabled: config.publicAuthorizationEnabled,
     cookieKeys: config.cookieKeys,
     jwks: config.jwks,
     authorizationCodeTtlSeconds: config.authorizationCodeTtlSeconds,
@@ -235,7 +235,7 @@ export async function startServer({
       })
     : undefined;
   const interactionHandler = mcpHandler ? createResourceInteractionHandler({
-    provider, mcpHandler,
+    mcpHandler,
     adminHandler: createAdminInteractionHandler({
       provider, store: new InteractionStore(pool),
       service: createAdminConsentService({ store: new PostgresAdminConsentStore(pool), provider }),
