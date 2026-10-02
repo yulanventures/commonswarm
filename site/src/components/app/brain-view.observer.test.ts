@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { MESSAGE_MARKDOWN_LIMITS } from "../../lib/message-markdown.js";
 import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.js";
 

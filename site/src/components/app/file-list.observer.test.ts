@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { FILE_CONTENT_WARNING } from "../../lib/commonswarm.js";
 import type { DisplayFile } from "../../lib/file-list.js";
 import { renderFileListFixtures } from "./file-list.fixture.js";

@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { build } from "esbuild";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
