@@ -15,3 +15,23 @@ export class ClientError extends Error {
     });
   }
 }
+
+const INTERACTION_RESPONSES = new Map([
+  ["invalid_callback", 400],
+  ["interaction_binding_mismatch", 409],
+  ["interaction_mismatch", 409],
+  ["interaction_expired", 410],
+]);
+
+export class InteractionStateError extends Error {
+  constructor(code, message = code, options) {
+    const status = INTERACTION_RESPONSES.get(code);
+    if (!status) throw new TypeError("unsupported interaction state error");
+    super(message, options);
+    this.name = "InteractionStateError";
+    Object.defineProperties(this, {
+      status: { enumerable: true, value: status },
+      code: { enumerable: true, value: code },
+    });
+  }
+}

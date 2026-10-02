@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { hashOpaque, opaqueMatches, randomOpaque } from "./browser-security.js";
+import { InteractionStateError } from "./client-error.js";
 
 async function transaction(pool, callback) {
   const client = await pool.connect();
@@ -18,9 +19,7 @@ async function transaction(pool, callback) {
 }
 
 function conflict(message) {
-  const error = new Error(message);
-  error.code = "interaction_binding_mismatch";
-  return error;
+  return new InteractionStateError("interaction_binding_mismatch", message);
 }
 
 export class InteractionStore {
@@ -91,8 +90,8 @@ export class InteractionStore {
     const result = await this.pool.query(
       `INSERT INTO commonswarm_oauth.interactions (
          interaction_uid, session_hash, client_id, redirect_uri, resource,
-         requested_scopes, pkce_challenge, oauth_state, expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+         requested_scopes, pkce_challenge, oauth_state, user_id, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10::uuid,
                  statement_timestamp() + ($9 * interval '1 second'))
        ON CONFLICT (interaction_uid) DO UPDATE SET updated_at = statement_timestamp()
        WHERE commonswarm_oauth.interactions.session_hash = EXCLUDED.session_hash
@@ -107,7 +106,7 @@ export class InteractionStore {
        RETURNING *`,
       [binding.interactionUid, hashOpaque(binding.sessionId), binding.clientId,
         binding.redirectUri, binding.resource, binding.scopes, binding.pkceChallenge,
-        binding.oauthState ?? null, this.interactionTtlSeconds],
+        binding.oauthState ?? null, this.interactionTtlSeconds, binding.userId ?? null],
     );
     if (result.rowCount !== 1) throw conflict("OAuth interaction binding changed");
     return result.rows[0];
