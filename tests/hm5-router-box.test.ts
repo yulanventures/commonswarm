@@ -184,6 +184,8 @@ test("HM6 Caddy activates OAuth only and preserves the dark MCP resource contrac
   assert.match(caddy, /@oauth_health \{\s*method GET HEAD\s*path \/health/);
   assert.match(caddy, /@oauth_metadata \{\s*method GET HEAD\s*path \/\.well-known\/oauth-authorization-server \/\.well-known\/openid-configuration \/jwks/);
   assert.match(caddy, /@oauth_authorize \{\s*method GET HEAD\s*path \/authorize/);
+  // oidc-provider resumes an interaction at /authorize/<uid>; without this route Caddy's fallback answers 404.
+  assert.match(caddy, /@oauth_authorize \{\s*method GET HEAD\s*path \/authorize \/authorize\/\*\s*\}/);
   assert.match(caddy, /@oauth_post \{\s*method POST\s*path \/token \/interaction\/\*/);
   assert.match(caddy, /@oauth_browser_get \{\s*method GET HEAD\s*path \/interaction\/\* \/oauth\/callback\/gotrue/);
   assert.doesNotMatch(caddy, /\/connections(?:\/|\s)/);
