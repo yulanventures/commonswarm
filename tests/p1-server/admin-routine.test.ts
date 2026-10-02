@@ -122,8 +122,9 @@ for (const [scenario, label] of Object.entries(scenarios)) {
           ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
         },
       });
-      // The harness emits only fixed assertion labels, never raw errors or secrets.
-      assert.equal(run.status, 0, run.stdout);
+      // Forward only the handler's sanitized one-line diagnostics, never raw stderr.
+      const failures = run.stderr.split(/\r?\n/u).filter(line => line.startsWith("admin_command_failed ")).join("\n");
+      assert.equal(run.status, 0, run.stdout + failures);
       assert.match(run.stdout, /ADMIN_ROUTINE_SERVER_OK/u);
     } finally {
       await sql.end();

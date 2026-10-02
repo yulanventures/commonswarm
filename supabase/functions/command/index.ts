@@ -81,7 +81,7 @@ import {
   dbCode,
   durableCommandFailure,
   finishCommandFailure,
-  safeError,
+  safeError, safeAdminError,
   type DurableCommandFailure,
 } from "./failures.ts";
 import {
@@ -13204,9 +13204,9 @@ async function runAdminAccountCommand(
       return await adminTransaction(tx, input, authentication);
     });
     return outcome.result;
-  } catch {
-    // No SQL/credential material is logged. Account failure auditing is added
-    // by the same adapter in a fresh transaction after rollback.
+  } catch (error) {
+    console.error("admin_command_failed", safeAdminError(error));
+    // Account failure auditing follows in a fresh transaction after rollback.
     try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
     catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
     return { status: 500, body: { error: "admin_command_failed" } };
@@ -13230,8 +13230,8 @@ export async function handleAdminRuntimeCommand(
   try { outcome = await db.begin("isolation level read committed", async tx => {
     await setTransaction(tx);
     return await adminTransaction(tx, input, authentication);
-  }); } catch {
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
+  }); } catch (error) {
+    console.error("admin_command_failed", safeAdminError(error)); try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
     catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
     return { status: 500, body: { error: "admin_command_failed" } };
   }
@@ -14277,8 +14277,8 @@ export async function handleAdminWorkerRuntimeCommand(
       await setTransaction(tx);
       return await adminTransaction(tx, input, authentication);
     });
-  } catch {
-    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx,input,authentication); }); }
+  } catch (error) {
+    console.error("admin_command_failed", safeAdminError(error)); try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx,input,authentication); }); }
     catch { return {status:500,body:{error:'admin_failure_audit_unavailable'}}; }
     return {status:500,body:{error:'admin_command_failed'}};
   }

@@ -14,7 +14,7 @@ export async function restoreAdminRoutineWorkspace(
   const events = await tx<(Omit<WorkspaceEventEnvelope, "seq" | "occurred_at_server"> & {
     seq: string | number; occurred_at_server: Date;
   })[]>`
-    SELECT * FROM swarm.events
+    SELECT * FROM swarm.admin_routine_workspace_events
     WHERE workspace_id = ${workspace.workspace.workspace_id}::uuid
       AND stream_id = ${streamId}::uuid AND type = ANY(${ADMIN_ROUTINE_EVENT_TYPES})
     ORDER BY seq

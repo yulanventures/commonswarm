@@ -658,6 +658,17 @@ try {
       );
     }
   }
+  const routineHistory = await db.begin(async tx => {
+    await tx`SELECT set_config('role','swarm_command',true)`;
+    return await tx`SELECT event_id,type FROM swarm.admin_routine_workspace_events WHERE workspace_id=${config.workspace}::uuid`;
+  });
+  const expectedHistory = await db`SELECT event_id FROM swarm.events WHERE workspace_id=${config.workspace}::uuid AND grant_id IS NOT NULL AND type=ANY(${policy.ADMIN_ROUTINE_EVENT_TYPES})`;
+  check(routineHistory.length === expectedHistory.length &&
+    routineHistory.every(row => policy.ADMIN_ROUTINE_EVENT_TYPES.includes(row.type)) &&
+    expectedHistory.every(row => routineHistory.some(actual => actual.event_id === row.event_id)),
+    "command history contains every delegated routine event and excludes ordinary events", {
+      history_count: routineHistory.length, expected_count: expectedHistory.length,
+    });
   // Reconcile pages against durable attempts for each real routine scenario.
   // Raw domain events contain recipient/credential fields and must not be cards.
   const cards = await history();

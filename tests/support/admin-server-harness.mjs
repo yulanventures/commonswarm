@@ -134,6 +134,22 @@ try {
       { kind: 'human', identity: { user_id: config.owner, session_binding: binding, interactive_at_seconds: Date.now() / 1000, csrf_verified: true } });
     check(result.result.status === 403, 'session substitution refused');
   } else if (scenario === 'storage') {
+    await db.begin(async tx => {
+      await tx`SELECT set_config('role','swarm_command',true)`;
+      await tx`SELECT * FROM swarm.admin_routine_workspace_events LIMIT 0`;
+    });
+    let rawReadDenied = false;
+    try { await db.begin(async tx => {
+      await tx`SELECT set_config('role','swarm_command',true)`;
+      await tx`SELECT * FROM swarm.events LIMIT 0`;
+    }); } catch (error) { rawReadDenied = error.code === '42501'; }
+    check(rawReadDenied, 'routine history readable while raw event history remains denied');
+    const [historyRights] = await db`SELECT
+      has_table_privilege('anon','swarm.admin_routine_workspace_events','SELECT') AS anonymous,
+      has_table_privilege('authenticated','swarm.admin_routine_workspace_events','SELECT') AS human,
+      has_table_privilege('swarm_read','swarm.admin_routine_workspace_events','SELECT') AS worker,
+      has_table_privilege('swarm_command','swarm.admin_routine_workspace_events','INSERT,UPDATE,DELETE') AS mutable`;
+    check(!historyRights.anonymous && !historyRights.human && !historyRights.worker && !historyRights.mutable, 'routine history remains command-only and read-only');
     const names = ['admin_accounts', 'admin_grants', 'admin_consents', 'admin_credentials', 'admin_events', 'admin_command_results', 'admin_rate_buckets', 'admin_security_audit'];
     const rows = await db`SELECT c.relname, c.relrowsecurity,
       has_table_privilege('authenticated', c.oid, 'SELECT') AS human_read,
@@ -148,6 +164,9 @@ try {
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
     await db.begin(async tx => {
+      await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000005-rollback.sql'));
+      const [historyAbsent] = await tx`SELECT to_regclass('swarm.admin_routine_workspace_events') AS relation`;
+      check(historyAbsent.relation === null, 'rollback removes routine history view');
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000004-rollback.sql')); await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000003-rollback.sql'));
       const [readAbsent] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readAbsent.fn === null, 'rollback removes human recovery function');
@@ -158,6 +177,9 @@ try {
       await tx.unsafe(migration);
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000002_admin_routine.sql'));
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000003_admin_recovery_read.sql')); await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000004_admin_worker_read_fence.sql'));
+      await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000005_admin_routine_workspace_history.sql'));
+      const [historyRestored] = await tx`SELECT to_regclass('swarm.admin_routine_workspace_events') AS relation`;
+      check(historyRestored.relation !== null, 'migration restores routine history view');
       const [readRestored] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readRestored.fn !== null, 'migration restores human recovery function');
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;
