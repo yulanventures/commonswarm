@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { dbAssert, emptyApplicationSchema, fixture, refuses } from '../support/admin-schema-db.js';
@@ -13,7 +14,7 @@ test('admin-owner-approval-scoped: Bob approval cannot authorize Alice; real own
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
   })) as { DB_URL: string };
   assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(local.DB_URL).hostname));
-  const secretDir = mkdtempSync('/private/tmp/anvil-secret.');
+  const secretDir = mkdtempSync(join(tmpdir(), 'admin-owner-approval-'));
   chmodSync(secretDir, 0o700);
   const f = fixture(), aliceGrant = randomUUID(), aliceConnection = randomUUID(), aliceFamily = `family-${randomUUID()}`;
   const prepare = `${f.sql}
@@ -145,8 +146,8 @@ console.log('ADMIN_OWNER_APPROVAL_OK');
     assert.match(run.stdout, /ADMIN_OWNER_APPROVAL_OK/u);
   } finally {
     const resolved = realpathSync(secretDir);
-    assert.equal(dirname(resolved), '/private/tmp');
-    assert.ok(basename(resolved).startsWith('anvil-secret.') && resolved !== process.env.HOME);
+    assert.equal(dirname(resolved), realpathSync(tmpdir()));
+    assert.ok(basename(resolved).startsWith('admin-owner-approval-') && resolved !== process.env.HOME);
     execFileSync('rm', ['-r', resolved], { stdio: 'pipe' });
   }
 });
