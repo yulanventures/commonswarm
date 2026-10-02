@@ -1,6 +1,51 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { safeAdminError } from "../../supabase/functions/command/failures.js";
+
+// The formatter tests cannot catch a handler reverting to safeError or logging
+// the exception directly. Inspect the three real transaction failure boundaries
+// independently; this test never calls the formatter to produce its expectation.
+test("all three admin transaction failure handlers route diagnostics through the imported safeAdminError", () => {
+  const source = ts.createSourceFile("command/index.ts", readFileSync(
+    new URL("../../supabase/functions/command/index.ts", import.meta.url), "utf8"),
+    ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const imports = source.statements.filter(ts.isImportDeclaration);
+  const bindings = imports.filter(declaration => ts.isStringLiteral(declaration.moduleSpecifier) &&
+    /^\.\/failures\.[jt]s$/u.test(declaration.moduleSpecifier.text))
+    .flatMap(declaration => {
+      const named = declaration.importClause?.namedBindings;
+      return named && ts.isNamedImports(named) ? named.elements : [];
+    });
+  const formatter = bindings.find(binding => (binding.propertyName ?? binding.name).text === "safeAdminError");
+  assert.ok(formatter, "admin formatter must come from the failure boundary module");
+  for (const name of ["runAdminAccountCommand", "handleAdminRuntimeCommand", "handleAdminWorkerRuntimeCommand"]) {
+    const handler = source.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name);
+    assert.ok(handler && ts.isFunctionDeclaration(handler) && handler.body, `${name}: handler missing`);
+    const transactionCatch = handler.body.statements.filter(ts.isTryStatement)[0]?.catchClause;
+    assert.ok(transactionCatch?.variableDeclaration && ts.isIdentifier(transactionCatch.variableDeclaration.name),
+      `${name}: transaction failure catch missing`);
+    const exception = transactionCatch.variableDeclaration.name.text;
+    const logs: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "console" &&
+        node.expression.name.text === "error") logs.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(transactionCatch.block);
+    assert.equal(logs.length, 1, `${name}: expected one sanitized failure diagnostic`);
+    const log = logs[0]!;
+    assert.equal(log.arguments.length, 2, `${name}: extra log arguments can leak request or database data`);
+    const [label, diagnostic] = log.arguments;
+    assert.ok(label && ts.isStringLiteral(label) && label.text === "admin_command_failed", `${name}: diagnostic label`);
+    assert.ok(diagnostic && ts.isCallExpression(diagnostic) && ts.isIdentifier(diagnostic.expression) &&
+      diagnostic.expression.text === formatter.name.text && diagnostic.arguments.length === 1 &&
+      ts.isIdentifier(diagnostic.arguments[0]!) && diagnostic.arguments[0]!.text === exception,
+      `${name}: caught error must be logged only through safeAdminError`);
+  }
+});
 
 test("admin failure diagnostics retain the internal error class and safe message", () => {
   const error = new Error("permission denied for table events");

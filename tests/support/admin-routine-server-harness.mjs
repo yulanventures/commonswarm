@@ -658,17 +658,27 @@ try {
       );
     }
   }
+  const [historyStream] = await db`SELECT stream_id FROM swarm.streams WHERE workspace_id=${config.workspace}::uuid AND kind='workspace'`;
   const routineHistory = await db.begin(async tx => {
     await tx`SELECT set_config('role','swarm_command',true)`;
-    return await tx`SELECT event_id,type FROM swarm.admin_routine_workspace_events WHERE workspace_id=${config.workspace}::uuid`;
+    return await tx`SELECT seq,type,schema_version,actor_user,actor_agent_principal,
+      admin_identity_id,grant_id,grant_manifest_digest,occurred_at_server,payload
+      FROM swarm.admin_routine_workspace_history(${config.workspace}::uuid,${grant}::uuid,${historyStream.stream_id}::uuid) ORDER BY seq`;
   });
-  const expectedHistory = await db`SELECT event_id FROM swarm.events WHERE workspace_id=${config.workspace}::uuid AND grant_id IS NOT NULL AND type=ANY(${policy.ADMIN_ROUTINE_EVENT_TYPES})`;
+  const expectedHistory = await db`SELECT seq,type,grant_id,occurred_at_server,payload FROM swarm.events
+    WHERE workspace_id=${config.workspace}::uuid AND stream_id=${historyStream.stream_id}::uuid
+      AND grant_id=${grant}::uuid AND type=ANY(${policy.ADMIN_ROUTINE_EVENT_TYPES}) ORDER BY seq`;
   check(routineHistory.length === expectedHistory.length &&
     routineHistory.every(row => policy.ADMIN_ROUTINE_EVENT_TYPES.includes(row.type)) &&
-    expectedHistory.every(row => routineHistory.some(actual => actual.event_id === row.event_id)),
-    "command history contains every delegated routine event and excludes ordinary events", {
+    expectedHistory.every((row,index) => row.seq === routineHistory[index].seq && row.type === routineHistory[index].type),
+    "command history contains every delegated routine event for this grant and excludes ordinary events", {
       history_count: routineHistory.length, expected_count: expectedHistory.length,
     });
+  const replay = rows => rows.reduce((state,row) => policy.reduceAdminRoutine(state, {
+    type: row.type, grant_id: row.grant_id, occurred_at_server: row.occurred_at_server.getTime(), payload: row.payload,
+  }), undefined);
+  check(JSON.stringify(replay(routineHistory)) === JSON.stringify(replay(expectedHistory)),
+    "minimized workspace history rebuilds the same routine state as the durable events");
   // Reconcile pages against durable attempts for each real routine scenario.
   // Raw domain events contain recipient/credential fields and must not be cards.
   const cards = await history();

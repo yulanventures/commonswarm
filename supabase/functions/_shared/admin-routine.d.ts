@@ -144,4 +144,4 @@ export interface AdminRoutineDecision extends AdminDecision {
 export declare function parseAdminRoutineCommand(value: unknown): AdminRoutineCommand | null;
 /** No human impersonation and no I/O: both projections and budgets come from events. */
 export declare function decideAdminRoutine(command: AdminRoutineCommand, account: AdminAccountState, ctx: AdminRoutineContext): AdminRoutineDecision;
-export declare function reduceAdminRoutine(previous: AdminRoutineState | undefined, event: AdminAccountEvent): AdminRoutineState;
+export declare function reduceAdminRoutine(previous: AdminRoutineState | undefined, event: Pick<AdminAccountEvent, "type" | "grant_id" | "occurred_at_server" | "payload">): AdminRoutineState;

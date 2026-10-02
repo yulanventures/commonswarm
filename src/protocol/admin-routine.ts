@@ -930,7 +930,7 @@ export function decideAdminRoutine(
 
 export function reduceAdminRoutine(
   previous: AdminRoutineState | undefined,
-  event: AdminAccountEvent,
+  event: Pick<AdminAccountEvent, "type" | "grant_id" | "occurred_at_server" | "payload">,
 ): AdminRoutineState {
   const state = previous ?? emptyAdminRoutine(),
     p = event.payload,

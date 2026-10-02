@@ -134,10 +134,69 @@ try {
       { kind: 'human', identity: { user_id: config.owner, session_binding: binding, interactive_at_seconds: Date.now() / 1000, csrf_verified: true } });
     check(result.result.status === 403, 'session substitution refused');
   } else if (scenario === 'storage') {
+    const foreignGrant = await activate();
+    let isolatedHistory = false;
+    const historyDrill = new Error('history rollback drill');
     await db.begin(async tx => {
+      const stream = id(), foreignWorkspace = id(), foreignStream = id();
+      await tx`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${stream}::uuid,${config.workspace}::uuid,'workspace')`;
+      await tx`INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES(${foreignWorkspace}::uuid,'Other history workspace',${config.owner}::uuid)`;
+      await tx`INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES(${foreignStream}::uuid,${foreignWorkspace}::uuid,'workspace')`;
+      const privateMarker = 'future-private-field-must-not-escape';
+      const invitation = { invitation_id: id(), workspace_id: config.workspace,
+        recipient_ref: config.owner, recipient_user_id: config.owner,
+        recipient_connection_id: null, role: 'member', expires_at: Date.now() + 60000,
+        delivery_state: 'awaiting_authorization', future_private_field: privateMarker };
+      const credential = { credential_id: id(), principal_id: id(), worker_lineage_id: id(),
+        future_private_field: privateMarker };
+      const provision = { principal_id: credential.principal_id, credential_id: credential.credential_id,
+        recipient_connection_id: grant.manifest.connection_id, worker_scope_names: ['post_signal'],
+        worker_policy: { kind: 'timeboxed', future_private_field: privateMarker },
+        parent_admin_grant_id: grant.grantId, dependent_on_admin_grant: true,
+        credential_expires_at: Date.now() + 60000, delivery_state: 'awaiting_delivery', credential,
+        unused_credential_metadata: privateMarker };
+      const facts = [
+        [config.workspace, stream, grant, 'AdminMemberInvited', invitation],
+        [config.workspace, stream, grant, 'AdminSeatProvisioned', provision],
+        [config.workspace, stream, foreignGrant, 'AdminMemberInvited', invitation],
+        [foreignWorkspace, foreignStream, grant, 'AdminMemberInvited', invitation],
+        [config.workspace, stream, grant, 'CommandRejected', { ordinary_body: privateMarker }],
+      ];
+      for (const [offset, [workspace, streamId, g, type, payload]] of facts.entries()) {
+        await tx`INSERT INTO swarm.events(workspace_id,stream_id,seq,event_id,command_id,type,schema_version,
+          admin_identity_id,grant_id,grant_manifest_digest,payload)
+          VALUES(${workspace}::uuid,${streamId}::uuid,${offset + 1},${id()}::uuid,${id()},${type},1,
+          ${g.manifest.admin_identity_id}::uuid,${g.grantId}::uuid,${await adminDigest(g.manifest)},${tx.json(payload)})`;
+      }
       await tx`SELECT set_config('role','swarm_command',true)`;
-      await tx`SELECT * FROM swarm.admin_routine_workspace_events LIMIT 0`;
-    });
+      // Deliberately poison the caller's search_path; the definer pins its own.
+      await tx`SELECT set_config('search_path','pg_temp,public',true)`;
+      const rows = await tx`SELECT seq,type,schema_version,actor_user,actor_agent_principal,
+        admin_identity_id,grant_id,grant_manifest_digest,occurred_at_server,payload
+        FROM swarm.admin_routine_workspace_history(${config.workspace}::uuid,${grant.grantId}::uuid,${stream}::uuid)`;
+      check(rows.length === 2 && Number(rows[0].seq) === 1 && Number(rows[1].seq) === 2,
+        'history scopes workspace grant stream and excludes ordinary events');
+      const columns = ['seq','type','schema_version','actor_user','actor_agent_principal',
+        'admin_identity_id','grant_id','grant_manifest_digest','occurred_at_server','payload'];
+      check(rows.every(row => Object.keys(row).length === columns.length && columns.every(key => Object.hasOwn(row,key))),
+        'history returns only replay envelope columns');
+      check(!JSON.stringify(rows).includes(privateMarker) &&
+        rows[0].payload.recipient_user_id === config.owner &&
+        rows[1].payload.credential.credential_id === credential.credential_id &&
+        rows[1].payload.worker_policy.kind === 'timeboxed' &&
+        !Object.hasOwn(rows[1].payload,'unused_credential_metadata'),
+        'history strips unused and future payload fields including nested credential fields');
+      const wrongGrant = await tx`SELECT seq FROM swarm.admin_routine_workspace_history(${config.workspace}::uuid,${foreignGrant.grantId}::uuid,${stream}::uuid)`;
+      check(wrongGrant.length === 1 && Number(wrongGrant[0].seq) === 3, 'other grant has its own isolated history');
+      const wrongWorkspace = await tx`SELECT seq FROM swarm.admin_routine_workspace_history(${foreignWorkspace}::uuid,${grant.grantId}::uuid,${stream}::uuid)`;
+      const wrongStream = await tx`SELECT seq FROM swarm.admin_routine_workspace_history(${config.workspace}::uuid,${grant.grantId}::uuid,${foreignStream}::uuid)`;
+      const foreignControl = await tx`SELECT seq FROM swarm.admin_routine_workspace_history(${foreignWorkspace}::uuid,${grant.grantId}::uuid,${foreignStream}::uuid)`;
+      check(wrongWorkspace.length === 0 && wrongStream.length === 0 && foreignControl.length === 1,
+        'mismatched workspace or stream returns no history with populated positive control');
+      isolatedHistory = true;
+      throw historyDrill;
+    }).catch(error => { if (error !== historyDrill) throw error; });
+    check(isolatedHistory, 'history isolation drill completed');
     let rawReadDenied = false;
     try { await db.begin(async tx => {
       await tx`SELECT set_config('role','swarm_command',true)`;
@@ -145,11 +204,18 @@ try {
     }); } catch (error) { rawReadDenied = error.code === '42501'; }
     check(rawReadDenied, 'routine history readable while raw event history remains denied');
     const [historyRights] = await db`SELECT
-      has_table_privilege('anon','swarm.admin_routine_workspace_events','SELECT') AS anonymous,
-      has_table_privilege('authenticated','swarm.admin_routine_workspace_events','SELECT') AS human,
-      has_table_privilege('swarm_read','swarm.admin_routine_workspace_events','SELECT') AS worker,
-      has_table_privilege('swarm_command','swarm.admin_routine_workspace_events','INSERT,UPDATE,DELETE') AS mutable`;
-    check(!historyRights.anonymous && !historyRights.human && !historyRights.worker && !historyRights.mutable, 'routine history remains command-only and read-only');
+      has_function_privilege('anon','swarm.admin_routine_workspace_history(uuid,uuid,uuid)','EXECUTE') AS anonymous,
+      has_function_privilege('authenticated','swarm.admin_routine_workspace_history(uuid,uuid,uuid)','EXECUTE') AS human,
+      has_function_privilege('swarm_read','swarm.admin_routine_workspace_history(uuid,uuid,uuid)','EXECUTE') AS worker,
+      has_function_privilege('swarm_command','swarm.admin_routine_workspace_history(uuid,uuid,uuid)','EXECUTE') AS command,
+      to_regclass('swarm.admin_routine_workspace_events') AS broad_view`;
+    check(!historyRights.anonymous && !historyRights.human && !historyRights.worker && historyRights.command && historyRights.broad_view === null, 'routine history remains command-only and read-only without a broad view');
+    const [historyFunction] = await db`SELECT p.prosecdef,p.provolatile,p.proconfig,
+      pg_get_userbyid(p.proowner) AS owner FROM pg_proc p
+      WHERE p.oid='swarm.admin_routine_workspace_history(uuid,uuid,uuid)'::regprocedure`;
+    check(historyFunction.prosecdef && historyFunction.provolatile === 's' &&
+      historyFunction.owner === 'swarm_admin' && historyFunction.proconfig.includes('search_path=pg_catalog'),
+      'history function pins trusted owner read-only execution and search path');
     const names = ['admin_accounts', 'admin_grants', 'admin_consents', 'admin_credentials', 'admin_events', 'admin_command_results', 'admin_rate_buckets', 'admin_security_audit'];
     const rows = await db`SELECT c.relname, c.relrowsecurity,
       has_table_privilege('authenticated', c.oid, 'SELECT') AS human_read,
@@ -165,8 +231,8 @@ try {
     let control = false;
     await db.begin(async tx => {
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000005-rollback.sql'));
-      const [historyAbsent] = await tx`SELECT to_regclass('swarm.admin_routine_workspace_events') AS relation`;
-      check(historyAbsent.relation === null, 'rollback removes routine history view');
+      const [historyAbsent] = await tx`SELECT to_regprocedure('swarm.admin_routine_workspace_history(uuid,uuid,uuid)') AS fn`;
+      check(historyAbsent.fn === null, 'rollback removes routine history function');
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000004-rollback.sql')); await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000003-rollback.sql'));
       const [readAbsent] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readAbsent.fn === null, 'rollback removes human recovery function');
@@ -178,8 +244,8 @@ try {
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000002_admin_routine.sql'));
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000003_admin_recovery_read.sql')); await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000004_admin_worker_read_fence.sql'));
       await tx.unsafe(await Deno.readTextFile('supabase/migrations/20261001000005_admin_routine_workspace_history.sql'));
-      const [historyRestored] = await tx`SELECT to_regclass('swarm.admin_routine_workspace_events') AS relation`;
-      check(historyRestored.relation !== null, 'migration restores routine history view');
+      const [historyRestored] = await tx`SELECT to_regprocedure('swarm.admin_routine_workspace_history(uuid,uuid,uuid)') AS fn`;
+      check(historyRestored.fn !== null, 'migration restores routine history function');
       const [readRestored] = await tx`SELECT to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)') AS fn`;
       check(readRestored.fn !== null, 'migration restores human recovery function');
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;

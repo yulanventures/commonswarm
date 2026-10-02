@@ -113,7 +113,7 @@ export async function prepareAdminRoutine(
         m.role === "owner" && m.revoked_at === null
       ).length,
     };
-    workspace = await restoreAdminRoutineWorkspace(tx, workspace, streams[0].stream_id);
+    workspace = await restoreAdminRoutineWorkspace(tx, workspace, streams[0].stream_id, command.grant_id);
   }
   const [owned] = await tx<
     { n: string }[]
