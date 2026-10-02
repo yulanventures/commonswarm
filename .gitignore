@@ -25,6 +25,7 @@ coverage
 dist
 dist-release/
 node_modules
+services/mcp-auth/src/management-command.generated.js
 REPORT.md
 scratchpad
 supabase/.branches

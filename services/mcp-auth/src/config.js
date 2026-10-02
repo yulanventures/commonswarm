@@ -21,6 +21,11 @@ const FILE_SETTINGS = Object.freeze({
     name: "database credential",
     policy: "secret",
   }),
+  managementCredentials: Object.freeze({
+    envName: "MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE",
+    name: "management database credential",
+    policy: "secret",
+  }),
   databaseTlsCa: Object.freeze({
     envName: "MCP_OAUTH_DATABASE_TLS_CA_FILE",
     name: "database TLS CA",
@@ -174,11 +179,27 @@ export async function loadConfig(env = process.env) {
   }
   const allowedOrigins = exactOrigins(required(env, "MCP_OAUTH_ALLOWED_ORIGINS"));
   allowedOrigins.add(issuer);
+  const publicAuthorizationEnabled = env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1";
+  let management;
+  if (publicAuthorizationEnabled) {
+    const document = JSON.parse(await configuredFileText(env, "managementCredentials"));
+    if (typeof document.databaseUrl !== "string") {
+      throw new Error("management credential file must contain databaseUrl");
+    }
+    const url = new URL(document.databaseUrl);
+    if (!["postgres:", "postgresql:"].includes(url.protocol) || !url.username || !url.password ||
+        url.hostname !== required(env, "MCP_OAUTH_DATABASE_HOST") || url.search || url.hash) {
+      throw new Error("management database URL must use the verified database hostname without query overrides");
+    }
+    management = { databaseUrl: document.databaseUrl };
+  }
   return {
     issuer,
     resource,
     publicOrigin,
-    publicAuthorizationEnabled: env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1",
+    publicAuthorizationEnabled,
+    management,
+    supabaseUrl: publicAuthorizationEnabled ? required(env, "SUPABASE_URL") : undefined,
     nativeLoopbackEnabled: env.MCP_OAUTH_NATIVE_LOOPBACK_ENABLED === "1",
     allowedOrigins,
     gotrueUrl: required(env, "MCP_OAUTH_GOTRUE_URL"),

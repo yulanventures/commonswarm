@@ -8,12 +8,14 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "pretest": "node build-management.mjs",
     "test": "node --test test/*.test.js",
     "test:postgres": "node --test test-postgres/*.test.js"
   },
   "dependencies": {
     "jose": "6.2.10",
     "oidc-provider": "9.12.2",
-    "pg": "8.16.3"
+    "pg": "8.16.3",
+    "postgres": "3.4.9"
   }
 }

@@ -1,0 +1,12 @@
+# Add ONLY for the approved switch-on. OFF and rollback use compose.yaml alone.
+services:
+  oauth:
+    environment:
+      MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/management-database-credentials
+    volumes:
+      - type: bind
+        source: /etc/commonswarm-oauth/management-database-credentials
+        target: /run/commonswarm-oauth/management-database-credentials
+        read_only: true
+        bind:
+          create_host_path: false
