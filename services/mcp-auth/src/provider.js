@@ -17,6 +17,7 @@ export const AUTHORIZATION_CODE_TTL_SECONDS = 60;
 export const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const CIMD_CACHE_DURATION_SECONDS = Object.freeze({ min: 30, max: 5 * 60 });
 export const TEST_ACCOUNT_ID = "commonswarm-test-user";
+export const RESOURCE_SCOPES = Object.freeze(["mcp"]);
 
 async function signingJwk() {
   const { privateKey } = await generateKeyPair("ES256", { extractable: true });
@@ -105,7 +106,7 @@ export async function createMcpProvider({
             accessTokenTTL: ACCESS_TOKEN_TTL_SECONDS,
             audience: RESOURCE,
             jwt: { sign: { alg: "ES256" } },
-            scope: "mcp",
+            scope: RESOURCE_SCOPES.join(" "),
           };
         },
         useGrantedResource: (ctx) => {

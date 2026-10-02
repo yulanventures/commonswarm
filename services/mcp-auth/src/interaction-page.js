@@ -30,6 +30,7 @@ export function renderConsentPage({
   csrfToken,
   progress = [],
   failure = null,
+  validationError = null,
 }) {
   const selected = new Set(selectedWorkspaceIds);
   const names = new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
@@ -67,6 +68,7 @@ export function renderConsentPage({
   <p class="eyebrow">CommonSwarm connected app</p><h1>Choose workspaces for ${escapeHtml(clientHost)}</h1>
   <div class="meta"><p>Signed in as <strong>${escapeHtml(identityLabel)}</strong></p><p>Client: <strong>${escapeHtml(clientHost)}</strong></p></div>
   ${progressMarkup}
+  ${validationError ? `<p class="error" role="alert">${escapeHtml(validationError)}</p>` : ""}
   <form method="post" action="/interaction/${encodeURIComponent(interactionUid)}/consent">
     <input type="hidden" name="selection_version" value="${escapeHtml(selectionVersion)}">
     <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}">

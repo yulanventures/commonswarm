@@ -10,6 +10,7 @@ import {
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
 import { renderConsentPage } from "./interaction-page.js";
+import { RESOURCE_SCOPES } from "./provider.js";
 
 function respond(response, status, body, headers = {}) {
   response.writeHead(status, {
@@ -272,8 +273,29 @@ export function createInteractionHandler({
       respond(response, 403, { error: "csrf_required" });
       return true;
     }
+    async function invalidRequest(message, selectedWorkspaceIds = [], workspaces, refreshToken = false) {
+      if (parsed.format !== "form" || operation !== "consent") {
+        respond(response, 400, { error: "invalid_request" });
+        return;
+      }
+      const csrf = refreshToken
+        ? await store.issueConsentToken(interactionUid, browser.id, session.user_id)
+        : { selectionVersion: body.selection_version, token: csrfToken };
+      respondHtml(response, 400, renderConsentPage({
+        interactionUid,
+        clientHost: new URL(details.params.client_id).host,
+        identity: identity(session),
+        workspaces: workspaces ?? await workspaceReader(identity(session)),
+        selectedWorkspaceIds,
+        selectionLocked: bound.commonswarm_grant_id != null,
+        homeWorkspaceId: null,
+        selectionVersion: csrf.selectionVersion,
+        csrfToken: csrf.token,
+        validationError: message,
+      }));
+    }
     if (!Number.isSafeInteger(body.selection_version)) {
-      respond(response, 400, { error: "invalid_request" });
+      await invalidRequest("Reload the workspace selection and try again.", [], undefined, true);
       return true;
     }
 
@@ -304,24 +326,32 @@ export function createInteractionHandler({
       return true;
     }
 
-    if (typeof body.home_workspace_id !== "string") {
-      respond(response, 400, { error: "invalid_request" });
-      return true;
-    }
     const promptDetails = consentPromptDetails(details);
     const formWorkspaceIds = parsed.format === "form" ? body.workspace_ids : null;
     if (formWorkspaceIds !== null && (!Array.isArray(formWorkspaceIds) ||
         formWorkspaceIds.some((id) => typeof id !== "string"))) {
-      respond(response, 400, { error: "invalid_request" });
+      await invalidRequest("Select at least one workspace for this connection.");
       return true;
     }
+    const available = formWorkspaceIds === null ? null : await workspaceReader(identity(session));
     if (formWorkspaceIds !== null) {
-      const available = await workspaceReader(identity(session));
       const availableIds = new Set(available.map((workspace) => workspace.id));
       if (formWorkspaceIds.some((id) => !availableIds.has(id))) {
         respond(response, 403, { error: "workspace_forbidden" });
         return true;
       }
+    }
+    const selectedWorkspaceIds = [...new Set(formWorkspaceIds ?? bound.selected_workspace_ids ?? [])];
+    if (parsed.format === "form" && selectedWorkspaceIds.length === 1 && !body.home_workspace_id) {
+      body.home_workspace_id = selectedWorkspaceIds[0];
+    }
+    if (typeof body.home_workspace_id !== "string" ||
+        (parsed.format === "form" && !selectedWorkspaceIds.includes(body.home_workspace_id))) {
+      // Validation keeps the form's token and CAS version usable for correction.
+      await invalidRequest(selectedWorkspaceIds.length === 0
+        ? "Select at least one workspace for this connection."
+        : "Choose a home workspace for this connection.", selectedWorkspaceIds, available);
+      return true;
     }
     const consent = formWorkspaceIds === null
       ? await store.consumeConsent({
@@ -341,7 +371,7 @@ export function createInteractionHandler({
         });
     if (!Array.isArray(consent.selected_workspace_ids) ||
         !consent.selected_workspace_ids.includes(body.home_workspace_id)) {
-      respond(response, 400, { error: "invalid_request" });
+      await invalidRequest("Choose a home workspace for this connection.", [], undefined, true);
       return true;
     }
     let grant = consent.provider_grant_id
@@ -349,16 +379,15 @@ export function createInteractionHandler({
       : undefined;
     if (!grant) {
       grant = new provider.Grant({ accountId: session.user_id, clientId: consent.client_id });
-      if (promptDetails.missingOIDCScope) {
-        grant.addOIDCScope(promptDetails.missingOIDCScope.join(" "));
-      }
+      // Prompt details are a delta against the provider session's old grant.
+      // This connection gets its own manifest-bound grant, so authorize the
+      // full validated request, including scopes already met by that old grant.
+      const requestedScopes = String(details.params.scope ?? "").split(" ").filter(Boolean);
+      grant.addOIDCScope(requestedScopes.join(" "));
+      grant.addResourceScope(details.params.resource,
+        requestedScopes.filter((scope) => RESOURCE_SCOPES.includes(scope)).join(" "));
       if (promptDetails.missingOIDCClaims) {
         grant.addOIDCClaims(promptDetails.missingOIDCClaims);
-      }
-      for (const [resource, scopes] of Object.entries(
-        promptDetails.missingResourceScopes ?? {},
-      )) {
-        grant.addResourceScope(resource, scopes.join(" "));
       }
       const providerGrantId = await grant.save();
       const persisted = await store.bindProviderGrant(interactionUid, providerGrantId,
