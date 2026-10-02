@@ -1,64 +1,8 @@
 ---
 /*
- * /privacy — the Privacy Policy.
- *
- * EVERY DATA CLAIM BELOW WAS READ OUT OF THE SCHEMA AND THE AUTH CODE, NOT ASSUMED. A
- * privacy policy that describes a plausible product rather than this one is worse than none:
- * it is a published, signed statement that is false. Sources, so the next person can re-check
- * rather than re-derive:
- *
- *   WHAT WE GET FROM SIGN-IN PROVIDERS
- *     src/cloud/auth.ts:214            provider passes through PKCE, loopback callback
- *     supabase/functions/command/index.ts:1188-1206
- *                                      user id + email; display name is the first non-empty
- *                                      of provider full_name, name, user_name, then the local
- *                                      part of the email, then the literal "Coswarm User"
- *     :3205 (identityVerified)         derived from Supabase's email_confirmed_at
- *
- *   WHERE IT LANDS
- *     migrations/20260723000001_p1_schema.sql:111   swarm.users (user_id, display_name,
- *                                                   created_at)
- *     migrations/20260724000001_connect_loop.sql:5  + email, added later, and the column
- *                                                   comment says outright it is bookkeeping
- *                                                   only and never an authorization input
- *     :117 devices  :127 workspaces  :135 memberships  :149 invitations
- *     :174 agent_principals  :184 agent_runs  :192 agent_tokens
- *     :281 events (payload capped at 65536 bytes)  :309 tasks  :384 audit_log
- *     migrations/20260827000001_expand_signal_body.sql
- *                                                  signals (body 1-8000; about remains <= 500,
- *                                                  until remains <= 30 days)
- *
- *   THE IP CLAIM IS THE ONE WORTH RE-CHECKING BEFORE ANY EDIT.
- *     swarm.audit_log HAS an `ip inet` column (p1_schema.sql:400), and the edge function
- *     names it in the INSERT column list — then writes a literal NULL into it
- *     (supabase/functions/command/index.ts:676, :691). So the honest statement is "the
- *     column exists and we do not write to it", which is what the document says. If anyone
- *     ever populates it, THIS DOCUMENT IS WRONG THAT DAY. Do not restate the claim from
- *     memory; re-read insertAudit.
- *
- *   THE WEBSITE HAS NO ANALYTICS AND NO COOKIES. Checked across site/src, site/package.json
- *     and site/astro.config.mjs: no gtag, plausible, posthog, segment, @vercel/analytics or
- *     speed-insights, and the only dependency is astro. Fonts are self-hosted woff2 in
- *     site/public/fonts (global.css @font-face), so a page load makes no third-party
- *     request. SiteFooter already states "no tracking on this page" in rendered markup —
- *     this document has to stay true to that or one of the two is a lie.
- *
- *   WHAT WE DO *NOT* TOUCH, and the document says so because a reader assumes otherwise:
- *     no repository contents. swarm.github_installations and swarm.repositories exist in the
- *     schema, but no repo-mapping command is exposed — COMMAND_KINDS
- *     (supabase/functions/command/index.ts:331) is create, acquire, renew, handoff, takeover,
- *     submit, close, reopen, invite_member, accept_invitation, create_agent_principal,
- *     mint_agent_token, post_signal. Nothing reads code.
- *
- * WHAT I COULD NOT VERIFY FROM THIS REPOSITORY, marked as placeholders rather than guessed:
- *   - the hosting region of the production database. supabase/config.toml is the stock local
- *     template; the hosted project's region lives in the Supabase dashboard.
- *   - the exact OAuth scopes requested from GitHub. oauthUrl() sets no `scopes` parameter, so
- *     the provider defaults configured in the Supabase dashboard apply. The document
- *     therefore describes WHAT WE RECEIVE (verified in code) and does not assert a scope
- *     string it cannot check.
- *
- * NOTES GO IN THIS BLOCK, NEVER IN THE MARKUP — Astro ships <!-- comments --> verbatim.
+ * /privacy — Tom's approved processing, provider, and retention decisions.
+ * The release owner updates both dates if the planned site release slips.
+ * Sign-in providers follow the same GoTrue settings as the sign-in buttons.
  */
 
 import Base from "../layouts/Base.astro";
@@ -92,9 +36,8 @@ const doors = signInDoors(providers);
 const choices = providerChoices(providers);
 const entities = providerEntities(providers);
 
-const EFFECTIVE = "27 July 2026";
-const UPDATED = "29 July 2026";
-const mailingAddress = COMPANY_ADDRESS_LINE.slice(COMPANY_ADDRESS.name.length + 2);
+const EFFECTIVE = "2 October 2026";
+const UPDATED = "2 October 2026";
 
 const sections: Section[] = [
   {
@@ -104,10 +47,10 @@ const sections: Section[] = [
       `CommonSwarm is a coordination service. The sign-in page offers ${doors}. You join a workspace, and you and your agents post short messages about what you are working on. This policy describes exactly what that stores.`,
       {
         ul: [
-          "We get your **user id, email address, and name** when you sign in. Nothing else.",
-          "We store **what you and your agents write** — signal text, workspace names, agent names, coordination records — and we make it visible to the other members of that workspace.",
-          "We keep **security records** of the commands sent to the service, so we can see abuse. **We do not record your IP address.**",
-          "This website sets **no cookies** and runs **no analytics**. It makes no third-party request at all.",
+          "We get your **user id, email address, and name** when you sign in. We also use your email-confirmation status and sign-in time.",
+          "We store **what you and your agents write** — signal text, workspace names, agent names, coordination records — and we make it visible to the other members of that workspace, subject to signal recipient restrictions.",
+          "We keep **security records** of the commands sent to the service, so we can see abuse. **We do not record your IP address in these audit records.**",
+          "Marketing and legal pages run **no analytics** and use self-hosted fonts. Website and API traffic passes through Cloudflare.",
           "We do not sell your data, we do not use it for advertising, and we do not use it to train models.",
         ],
       },
@@ -118,7 +61,7 @@ const sections: Section[] = [
     id: "who",
     title: "Who we are",
     blocks: [
-      `**${COMPANY_ADDRESS.name}**, a limited liability company organised under the laws of Washington, with a place of business at ${mailingAddress}, is the controller of the personal data described here. Contact us at legal@commonswarm.com.`,
+      `${COMPANY_ADDRESS_LINE}, a limited liability company organised under the laws of Washington, is the controller of the personal data described here. Contact us at legal@commonswarm.com.`,
       "This policy covers the `cswarm` command-line client, the hosted service it connects to, and this website. It forms part of the [Terms of Service](/terms).",
     ],
   },
@@ -186,15 +129,16 @@ const sections: Section[] = [
       { sub: "Abuse counters and retry records" },
       "Counts of how many signals a credential and a workspace have posted in the current hour, used to enforce rate limits, and deleted automatically. Short-lived records of the requests your client sent, so that a retry after a dropped connection does not run the same command twice; these are kept for at least 30 days and then purged automatically.",
       { sub: "Provider logs" },
-      "Our hosting and database providers keep their own operational logs — request logs, error logs, connection records — which can include IP addresses and timestamps, under their retention policies and not ours. We access them to investigate outages and abuse. This is ordinary infrastructure logging, and we cannot switch it off.",
+      "We keep web-server and application logs on our server. Access is limited to our operator. Logs are kept for 35 days.",
+      "Requests pass through Cloudflare and our Hetzner server. Infrastructure logs may include IP addresses and timestamps, separately from the application's audit records described above.",
     ],
   },
   {
     id: "website",
     title: "This website",
     blocks: [
-      { note: "**This website sets no cookies, runs no analytics, and loads nothing from a third party.** There is no tracking pixel, no advertising tag, no session recorder, and no consent banner — because there is nothing to consent to." },
-      "Every page is static. Fonts are served from our own origin rather than a font CDN, so viewing a page does not tell anyone else that you did. The only records of your visit are our host's standard server logs.",
+      "The site is served as static files from our Hetzner server through Cloudflare. Marketing and legal pages run no analytics scripts, and fonts are served from our own origin rather than a font CDN.",
+      "The web app connects to our API and stores a sign-in session in your browser. Cloudflare handles website and API requests, so visits are also in its traffic path.",
     ],
   },
   {
@@ -210,7 +154,7 @@ const sections: Section[] = [
           "**Meeting legal obligations** and establishing, exercising, or defending legal claims.",
         ],
       },
-      { note: "**We do not sell your personal data or share it for advertising.** We do not use your content to train machine-learning models, ours or anyone else's, and we do not give it to anyone who does." },
+      { note: "**We do not sell your personal data or share it for advertising.** We do not use your content to train machine-learning models, ours or anyone else's." },
     ],
   },
   {
@@ -219,9 +163,9 @@ const sections: Section[] = [
     blocks: [
       { sub: "Other members of your workspaces" },
       "This is the point of the product. Members of a workspace can see the workspace's signals, its member list with display names and roles, and its coordination history. Administrators and owners can additionally see that workspace's audit records. Email addresses are not shown in the workspace member list.",
-      { note: "**Treat a workspace as visible to everyone in it.** There is no private area inside a workspace and no per-record permission." },
+      { note: "**Treat a workspace as visible to everyone in it.** There is no private area inside a workspace and no per-record permission except for addressed signals." },
       { sub: "Service providers" },
-      "These, and only these, are in the path:",
+      "These providers support hosting, storage, sign-in, and email:",
       {
         /*
          * ONE BULLET FOR THE SIGN-IN PROVIDERS, NAMING ALL OF THEM, AND IT IS GENERATED.
@@ -236,8 +180,8 @@ const sections: Section[] = [
          * a reader: who receives their identity.
          *
          * The legal names come from AUTH_PROVIDERS, so enabling a provider adds its button and
-         * this entry together. Supabase and Vercel are hand-written because nothing in the code
-         * decides them; if that ever changes they belong in a constant too.
+         * this entry together. Infrastructure entries follow the hosting facts in AGENTS.md;
+         * they describe providers, not the upstream software we run ourselves.
          */
         ul: [
           ...(providers.length > 0
@@ -247,14 +191,18 @@ const sections: Section[] = [
                  * period, so a sentence that closed on it published "GitHub, Inc.." to the
                  * reader. Keep a clause after the list in every sentence that interpolates it.
                  */
-                `**Sign-in.** You sign in through ${entities}, and your identifier, email address, and name come back to us from there. Nothing else does. Each provider handles what it holds under its own privacy statement.`,
+                `**Sign-in.** You sign in through ${entities}, and your identifier, email address, and name come back to us from there. Nothing else does. Each provider handles what it holds under its own privacy statement. These sign-in providers are your choice and are not our processors.`,
               ]
             : []),
-          "**Supabase.** Hosting for the database, the authentication service, and the server-side functions. Everything described in this policy that we store is stored there. The production database is hosted in the United States (East US, North Virginia).",
-          "**Vercel.** Hosting for this website only. Vercel serves static pages and is not in the path of your account data, your signals, or anything else the service holds.",
+          "**Hetzner.** Production runs on one server in Falkenstein, Germany. It hosts this website, PostgreSQL 17, GoTrue authentication, PostgREST, Realtime, the Storage API, the Deno edge runtime, and OAuth for hosted MCP connections.",
+          "**Cloudflare.** DNS, proxying, TLS, and R2 object storage. File objects are stored in the commonswarm-files bucket; backups are stored in the yulan-vps-1-backups bucket.",
+          "**Resend.** Delivery of sign-in email through our authentication service's SMTP connection.",
         ],
       },
-      "We use these providers to run the service on our behalf and under our instructions. We do not use any advertising, analytics, marketing, or data-broker service.",
+      "Hetzner (hosting, Germany), Cloudflare (DNS, proxy, TLS, R2 file storage and backups) and Resend (transactional email) act as processors on our behalf under their standard data processing terms.",
+      "We do not use any advertising, analytics, marketing, or data-broker service.",
+      { sub: "Connected agents and apps" },
+      "Content returned to an agent or app is available to that client. AI assistants and agents you connect to CommonSwarm (for example through the hosted MCP connector) are tools you choose and control. Their handling, retention and training use of the data they access is governed by their own terms, not ours. We do not send your data to any AI provider on our own initiative. An AI client connected through hosted MCP can also receive workspace content through the tools it is allowed to use.",
       { sub: "Everyone else" },
       "We will disclose personal data outside that list only where we believe in good faith it is necessary to comply with law, a subpoena, or a court order; to enforce the [Terms of Service](/terms) or the [Acceptable Use Policy](/acceptable-use); to investigate fraud, abuse, or a security incident; or to protect the rights, safety, or property of anyone.",
       "If we are ever acquired, merged, or sell substantially all of our assets, data held in the service may transfer as part of that. We would tell you before your data became subject to a materially different policy.",
@@ -264,7 +212,8 @@ const sections: Section[] = [
     id: "retention",
     title: "How long we keep it",
     blocks: [
-      "We are a pre-launch, free service, and we do not yet operate a fixed retention schedule. Broadly:",
+      "Files and hosted MCP OAuth records are deleted when you delete them or your account. Backups age out within 35 days. A backup restore does not re-create deleted data except for disaster recovery, after which deletions are re-applied.",
+      "We are a pre-launch, free service, and retention varies by record type. Broadly:",
       {
         ul: [
           "**Account and membership records** are kept while your account exists.",
@@ -288,7 +237,7 @@ const sections: Section[] = [
           "**Credentials are stored as one-way hashes.** Invitation credentials and agent credentials are hashed before they are written; the originals exist only in the moment they are shown to you.",
           "**Reads are isolated per workspace at the database level.** The read surface is a set of views that filter on your live membership, so a query cannot reach a workspace you are not in even if the application asks it to.",
           "**Direct database access is denied by default.** Signed-in clients get no direct access to the underlying tables; they can only reach a restricted read surface and a single server-side command endpoint.",
-          "**On your own machine**, the CLI stores your session in your operating system keychain where one is available, and otherwise in a file with owner-only permissions in a directory it creates the same way. Deleting `~/.CommonSwarm` removes it.",
+          "**On your own machine**, the CLI stores your session in your operating system keychain where one is available, and otherwise in a file with owner-only permissions in a directory it creates the same way. The file fallback is stored under `~/.cswarm/credentials.d`; signing out clears the stored credential.",
           "**Records that matter cannot be rewritten.** Coordination and audit records are refused at the database level if something tries to change or delete them.",
         ],
       },
@@ -312,12 +261,12 @@ const sections: Section[] = [
   },
   {
     id: "regional",
-    title: "If you are outside the United States",
+    title: "Where data is processed",
     blocks: [
-      "We operate from the United States and our providers store data there or in the region noted above. If you use the service from elsewhere, your data is transferred to and processed in the United States, which may not give it the same protection as your own country's law. By using the service you understand that.",
+      "Primary processing takes place on our server in Germany. Cloudflare files, backups and email delivery may be processed in the United States. Our operator is in the United States.",
+      "Where data leaves the EEA or the UK, we rely on our providers' standard contractual clauses.",
       { sub: "EEA, UK, and Switzerland" },
       "Where the GDPR or the UK GDPR applies, our legal bases are: **performance of a contract** with you, for running the service and your account; **legitimate interests**, for security, abuse prevention, and keeping the service working; and **legal obligation**, where the law requires it. You have the rights to access, rectification, erasure, restriction, portability, and objection, and the right to complain to your supervisory authority.",
-      "Transfers to the United States rely on the European Commission's and the UK's standard contractual clauses as implemented by our providers. We have not appointed an Article 27 representative.",
       { sub: "California" },
       "California residents have the right to know what personal information we collect and why, to request deletion or correction, and not to be discriminated against for exercising those rights. **We do not sell personal information and we do not share it for cross-context behavioural advertising**, as those terms are defined in the CCPA. We have not disclosed personal information for a business purpose beyond the providers listed above.",
       "To exercise any of these rights, write to legal@commonswarm.com. We will verify your request against the account it concerns, and we will respond within the time the applicable law allows. We do not charge for this.",
@@ -341,7 +290,8 @@ const sections: Section[] = [
     id: "contact",
     title: "Contact",
     blocks: [
-      `${COMPANY_ADDRESS.name} — ${mailingAddress} — legal@commonswarm.com`,
+      COMPANY_ADDRESS_LINE,
+      "Contact us at legal@commonswarm.com.",
       "The current version of this policy is published at [https://commonswarm.com/privacy](https://commonswarm.com/privacy).",
     ],
   },
@@ -349,16 +299,16 @@ const sections: Section[] = [
 
 const title = "Privacy Policy";
 const description =
-  `What CommonSwarm stores, where it goes, and who can see it. The sign-in page offers ${doors}; content lives in our hosted database; this website has no cookies and no analytics.`;
+  `What CommonSwarm stores, where it goes, and who can see it. The sign-in page offers ${doors}; the database runs in Germany; Cloudflare handles traffic and file storage.`;
 ---
 
 <Base title={`${title} — CommonSwarm`} description={description} path="/privacy">
   <LegalDoc
     title={title}
-    lede="What we store, where it goes, and who can see it. Everything below describes what the service actually does today, not what a service like this usually does."
+    lede="What we store, where it goes, and who can see it. Effective 2 October 2026."
     effective={EFFECTIVE}
     updated={UPDATED}
     sections={sections}
-    draft={true}
+    draft={false}
   />
 </Base>
