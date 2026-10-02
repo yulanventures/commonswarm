@@ -72,8 +72,10 @@ commands during the window. No Actions, HOME changes, Mac Docker or browser.
 ## (a) Archive and read-only preflight
 
 Mac input: reviewed landed `OAUTH_RELEASE_SHA`. Run from a clean checkout.
-The public archive is copied to `/private/tmp` on the box; HezLead supplies
-its printed `OAUTH_ARCHIVE_SHA256` to the box shell.
+The public archive is copied as a mode-0600 file to the box's `/tmp` (1777),
+using a fresh suffix chosen by Mac `mktemp`. HezLead supplies its printed
+`OAUTH_ARCHIVE_SHA256` and `BOX_ARCHIVE_PATH` to the box shell. Mac staging
+remains under `/private/tmp`; the box's `/private` is root-only (0700).
 
 ```sh
 # step: hm37-oauth-archive
@@ -86,21 +88,29 @@ test -z "$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1
 git merge-base --is-ancestor "$OAUTH_RELEASE_SHA" origin/main || exit 1
 ARCHIVE_DIR=$(mktemp -d /private/tmp/hm37-oauth-archive.XXXXXX) || exit 1
 git archive --format=tar "$OAUTH_RELEASE_SHA" >"$ARCHIVE_DIR/release.tar" || exit 1
+chmod 0600 "$ARCHIVE_DIR/release.tar" || exit 1
+BOX_ARCHIVE_PATH=/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}-${ARCHIVE_DIR##*.}.tar
 shasum -a 256 "$ARCHIVE_DIR/release.tar" || exit 1
-scp "$ARCHIVE_DIR/release.tar" "ops@100.115.66.74:/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" || exit 1
+ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 \
+  "test \"\$(stat -c '%a' /tmp)\" = 1777 && (set -C; umask 077; : > '$BOX_ARCHIVE_PATH')" || exit 1
+scp -p "$ARCHIVE_DIR/release.tar" "ops@100.115.66.74:$BOX_ARCHIVE_PATH" || exit 1
+printf 'BOX_ARCHIVE_PATH=%s\n' "$BOX_ARCHIVE_PATH"
 printf 'Retain public archive until box reconciliation: %s\n' "$ARCHIVE_DIR"
 ```
 
 Preflight reads values only inside the process; it prints env **names** and
 safe identities. It creates no secret backups and changes no service. If
 any baseline differs, report the conflict and stop before opening the window.
+The sites import is resolved against `/etc/caddy`: both `sites/*.caddy`
+and `/etc/caddy/sites/*.caddy` match. Snapshot, switch-on and rollback use
+the same check; no step rewrites `/etc/caddy/Caddyfile`.
 
 ```sh
 # step: hm37-oauth-preflight
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-preflight line $LINENO" >&2' ERR
 python3 - <<'PY'
-import json, pathlib, subprocess
+import json, pathlib, posixpath, shlex, subprocess
 def inspect(name):
     return json.loads(subprocess.check_output(['docker','inspect',name], text=True))[0]
 for name, project, service, sha in [
@@ -147,15 +157,24 @@ for file in ['/etc/commonswarm-oauth/compose.env','/etc/commonswarm-oauth/servic
 site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
 assert 'import mcp_oauth_active' in site and '@mcp_unavailable' in site and '(mcp_resource_active)' in site
 assert 'import mcp_resource_active' not in site and 'reverse_proxy 127.0.0.1:3490' in site
-assert 'import /etc/caddy/sites/*.caddy' in pathlib.Path('/etc/caddy/Caddyfile').read_text()
+imports=[]
+for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
+    fields=shlex.split(line, comments=True)
+    if len(fields)==2 and fields[0]=='import':
+        imports.append(posixpath.normpath(posixpath.join('/etc/caddy', fields[1])))
+assert '/etc/caddy/sites/*.caddy' in imports, 'Caddy sites import differs after resolving against /etc/caddy'
 print('preflight baseline reconciled; no production mutation')
 PY
 ```
 
 ## Open window and retain rollback inputs
 
-Additional prompt inputs: `OAUTH_ARCHIVE_SHA256` and `BOX_RM_GUARD` (the exact
+Additional prompt inputs: `OAUTH_ARCHIVE_SHA256`, `BOX_ARCHIVE_PATH`, and `BOX_RM_GUARD` (the exact
 installed guarded-rm path, verified by HezLead; not measured by this worker).
+**TODO — BOX_RM_GUARD: HezLead must supply the box's `command -v rm` output
+for both ops and the approved root shell and confirm which installed guard
+the root steps must use. Do not open the window until this is resolved;
+no box guard path is assumed here.**
 Secret backups stay in a fresh mode-0700 `/private/tmp/anvil-secret.*`.
 If the guard refuses cleanup, leave the directory and report its exact path
 and refusal. Never bypass it. Retain old release/image and original files.
@@ -166,6 +185,7 @@ set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-open line $LINENO" >&2' ERR
 : "${OAUTH_RELEASE_SHA:?FAIL: reviewed landed SHA missing}"
 : "${OAUTH_ARCHIVE_SHA256:?FAIL: Mac archive hash missing}"
+: "${BOX_ARCHIVE_PATH:?FAIL: Mac-chosen box transport path missing}"
 : "${BOX_RM_GUARD:?FAIL: box rm guard not confirmed}"
 case "$OAUTH_RELEASE_SHA" in ''|*[!0-9a-f]*) echo 'FAIL: SHA format' >&2; exit 1;; esac
 test "${#OAUTH_RELEASE_SHA}" -eq 40 || exit 1
@@ -173,11 +193,23 @@ test "$(command -v rm)" = "$BOX_RM_GUARD" && test -x "$BOX_RM_GUARD" || exit 1
 OAUTH_RELEASE_DIR=/home/commonswarm/oauth/releases/$OAUTH_RELEASE_SHA
 PROOF_DIR=/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA
 test ! -e "$OAUTH_RELEASE_DIR" && test ! -e "$PROOF_DIR" || { echo 'FAIL: window already exists; do not overwrite it' >&2; exit 1; }
-test -f "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" || exit 1
-ACTUAL=$(sha256sum "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar") || exit 1
+python3 - "$BOX_ARCHIVE_PATH" "$OAUTH_RELEASE_SHA" <<'PY'
+import pathlib, re, sys
+path=pathlib.Path(sys.argv[1])
+assert re.fullmatch(r'/tmp/hm37-oauth-'+re.escape(sys.argv[2])+r'-[A-Za-z0-9]{6}\.tar',str(path)), 'archive transport boundary'
+assert path.is_file() and not path.is_symlink() and path.resolve(strict=True)==path
+assert path.stat().st_mode & 0o777==0o600, 'archive transport mode must be 0600'
+PY
+ACTUAL=$(sha256sum "$BOX_ARCHIVE_PATH") || exit 1
 test "${ACTUAL%% *}" = "$OAUTH_ARCHIVE_SHA256" || exit 1
+sudo -n install -d -m 0700 "$PROOF_DIR" || exit 1
+sudo -n install -o root -g root -m 0600 "$BOX_ARCHIVE_PATH" "$PROOF_DIR/release.tar" || exit 1
+ACTUAL=$(sha256sum "$PROOF_DIR/release.tar") || exit 1
+test "${ACTUAL%% *}" = "$OAUTH_ARCHIVE_SHA256" || exit 1
+rm -- "$BOX_ARCHIVE_PATH" || { echo "FAIL: guarded cleanup refused $BOX_ARCHIVE_PATH; report exact guard message" >&2; exit 1; }
+test ! -e "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH" || exit 1
 install -d -m 0755 "$OAUTH_RELEASE_DIR" || exit 1
-tar -xf "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" -C "$OAUTH_RELEASE_DIR" || exit 1
+tar -xf "$PROOF_DIR/release.tar" -C "$OAUTH_RELEASE_DIR" || exit 1
 printf '%s\n' "$OAUTH_RELEASE_SHA" >"$OAUTH_RELEASE_DIR/RELEASE_SHA"
 install -d -m 0700 "$PROOF_DIR" || exit 1
 install -d -m 1777 /private/tmp || exit 1
@@ -203,6 +235,17 @@ umask 077
 printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nOLD_OAUTH_DIR=%q\nEDGE_DIR=%q\nOLD_IMAGE=%q\nBOX_RM_GUARD=%q\n' \
   "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$OLD_OAUTH_DIR" "$EDGE_DIR" "$OLD_IMAGE" "$BOX_RM_GUARD" >"$STATE"
 cat >>"$STATE" <<'SH'
+caddy_sites_import() {
+python3 - <<'PY' || return 1
+import pathlib, posixpath, shlex
+imports=[]
+for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
+    fields=shlex.split(line, comments=True)
+    if len(fields)==2 and fields[0]=='import':
+        imports.append(posixpath.normpath(posixpath.join('/etc/caddy', fields[1])))
+assert '/etc/caddy/sites/*.caddy' in imports, 'Caddy sites import differs after resolving against /etc/caddy'
+PY
+}
 oauth_compose() {
   docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
     -f "$OAUTH_RELEASE_DIR/deploy/mcp-auth/compose.yaml" "$@"
@@ -228,6 +271,7 @@ healthy() {
   echo "FAIL: unhealthy container $1" >&2; return 1
 }
 rollback_to_off() {
+  caddy_sites_import || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || return 1
   cat "$SECRET_STAGE/edge.off.env" >/home/commonswarm/.env || return 1
@@ -299,6 +343,9 @@ print('OAuth memory <80%: PASS')
 PY
 }
 SH
+. "$STATE"
+caddy_sites_import || exit 1
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
 
@@ -447,6 +494,7 @@ Then run the marked route probe with `MCP_EXPECTED_MODE=off` before cleanup.
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-rollback line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+caddy_sites_import || exit 1
 test "$OLD_OAUTH_DIR" = /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05 || exit 1
 test "$OLD_IMAGE" = sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a || exit 1
 docker image inspect "$OLD_IMAGE" >/dev/null || exit 1
@@ -509,6 +557,7 @@ Keep the OAuth loopback upstream, certificate, log filters and method bounds.
 set -euo pipefail
 test "${TOM_ENABLE_APPROVAL:-}" = 2026-09-29 || { echo 'FAIL: named HezLead switch-on approval missing' >&2; exit 1; }
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+caddy_sites_import || exit 1
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
