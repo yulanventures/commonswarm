@@ -372,8 +372,10 @@ signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
 click-through or reduced-control fallback. Close stops only the task-owned
 headless process and removes its private profile through guarded rm.
 
-Preflight uses a unique named harness daemon and private runtime directory;
-its EXIT trap stops that daemon on success or failure, never the default daemon.
+Each browser step uses a unique named harness daemon derived from the window ID,
+step, and private-root suffix, with its own private runtime directory. Its EXIT
+trap stops only that exact named daemon on success or failure. Later controls
+reuse the task-owned headless process/profile and leave removal to window close.
 The headless process/profile remain available to later controls on success.
 Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
@@ -383,7 +385,10 @@ setup failed before Python started. Steps 1–13 are attachment, navigation,
 document load, app readiness, state snapshot, keychain/challenge check, branch
 selection, account label, user identity, starting workspace, workspace switch,
 switch wait, and receipt write. STEP 4 requires a non-loading dashboard state
-and exactly one visible panel before reading sign-in state.
+and exactly one visible panel before reading sign-in state. Acceptance and
+rollback controls repeat this same attachment and readiness check after navigation
+to `/app`; their numbered stages and filtered summaries identify failures without
+retaining raw browser output in the public evidence directory.
 
 ```sh
 # step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium identity and workspace preflight
@@ -435,7 +440,7 @@ and exactly one visible panel before reading sign-in state.
   chmod 0700 "$browser_root"
   private_evidence="$browser_root/evidence"
   harness_runtime="$browser_root/harness-runtime"
-  harness_name="site-preflight-${browser_root##*.}"
+  harness_name="site-${SITE_WINDOW_ID}-03-${browser_root##*.}"
   mkdir -m 0700 "$private_evidence" "$harness_runtime"
   harness_stdout="$private_evidence/harness.stdout"
   harness_stderr="$private_evidence/harness.stderr"
@@ -986,12 +991,75 @@ automatically.
   . "$HOME/.commonswarm-site-window.env"
   export SITE_EVIDENCE SITE_CHROME_ENDPOINT
   set +e
-  BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import base64,json,os,pathlib,re,time
+  # Capture the complete control failure without echoing its Python/source text.
+  trap - ERR
+  (
+    set -e
+    umask 077
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
+    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
+    browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
+    case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
+    endpoint="$SITE_CHROME_ENDPOINT"
+    private_evidence="$SITE_BROWSER_ROOT/site-05-browser-acceptance-evidence"
+    harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-05"
+    harness_name="site-${SITE_WINDOW_ID}-05-${SITE_BROWSER_ROOT##*.}"
+    mkdir -m 0700 "$private_evidence" "$harness_runtime"
+    harness_stdout="$private_evidence/harness.stdout"
+    harness_stderr="$private_evidence/harness.stderr"
+    : >"$harness_stdout"; : >"$harness_stderr"
+    chmod 0600 "$harness_stdout" "$harness_stderr"
+    harness_started=0
+    cleanup_browser_control() {
+      status=$?
+      trap - EXIT
+      if [ "$harness_started" -eq 1 ]; then
+        # --reload only stops; these exact name/runtime settings never address default.
+        if ! BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+          BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+          BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
+          browser-harness --reload >"$private_evidence/harness-stop.stdout" \
+          2>"$private_evidence/harness-stop.stderr"; then
+          printf '%s\n' 'STOP: named site-05-browser-acceptance daemon cleanup failed; details withheld' >&2
+          status=1
+        fi
+      fi
+      # The headless process/profile belong to the window; only close removes them.
+      exit "$status"
+    }
+    trap cleanup_browser_control EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    browser_status=0
+    harness_started=1
+    BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+      BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+      BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 BH_TAB_MARKER=0 \
+      browser-harness >"$harness_stdout" 2>"$harness_stderr" <<'PY' || browser_status=$?
+import base64,json,os,pathlib,re,time,urllib.request
+print("STEP 1", flush=True)
+endpoint = os.environ["BU_CDP_URL"]
+def endpoint_json(path):
+    # Loopback only; bypass ambient HTTP proxies. Never print endpoint responses.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(endpoint + path, timeout=5) as response:
+        return json.load(response)
+version = endpoint_json("/json/version")
+attached_version = cdp("Browser.getVersion")
+attached_target = current_tab()["targetId"]
+if (not version.get("webSocketDebuggerUrl", "").startswith(
+        endpoint.replace("http://", "ws://", 1) + "/devtools/browser/")
+    or "HeadlessChrome/" not in attached_version.get("userAgent", "")
+    or attached_version.get("product") != version.get("Browser")
+    or attached_version.get("userAgent") != version.get("User-Agent")
+    or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
+    raise SystemExit("STOP: STEP 1 endpoint ownership")
 expected_user="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"; expected_workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
 start_workspace="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
-branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+print("STEP 2", flush=True)
 cdp("Page.addScriptToEvaluateOnNewDocument",source="""
 window.__siteControlErrors=[];
 addEventListener('error',e=>window.__siteControlErrors.push(String(e.message||'error')));
@@ -999,7 +1067,24 @@ addEventListener('unhandledrejection',e=>window.__siteControlErrors.push(String(
 const originalConsoleError=console.error.bind(console);
 console.error=(...args)=>{window.__siteControlErrors.push('console.error');originalConsoleError(...args)};
 """)
-goto_url("https://commonswarm.com/app?w="+expected_workspace); wait_for_load()
+goto_url("https://commonswarm.com/app?w="+expected_workspace)
+print("STEP 3", flush=True)
+if not wait_for_load(): raise SystemExit("STOP: STEP 3 document load timeout")
+print("STEP 4", flush=True)
+deadline = time.monotonic() + 30
+ready = False
+while time.monotonic() < deadline:
+    ready = js("""(() => {
+      const app=document.querySelector('live-dashboard[data-state]');
+      if(!app || !app.dataset.state || app.dataset.state==='loading') return false;
+      if(!app.querySelector('[data-panel="signed-out"]')) return false;
+      const visible=[...app.querySelectorAll('.dashboard__root > [data-panel]')]
+        .filter(panel=>!panel.hidden && panel.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
+      return visible.length===1 && visible[0].dataset.panel===app.dataset.state;
+    })()""")
+    if ready: break
+    time.sleep(.25)
+if not ready: raise SystemExit("STOP: STEP 4 app readiness timeout")
 def inspect():
     return js("""(() => {
       let userId=''; for(const key of Object.keys(localStorage)){if(!key.startsWith('sb-')||!key.endsWith('-auth-token'))continue;
@@ -1013,11 +1098,12 @@ def inspect():
       connectedSurface:!!document.querySelector('[data-connected-apps-open]'),
       connectedCreateAction:!!dialog&&[...dialog.querySelectorAll('button,a')].some(x=>/^(?:connect\\b|create\\b|add app\\b)/i.test((x.textContent||'').trim())),
       errors:window.__siteControlErrors||[]};})()""")
-for _ in range(60):
-    observed=inspect()
-    if observed.get("signedOut") or observed.get("workspaceId"): break
-    time.sleep(1)
+print("STEP 5", flush=True)
+branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+observed=inspect()
+print("STEP 6", flush=True)
 if branch=="FULL-CONTROL":
+    print("STEP 7", flush=True)
     if observed["userId"]!=expected_user or observed["workspaceId"]!=expected_workspace: raise SystemExit(1)
     if observed["display"]!="Ridgeio": raise SystemExit(1)
     workspace_state=js("""(() => ({
@@ -1031,6 +1117,7 @@ if branch=="FULL-CONTROL":
         raise SystemExit(1)
     if not workspace_state["h0"] or workspace_state["workspaceError"]:
         raise SystemExit(1)
+    print("STEP 8", flush=True)
     asset_paths=[]
     for line in (evidence/"site-05-public.txt").read_text(encoding="utf-8").splitlines():
         match=re.match(r"asset_sha256=[0-9a-f]{64} (/_astro/.+)",line)
@@ -1038,6 +1125,7 @@ if branch=="FULL-CONTROL":
     loaded=js("performance.getEntriesByType('resource').map(entry => new URL(entry.name).pathname)")
     if not asset_paths or not all(path in loaded for path in asset_paths): raise SystemExit(1)
     if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    print("STEP 9", flush=True)
     js("document.querySelector('[data-user-menu-trigger]').click()")
     js("document.querySelector('[data-connected-apps-open]').click()")
     connected_list={}
@@ -1053,6 +1141,7 @@ if branch=="FULL-CONTROL":
         if connected_list["failed"] or "Nothing was changed" in connected_list["status"]: break
         if connected_list["text"] and not connected_list["status"]: break
         time.sleep(.5)
+    print("STEP 10", flush=True)
     if connected_list["failed"] or connected_list["status"]: raise SystemExit(1)
     if connected_list["text"]=="No apps are connected to this account." and connected_list["cardCount"]==0:
         connected_apps_state="EMPTY"
@@ -1063,10 +1152,12 @@ if branch=="FULL-CONTROL":
     if js("!document.querySelector('[data-connected-apps-retry]').hidden"): raise SystemExit(1)
     if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
     if inspect()["connectedCreateAction"] or inspect()["errors"]: raise SystemExit(1)
+    print("STEP 11", flush=True)
     dialog_clip=js("""(() => {const r=document.querySelector('[data-connected-apps-dialog]').getBoundingClientRect();
       return{x:r.x,y:r.y,width:r.width,height:r.height,scale:1};})()""")
     dialog_png=cdp("Page.captureScreenshot",format="png",fromSurface=True,clip=dialog_clip)["data"]
     dialog_path=evidence/"site-05-connected-apps.png"; dialog_path.write_bytes(base64.b64decode(dialog_png)); dialog_path.chmod(0o600)
+    print("STEP 12", flush=True)
     geometry={}
     for width,height in ((320,568),(390,844)):
         cdp("Emulation.setDeviceMetricsOverride",width=width,height=height,deviceScaleFactor=1,mobile=True); time.sleep(.5)
@@ -1085,6 +1176,7 @@ if branch=="FULL-CONTROL":
         mobile_path.write_bytes(base64.b64decode(mobile_png)); mobile_path.chmod(0o600)
     cdp("Emulation.clearDeviceMetricsOverride")
     if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    print("STEP 13", flush=True)
     js("document.querySelector('[data-connected-apps-close]').click()")
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     switched=js("""(() => { const target=document.querySelector(
@@ -1106,10 +1198,61 @@ else:
     result={"branch":"REDUCED-CONTROL","signed_out_bundle_connected_apps_surface":"PASS",
       "signed_out_bundle_creation_action_absent":"PASS","signed_in_connected_apps_load":"NOT PROVED",
       "signed_in_empty_state":"NOT PROVED","signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED"}
+print("STEP 14", flush=True)
 path=evidence/"site-05-browser.json"; path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
+    python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
+import collections, pathlib, re, sys
+stdout, stderr = map(pathlib.Path, sys.argv[1:3])
+code = int(sys.argv[3])
+names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
+    4:"app readiness", 5:"state snapshot", 6:"branch selection", 7:"identity/workspace",
+    8:"assets", 9:"Connected apps view", 10:"Connected apps assertions",
+    11:"dialog screenshot", 12:"mobile geometry", 13:"workspace restore", 14:"receipt write"}
+step = 0
+with stdout.open(encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = re.fullmatch(r"STEP ([1-9]|1[0-4])\n?", line)
+        if match: step = int(match[1])
+# Reject sensitive-looking lines, then emit only fixed categories/line numbers.
+# No arbitrary message, source-code line, URL, file path or exception detail passes.
+unsafe = re.compile(r"token|jwt|email|cookie|session|bearer|credential|password|secret|"
+    r"authorization|localstorage|@|https?://|wss?://|eyJ[A-Za-z0-9_-]*\.|"
+    r"[A-Za-z0-9_+/=-]{24,}|[\x00-\x08\x0b-\x1f\x7f]", re.I)
+classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefusedError",
+    "OSError", "PermissionError", "FileNotFoundError", "KeyError", "ValueError",
+    "TypeError", "AssertionError", "SyntaxError", "ImportError", "ModuleNotFoundError")
+named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
+    "STOP: STEP 4 app readiness timeout"}
+with stderr.open(encoding="utf-8", errors="replace") as stream:
+    tail = collections.deque(stream, maxlen=20)
+safe = []
+for raw in tail:
+    line = raw.rstrip("\n")
+    if unsafe.search(line): continue
+    if line in named:
+        safe.append(line)
+        continue
+    for kind in classes:
+        if line == kind or line.startswith(kind + ":"):
+            safe.append(kind + " (details withheld)")
+            break
+    else:
+        match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
+        if match: safe.append("Python line " + match[1])
+summary = [f"site-05-browser-acceptance: STEP {step} ({names[step]}); exit code {code}"]
+summary += ["stderr: " + line for line in safe[-8:]]
+if not safe: summary.append("stderr: no safe detail retained")
+text = "\n".join(summary) + "\n"
+path = pathlib.Path(sys.argv[4]) / "site-05-browser-acceptance-summary.txt"
+path.write_text(text, encoding="utf-8"); path.chmod(0o600)
+print(text, end="")
+PY
+    if [ "$browser_status" -ne 0 ]; then exit "$browser_status"; fi
+  )
   browser_status=$?
   set -e
+  trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   if test "$browser_status" -ne 0; then
     pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
@@ -1166,37 +1309,170 @@ PY
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"
   export SITE_EVIDENCE
-  BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import json,os,pathlib,time
+  umask 077
+  case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+  test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
+  test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+  test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
+  browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
+  case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
+  endpoint="$SITE_CHROME_ENDPOINT"
+  private_evidence="$SITE_BROWSER_ROOT/site-06-evidence"
+  harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-06"
+  harness_name="site-${SITE_WINDOW_ID}-06-${SITE_BROWSER_ROOT##*.}"
+  mkdir -m 0700 "$private_evidence" "$harness_runtime"
+  harness_stdout="$private_evidence/harness.stdout"
+  harness_stderr="$private_evidence/harness.stderr"
+  : >"$harness_stdout"; : >"$harness_stderr"
+  chmod 0600 "$harness_stdout" "$harness_stderr"
+  harness_started=0
+  cleanup_browser_control() {
+    status=$?
+    trap - EXIT
+    if [ "$harness_started" -eq 1 ]; then
+      # --reload only stops; these exact name/runtime settings never address default.
+      if ! BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+        BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+        BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
+        browser-harness --reload >"$private_evidence/harness-stop.stdout" \
+        2>"$private_evidence/harness-stop.stderr"; then
+        printf '%s\n' 'STOP: named site-06 daemon cleanup failed; details withheld' >&2
+        status=1
+      fi
+    fi
+    # The headless process/profile belong to the window; only close removes them.
+    exit "$status"
+  }
+  trap cleanup_browser_control EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  browser_status=0
+  harness_started=1
+  BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+    BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+    BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 BH_TAB_MARKER=0 \
+    browser-harness >"$harness_stdout" 2>"$harness_stderr" <<'PY' || browser_status=$?
+import json,os,pathlib,time,urllib.request
+print("STEP 1", flush=True)
+endpoint = os.environ["BU_CDP_URL"]
+def endpoint_json(path):
+    # Loopback only; bypass ambient HTTP proxies. Never print endpoint responses.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(endpoint + path, timeout=5) as response:
+        return json.load(response)
+version = endpoint_json("/json/version")
+attached_version = cdp("Browser.getVersion")
+attached_target = current_tab()["targetId"]
+if (not version.get("webSocketDebuggerUrl", "").startswith(
+        endpoint.replace("http://", "ws://", 1) + "/devtools/browser/")
+    or "HeadlessChrome/" not in attached_version.get("userAgent", "")
+    or attached_version.get("product") != version.get("Browser")
+    or attached_version.get("userAgent") != version.get("User-Agent")
+    or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
+    raise SystemExit("STOP: STEP 1 endpoint ownership")
 workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
 start="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
+print("STEP 2", flush=True)
+goto_url("https://commonswarm.com/app")
+print("STEP 3", flush=True)
+if not wait_for_load(): raise SystemExit("STOP: STEP 3 document load timeout")
+print("STEP 4", flush=True)
+deadline = time.monotonic() + 30
+ready = False
+while time.monotonic() < deadline:
+    ready = js("""(() => {
+      const app=document.querySelector('live-dashboard[data-state]');
+      if(!app || !app.dataset.state || app.dataset.state==='loading') return false;
+      if(!app.querySelector('[data-panel="signed-out"]')) return false;
+      const visible=[...app.querySelectorAll('.dashboard__root > [data-panel]')]
+        .filter(panel=>!panel.hidden && panel.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
+      return visible.length===1 && visible[0].dataset.panel===app.dataset.state;
+    })()""")
+    if ready: break
+    time.sleep(.25)
+if not ready: raise SystemExit("STOP: STEP 4 app readiness timeout")
+print("STEP 5", flush=True)
 branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
-goto_url("https://commonswarm.com/app"); wait_for_load()
 if branch=="FULL-CONTROL":
+    print("STEP 6", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     if not js("""(() => {const target=document.querySelector(
       '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
       if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    print("STEP 7", flush=True)
     for _ in range(60):
         selected=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
         if selected==workspace: break
         time.sleep(.5)
     if selected!=workspace: raise SystemExit(1)
+    print("STEP 8", flush=True)
     # Workspace is asserted before this rollback-view control.
     if js("document.querySelector('[data-rail-account]')?.textContent?.trim()")!="Ridgeio": raise SystemExit(1)
+    print("STEP 9", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     if not js("""(() => {const target=document.querySelector(
       '[data-workspace-list] [data-workspace-id="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"]');
       if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    print("STEP 10", flush=True)
     for _ in range(60):
         restored=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
         if restored==start: break
         time.sleep(.5)
     if restored!=start: raise SystemExit(1)
 else:
+    print("STEP 11", flush=True)
     if not js("!document.querySelector('[data-panel=\"signed-out\"]')?.hasAttribute('hidden')"): raise SystemExit(1)
+print("STEP 12", flush=True)
 PY
+  python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
+import collections, pathlib, re, sys
+stdout, stderr = map(pathlib.Path, sys.argv[1:3])
+code = int(sys.argv[3])
+names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
+    4:"app readiness", 5:"branch selection", 6:"workspace switch", 7:"switch wait",
+    8:"account label", 9:"workspace restore", 10:"restore wait",
+    11:"signed-out assertion", 12:"completed"}
+step = 0
+with stdout.open(encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = re.fullmatch(r"STEP ([1-9]|1[0-2])\n?", line)
+        if match: step = int(match[1])
+# Reject sensitive-looking lines, then emit only fixed categories/line numbers.
+# No arbitrary message, source-code line, URL, file path or exception detail passes.
+unsafe = re.compile(r"token|jwt|email|cookie|session|bearer|credential|password|secret|"
+    r"authorization|localstorage|@|https?://|wss?://|eyJ[A-Za-z0-9_-]*\.|"
+    r"[A-Za-z0-9_+/=-]{24,}|[\x00-\x08\x0b-\x1f\x7f]", re.I)
+classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefusedError",
+    "OSError", "PermissionError", "FileNotFoundError", "KeyError", "ValueError",
+    "TypeError", "AssertionError", "SyntaxError", "ImportError", "ModuleNotFoundError")
+named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
+    "STOP: STEP 4 app readiness timeout"}
+with stderr.open(encoding="utf-8", errors="replace") as stream:
+    tail = collections.deque(stream, maxlen=20)
+safe = []
+for raw in tail:
+    line = raw.rstrip("\n")
+    if unsafe.search(line): continue
+    if line in named:
+        safe.append(line)
+        continue
+    for kind in classes:
+        if line == kind or line.startswith(kind + ":"):
+            safe.append(kind + " (details withheld)")
+            break
+    else:
+        match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
+        if match: safe.append("Python line " + match[1])
+summary = [f"site-06-browser: STEP {step} ({names[step]}); exit code {code}"]
+summary += ["stderr: " + line for line in safe[-8:]]
+if not safe: summary.append("stderr: no safe detail retained")
+text = "\n".join(summary) + "\n"
+path = pathlib.Path(sys.argv[4]) / "site-06-browser-summary.txt"
+path.write_text(text, encoding="utf-8"); path.chmod(0o600)
+print(text, end="")
+PY
+  if [ "$browser_status" -ne 0 ]; then exit "$browser_status"; fi
 )
 ```
 
