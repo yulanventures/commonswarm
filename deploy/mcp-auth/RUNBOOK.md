@@ -134,6 +134,17 @@ keys and the OAuth artifact database credential are unchanged. No new
 1Password item name is defined here; HezLead supplies existing item references
 in vault **Yulan Ventures Infra** if recovery is needed.
 
+The HM37 procedure takes `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE`
+from HezLead's measured live OFF report. Preflight/open compare them to the
+running container and capture its release/base Compose path from labels;
+full rollback uses that captured path and immutable image. The expected next
+baseline is 972df171 / 80b52aa6; 826db6a3 / 5511a358 is historical. Preserve
+the baseline proof directory and use a different landed `OAUTH_RELEASE_SHA`
+for a fresh window. OFF/disable restores the exact original service/edge env
+bytes, including absent flags; only Compose stays on the new OFF image.
+Full rollback also restores the baseline Compose env/image. Follow the exact
+rerun order and named input sources in RELEASE.md; do not resume a closed window.
+
 The Dockerfile now uses the **clean exact-SHA repository archive root** as its
 build context because it packages the shared lane-2 source. The two stages
 use the same digest-pinned base. `git archive` excludes untracked files,
