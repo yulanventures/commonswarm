@@ -230,6 +230,11 @@ try {
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
     await db.begin(async tx => {
+      // Additive OAuth schema depends on these predecessor tables. Its reserves
+      // refuse if artifacts exist; this isolated legacy drill has none.
+      for (const version of ['20261003000003','20261003000002','20261003000001']) {
+        await tx.unsafe(await Deno.readTextFile(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
+      }
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000005-rollback.sql'));
       const [historyAbsent] = await tx`SELECT to_regprocedure('swarm.admin_routine_workspace_history(uuid,uuid,uuid)') AS fn`;
       check(historyAbsent.fn === null, 'rollback removes routine history function');
@@ -250,6 +255,9 @@ try {
       check(readRestored.fn !== null, 'migration restores human recovery function');
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;
       check(restored.relation !== null, 'migration restores grants');
+      for (const name of ['20261003000001_admin_oauth_bindings.sql','20261003000002_admin_oauth_policy.sql','20261003000003_admin_oauth_cutover.sql']) {
+        await tx.unsafe(await Deno.readTextFile(`supabase/migrations/${name}`));
+      }
       control = true;
       throw new Error('rollback drill');
     }).catch(() => {});

@@ -27,7 +27,7 @@
     "test:p1-local": "node --import tsx --test --test-concurrency=1 tests/p1-local/local-integration.test.ts tests/p1-local/file-artifacts-e2e.test.ts tests/p1-local/delivery-receipts-postgres.test.ts tests/p1-local/human-seen-browser.test.ts tests/p1-local/standing-grants-postgres.test.ts tests/p1-local/activity-realtime-auth.test.ts tests/p1-local/chat-channels-postgres.test.ts tests/p1-local/chat-recipients-postgres.test.ts tests/p1-local/wake-realtime-auth.test.ts tests/p1-local/idempotency-retention.test.ts",
     "test:uxtest": "node --import tsx --test tests/uxtest-harness.test.ts",
     "pretest:p1-server": "npm run build:command-core",
-    "test:p1-server": "node --import tsx --test --test-concurrency=1 tests/p1-server/**/*.test.ts",
+    "test:p1-server": "node --import tsx --test --test-concurrency=1 tests/p1-server/admin-schema-isolation.test.ts tests/p1-server/legacy-db-fence.test.ts tests/p1-server/**/*.test.ts",
     "prebuild": "rm -rf dist",
     "postbuild": "chmod 755 dist/cli.js",
     "db:start": "supabase start",
