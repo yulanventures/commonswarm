@@ -792,7 +792,7 @@ try {
   url.hostname = "db.commonswarm.internal";
   const ssl = { ca: fs.readFileSync("/etc/ssl/yulan-internal-ca.pem", "utf8").trim(), servername: "db.commonswarm.internal", rejectUnauthorized: true };
   requireCheck(ssl.ca.includes("-----BEGIN CERTIFICATE-----"), 10, "mounted TLS CA contains a certificate");
-  // Grant numbers follow the fixed role/schema/table/function traversal below.
+  // Grant numbers follow the fixed role/schema/table/behavior traversal below.
   let grantRequirement = 11;
   check = "edge login connection with verified CA/servername";
   db = postgres(url.href, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 3, ssl, onnotice() {} });
@@ -837,15 +837,18 @@ try {
         }
       }
       if (role === "swarm_read") {
-        for (const signature of ["auth.uid()", "swarm.is_member(uuid,uuid)"]) {
-          check = `EXECUTE ON FUNCTION ${signature} TO swarm_read`;
-          const rows = await tx`SELECT has_function_privilege(current_user, ${signature}, 'EXECUTE') AS allowed`;
-          requireCheck(rows[0]?.allowed === true, grantRequirement++, check);
-        }
+        // The workspaces view is definer-rights, owned by swarm_admin:
+        // 20260724000002_status_workspaces.sql:28 preserves ownership through
+        // 20260820000001_hide_archived_workspaces.sql:6-15 (security_barrier only).
+        // Check the view behavior under SET ROLE swarm_read; resolving auth.uid()
+        // by text here would require unnecessary USAGE on the auth schema.
         check = "SELECT ON swarm_read.workspaces with verified-user claims (including view dependencies)";
         await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({sub: "00000000-0000-4000-8000-000000000000", role: "authenticated"})}, true)`;
         const rows = await tx`SELECT workspace_id, name FROM swarm_read.workspaces LIMIT 1`;
         requireCheck(rows.length === 0, grantRequirement++, check);
+        check = "management workspace listing ON swarm_read.workspaces with verified-user claims under SET ROLE swarm_read";
+        const listing = await tx`SELECT workspace_id AS id, name FROM swarm_read.workspaces ORDER BY name, workspace_id`;
+        requireCheck(listing.length === 0, grantRequirement++, check);
       }
     });
   }
