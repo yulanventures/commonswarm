@@ -97,8 +97,8 @@ const providers = await enabledProvidersForBuild({
 const doors = signInDoors(providers);
 const entities = providerEntities(providers);
 
-const EFFECTIVE = "27 July 2026";
-const UPDATED = "29 July 2026";
+const EFFECTIVE = "[DECISION FOR TOM: Set an effective date after approving this draft.]";
+const UPDATED = "2 October 2026";
 const mailingAddress = COMPANY_ADDRESS_LINE.slice(COMPANY_ADDRESS.name.length + 2);
 
 const sections: Section[] = [
@@ -232,7 +232,7 @@ const sections: Section[] = [
     id: "third-parties",
     title: "Third-party services",
     blocks: [
-      "The Service depends on services we do not control, including the providers we offer for sign-in and our hosting and database providers. Their availability, behaviour, terms, and pricing are theirs, not ours. We are not responsible for anything they do or fail to do, and an outage or a change on their side is not a breach of these Terms by us.",
+      "The Service depends on services we do not control, including the providers we offer for sign-in, Hetzner for server hosting, Cloudflare for traffic and storage, and Resend for sign-in email. Their availability, behaviour, terms, and pricing are theirs, not ours. We are not responsible for anything they do or fail to do, and an outage or a change on their side is not a breach of these Terms by us.",
       ...(providers.length > 0
         ? [
             // The entity list never ends the sentence: "GitHub, Inc." carries its own period,
