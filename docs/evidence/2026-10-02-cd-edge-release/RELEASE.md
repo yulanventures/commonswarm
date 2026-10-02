@@ -7,24 +7,31 @@ Window 2 left migrations 20261001000001..05 applied and restored edge to
 not a worker measurement. OAuth `00e89738`, stack `ad964ed1`, site `603a206e`,
 MCP ON and the live byte-equal 2 GiB override are required by the edge gates.
 
-The exact 810b44dc request has no repository-controlled 403 before read's
-admin-credential refusal. API Caddy directly proxies `/functions/v1/read` to
-9000; the production router dispatches to `/read` without JWT/apikey admission;
-read returns `credential_kind_forbidden` before method/body/auth work. Its CORS
-wrapper preserves that body. **The responder in window 2 is NOT PROVED**:
-the body was discarded and container logs are gone. Possible external ingress
-policy, a live Caddy/config/source discrepancy or request alteration cannot be
-selected without new evidence. Do not change a security guard or accept generic
-`forbidden` speculatively. Preserve the intended credential-kind contract.
-This plan fixes the diagnostic loss and compares loopback with public ingress.
+HezLead's read-only box probes confirmed that window 2 tested Cloudflare
+Browser Integrity Check: Python-urllib/3.12 received 403, server=cloudflare,
+body "error code: 1010", before Caddy. With curl/8.7.1 the same synthetic
+request reached baseline edge 65a6caf0 and returned 400 invalid_request.
+These are supplied measurements. RESULT-2's unresolved-responder diagnosis is
+superseded. Content-type cannot distinguish Cloudflare from the edge.
+
+The direct admin contract probe targets
+`http://127.0.0.1:9000/functions/v1/read` with `Host: api.commonswarm.com`.
+At RELEASE_SHA, deploy/edge-runtime/main/router.ts strips `/functions/v1/`
+and dispatches read; deploy/supabase-stack/commonswarm-api.caddy proxies that
+path unchanged and preserves Host (only X-Forwarded-For is overridden).
+The public end-to-end probe sets `User-Agent: curl/8.7.1`. Both must return
+403 with the exact JSON error `credential_kind_forbidden`; a Cloudflare server
+header alone does not prove a block because successful edge traffic is proxied.
+A Cloudflare response without that contract, or an "error code: NNNN" body,
+fails as `cloudflare_block`. Preserve the credential-kind security boundary.
 
 This is an edge release only: no DDL, migration apply/rollback, admin activation,
 stack release directory/current, OAuth/site/image or persistent env change.
-The 400-after-initialized and Claim-seat changes are not on the starting main
-and are excluded. Runtime inventory remains byte-identical to `810b44dc` across
-supabase/functions, supabase/migrations, deploy/edge-runtime and deploy/supabase-stack;
-cd-archive enforces that inventory. Any later runtime delta requires a new review
-and updated inventory gate. Tests/prose in the archive do not change the runtime.
+The tools/list params repair ships in this release; Claim-seat changes remain
+excluded. Runtime inventory must match `810b44dc` except for the reviewed
+`supabase/functions/mcp/protocol.ts` list-params repair. cd-archive enforces
+that exact path exception and requires the hosted auth/protocol gate at the
+landed RELEASE_SHA. Any other runtime delta requires a new review and plan.
 
 Use the [generalized ON edge plan](../2026-10-02-edge-mcp-release/RELEASE.md)
 verbatim, including every gate, override carry, rollback, failed-open cleanup,
@@ -80,6 +87,7 @@ npm run check:edge: PASS
 node --import tsx --test tests/release-proof-format.test.ts: PASS
 both release plans /bin/bash -n: PASS
 node --import tsx --test tests/p1-cli/admin-worker-boundary.test.ts: PASS
+node --import tsx --test tests/hosted-mcp-auth.test.ts tests/hosted-mcp-protocol.test.ts: PASS
 ```
 
 "both release plans" means this follow-up and the generalized ON edge plan.
@@ -115,16 +123,17 @@ outage and STOP; never close or claim ON without verification. Partial open
 uses edge-mcp-open-abort exactly as the generalized plan specifies.
 
 Smoke receipts in the **edge** proof directory retain only probe label, status,
-normalized content type (known media only; others become "other"), bounded
-sample size (131073 means at least that many bytes), and the error field only
-when `^[a-z_]{1,64}$` matches. They are written incrementally on PASS and FAIL;
-precondition failure has an empty failure receipt. Transport/malformed/oversize
-responses never expose exception text or body. On FAIL, print only probe name
-and allowlisted error or <absent_or_redacted>. The fixture has no real credential
-and no apikey; preserve the original public request and default urllib agent.
-Loopback health is the positive control; loopback read distinguishes an edge
-contract failure from a public-only mismatch. No admin or authenticated MCP
-success is claimed. All schemas/catalogs/ledger and cron stay unchanged.
+normalized content type (known media only; others become "other"), server
+(cloudflare/caddy, otherwise "other" or null), bounded sample size (131073 means
+at least that many bytes), and the error field only when `^[a-z_]{1,64}$ matches.
+They are written incrementally on PASS and FAIL; precondition failure has an
+empty failure receipt. On FAIL, print these same redacted metadata plus a stable
+failure name; never print raw headers/body, token or exception text. Loopback
+health is the positive control. Direct read proves the new edge contract without
+Cloudflare, and public read proves ingress with the explicit curl agent. The
+fixture has no real credential and no apikey. Authenticated admin and MCP tools
+success remain NOT PROVED; no tools/list smoke requiring a real bearer is added.
+All schemas/catalogs/ledger and cron stay unchanged.
 
 Retain exact-SHA gate inputs/checksums, five ledger/catalog=t receipts,
 applied-before/closed-ledger, routine backfill, cron comparison, edge config/env
@@ -150,7 +159,8 @@ git fetch origin main
 test "$(git rev-parse "${RELEASE_SHA}^{commit}")" = "$RELEASE_SHA"
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
 git merge-base --is-ancestor 810b44dc71b89a2a02979eecc38c0dcbc24cf2a2 "$RELEASE_SHA"
-git diff --quiet 810b44dc71b89a2a02979eecc38c0dcbc24cf2a2 "$RELEASE_SHA" -- supabase/functions supabase/migrations deploy/edge-runtime deploy/supabase-stack
+git diff --quiet 810b44dc71b89a2a02979eecc38c0dcbc24cf2a2 "$RELEASE_SHA" -- supabase/functions supabase/migrations deploy/edge-runtime deploy/supabase-stack \
+ ':(exclude)supabase/functions/mcp/protocol.ts'
 python3 - "$CD_PLAN_FILE" "$EDGE_PLAN_FILE" "$GATE_EVIDENCE_FILE" "$RELEASE_SHA" <<'PYCODE'
 import pathlib,subprocess,sys
 for value,relative in zip(sys.argv[1:3],['docs/evidence/2026-10-02-cd-edge-release/RELEASE.md','docs/evidence/2026-10-02-edge-mcp-release/RELEASE.md']):
@@ -163,6 +173,7 @@ for gate in ['npm run build:command-core && git diff --exit-code supabase/functi
  'npm run check:edge','node --import tsx --test tests/release-proof-format.test.ts','both release plans /bin/bash -n']:
  assert gate+': PASS' in lines, 'FAIL cd-archive: missing exact-SHA gate evidence'
 assert 'node --import tsx --test tests/p1-cli/admin-worker-boundary.test.ts: PASS' in lines, 'FAIL cd-archive: missing router boundary evidence'
+assert 'node --import tsx --test tests/hosted-mcp-auth.test.ts tests/hosted-mcp-protocol.test.ts: PASS' in lines, 'FAIL cd-archive: missing tools/list evidence'
 PYCODE
 CD_ARCHIVE_DIR=$(mktemp -d /private/tmp/cd-release-archive.XXXXXX)
 chmod 0700 "$CD_ARCHIVE_DIR"
@@ -430,7 +441,7 @@ test ! -e "$PROOF_DIR/closed.txt"
 # Write a failure receipt even if a local precondition fails before HTTP.
 python3 - "$PROOF_DIR/admin-smoke.json" <<'PYCODE'
 import pathlib,sys
-pathlib.Path(sys.argv[1]).write_text('{"result":"FAIL","responses":[],"status":null,"content_type":null,"size":null,"error":null}\n')
+pathlib.Path(sys.argv[1]).write_text('{"result":"FAIL","responses":[],"status":null,"content_type":null,"server":null,"size":null,"error":null}\n')
 PYCODE
 window_check
 test -f "$CD_PROOF_DIR/schema-verified.txt" && test ! -e "$CD_PROOF_DIR/closed.txt"
@@ -442,12 +453,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 opener=urllib.request.build_opener(NoRedirect())
 fixture={'resource':'admin_grants','workspace_id':None,'limit':1,'before':None}
 checks=[('health','http://127.0.0.1:9000/health','GET',None,{},200,'status','ok'),
- ('loopback_admin','http://127.0.0.1:9000/functions/v1/read','POST',fixture,{'Authorization':'Bearer swm_adm_release_probe_not_a_credential'},403,'error','credential_kind_forbidden'),
- ('public_admin','https://api.commonswarm.com/functions/v1/read','POST',fixture,{'Authorization':'Bearer swm_adm_release_probe_not_a_credential'},403,'error','credential_kind_forbidden')]
+ ('loopback_admin','http://127.0.0.1:9000/functions/v1/read','POST',fixture,{'Authorization':'Bearer swm_adm_release_probe_not_a_credential','Host':'api.commonswarm.com'},403,'error','credential_kind_forbidden'),
+ ('public_admin','https://api.commonswarm.com/functions/v1/read','POST',fixture,{'Authorization':'Bearer swm_adm_release_probe_not_a_credential','User-Agent':'curl/8.7.1'},403,'error','credential_kind_forbidden')]
 rows=[]; failed=False
 for name,url,method,data,headers,status,key,expected in checks:
- row={'probe':name,'status':None,'content_type':None,'size':None,'error':None}
- ok=False
+ row={'probe':name,'status':None,'content_type':None,'server':None,'size':None,'error':None}
+ ok=False; failure='edge_contract'
  try:
   headers.update({'Content-Type':'application/json','Accept':'application/json'})
   req=urllib.request.Request(url,data=None if data is None else json.dumps(data).encode(),method=method,headers=headers)
@@ -457,18 +468,26 @@ for name,url,method,data,headers,status,key,expected in checks:
    row['status']=response.code
    media=response.headers.get_content_type()
    row['content_type']=media if media in ('application/json','text/html','text/plain','application/octet-stream') else 'other'
+   server=response.headers.get('Server')
+   row['server']=None if server is None else server.lower() if server.lower() in ('cloudflare','caddy') else 'other'
    body=response.read(131073); row['size']=len(body)
-   value=json.loads(body) if len(body)<=131072 and media=='application/json' else None
+   cloudflare_body=re.search(rb'\berror code:\s*[0-9]+\b',body,re.I) is not None
+   try: value=json.loads(body) if len(body)<=131072 else None
+   except (ValueError,UnicodeError): value=None
    field=value.get('error') if isinstance(value,dict) else None
    row['error']=field if isinstance(field,str) and re.fullmatch('[a-z_]{1,64}',field) else None
-   ok=response.code==status and len(body)<=131072 and media=='application/json' and isinstance(value,dict) and value.get(key)==expected
+   contract=response.code==status and len(body)<=131072 and isinstance(value,dict) and value.get(key)==expected
+   if cloudflare_body or (row['server']=='cloudflare' and not contract): failure='cloudflare_block'
+   ok=contract and media=='application/json' and not cloudflare_body
  except Exception:
   # No exception, response body, header set or credential is logged/retained.
   ok=False
  rows.append(row); failed=failed or not ok
  pathlib.Path(sys.argv[1]).write_text(json.dumps({'result':'FAIL' if failed or len(rows)<len(checks) else 'PASS','responses':rows},sort_keys=True)+'\n')
  if ok: print('PASS cd-admin-smoke: '+name)
- else: print('FAIL cd-admin-smoke: '+name+' error='+str(row['error'] or '<absent_or_redacted>')+'; STOP',file=sys.stderr)
+ else:
+  print('FAIL cd-admin-smoke: '+name+' error='+str(row['error'] or '<absent_or_redacted>')+'; STOP',file=sys.stderr)
+  print('FAIL '+failure+' '+json.dumps(row,sort_keys=True),file=sys.stderr)
 if failed: raise SystemExit(1)
 print('NOT PROVED: authenticated admin recovery/command and authenticated MCP tools')
 PYCODE
