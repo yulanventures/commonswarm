@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { approvalCatalog, approvalFailureDetail } from '../support/admin-db-diagnostic.js';
 import { dbAssert, emptyApplicationSchema, fixture, refuses } from '../support/admin-schema-db.js';
 
 test('admin-owner-approval-scoped: Bob approval cannot authorize Alice; real owner commands are retryable and atomically fence only her families', { timeout: 180000 }, () => {
@@ -14,7 +14,8 @@ test('admin-owner-approval-scoped: Bob approval cannot authorize Alice; real own
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
   })) as { DB_URL: string };
   assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(local.DB_URL).hostname));
-  const secretDir = mkdtempSync(join(tmpdir(), 'admin-owner-approval-'));
+  const secretRoot = process.platform === 'darwin' ? '/private/tmp' : '/tmp';
+  const secretDir = execFileSync('mktemp', ['-d', join(secretRoot, 'anvil-secret.XXXXXX')], { encoding: 'utf8' }).trim();
   chmodSync(secretDir, 0o700);
   const f = fixture(), aliceGrant = randomUUID(), aliceConnection = randomUUID(), aliceFamily = `family-${randomUUID()}`;
   const prepare = `${f.sql}
@@ -43,14 +44,24 @@ ${refuses(binding, '23503')}
   const harness = `
 import assert from 'node:assert/strict';
 import postgres from 'npm:postgres@3.4.9';
-import { adminTransaction } from ${JSON.stringify(new URL('../../supabase/functions/command/admin-delegation.ts', import.meta.url).href)};
-const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
-const sql = postgres(config.url, { prepare: false, max: 1 });
+import { approvalCatalog, approvalDiagnostic } from ${JSON.stringify(new URL('../support/admin-db-diagnostic.ts', import.meta.url).href)};
+let step = 'initialize';
+let sql;
+let catalog = approvalCatalog('');
 const rollback = new Error('test transaction rollback');
 try {
+ const { adminTransaction } = await import(${JSON.stringify(new URL('../../supabase/functions/command/admin-delegation.ts', import.meta.url).href)});
+ const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
+ catalog = approvalCatalog(config.schema);
+ sql = postgres(config.url, { prepare: false, max: 1 });
  await sql.begin(async tx => {
+  step = 'schema-isolation';
   await tx.unsafe(config.schema);
-  await tx.unsafe(config.prepare + config.verificationPrep);
+  step = 'fixture-prepare';
+  await tx.unsafe(config.prepare);
+  step = 'verification-prepare';
+  await tx.unsafe(config.verificationPrep);
+  step = 'projection-prepare';
   // Bring fixture projections into the real adapter's durable consistency contract.
   for (const owner of [config.bob, config.alice]) {
    const grants = await tx\`SELECT * FROM swarm.admin_grants WHERE owner_user_id=\${owner}::uuid\`;
@@ -74,80 +85,106 @@ try {
    return outcome;
   }
   const verificationBefore = await tx\`SELECT * FROM commonswarm_oauth.admin_verified_clients ORDER BY verification_version\`;
+  step = 'actor-refusals';
   for (const auth of [
     { kind:'system',owner_user_id:config.alice },
     { ...human,identity:{...human.identity,csrf_verified:false} },
     { ...human,identity:{...human.identity,interactive_at_seconds:0} },
   ]) assert.equal((await run(wire(approve.command),auth)).status,403);
+  step = 'verification-refusals';
   for (const verification_version of [2,3]) {
    const result = await run(wire({...approve.command,verification_version}));
    assert.equal(result.status,403);
    assert.equal(result.body.error,'client_verification_required');
   }
+  step = 'owner-injection';
   assert.equal((await run(wire({...approve.command,owner_user_id:config.bob}))).status,400);
   assert.equal((await tx\`SELECT count(*)::int AS count FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id=\${config.alice}::uuid\`)[0].count,0);
+  step = 'owner-approval';
   const approvalResult = await run(approve);
   assert.equal(approvalResult.status,200);
   assert.deepEqual(approvalResult.body.events.map(event=>event.type),['AdminClientApproved','AdminActionRecorded']);
   assert.equal(approvalResult.body.events[0].actor_user,config.alice);
   assert.equal(approvalResult.body.events[1].payload.target_id,config.client);
   assert.deepEqual(await tx\`SELECT * FROM commonswarm_oauth.admin_verified_clients ORDER BY verification_version\`,verificationBefore);
+  step = 'approval-retry';
   const [before] = await tx\`SELECT count(*)::int AS count FROM swarm.admin_events WHERE owner_user_id=\${config.alice}::uuid\`;
-  assert.deepEqual(await run(approve),await run(approve));
+  assert.deepEqual(await run(approve),approvalResult);
+  assert.deepEqual(await run(approve),approvalResult);
   const [after] = await tx\`SELECT count(*)::int AS count FROM swarm.admin_events WHERE owner_user_id=\${config.alice}::uuid\`;
   assert.equal(after.count,before.count);
+  step = 'command-id-conflict';
   assert.equal((await run({...approve,command:{...approve.command,verification_version:2}})).status,409);
+  step = 'alice-binding';
   await tx.unsafe(config.binding);
+  step = 'active-control';
   const [policy] = await tx\`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(\${config.aliceFamily},\${config.alice},'test-kid')\`;
   assert.equal(policy.active,true);
   const withdraw = wire({kind:'withdraw_admin_client_approval',client_id:config.client,verification_version:1,reason_code:'owner_withdrew'});
   const beforeRollback = (await tx\`SELECT seq,projection FROM swarm.admin_accounts WHERE owner_user_id=\${config.alice}::uuid\`)[0];
   // Force the real approval-trigger/fence/tombstone path to fail after domain event persistence.
+  step = 'withdrawal-fault-setup';
   await tx.unsafe("CREATE FUNCTION commonswarm_oauth.approval_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test rollback' USING ERRCODE='ZX002'; END $$; CREATE TRIGGER approval_test_failure BEFORE INSERT ON commonswarm_oauth.refresh_family_tombstones FOR EACH ROW EXECUTE FUNCTION commonswarm_oauth.approval_test_failure()");
+  step = 'withdrawal-rollback';
   await assert.rejects(tx.savepoint(scope=>run(withdraw,human,scope)), error=>error.code==='ZX002');
+  step = 'withdrawal-rollback-readback';
   assert.deepEqual((await tx\`SELECT seq,projection FROM swarm.admin_accounts WHERE owner_user_id=\${config.alice}::uuid\`)[0],beforeRollback);
   assert.equal((await tx\`SELECT withdrawn_at FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id=\${config.alice}::uuid\`)[0].withdrawn_at,null);
   assert.equal((await tx\`SELECT state FROM swarm.admin_grants WHERE grant_id=\${config.aliceGrant}::uuid\`)[0].state,'active');
   assert.equal((await tx\`SELECT state FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=\${config.aliceFamily}\`)[0].state,'active');
   assert.equal((await tx\`SELECT count(*)::int AS count FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=\${config.aliceFamily}\`)[0].count,0);
   assert.equal((await tx\`SELECT count(*)::int AS count FROM swarm.admin_command_results WHERE owner_user_id=\${config.alice}::uuid AND command_id=\${withdraw.command_id}\`)[0].count,0);
+  step = 'withdrawal-fault-cleanup';
   await tx.unsafe('DROP TRIGGER approval_test_failure ON commonswarm_oauth.refresh_family_tombstones; DROP FUNCTION commonswarm_oauth.approval_test_failure()');
+  step = 'owner-withdrawal';
   const result = await run(withdraw);
   assert.equal(result.status,200);
   assert.deepEqual(await run(withdraw),result);
+  step = 'withdrawal-readback';
   assert.equal((await tx\`SELECT withdrawn_at IS NOT NULL AS withdrawn FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id=\${config.alice}::uuid\`)[0].withdrawn,true);
   assert.equal((await tx\`SELECT state FROM swarm.admin_grants WHERE grant_id=\${config.aliceGrant}::uuid\`)[0].state,'revoked');
   assert.equal((await tx\`SELECT state FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=\${config.aliceFamily}\`)[0].state,'revoked');
   assert.equal((await tx\`SELECT count(*)::int AS count FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=\${config.aliceFamily}\`)[0].count,1);
   const [projection] = await tx\`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=\${config.alice}::uuid\`;
   assert.equal(projection.projection.grants[config.aliceGrant].state,'revoked');
+  step = 'bob-control';
   assert.equal((await tx\`SELECT state FROM swarm.admin_grants WHERE grant_id=\${config.bobGrant}::uuid\`)[0].state,'active');
   assert.equal((await tx\`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(\${config.bobFamily},\${config.bob},'test-kid')\`)[0].active,true);
   assert.equal((await tx\`SELECT withdrawn_at FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id=\${config.bob}::uuid\`)[0].withdrawn_at,null);
   assert.equal((await tx\`SELECT count(*)::int AS count FROM commonswarm_oauth.admin_oauth_audit WHERE provider_grant_id=\${config.aliceFamily} AND event_kind='revoked'\`)[0].count,1);
+  step = 'no-resurrection';
   assert.equal((await run(wire(approve.command))).body.error,'client_approval_withdrawn');
+  step = 'issuance-closed';
   assert.equal((await tx\`SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state\`)[0].admin_issuance_enabled,false);
   // Always restore the schema names and fixture data by rolling back this outer transaction.
+  step = 'outer-rollback';
   throw rollback;
  });
-} catch (error) { if (error !== rollback) throw error; }
-finally { await sql.end(); }
-console.log('ADMIN_OWNER_APPROVAL_OK');
+} catch (error) {
+ if (error !== rollback) { console.log(approvalDiagnostic(step,error,catalog)); Deno.exitCode = 1; }
+} finally {
+ try { await sql?.end(); } catch (error) {
+  if (!Deno.exitCode) console.log(approvalDiagnostic('connection-close',error,catalog));
+  Deno.exitCode = 1;
+ }
+}
+if (!Deno.exitCode) console.log('ADMIN_OWNER_APPROVAL_OK');
 `;
   try {
     const configPath = join(secretDir, 'config.json'), harnessPath = join(secretDir, 'harness.mjs');
-    writeFileSync(configPath, JSON.stringify({ url: local.DB_URL, schema: emptyApplicationSchema(), prepare, verificationPrep, binding,
+    const schema = emptyApplicationSchema();
+    writeFileSync(configPath, JSON.stringify({ url: local.DB_URL, schema, prepare, verificationPrep, binding,
       bob: f.owner, alice: f.foreign, client: f.client, bobGrant: f.grant, aliceGrant, bobFamily: f.provider, aliceFamily }), { mode: 0o600 });
     writeFileSync(harnessPath, harness, { mode: 0o600 });
     const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
       '--allow-read', '--allow-env', '--allow-net', harnessPath, configPath], { encoding: 'utf8', timeout: 150000 });
-    // Database errors may contain parameters; expose only the fixed success marker.
-    assert.equal(run.status, 0, 'admin owner approval DB harness failed (details withheld)');
+    // Only the validated diagnostic crosses the child-process boundary.
+    assert.equal(run.status, 0, 'admin owner approval DB harness failed: ' + approvalFailureDetail(run.stdout ?? '', approvalCatalog(schema)));
     assert.match(run.stdout, /ADMIN_OWNER_APPROVAL_OK/u);
   } finally {
     const resolved = realpathSync(secretDir);
-    assert.equal(dirname(resolved), realpathSync(tmpdir()));
-    assert.ok(basename(resolved).startsWith('admin-owner-approval-') && resolved !== process.env.HOME);
+    assert.equal(dirname(resolved), realpathSync(secretRoot));
+    assert.ok(basename(resolved).startsWith('anvil-secret.') && resolved !== process.env.HOME);
     execFileSync('rm', ['-r', resolved], { stdio: 'pipe' });
   }
 });
