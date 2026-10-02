@@ -14,10 +14,12 @@ It folds in C3PO's
 `/Users/yulanbot/work/cswarm-vision/c3po-plans/cswarm-distribution-plan.md`
 and onboarding draft, with
 `/Users/yulanbot/work/cswarm-vision/lanes/verdict-p6-refute.txt`.
-Vendor facts below are retained from those sourced drafts. The linked pages
-were not fetched again. Current submission rules must be checked by the
-authorized publisher before submission. Anything without that source basis is
-marked not verified. This lane ran no tests or service probes and submitted nothing.
+Vendor facts below are retained from those sourced drafts. P6b compared the
+corrected v2 drafts and fetched Google's custom-app help page on 2026-10-02 to
+verify its non-DCR credential-entry route. Other linked pages were not fetched
+again. Current submission rules must be checked by the authorized publisher
+before submission. Anything without that source basis is marked not verified.
+This lane ran no tests or service probes and submitted nothing.
 
 `git log origin/main` confirms C/D merged at `cda775f4`. Routine admin and
 human grant list/history/revoke are built on main. B is also on main. B/C/D
@@ -209,6 +211,10 @@ future reuse separately. Host project file access is outside the eight hosted to
   in that source. Prove the web connection and each claimed web/mobile surface.
   Preserve manual write confirmation. Disclose prerequisites without asking users
   to weaken privacy choices. [Custom app requirements](https://support.google.com/gemini/answer/17209137).
+- Verify the applicable client-registration route. When the MCP server lacks
+  DCR, Google's setup guide directs users to Show more under Advanced features
+  and enter credentials there. Test that host flow before advertising it; keep
+  credentials out of chat. [Custom app authentication setup](https://support.google.com/gemini/answer/17209137).
 - A general public Gemini consumer-directory submission route is **not verified**.
   Do not describe the CLI gallery as an Apps directory.
 - For CLI, supply root `gemini-extension.json` with name, version, and MCP
@@ -295,6 +301,10 @@ child poll or completion callback is not an idle-root wake.
 2. Assemble one shared packet with exact tools, actual scopes, data flow,
    isolation/revoke results, support path, synthetic reviewer access, release
    provenance, and a dated host matrix. Complete applicable checklist rows.
+   Follow C3PO's v2 pilot sequence: after Claude acceptance, test a second remote
+   host and one local CLI, starting with identity/roster lookups and authorizing
+   `check`'s cursor mutation before inbox use. Pilot delegated administration in
+   disposable test workspaces after its release proof.
 3. Prove the Claude custom connector. Then have the authorized publisher submit
    the Claude connector, followed by the companion workflow plugin if needed.
    Submit only when automatic listing would be safe to announce. Verify the
