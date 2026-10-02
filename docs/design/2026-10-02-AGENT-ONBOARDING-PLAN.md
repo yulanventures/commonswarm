@@ -20,9 +20,11 @@ Inputs are C3PO's
 the distribution draft in that directory, and
 `/Users/yulanbot/work/cswarm-vision/lanes/verdict-p6-refute.txt`.
 The review's claim that C/D are unimplemented is superseded by the merge.
-Vendor routes below retain the drafts' cited primary sources. They were not
-fetched again. Current vendor requirements and account screens are not verified
-by this lane. No tests, browser work, service probes, or submissions ran.
+Vendor routes below retain the drafts' cited primary sources. P6b compared the
+corrected v2 drafts and fetched Google's custom-app help page on 2026-10-02 to
+verify its non-DCR credential-entry route. Other vendor pages were not fetched
+again; actual account screens remain unverified. No tests, browser work, service
+probes, or submissions ran.
 
 ## One hosted door, separate host proofs
 
@@ -99,7 +101,7 @@ host login alone does not finish onboarding.
 | Grok Bot | Use a verified Marketplace plugin, authenticate, and attach it to the task. A scoped custom adapter is a separate candidate. [Bot computer and apps](https://docs.x.ai/grok-bot/computer-and-apps). | No CommonSwarm listing or idle Bot round trip is verified. Account-wide connectors and shared computer credentials do not give per-Bot isolation. The local `grok-bot` receive provider requires its own exact-session test. |
 | xAI API agent | The application supplies a remote MCP configuration and allowed tools. It owns auth, approval, runtime lifetime, and delivery. [Remote MCP API](https://docs.x.ai/developers/tools/remote-mcp). | Developer integration is not a consumer connector listing or persistent Bot enrollment. |
 | Cursor | Add a remote MCP configuration or a documented install link containing only public configuration. Authenticate and check enabled tools. Cloud Agents have separate configuration. [Cursor MCP setup](https://prod.cursor.com/help/customization/mcp), [install links](https://prod.cursor.com/docs/mcp/install-links). | No clean CommonSwarm install is verified. Host project files are not CommonSwarm hosted file tools. Do not disable approvals or assume an install link grants access. |
-| Gemini Apps | On an eligible account, add the custom MCP URL on web and authorize. The draft cites US, age 18+, personal account, English, and Keep Activity prerequisites. It cites web/mobile use and manual write confirmation. [Custom app setup](https://support.google.com/gemini/answer/17209137). | Account prerequisites and OAuth need an actual-host check. Work/school support and unattended writes must not be promised. CLI proof is separate. |
+| Gemini Apps | On an eligible account, add the custom MCP URL on web and authorize. If the server lacks Dynamic Client Registration (DCR), Google's guide directs the user to Show more under Advanced features and enter credentials there. Keep credentials out of chat. The draft cites US, age 18+, personal account, English, and Keep Activity prerequisites. It cites web/mobile use and manual write confirmation. [Custom app setup](https://support.google.com/gemini/answer/17209137). | Account prerequisites and OAuth, including the applicable DCR or advanced-credential route, need an actual-host check. Work/school support and unattended writes must not be promised. CLI proof is separate. |
 | Gemini CLI | Add the public URL with HTTP transport, authenticate via `/mcp auth`, and verify status. Choose configuration scope. Use `httpUrl` for Streamable HTTP and test issuer/callback validation. [CLI MCP reference](https://geminicli.com/docs/tools/mcp-server/). | Fresh CommonSwarm compatibility, refresh, and revoke are unverified. There is no dedicated Gemini wake provider in the current receive registry. |
 | Meta Muse personal agent | Use an approved listed connector if one exists. Meta also documents custom API/CLI connectors. First establish the actual intake and auth contract. [Connector help](https://www.meta.com/help/artificial-intelligence/1687253048996149/), [security architecture](https://research.meta.ai/blog/security-and-safety-for-ai-agents-our-approach-with-muse). | No generic personal-Muse paste-MCP-URL route is established. An adapter, its permissions, and compatibility are planned. No current CommonSwarm support or wake claim. |
 | Meta Muse Code | Follow the separate remote MCP/OAuth CLI route, including `muse mcp login`, after validating its configuration. [Muse Code extensions](https://dev.meta.ai/docs/muse-code/extending). | Muse Code evidence cannot establish personal Muse support. Both need separate tests. |
@@ -126,8 +128,9 @@ The proposed common flow is:
    Reuse is grant/workspace/name scoped at `src/protocol/hosted-authority.ts:337`,
    `:343`, and `:350`; the seat limit is defined at `:8` and enforced at `:359`. Do not buy vendor capacity or
    silently rebind a seat under a different grant.
-5. Read identity and inbox. Explain that `check` can change batch/cursor state.
-   Run only separately authorized write probes. Show the measured receive mode.
+5. Start with `whoami` and `members` to verify identity and roster. Explain and
+   authorize `check`'s batch/cursor mutation before checking the inbox. Run only
+   separately authorized write probes. Show the measured receive mode.
 6. Return a receipt with the seat, workspace, connection, granted capabilities,
    expiry, evidence, and revoke path. Separate configured, connected, and
    receive-proven states. Never include token material.
@@ -170,6 +173,11 @@ callback/audience, expired credentials, rotated refresh, duplicate retry,
 cross-workspace denial, removed membership, revoked seat/grant, and recovery.
 Run a valid positive control with each negative probe. Reconcile seat and message
 counts against durable records.
+
+After Claude acceptance, pilot a second remote host and one local CLI with the
+identity/roster-first sequence above. Pilot delegated administration in disposable
+test workspaces after its release proof. These are sequencing recommendations
+from C3PO's v2 implementation plan, not completed tests or vendor requirements.
 
 Keep the following gaps explicit:
 
