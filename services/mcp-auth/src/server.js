@@ -9,6 +9,8 @@ import { createConsentOrchestrator, createPostgresConsentProgress } from "./cons
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
+import { AdminConsentError, createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
+import { createAdminInteractionHandler, createResourceInteractionHandler } from "./admin-interactions.js";
 import { createLogger, logProviderError, subscribeProviderErrors } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
 import { createPostgresAdapter } from "./postgres-adapter.js";
@@ -41,7 +43,8 @@ function rejectOversizedRequest(request, response) {
 }
 
 function clientErrorResponse(error) {
-  if (!(error instanceof ClientError) && !(error instanceof InteractionStateError)) return null;
+  if (!(error instanceof ClientError) && !(error instanceof InteractionStateError) &&
+      !(error instanceof AdminConsentError)) return null;
   return {
     status: error.status,
     body: { error: error.code },
@@ -211,7 +214,7 @@ export async function startServer({
     findAccount: createProductionFindAccount(pool),
   });
   const logger = createLogger(writeLog);
-  const interactionHandler = config.publicAuthorizationEnabled
+  const mcpHandler = config.publicAuthorizationEnabled
     ? createInteractionHandler({
         provider,
         store: new InteractionStore(pool),
@@ -231,6 +234,18 @@ export async function startServer({
         bodyReadTimeoutMs: config.requestTimeoutMs,
       })
     : undefined;
+  const interactionHandler = mcpHandler ? createResourceInteractionHandler({
+    mcpHandler,
+    adminHandler: createAdminInteractionHandler({
+      provider, store: new InteractionStore(pool),
+      service: createAdminConsentService({ store: new PostgresAdminConsentStore(pool), provider }),
+      gotrue: createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
+        provider: config.gotrueProvider }),
+      workspaceReader: managementWorkspaceReader, allowedOrigins: config.allowedOrigins,
+      callbackUrl: `${config.issuer}/oauth/callback/gotrue`,
+      maxBodyBytes: config.maxBodyBytes, bodyReadTimeoutMs: config.requestTimeoutMs,
+    }),
+  }) : undefined;
   const server = createServer(createHandler({ provider, pool, logger, interactionHandler, ...config }));
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);

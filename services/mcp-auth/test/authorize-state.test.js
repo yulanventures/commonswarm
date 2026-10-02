@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { IncomingMessage, ServerResponse } from "node:http";
+import { IncomingMessage, Server, ServerResponse } from "node:http";
 import { PassThrough, Readable } from "node:stream";
 import { test } from "node:test";
 import { createLocalJWKSet, jwtVerify } from "jose";
+import pg from "pg";
 
+import { adminDigest, createAdminConsentService, PostgresAdminConsentStore } from "../src/admin-consent.js";
+import { createResourceInteractionHandler } from "../src/admin-interactions.js";
 import { hashOpaque, SESSION_COOKIE } from "../src/browser-security.js";
 import { createConsentOrchestrator } from "../src/consent.js";
 import { InteractionStore } from "../src/interaction-store.js";
 import { createInteractionHandler } from "../src/interactions.js";
 import { createLogger } from "../src/logger.js";
 import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
-import { createHandler, createProductionFindAccount } from "../src/server.js";
+import { createHandler, createProductionFindAccount, startServer } from "../src/server.js";
 
 const CLIENT = "https://claude.ai/oauth/mcp-oauth-client-metadata";
 const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
@@ -172,16 +175,19 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
   const handler = createHandler({
     provider, pool, publicAuthorizationEnabled: true, maxBodyBytes: 64 * 1024,
     logger: createLogger((line) => logs.push(JSON.parse(line))),
-    interactionHandler: createInteractionHandler({
-      provider, store: new InteractionStore(pool),
-      gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
-        state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
-      consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
-        commands.push({ body, identity });
-        return { status: 200, body: { ok: true } };
-      } }),
-      workspaceReader: async () => [{ id: W1, name: "One" }, { id: W2, name: "Two" }], allowedOrigins: new Set([ISSUER]),
-      callbackUrl: `${ISSUER}/oauth/callback/gotrue`,
+    interactionHandler: createResourceInteractionHandler({
+      adminHandler: () => { throw new Error("ordinary MCP must not reach admin consent"); },
+      mcpHandler: createInteractionHandler({
+        provider, store: new InteractionStore(pool),
+        gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
+          state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
+        consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
+          commands.push({ body, identity });
+          return { status: 200, body: { ok: true } };
+        } }),
+        workspaceReader: async () => [{ id: W1, name: "One" }, { id: W2, name: "Two" }], allowedOrigins: new Set([ISSUER]),
+        callbackUrl: `${ISSUER}/oauth/callback/gotrue`,
+      }),
     }),
   });
   const cookies = new Map([[SESSION_COOKIE, BROWSER]]);
@@ -541,6 +547,61 @@ async function registeredHarness(options) {
   return { h, clientId: result.metadata.client_id, metadata: result.metadata };
 }
 
+test("production startServer keeps ordinary DCR enabled only with public authorization", async (t) => {
+  // Exercise the real composition root and PostgreSQL registration adapter.
+  // Only SQL persistence and listen are replaced; no database or socket opens.
+  const registrations = new Map();
+  t.mock.method(pg.Pool.prototype, "query", async (sql, values) => {
+    if (sql.includes("DELETE FROM commonswarm_oauth.registered_clients")) return { rowCount: 0, rows: [] };
+    if (sql.includes("INSERT INTO commonswarm_oauth.registered_clients")) {
+      registrations.set(values[0], JSON.parse(values[1]));
+      return { rowCount: 1, rows: [] };
+    }
+    if (sql.includes("SELECT metadata FROM commonswarm_oauth.registered_clients")) {
+      const metadata = registrations.get(values[0]);
+      return { rowCount: metadata ? 1 : 0, rows: metadata ? [{ metadata }] : [] };
+    }
+    throw new Error("unexpected DCR fixture SQL");
+  });
+  t.mock.method(Server.prototype, "listen", function (_port, _host, callback) {
+    queueMicrotask(callback);
+    return this;
+  });
+  for (const enabled of [true, false]) {
+    const running = await startServer({ config: {
+      database: {}, publicAuthorizationEnabled: enabled, issuer: ISSUER, port: 0,
+      maxBodyBytes: 64 * 1024, requestTimeoutMs: 10_000,
+      gotrueUrl: "https://api.commonswarm.com/auth/v1", gotrueProvider: "github",
+      allowedOrigins: new Set([ISSUER]),
+    }, managementCommand: async () => { throw new Error("registration must not activate a hosted grant"); },
+    managementWorkspaceReader: async () => [], writeLog: () => {} });
+    try {
+      const handler = running.server.listeners("request")[0];
+      const discovery = exchange("/.well-known/oauth-authorization-server");
+      await handler(discovery.request, discovery.response);
+      assert.equal(discovery.response.statusCode, 200);
+      assert.equal(JSON.parse(discovery.response.body).registration_endpoint, enabled ? `${ISSUER}/reg` : undefined);
+      const body = JSON.stringify({ redirect_uris: [REDIRECT] });
+      const registration = exchange("/reg", new Map(), body);
+      registration.request.method = "POST";
+      registration.request.socket.remoteAddress = "203.0.113.10";
+      Object.assign(registration.request.headers, { accept: "application/json",
+        "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      await handler(registration.request, registration.response);
+      assert.equal(registration.response.statusCode, enabled ? 201 : 503, registration.response.body);
+      if (enabled) {
+        const metadata = JSON.parse(registration.response.body);
+        assert.equal(metadata.scope, "openid offline_access mcp");
+        assert.ok(await running.provider.Client.find(metadata.client_id));
+      }
+      assert.equal(registrations.size, 1);
+    } finally {
+      running.server.emit("close");
+      await running.pool.end();
+    }
+  }
+});
+
 test("DCR registration completes the same workspace consent and PKCE token flow as CIMD", async (t) => {
   const { h, clientId, metadata } = await registeredHarness();
   assert.equal(metadata.token_endpoint_auth_method, "none");
@@ -549,6 +610,49 @@ test("DCR registration completes the same workspace consent and PKCE token flow 
   assert.equal(metadata.registration_access_token, undefined);
   assert.equal(metadata.registration_client_uri, undefined);
   assert.equal(metadata.id_token_signed_response_alg, "ES256");
+  await t.test("registered client cannot consent to admin despite forged verification and owner approval", async () => {
+    const admin = "https://api.commonswarm.com/admin";
+    const registeredMetadata = (await h.provider.Client.find(clientId)).metadata();
+    const verification = { client_id: clientId, active: true, withdrawn_at: null, verification_version: 1,
+      registration_source: "cimd", application_type: "web", metadata_digest: adminDigest(registeredMetadata),
+      redirect_uris: [REDIRECT], scope_ceiling: ["admin:read"], publisher_identity: "Forged publisher",
+      publisher_contact: "forged.example", review_evidence_ref: "forged-review", pkce_s256_tested: true,
+      dpop_tested: true, redirect_tested: true, origin_control_verified: true,
+      delegation_eligible: false, native_loopback_eligible: false };
+    const approval = { owner_user_id: USER, client_id: clientId, verification_version: 1,
+      withdrawn_at: null, approval_event_id: "forged-event", approval_command_id: "forged-command" };
+    const queries = [];
+    const tx = { release() {}, async query(sql, values) {
+      queries.push(sql);
+      if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) return { rows: [], rowCount: 0 };
+      let row;
+      if (sql.includes("FROM commonswarm_oauth.browser_sessions")) {
+        row = { user_id: USER, authenticated_at: new Date().toISOString() };
+      } else if (sql.includes("FROM commonswarm_oauth.admin_verified_clients")) {
+        assert.equal(values[0], clientId); row = verification;
+      } else if (sql.includes("FROM commonswarm_oauth.admin_client_owner_approvals")) {
+        assert.deepEqual(values, [USER, clientId, 1]); row = approval;
+      } else if (sql.includes("FROM commonswarm_oauth.registered_clients")) {
+        row = await h.provider.Client.adapter.find(values[0]) ? { exists: 1 } : undefined;
+      } else throw new Error("admin DCR refusal must precede receipt or authority writes");
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+    } };
+    const clientLookup = t.mock.method(h.provider.Client, "find");
+    try {
+      const service = createAdminConsentService({ provider: h.provider,
+        store: new PostgresAdminConsentStore({ connect: async () => tx }) });
+      await assert.rejects(service.select({ uid: "dcr-admin", sessionId: BROWSER, ownerUserId: USER,
+        csrfToken: "synthetic-admin-csrf-token", version: 0, params: { client_id: clientId,
+          redirect_uri: REDIRECT, resource: admin, scope: "openid admin:read",
+          code_challenge: "a".repeat(43), code_challenge_method: "S256", dpop_jkt: "b".repeat(43) } },
+      { mode: "granular", scope_names: ["admin:read"], workspace_ids: [] }), { code: "unauthorized_client" });
+      assert.ok(queries.some(sql => sql.includes("FROM commonswarm_oauth.registered_clients")));
+      assert.equal(queries.at(-1), "ROLLBACK");
+      assert.equal(clientLookup.mock.callCount(), 0, "registration provenance refuses before metadata lookup");
+      assert.equal(h.commands.length, 0);
+      assert.equal(h.interactions.size, 0);
+    } finally { clientLookup.mock.restore(); }
+  });
   const originalExpiry = (await h.provider.Client.adapter.list())[0].expires_at;
   t.mock.timers.enable({ apis: ["Date"], now: originalExpiry - 29 * 24 * 60 * 60 * 1000 });
   await h.completedLogin();
