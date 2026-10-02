@@ -246,28 +246,28 @@ the cross-repository operations runbook remains authoritative for host operation
 
 ## CI
 
-This repository has two GitHub Actions workflows. Both run on pushes and pull requests:
+Ordinary PRs run no workflows. A **release PR** is a `pull_request` whose base branch
+is `release`; no workflow uses `pull_request_target`.
 
-| Workflow | Check |
+| Workflow | When and what |
 |---|---|
-| `.github/workflows/agent-trailers.yml` | Self-tests the trailer checker, resolves the commit range, enforces required agent-authorship fields, and writes an informational summary. |
-| `.github/workflows/commit-identity.yml` | Checks author and committer addresses with `scripts/check-commit-identity.sh`. |
+| `.github/workflows/build.yml` | Push to `main` only: `npm ci`, root build, site install, site build. The site builds without secrets or `.env`. |
+| `.github/workflows/server-suite.yml` | Release PRs and nightly at **03:00 UTC**: server (including MCP auth), p1-cli, site, box-dry-run, and `npm test`. Manual `workflow_dispatch` still selects one suite; server-repeat is manual only. |
+| `.github/workflows/agent-trailers.yml` | Release PRs and nightly at 03:00 UTC: trailer checker self-test, required authorship fields, and informational summary. |
+| `.github/workflows/commit-identity.yml` | Release PRs and nightly at 03:00 UTC: author and committer allowlist. |
 
-Both use this runner fallback:
+Release guards check the PR base SHA through its head SHA. Nightly guards fetch
+`origin/main` and check the range after its latest first-parent commit at least 24 hours
+old. This includes branch commits landed in that window, even if authored earlier;
+an idle `main` yields an empty range. If all history is younger, they check all of it.
+Local hooks and `npm run hooks:install` are unchanged.
 
-```yaml
-runs-on: ${{ vars.CI_RUNS_ON_LIGHT || vars.CI_RUNS_ON_NODE || vars.CI_RUNS_ON || 'ubuntu-latest' }}
-```
+Build and commit guards retain the ordered `CI_RUNS_ON_LIGHT`, `CI_RUNS_ON_NODE`,
+`CI_RUNS_ON`, `ubuntu-latest` fallback. Server suites retain `ubuntu-latest` for Linux
+containers, browsers, and root fixtures. Do not change fleet labels.
 
-Use the workspace self-hosted fleet when the repository variables route there. Do not
-change fleet labels in this repository. If none of the variables is set, the workflows
-fall back to `ubuntu-latest`.
-
-These are commit guards, not a build-and-test pipeline. No workflow in this repository
-runs the TypeScript build, product tests, local database suites, site build, or a deploy.
-Run the smallest relevant local gates and rely on both commit workflows before accepting a
-change. Repository files do not prove whether GitHub branch protection marks either check
-as required; do not equate a workflow file with enforced merge protection.
+**There is no CommonSwarm staging deploy.** Push to `main` builds only. CI never deploys
+production. Workflow files do not establish GitHub branch-protection requirements.
 
 ## Secrets and environment
 

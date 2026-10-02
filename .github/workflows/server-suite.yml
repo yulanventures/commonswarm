@@ -1,25 +1,17 @@
-# Runs one suite that cannot run on the Mac mini, for one ref, on demand only:
-# - suite server: the local-stack server suite (`npm run test:p1-server`);
-# - suite server-repeat: repeats one selected local-stack server test to measure its failure rate;
-# - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers;
-# - suite site: the site build, then `npm --prefix site test`, whose observer tests start a headless Chrome.
-# - suite box-dry-run: root-only whole-block box fixtures at the real production paths, protected by a refusal guard.
-#
-# Why it exists (HezLead rulings, 2026-09-26): the Mac mini runs no docker at all (any docker CLI call starts
-# OrbStack, which was stopped for memory) and no browser tests (each headless Chrome raises a Keychain dialog on the
-# operator's screen), and no lane ships with an unrun suite, so lanes run these here.
-#
-# Limits, all deliberate:
-# - workflow_dispatch ONLY. Never on push, pull_request or schedule: each run costs paid minutes.
-# - GitHub-hosted ubuntu-latest ONLY. It does not read the CI_RUNS_ON* repository variables the other workflows use,
-#   because those route to the self-hosted fleet on machines that cannot spare a Supabase stack's memory.
-# - No secrets. The local stack generates its own development keys.
-# - timeout-minutes 30; one dispatch per landing SHA and suite (server-repeat defaults to 50 targeted runs);
-#   at most 20 dispatches a week in total (about $2.50).
-# The ref input is used only as a checkout ref, never inside a run script; the suite input is a fixed choice.
-name: server suite (manual)
+# Release PR means a pull_request whose base branch is release.
+# Full suite runs nightly at 03:00 UTC and on release PRs; manual suite selection remains.
+# Full suite: server (including MCP auth), p1-cli, site, box-dry-run, and npm test (unit).
+# server-repeat remains a manual diagnostic; it is not part of the full-suite matrix.
+# Keep ubuntu-latest: these suites need Linux containers, headless browsers, or root fixtures.
+# No production secrets or deploys. The local stack generates its own development keys.
+# Manual ref is used only as a checkout ref; suite is a fixed choice.
+name: server suite
 
 on:
+  pull_request:
+    branches: [release]
+  schedule:
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       ref:
@@ -36,6 +28,7 @@ on:
           - p1-cli
           - site
           - box-dry-run
+          - unit
         default: server
       repeat_file:
         description: "Server test file to repeat"
@@ -54,7 +47,7 @@ on:
         default: "50"
 
 concurrency:
-  group: server-suite-${{ inputs.suite }}-${{ inputs.ref }}
+  group: server-suite-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.ref || github.ref }}-${{ inputs.suite }}
   cancel-in-progress: false
 
 permissions:
@@ -62,12 +55,17 @@ permissions:
 
 jobs:
   suite:
+    name: ${{ matrix.suite }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.suite) || '["server","p1-cli","site","box-dry-run","unit"]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -75,16 +73,16 @@ jobs:
           node-version: 22
           cache: npm
       - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2
-        if: inputs.suite == 'server' || inputs.suite == 'p1-cli'
+        if: matrix.suite == 'server' || matrix.suite == 'p1-cli'
         with:
           deno-version: v2.x
       - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2
-        if: inputs.suite == 'server-repeat'
+        if: matrix.suite == 'server-repeat'
         with:
           deno-version: v2.x
       - run: npm ci
       - name: Guard and run the box whole-block dry run
-        if: inputs.suite == 'box-dry-run'
+        if: matrix.suite == 'box-dry-run'
         env:
           BOX_DRY_RUN: "1"
           BOX_DRY_RUN_PART: box
@@ -101,32 +99,32 @@ jobs:
           sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
             "$(command -v npm)" run test:box-dry-run 2>&1 | tee box-dry-run.log
       - uses: supabase/setup-cli@v1
-        if: inputs.suite == 'server'
+        if: matrix.suite == 'server'
         with:
           version: 2.118.0
       - uses: supabase/setup-cli@v1
-        if: inputs.suite == 'server-repeat'
+        if: matrix.suite == 'server-repeat'
         with:
           version: 2.118.0
       - name: Start the local stack
-        if: inputs.suite == 'server'
+        if: matrix.suite == 'server'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
         run: |
           supabase start --ignore-health-check
           npm run db:reset
       - name: Start the local stack for server repeat
-        if: inputs.suite == 'server-repeat'
+        if: matrix.suite == 'server-repeat'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
         run: |
           supabase start --ignore-health-check
           npm run db:reset
       - name: Server suite
-        if: inputs.suite == 'server'
+        if: matrix.suite == 'server'
         run: |
           set -o pipefail
           npm run test:p1-server 2>&1 | tee server.log
       - name: Repeat one server test
-        if: inputs.suite == 'server-repeat'
+        if: matrix.suite == 'server-repeat'
         env:
           REPEAT_FILE: ${{ inputs.repeat_file }}
           REPEAT_PATTERN: ${{ inputs.repeat_pattern }}
@@ -190,29 +188,34 @@ jobs:
             exit 1
           fi
       - name: MCP auth suite
-        if: ${{ !cancelled() && inputs.suite == 'server' }}
+        if: ${{ !cancelled() && matrix.suite == 'server' }}
         run: |
           set -o pipefail
           npm ci --prefix services/mcp-auth --ignore-scripts --no-audit --no-fund 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth test 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth run test:postgres 2>&1 | tee -a server.log
       - name: p1-cli suite
-        if: inputs.suite == 'p1-cli'
+        if: matrix.suite == 'p1-cli'
         run: |
           set -o pipefail
           npm run test:p1-cli 2>&1 | tee p1-cli.log
       - name: Site build and site suite
-        if: inputs.suite == 'site'
+        if: matrix.suite == 'site'
         # The observer tests read the built pages, so the build runs first; they find /usr/bin/google-chrome.
         run: |
           set -o pipefail
           npm ci --prefix site
           npm --prefix site run build
           npm --prefix site test 2>&1 | tee site.log
+      - name: Service-free test suite
+        if: matrix.suite == 'unit'
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee unit.log
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.suite }}-log
-          path: ${{ inputs.suite }}.log
+          name: ${{ matrix.suite }}-log
+          path: ${{ matrix.suite }}.log
           retention-days: 14
