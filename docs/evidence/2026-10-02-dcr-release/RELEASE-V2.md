@@ -1,4 +1,5 @@
 # DCR v2: read-only schema preflight, ON OAuth release, MCP Caddy, public probes
+Mac blocks must not call setuid/setgid tools.
 
 Prepared, **not executed**. This supersedes the execution order in
 [RELEASE.md](RELEASE.md), which remains history. HezLead supplies the reviewed,
