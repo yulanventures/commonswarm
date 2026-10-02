@@ -186,8 +186,13 @@ test("HM6 Caddy activates OAuth only and preserves the dark MCP resource contrac
   assert.match(caddy, /@oauth_authorize \{\s*method GET HEAD\s*path \/authorize/);
   // oidc-provider resumes an interaction at /authorize/<uid>; without this route Caddy's fallback answers 404.
   assert.match(caddy, /@oauth_authorize \{\s*method GET HEAD\s*path \/authorize \/authorize\/\*\s*\}/);
-  assert.match(caddy, /@oauth_post \{\s*method POST\s*path \/token \/interaction\/\*/);
-  assert.match(caddy, /@oauth_browser_get \{\s*method GET HEAD\s*path \/interaction\/\* \/oauth\/callback\/gotrue/);
+  assert.match(caddy, /@oauth_post \{\s*method POST\s*path \/token \/reg \/me \/session\/end\/confirm \/interaction\/\*/);
+  assert.match(caddy, /@oauth_browser_get \{\s*method GET HEAD\s*path \/me \/session\/end \/session\/end\/success \/interaction\/\* \/oauth\/callback\/gotrue/);
+  const wrongMethods = /@oauth_wrong_method path ([^\n]+)/u.exec(caddy)?.[1].split(" ") ?? [];
+  for (const endpoint of ["/reg", "/me", "/session/end", "/session/end/confirm", "/session/end/success"]) {
+    assert.ok(wrongMethods.includes(endpoint), `${endpoint} needs a wrong-method fallback`);
+  }
+
   assert.doesNotMatch(caddy, /\/connections(?:\/|\s)/);
 
   const releasePlaceholder =

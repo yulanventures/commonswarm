@@ -75,13 +75,13 @@ test("DCR metadata validates with omitted algorithms and supported grant/respons
   const minimal = {
     client_id: "dcr-client",
     redirect_uris: claudeMetadata().redirect_uris,
-    token_endpoint_auth_method: "none",
   };
   await provider.Client.validate(minimal);
   const client = new provider.Client(minimal);
   assert.equal(client.responseTypeAllowed("code"), true);
   assert.equal(client.grantTypeAllowed("authorization_code"), true);
   assert.equal(client.idTokenSignedResponseAlg, "ES256");
+  assert.equal(client.tokenEndpointAuthMethod, "none");
 });
 
 test("explicit unsupported ID-token algorithms remain invalid for CIMD and DCR metadata", async () => {

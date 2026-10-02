@@ -88,6 +88,13 @@ function identity(session) {
   };
 }
 
+async function clientLabel(provider, clientId) {
+  const client = await provider.Client.find(clientId);
+  // CIMD keeps its established host label; DCR uses validated display metadata.
+  if (client?.clientIdMetadataDocument) return new URL(clientId).host;
+  return client?.clientName || "Registered app";
+}
+
 async function ensureSession(request, response, store) {
   const supplied = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
   if (supplied) {
@@ -250,7 +257,7 @@ export function createInteractionHandler({
       const csrf = await store.issueConsentToken(interactionUid, browser.id, session.user_id);
       respondHtml(response, 200, renderConsentPage({
         interactionUid,
-        clientHost: new URL(details.params.client_id).host,
+        clientHost: await clientLabel(provider, details.params.client_id),
         identity: currentIdentity,
         workspaces,
         selectedWorkspaceIds: bound.selected_workspace_ids ?? [],
@@ -295,7 +302,7 @@ export function createInteractionHandler({
         : { selectionVersion: body.selection_version, token: csrfToken };
       respondHtml(response, 400, renderConsentPage({
         interactionUid,
-        clientHost: new URL(details.params.client_id).host,
+        clientHost: await clientLabel(provider, details.params.client_id),
         identity: identity(session),
         workspaces: workspaces ?? await workspaceReader(identity(session)),
         selectedWorkspaceIds,
@@ -435,7 +442,7 @@ export function createInteractionHandler({
       const workspaces = await workspaceReader(identity(session));
       respondHtml(response, 502, renderConsentPage({
         interactionUid,
-        clientHost: new URL(consent.client_id).host,
+        clientHost: await clientLabel(provider, consent.client_id),
         identity: identity(session),
         workspaces,
         selectedWorkspaceIds: consent.selected_workspace_ids,
