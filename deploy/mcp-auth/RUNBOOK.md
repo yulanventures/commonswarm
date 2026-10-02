@@ -134,16 +134,35 @@ keys and the OAuth artifact database credential are unchanged. No new
 1Password item name is defined here; HezLead supplies existing item references
 in vault **Yulan Ventures Infra** if recovery is needed.
 
-The HM37 procedure takes `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE`
-from HezLead's measured live OFF report. Preflight/open compare them to the
-running container and capture its release/base Compose path from labels;
-full rollback uses that captured path and immutable image. The expected next
-baseline is 972df171 / 80b52aa6; 826db6a3 / 5511a358 is historical. Preserve
-the baseline proof directory and use a different landed `OAUTH_RELEASE_SHA`
-for a fresh window. OFF/disable restores the exact original service/edge env
-bytes, including absent flags; only Compose stays on the new OFF image.
-Full rollback also restores the baseline Compose env/image. Follow the exact
-rerun order and named input sources in RELEASE.md; do not resume a closed window.
+The HM37 procedure takes full `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE`
+from HezLead's latest measured ON or OFF report. Preflight/open compare them
+with the running container and capture its release/base Compose path from
+labels. Preserve baseline proofs and use a different landed `OAUTH_RELEASE_SHA`.
+Never resume a closed window or reuse its removed secret stage.
+
+## Releasing OAuth while MCP is ON
+
+Follow the marked blocks in
+[RELEASE.md](../../docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md):
+`hm37-mcp-baseline-state`, archive/preflight, then `hm37-oauth-open` captures
+exact ON env/Compose/Caddy/management bytes in a fresh secret stage.
+Immediately run `hm37-mcp-transition-off` and `hm37-mcp-route-probes` with
+`MCP_EXPECTED_MODE=off`; build, inputs and release-OFF follow as documented.
+After OFF gates, enable and ON probes restore service. The receipt records UTC
+start/end and duration of the 503 window, conservatively from transition start
+through verified ON readiness. The original ON snapshots remain untouched.
+
+Any failure after transition requires `hm37-oauth-rollback`, which restores
+the baseline image OFF, verifies 503, then restores exact baseline ON inputs
+and verifies ON. `hm37-mcp-restore-on` is the marked retry of that same recovery.
+If ON restoration fails, the helper returns baseline OFF with dark Caddy and
+verified 503 (named REQ 92); if OFF containment fails, state is UNVERIFIED
+(REQ 90/91), retain staging and STOP. See RELEASE.md's failure-state table.
+An OFF baseline skips transition; its original env/Caddy bytes are restored
+by disable, and full rollback also restores its original Compose env/image.
+
+Future follow-up: blue/green OAuth slots with a checked Caddy switch should
+remove the planned 503 window; this procedure uses the existing single slot.
 
 The Dockerfile now uses the **clean exact-SHA repository archive root** as its
 build context because it packages the shared lane-2 source. The two stages
