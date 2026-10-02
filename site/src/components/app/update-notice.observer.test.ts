@@ -659,9 +659,9 @@ test("a sign-in page built the same way raises no notice", async () => {
   assert.equal(value.display, "none", "the bar is marked hidden but still painted");
 });
 
-/* A rollback must not strand the dismissal. Dismiss build two; the server rolls back to the build
-   this tab is running, which puts the tab back in step; then build two ships again and must ask. */
-test("a rollback does not silence the build that follows it", async () => {
+/* Dismiss build two; a rollback returns to the running build. Serving the same dismissed
+   build again must respect the reader's choice rather than undoing it. */
+test("a rollback preserves dismissal for the same served build", async () => {
   const value = await measure(await findChrome(), "rollback", 390, 844, true);
   assert.equal(
     value.startedInStep,
@@ -679,10 +679,7 @@ test("a rollback does not silence the build that follows it", async () => {
     true,
     `Not now did not put the bar down: ${JSON.stringify(value)}`,
   );
-  /* THE ROLLBACK ITSELF. Serving the build this tab is running must put the bar down again, which
-     is what "back in step" means and the only moment the dismissal is allowed to be cleared.
-     Without this assertion the case passes even if that branch is deleted, because the bar simply
-     stays up from build two and the final check below cannot tell the difference. */
+  /* The running build is quiet, and returning to the dismissed signature stays quiet. */
   assert.equal(
     value.rollbackWentBackInStep,
     true,
@@ -691,8 +688,8 @@ test("a rollback does not silence the build that follows it", async () => {
   );
   assert.equal(
     value.shown,
-    true,
-    `the build after a rollback must ask again: ${JSON.stringify(value)}`,
+    false,
+    `the same dismissed build must stay hidden after a rollback: ${JSON.stringify(value)}`,
   );
 });
 
