@@ -110,8 +110,10 @@ rm guard remains unchanged. Its JSON document
 contains `databaseUrl`, read from the existing box edge configuration's
 `SWARM_DATABASE_URL` only. A root program reads it inside the exact OAuth
 image on the box at switch-on; it first checks membership, SET ROLE and
-effective schema/table grants in read-only transactions. Missing grants stop
-with the exact privilege/object/role; never widen grants. Install the file
+effective schema/table grants in read-only transactions. Failed requirements print
+`FAIL hm37-mcp-enable REQ <n>: <description>` with only fixed descriptions,
+including the exact privilege/object/role for grants; never widen grants. Install
+the file
 `0440 root:986` after verifying the measured box runtime UID:GID `996:986`.
 Compose explicitly overrides Dockerfile `USER 10001:10001`; preserve the
 existing unprivileged service identity and stop on drift. Only root and
@@ -119,8 +121,11 @@ that runtime group can read it; its ON-only bind mount is read-only.
 No management 1Password item is created or used. The login must be able to set
 `swarm_command` and `swarm_read`; do not broaden the OAuth artifact role.
 The URL must use `MCP_OAUTH_DATABASE_HOST`, contain a login/password, and
-have no query overrides. The producer changes only the edge URL host to
-`db.commonswarm.internal`, which base Compose maps to `172.31.0.10` through
+have no query overrides. The producer accepts an absent query or exactly one
+parsed `sslmode=verify-full` pair; duplicates, other names or values fail closed.
+It strips the query before connecting and writing the management URL, since the
+runtime rejects query strings and enforces TLS explicitly. It changes the edge
+URL host to `db.commonswarm.internal`, which base Compose maps to `172.31.0.10` through
 `extra_hosts`; verify the live DNS mapping. The bundled postgres.js client
 receives the mounted CA, explicit `servername=db.commonswarm.internal`, and
 `rejectUnauthorized=true` from the management runtime adapter. `SUPABASE_URL` and
@@ -128,6 +133,17 @@ receives the mounted CA, explicit `servername=db.commonswarm.internal`, and
 keys and the OAuth artifact database credential are unchanged. No new
 1Password item name is defined here; HezLead supplies existing item references
 in vault **Yulan Ventures Infra** if recovery is needed.
+
+The HM37 procedure takes `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE`
+from HezLead's measured live OFF report. Preflight/open compare them to the
+running container and capture its release/base Compose path from labels;
+full rollback uses that captured path and immutable image. The expected next
+baseline is 972df171 / 80b52aa6; 826db6a3 / 5511a358 is historical. Preserve
+the baseline proof directory and use a different landed `OAUTH_RELEASE_SHA`
+for a fresh window. OFF/disable restores the exact original service/edge env
+bytes, including absent flags; only Compose stays on the new OFF image.
+Full rollback also restores the baseline Compose env/image. Follow the exact
+rerun order and named input sources in RELEASE.md; do not resume a closed window.
 
 The Dockerfile now uses the **clean exact-SHA repository archive root** as its
 build context because it packages the shared lane-2 source. The two stages
