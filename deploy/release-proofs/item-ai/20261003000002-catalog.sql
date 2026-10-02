@@ -123,6 +123,24 @@ SELECT COALESCE((
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY[]::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
+  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.lock_admin_client_verification(text,integer)')
+  AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true AND p.provolatile='v'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='56a5ba61e547917cb5d35eea06b975b4'
+  AND p.prorettype='record'::regtype AND p.proretset
+  AND p.proallargtypes=ARRAY['text'::regtype,'integer'::regtype,'text'::regtype,'integer'::regtype,
+    'boolean'::regtype,'timestamptz'::regtype,'text'::regtype,'text'::regtype,'text[]'::regtype,'text'::regtype]::oid[]
+  AND p.proargmodes=ARRAY['i','i','t','t','t','t','t','t','t','t']::"char"[]
+  AND p.proargnames=ARRAY['p_client_id','p_verification_version','client_id','verification_version','active',
+    'withdrawn_at','metadata_digest','application_type','redirect_uris','redirect_class']::text[]
+  AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+    WHERE a.privilege_type<>'EXECUTE' OR a.is_grantable OR (a.grantee<>p.proowner
+      AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname='swarm_command')))
+  AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=1)
+  AND COALESCE(has_function_privilege('swarm_command',to_regprocedure('commonswarm_oauth.lock_admin_client_verification(text,integer)'),'EXECUTE'),false)
+  AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.rolname IN
+    ('anon','authenticated','swarm_read','commonswarm_oauth_runtime','commonswarm_admin_release',
+     'commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
+    AND has_function_privilege(r.oid,to_regprocedure('commonswarm_oauth.lock_admin_client_verification(text,integer)'),'EXECUTE'))
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.resolve_admin_grant_status(text,uuid,text)')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
   AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='49ad465b7b00403f87c711a609a04f67'

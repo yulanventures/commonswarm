@@ -203,6 +203,23 @@ END $fn$;
 CREATE TRIGGER issuer_key_denial_lock BEFORE INSERT ON commonswarm_oauth.issuer_key_denials
   FOR EACH ROW EXECUTE FUNCTION commonswarm_oauth.lock_issuer_key_denial();
 
+-- First owner approval has no provider binding yet. Hold this exact verification
+-- before the account/grant locks, without giving command callers verification DML.
+-- M2's web-only constraints and redirect guard enforce the hosted HTTPS class.
+-- Returned scalar facts carry no table row type or write authority.
+CREATE FUNCTION commonswarm_oauth.lock_admin_client_verification(p_client_id text,p_verification_version integer)
+RETURNS TABLE(client_id text,verification_version integer,active boolean,withdrawn_at timestamptz,
+  metadata_digest text,application_type text,redirect_uris text[],redirect_class text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE;
+BEGIN
+  SELECT c.* INTO v FROM commonswarm_oauth.admin_verified_clients c
+    WHERE c.client_id=p_client_id AND c.verification_version=p_verification_version FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'admin client verification not found'; END IF;
+  RETURN QUERY SELECT v.client_id,v.verification_version,v.active,v.withdrawn_at,
+    v.metadata_digest,v.application_type,v.redirect_uris,'hosted_https'::text;
+END $fn$;
+
 CREATE FUNCTION commonswarm_oauth.resolve_admin_grant_status(p_provider_grant_id text,p_owner_user_id uuid,p_kid text)
 RETURNS TABLE(admin_grant_id uuid,admin_identity_id uuid,connection_id uuid,client_id text,resource text,
   jkt text,manifest_digest text,registry_version integer,scope_names text[],capabilities text[],expires_at timestamptz,active boolean)
@@ -340,6 +357,7 @@ BEGIN
   END LOOP;
   FOREACH f IN ARRAY ARRAY['register_dpop_nonce(bytea,text,text)','admit_dpop_proof(text,text,text,bigint,bytea)',
     'purge_expired_dpop(integer)','issuer_key_allowed(text,text)','lock_issuer_key_denial()',
+    'lock_admin_client_verification(text,integer)',
     'resolve_admin_grant_status(text,uuid,text)','resolve_provider_grant_status(text,uuid,text)',
     'fence_admin_family(text,uuid,text,text)','guard_verified_client()','guard_owner_approval()'] LOOP
     EXECUTE 'ALTER FUNCTION commonswarm_oauth.'||f||' OWNER TO swarm_admin';
@@ -358,6 +376,8 @@ GRANT SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verificati
 CREATE POLICY denial_release_read ON commonswarm_oauth.issuer_key_denials FOR SELECT TO commonswarm_admin_release USING(true);
 CREATE POLICY denial_release_insert ON commonswarm_oauth.issuer_key_denials FOR INSERT TO commonswarm_admin_release WITH CHECK(true);
 GRANT SELECT,INSERT ON commonswarm_oauth.issuer_key_denials TO commonswarm_admin_release;
+-- Human account-command path only. No runtime, worker, hosted-seat or public grant.
+GRANT EXECUTE ON FUNCTION commonswarm_oauth.lock_admin_client_verification(text,integer) TO swarm_command;
 GRANT EXECUTE ON FUNCTION commonswarm_oauth.register_dpop_nonce(bytea,text,text),
   commonswarm_oauth.admit_dpop_proof(text,text,text,bigint,bytea) TO commonswarm_oauth_runtime,commonswarm_dpop_verifier;
 GRANT EXECUTE ON FUNCTION commonswarm_oauth.purge_expired_dpop(integer) TO commonswarm_oauth_maintenance;
@@ -406,6 +426,7 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- DROP FUNCTION commonswarm_oauth.guard_owner_approval();
 -- DROP FUNCTION commonswarm_oauth.guard_verified_client();
 -- DROP FUNCTION commonswarm_oauth.resolve_provider_grant_status(text,uuid,text);
+-- DROP FUNCTION commonswarm_oauth.lock_admin_client_verification(text,integer);
 -- DROP FUNCTION commonswarm_oauth.resolve_admin_grant_status(text,uuid,text);
 -- DROP FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,text);
 -- DROP FUNCTION commonswarm_oauth.lock_issuer_key_denial();
