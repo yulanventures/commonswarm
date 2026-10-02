@@ -23,7 +23,7 @@ async function run(command: string, args: string[]): Promise<string> {
 
 test("OAuth image builds pinned dependencies and runs as the unprivileged service user", async () => {
   const tag = `commonswarm-mcp-auth-test:${randomUUID()}`;
-  await run("docker", ["build", "--pull=false", "--tag", tag, "services/mcp-auth"]);
+  await run("docker", ["build", "--pull=false", "--tag", tag, "--file", "services/mcp-auth/Dockerfile", "."]);
   try {
     const result = await run("docker", [
       "run", "--rm", "--read-only", "--entrypoint", "node", tag, "-e",
