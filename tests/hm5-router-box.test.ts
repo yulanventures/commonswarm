@@ -214,7 +214,7 @@ test("HM6 Caddy activates OAuth only and preserves the dark MCP resource contrac
 
   assert.match(
     stackEnv,
-    /^GOTRUE_URI_ALLOW_LIST=https:\/\/commonswarm\.com\/app,https:\/\/www\.commonswarm\.com\/app,http:\/\/127\.0\.0\.1:\*\/callback,https:\/\/mcp\.commonswarm\.com\/oauth\/callback\/gotrue$/m,
+    /^GOTRUE_URI_ALLOW_LIST=https:\/\/commonswarm\.com\/app,https:\/\/www\.commonswarm\.com\/app,http:\/\/127\.0\.0\.1:\*\/callback,https:\/\/mcp\.commonswarm\.com\/oauth\/callback\/gotrue\*\*$/m,
   );
 });
 

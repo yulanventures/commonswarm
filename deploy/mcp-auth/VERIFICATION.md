@@ -26,8 +26,10 @@ HezLead.
   edge-resource snippet remains unimported, and `/mcp` plus its
   protected-resource metadata route return explicit disabled JSON.
 - The GoTrue example appends
-  `https://mcp.commonswarm.com/oauth/callback/gotrue` to the three baseline
-  entries.
+  `https://mcp.commonswarm.com/oauth/callback/gotrue**` to the three baseline
+  entries. The `**` glob is required: GoTrue matches the allow list against the
+  full redirect URL, including the `interaction` and `state` query, and an exact
+  entry falls back to `GOTRUE_SITE_URL` (live connector test, 2026-10-02).
 
 The service-free configuration test is in the literal root `npm test` list.
 Docker validation belongs to the Actions `p1-cli` suite, and PostgreSQL

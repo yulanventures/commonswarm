@@ -171,20 +171,9 @@ including local credentials; the Dockerfile copies only the needed source
 paths and package manifests. The command pool is lazy and capped at two
 connections; switch-on checks `docker stats --no-stream` against the inspected
 memory limit after ON and route probes, and rolls back to OFF at or above 80%.
-Build only on the box, retaining the old image; the release procedure contains the exact pull and build commands:
-
-```sh
-# step: oauth-image-build
-set -eu
-: "${OAUTH_RELEASE_DIR:?FAIL: exact-SHA archive directory required}"
-: "${PROOF_DIR:?FAIL: release proof directory required}"
-BASE_REFERENCE=node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
-docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
-docker build --pull=false \
-  --iidfile "$PROOF_DIR/oauth-image.id" \
-  --file "$OAUTH_RELEASE_DIR/services/mcp-auth/Dockerfile" \
-  "$OAUTH_RELEASE_DIR" || { echo 'FAIL: OAuth image build' >&2; exit 1; }
-```
+Build only on the box, retaining the old image. The exact pinned base pull and the build from the exact-SHA archive
+context are the marked step `hm37-oauth-build` in
+`docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md`; this runbook carries no executable blocks.
 
 Use the resulting local immutable `sha256:<image-id>` in Compose with
 `--pull never`, as in HM6. No registry image tag is assumed. See
