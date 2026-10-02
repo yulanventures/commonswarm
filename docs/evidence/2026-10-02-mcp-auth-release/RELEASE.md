@@ -32,16 +32,18 @@ which the preflight below must reconcile before any production mutation:
 | Edge env/override | `/home/commonswarm/.env`; deployed `deploy/edge-runtime/compose.override.yaml` must be retained |
 | Caddy | `/etc/caddy/Caddyfile`, `/etc/caddy/sites/20-commonswarm-mcp.caddy`; HM6 rendered OAuth ingress, resource routes dark |
 | Existing protected files | `/etc/commonswarm-oauth/{signing-keys.pem,cookie-keys,database-credentials}`, `/etc/ssl/yulan-internal-ca.pem` |
-| New protected file | `/etc/commonswarm-oauth/management-database-credentials`, JSON `databaseUrl` from the existing edge DB configuration |
+| ON-only protected file | `/etc/commonswarm-oauth/management-database-credentials`, JSON `databaseUrl` from the existing edge DB configuration |
 
-Sources: `deploy/mcp-auth/{RUNBOOK.md,compose.yaml,env.example}`,
+Sources: `deploy/mcp-auth/{RUNBOOK.md,compose.yaml,compose.management.yaml,env.example}`,
 `deploy/edge-runtime/compose.yaml`, `deploy/supabase-stack/commonswarm-mcp.caddy`,
 `docs/evidence/2026-09-28-release-826db6a34f23-v5/`, and the supplied
 `~/work/hm37-live-release/B-FINAL-REPORT.md`. The latter reports B PASS and
 both flags rolled back OFF; it is a handoff, not this worker's live measurement.
 
 New input **name**: `MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE` (container
-path `/run/commonswarm-oauth/management-database-credentials`). Its value
+path `/run/commonswarm-oauth/management-database-credentials`). Only step (f)
+installs it and adds `compose.management.yaml`; OFF uses the unchanged base
+Compose file and has no management credential on host or in container. Its value
 source is a protected on-box file, not an environment secret or management
 bearer. `SWARM_DATABASE_URL` (fallback `SUPABASE_DB_URL`) already lives in
 `/home/commonswarm/.env`. That login must set `swarm_command` and `swarm_read`;
@@ -116,6 +118,10 @@ for name, project, service, sha in [
     files=str(work/'compose.yaml') + (','+str(work/'compose.override.yaml') if service=='edge-runtime' else '')
     assert labels['com.docker.compose.project.config_files']==files, 'compose files differ'
     if service=='oauth':
+        assert 'MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE' not in env
+        assert all(m['Destination']!='/run/commonswarm-oauth/management-database-credentials' for m in data['Mounts'])
+        assert not pathlib.Path('/etc/commonswarm-oauth/management-database-credentials').exists()
+        assert not pathlib.Path('/etc/commonswarm-oauth/management-database-credentials').is_symlink()
         assert data['Image']=='sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a'
         ports=data['NetworkSettings']['Ports']['3490/tcp']
         assert len(ports)==1 and ports[0]['HostIp']=='127.0.0.1' and ports[0]['HostPort']=='3490'
@@ -196,6 +202,11 @@ oauth_compose() {
   docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
     -f "$OAUTH_RELEASE_DIR/deploy/mcp-auth/compose.yaml" "$@"
 }
+oauth_management_compose() {
+  docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
+    -f "$OAUTH_RELEASE_DIR/deploy/mcp-auth/compose.yaml" \
+    -f "$OAUTH_RELEASE_DIR/deploy/mcp-auth/compose.management.yaml" "$@"
+}
 edge_compose() {
   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
     docker compose --project-name commonswarm-edge \
@@ -211,6 +222,23 @@ healthy() {
   done
   echo "FAIL: unhealthy container $1" >&2; return 1
 }
+rollback_to_off() {
+  install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || return 1
+  cat "$SECRET_STAGE/edge.off.env" >/home/commonswarm/.env || return 1
+  install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
+  runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
+  systemctl reload caddy || return 1
+  oauth_compose config --quiet || return 1
+  oauth_compose up -d --no-deps --force-recreate --pull never oauth || return 1
+  test "$(command -v rm)" = "$BOX_RM_GUARD" || return 1
+  rm -f /etc/commonswarm-oauth/management-database-credentials || {
+    echo 'FAIL: guarded removal refused /etc/commonswarm-oauth/management-database-credentials; report exact guard message' >&2; return 1;
+  }
+  test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
+  edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
+  healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
+}
 SH
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
@@ -218,8 +246,14 @@ printf 'Window state (paths and code only): %s\n' "$STATE"
 ## (b) Build the exact-SHA image on the box
 
 These are RUNBOOK's exact pull/build commands. The context changed to the
-repository root to include the shared command source; no secrets are copied
-into the immutable archive. There is no app registry tag or Mac image build.
+repository root to include the shared command source. `git archive` includes
+only tracked files at the reviewed SHA, so untracked credentials, `.env` files,
+node_modules and local scratch are absent. This is the context boundary; no
+root `.dockerignore` is required for this archive-only build. The Dockerfile
+copies package manifests, the five required `src` contract files, command and
+shared function directories, the build adapter, and the OAuth runtime source.
+It never uses `COPY .`; no secret files are copied into the image. There is
+no app registry tag or Mac image build.
 
 ```sh
 # step: hm37-oauth-build
@@ -240,12 +274,12 @@ docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e
   'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.existsSync("src/management-command.generated.js")) process.exit(1)' || exit 1
 ```
 
-## (c) Stage the binding credential and OFF env files
+## (c) Stage only OFF env files
 
 No secret appears in argv, environment, output, evidence or the source tree.
 Read the existing edge file with Python, never `source` it. Reject ambiguous
-env syntax/duplicate names and connection options; report a mismatch to
-HezLead instead of stripping options or provisioning another database role.
+env syntax/duplicate names. No management credential is read, staged or
+installed in (c)/(d); that work belongs exclusively to switch-on (f).
 The least-privilege OAuth artifact credential remains unchanged.
 
 ```sh
@@ -254,7 +288,7 @@ set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-inputs line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 python3 - "$SECRET_STAGE" "$PROOF_DIR/oauth-image.id" <<'PY'
-import json, os, pathlib, re, sys, urllib.parse
+import os, pathlib, re, sys
 stage=pathlib.Path(sys.argv[1]); image=pathlib.Path(sys.argv[2]).read_text().strip()
 def env(path):
     result={}
@@ -274,31 +308,17 @@ def save(path, source, updates):
     path.write_text(text); os.chmod(path,0o600)
 edge=env(stage/'edge.env'); compose=env(stage/'compose.env'); service=env(stage/'service.env')
 assert edge.get('SWARM_MCP_PUBLIC_ENABLED')!='1' and service.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED')!='1'
-url=edge.get('SWARM_DATABASE_URL') or edge.get('SUPABASE_DB_URL')
-assert url, 'existing management DB configuration missing'
-parsed=urllib.parse.urlsplit(url)
-assert parsed.scheme in ('postgres','postgresql') and parsed.username and parsed.password
-assert parsed.hostname==compose['MCP_OAUTH_DATABASE_HOST'] and not parsed.query and not parsed.fragment
 assert service.get('SUPABASE_URL') and service.get('SUPABASE_ANON_KEY')
-(stage/'management-database-credentials').write_text(json.dumps({'databaseUrl':url})+'\n')
-os.chmod(stage/'management-database-credentials',0o600)
 save(stage/'compose.off.env',stage/'compose.env',{'MCP_OAUTH_IMAGE':image,'MCP_OAUTH_ENV_FILE':'/etc/commonswarm-oauth/service.env'})
 save(stage/'service.off.env',stage/'service.env',{'MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED':'0'})
 save(stage/'edge.off.env',stage/'edge.env',{'SWARM_MCP_PUBLIC_ENABLED':'0'})
 print('input names validated; secret values retained only in protected files')
 PY
-if test -e /etc/commonswarm-oauth/management-database-credentials; then
-  test ! -L /etc/commonswarm-oauth/management-database-credentials || exit 1
-  cp /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/prior-management" || exit 1
-  chmod 0600 "$SECRET_STAGE/prior-management" || exit 1
-fi
-GROUP=$(stat -c '%G' /etc/commonswarm-oauth/database-credentials) || exit 1
-install -o root -g "$GROUP" -m 0640 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || exit 1
 ```
 
-## (d) Recreate with flags OFF; verify service and bindings
+## (d) Recreate with flags OFF using base Compose only
 
 ```sh
 # step: hm37-oauth-release-off
@@ -310,23 +330,17 @@ oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
 healthy commonswarm-oauth-oauth-1 || exit 1
 test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")" || exit 1
 docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
+import fs from "node:fs";
 import {loadConfig} from "./src/config.js";
 import {createProductionManagementBindings} from "./src/management-bindings.js";
-if(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1") process.exit(1);
-const config=await loadConfig({...process.env,MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED:"1"});
-const bindings=await createProductionManagementBindings(config);
-try {
-  const {db}=await import("./src/management-command.generated.js");
-  const rows=await db`SELECT pg_has_role(current_user, '\''swarm_command'\'', '\''MEMBER'\'') AS command,
-    pg_has_role(current_user, '\''swarm_read'\'', '\''MEMBER'\'') AS read`;
-  if(rows[0]?.command!==true || rows[0]?.read!==true) throw new Error("management role readiness");
-  await db.begin(async tx => { await tx`SELECT set_config('\''role'\'', '\''swarm_command'\'', true)`; });
-  const workspaces=await bindings.managementWorkspaceReader({userId:crypto.randomUUID(),identityVerified:true});
-  if(workspaces.length!==0) throw new Error("workspace identity scope");
-  console.log("management command role and scoped workspace read: PASS");
-} catch { console.error("FAIL: management binding readiness"); process.exitCode=1; }
-finally { await bindings.closeManagement(); }
+if(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1" ||
+   process.env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE ||
+   fs.existsSync("/run/commonswarm-oauth/management-database-credentials")) process.exit(1);
+const bindings=await createProductionManagementBindings(await loadConfig());
+if(Object.keys(bindings).length!==0) process.exit(1);
+console.log("OFF startup without management inputs: PASS");
 ' || exit 1
+test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || exit 1
 docker exec commonswarm-edge-edge-runtime-1 /bin/bash -c \
   'test "${SWARM_MCP_PUBLIC_ENABLED:-0}" != 1' || exit 1
 test -L /home/commonswarm/oauth/current || exit 1
@@ -382,7 +396,8 @@ PY
 ```
 
 For step (d) supply `MCP_EXPECTED_MODE=off` and run the probe. Do not enable
-either flag until both the binding readiness and all OFF probes pass.
+either flag until the OFF startup check and all OFF probes pass. Management
+role/workspace readiness runs only after the credential is installed in (f).
 
 ## (e) ROLLBACK to 826db6a3 and original env/Caddy
 
@@ -402,18 +417,17 @@ docker image inspect "$OLD_IMAGE" >/dev/null || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/service.env" /etc/commonswarm-oauth/service.env || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env || exit 1
 cat "$SECRET_STAGE/edge.env" >/home/commonswarm/.env || exit 1
-if test -f "$SECRET_STAGE/prior-management"; then
-  GROUP=$(stat -c '%G' /etc/commonswarm-oauth/database-credentials) || exit 1
-  install -o root -g "$GROUP" -m 0640 "$SECRET_STAGE/prior-management" /etc/commonswarm-oauth/management-database-credentials || exit 1
-else
-  chmod 0600 /etc/commonswarm-oauth/management-database-credentials || exit 1
-fi
 install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || exit 1
 runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || exit 1
 systemctl reload caddy || exit 1
 OAUTH_RELEASE_DIR=$OLD_OAUTH_DIR
 oauth_compose config --quiet || exit 1
 oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
+test "$(command -v rm)" = "$BOX_RM_GUARD" || exit 1
+rm -f /etc/commonswarm-oauth/management-database-credentials || {
+  echo 'FAIL: guarded removal refused /etc/commonswarm-oauth/management-database-credentials; report exact guard message' >&2; exit 1;
+}
+test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || exit 1
 edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || exit 1
 healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || exit 1
 test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$OLD_IMAGE" || exit 1
@@ -423,8 +437,9 @@ test -L /home/commonswarm/oauth/current || exit 1
 ln -sfn "$OLD_OAUTH_DIR" /home/commonswarm/oauth/current || exit 1
 ```
 
-A newly created management credential is retained root-only on rollback
-(matching HM6's retired-secret rule); the old image cannot consume it.
+OAuth-release rollback uses only the old base Compose and removes the exact
+management credential path with the verified guard. A refused removal is a
+failed rollback cleanup: retain it and report the guard message.
 No migration, app/stack, site, signing key, artifact credential or timer change.
 
 ## (f) MCP SWITCH-ON
@@ -439,12 +454,33 @@ Keep the OAuth loopback upstream, certificate, log filters and method bounds.
 ```sh
 # step: hm37-mcp-enable
 set -euo pipefail
-trap 'echo "FAIL: hm37-mcp-enable line $LINENO" >&2' ERR
 test "${TOM_ENABLE_APPROVAL:-}" = 2026-09-29 || { echo 'FAIL: named HezLead switch-on approval missing' >&2; exit 1; }
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-python3 - "$SECRET_STAGE" <<'PY'
-import os, pathlib, re, sys
+cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
+cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
+test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
+switch_on() {
+  python3 - "$SECRET_STAGE" <<'PY' || return 1
+import json, os, pathlib, re, sys, urllib.parse
 stage=pathlib.Path(sys.argv[1])
+def env(path):
+    result={}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        name,sep,value=line.partition('=')
+        assert sep and re.fullmatch(r'[A-Z][A-Z0-9_]*',name) and name not in result, 'env syntax or duplicate'
+        if len(value)>=2 and value[0]==value[-1] and value[0] in "'\"": value=value[1:-1]
+        result[name]=value
+    return result
+edge=env(stage/'edge.env'); compose=env(stage/'compose.env')
+url=edge.get('SWARM_DATABASE_URL') or edge.get('SUPABASE_DB_URL')
+assert url, 'existing management DB configuration missing'
+parsed=urllib.parse.urlsplit(url)
+assert parsed.scheme in ('postgres','postgresql') and parsed.username and parsed.password
+assert parsed.hostname==compose['MCP_OAUTH_DATABASE_HOST'] and not parsed.query and not parsed.fragment
+(stage/'management-database-credentials').write_text(json.dumps({'databaseUrl':url})+'\n')
+os.chmod(stage/'management-database-credentials',0o600)
 for source,target,flag in [('service.off.env','service.on.env','MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED'),
     ('edge.off.env','edge.on.env','SWARM_MCP_PUBLIC_ENABLED')]:
     text=(stage/source).read_text()
@@ -458,26 +494,90 @@ text,count=re.subn(pattern,'\t\timport mcp_resource_active',text)
 assert count==1 and '@mcp_unavailable' not in text, 'live Caddy differs; stop'
 (stage/'mcp.on.caddy').write_text(text); os.chmod(stage/'mcp.on.caddy',0o600)
 PY
-install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || exit 1
-cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL: edge env changed since snapshot' >&2; exit 1; }
-cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot' >&2; exit 1; }
-cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || exit 1
-oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
-edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || exit 1
-healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || exit 1
-docker exec commonswarm-oauth-oauth-1 node -e 'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1" ? 0 : 1)' || exit 1
-docker exec commonswarm-edge-edge-runtime-1 /bin/bash -c 'test "${SWARM_MCP_PUBLIC_ENABLED:-0}" = 1' || exit 1
-install -o root -g root -m 0644 "$SECRET_STAGE/mcp.on.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || exit 1
-runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || exit 1
-systemctl reload caddy || exit 1
+  GROUP=$(stat -c '%g' /etc/commonswarm-oauth/database-credentials) || return 1
+  OAUTH_GID=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
+  OAUTH_GID=${OAUTH_GID#*:}
+  test "$GROUP" = "$OAUTH_GID" || { echo 'FAIL: artifact credential group differs from OAuth gid' >&2; return 1; }
+  test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
+  install -o root -g "$GROUP" -m 0640 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
+  cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
+  oauth_management_compose config --quiet || return 1
+  oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
+  edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
+  healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
+  docker exec commonswarm-oauth-oauth-1 node -e 'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1" ? 0 : 1)' || return 1
+  docker exec commonswarm-edge-edge-runtime-1 /bin/bash -c 'test "${SWARM_MCP_PUBLIC_ENABLED:-0}" = 1' || return 1
+  docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
+import {loadConfig} from "./src/config.js";
+import {createProductionManagementBindings} from "./src/management-bindings.js";
+if(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED!=="1") process.exit(1);
+const config=await loadConfig();
+const bindings=await createProductionManagementBindings(config);
+try {
+  const {db}=await import("./src/management-command.generated.js");
+  const rows=await db`SELECT pg_has_role(current_user, '\''swarm_command'\'', '\''MEMBER'\'') AS command,
+    pg_has_role(current_user, '\''swarm_read'\'', '\''MEMBER'\'') AS read`;
+  if(rows[0]?.command!==true || rows[0]?.read!==true) throw new Error("management role readiness");
+  await db.begin(async tx => { await tx`SELECT set_config('\''role'\'', '\''swarm_command'\'', true)`; });
+  const workspaces=await bindings.managementWorkspaceReader({userId:crypto.randomUUID(),identityVerified:true});
+  if(workspaces.length!==0) throw new Error("workspace identity scope");
+  console.log("management command role and scoped workspace read: PASS");
+} catch { console.error("FAIL: management binding readiness"); process.exitCode=1; }
+finally { await bindings.closeManagement(); }
+' || return 1
+  docker inspect --format '{{.HostConfig.Memory}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-memory-limit.bytes" || return 1
+  docker stats --no-stream --format '{{json .}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-stats.json" || return 1
+  python3 - "$PROOF_DIR" <<'PY' || return 1
+import decimal, json, pathlib, re, sys
+proof=pathlib.Path(sys.argv[1]); limit=int((proof/'oauth-memory-limit.bytes').read_text())
+assert limit>0, 'OAuth container has no memory limit'
+stats=json.loads((proof/'oauth-stats.json').read_text())
+assert stats['Name']=='commonswarm-oauth-oauth-1', 'stats container identity mismatch'
+match=re.fullmatch(r'\s*([0-9.]+)\s*(B|KiB|MiB|GiB|TiB|kB|MB|GB|TB)\s*',stats['MemUsage'].split('/')[0])
+assert match, 'unrecognized Docker memory units'
+units={'B':1,'KiB':1024,'MiB':1024**2,'GiB':1024**3,'TiB':1024**4,'kB':1000,'MB':1000**2,'GB':1000**3,'TB':1000**4}
+used=decimal.Decimal(match[1])*units[match[2]]
+print('OAuth docker stats memory bytes='+str(used)+' inspected limit bytes='+str(limit))
+assert used*5<=limit*4, 'OAuth memory exceeds 80% of inspected limit; rollback required'
+print('OAuth memory <=80%: PASS')
+PY
+  install -o root -g root -m 0644 "$SECRET_STAGE/mcp.on.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
+  runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
+  systemctl reload caddy || return 1
+}
+if ! switch_on; then
+  echo 'FAIL: switch-on/readiness/memory; rolling back to OFF' >&2
+  rollback_to_off || { echo 'FAIL: rollback-to-OFF; stop and report' >&2; exit 1; }
+  exit 1
+fi
+```
+
+The command bundle allocates its postgres.js pool only on first database use,
+with maximum two connections. The switch-on block measures OAuth memory via
+`docker stats --no-stream` after enable and management readiness, compares it
+to `.HostConfig.Memory` from inspect, and automatically rolls back to OFF on
+usage above 80% (or any failed enable/readiness check). This is one release
+sample, not a sustained-load measurement.
+
+```sh
+# step: hm37-mcp-disable
+set -euo pipefail
+trap 'echo "FAIL: hm37-mcp-disable line $LINENO" >&2' ERR
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+rollback_to_off || exit 1
+docker exec commonswarm-oauth-oauth-1 node -e 'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1" || process.env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE ? 1 : 0)' || exit 1
+docker exec commonswarm-edge-edge-runtime-1 /bin/bash -c 'test "${SWARM_MCP_PUBLIC_ENABLED:-0}" != 1' || exit 1
 ```
 
 Run the marked route probe with `MCP_EXPECTED_MODE=on`: health, both discovery
 documents and JWKS 200; invalid authorization 400; token 400/401; public
 `/mcp` POST 401 and protected-resource metadata 200 through Caddy/Cloudflare.
-If any probe fails, run step (e), then the OFF probe; authorization, token,
+If any probe fails, run `hm37-mcp-disable` (base Compose, both flags OFF,
+exact guarded management-file removal), then the OFF probe; authorization, token,
 MCP and protected-resource metadata must all return disabled 503 JSON again.
 The rollback restores both flags, recreates both services, and restores Caddy.
+Step (e) is available when the OAuth release itself must also revert.
 
 ## Close and remove secret staging
 

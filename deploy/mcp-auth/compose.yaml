@@ -19,19 +19,12 @@ services:
       MCP_OAUTH_SIGNING_KEYS_FILE: /run/commonswarm-oauth/signing-keys.pem
       MCP_OAUTH_COOKIE_KEYS_FILE: /run/commonswarm-oauth/cookie-keys
       MCP_OAUTH_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/database-credentials
-      MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/management-database-credentials
       # config.js supplies this CA and verifies the hostname, the node-postgres
       # equivalent of libpq sslmode=verify-full.
       MCP_OAUTH_DATABASE_TLS_CA_FILE: /etc/ssl/yulan-internal-ca.pem
     extra_hosts:
       - "${MCP_OAUTH_DATABASE_HOST:?set the database TLS hostname}:${MCP_OAUTH_DATABASE_ADDRESS:?set the database fixed IP address}"
     volumes:
-      - type: bind
-        source: /etc/commonswarm-oauth/management-database-credentials
-        target: /run/commonswarm-oauth/management-database-credentials
-        read_only: true
-        bind:
-          create_host_path: false
       - type: bind
         source: /etc/commonswarm-oauth/signing-keys.pem
         target: /run/commonswarm-oauth/signing-keys.pem

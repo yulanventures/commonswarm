@@ -54,3 +54,49 @@ All synthetic credential/JWK files used fresh mode-0700
 `/private/tmp/anvil-secret.*` directories, mode-0600 files, removed through
 the guarded rm after each test. HOME was inherited unchanged. No secrets
 were printed, no op/keychain/GUI/Chrome/Alloy calls, no push or Actions run.
+
+## TASK-2 Composer corrections (supersedes initial validation counts)
+
+The base Compose is byte-identical to origin/main. Its management env/mount
+are now only in `compose.management.yaml`, selected only by switch-on. Step
+(c)/(d) neither stages nor installs a management credential. Role/workspace
+readiness moved to step (f). Both OFF rollback paths recreate with base only
+and remove `/etc/commonswarm-oauth/management-database-credentials` using the
+verified guard and a literal path. Switch-on refuses snapshot drift before
+mutation; failed enable/readiness/memory rolls back to the new release OFF.
+
+The shared command source already set `max: 2`; the build adapter preserves
+and checks that cap and wraps pool creation lazily. `postgres` 3.4.9 is now
+a pinned service dependency external to the generated bundle. That preserves
+the normal dependency boundary for a database stub without replacing the
+bundled management handler or adding a test-only production export.
+
+- Node 24.20.0 focused file: 8 tests, 6 passed, 2 skipped for socket EPERM,
+  0 failed. The new fresh-process checks do not listen: they call the real
+  production composition root with only the HTTP listening boundary stubbed.
+  The enabled check observes the callback passed to the real consent
+  orchestrator, invokes the real bundled revoke handler with a postgres stub,
+  and asserts its missing-grant refusal, transaction, verified-user write,
+  grant lookup, first-use pool creation, max 2, and pool close. OFF observes
+  zero bundle loads, pool constructors or management SQL.
+- Mutation controls: allocating eagerly fails startup's zero-pool assertion;
+  returning the same refusal without calling the handler fails the pool/SQL
+  observations. Both owners restored byte-for-byte, focused check passed.
+- All 13 sh blocks (12 RELEASE, 1 RUNBOOK): `bash -n` and `/bin/bash -n`
+  PASS. All 7 Python heredocs compile; both embedded Node readiness scripts
+  pass syntax after shell unquoting.
+- Memory-gate Python exercised with public synthetic metrics and a 10 MiB
+  inspected-limit fixture: exactly 8 MiB passes; 8.01 MiB and 9 MiB fail;
+  decimal `kB` units also pass below threshold. No Docker call was executed.
+- Recreated the management-build stage from exactly the Dockerfile COPY
+  inputs and read-only links to existing dependencies: bundle build and
+  Node syntax PASS. No Docker image build or dependency installation ran.
+- `git diff --check` PASS. Identity/trailer checks run again on the final
+  two-commit range after the single TASK-2 commit.
+
+No live memory measurement, PostgreSQL transaction, release, network probe,
+CI, push, Alloy, browser, GUI, keychain or HOME mutation occurred. Synthetic
+credential/key fixtures used mode-0700 `anvil-secret.*` dirs and mode-0600
+files; every fixture cleanup used the installed rm guard and succeeded.
+The initial report's live-measurement and production-readiness limits still
+apply; HezLead arranges the independent cross-family check.

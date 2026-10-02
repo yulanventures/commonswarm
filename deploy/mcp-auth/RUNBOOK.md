@@ -101,7 +101,10 @@ verified-user claims. No extra listener or management bearer is introduced.
 
 Enabled startup additionally requires
 `MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE`, mounted from
-`/etc/commonswarm-oauth/management-database-credentials`. Its JSON document
+`/etc/commonswarm-oauth/management-database-credentials`. Install it only
+at switch-on with `compose.yaml` plus `compose.management.yaml`. OFF and
+both rollback paths use base Compose alone and remove the exact host file
+with the verified rm guard. Its JSON document
 contains `databaseUrl`, read from the existing box edge configuration's
 `SWARM_DATABASE_URL` (or `SUPABASE_DB_URL`). The login must be able to set
 `swarm_command` and `swarm_read`; do not broaden the OAuth artifact role.
@@ -114,8 +117,12 @@ in vault **Yulan Ventures Infra** if recovery is needed.
 
 The Dockerfile now uses the **clean exact-SHA repository archive root** as its
 build context because it packages the shared lane-2 source. The two stages
-use the same digest-pinned base. Build only on the box, retaining the old
-image; the release procedure contains the exact pull and build commands:
+use the same digest-pinned base. `git archive` excludes untracked files,
+including local credentials; the Dockerfile copies only the needed source
+paths and package manifests. The command pool is lazy and capped at two
+connections; switch-on checks `docker stats --no-stream` against the inspected
+memory limit and rolls back to OFF above 80%. Build only on the box, retaining
+the old image; the release procedure contains the exact pull and build commands:
 
 ```sh
 # step: oauth-image-build

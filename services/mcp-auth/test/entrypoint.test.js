@@ -116,6 +116,19 @@ test("enabled configuration requires the protected management credential; disabl
   assert.deepEqual(await createProductionManagementBindings(await loadConfig(env)), {});
 });
 
+test("production entrypoint invokes the bundled management handler; OFF imports no bundle and allocates no pool", async (t) => {
+  for (const enabled of [false, true]) {
+    await t.test(enabled ? "enabled real bundled handler with stub DB" : "disabled no management database", async (t) => {
+      const env = await fixture(t);
+      env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED = enabled ? "1" : "0";
+      if (!enabled) delete env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE;
+      const { stdout } = await exec(process.execPath,
+        [new URL("fixtures/management-entrypoint.js", import.meta.url).pathname], { env, timeout: 10_000 });
+      assert.match(stdout, enabled ? /real bundled revoke.*PASS/u : /zero management bundle imports, pools or queries PASS/u);
+    });
+  }
+});
+
 test("production bindings refuse unverified identities and non-management commands before database work", async (t) => {
   const env = await fixture(t);
   env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED = "1";
