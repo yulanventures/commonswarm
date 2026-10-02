@@ -372,6 +372,19 @@ signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
 click-through or reduced-control fallback. Close stops only the task-owned
 headless process and removes its private profile through guarded rm.
 
+Preflight uses a unique named harness daemon and private runtime directory;
+its EXIT trap stops that daemon on success or failure, never the default daemon.
+The headless process/profile remain available to later controls on success.
+Raw harness output and daemon logs stay under the private secret-staging root
+until failure cleanup or window close. Only a sanitized mode-0600 summary is
+retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
+stderr categories, with arbitrary error details withheld. STEP 0 means harness
+setup failed before Python started. Steps 1–13 are attachment, navigation,
+document load, app readiness, state snapshot, keychain/challenge check, branch
+selection, account label, user identity, starting workspace, workspace switch,
+switch wait, and receipt write. STEP 4 requires a non-loading dashboard state
+and exactly one visible panel before reading sign-in state.
+
 ```sh
 # step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium identity and workspace preflight
 # readonly: no
@@ -386,10 +399,30 @@ headless process and removes its private profile through guarded rm.
   browser_root="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
   case "$browser_root" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   chrome_pid=
+  harness_started=0
+  keep_browser=0
   cleanup_browser_preflight() {
     status=$?
     trap - EXIT
-    if [ -n "$chrome_pid" ]; then kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; fi
+    if [ "$harness_started" -eq 1 ]; then
+      # --reload only stops; these exact name/runtime settings never address default.
+      if ! BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+        BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+        BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
+        browser-harness --reload >"$private_evidence/harness-stop.stdout" \
+        2>"$private_evidence/harness-stop.stderr"; then
+        printf '%s\n' 'STOP: named preflight daemon cleanup failed; details withheld' >&2
+        status=1
+        keep_browser=0
+      fi
+    fi
+    if [ "$keep_browser" -eq 1 ] && [ "$status" -eq 0 ]; then exit 0; fi
+    if [ -n "$chrome_pid" ] && kill -0 "$chrome_pid" 2>/dev/null; then
+      case "$(ps -p "$chrome_pid" -o command= 2>/dev/null)" in
+        *"$chrome"*"--user-data-dir=$profile"*) kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true ;;
+        *) printf 'WARN site-03-browser-session-preflight: pid %s is not the task-owned browser; not signalled\n' "$chrome_pid" >&2 ;;
+      esac
+    fi
     if ! rm -r -- "$browser_root"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
       exit 1
@@ -400,6 +433,14 @@ headless process and removes its private profile through guarded rm.
   trap 'exit 130' INT
   trap 'exit 143' TERM
   chmod 0700 "$browser_root"
+  private_evidence="$browser_root/evidence"
+  harness_runtime="$browser_root/harness-runtime"
+  harness_name="site-preflight-${browser_root##*.}"
+  mkdir -m 0700 "$private_evidence" "$harness_runtime"
+  harness_stdout="$private_evidence/harness.stdout"
+  harness_stderr="$private_evidence/harness.stderr"
+  : >"$harness_stdout"; : >"$harness_stderr"
+  chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
@@ -435,13 +476,52 @@ NODE
   } >>"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
   export CLI_USER_ID SITE_EVIDENCE
-  BU_CDP_URL="$endpoint" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import json, os, pathlib, time
+  harness_status=0
+  harness_started=1
+  BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+    BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+    BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 BH_TAB_MARKER=0 \
+    browser-harness >"$harness_stdout" 2>"$harness_stderr" <<'PY' || harness_status=$?
+import json, os, pathlib, time, urllib.request
 expected_user = "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
 start_workspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 control_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+print("STEP 1", flush=True)
+endpoint = os.environ["BU_CDP_URL"]
+def endpoint_json(path):
+    # Loopback only; bypass ambient HTTP proxies. Never print endpoint responses.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(endpoint + path, timeout=5) as response:
+        return json.load(response)
+version = endpoint_json("/json/version")
+attached_version = cdp("Browser.getVersion")
+attached_target = current_tab()["targetId"]
+if (not version.get("webSocketDebuggerUrl", "").startswith(
+        endpoint.replace("http://", "ws://", 1) + "/devtools/browser/")
+    or "HeadlessChrome/" not in attached_version.get("userAgent", "")
+    or attached_version.get("product") != version.get("Browser")
+    or attached_version.get("userAgent") != version.get("User-Agent")
+    or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
+    raise SystemExit("STOP: STEP 1 endpoint ownership")
+print("STEP 2", flush=True)
 new_tab("https://commonswarm.com/app")
-wait_for_load()
+print("STEP 3", flush=True)
+if not wait_for_load(): raise SystemExit("STOP: STEP 3 document load timeout")
+print("STEP 4", flush=True)
+deadline = time.monotonic() + 30
+ready = False
+while time.monotonic() < deadline:
+    ready = js("""(() => {
+      const app=document.querySelector('live-dashboard[data-state]');
+      if(!app || !app.dataset.state || app.dataset.state==='loading') return false;
+      if(!app.querySelector('[data-panel="signed-out"]')) return false;
+      const visible=[...app.querySelectorAll('.dashboard__root > [data-panel]')]
+        .filter(panel=>!panel.hidden && panel.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
+      return visible.length===1 && visible[0].dataset.panel===app.dataset.state;
+    })()""")
+    if ready: break
+    time.sleep(.25)
+if not ready: raise SystemExit("STOP: STEP 4 app readiness timeout")
 def state():
     return js("""(() => {
       let userId='';
@@ -456,12 +536,15 @@ def state():
         display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
         signedOut:!document.querySelector('[data-panel="signed-out"]')?.hasAttribute('hidden')};
     })()""")
+print("STEP 5", flush=True)
 observed=state()
 signin_attempted=False
 # A fresh profile has no inherited operator SSO. This view-only control never
 # initiates sign-in. Signed-out state selects the existing reduced branch.
-if js("/keychain/i.test(document.body?.innerText||'')"): raise SystemExit('STOP: keychain dialog')
+print("STEP 6", flush=True)
+if js("/keychain/i.test(document.body?.innerText||'')"): raise SystemExit('STOP: STEP 6 keychain dialog')
 challenge=js("/two-factor|2fa|verification code/i.test(document.body?.innerText||'')")
+print("STEP 7", flush=True)
 if observed.get("signedOut") or challenge:
     result={"branch":"REDUCED-CONTROL","signin_attempted":signin_attempted,
       "reason":"signed-out-or-interactive-challenge",
@@ -469,14 +552,19 @@ if observed.get("signedOut") or challenge:
       "signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED",
       "mobile_320":"NOT PROVED","mobile_390":"NOT PROVED"}
 else:
+    print("STEP 8", flush=True)
     if observed["display"] != "Ridgeio": raise SystemExit(1)
+    print("STEP 9", flush=True)
     if observed["userId"] != expected_user or observed["userId"] != os.environ["CLI_USER_ID"]: raise SystemExit(1)
+    print("STEP 10", flush=True)
     if observed["selectedWorkspace"] != start_workspace: raise SystemExit(1)
+    print("STEP 11", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     switched=js("""(() => { const target=document.querySelector(
       '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
       if(!target)return false; target.click(); return true; })()""")
     if not switched: raise SystemExit(1)
+    print("STEP 12", flush=True)
     for _ in range(60):
         time.sleep(.5); observed=state()
         if observed.get("selectedWorkspace")==control_workspace: break
@@ -484,10 +572,59 @@ else:
     result={"branch":"FULL-CONTROL","account_label":"Ridgeio",
       "cli_user_id":expected_user,"web_user_id":expected_user,
       "start_workspace_id":start_workspace,"control_workspace_id":control_workspace}
+print("STEP 13", flush=True)
 path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
-  trap - EXIT INT TERM
+  python3 - "$harness_stdout" "$harness_stderr" "$harness_status" "$SITE_EVIDENCE" <<'PY'
+import collections, pathlib, re, sys
+stdout, stderr = map(pathlib.Path, sys.argv[1:3])
+code = int(sys.argv[3])
+names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
+    4:"app readiness", 5:"state snapshot", 6:"keychain/challenge", 7:"branch selection",
+    8:"account label", 9:"user identity", 10:"starting workspace", 11:"workspace switch",
+    12:"switch wait", 13:"receipt write"}
+step = 0
+with stdout.open(encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = re.fullmatch(r"STEP ([1-9]|1[0-3])\n?", line)
+        if match: step = int(match[1])
+# Reject sensitive-looking lines, then emit only fixed categories/line numbers.
+# No arbitrary message, source-code line, URL, file path or exception detail passes.
+unsafe = re.compile(r"token|jwt|email|cookie|session|bearer|credential|password|secret|"
+    r"authorization|localstorage|@|https?://|wss?://|eyJ[A-Za-z0-9_-]*\.|"
+    r"[A-Za-z0-9_+/=-]{24,}|[\x00-\x08\x0b-\x1f\x7f]", re.I)
+classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefusedError",
+    "OSError", "PermissionError", "FileNotFoundError", "KeyError", "ValueError",
+    "TypeError", "AssertionError", "SyntaxError", "ImportError", "ModuleNotFoundError")
+named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
+    "STOP: STEP 4 app readiness timeout", "STOP: STEP 6 keychain dialog"}
+with stderr.open(encoding="utf-8", errors="replace") as stream:
+    tail = collections.deque(stream, maxlen=20)
+safe = []
+for raw in tail:
+    line = raw.rstrip("\n")
+    if unsafe.search(line): continue
+    if line in named:
+        safe.append(line)
+        continue
+    for kind in classes:
+        if line == kind or line.startswith(kind + ":"):
+            safe.append(kind + " (details withheld)")
+            break
+    else:
+        match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
+        if match: safe.append("Python line " + match[1])
+summary = [f"site-03-browser-preflight: STEP {step} ({names[step]}); exit code {code}"]
+summary += ["stderr: " + line for line in safe[-8:]]
+if not safe: summary.append("stderr: no safe detail retained")
+text = "\n".join(summary) + "\n"
+path = pathlib.Path(sys.argv[4]) / "site-03-browser-preflight-summary.txt"
+path.write_text(text, encoding="utf-8"); path.chmod(0o600)
+print(text, end="")
+PY
+  if [ "$harness_status" -ne 0 ]; then exit "$harness_status"; fi
+  keep_browser=1
 )
 ```
 
@@ -993,8 +1130,9 @@ BOX
 
 ## 6. Rollback verification
 
-`site-06` always runs. It records `not-needed`, or verifies pinned baseline
-bytes through the public boundary and rechecks the appropriate browser branch.
+`site-06` always runs before either close path. It records `not-needed`, or
+verifies pinned baseline bytes through the public boundary and rechecks the
+appropriate browser branch.
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; verify automatic rollback or record not-needed
@@ -1070,6 +1208,143 @@ the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
 The task-owned headless browser is stopped and its private profile is removed through guarded rm. The
 temporary build `site/.env` is removed at close.
+
+Choose the close by the pin invocation marker, `site-03-pin.txt`: the pin step
+creates it before its SSH call, even if that call fails. If the marker is absent
+and `site-03-pin-previous` never ran, run `site-06`, then
+`site-07-pre-pin-manifest-close` below. This path needs no `previous.release`
+and verifies the live baseline without changing `current`. If the pin step ran,
+use the unchanged `site-07-manifest-close` instead after the applicable failure
+reconciliation and `site-06`. A partial pin failure needs HezLead reconciliation;
+never delete its marker or use the pre-pin path to bypass it. Do not retry the
+failed release step within the closing window.
+
+```sh
+# step: site-07-pre-pin-manifest-close — Mac mini /bin/bash 3.2; Anvil; close a failure before pin invocation
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  test -f "$HOME/.commonswarm-site-window.env"
+  test ! -L "$HOME/.commonswarm-site-window.env"
+  . "$HOME/.commonswarm-site-window.env"
+  test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  for input_path in "$SITE_EVIDENCE" "$SITE_RELEASE_REPO"; do
+    case "$input_path" in /*) ;; *) exit 1 ;; esac
+    test -d "$input_path"
+    test ! -L "$input_path"
+  done
+  for marker in site-03-pin.txt previous.release previous.original GO.txt after.release; do
+    test ! -e "$SITE_EVIDENCE/$marker"
+    test ! -L "$SITE_EVIDENCE/$marker"
+  done
+  grep -qFx 'rollback=not-needed' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+  # Reject unsafe evidence before changing either window state file.
+  python3 - "$SITE_EVIDENCE" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1]).resolve()
+for path in sorted(root.rglob("*")):
+    if path.is_symlink(): raise SystemExit(1)
+    if path.name=="chrome-launch.log" or path.is_dir(): continue
+    if not path.is_file() or path.suffix.lower() in {".html",".har"}: raise SystemExit(1)
+    if path.suffix.lower() in {".txt",".json",".log",""}:
+        text=path.read_bytes().decode("utf-8"); patterns=(r"Authorization:\s*Bearer",
+          r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",
+          r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",r"<!doctype\s+html|<html[ >]",r'"log"\s*:\s*\{\s*"version"')
+        if any(re.search(pattern,text,re.I) for pattern in patterns): raise SystemExit(1)
+PY
+  python3 - "$SITE_RELEASE_REPO/site/.env" "$SITE_RELEASE_REPO" <<'PY'
+import pathlib,sys
+repo=pathlib.Path(sys.argv[2]).resolve(strict=True); target=pathlib.Path(sys.argv[1])
+assert repo!=pathlib.Path.home().resolve() and repo!=pathlib.Path("/")
+assert target.name==".env" and target.parent.resolve(strict=True)==repo/"site"
+assert not target.is_symlink()
+if target.exists(): assert target.is_file()
+PY
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
+    >"$SITE_EVIDENCE/site-07-pre-pin-close.txt" <<'BOX'
+set -euo pipefail
+set -E
+trap 'printf "FAIL site-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+window_id=$1; root=/srv/commonswarm/site
+case "$window_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+esac
+previous="$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+test -L "$root/current"
+test "$(readlink -f "$root/current")" = "$previous"
+test -d "$previous"
+test ! -L "$previous"
+test ! -e "$root/releases/.site-window-pin-$window_id"
+test ! -L "$root/releases/.site-window-pin-$window_id"
+test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -f /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+rm -f -- /tmp/commonswarm-site-window.env
+test ! -e /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+printf 'closed_before_pin=true\nBASELINE_UNCHANGED=PASS\ncurrent_release=%s\noutcome=failed-before-pin\n' "$previous"
+BOX
+  chmod 0600 "$SITE_EVIDENCE/site-07-pre-pin-close.txt"
+  rm -f -- "$SITE_RELEASE_REPO/site/.env"
+  test ! -e "$SITE_RELEASE_REPO/site/.env"
+  test ! -L "$SITE_RELEASE_REPO/site/.env"
+  # Same task-owned headless process/profile cleanup as the normal close.
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
+    if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
+      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
+      kill "$SITE_CHROME_PID"
+      for tries in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+    fi
+    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SITE_BROWSER_ROOT"
+  fi
+  # Write the manifest after the box receipt and cleanup; CLOSE.txt stays outside it.
+  python3 - "$SITE_EVIDENCE" <<'PY'
+import hashlib,json,pathlib,stat,sys
+root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
+for path in sorted(root.rglob("*")):
+    if path.is_symlink(): raise SystemExit(1)
+    if path.name in {"chrome-launch.log","manifest.json","CLOSE.txt"} or path.is_dir(): continue
+    if not path.is_file(): raise SystemExit(1)
+    data=path.read_bytes()
+    rows.append({"path":path.relative_to(root).as_posix(),"bytes":len(data),
+      "mode":format(stat.S_IMODE(path.stat().st_mode),"04o"),"sha256":hashlib.sha256(data).hexdigest()})
+if not rows: raise SystemExit(1)
+manifest=root/"manifest.json"; manifest.write_text(json.dumps(rows,sort_keys=True,indent=2)+"\n",encoding="utf-8"); manifest.chmod(0o600)
+PY
+  manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
+  {
+    printf 'CLOSED=yes\nOUTCOME=failed-before-pin\nclosed_before_pin=true\n'
+    printf 'BASELINE_UNCHANGED=PASS\nPIN_RELEASED=not-created\n'
+    printf 'MANIFEST_SHA256=%s\nCLOSED_AT=%s\n' "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$SITE_EVIDENCE/CLOSE.txt"
+  chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
+  test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
+  test -f "$SITE_WINDOW_FILE"
+  test ! -L "$SITE_WINDOW_FILE"
+  rm -f -- "$SITE_WINDOW_FILE"
+  test ! -e "$SITE_WINDOW_FILE"
+  test ! -L "$SITE_WINDOW_FILE"
+)
+```
 
 ```sh
 # step: site-07-manifest-close — Mac mini /bin/bash 3.2; Anvil; sanitize, release pin, and close
@@ -1206,7 +1481,7 @@ PY
 | P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
 | P2-K2-09 | The marked browser steps use only Anvil's task-owned fresh headless profile and restore its starting workspace. |
 | P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
-| P2-K2-11 | `site-07-manifest-close` scans, hashes, closes, and cleans inputs. |
+| P2-K2-11 | `site-07-manifest-close`, or `site-07-pre-pin-manifest-close` before pin invocation, scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site-01` produces the evidence directory. |
 | P2-K3-02 | `site-00-source-checkout` produces the checkout. |
 | P2-K3-03 | `site-00-build-env` produces `site/.env`. |
@@ -1237,8 +1512,12 @@ PY
 ## 9. Recorded outcomes
 
 `CLOSE.txt` separately records outcome, browser branch, manifest digest, pin
-release, and closure. The evidence set separately records build/upload/switch,
-public bytes, browser controls, and any rollback. A successful site release
+release, and closure. A pre-pin failure instead records `OUTCOME=failed-before-pin`,
+`closed_before_pin=true`, `BASELINE_UNCHANGED=PASS`, and `PIN_RELEASED=not-created`;
+it makes no release or browser-acceptance claim. Its manifest includes the box
+baseline/close receipt, with `CLOSE.txt` outside the hashed set. The evidence set
+separately records build/upload/switch, public bytes, browser controls, and any
+rollback. A successful site release
 records the pre-GO MCP metadata/401 status check separately from site controls.
 Those read-only probes establish public MCP routing and its unauthenticated
 challenge; they do not prove an authenticated MCP session or live revoke
