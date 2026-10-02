@@ -12,6 +12,7 @@ globalThis.fetch = () => { authCalls++; throw new Error('unexpected_authenticati
 let served;
 Deno.serve = handler => { served = handler; };
 const { handleRequest: read, handleHostedRead } = await import('../../supabase/functions/read/index.ts');
+const { handleGatewayRequest, rewriteFunctionRequest } = await import('../../deploy/edge-runtime/main/router.ts');
 const { handleRequest: command, handleHostedCommand } = await import('../../supabase/functions/command/index.ts');
 const { handleRequest: mcp } = await import('../../supabase/functions/mcp/index.ts');
 await import('../../supabase/functions/activity/index.ts');
@@ -46,6 +47,30 @@ assert.equal((await command(request('/command', worker, 'GET'))).status, 405);
 assert.equal((await activity(request('/activity', worker, 'GET'))).status, 405);
 assert.equal((await h0(new Request('http://127.0.0.1/h0/agent-doc/fixture'))).status, 200);
 assert.equal((await mcp(new Request('http://127.0.0.1/.well-known/oauth-protected-resource/mcp'))).status, 200);
+// The release smoke enters the production gateway without an apikey. Exercise
+// its dispatch and path rewrite with the real read handler, without a listener.
+let readDispatches = 0;
+async function gatewayRead(input) {
+  return await handleGatewayRequest(input, true, async (route, original) => {
+    assert.equal(route.functionName, 'read');
+    assert.equal(route.pathname, '/read');
+    readDispatches++;
+    return await read(rewriteFunctionRequest(original, route.pathname));
+  });
+}
+assert.equal((await gatewayRead(new Request('https://api.commonswarm.com/functions/v1/read', {
+  method: 'GET',
+}))).status, 405, 'positive control reaches the read worker through dispatch');
+const smoke = await gatewayRead(new Request('https://api.commonswarm.com/functions/v1/read', {
+  method: 'POST',
+  headers: { authorization: 'Bearer swm_adm_release_probe_not_a_credential',
+    'content-type': 'application/json', accept: 'application/json' },
+  body: JSON.stringify({ resource: 'admin_grants', workspace_id: null, limit: 1, before: null }),
+}));
+assert.equal(readDispatches, 2, 'a gateway denial cannot masquerade as a read refusal');
+assert.equal(smoke.status, 403);
+assert.match(smoke.headers.get('content-type'), /^application\/json\b/u);
+assert.deepEqual(await smoke.json(), { error: 'credential_kind_forbidden' });
 for (const token of tokens) {
   assert.equal((await command(request('/command', token))).status, 403, 'malformed input cannot select an admin account path');
   assert.equal((await h0(request('/h0/register', worker, 'POST', JSON.stringify({
