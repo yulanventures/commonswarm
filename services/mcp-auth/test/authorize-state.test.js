@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { test } from "node:test";
+import { createLocalJWKSet, jwtVerify } from "jose";
 
 import { hashOpaque, SESSION_COOKIE } from "../src/browser-security.js";
 import { createConsentOrchestrator } from "../src/consent.js";
@@ -17,20 +18,23 @@ const REDIRECT = "https://claude.ai/api/mcp/auth_callback";
 const USER = "10000000-0000-4000-8000-000000000001";
 const BROWSER = "authenticated-browser-session-fixture";
 const STATE = "synthetic-authorization-state";
+const VERIFIER = "synthetic-pkce-verifier-with-at-least-43-characters";
+const W1 = "20000000-0000-4000-8000-000000000001";
+const W2 = "20000000-0000-4000-8000-000000000002";
 
-function authorize(prompt) {
+function authorize(prompt, scope = "openid mcp") {
   const params = new URLSearchParams({
     client_id: CLIENT, redirect_uri: REDIRECT, resource: RESOURCE,
-    response_type: "code", scope: "openid mcp", state: STATE,
-    code_challenge: createHash("sha256").update("synthetic-pkce-verifier-long-enough").digest("base64url"),
+    response_type: "code", scope, state: STATE,
+    code_challenge: createHash("sha256").update(VERIFIER).digest("base64url"),
     code_challenge_method: "S256",
   });
   if (prompt !== undefined) params.set("prompt", prompt);
   return `/authorize?${params}`;
 }
 
-function exchange(url, cookies = new Map()) {
-  const request = Readable.from([]);
+function exchange(url, cookies = new Map(), body = "") {
+  const request = Readable.from(body ? [Buffer.from(body)] : []);
   Object.assign(request, {
     method: "GET", url, httpVersionMajor: 1, httpVersionMinor: 1,
     headers: { host: new URL(ISSUER).host, "x-forwarded-proto": "https",
@@ -48,6 +52,7 @@ function exchange(url, cookies = new Map()) {
 async function harness({ findAccount } = {}) {
   const logs = [];
   const queries = [];
+  const commands = [];
   const sessions = new Map([[hashOpaque(BROWSER).toString("hex"), {
     session_hash: hashOpaque(BROWSER), user_id: USER, authenticated_at: new Date().toISOString(),
     user_email: "human@example.test", user_display_name: "Human", status: "valid",
@@ -72,14 +77,55 @@ async function harness({ findAccount } = {}) {
         return rows(row);
       }
       if (sql.includes("INSERT INTO commonswarm_oauth.interactions")) {
-        const row = interactions.get(values[0]) ?? {
-          interaction_uid: values[0], user_id: values[9], selection_version: 0, selected_workspace_ids: [],
+        const previous = interactions.get(values[0]);
+        const row = {
+          interaction_uid: values[0], session_hash: values[1], client_id: values[2],
+          redirect_uri: values[3], resource: values[4], requested_scopes: values[5],
+          pkce_challenge: values[6], oauth_state: values[7], user_id: values[9],
+          selection_version: 0, selected_workspace_ids: [],
         };
+        if (previous) {
+          const matches = previous.session_hash.equals(row.session_hash) &&
+            ["client_id", "redirect_uri", "resource", "pkce_challenge", "oauth_state"].every(
+              (key) => previous[key] === row[key]) &&
+            JSON.stringify(previous.requested_scopes) === JSON.stringify(row.requested_scopes);
+          return rows(matches && !previous.completed ? previous : null);
+        }
         interactions.set(values[0], row);
         return rows(row);
       }
-      if (sql.includes("SET consent_token_hash") || sql.includes("SET signin_state_hash")) {
-        return rows(interactions.get(sql.includes("SET consent_token_hash") ? values[1] : values[2]));
+      if (sql.includes("SET consent_token_hash")) {
+        const [tokenHash, uid, sessionHash, userId] = values;
+        const row = interactions.get(uid);
+        if (!row || row.completed || !row.session_hash.equals(sessionHash) || row.user_id !== userId) return rows(null);
+        row.consent_token_hash = tokenHash;
+        row.consent_token_consumed_at = null;
+        return rows({ ...row });
+      }
+      if (sql.includes("SET signin_state_hash")) return rows(interactions.get(values[2]));
+      if (sql.includes("SET selected_workspace_ids")) {
+        const [selected, digest, uid, sessionHash, userId, version, tokenHash] = values;
+        const row = interactions.get(uid);
+        if (!row || row.completed || !row.session_hash.equals(sessionHash) || row.user_id !== userId ||
+            row.selection_version !== version || !row.consent_token_hash.equals(tokenHash) ||
+            row.consent_token_consumed_at !== null || (row.commonswarm_grant_id &&
+              (JSON.stringify(row.selected_workspace_ids) !== JSON.stringify(selected) ||
+                !row.manifest_digest.equals(digest)))) return rows(null);
+        Object.assign(row, { selected_workspace_ids: selected, manifest_digest: digest,
+          selection_version: version + 1, consent_token_consumed_at: new Date() });
+        return rows({ ...row });
+      }
+      if (sql.includes("SET provider_grant_id")) {
+        const [providerId, commonswarmId, uid] = values;
+        const row = interactions.get(uid);
+        if (!row || row.completed || (row.provider_grant_id && row.provider_grant_id !== providerId) ||
+            (row.commonswarm_grant_id && row.commonswarm_grant_id !== commonswarmId)) return rows(null);
+        Object.assign(row, { provider_grant_id: providerId, commonswarm_grant_id: commonswarmId });
+        return rows({ ...row });
+      }
+      if (sql.includes("SET completed_at")) {
+        interactions.get(values[0]).completed = true;
+        return rows({});
       }
       throw new Error("unexpected fixture database operation");
     },
@@ -102,16 +148,24 @@ async function harness({ findAccount } = {}) {
       provider, store: new InteractionStore(pool),
       gotrue: { begin: () => ({ url: new URL("https://api.commonswarm.com/auth/v1/authorize"),
         state: "synthetic-sign-in-state", verifier: "synthetic-sign-in-verifier" }) },
-      consentOrchestrator: createConsentOrchestrator({ command: async () => assert.fail("no consent was submitted") }),
-      workspaceReader: async () => [], allowedOrigins: new Set([ISSUER]),
+      consentOrchestrator: createConsentOrchestrator({ command: async (body, identity) => {
+        commands.push({ body, identity });
+        return { status: 200, body: { ok: true } };
+      } }),
+      workspaceReader: async () => [{ id: W1, name: "One" }, { id: W2, name: "Two" }], allowedOrigins: new Set([ISSUER]),
       callbackUrl: `${ISSUER}/oauth/callback/gotrue`,
     }),
   });
   const cookies = new Map([[SESSION_COOKIE, BROWSER]]);
-  async function run(url, method = "GET") {
-    const { request, response } = exchange(url, cookies);
+  async function run(url, method = "GET", body = "", contentType = "application/x-www-form-urlencoded") {
+    const { request, response } = exchange(url, cookies, body);
     request.method = method;
-    if (method === "POST") request.headers["content-type"] = "application/x-www-form-urlencoded";
+    if (method === "POST") {
+      request.headers["content-type"] = contentType;
+      if (url === "/token") request.headers.accept = "application/json";
+      if (url.startsWith("/interaction/")) request.headers.origin = ISSUER;
+      request.headers["content-length"] = String(Buffer.byteLength(body));
+    }
     await handler(request, response);
     for (const cookie of response.getHeader("set-cookie") ?? []) {
       const [pair] = cookie.split(";", 1);
@@ -133,7 +187,7 @@ async function harness({ findAccount } = {}) {
     assert.equal(session.accountId, USER);
     return session;
   }
-  return { provider, pool, logs, queries, sessions, cookies, run, completedLogin };
+  return { provider, pool, logs, queries, sessions, cookies, run, completedLogin, interactions, commands };
 }
 
 // The owner boundary is GET /authorize with real provider policies and signed
@@ -248,4 +302,125 @@ test("provider error events log a thrown hook with request id and source locatio
   assert.ok(h.logs.some((entry) => entry.event === "interaction.error" &&
     entry.error_name === "InteractionStateError" && entry.error_code === "interaction_mismatch" &&
     entry.request_id === expiredInteraction.getHeader("x-request-id")));
+});
+
+// Full OAuth boundary: the provider makes interactions and issues/exchanges the
+// code; production handlers and InteractionStore own consent. Only DB and the
+// lane-2 command transport use in-memory fixtures. No sockets or provider mocks.
+test("one workspace consent completes Claude authorization and token exchange", async (t) => {
+  for (const prompt of ["consent", undefined]) {
+    for (const home of ["explicit", "omitted"]) {
+      for (const priorGrant of ["none", "oidc-only", "resource-only", ...(prompt === "consent" ? ["complete"] : [])]) {
+        await t.test(`prompt ${prompt ?? "absent"}, home ${home}, prior grant ${priorGrant}`, async () => {
+          const h = await harness();
+          const session = await h.completedLogin();
+          if (priorGrant !== "none") {
+            const grant = new h.provider.Grant({ accountId: USER, clientId: CLIENT });
+            if (priorGrant !== "resource-only") grant.addOIDCScope("openid offline_access mcp");
+            if (priorGrant !== "oidc-only") grant.addResourceScope(RESOURCE, "mcp");
+            session.grantIdFor(CLIENT, await grant.save());
+            await session.persist();
+          }
+          const start = await h.run(authorize(prompt, "openid offline_access mcp"));
+          assert.equal(start.statusCode, 303);
+          const path = start.getHeader("location");
+          const page = await h.run(path);
+          assert.equal(page.statusCode, 200);
+          const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+          const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
+          const form = new URLSearchParams({ csrf_token: token, selection_version: version, workspace_ids: W1 });
+          if (home === "explicit") form.set("home_workspace_id", W1);
+          const consent = await h.run(`${path}/consent`, "POST", form.toString());
+          assert.equal(consent.statusCode, 303, "one valid workspace selection must be accepted");
+          const resume = new URL(consent.getHeader("location"));
+          assert.match(resume.pathname, /^\/authorize\/[^/]+$/u);
+          const finished = await h.run(resume.pathname);
+          assert.equal(finished.statusCode, 303);
+          const callback = new URL(finished.getHeader("location"), ISSUER);
+          assert.equal(callback.origin + callback.pathname, REDIRECT, "resume must issue a code, not another consent prompt");
+          assert.equal(callback.searchParams.get("error"), null);
+          assert.equal(callback.searchParams.get("state"), STATE);
+          assert.equal(callback.searchParams.get("iss"), ISSUER);
+          const code = callback.searchParams.get("code");
+          assert.ok(code);
+          const tokenResponse = await h.run("/token", "POST", new URLSearchParams({
+            grant_type: "authorization_code", client_id: CLIENT, redirect_uri: REDIRECT,
+            resource: RESOURCE, code, code_verifier: VERIFIER,
+          }).toString());
+          assert.equal(tokenResponse.statusCode, 200, "issued code must exchange successfully");
+          const tokens = JSON.parse(tokenResponse.body);
+          if (prompt === "consent") assert.ok(tokens.refresh_token);
+          assert.ok(tokens.id_token);
+          const jwks = JSON.parse((await h.run("/jwks")).body);
+          const verified = await jwtVerify(tokens.access_token, createLocalJWKSet(jwks), {
+            algorithms: ["ES256"], issuer: ISSUER, audience: RESOURCE,
+          });
+          assert.equal(verified.payload.sub, USER);
+          assert.equal(verified.payload.scope, "mcp");
+          const bound = h.interactions.get(path.split("/").at(-1));
+          assert.equal(verified.payload.grant_id, bound.provider_grant_id);
+          assert.equal(bound.completed, true);
+          assert.equal(bound.selection_version, Number(version) + 1);
+          assert.ok(bound.consent_token_consumed_at);
+          assert.deepEqual(h.commands.map(({ body }) => body.command.kind), [
+            "begin_hosted_mcp_grant", "consent_hosted_mcp_workspace", "activate_hosted_mcp_grant",
+          ]);
+          const begin = h.commands[0];
+          assert.equal(begin.identity.userId, USER);
+          assert.equal(begin.body.command.home_workspace_id, W1);
+          assert.equal(begin.body.command.provider_grant_id, bound.provider_grant_id);
+          assert.equal(begin.body.command.grant_id, bound.commonswarm_grant_id);
+          assert.equal(begin.body.command.manifest_digest, bound.manifest_digest.toString("hex"));
+          const replay = await h.run(`${path}/consent`, "POST", form.toString());
+          assert.equal(replay.statusCode, 410);
+          assert.equal(h.commands.length, 3);
+        });
+      }
+    }
+  }
+});
+
+test("consent validation preserves a usable form and rejects non-member workspaces", async (t) => {
+  const cases = [
+    { name: "multiple workspaces without home", selected: [W1, W2], message: "Choose a home workspace" },
+    { name: "no workspace", selected: [], message: "Select at least one workspace" },
+    { name: "home outside selection", selected: [W1], home: W2, message: "Choose a home workspace" },
+    { name: "non-member workspace", selected: [USER], home: USER, status: 403 },
+    { name: "malformed selection version", selected: [W1], home: W1, version: "invalid", message: "Reload the workspace selection" },
+  ];
+  for (const row of cases) {
+    await t.test(row.name, async () => {
+      const h = await harness();
+      await h.completedLogin();
+      const start = await h.run(authorize("consent"));
+      const path = start.getHeader("location");
+      const page = await h.run(path);
+      const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+      const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
+      const form = new URLSearchParams({ csrf_token: token, selection_version: row.version ?? version });
+      for (const workspace of row.selected) form.append("workspace_ids", workspace);
+      if (row.home) form.set("home_workspace_id", row.home);
+      const response = await h.run(`${path}/consent`, "POST", form.toString());
+      assert.equal(response.statusCode, row.status ?? 400);
+      if (row.message) {
+        assert.match(response.getHeader("content-type"), /^text\/html/u);
+        assert.ok(response.body.includes(row.message));
+        assert.match(response.body, /role="alert"/u);
+        if (!row.version) assert.ok(response.body.includes(`name="csrf_token" value="${token}"`));
+      }
+      const bound = h.interactions.get(path.split("/").at(-1));
+      assert.equal(bound.selection_version, Number(version));
+      assert.equal(bound.consent_token_consumed_at, null);
+      assert.equal(h.commands.length, 0);
+      // Home validation preserves the original token/version. Malformed
+      // versions get a fresh form; both remain usable without granting access.
+      const correction = new URLSearchParams({
+        csrf_token: row.version ? /name="csrf_token" value="([^"]+)"/u.exec(response.body)[1] : token,
+        selection_version: version, workspace_ids: W1, home_workspace_id: W1,
+      });
+      assert.equal((await h.run(`${path}/consent`, "POST", correction.toString())).statusCode, 303);
+      assert.equal((await h.run(`${path}/consent`, "POST", correction.toString())).statusCode, 409);
+      assert.equal(h.commands.length, 3);
+    });
+  }
 });
