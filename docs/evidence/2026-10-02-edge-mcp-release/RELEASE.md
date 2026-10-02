@@ -32,7 +32,29 @@ survive recreation (`deploy/RELEASE-TO-BOX.md:2148`, `:2231`, `:2349`;
 for the new release (`deploy/edge-runtime/compose.yaml:38`), rather than
 creating a persistent second secret env file. A fresh protected snapshot is
 byte-compared before every recreation and after verification. Compose's
-resolved environment is checked against the running container without output.
+resolved environment, including image defaults, is compared by per-key
+digest against docker inspect; only differing key names are reported.
+Preflight derives the project and network from live Compose labels/inspect,
+and the service env_file from the baseline render with both label-listed
+files. It captures safe fingerprints, then renders the archive with that
+baseline override before open, using the existing live working_dir for the
+in-memory preview. Stage verifies the actual relocated mount paths in the
+new directory. Stage/apply/rollback use those same inputs. Every Compose
+config/up receives `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`, derived
+from live inspect; preflight stops if the live network differs. The `bridge`
+default stays because `tests/p1-cli/edge-runtime-box.test.ts` pins it.
+The repository now carries the recorded box override with `mem_limit: 2g`.
+Older release trees (including `65a6caf0`) lack it: stage copies the live
+bytes into them. If a release tree contains the override, preflight and stage
+require a regular file byte-equal to live before accepting it; a mismatch
+reports the path and differing SHA-256 digests and stops. Rollback retains
+the baseline override without rewriting it.
+Every rendered service field must match the captured baseline; live image
+id, complete env key/value digests, networks, memory, restart policy, ports
+and mounts must also match. Only release-prefixed bind sources and the
+working_dir/config_files labels change. Compose-generated config-hash is a
+derived label, verified through the normalized rendered fields rather than
+compared literally across different release paths.
 
 Run only the marked blocks extracted by step ID. Keep one Mac Bash 3.2 shell
 for archive/transport/cleanup. Run preflight/open in the same approved box root
@@ -188,29 +210,190 @@ systemctl is-active --quiet commonswarm-edge-recycle.timer
 test "$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)" = inactive
 systemctl cat commonswarm-edge-recycle.timer | python3 -c 'import sys; s=sys.stdin.read(); assert "OnCalendar=*-*-* 03,09,15,21:30:00 UTC" in s and "Persistent=false" in s'
 systemctl cat commonswarm-edge-recycle.service | python3 -c 'import sys; s=sys.stdin.read(); assert "docker restart --time 30 commonswarm-edge-edge-runtime-1" in s'
+edge_context() {
+python3 - "$PREVIOUS_EDGE" <<'PY'
+import json,os,pathlib,shlex,subprocess,sys
+try:
+    root=pathlib.Path(sys.argv[1]); work=root/'deploy/edge-runtime'
+    live=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],stderr=subprocess.DEVNULL))[0]
+    labels=live['Config']['Labels']; project=labels['com.docker.compose.project']
+    assert labels['com.docker.compose.project.working_dir']==str(work)
+    assert labels['com.docker.compose.project.config_files']==str(work/'compose.yaml')+','+str(work/'compose.override.yaml')
+    assert labels['com.docker.compose.service']=='edge-runtime' and project=='commonswarm-edge'
+    network=live['HostConfig']['NetworkMode']
+    assert network=='commonswarm-net' and sorted(live['NetworkSettings']['Networks'])==[network]
+    project_env=labels.get('com.docker.compose.project.environment_file','')
+    assert not project_env or (',' not in project_env and pathlib.Path(project_env).is_absolute() and pathlib.Path(project_env).is_file())
+    # Without an explicit interpolation env label, require no implicit .env.
+    assert project_env or not (work/'.env').exists()
+    process_env={k:v for k,v in os.environ.items() if not k.startswith(('COMPOSE_','COMMONSWARM_EDGE_'))}
+    process_env['COMMONSWARM_EDGE_NETWORK_MODE']=network
+    args=['docker','compose','--project-directory',str(work),'-p',project]
+    if project_env: args+=['--env-file',project_env]
+    args+=['-f',str(work/'compose.yaml'),'-f',str(work/'compose.override.yaml')]
+    raw=json.loads(subprocess.check_output(args+['config','--no-env-resolution','--format','json'],cwd=work,env=process_env,stderr=subprocess.DEVNULL))
+    files=raw['services']['edge-runtime']['env_file']
+    assert len(files)==1
+    env_file=files[0]['path'] if isinstance(files[0],dict) else files[0]
+    assert env_file=='/home/commonswarm/.env'
+    for key,value in [('EDGE_PROJECT',project),('EDGE_NETWORK',network),('EDGE_ENV_FILE',env_file),('EDGE_PROJECT_ENV_FILE',project_env)]:
+        print(key+'='+shlex.quote(value))
+except Exception: raise SystemExit('FAIL edge-mcp-config: differing fields compose.labels/project/env_file/network; STOP') from None
+PY
+}
+EDGE_CONTEXT=$(edge_context)
+eval "$EDGE_CONTEXT"
 edge_compose() {
-  COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-    docker compose -p commonswarm-edge -f "$EDGE_DIR/deploy/edge-runtime/compose.yaml" \
-    -f "$EDGE_DIR/deploy/edge-runtime/compose.override.yaml" "$@"
+  edge_config_check compose "$@"
 }
 edge_config_check() {
-python3 - "$EDGE_DIR" "$PREVIOUS_EDGE" <<'PY'
-import json,os,subprocess,sys
-env=dict(os.environ,COMMONSWARM_EDGE_NETWORK_MODE='commonswarm-net',COMMONSWARM_EDGE_ENV_FILE='/home/commonswarm/.env')
+local mode=${1:-config}
+if test "$#" -gt 0; then shift; fi
+test "$EDGE_NETWORK" = commonswarm-net
+export COMMONSWARM_EDGE_NETWORK_MODE="$EDGE_NETWORK"
+python3 - "$mode" "$EDGE_DIR" "$PREVIOUS_EDGE" "$NEW_EDGE" "$EDGE_PROJECT" "$EDGE_NETWORK" "$EDGE_ENV_FILE" "$EDGE_PROJECT_ENV_FILE" "${EDGE_BASELINE_FACTS:-}" "$BOX_ARCHIVE_PATH" "$@" <<'PY'
+import copy,hashlib,json,os,pathlib,subprocess,sys,tarfile
+mode,selected,previous,new,project,network,env_file,project_env,saved,archive=sys.argv[1:11]
+command=sys.argv[11:]
+def compose_env():
+    # Retain HOME unchanged; prevent inherited Compose overrides in every mode.
+    env={k:v for k,v in os.environ.items() if not k.startswith(('COMPOSE_','COMMONSWARM_EDGE_'))}
+    env.update(COMMONSWARM_EDGE_NETWORK_MODE=network,COMMONSWARM_EDGE_ENV_FILE=env_file)
+    return env
+def compose_args(root):
+    work=root+'/deploy/edge-runtime'
+    args=['docker','compose','--project-directory',work,'-p',project]
+    if project_env: args+=['--env-file',project_env]
+    return args+['-f',work+'/compose.yaml','-f',work+'/compose.override.yaml']
+def digest(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+def run(args,**kwargs):
+    return json.loads(subprocess.check_output(args,stderr=subprocess.DEVNULL,**kwargs))
+def image(pin): return run(['docker','image','inspect',pin])[0]
+def env_hash(values): return {k:digest(str(v)) for k,v in values.items()}
+def env_map(values):
+    pairs=[v.split('=',1) for v in values or []]
+    assert len(pairs)==len({k for k,v in pairs})
+    return dict(pairs)
+def source_class(source,root):
+    p=pathlib.Path(source); r=pathlib.Path(root)
+    return 'release:'+str(p.relative_to(r)) if p.is_relative_to(r) else 'external:'+str(p)
+def mount_label(m): return m['destination']+' ('+m['type']+':'+m['source']+', '+('rw' if m['rw'] else 'ro')+')'
+def render(root,preview=False):
+    # Preview uses the existing live working_dir; stage checks relocated paths.
+    render_root=previous if preview else root
+    work=render_root+'/deploy/edge-runtime'
+    args=['docker','compose','--project-directory',work,'-p',project]
+    if project_env: args+=['--env-file',project_env]
+    process_env=compose_env()
+    if preview:
+        with tarfile.open(archive) as tar:
+            members=[m for m in tar.getmembers() if m.name=='deploy/edge-runtime/compose.yaml']
+            assert len(members)==1 and members[0].isfile()
+            content=tar.extractfile(members[0]).read()
+            override_path='deploy/edge-runtime/compose.override.yaml'
+            overrides=[m for m in tar.getmembers() if m.name==override_path]
+            if overrides:
+                if len(overrides)!=1 or not overrides[0].isfile(): fail([override_path+' type/duplicate'])
+                candidate=tar.extractfile(overrides[0]).read()
+                live_override=pathlib.Path(previous+'/'+override_path).read_bytes()
+                if candidate!=live_override:
+                    fail([override_path+' bytes live.sha256='+hashlib.sha256(live_override).hexdigest()+' archive.sha256='+hashlib.sha256(candidate).hexdigest()])
+        args+=['-f','-','-f',previous+'/deploy/edge-runtime/compose.override.yaml']
+        options={'input':content,'cwd':work,'env':process_env}
+        config=run(args+['config','--format','json'],**options)
+    else:
+        args+=['-f',work+'/compose.yaml','-f',work+'/compose.override.yaml']
+        options={'cwd':work,'env':process_env}
+        config=run(args+['config','--format','json'],**options)
+    raw=run(args+['config','--no-env-resolution','--format','json'],**options)
+    files=raw['services']['edge-runtime'].get('env_file',[])
+    paths=[v['path'] if isinstance(v,dict) else v for v in files]
+    if paths!=[env_file]: fail(['compose.env_file'])
+    service=config['services']['edge-runtime']; img=image(service['image'])
+    env=env_map(img['Config'].get('Env')); env.update({k:str(v) for k,v in service['environment'].items()})
+    mounts=[]
+    for v in service.get('volumes',[]):
+        src=source_class(v['source'],render_root) if v['type']=='bind' else config['volumes'][v['source']]['name']
+        mounts.append({'type':v['type'],'source':src,'destination':v['target'],'rw':not v.get('read_only',False)})
+    ports=sorted([p.get('host_ip',''),str(p['published']),str(p['target']),p.get('protocol','tcp')] for p in service.get('ports',[]))
+    restart=service.get('restart','no').split(':',1)
+    normalized=copy.deepcopy(service)
+    normalized['environment']=env_hash(service['environment'])
+    normalized['env_file']=files
+    for v in normalized.get('volumes',[]):
+        if v['type']=='bind': v['source']=source_class(v['source'],render_root)
+    # Hash every rendered field, so other Compose settings cannot drift either.
+    return {'env':env_hash(env),'image_id':img['Id'],'network_mode':service['network_mode'],
+      'networks':[service['network_mode']],'memory':int(service['mem_limit']),
+      'restart_policy':{'Name':restart[0],'MaximumRetryCount':int(restart[1]) if len(restart)>1 else 0},
+      'ports':ports,'mounts':sorted(mounts,key=lambda m:m['destination']),
+      'compose':{k:digest(v) for k,v in normalized.items()}}
+def live_facts(root):
+    live=run(['docker','inspect','commonswarm-edge-edge-runtime-1'])[0]
+    labels=live['Config']['Labels']; work=root+'/deploy/edge-runtime'
+    differences=[]
+    for key,value in [('com.docker.compose.project',project),('com.docker.compose.service','edge-runtime'),
+      ('com.docker.compose.project.working_dir',work),('com.docker.compose.project.config_files',work+'/compose.yaml,'+work+'/compose.override.yaml'),
+      ('com.docker.compose.project.environment_file',project_env)]:
+        if labels.get(key,'')!=value: differences.append('labels.'+key)
+    if differences: fail(differences)
+    mounts=[{'type':m['Type'],'source':source_class(m['Source'],root) if m['Type']=='bind' else m['Name'],
+      'destination':m['Destination'],'rw':m['RW']} for m in live['Mounts']]
+    ports=sorted([p['HostIp'],str(p['HostPort']),target.split('/')[0],target.split('/')[1]]
+      for target,bindings in (live['HostConfig'].get('PortBindings') or {}).items() for p in bindings or [])
+    return {'env':env_hash(env_map(live['Config']['Env'])),'image_id':live['Image'],
+      'network_mode':live['HostConfig']['NetworkMode'],'networks':sorted(live['NetworkSettings']['Networks']),
+      'memory':live['HostConfig']['Memory'],'restart_policy':live['HostConfig']['RestartPolicy'],
+      'ports':ports,'mounts':sorted(mounts,key=lambda m:m['destination'])}
+def fail(fields):
+    raise SystemExit('FAIL edge-mcp-config: differing fields '+', '.join(sorted(set(fields)))+'; STOP')
+def compare(expected,actual,compose=True):
+    differences=[]
+    for k in sorted(set(expected['env'])|set(actual['env'])):
+        if expected['env'].get(k)!=actual['env'].get(k): differences.append('env.'+k)
+    for key in ('image_id','network_mode','networks','memory','restart_policy','ports'):
+        if expected[key]!=actual[key]:
+            # These names/ids are safe; environment values are never reported.
+            differences.append(key+' '+json.dumps(expected[key],sort_keys=True)+' -> '+json.dumps(actual[key],sort_keys=True))
+    before={m['destination']:m for m in expected['mounts']}; after={m['destination']:m for m in actual['mounts']}
+    for dest in sorted(set(before)|set(after)):
+        if before.get(dest)!=after.get(dest):
+            differences.append('mounts.'+dest+' '+('missing' if dest not in before else mount_label(before[dest]))+' -> '+('missing' if dest not in after else mount_label(after[dest])))
+    if compose:
+        for key in sorted(set(expected['compose'])|set(actual['compose'])):
+            if expected['compose'].get(key)!=actual['compose'].get(key): differences.append('compose.'+key)
+    if differences: fail(differences)
 try:
-    configs=[]
-    for root in sys.argv[1:]:
-        work=root+'/deploy/edge-runtime'
-        value=json.loads(subprocess.check_output(['docker','compose','-p','commonswarm-edge','-f',work+'/compose.yaml','-f',work+'/compose.override.yaml','config','--format','json'],env=env,stderr=subprocess.DEVNULL))
-        configs.append(value['services']['edge-runtime'])
-    new,old=configs
-    assert new['environment']==old['environment'] and new['environment'].get('SWARM_MCP_PUBLIC_ENABLED')=='1'
-    assert new['image']==old['image'] and new['network_mode']=='commonswarm-net' and new['mem_limit']==2147483648
-    print('PASS edge-mcp-config: same complete ON env, image pin, commonswarm-net, 2 GiB')
-except Exception: raise SystemExit('FAIL edge-mcp-config: new Compose changes effective env/image/network/memory; STOP') from None
+    assert mode in ('capture','archive','config','runtime','compose')
+    if mode=='capture':
+        baseline=render(previous); compare(baseline,live_facts(previous),compose=False)
+        for key in ('SWARM_MCP_PUBLIC_ENABLED','SWARM_SELF_SERVE'):
+            if baseline['env'].get(key)!=digest('1'): fail(['env.'+key])
+        if baseline['memory']!=2147483648: fail(['memory'])
+        if baseline['networks']!=['commonswarm-net']: fail(['networks'])
+        forbidden=[k for k in baseline['env'] if k.startswith('SWARM_CMD_TEST_')]
+        if forbidden: fail(['env.'+k for k in forbidden])
+        baseline['override_sha256']=hashlib.sha256(pathlib.Path(previous+'/deploy/edge-runtime/compose.override.yaml').read_bytes()).hexdigest()
+        print(json.dumps(baseline,sort_keys=True,separators=(',',':')))
+    else:
+        baseline=json.loads(saved)
+        root=new if mode=='archive' else selected
+        override=pathlib.Path((previous if mode=='archive' else root)+'/deploy/edge-runtime/compose.override.yaml')
+        if hashlib.sha256(override.read_bytes()).hexdigest()!=baseline['override_sha256']: fail(['compose.override.sha256'])
+        compare(baseline,render(root,preview=mode=='archive'))
+        if mode=='runtime': compare(baseline,live_facts(root),compose=False)
+        if mode=='compose':
+            assert command==['up','-d','--no-deps','--force-recreate','--pull','never','edge-runtime']
+            result=subprocess.run(compose_args(root)+command,cwd=root+'/deploy/edge-runtime',env=compose_env(),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            if result.returncode: fail(['compose.recreate'])
+        print('PASS edge-mcp-config: complete live ON baseline matched; env digests only, image id, network, memory, restart, ports, mounts, Compose fields')
+except SystemExit: raise
+except Exception: raise SystemExit('FAIL edge-mcp-config: differing fields config.render/inspect/input (values withheld); STOP') from None
 PY
 }
 edge_check() {
+edge_config_check runtime
 python3 - "$EDGE_DIR" "${1:-on}" "${2:-$EDGE_DIR}" "$PROOF_DIR" <<'PY'
 import json,pathlib,subprocess,sys,os
 def need(ok):
@@ -228,12 +411,6 @@ labels=edge['Config']['Labels']; work=str(p/'deploy/edge-runtime')
 need(labels.get('com.docker.compose.project.working_dir')==work)
 need(labels.get('com.docker.compose.project.config_files')==work+'/compose.yaml,'+work+'/compose.override.yaml')
 need(any(m['Source']==str(p/'supabase/functions') and m['Destination']=='/home/deno/functions-source' and not m['RW'] for m in edge['Mounts']))
-process_env=dict(os.environ,COMMONSWARM_EDGE_NETWORK_MODE='commonswarm-net',COMMONSWARM_EDGE_ENV_FILE=str(env))
-config=json.loads(subprocess.check_output(['docker','compose','-p','commonswarm-edge','-f',work+'/compose.yaml','-f',work+'/compose.override.yaml','config','--format','json'],env=process_env,stderr=subprocess.DEVNULL))
-expected=config['services']['edge-runtime']; effective=dict(x.split('=',1) for x in edge['Config']['Env'])
-need(expected['environment'].get('SWARM_MCP_PUBLIC_ENABLED')=='1')
-need(all(effective.get(k)==str(v) for k,v in expected['environment'].items()))
-need(effective.get('SWARM_SELF_SERVE')=='1' and not any(k.startswith('SWARM_CMD_TEST_') for k in effective))
 need(dict(x.split('=',1) for x in oauth['Config']['Env']).get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED')=='1')
 site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
 if sys.argv[2]=='dark':
@@ -338,8 +515,9 @@ receipt() {
   fi
 }
 EDGE_DIR=$PREVIOUS_EDGE
-edge_compose config --quiet
-edge_config_check
+EDGE_BASELINE_FACTS=$(edge_config_check capture)
+# Render archive Compose with the live override before opening; write no files.
+edge_config_check archive
 edge_check
 edge_probes
 external_check preflight
@@ -362,6 +540,9 @@ install -m 0600 /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cp -p /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 cp -p "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"
+# Recheck live/config/override against preflight after capturing the inputs.
+edge_config_check runtime
+printf '%s\n' "$EDGE_BASELINE_FACTS" >"$PROOF_DIR/edge-baseline.json"
 external_check capture
 python3 - "$PROOF_DIR/mcp.on.caddy" "$PROOF_DIR/mcp.off.caddy" "$PREVIOUS_EDGE" <<'PY'
 import pathlib,re,sys
@@ -373,7 +554,7 @@ assert dark and on.count(b'\t\timport mcp_resource_active')==1
 pathlib.Path(sys.argv[2]).write_bytes(on.replace(b'\t\timport mcp_resource_active',dark[0]))
 PY
 {
-  for name in RELEASE_SHA WINDOW_ID BASELINE_EDGE_SHA BOX_ARCHIVE_PATH EDGE_ARCHIVE_SHA256 WINDOW_END_UTC MAX_MCP_OUTAGE_SECONDS PREVIOUS_EDGE NEW_EDGE PROOF_DIR SECRET_STAGE; do
+  for name in RELEASE_SHA WINDOW_ID BASELINE_EDGE_SHA BOX_ARCHIVE_PATH EDGE_ARCHIVE_SHA256 WINDOW_END_UTC MAX_MCP_OUTAGE_SECONDS PREVIOUS_EDGE NEW_EDGE PROOF_DIR SECRET_STAGE EDGE_PROJECT EDGE_NETWORK EDGE_ENV_FILE EDGE_PROJECT_ENV_FILE EDGE_BASELINE_FACTS; do
     printf '%s=%q\n' "$name" "${!name}"
   done
   declare -f edge_compose edge_config_check edge_check edge_probes external_check window_check receipt
@@ -383,7 +564,12 @@ printf 'open\n' >"$PROOF_DIR/open.txt"
 printf 'PASS edge-mcp-open: protected env snapshot; no production mutation\n'
 ```
 
-Stage verifies a fresh archive tree and any reused destination, including the
+Stage copies the captured baseline override byte-for-byte and verifies its
+SHA-256, after requiring any archive override to be byte-equal. Both renders
+and recreation use the measured project, service env
+file, interpolation env label (if present), network mode and both Compose
+files, with working_dir set to the selected release. Stage verifies a fresh
+archive tree and any reused destination, including the
 complete path set, types, modes, symlink containment and file bytes. Extras
 are limited to RELEASE_SHA and the exact copied override, as in §1's reuse
 contract (`deploy/RELEASE-TO-BOX.md:593`). Staging does not move current.
@@ -398,8 +584,10 @@ window_check
 test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
 test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$EDGE_ARCHIVE_SHA256"
 python3 - "$BOX_ARCHIVE_PATH" "$PROOF_DIR/source" "$NEW_EDGE" "$RELEASE_SHA" "$PROOF_DIR/compose.override.yaml" <<'PY'
-import os,pathlib,pwd,shutil,stat,sys,tarfile
+import hashlib,os,pathlib,pwd,shutil,stat,sys,tarfile
 archive,source,new,sha,override=sys.argv[1:]; source=pathlib.Path(source); new=pathlib.Path(new)
+override_path='deploy/edge-runtime/compose.override.yaml'
+live_override=pathlib.Path(override).read_bytes()
 try:
     if not source.exists():
         source.mkdir(mode=0o700)
@@ -412,7 +600,12 @@ try:
                 if m.issym():
                     target=pathlib.PurePosixPath(m.linkname)
                     assert not target.is_absolute() and '..' not in target.parts
-                assert m.name not in ('RELEASE_SHA','deploy/edge-runtime/compose.override.yaml')
+                assert m.name!='RELEASE_SHA'
+                if m.name==override_path:
+                    if not m.isfile(): raise SystemExit('FAIL edge-mcp-stage: '+override_path+' type differs from live regular file; STOP')
+                    candidate=tar.extractfile(m).read()
+                    if candidate!=live_override:
+                        raise SystemExit('FAIL edge-mcp-stage: '+override_path+' bytes differ: live.sha256='+hashlib.sha256(live_override).hexdigest()+' archive.sha256='+hashlib.sha256(candidate).hexdigest()+'; STOP')
             tar.extractall(source,filter='data')
         (source/'RELEASE_SHA').write_text(sha+'\n')
         shutil.copyfile(override,source/'deploy/edge-runtime/compose.override.yaml')
@@ -439,16 +632,18 @@ try:
             for name in dirs+files: os.chown(pathlib.Path(base)/name,uid,gid,follow_symlinks=False)
     assert not new.is_symlink() and new.resolve()==new and new.stat().st_mode & 0o777==0o750
     assert entries(new)==expected
+    def file_digest(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+    assert file_digest(new/'deploy/edge-runtime/compose.override.yaml')==file_digest(override)
     uid=pwd.getpwnam('commonswarm').pw_uid; gid=pwd.getpwnam('commonswarm').pw_gid
     assert (new.stat().st_uid,new.stat().st_gid)==(uid,gid)
     for base,dirs,files in os.walk(new,followlinks=False):
         for name in dirs+files:
             s=(pathlib.Path(base)/name).lstat(); assert (s.st_uid,s.st_gid)==(uid,gid)
+    print('PASS edge-mcp-stage: compose.override.sha256='+file_digest(override))
     print('PASS edge-mcp-stage: exact archive path inventory, bytes, symlinks, modes, owner')
 except Exception: raise SystemExit('FAIL edge-mcp-stage: immutable release mismatch or incomplete stage; STOP') from None
 PY
 EDGE_DIR=$NEW_EDGE
-edge_compose config --quiet
 edge_config_check
 touch "$PROOF_DIR/staged.txt"
 ```
@@ -496,7 +691,6 @@ test ! -e "$PROOF_DIR/rollback.txt"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.off.caddy"
 cmp -s "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"
 EDGE_DIR=$NEW_EDGE
-edge_compose config --quiet
 edge_config_check
 edge_compose up -d --no-deps --force-recreate --pull never edge-runtime
 deadline=$(( $(date -u +%s) + 180 ))
@@ -555,7 +749,6 @@ cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"
 external_check
 EDGE_DIR=$PREVIOUS_EDGE
-edge_compose config --quiet
 edge_config_check
 if test -f "$PROOF_DIR/mcp-503-start.epoch"; then
   # A failed ON probe may have reopened ingress: re-establish 503 before rollback.
