@@ -376,7 +376,9 @@ Each browser step uses a unique named harness daemon derived from the window ID,
 step, and private-root suffix, with its own private runtime directory. Its EXIT
 trap stops only that exact named daemon on success or failure. Later controls
 reuse the task-owned headless process/profile and leave removal to window close.
-The headless process/profile remain available to later controls on success.
+Chromium starts in its own session/process group with stdin closed, so ending a
+marked block's process group does not stop it. The saved PID stays the same
+through setsid and exec; later controls reuse that process/profile on success.
 Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
 retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
@@ -449,11 +451,8 @@ retaining raw browser output in the public evidence directory.
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
-  chrome="$(node - "$(npm root -g)/playwright" <<'NODE'
-const { chromium } = require(process.argv[2]);
-console.log(chromium.executablePath());
-NODE
-  )"
+  chrome="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' \
+    "$(npm root -g)/playwright")"
   case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac
   test -x "$chrome"
   CLI_USER_ID="$(cswarm status \
@@ -461,10 +460,12 @@ NODE
   test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
   chrome_port=9335
   if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
-  "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
+  # setsid detaches from the block executor's process group; exec preserves $!.
+  python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
     --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
-    >"$browser_root/chromium-launch.log" 2>&1 &
+    </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
   chrome_pid=$!
   port_file="$profile/DevToolsActivePort"
   tries=0
@@ -910,9 +911,56 @@ the pin.
   set -E
   trap 'printf "FAIL site-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
-  pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-05-public-summary.txt"
+  printf '%s\n' 'site-05: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_public_control() {
+    status=$1
+    trap - EXIT
+    # Covers setup, control, daemon cleanup and rollback failures, even before Python.
+    printf 'site-05: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  trap 'finish_public_control "$?"' EXIT
+  check_task_browser() {
+    browser_reason=
+    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
+    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_reason='pid gone'
+    fi
+    if [ -z "$browser_reason" ]; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
+      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+        browser_reason='not ours'
+      else
+        case "$browser_command" in
+          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+          *) browser_reason='not ours' ;;
+        esac
+      fi
+    fi
+    if [ -z "$browser_reason" ]; then
+      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
+        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
+        browser_reason='endpoint down'
+      fi
+    fi
+    if [ -n "$browser_reason" ]; then
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >>"$control_summary"
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >&2
+      return 1
+    fi
+  }
   set +e
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
+  trap - ERR
+  (
+    trap - EXIT
+    set -e
+    check_task_browser
+    after=$(cat "$SITE_EVIDENCE/after.release")
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
     >"$SITE_EVIDENCE/site-05-public.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -950,10 +998,12 @@ print("download_sha256="+hashlib.sha256(download).hexdigest())
 print("PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
+  )
   control_status=$?
   set -e
-  chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"
+  if [ -f "$SITE_EVIDENCE/site-05-public.txt" ]; then chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"; fi
   if test "$control_status" -ne 0; then
+    pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
@@ -989,19 +1039,61 @@ automatically.
   set -E
   trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-05-browser-acceptance-summary.txt"
+  printf '%s\n' 'site-05-browser-acceptance: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_browser_acceptance() {
+    status=$1
+    trap - EXIT
+    # Covers setup, control, daemon cleanup and rollback failures, even before Python.
+    printf 'site-05-browser-acceptance: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  trap 'finish_browser_acceptance "$?"' EXIT
+  check_task_browser() {
+    browser_reason=
+    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
+    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_reason='pid gone'
+    fi
+    if [ -z "$browser_reason" ]; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
+      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+        browser_reason='not ours'
+      else
+        case "$browser_command" in
+          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+          *) browser_reason='not ours' ;;
+        esac
+      fi
+    fi
+    if [ -z "$browser_reason" ]; then
+      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
+        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
+        browser_reason='endpoint down'
+      fi
+    fi
+    if [ -n "$browser_reason" ]; then
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >>"$control_summary"
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >&2
+      return 1
+    fi
+  }
   export SITE_EVIDENCE SITE_CHROME_ENDPOINT
   set +e
   # Capture the complete control failure without echoing its Python/source text.
   trap - ERR
   (
+    trap - EXIT
     set -e
+    check_task_browser
     umask 077
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
     test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-    case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
     endpoint="$SITE_CHROME_ENDPOINT"
     private_evidence="$SITE_BROWSER_ROOT/site-05-browser-acceptance-evidence"
     harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-05"
@@ -1252,7 +1344,6 @@ PY
   )
   browser_status=$?
   set -e
-  trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   if test "$browser_status" -ne 0; then
     pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
@@ -1286,6 +1377,56 @@ appropriate browser branch.
   set -E
   trap 'printf "FAIL site-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-06-browser-summary.txt"
+  printf '%s\n' 'site-06-browser: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_rollback_control() {
+    status=$1
+    trap - EXIT
+    # Covers setup, control, daemon cleanup and rollback failures, even before Python.
+    printf 'site-06-browser: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  trap 'finish_rollback_control "$?"' EXIT
+  check_task_browser() {
+    browser_reason=
+    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
+    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_reason='pid gone'
+    fi
+    if [ -z "$browser_reason" ]; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
+      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+        browser_reason='not ours'
+      else
+        case "$browser_command" in
+          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+          *) browser_reason='not ours' ;;
+        esac
+      fi
+    fi
+    if [ -z "$browser_reason" ]; then
+      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
+        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
+        browser_reason='endpoint down'
+      fi
+    fi
+    if [ -n "$browser_reason" ]; then
+      printf 'STOP site-06: task-owned Chromium is not running (%s)\n' "$browser_reason" >>"$control_summary"
+      printf 'STOP site-06: task-owned Chromium is not running (%s)\n' "$browser_reason" >&2
+      return 1
+    fi
+  }
+  if ! check_task_browser; then
+    # Preserve the no-rollback receipt so a failed pre-pin window can still close.
+    if test ! -f "$SITE_EVIDENCE/rollback-auto.txt"; then
+      printf '%s\n' 'rollback=not-needed' >"$SITE_EVIDENCE/site-06-rollback-verify.txt"
+      chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+    fi
+    exit 1
+  fi
   if test ! -f "$SITE_EVIDENCE/rollback-auto.txt"; then
     printf '%s\n' 'rollback=not-needed' >"$SITE_EVIDENCE/site-06-rollback-verify.txt"
     chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"; exit 0
@@ -1314,8 +1455,6 @@ BOX
   test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
   test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
   test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-  browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-  case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
   endpoint="$SITE_CHROME_ENDPOINT"
   private_evidence="$SITE_BROWSER_ROOT/site-06-evidence"
   harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-06"
@@ -1341,7 +1480,7 @@ BOX
       fi
     fi
     # The headless process/profile belong to the window; only close removes them.
-    exit "$status"
+    finish_rollback_control "$status"
   }
   trap cleanup_browser_control EXIT
   trap 'exit 130' INT
@@ -1578,13 +1717,22 @@ BOX
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
       browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
-      kill "$SITE_CHROME_PID"
+      case "$browser_command" in
+        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+        *) exit 1 ;;
+      esac
+      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-pre-pin-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
+        exit 1
+      fi
       for tries in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
         sleep 1
       done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-pre-pin-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
+        exit 1
+      fi
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
@@ -1721,13 +1869,22 @@ PY
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
       browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
-      kill "$SITE_CHROME_PID"
+      case "$browser_command" in
+        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+        *) exit 1 ;;
+      esac
+      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
+        exit 1
+      fi
       for tries in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
         sleep 1
       done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
+        exit 1
+      fi
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
