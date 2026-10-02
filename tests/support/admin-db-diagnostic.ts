@@ -1,6 +1,8 @@
 /** The DB harness may expose catalog metadata, never exception text or values. */
 export const approvalSteps = [
   'initialize', 'schema-isolation', 'fixture-prepare', 'verification-prepare',
+  'fixture-prepare:account', 'fixture-prepare:grant', 'fixture-prepare:verification',
+  'fixture-prepare:approval', 'fixture-prepare:resource', 'fixture-prepare:binding',
   'projection-prepare', 'actor-refusals', 'verification-refusals', 'owner-injection',
   'owner-approval', 'approval-retry', 'command-id-conflict', 'alice-binding',
   'active-control', 'withdrawal-fault-setup', 'withdrawal-rollback',

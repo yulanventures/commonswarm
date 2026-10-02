@@ -13,6 +13,14 @@ export const migrationNames = [
 export function repoSql(path: string): string {
   return readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 }
+const clusterAdministrator = 'supabase_admin';
+/** Same local cluster administrator as runSql; never accept a remote target. */
+export function localClusterAdminUrl(dbUrl: string): string {
+  const target = new URL(dbUrl);
+  assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname), 'local stack required');
+  target.username = clusterAdministrator;
+  return target.toString();
+}
 export function databaseContainer(): string {
   const names = execFileSync('docker', ['ps', '--format', '{{.Names}}'], { encoding: 'utf8' })
     .trim().split('\n').filter(name => /^supabase_db_/.test(name));
@@ -28,7 +36,7 @@ export function emptyApplicationSchema(): string {
   const schemas = ['swarm', 'swarm_read', 'commonswarm_oauth'];
   const suffix = randomUUID().replaceAll('-', '');
   const ddl = execFileSync('docker', ['exec', databaseContainer(), 'pg_dump',
-    '-U', 'supabase_admin', '-d', 'postgres', '--schema-only',
+    '-U', clusterAdministrator, '-d', 'postgres', '--schema-only',
     ...schemas.map(schema => `--schema=${schema}`)], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   // These pg_dump client directives cannot be sent through postgres.js.
   const sql = ddl.replace(/^\\(?:un)?restrict \S+\r?$/gm, '');
@@ -39,7 +47,7 @@ export function emptyApplicationSchema(): string {
 export function runSql(sql: string): void {
   const emptySchema = emptyApplicationSchema();
   const result = spawnSync('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
-    '-U', 'supabase_admin', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+    '-U', clusterAdministrator, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
     input: `BEGIN;\n${emptySchema}\n${sql}\nROLLBACK;\n`, encoding: 'utf8', timeout: 60_000,
   });
   assert.ifError(result.error);
@@ -68,17 +76,19 @@ export function fixture(version = 2) {
   const owner = randomUUID(), foreign = randomUUID(), grant = randomUUID(), identity = randomUUID(), connection = randomUUID();
   const client = `https://client.example/${randomUUID()}`, provider = `family-${randomUUID()}`, event = randomUUID();
   const digest = 'a'.repeat(64), jkt = 'K'.repeat(43);
-  const sql = `
+  const preparation = [{ step: 'fixture-prepare:account', sql: `
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test'),
   ('${foreign}','authenticated','authenticated','${foreign}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Schema owner'),('${foreign}','Foreign owner');
 INSERT INTO swarm.admin_accounts(owner_user_id,stream_id) VALUES('${owner}','${randomUUID()}'),('${foreign}','${randomUUID()}');
+` }, { step: 'fixture-prepare:grant', sql: `
 INSERT INTO swarm.admin_grants(grant_id,owner_user_id,admin_identity_id,connection_id,client_id,resource,registry_version,
   workspace_ids,created_workspace_policy,target_rules,worker_scope_ceiling,role_ceiling,renewal_limits,issuance_limits,
   expires_at,refresh_deadline,state,consent_receipt_id,manifest_digest,created_at)
 VALUES('${grant}','${owner}','${identity}','${connection}','${client}','https://api.commonswarm.com/admin',${version},
   '{}','{"scope_names":[]}','{}','{}','member','{}','{}',date_trunc('second',statement_timestamp())+interval '1 day',
   date_trunc('second',statement_timestamp())+interval '1 day','active','${randomUUID()}','${digest}',date_trunc('second',statement_timestamp()));
+` }, { step: 'fixture-prepare:verification', sql: `
 SET LOCAL ROLE commonswarm_admin_release;
 INSERT INTO commonswarm_oauth.admin_verified_clients(client_id,verification_version,application_type,registration_source,
   publisher_identity,publisher_contact,metadata_digest,redirect_uris,scope_ceiling,pkce_s256_tested,dpop_tested,redirect_tested,
@@ -86,6 +96,7 @@ INSERT INTO commonswarm_oauth.admin_verified_clients(client_id,verification_vers
 VALUES('${client}',1,'web','static','Test publisher','contact@example.test','${digest}',ARRAY['https://client.example/callback'],
   ARRAY['admin:read'],true,true,true,true,'test-reviewed-evidence','schema-test',true);
 RESET ROLE;
+` }, { step: 'fixture-prepare:approval', sql: `
 SET LOCAL ROLE swarm_command;
 INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
 VALUES('${owner}',1,'${event}','approval-command',jsonb_build_object('stream_kind','account','owner_user_id','${owner}',
@@ -93,18 +104,19 @@ VALUES('${owner}',1,'${event}','approval-command',jsonb_build_object('stream_kin
 INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,approval_event_id,approval_command_id)
 VALUES('${owner}','${client}',1,'${event}','approval-command');
 RESET ROLE;
-${version >= 2 ? `SET LOCAL ROLE commonswarm_oauth_runtime;
+` }, ...(version >= 2 ? [{ step: 'fixture-prepare:resource', sql: `SET LOCAL ROLE commonswarm_oauth_runtime;
 INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,admin_grant_id)
 VALUES('${provider}','https://api.commonswarm.com/admin','delegated_admin','${owner}','${client}','${connection}','${grant}');
 RESET ROLE;
+` }, { step: 'fixture-prepare:binding', sql: `
 INSERT INTO commonswarm_oauth.admin_grant_bindings(provider_grant_id,admin_grant_id,owner_user_id,admin_identity_id,connection_id,
   client_id,resource,registry_version,capabilities,scope_names,availability_digest,manifest_digest,verification_version,jkt,
   consented_at,expires_at,refresh_deadline,initial_issued_at,state)
 SELECT '${provider}',grant_id,owner_user_id,admin_identity_id,connection_id,client_id,resource,registry_version,
   ARRAY['list_admin_grants'],scope_names,'${digest}',manifest_digest,1,'${jkt}',created_at,expires_at,refresh_deadline,created_at,'active'
-FROM swarm.admin_grants WHERE grant_id='${grant}';` : ''}
-`;
-  return { owner, foreign, grant, identity, connection, client, provider, digest, jkt, sql };
+FROM swarm.admin_grants WHERE grant_id='${grant}';` }] : [])];
+  const sql = preparation.map(part => part.sql).join('\n');
+  return { owner, foreign, grant, identity, connection, client, provider, digest, jkt, sql, preparation };
 }
 
 export function issuance(f: ReturnType<typeof fixture>, generation = 0) {

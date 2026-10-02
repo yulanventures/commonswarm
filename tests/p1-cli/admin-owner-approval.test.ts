@@ -7,8 +7,22 @@ import * as bundle from '../../supabase/functions/_shared/protocol.js';
 import { adminCoreFixture } from '../support/admin-fixture.js';
 import type { AdminActor, AdminClientApproval } from '../../src/protocol/admin-authority.js';
 import { approvalCatalog, approvalDiagnostic, approvalFailureDetail } from '../support/admin-db-diagnostic.js';
+import { localClusterAdminUrl } from '../support/admin-schema-db.js';
 
 const command = { kind: 'approve_admin_client' as const, client_id: 'https://client.example/metadata', verification_version: 1 };
+
+test('admin-owner-approval-scoped: cluster-admin fixture connection refuses remote targets and preserves local connection settings', () => {
+  for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+    const source = new URL(`postgresql://postgres:nonsecret-placeholder@${host}:54322/postgres?sslmode=disable`);
+    const target = new URL(localClusterAdminUrl(source.toString()));
+    assert.equal(target.username, 'supabase_admin');
+    target.username = source.username;
+    assert.equal(target.toString(), source.toString());
+  }
+  for (const host of ['api.commonswarm.com', 'localhost.example', '127.0.0.2']) {
+    assert.throws(() => localClusterAdminUrl(`postgresql://postgres@${host}/postgres`), /local stack required/u);
+  }
+});
 
 test('admin-owner-approval-scoped: DB failure diagnostics retain the step and catalog metadata but withhold row data and credentials', () => {
   const catalog = approvalCatalog('CREATE TABLE commonswarm_oauth.admin_verified_clients (client_id text);\nCREATE UNIQUE INDEX admin_client_active_version ON commonswarm_oauth.admin_verified_clients (client_id);');
@@ -20,6 +34,11 @@ test('admin-owner-approval-scoped: DB failure diagnostics retain the step and ca
   assert.deepEqual(JSON.parse(detail(diagnostic('fixture-prepare', raw))), {
     step: 'fixture-prepare', sqlstate: '23505', constraint: 'admin_client_active_version', table: 'admin_verified_clients',
   });
+  for (const step of ['fixture-prepare:account', 'fixture-prepare:grant', 'fixture-prepare:verification',
+    'fixture-prepare:approval', 'fixture-prepare:resource', 'fixture-prepare:binding'] as const) {
+    const safe = JSON.parse(detail(diagnostic(step, { ...raw, code: '42501' })));
+    assert.deepEqual(safe, { step, sqlstate: '42501', constraint: 'admin_client_active_version', table: 'admin_verified_clients' });
+  }
   const wrapped = new assert.AssertionError({ message: 'private assertion detail', actual: raw });
   assert.deepEqual(JSON.parse(detail(diagnostic('withdrawal-rollback', wrapped))), {
     step: 'withdrawal-rollback', sqlstate: '23505', constraint: 'admin_client_active_version', table: 'admin_verified_clients',
