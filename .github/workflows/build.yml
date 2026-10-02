@@ -1,0 +1,31 @@
+# Release PR means a pull_request whose base branch is release.
+# This workflow is push-only.
+# Push to main builds the root package and the site. No CommonSwarm staging deploy exists.
+# Site builds without .env: both PUBLIC_SUPABASE_* values are optional when absent together.
+name: build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ vars.CI_RUNS_ON_LIGHT || vars.CI_RUNS_ON_NODE || vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            site/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm --prefix site ci
+      - run: npm --prefix site run build
