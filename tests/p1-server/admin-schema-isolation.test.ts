@@ -13,6 +13,15 @@ ${versions.map(v => catalog(v)).join('\n')}
 ${[...versions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false)).join('\n')}
 -- In the isolated rollback transaction, also exercise the non-superuser CREATE
 -- ROLE path. The reserve itself retains these dormant/operator-owned roles.
+-- Remove their ACLs on the saved originals too; all changes roll back. These
+-- narrow roles own no objects, so DROP OWNED revokes privileges only.
+${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_class WHERE relowner IN (SELECT oid FROM pg_roles WHERE rolname IN
+  ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))
+  AND NOT EXISTS(SELECT 1 FROM pg_proc WHERE proowner IN (SELECT oid FROM pg_roles WHERE rolname IN
+  ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))
+  AND NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspowner IN (SELECT oid FROM pg_roles WHERE rolname IN
+  ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))`, 'policy roles own no objects')}
+DROP OWNED BY commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 DROP ROLE commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Hosted prerequisite owner');

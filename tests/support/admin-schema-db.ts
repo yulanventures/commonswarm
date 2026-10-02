@@ -19,10 +19,28 @@ export function databaseContainer(): string {
   assert.equal(names.length, 1, 'exclusive local Supabase database required');
   return names[0]!;
 }
+/**
+ * Copy the real application DDL into empty schemas inside a rollback transaction.
+ * Renamed originals retain every row and dependency; ROLLBACK restores their names.
+ * Older inverse drills must not run against durable artifacts from earlier tests.
+ */
+export function emptyApplicationSchema(): string {
+  const schemas = ['swarm', 'swarm_read', 'commonswarm_oauth'];
+  const suffix = randomUUID().replaceAll('-', '');
+  const ddl = execFileSync('docker', ['exec', databaseContainer(), 'pg_dump',
+    '-U', 'supabase_admin', '-d', 'postgres', '--schema-only',
+    ...schemas.map(schema => `--schema=${schema}`)], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  // These pg_dump client directives cannot be sent through postgres.js.
+  const sql = ddl.replace(/^\\(?:un)?restrict \S+\r?$/gm, '');
+  return schemas.map(schema => `ALTER SCHEMA ${schema} RENAME TO ai_saved_${schema}_${suffix};`).join('\n')
+    + '\n' + sql + '\nSET LOCAL search_path=pg_catalog;\nSET LOCAL row_security=on;\nSET LOCAL check_function_bodies=on;\n'
+    + 'INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true);\n';
+}
 export function runSql(sql: string): void {
+  const emptySchema = emptyApplicationSchema();
   const result = spawnSync('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
-    '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
-    input: `BEGIN;\n${sql}\nROLLBACK;\n`, encoding: 'utf8', timeout: 60_000,
+    '-U', 'supabase_admin', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+    input: `BEGIN;\n${emptySchema}\n${sql}\nROLLBACK;\n`, encoding: 'utf8', timeout: 60_000,
   });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
@@ -105,12 +123,20 @@ SELECT '${jti}',decode('${tokenDigest}','hex'),provider_grant_id,admin_grant_id,
   scope_names,'https://mcp.commonswarm.com','test-kid',date_trunc('second',statement_timestamp()),
   date_trunc('second',statement_timestamp())+interval '5 minutes','${event}','${audit}'
 FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id='${f.provider}';
+-- Capture public issuance times while the inserting role can read the ledger.
+-- swarm_read must exercise only the narrow admission function, not table SELECT.
+DO $capture$ BEGIN
+  PERFORM set_config('schema_test.issued_at_${generation}',issued_at::text,true),
+    set_config('schema_test.expires_at_${generation}',expires_at::text,true)
+    FROM commonswarm_oauth.admin_access_issuances WHERE access_jti='${jti}';
+END $capture$;
 `;
   const sql = `SET LOCAL ROLE swarm_command;\n${eventInsert}\nRESET ROLE;\nSET LOCAL ROLE commonswarm_oauth_runtime;\n${auditInsert}\n${accessInsert}\nRESET ROLE;\n`;
   const active = (overrides: { jti?: string; owner?: string; digest?: string } = {}) =>
     `SELECT commonswarm_oauth.admin_access_is_active('${overrides.jti ?? jti}',decode('${overrides.digest ?? tokenDigest}','hex'),
     '${f.provider}','${f.grant}','${overrides.owner ?? f.owner}',${generation},'${f.client}','https://api.commonswarm.com/admin',
-    '${f.jkt}','${f.digest}',i.issued_at,i.expires_at,'test-kid') FROM commonswarm_oauth.admin_access_issuances i WHERE i.access_jti='${jti}'`;
+    '${f.jkt}','${f.digest}',current_setting('schema_test.issued_at_${generation}')::timestamptz,
+    current_setting('schema_test.expires_at_${generation}')::timestamptz,'test-kid')`;
   return { jti, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
 }
 
