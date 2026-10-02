@@ -161,6 +161,7 @@ interface AttemptFailure {
   readonly signal: NodeJS.Signals | null;
   readonly stderr: string;
   readonly stdout: string;
+  readonly timedOut: boolean;
 }
 
 const describeFailure = (attempt: number, failure: AttemptFailure): string =>
@@ -171,7 +172,11 @@ const runAttempt = (
   args: readonly string[],
   options: ChromeLaunchOptions,
 ): Promise<ChromeLaunchResult> => new Promise((resolve, reject) => {
-  execFile(chrome, [...args], { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+  // Own the process group and deadline: inherited output pipes must not delay timeout rejection.
+  const child = execFile(chrome, [...args], {
+    maxBuffer: options.maxBuffer, encoding: "utf8", detached: process.platform !== "win32",
+  }, (error, stdout, stderr) => {
+    clearTimeout(timer);
     if (error) {
       reject({
         code: error.code ?? null,
@@ -179,18 +184,32 @@ const runAttempt = (
         signal: error.signal ?? null,
         stderr,
         stdout,
+        timedOut: false,
       } satisfies AttemptFailure);
       return;
     }
     resolve({ stderr, stdout });
   });
+  const timer = setTimeout(() => {
+    if (child.pid && process.platform !== "win32") {
+      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+    } else {
+      child.kill("SIGKILL");
+    }
+    reject({
+      code: null, killed: true, signal: "SIGKILL", stderr: "", stdout: "", timedOut: true,
+    } satisfies AttemptFailure);
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+  }, options.timeout);
 });
 
 /**
  * Run one headless Chrome load. Callers provide only the flags specific to their measurement.
  * GitHub Actions uses Chrome's normal process model; constrained local runs keep the historical
  * single-process flags. An unexpected signal death gets one fresh process before the launcher
- * reports both attempts; a timeout or caller-requested kill is returned immediately.
+ * reports both attempts. A hard SIGKILL deadline covers both attempts, capped at 60 seconds.
  */
 export async function launchChrome(
   chrome: string,
@@ -217,20 +236,23 @@ async function launchAttempts(
   args: readonly string[],
   options: ChromeLaunchOptions,
 ): Promise<ChromeLaunchResult> {
+  const timeout = options.timeout !== undefined && Number.isFinite(options.timeout) && options.timeout > 0
+    ? Math.min(options.timeout, 60_000) : 60_000;
+  const deadline = Date.now() + timeout;
   const failures: AttemptFailure[] = [];
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      return await runAttempt(chrome, args, options);
+      return await runAttempt(chrome, args, { ...options, timeout: Math.max(1, deadline - Date.now()) });
     } catch (error) {
       const failure = error as AttemptFailure;
       failures.push(failure);
-      const callerRequestedSignal = options.killSignal ?? "SIGTERM";
-      const callerStoppedProcess = failure.killed || failure.signal === callerRequestedSignal;
+      const callerStoppedProcess = failure.killed || failure.signal === (options.killSignal ?? "SIGTERM");
       if (failure.signal === null || callerStoppedProcess || attempt === 2) break;
     }
   }
   const last = failures.at(-1)!;
   const details = failures.map((failure, index) => describeFailure(index + 1, failure)).join("; ");
   const output = `${last.stderr}\n${last.stdout}`.trim();
-  throw new Error(`Chrome failed (${details})${output ? `\n${output}` : ""}`);
+  const reason = last.timedOut ? `Chrome timed out after ${timeout} ms (SIGKILL)` : "Chrome failed";
+  throw new Error(`${reason} (${details}); URL/flags: ${JSON.stringify(args)}${output ? `\n${output}` : ""}`);
 }

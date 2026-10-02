@@ -197,3 +197,88 @@ test("Chrome finder never includes installed-browser candidates", async () => {
   assert.doesNotMatch(source, /["']\/usr\/bin\/(?:google-chrome|chromium)/u);
   assert.doesNotMatch(source, /systemChromeCandidates/u);
 });
+
+test("launch deadline kills a TERM-resistant fake executable and cleans its profile", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chrome-guard-timeout-"));
+  const saved = { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH,
+    RUN_BROWSER_TESTS: process.env.RUN_BROWSER_TESTS };
+  const realSetTimeout = globalThis.setTimeout;
+  const url = "http://127.0.0.1/timeout-fixture";
+  let pid: number | undefined;
+  try {
+    process.env.PLAYWRIGHT_BROWSERS_PATH = directory;
+    process.env.RUN_BROWSER_TESTS = "1";
+    const executable = join(directory, "fake-sleeper");
+    // Harmless process, never a browser. Ignoring TERM proves that the deadline uses SIGKILL.
+    await writeFile(executable, `#!/bin/sh
+printf '%s\\n' "$$" "$@" > "$0.started"
+for arg do
+  if [ "$arg" = "--fake-success" ]; then printf 'fake success'; exit 0; fi
+done
+trap '' TERM
+printf 'ready\\n' >> "$0.started"
+exec /bin/sleep 30
+`, { mode: 0o700 });
+    const success = await launchChrome(executable, ["--fake-success", url]);
+    assert.equal(success.stdout, "fake success");
+    const successRecord = await readFile(`${executable}.started`, "utf8");
+    const profileFrom = (record: string): string => {
+      const profile = record.split("\n").find((arg) => arg.startsWith("--user-data-dir="));
+      assert.ok(profile, "launch must supply its temporary profile");
+      return profile.slice("--user-data-dir=".length);
+    };
+    await assert.rejects(realpath(profileFrom(successRecord)), { code: "ENOENT" });
+
+    for (const timeout of [500, undefined, 120_000, 0]) {
+      await rm(`${executable}.started`);
+      const budget = timeout === 500 ? 500 : 60_000;
+      // Exercise the real default/cap without spending a minute on each fake process.
+      if (timeout !== 500) t.mock.timers.enable({ apis: ["setTimeout"] });
+      const pending = launchChrome(executable, ["--dump-dom", url], { timeout, killSignal: "SIGTERM" });
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const bounded = Promise.race([pending, new Promise<never>((_, reject) => {
+        watchdog = realSetTimeout(() => reject(new Error("fake launch did not enforce its deadline")), 3_000);
+      })]);
+      const rejected = assert.rejects(bounded, (error: Error) => {
+        assert.match(error.message, new RegExp(`Chrome timed out after ${budget} ms \\(SIGKILL\\)`));
+        assert.ok(error.message.includes(url));
+        assert.ok(error.message.includes("--dump-dom"));
+        assert.doesNotMatch(error.message, /attempt 2/u, "timeouts must not retry");
+        return true;
+      });
+      try {
+        let record = "";
+        const started = Date.now();
+        while (!record.endsWith("\nready\n") && Date.now() - started < 2_000) {
+          try { record = await readFile(`${executable}.started`, "utf8"); } catch { /* Wait for the fake. */ }
+        }
+        assert.ok(record.endsWith("\nready\n"), "the TERM-resistant fake must actually start");
+        pid = Number(record.split("\n")[0]);
+        if (timeout !== 500) t.mock.timers.tick(budget);
+        await rejected;
+        t.mock.timers.reset();
+        // Reaping is asynchronous; wait until the killed process no longer exists.
+        const killed = Date.now();
+        let alive = true;
+        while (alive && Date.now() - killed < 1_000) {
+          try { process.kill(pid, 0); } catch { alive = false; }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(alive, false, "SIGKILL must stop the TERM-resistant fake process");
+        pid = undefined;
+        await assert.rejects(realpath(profileFrom(record)), { code: "ENOENT" });
+      } finally {
+        t.mock.timers.reset();
+        clearTimeout(watchdog);
+        if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* Already reaped. */ } }
+        await pending.catch(() => {});
+      }
+    }
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});

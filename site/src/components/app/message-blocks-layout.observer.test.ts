@@ -315,23 +315,25 @@ const measureAll = async (): Promise<Record<string, Measurement>> => {
   }
 };
 
-const measuredPromise = measureAll();
-const measurementPromise = measuredPromise.then((measured) => {
+let measuredPromise: Promise<Record<string, Measurement>> | undefined;
+const measurements = (): Promise<Record<string, Measurement>> => measuredPromise ??= measureAll();
+const shippedMeasurement = async (): Promise<Measurement> => {
+  const measured = await measurements();
   const shipped = measured[""];
   assert.ok(shipped, "the shipped-stylesheet variant must be measured");
   return shipped;
-});
+};
 
 /** One control variant, by the half of the fix it reverted. */
 const controlOf = async (variant: string): Promise<Measurement> => {
-  const measured = await measuredPromise;
+  const measured = await measurements();
   const control = measured[variant];
   assert.ok(control, `the "${variant}" control variant was not measured`);
   return control;
 };
 
 test("a table wider than the phone scrolls inside itself and does not widen the page", async () => {
-  const measurement = await measurementPromise;
+  const measurement = await shippedMeasurement();
   assert.ok(
     measurement.innerWidth > 0 && measurement.innerWidth <= VIEWPORT_WIDTH,
     `unexpected viewport: ${JSON.stringify(measurement)}`,
@@ -391,7 +393,7 @@ test("CONTROL: with the cell wrap rule reverted the table squeezes instead of sc
 });
 
 test("the align attribute still decides a column, so no cell rule outranks it", async () => {
-  const measurement = await measurementPromise;
+  const measurement = await shippedMeasurement();
   /* `align` is a presentational hint and ANY author `text-align` on a cell beats it. A rule added
    * to the stylesheet for tidiness would delete the alignment feature without failing one string
    * assertion in the pure tests, so the computed value is pinned here.
@@ -412,7 +414,7 @@ test("the align attribute still decides a column, so no cell rule outranks it", 
 });
 
 test("a task item drops its bullet, a plain item beside it keeps one, and neither is an input", async () => {
-  const measurement = await measurementPromise;
+  const measurement = await shippedMeasurement();
   assert.equal(measurement.taskListStyle, "none");
   /* The positive half: the rule is scoped to task items, so an ordinary item is untouched. */
   assert.notEqual(measurement.plainListStyle, "none");
@@ -420,7 +422,7 @@ test("a task item drops its bullet, a plain item beside it keeps one, and neithe
 });
 
 test("every new block keeps its gap on BOTH sides, not only the side it was added to", async () => {
-  const measurement = await measurementPromise;
+  const measurement = await shippedMeasurement();
   const spacing = measurement.blockSpacing;
   /* A list is the reference: it was in the spacing rule before this lane and is untouched by it.
    * Every pair a table or a rule takes part in has to read the same gap. A sibling selector names
@@ -435,7 +437,7 @@ test("every new block keeps its gap on BOTH sides, not only the side it was adde
 });
 
 test("a rule is a visible line and strikethrough is struck through", async () => {
-  const measurement = await measurementPromise;
+  const measurement = await shippedMeasurement();
   assert.ok(
     measurement.ruleHeight >= 1 && measurement.ruleWidth > 100,
     `the rule did not render as a line: ${JSON.stringify(measurement)}`,
