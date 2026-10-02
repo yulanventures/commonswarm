@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import {
   assertAllowedOrigin,
+  INTERACTION_SECURITY_HEADERS,
   hashOpaque,
   opaqueMatches,
   SESSION_COOKIE_ATTRIBUTES,
@@ -230,4 +231,14 @@ test("public authorization is disabled while health and discovery remain reachab
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("interaction pages send a same-origin referrer policy so form POSTs carry a real Origin", () => {
+  // Under "no-referrer" browsers serialize a form POST's Origin as "null", which assertAllowedOrigin
+  // must keep refusing; the page header therefore has to allow the same-origin Origin through.
+  assert.equal(INTERACTION_SECURITY_HEADERS["referrer-policy"], "same-origin");
+  const csp = INTERACTION_SECURITY_HEADERS["content-security-policy"];
+  assert.doesNotMatch(csp, /(^|;)\s*sandbox\b/);
+  assert.match(csp, /form-action 'self'/);
+  assert.throws(() => assertAllowedOrigin("null", new Set(["https://mcp.commonswarm.com"])), { code: "origin_forbidden" });
 });
