@@ -6,8 +6,37 @@ import * as core from '../../src/protocol/index.js';
 import * as bundle from '../../supabase/functions/_shared/protocol.js';
 import { adminCoreFixture } from '../support/admin-fixture.js';
 import type { AdminActor, AdminClientApproval } from '../../src/protocol/admin-authority.js';
+import { approvalCatalog, approvalDiagnostic, approvalFailureDetail } from '../support/admin-db-diagnostic.js';
 
 const command = { kind: 'approve_admin_client' as const, client_id: 'https://client.example/metadata', verification_version: 1 };
+
+test('admin-owner-approval-scoped: DB failure diagnostics retain the step and catalog metadata but withhold row data and credentials', () => {
+  const catalog = approvalCatalog('CREATE TABLE commonswarm_oauth.admin_verified_clients (client_id text);\nCREATE UNIQUE INDEX admin_client_active_version ON commonswarm_oauth.admin_verified_clients (client_id);');
+  const detail = (stdout: string) => approvalFailureDetail(stdout, catalog);
+  const diagnostic = (step: Parameters<typeof approvalDiagnostic>[0], error: unknown) => approvalDiagnostic(step, error, catalog);
+  const raw = { code: '23505', constraint_name: 'admin_client_active_version', table_name: 'admin_verified_clients',
+    message: 'duplicate row containing private values', detail: 'private row data', query: 'private SQL',
+    parameters: ['swm_agt_private'], connection: 'postgresql://user:password@host/db' };
+  assert.deepEqual(JSON.parse(detail(diagnostic('fixture-prepare', raw))), {
+    step: 'fixture-prepare', sqlstate: '23505', constraint: 'admin_client_active_version', table: 'admin_verified_clients',
+  });
+  const wrapped = new assert.AssertionError({ message: 'private assertion detail', actual: raw });
+  assert.deepEqual(JSON.parse(detail(diagnostic('withdrawal-rollback', wrapped))), {
+    step: 'withdrawal-rollback', sqlstate: '23505', constraint: 'admin_client_active_version', table: 'admin_verified_clients',
+  });
+  for (const value of ['swm_agt_private', 'postgresql://user:password@host/db', 'private_value', 'admin_verified_clients\nprivate']) {
+    assert.deepEqual(JSON.parse(detail(diagnostic('owner-approval', {
+      ...raw, code: value, constraint_name: value, table_name: value,
+    }))), { step: 'owner-approval', sqlstate: null, constraint: null, table: null });
+  }
+  const partial = 'ADMIN_OWNER_APPROVAL_DIAGNOSTIC {"step":"private value"}\nraw private error';
+  assert.equal(detail(partial), 'step=initialize; safe diagnostic unavailable');
+  assert.equal(detail('ADMIN_OWNER_APPROVAL_DIAGNOSTIC null'), 'step=initialize; safe diagnostic unavailable');
+  assert.equal(detail('ADMIN_OWNER_APPROVAL_DIAGNOSTIC {'), 'step=initialize; safe diagnostic unavailable');
+  assert.deepEqual(JSON.parse(detail(diagnostic('withdrawal-rollback', new Error('private failure')))), {
+    step: 'withdrawal-rollback', sqlstate: null, constraint: null, table: null,
+  });
+});
 
 test('admin-owner-approval-scoped: public account commands refuse agent tokens before human authentication or database access', () => {
   // Nonsecret placeholders satisfy import-time configuration only. No service,
