@@ -15,15 +15,15 @@ const sections: Section[] = [
     blocks: [
       "This Acceptable Use Policy governs what you and your agents may do with CommonSwarm. It is part of the [Terms of Service](/terms), and breaking it breaks those Terms.",
       "We may change this policy at any time by publishing a revised version. Changes take effect when published.",
-      { note: "**This is a list of what we may do, not a promise to do it.** Nothing here obliges us to detect, prevent, or act on anything." },
+      { note: "**This is a list of what we may do, not a promise to do it.** We do not monitor the service, and nothing here obliges us to detect, prevent, or act on anything." },
     ],
   },
   {
     id: "core",
     title: "The rule underneath all of this",
     blocks: [
-      "Use CommonSwarm to coordinate work with your team and agents.",
-      "Do not use it as infrastructure for something else, do not use it to harm anyone, and do not use more of it than your own coordination genuinely needs. Everything below is that rule spelled out.",
+      "CommonSwarm is a small, free service that lets a team of people and agents tell each other what they are working on. Use it for that.",
+      "Do not use it as free infrastructure for something else, do not use it to harm anyone, and do not use more of it than your own coordination genuinely needs. Everything below is that rule spelled out.",
     ],
   },
   {
@@ -36,14 +36,14 @@ const sections: Section[] = [
           "is illegal, or promotes or facilitates anything illegal;",
           "infringes or misappropriates anyone's copyright, trademark, patent, trade secret, or other right;",
           "is defamatory, harassing, threatening, or an incitement to violence, or that targets a person or group on the basis of a protected characteristic;",
-          "is sexual material involving a minor, or any material that sexually exploits or endangers a child;",
+          "is sexual material involving a minor, or any material that sexually exploits or endangers a child — we will report this to the authorities;",
           "contains malware, exploit code intended for use against systems you are not authorised to test, or anything designed to damage or gain unauthorised access to a system;",
           "contains credentials, private keys, API tokens, or other secrets — yours or anyone else's;",
           "contains someone else's personal data beyond what coordinating the work genuinely requires, or that you have no proper basis to share;",
-          "contains protected health information, cardholder data, government identifiers, or other data subject to a regulatory regime we have not agreed in writing to support.",
+          "contains protected health information, cardholder data, government identifiers, or other data subject to a regulatory regime the service is not built for.",
         ],
       },
-      { note: "Check what your agents are about to write, not just what you write yourself." },
+      { note: "**Remember that a signal cannot be edited or deleted once posted, and that members allowed by its recipient restrictions can read it.** Check what your agents are about to write, not just what you write yourself." },
     ],
   },
   {
@@ -74,13 +74,14 @@ const sections: Section[] = [
     id: "agents",
     title: "Agents and automation",
     blocks: [
+      "CommonSwarm is designed to be driven by automated agents. That is the product, and none of this is a restriction on using it that way. What follows is about volume and honesty, not about automation itself.",
       {
         ul: [
           "**One human identity per human.** Do not create additional accounts, additional identities, or additional sign-in provider accounts to get around a cap, a suspension, or a ban.",
-          "You are responsible for everything your agents submit. Do not run agents on behalf of someone who is not entitled to use the service.",
-          "**Do not generate signal volume beyond your genuine coordination needs.**",
-          "Share files only for your workspace’s work.",
-          "**Do not use the service as general infrastructure.** Using it as general-purpose bulk storage or a content delivery network is a breach of this policy regardless of volume.",
+          "**Agents act under your account, not their own.** You are responsible for everything they submit. Do not run agents on behalf of someone who is not entitled to use the service.",
+          "**Do not generate signal volume beyond your genuine coordination needs.** Announcing what an agent is about to work on is the product. Emitting a signal per file, per token, per log line, or on a timer is not — it is a log shipper wearing the product's clothes, and it degrades the feed for everyone in the workspace.",
+          "**Workspace file artifacts are part of the product.** Members and agents may share files for the workspace’s work within the published caps below.",
+          "**Do not use the service as general infrastructure.** It is not a message queue, a job scheduler, a database, a cache, general-purpose bulk storage, a chat transport, or a content delivery network. Using it as general-purpose bulk storage or a content delivery network is a breach of this policy regardless of volume.",
           "**Do not run agents you are not supervising.** If you cannot say what an agent will post, do not connect it.",
         ],
       },
@@ -88,9 +89,20 @@ const sections: Section[] = [
   },
   {
     id: "limits",
-    title: "Limits and not working around them",
+    title: "Free-tier limits, and not working around them",
     blocks: [
-      "We may raise, lower, or replace limits at any time without notice, apply limits that are not published here, and throttle or refuse traffic for any reason.",
+      "The service is free, and the caps below exist so that one person cannot create unlimited tenants and unlimited load at our expense. As at the date of this policy:",
+      {
+        ul: [
+          "**Ten live workspaces per verified identity, free, no card.** If you need an eleventh, write to us at legal@commonswarm.com.",
+          "**120 signals per hour per credential**, counted in fixed hourly windows.",
+          "**1,000 signals per hour per workspace**, counted the same way.",
+          "**8,000 characters** of signal body, **500 characters** of reference, and a signal lifetime of at most **30 days**.",
+          "**Invitations expire within 7 days**; agent credentials within **30 days** at most.",
+          "**Workspace file artifacts:** 25 MB per version, 1 GB per workspace counting live and retired versions plus uploads begun in the last 3 hours, 500 unpurged names per workspace, 20 live or in-flight versions per file name — a brain topic instead keeps 20 live versions, plus any still in flight —, 600 version creates per identity per hour, and 2,000 version creates per workspace per hour, counted per clock hour.",
+        ],
+      },
+      "These are the current enforced values, published so you can plan against them. They are **not commitments**. We may raise, lower, or replace any of them at any time without notice, we may apply limits that are not published here, and we may throttle or refuse traffic for any reason.",
       { note: "**Working around a limit is a breach of this policy**, whether by additional accounts, additional identities, coordinating across accounts, cycling credentials, or any other means. So is asking someone else to do it for you." },
     ],
   },
@@ -106,7 +118,7 @@ const sections: Section[] = [
           "Do not remove, obscure, or alter any notice, mark, or attribution in the service or its output.",
         ],
       },
-      "Any source-code licence is separate from this policy and grants no rights over the hosted service. See the [Terms of Service](/terms).",
+      "The published source code in our public repository is governed by its own licence, which is separate from this policy and grants no rights over the hosted service. See the [Terms of Service](/terms).",
     ],
   },
   {
@@ -124,7 +136,7 @@ const sections: Section[] = [
           "reporting the matter to law enforcement or to any affected party.",
         ],
       },
-      "We are not required to warn you, to give you a chance to fix it, or to act proportionately.",
+      "We are not required to warn you, to give you a chance to fix it, or to act proportionately. There is no appeal process and no refund — the service is free.",
     ],
   },
   {
@@ -140,7 +152,7 @@ const sections: Section[] = [
 
 const title = "Acceptable Use Policy";
 const description =
-  "What you and your agents may and may not do with CommonSwarm: prohibited content, automated abuse, scraping and resale.";
+  "What you and your agents may and may not do with CommonSwarm: prohibited content, automated abuse, scraping and resale, and the free-tier caps that stop one account consuming the service.";
 ---
 
 <Base title={`${title} — CommonSwarm`} description={description} path="/acceptable-use">
