@@ -54,8 +54,9 @@ A root program reads it on the box at switch-on; there is no fallback, new
 1Password item, secret shell variable, secret argv or credential output.
 Before writing even the staged credential it checks membership, SET ROLE and
 the management path's schema/table privileges with that login in read-only
-transactions. A missing grant prints only its exact privilege/object/role and
-stops; never widen grants. That login must set `swarm_command` and `swarm_read`;
+transactions. A failed requirement prints its number and fixed description
+(`FAIL hm37-mcp-enable REQ <n>: <description>`), including privilege/object/role
+for grants, and stops; never widen grants. That login must set `swarm_command` and `swarm_read`;
 do not grant these to `commonswarm_oauth_runtime`. Existing
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, GoTrue config, signing/cookie inputs and
 CA remain in their named service files/mounts. The repo does not name exact
@@ -584,9 +585,12 @@ to read the service-owned mode-0600 edge env despite dropping all other
 capabilities; the source env/CA binds are read-only, and only the protected
 staging bind is writable. Base Compose's `extra_hosts` maps `db.commonswarm.internal`
 to `172.31.0.10`; the OFF runtime's DNS and actual UID/GID must match first.
-The URL preserves the existing login/password/database, replacing only its
-host with that name. Query overrides/non-5432 ports fail closed. Both the
-producer and the bundled management client receive `ssl.ca`,
+The producer accepts an absent query or exactly one parsed query pair,
+`sslmode=verify-full`; duplicates, other names or other values fail closed.
+It strips the query before connecting or writing the management URL, preserving
+the existing login/password/database and replacing the host with that name.
+The runtime still requires a query-free management URL. Non-5432 ports fail
+closed. Both the producer and the bundled management client receive `ssl.ca`,
 `ssl.servername=db.commonswarm.internal`, and `ssl.rejectUnauthorized=true`.
 HezLead measured runtime UID:GID `996:986` in OAUTH-REPORT.md. Compose's
 explicit `user` overrides Dockerfile `USER 10001:10001`; retain that existing
@@ -638,13 +642,16 @@ import fs from "node:fs";
 import postgres from "postgres";
 let db;
 let check = "root credential producer configuration";
-function requireCheck(ok) { if (!ok) throw new Error("gate"); }
-function env(path) {
+function requireCheck(ok, number, description) {
+  check = `REQ ${number}: ${description}`;
+  if (!ok) throw new Error("gate");
+}
+function env(path, number, description) {
   const result = {};
   for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/u)) {
     if (!line.trim() || line.trimStart().startsWith("#")) continue;
     const match = /^([A-Z][A-Z0-9_]*)=(.*)$/u.exec(line);
-    requireCheck(match && !(match[1] in result));
+    requireCheck(match && !(match[1] in result), number, description);
     let value = match[2];
     if (value.length >= 2 && ["'", '\"'].includes(value[0]) && value.at(-1) === value[0]) value = value.slice(1,-1);
     result[match[1]] = value;
@@ -652,19 +659,24 @@ function env(path) {
   return result;
 }
 try {
-  requireCheck(process.getuid() === 0);
-  requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.env", "utf8"));
-  const edge = env("/home/commonswarm/.env");
-  const compose = env("/secret-stage/compose.off.env");
-  requireCheck(compose.MCP_OAUTH_UID === "996" && compose.MCP_OAUTH_GID === "986");
-  requireCheck(compose.MCP_OAUTH_DATABASE_HOST === "db.commonswarm.internal" && compose.MCP_OAUTH_DATABASE_ADDRESS === "172.31.0.10");
+  requireCheck(process.getuid() === 0, 1, "producer runs as root");
+  requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.env", "utf8"), 2, "edge env matches the window snapshot");
+  const edge = env("/home/commonswarm/.env", 3, "edge env syntax is valid and names are unique");
+  const compose = env("/secret-stage/compose.off.env", 4, "OFF compose env syntax is valid and names are unique");
+  requireCheck(compose.MCP_OAUTH_UID === "996" && compose.MCP_OAUTH_GID === "986", 5, "OAuth runtime UID:GID matches the measured identity");
+  requireCheck(compose.MCP_OAUTH_DATABASE_HOST === "db.commonswarm.internal" && compose.MCP_OAUTH_DATABASE_ADDRESS === "172.31.0.10", 6, "OAuth database hostname and address match the verified mapping");
   const url = new URL(edge.SWARM_DATABASE_URL);
-  requireCheck(["postgres:", "postgresql:"].includes(url.protocol) && url.username && url.password && !url.search && !url.hash);
-  requireCheck(!url.port || url.port === "5432");
+  requireCheck(["postgres:", "postgresql:"].includes(url.protocol) && url.username && url.password && !url.hash, 7, "edge database URL uses PostgreSQL with login/password and no fragment");
+  const query = [...url.searchParams];
+  requireCheck(!url.search || (query.length === 1 && query[0][0] === "sslmode" && query[0][1] === "verify-full"), 8, "edge database URL query is absent or exactly one sslmode=verify-full pair");
+  url.search = "";
+  requireCheck(!url.port || url.port === "5432", 9, "edge database URL port is absent or 5432");
   // Preserve edge username/password/database; dial the OAuth network hostname.
   url.hostname = "db.commonswarm.internal";
   const ssl = { ca: fs.readFileSync("/etc/ssl/yulan-internal-ca.pem", "utf8").trim(), servername: "db.commonswarm.internal", rejectUnauthorized: true };
-  requireCheck(ssl.ca.includes("-----BEGIN CERTIFICATE-----"));
+  requireCheck(ssl.ca.includes("-----BEGIN CERTIFICATE-----"), 10, "mounted TLS CA contains a certificate");
+  // Grant numbers follow the fixed role/schema/table/function traversal below.
+  let grantRequirement = 11;
   check = "edge login connection with verified CA/servername";
   db = postgres(url.href, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 3, ssl, onnotice() {} });
   await db.begin("read only", async tx => {
@@ -673,7 +685,7 @@ try {
       for (const privilege of ["MEMBER", "SET"]) {
         check = `${privilege} ON ROLE ${role} TO edge login`;
         const rows = await tx`SELECT pg_has_role(current_user, ${role}, ${privilege}) AS allowed`;
-        requireCheck(rows[0]?.allowed === true);
+        requireCheck(rows[0]?.allowed === true, grantRequirement++, check);
       }
     }
   });
@@ -686,7 +698,7 @@ try {
       for (const schema of role === "swarm_command" ? ["swarm"] : ["swarm_read", "swarm"]) {
         check = `USAGE ON SCHEMA ${schema} TO ${role}`;
         const rows = await tx`SELECT has_schema_privilege(current_user, ${schema}, 'USAGE') AS allowed`;
-        requireCheck(rows[0]?.allowed === true);
+        requireCheck(rows[0]?.allowed === true, grantRequirement++, check);
       }
       const tables = role === "swarm_command" ? [
         ["swarm.users", "SELECT,INSERT,UPDATE"],
@@ -704,19 +716,19 @@ try {
         for (const privilege of privileges.split(",")) {
           check = `${privilege} ON TABLE ${table} TO ${role}`;
           const rows = await tx`SELECT has_table_privilege(current_user, ${table}, ${privilege}) AS allowed`;
-          requireCheck(rows[0]?.allowed === true);
+          requireCheck(rows[0]?.allowed === true, grantRequirement++, check);
         }
       }
       if (role === "swarm_read") {
         for (const signature of ["auth.uid()", "swarm.is_member(uuid,uuid)"]) {
           check = `EXECUTE ON FUNCTION ${signature} TO swarm_read`;
           const rows = await tx`SELECT has_function_privilege(current_user, ${signature}, 'EXECUTE') AS allowed`;
-          requireCheck(rows[0]?.allowed === true);
+          requireCheck(rows[0]?.allowed === true, grantRequirement++, check);
         }
         check = "SELECT ON swarm_read.workspaces with verified-user claims (including view dependencies)";
         await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({sub: "00000000-0000-4000-8000-000000000000", role: "authenticated"})}, true)`;
         const rows = await tx`SELECT workspace_id, name FROM swarm_read.workspaces LIMIT 1`;
-        requireCheck(rows.length === 0);
+        requireCheck(rows.length === 0, grantRequirement++, check);
       }
     });
   }
@@ -729,7 +741,7 @@ try {
 } catch (error) {
   // Do not print error.message, query results, URLs, login names or objects.
   const code = /^[0-9A-Z]{5}$/u.test(error?.code ?? "") ? ` SQLSTATE=${error.code}` : "";
-  console.error(`FAIL: missing grant or failed check: ${check}${code}; STOP; never widen grants`);
+  console.error(`FAIL hm37-mcp-enable ${check}${code}; STOP; never widen grants`);
   process.exitCode = 1;
 } finally {
   if (db) { try { await db.end({timeout: 5}); } catch { process.exitCode = 1; } }
