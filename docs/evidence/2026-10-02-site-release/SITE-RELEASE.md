@@ -11,6 +11,13 @@ Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
 blocks use `/bin/bash` 3.2. They never assign `HOME`, print a credential, run
 Docker, deploy a second SHA, change Caddy or DNS, or restart a service.
 
+Every headless browser launch in this plan or any plan copied from it passes
+`--no-sandbox` with `--password-store=basic`, `--use-mock-keychain`, and a fresh
+temporary profile: Chromium's macOS seatbelt cannot start inside the release
+worker's `sandbox-exec` profile (`~/.config/agent-sandbox/no-real-chrome.sb`),
+which supplies containment. Use only Playwright's bundled Chromium, never the
+installed Chrome. See the REDUCED-CONTROL rule under "Fresh headless Chromium session".
+
 Hosted MCP must be ON. `site2-00-a-close-ingest` now records the live
 protected-resource metadata and unauthenticated MCP POST checks that replace
 the historical Window A handoff; `site2-03-go-record` repeats them before GO.
@@ -485,7 +492,13 @@ must not execute them.
 The preflight compares any authenticated web user with the CLI human and the
 fixed expected ID, retains the original full-control assertions, and otherwise
 selects REDUCED-CONTROL. A fresh signed-out profile therefore reports the
-signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
+signed-in and mobile claims as NOT PROVED. Every headless Chromium launch uses
+`--no-sandbox`: Chromium's macOS seatbelt cannot initialize inside the release
+worker's sandbox. The worker's outer `sandbox-exec` profile
+`~/.config/agent-sandbox/no-real-chrome.sb` supplies containment, denying execution
+of installed Chrome and reads of real Chrome profiles and the macOS keychain.
+Only Playwright's bundled Chromium may run; later CDP controls reuse that process.
+A keychain dialog is STOP, never a
 click-through or reduced-control fallback. Close stops only the task-owned
 headless process and removes its private profile through guarded rm.
 
@@ -500,7 +513,9 @@ Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
 retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
 stderr categories, with arbitrary error details withheld. STEP 0 means harness
-setup failed before Python started. Steps 1–13 are attachment, navigation,
+setup failed before Python started; its one-line cause retains the exit code,
+signal when available, and first stderr line with home paths redacted and
+sensitive-looking details withheld. Steps 1–13 are attachment, navigation,
 document load, app readiness, state snapshot, keychain/challenge check, branch
 selection, account label, user identity, starting workspace, workspace switch,
 switch wait, and receipt write. STEP 4 requires a non-loading dashboard state
@@ -579,7 +594,7 @@ retaining raw browser output in the public evidence directory.
   if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
   # setsid detaches from the block executor's process group; exec preserves $!.
   python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
+    "$chrome" --headless --no-sandbox --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
     --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
     </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
@@ -700,7 +715,7 @@ path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site2-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
   python3 - "$harness_stdout" "$harness_stderr" "$harness_status" "$SITE_EVIDENCE" <<'PY'
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -723,6 +738,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout", "STOP: STEP 6 keychain dialog"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -739,8 +756,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-03-browser-preflight: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-03-browser-preflight-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
@@ -1444,7 +1474,7 @@ print("STEP 14", flush=True)
 path=evidence/"site2-05-browser.json"; path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
     python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -1467,6 +1497,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -1483,8 +1515,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-05-browser-acceptance: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-05-browser-acceptance-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
@@ -1791,7 +1836,7 @@ else:
 print("STEP 12", flush=True)
 PY
   python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -1814,6 +1859,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -1830,8 +1877,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-06-browser: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-06-browser-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
