@@ -11,6 +11,7 @@ SELECT COALESCE((
   AND to_regprocedure('commonswarm_oauth.purge_expired_dpop(integer)') IS NULL
   AND to_regprocedure('commonswarm_oauth.issuer_key_allowed(text,text)') IS NULL
   AND to_regprocedure('commonswarm_oauth.lock_issuer_key_denial()') IS NULL
+  AND to_regprocedure('commonswarm_oauth.lock_admin_client_verification(text,integer)') IS NULL
   AND to_regprocedure('commonswarm_oauth.resolve_admin_grant_status(text,uuid,text)') IS NULL
   AND to_regprocedure('commonswarm_oauth.fence_admin_family(text,uuid,text,text)') IS NULL
   AND to_regprocedure('commonswarm_oauth.guard_verified_client()') IS NULL

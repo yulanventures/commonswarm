@@ -36,6 +36,7 @@ DROP TABLE commonswarm_oauth.issuer_key_denials;
 DROP FUNCTION commonswarm_oauth.guard_owner_approval();
 DROP FUNCTION commonswarm_oauth.guard_verified_client();
 DROP FUNCTION commonswarm_oauth.resolve_provider_grant_status(text,uuid,text);
+DROP FUNCTION commonswarm_oauth.lock_admin_client_verification(text,integer);
 DROP FUNCTION commonswarm_oauth.resolve_admin_grant_status(text,uuid,text);
 DROP FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,text);
 DROP FUNCTION commonswarm_oauth.lock_issuer_key_denial();
