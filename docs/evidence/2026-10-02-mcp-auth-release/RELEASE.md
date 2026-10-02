@@ -26,9 +26,10 @@ those live checks:
 
 | Input | Repository / HezLead evidence |
 | --- | --- |
-| `BASELINE_OAUTH_SHA` | HezLead's measured live OFF report; expected next run: `972df1715c84b0ecba1a5c5e81c2b46f7232400d` (40 lowercase hex) |
-| `BASELINE_OAUTH_IMAGE` | Same measured report; expected next run: `sha256:80b52aa64a09111b5f4f1db406eff5f884cc437ce8e4230b14396158ca2f28ec` (sha256 + 64 lowercase hex); no registry tag |
+| `BASELINE_OAUTH_SHA` | HezLead's latest measured live ON or OFF report; full 40 lowercase hex, independently checked against the running source |
+| `BASELINE_OAUTH_IMAGE` | Same measured report; full sha256 + 64 lowercase hex, independently checked against the running image; no registry tag |
 | Historical OAuth baseline only | `826db6a34f235064a3a03c57377d8e32a35d2f05` / `sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a`; HM6, superseded by try 2 |
+| Latest task handoff | TASK-11 reports production ON at source `603a206e`, image prefix `sha256:67687a3f`, both flags 1, management override/mount present and Caddy active. Prefixes are evidence only; HezLead supplies the full measured inputs. |
 | OAuth project / service / container | `commonswarm-oauth` / `oauth` / `commonswarm-oauth-oauth-1` |
 | OAuth inputs | `/etc/commonswarm-oauth/compose.env`, `/etc/commonswarm-oauth/service.env` |
 | Port/network | HM6 recorded loopback `3490`; Compose allows `3490..3499`; `commonswarm-net` |
@@ -53,8 +54,9 @@ The rollback release/Compose path comes from its labels and working directory,
 with the current symlink and RELEASE_SHA checked against that measured path.
 
 New input **name**: `MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE` (container
-path `/run/commonswarm-oauth/management-database-credentials`). Only step (f)
-installs it and adds `compose.management.yaml`; OFF uses the unchanged base
+path `/run/commonswarm-oauth/management-database-credentials`). Step (f)
+installs the newly produced credential and adds `compose.management.yaml`;
+ON-baseline recovery reinstalls the captured original file/override. OFF uses the unchanged base
 Compose file and has no management credential on host or in container. Its value
 source is a protected on-box file, not an environment secret or management
 bearer. Only `SWARM_DATABASE_URL` in `/home/commonswarm/.env` supplies the edge login.
@@ -78,37 +80,41 @@ Execute only the marked blocks, extracted by step ID. Mac blocks use Bash
 3.2 syntax. Box blocks run in HezLead's approved root release shell; **this
 preparation worker has not used sudo**. Each box block receives the same
 nonsecret `OAUTH_RELEASE_SHA`; preflight and open also receive the two
-baseline inputs; later blocks reload a root-owned state file holding
+baseline inputs and the checked MODE; later blocks reload a root-owned state file holding
 only paths, SHA/image identity, and helper code. On any FAIL stop forward
-work, run rollback then cleanup before closing the window. Do not invent
+work and follow the failure-state table before cleanup/closing. Do not invent
 commands during the window. No Actions, HOME changes, Mac Docker or browser.
 
 ## HezLead rerun order and input sources
 
-The try-2 window is closed: restart at (a) with the reviewed merge of this
+The try-2 window is closed: restart at (0) with the reviewed merge of this
 branch landed on main, a fresh archive and fresh secret staging. Execute each
 existing marked block by its step ID; no ad hoc recovery of the closed state.
 
 | Phase | Exact step IDs, in order |
 | --- | --- |
+| (0) | `hm37-mcp-baseline-state` (box, read-only; retain the same root shell for preflight/open) |
 | (a) | `hm37-oauth-archive` (Mac), `hm37-oauth-preflight` (box), then `hm37-oauth-open` (box) |
+| (a1), ON baseline only | `hm37-mcp-transition-off` immediately after open, then `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off`. OFF baselines skip (a1). |
 | (b) | `hm37-oauth-build` |
 | (c) | `hm37-oauth-inputs` |
 | (d) | `hm37-oauth-release-off`, then `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off` |
-| (e), failure recovery only | `hm37-oauth-rollback`, then `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off`; stop forward work |
+| (e), failure recovery only | `hm37-oauth-rollback`: baseline image OFF and OFF probes, then exact baseline ON restoration and ON probes/memory if the baseline was ON. These checks run inside the block; stop forward work. |
 | (f), after every OFF gate passes | `hm37-mcp-enable`, then `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=on` (includes memory gate) |
 
 On failed enable/ON probes, automatic rollback is followed by
 `hm37-mcp-disable` and `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off`.
-Use (e) if the OAuth release itself must revert. After successful ON or
-rollback-OFF probes, run `hm37-oauth-close` (box) and
+For an ON baseline, every failure after transition (including build/inputs,
+OFF release/probes, enable and ON probes/memory) must run (e) to restore the
+baseline image and ON snapshots. For an OFF baseline, use (e) if the release
+must revert. After successful ON or verified baseline recovery, run `hm37-oauth-close` (box) and
 `hm37-oauth-mac-close` (Mac). Stop and report any failed rollback/cleanup.
 The separately approved HM done-test follows successful activation.
 
 | Input | Source and use |
 | --- | --- |
 | `OAUTH_RELEASE_SHA` | HezLead supplies the exact reviewed merge SHA landed on main; archive verifies ancestry. Supply it to all box blocks; must differ from `BASELINE_OAUTH_SHA`. |
-| `BASELINE_OAUTH_SHA`, `BASELINE_OAUTH_IMAGE` | HezLead's latest measured live OFF report, expected values in the table above. Supply to preflight/open; open saves them with the measured release/Compose path in the new window state. |
+| `BASELINE_OAUTH_SHA`, `BASELINE_OAUTH_IMAGE` | HezLead's latest measured live ON or OFF report, full immutable identities. Supply to preflight/open; open saves them with the measured release/Compose path in the new window state. |
 | `OAUTH_ARCHIVE_SHA256` | Exact `shasum -a 256` result from `hm37-oauth-archive`; HezLead supplies it to open. |
 | `BOX_ARCHIVE_PATH` | Exact printed path from `hm37-oauth-archive`; HezLead supplies it to open. |
 | `TOM_ENABLE_APPROVAL` | HezLead's named prompt authorization `2026-09-29`; required for (f), never inferred from this document. |
@@ -119,11 +125,130 @@ Open creates the new release/proof paths and secret stage; later box blocks
 load these and the captured baseline identities from the new state file.
 Never supply guessed rollback paths or reuse the baseline proof directory.
 
+## (0) Measure the MCP baseline before opening a window
+
+Run this block first in the same root Bash shell as preflight/open. It defines
+the shared read-only checker and route probe; preflight/open repeat both before
+any write. MODE is recorded in the shell and printed without credentials;
+open persists it in the new proof directory. Mixed flags, file/mount/Compose
+drift, a mismatched Caddy site or failed public probes refuse the window.
+
+```sh
+# step: hm37-mcp-baseline-state
+set -euo pipefail
+trap 'echo "FAIL hm37-mcp-baseline-state REQ 99: unexpected check failure; STOP" >&2' ERR
+test "$(id -u)" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+hm37_baseline_mode() {
+python3 - <<'PY' || return 1
+import json, pathlib, re, subprocess
+def require(ok, number, description):
+    if not ok: raise SystemExit(f"FAIL hm37-mcp-baseline-state REQ {number}: {description}; STOP")
+def inspect(name):
+    return json.loads(subprocess.check_output(['docker','inspect',name],text=True))[0]
+def env_file(path):
+    result={}
+    for line in pathlib.Path(path).read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        name,sep,value=line.partition('=')
+        require(sep and re.fullmatch(r'[A-Z][A-Z0-9_]*',name) and name not in result,2,'baseline env syntax and names are unique')
+        if len(value)>=2 and value[0]==value[-1] and value[0] in "\"'": value=value[1:-1]
+        result[name]=value
+    return result
+oauth=inspect('commonswarm-oauth-oauth-1'); edge=inspect('commonswarm-edge-edge-runtime-1')
+oe=dict(x.split('=',1) for x in oauth['Config']['Env']); ee=dict(x.split('=',1) for x in edge['Config']['Env'])
+flags=[oe.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0'),ee.get('SWARM_MCP_PUBLIC_ENABLED','0')]
+require(flags in (['0','0'],['1','1']),3,'both effective public flags must agree and be 0 or 1')
+mode='on' if flags[0]=='1' else 'off'
+require(oauth['State']['Health']['Status']=='healthy' and edge['State']['Health']['Status']=='healthy',4,'both baseline services are healthy')
+service=env_file('/etc/commonswarm-oauth/service.env'); edge_env=env_file('/home/commonswarm/.env')
+require([service.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0'),edge_env.get('SWARM_MCP_PUBLIC_ENABLED','0')]==flags,5,'baseline env files match effective flags')
+host=pathlib.Path('/etc/commonswarm-oauth/management-database-credentials')
+destination='/run/commonswarm-oauth/management-database-credentials'
+mounts=[m for m in oauth['Mounts'] if m['Destination']==destination]
+work=pathlib.Path(oauth['Config']['Labels'].get('com.docker.compose.project.working_dir',''))
+require(work.is_absolute(),6,'baseline Compose working directory is absolute')
+files=str(work/'compose.yaml')
+if mode=='on':
+    files+=','+str(work/'compose.management.yaml')
+    require((work/'compose.management.yaml').is_file(),7,'ON baseline management Compose exists')
+    require(host.is_file() and not host.is_symlink() and host.resolve(strict=True)==host,8,'ON management host file is canonical and regular')
+    stat=host.stat()
+    require((stat.st_uid,stat.st_gid,stat.st_mode & 0o777)==(0,986,0o440),9,'ON management file is root:986 mode 0440')
+    require(oe.get('MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE')==destination and len(mounts)==1 and mounts[0].get('Type')=='bind' and mounts[0].get('Source')==str(host) and mounts[0].get('RW') is False,10,'ON management env and read-only mount match the host file')
+else:
+    require(not host.exists() and not host.is_symlink() and not mounts and 'MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE' not in oe,11,'OFF baseline has no management host file, input or mount')
+require(oauth['Config']['Labels'].get('com.docker.compose.project.config_files')==files,12,'baseline Compose selection agrees with MODE')
+site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
+require(site.count('import mcp_oauth_active')==1 and '(mcp_resource_active)' in site and 'reverse_proxy 127.0.0.1:3490' in site,13,'baseline Caddy OAuth site and resource definition are present')
+require((site.count('import mcp_resource_active')==1 and '@mcp_unavailable' not in site) if mode=='on' else ('import mcp_resource_active' not in site and site.count('@mcp_unavailable path')==1 and site.count('handle @mcp_unavailable')==1),14,'baseline Caddy resource activation agrees with MODE')
+print(mode)
+PY
+}
+mcp_route_probes() {
+python3 - "$MCP_EXPECTED_MODE" <<'PY' || return 1
+import json, re, sys, urllib.error, urllib.request
+enabled=sys.argv[1]=='on'
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
+    for ua in ['Python-urllib/3.12','curl/8.7.1']:
+        paths=[('/health','GET',200),('/.well-known/openid-configuration','GET',200),
+            ('/.well-known/oauth-authorization-server','GET',200),('/jwks','GET',200),
+            ('/authorize','GET',400 if enabled else 503),('/token','POST',None if enabled else 503)]
+        if base.startswith('https:'):
+            paths += [('/mcp','POST',401 if enabled else 503),
+                ('/.well-known/oauth-protected-resource/mcp','GET',200 if enabled else 503)]
+        for path,method,expected in paths:
+            req=urllib.request.Request(base+path, data=b'' if method=='POST' else None, method=method,
+                headers={'User-Agent':ua,'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'})
+            try: response=opener.open(req, timeout=15)
+            except urllib.error.HTTPError as error: response=error
+            with response:
+                body=response.read(131073); code=response.code
+                content_type=response.headers.get('Content-Type','')
+                facts=f'method={method} base={base} path={path} UA={ua} status={code} content-type={content_type!r}'
+                assert len(body)<=131072, f'oversized response: {facts}'
+                if path=='/jwks':
+                    assert re.fullmatch(
+                        r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
+                        content_type.strip(), re.I), f'invalid JWKS content type: {facts}'
+                else:
+                    media_type='text/html' if enabled and path=='/authorize' else 'application/json'
+                    assert re.fullmatch(re.escape(media_type)+
+                        r'(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
+                        content_type.strip(), re.I), f'unexpected content type: {facts}'
+                if enabled and path=='/authorize':
+                    assert b'    at ' not in body and b'node_modules' not in body, f'HTML stack trace marker: {facts}'
+                    value=None
+                else:
+                    try: value=json.loads(body)
+                    except (ValueError, UnicodeError):
+                        raise AssertionError(f'invalid JSON: {facts}') from None
+                    assert isinstance(value,dict), f'JSON response is not an object: {facts}'
+                assert code==expected if expected is not None else code in (400,401), f'unexpected status: {facts}'
+                if path=='/health': assert value.get('status')=='ok', f'unhealthy response: {facts}'
+                if path.startswith('/.well-known/') and code==200:
+                    if path.endswith('/mcp'):
+                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp', f'unexpected resource: {facts}'
+                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[]), f'unexpected authorization servers: {facts}'
+                    else: assert value.get('issuer')=='https://mcp.commonswarm.com', f'unexpected issuer: {facts}'
+                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys']), f'invalid public JWKS: {facts}'
+                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled'), f'unexpected disabled error: {facts}'
+                print(method,base+path,ua,code,'PASS')
+PY
+}
+BASELINE_MCP_MODE=$(hm37_baseline_mode) || exit 1
+MCP_EXPECTED_MODE=$BASELINE_MCP_MODE
+mcp_route_probes || { echo 'FAIL hm37-mcp-baseline-state REQ 15: baseline route probes disagree with MODE; STOP' >&2; exit 1; }
+printf 'MODE=%s baseline consistency and public probes PASS (read-only)\n' "$BASELINE_MCP_MODE"
+```
+
 ## (a) Archive and read-only preflight
 
 Mac input: reviewed landed `OAUTH_RELEASE_SHA`. Box preflight/open inputs:
 `BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE` from HezLead's measured live
-OFF report. Run from a clean checkout.
+ON or OFF report. Run from a clean checkout.
 The public archive is copied as a mode-0600 file to the box's `/tmp` (1777),
 using a fresh suffix chosen by Mac `mktemp`. HezLead supplies its printed
 `OAUTH_ARCHIVE_SHA256` and `BOX_ARCHIVE_PATH` to the box shell. Mac staging
@@ -163,17 +288,22 @@ the same check; no step rewrites `/etc/caddy/Caddyfile`.
 # step: hm37-oauth-preflight
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-preflight line $LINENO" >&2' ERR
+: "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+MODE=$(hm37_baseline_mode) || exit 1
+test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-preflight REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
+MCP_EXPECTED_MODE=$MODE
+mcp_route_probes || { echo 'FAIL hm37-oauth-preflight REQ 21: baseline route consistency failed; STOP' >&2; exit 1; }
 test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
   test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" <<'PY'
+python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$MODE" <<'PY'
 import json, pathlib, posixpath, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-preflight REQ {number}: {description}; STOP")
-baseline_sha,baseline_image=sys.argv[1:]
+baseline_sha,baseline_image,mode=sys.argv[1:]
 require(re.fullmatch(r"[0-9a-f]{40}",baseline_sha),1,"BASELINE_OAUTH_SHA must be 40 lowercase hex")
 require(re.fullmatch(r"sha256:[0-9a-f]{64}",baseline_image),2,"BASELINE_OAUTH_IMAGE must be an immutable image ID")
 def inspect(name):
@@ -195,7 +325,7 @@ for name, project, service, sha in [
         require(release.parent==root/'releases' and release.is_dir() and release.resolve(strict=True)==release,4,'baseline release directory is canonical')
         require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,5,'running OAuth source equals BASELINE_OAUTH_SHA')
         require((root/'current').is_symlink() and (root/'current').exists() and (root/'current').resolve(strict=True)==release,6,'OAuth current symlink equals measured release directory')
-        require(labels.get('com.docker.compose.project.config_files')==str(work/'compose.yaml') and (work/'compose.yaml').is_file(),7,'baseline Compose label selects its existing base Compose file')
+        require(labels.get('com.docker.compose.project.config_files')==str(work/'compose.yaml')+(','+str(work/'compose.management.yaml') if mode=='on' else '') and (work/'compose.yaml').is_file(),7,'baseline Compose label selects its existing base Compose file')
         require(data['Image']==baseline_image,8,'running OAuth image equals BASELINE_OAUTH_IMAGE')
     else:
         release=(root/'current').resolve(strict=True)
@@ -203,17 +333,13 @@ for name, project, service, sha in [
     assert data['State']['Health']['Status']=='healthy'
     assert 'commonswarm-net' in (data['NetworkSettings'].get('Networks') or {})
     flag='MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED' if service=='oauth' else 'SWARM_MCP_PUBLIC_ENABLED'
-    assert env.get(flag)!='1', 'public flag already enabled'
+    require(env.get(flag,'0')==('1' if mode=='on' else '0'),9,'effective public flag agrees with checked MODE')
     work=release/'deploy'/('mcp-auth' if service=='oauth' else 'edge-runtime')
     assert labels['com.docker.compose.project.working_dir']==str(work)
-    files=str(work/'compose.yaml') + (','+str(work/'compose.override.yaml') if service=='edge-runtime' else '')
+    files=str(work/'compose.yaml') + (','+str(work/'compose.override.yaml') if service=='edge-runtime' else ','+str(work/'compose.management.yaml') if mode=='on' else '')
     assert labels['com.docker.compose.project.config_files']==files, 'compose files differ'
     if service=='oauth':
         assert data['Config']['User']=='996:986', 'OAuth Compose runtime identity differs'
-        assert 'MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE' not in env
-        assert all(m['Destination']!='/run/commonswarm-oauth/management-database-credentials' for m in data['Mounts'])
-        assert not pathlib.Path('/etc/commonswarm-oauth/management-database-credentials').exists()
-        assert not pathlib.Path('/etc/commonswarm-oauth/management-database-credentials').is_symlink()
         ports=data['NetworkSettings']['Ports']['3490/tcp']
         assert len(ports)==1 and ports[0]['HostIp']=='127.0.0.1' and ports[0]['HostPort']=='3490'
     print(name, 'image='+data['Image'], 'release='+sha, 'health=healthy', 'compose='+files)
@@ -231,8 +357,9 @@ for file in ['/etc/commonswarm-oauth/compose.env','/etc/commonswarm-oauth/servic
         print('file names: '+','.join(sorted(x.split('=',1)[0] for x in path.read_text().splitlines()
             if x and not x.startswith('#') and '=' in x)))
 site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
-assert 'import mcp_oauth_active' in site and '@mcp_unavailable' in site and '(mcp_resource_active)' in site
-assert 'import mcp_resource_active' not in site and 'reverse_proxy 127.0.0.1:3490' in site
+assert 'import mcp_oauth_active' in site and '(mcp_resource_active)' in site
+assert ('import mcp_resource_active' in site and '@mcp_unavailable' not in site) if mode=='on' else ('@mcp_unavailable' in site and 'import mcp_resource_active' not in site)
+assert 'reverse_proxy 127.0.0.1:3490' in site
 imports=[]
 for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
     fields=shlex.split(line, comments=True)
@@ -264,6 +391,11 @@ old release/image and original files; report failed cleanup paths and errors.
 # step: hm37-oauth-open
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-open line $LINENO" >&2' ERR
+: "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+MODE=$(hm37_baseline_mode) || exit 1
+test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
+MCP_EXPECTED_MODE=$MODE
+mcp_route_probes || { echo 'FAIL hm37-oauth-open REQ 21: baseline route consistency failed; STOP' >&2; exit 1; }
 : "${OAUTH_RELEASE_SHA:?FAIL: reviewed landed SHA missing}"
 : "${OAUTH_ARCHIVE_SHA256:?FAIL: Mac archive hash missing}"
 : "${BOX_ARCHIVE_PATH:?FAIL: Mac-chosen box transport path missing}"
@@ -275,11 +407,11 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-BASELINE_STATE=$(python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$OAUTH_RELEASE_SHA" <<'PY'
+python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$OAUTH_RELEASE_SHA" "$MODE" <<'PY'
 import json, pathlib, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-open REQ {number}: {description}; STOP")
-sha,image,new_sha=sys.argv[1:]
+sha,image,new_sha,mode=sys.argv[1:]
 require(re.fullmatch(r'[0-9a-f]{40}',sha),1,'BASELINE_OAUTH_SHA must be 40 lowercase hex')
 require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),2,'BASELINE_OAUTH_IMAGE must be an immutable image ID')
 require(new_sha!=sha,3,'OAUTH_RELEASE_SHA must differ from BASELINE_OAUTH_SHA; preserve baseline proofs')
@@ -294,15 +426,13 @@ require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RE
 current=pathlib.Path('/home/commonswarm/oauth/current')
 require(current.is_symlink() and current.exists() and current.resolve(strict=True)==release,8,'OAuth current symlink equals measured release directory')
 compose=work/'compose.yaml'
-require(labels.get('com.docker.compose.project.config_files')==str(compose) and compose.is_file(),9,'baseline Compose label selects its existing base Compose file')
+require(labels.get('com.docker.compose.project.config_files')==str(compose)+(','+str(work/'compose.management.yaml') if mode=='on' else '') and compose.is_file(),9,'baseline Compose label selects its existing base Compose file')
 require(data['Image']==image,10,'running OAuth image equals BASELINE_OAUTH_IMAGE')
 env=dict(x.split('=',1) for x in data['Config']['Env'])
-require(data['State']['Health']['Status']=='healthy' and env.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED')!='1' and 'MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE' not in env,11,'baseline OAuth is healthy and OFF without management input')
-for name,value in [('BASELINE_OAUTH_DIR',str(release)),('BASELINE_OAUTH_COMPOSE',str(compose))]:
-    print(name+'='+shlex.quote(value))
+require(data['State']['Health']['Status']=='healthy' and env.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0')==('1' if mode=='on' else '0'),11,'baseline OAuth is healthy in checked MODE')
 PY
-) || exit 1
-eval "$BASELINE_STATE"
+BASELINE_OAUTH_DIR=$(readlink -f /home/commonswarm/oauth/current) || exit 1
+BASELINE_OAUTH_COMPOSE=$BASELINE_OAUTH_DIR/deploy/mcp-auth/compose.yaml
 OAUTH_RELEASE_DIR=/home/commonswarm/oauth/releases/$OAUTH_RELEASE_SHA
 PROOF_DIR=/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA
 test ! -e "$OAUTH_RELEASE_DIR" && test ! -L "$OAUTH_RELEASE_DIR" &&
@@ -350,14 +480,63 @@ cp /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" || exit 1
 cp /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" || exit 1
 cp /home/commonswarm/.env "$SECRET_STAGE/edge.env" || exit 1
 cp /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || exit 1
+if test "$BASELINE_MCP_MODE" = on; then
+  cp /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || exit 1
+  cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || exit 1
+fi
 chmod 0600 "$SECRET_STAGE/"* || exit 1
+cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" &&
+  cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" &&
+  cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL hm37-oauth-open REQ 22: snapshot drift; STOP' >&2; exit 1; }
+MODE=$(hm37_baseline_mode) || exit 1
+test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 23: MODE drift during snapshot; STOP' >&2; exit 1; }
+printf '%s\n' "$BASELINE_MCP_MODE" >"$PROOF_DIR/baseline-mcp-mode"
 EDGE_DIR=$(readlink -f /home/commonswarm/edge/current) || exit 1
 STATE=$PROOF_DIR/hm37-window.sh
 umask 077
-printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_OAUTH_SHA=%q\nBASELINE_OAUTH_IMAGE=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
-  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" \
+printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%q\nBASELINE_OAUTH_SHA=%q\nBASELINE_OAUTH_IMAGE=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
+  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" \
   "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" "$EDGE_DIR" >"$STATE"
 cat >>"$STATE" <<'SH'
+prepare_off_inputs() {
+python3 - "$SECRET_STAGE" "$1" "$BASELINE_MCP_MODE" "$OAUTH_RELEASE_DIR" <<'PY' || return 1
+import os, pathlib, re, sys
+stage=pathlib.Path(sys.argv[1]); image=sys.argv[2]; mode=sys.argv[3]; release=pathlib.Path(sys.argv[4])
+def env(path):
+    result={}
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        name, sep, value=line.partition('=')
+        assert sep and re.fullmatch(r'[A-Z][A-Z0-9_]*',name) and name not in result, 'env syntax or duplicate'
+        if len(value)>=2 and value[0]==value[-1] and value[0] in "'\"": value=value[1:-1]
+        result[name]=value
+    return result
+def save(path, source, updates):
+    text=source.read_text()
+    for name,value in updates.items():
+        text,count=re.subn(r'^'+name+r'=.*$',name+'='+value,text,flags=re.M)
+        assert count<=1
+        if count==0: text=text.rstrip('\n')+'\n'+name+'='+value+'\n'
+    path.write_text(text); os.chmod(path,0o600)
+edge=env(stage/'edge.env'); compose=env(stage/'compose.env'); service=env(stage/'service.env')
+assert edge.get('SWARM_MCP_PUBLIC_ENABLED','0')==('1' if mode=='on' else '0') and service.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0')==('1' if mode=='on' else '0'), 'snapshot MODE conflict'
+assert service.get('SUPABASE_URL') and service.get('SUPABASE_ANON_KEY')
+save(stage/'compose.off.env',stage/'compose.env',{'MCP_OAUTH_IMAGE':image,'MCP_OAUTH_ENV_FILE':'/etc/commonswarm-oauth/service.env'})
+for name,flag in [('service','MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED'),('edge','SWARM_MCP_PUBLIC_ENABLED')]:
+    target=stage/(name+'.off.env')
+    if mode=='off': target.write_bytes((stage/(name+'.env')).read_bytes()); os.chmod(target,0o600)
+    else: save(target,stage/(name+'.env'),{flag:'0'})
+site=(stage/'mcp.caddy').read_bytes()
+if mode=='on':
+    template=(release/'deploy/supabase-stack/commonswarm-mcp.caddy').read_bytes()
+    pattern=rb'\t\t@mcp_unavailable path /mcp /\.well-known/oauth-protected-resource/mcp\n\t\thandle @mcp_unavailable \{\n(?:[^\n]*\n)*?\t\t\}'
+    dark=re.search(pattern,template)
+    assert dark and site.count(b'\t\timport mcp_resource_active')==1, 'Caddy snapshot differs'
+    site=site.replace(b'\t\timport mcp_resource_active',dark[0])
+(stage/'mcp.off.caddy').write_bytes(site); os.chmod(stage/'mcp.off.caddy',0o600)
+print('input names validated; secret values retained only in protected files')
+PY
+}
 box_rm_preflight() {
 test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
@@ -416,73 +595,100 @@ healthy() {
   echo "FAIL: unhealthy container $1" >&2; return 1
 }
 rollback_to_off() {
+  local off_compose_input="${1:-compose.off.env}"
   caddy_sites_import || return 1
-  install -o root -g root -m 0600 "$SECRET_STAGE/service.env" /etc/commonswarm-oauth/service.env || return 1
-  install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || return 1
-  cat "$SECRET_STAGE/edge.env" >/home/commonswarm/.env || return 1
-  cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" || return 1
-  cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || return 1
-  install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
+  install -o root -g root -m 0644 "$SECRET_STAGE/mcp.off.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
   systemctl reload caddy || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/$off_compose_input" /etc/commonswarm-oauth/compose.env || return 1
+  cat "$SECRET_STAGE/edge.off.env" >/home/commonswarm/.env || return 1
+  cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || return 1
+  cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.off.env" || return 1
   oauth_compose config --quiet || return 1
   oauth_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   remove_management_credentials || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
+  MODE=$(hm37_baseline_mode) || return 1
+  test "$MODE" = off || return 1
 }
-mcp_route_probes() {
-python3 - "$MCP_EXPECTED_MODE" <<'PY' || return 1
-import json, re, sys, urllib.error, urllib.request
-enabled=sys.argv[1]=='on'
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self,*args,**kwargs): return None
-opener=urllib.request.build_opener(NoRedirect())
-for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
-    for ua in ['Python-urllib/3.12','curl/8.7.1']:
-        paths=[('/health','GET',200),('/.well-known/openid-configuration','GET',200),
-            ('/.well-known/oauth-authorization-server','GET',200),('/jwks','GET',200),
-            ('/authorize','GET',400 if enabled else 503),('/token','POST',None if enabled else 503)]
-        if base.startswith('https:'):
-            paths += [('/mcp','POST',401 if enabled else 503),
-                ('/.well-known/oauth-protected-resource/mcp','GET',200 if enabled else 503)]
-        for path,method,expected in paths:
-            req=urllib.request.Request(base+path, data=b'' if method=='POST' else None, method=method,
-                headers={'User-Agent':ua,'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'})
-            try: response=opener.open(req, timeout=15)
-            except urllib.error.HTTPError as error: response=error
-            with response:
-                body=response.read(131073); code=response.code
-                content_type=response.headers.get('Content-Type','')
-                facts=f'method={method} base={base} path={path} UA={ua} status={code} content-type={content_type!r}'
-                assert len(body)<=131072, f'oversized response: {facts}'
-                if path=='/jwks':
-                    assert re.fullmatch(
-                        r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
-                        content_type.strip(), re.I), f'invalid JWKS content type: {facts}'
-                else:
-                    media_type='text/html' if enabled and path=='/authorize' else 'application/json'
-                    assert re.fullmatch(re.escape(media_type)+
-                        r'(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
-                        content_type.strip(), re.I), f'unexpected content type: {facts}'
-                if enabled and path=='/authorize':
-                    assert b'    at ' not in body and b'node_modules' not in body, f'HTML stack trace marker: {facts}'
-                    value=None
-                else:
-                    try: value=json.loads(body)
-                    except (ValueError, UnicodeError):
-                        raise AssertionError(f'invalid JSON: {facts}') from None
-                    assert isinstance(value,dict), f'JSON response is not an object: {facts}'
-                assert code==expected if expected is not None else code in (400,401), f'unexpected status: {facts}'
-                if path=='/health': assert value.get('status')=='ok', f'unhealthy response: {facts}'
-                if path.startswith('/.well-known/') and code==200:
-                    if path.endswith('/mcp'):
-                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp', f'unexpected resource: {facts}'
-                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[]), f'unexpected authorization servers: {facts}'
-                    else: assert value.get('issuer')=='https://mcp.commonswarm.com', f'unexpected issuer: {facts}'
-                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys']), f'invalid public JWKS: {facts}'
-                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled'), f'unexpected disabled error: {facts}'
-                print(method,base+path,ua,code,'PASS')
+baseline_rollback_off() {
+  local OAUTH_RELEASE_DIR="$BASELINE_OAUTH_DIR"
+python3 - "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY' || return 1
+import pathlib, re, sys
+def require(ok, number, description):
+    if not ok: raise SystemExit(f"FAIL hm37-oauth-rollback REQ {number}: {description}; STOP")
+sha,image,directory,compose=sys.argv[1:]; release=pathlib.Path(directory); file=pathlib.Path(compose)
+require(re.fullmatch(r'[0-9a-f]{40}',sha) and re.fullmatch(r'sha256:[0-9a-f]{64}',image),1,'saved baseline inputs have valid immutable identities')
+require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains BASELINE_OAUTH_SHA')
+require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved measured baseline Compose file exists in that release')
+PY
+  docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || return 1
+  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" rollback_to_off compose.baseline.off.env || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  test -L /home/commonswarm/oauth/current || return 1
+  ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
+  MCP_EXPECTED_MODE=off mcp_route_probes || return 1
+}
+restore_baseline_on() {
+  local OAUTH_RELEASE_DIR="$BASELINE_OAUTH_DIR"
+  test "$BASELINE_MCP_MODE" = on || return 1
+  caddy_sites_import || return 1
+  test -f "$SECRET_STAGE/management.baseline" && test ! -L "$SECRET_STAGE/management.baseline" || return 1
+  install -o root -g 986 -m 0440 "$SECRET_STAGE/management.baseline" /etc/commonswarm-oauth/management-database-credentials || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/service.env" /etc/commonswarm-oauth/service.env || return 1
+  install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env || return 1
+  cat "$SECRET_STAGE/edge.env" >/home/commonswarm/.env || return 1
+  cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" &&
+    cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" &&
+    cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
+    cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
+  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose config --quiet || return 1
+  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
+  edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
+  healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
+  cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
+  runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
+  systemctl reload caddy || return 1
+  ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
+  MODE=$(hm37_baseline_mode) || return 1
+  test "$MODE" = on || return 1
+  MCP_EXPECTED_MODE=on mcp_route_probes || return 1
+  oauth_memory_gate || return 1
+}
+recover_baseline() {
+  if ! baseline_rollback_off; then
+    echo 'FAIL hm37-oauth-rollback REQ 90: baseline OFF recovery/probes failed; state UNVERIFIED; retain stage; STOP' >&2
+    return 1
+  fi
+  if test "$BASELINE_MCP_MODE" = on; then
+    if ! restore_baseline_on; then
+      baseline_rollback_off || { echo 'FAIL hm37-mcp-restore-on REQ 91: OFF containment failed; state UNVERIFIED; retain stage; STOP' >&2; return 1; }
+      echo 'FAIL hm37-mcp-restore-on REQ 92: baseline ON restore failed; end state baseline OFF, dark Caddy and 503 verified; STOP' >&2
+      return 1
+    fi
+    outage_receipt || { echo 'FAIL hm37-oauth-rollback REQ 93: baseline ON verified but receipt failed; retain stage; STOP' >&2; return 1; }
+    echo 'Baseline image and exact ON snapshots restored; ON probes PASS; stop forward release work'
+  else
+    echo 'Baseline image restored; end state OFF; OFF probes PASS; stop forward release work'
+  fi
+}
+outage_receipt() {
+  test -f "$PROOF_DIR/mcp-503-start.epoch" || return 0
+  test ! -e "$PROOF_DIR/mcp-503-receipt.txt" || return 0
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/mcp-503-end.utc" || return 1
+  date -u +%s >"$PROOF_DIR/mcp-503-end.epoch" || return 1
+  python3 - "$PROOF_DIR" <<'PY' || return 1
+import pathlib, sys
+proof=pathlib.Path(sys.argv[1]); start=int((proof/'mcp-503-start.epoch').read_text()); end=int((proof/'mcp-503-end.epoch').read_text())
+assert end>=start, 'UTC clock moved backwards'
+receipt='503 window start='+ (proof/'mcp-503-start.utc').read_text().strip()+' end='+ (proof/'mcp-503-end.utc').read_text().strip()+' duration_seconds='+str(end-start)+'\n'
+(proof/'mcp-503-receipt.txt').write_text(receipt)
+print(receipt,end='')
 PY
 }
 oauth_memory_gate() {
@@ -504,11 +710,44 @@ print('OAuth memory <80%: PASS')
 PY
 }
 SH
+declare -f hm37_baseline_mode mcp_route_probes >>"$STATE"
 . "$STATE"
+prepare_off_inputs "$BASELINE_OAUTH_IMAGE" || { echo 'FAIL hm37-oauth-open REQ 24: OFF inputs could not be prepared; baseline unchanged; STOP' >&2; exit 1; }
+cp "$SECRET_STAGE/compose.env" "$SECRET_STAGE/compose.baseline.off.env" || exit 1
 caddy_sites_import || exit 1
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
+
+## (a1) ON baseline: transition OFF immediately after open
+
+For an OFF baseline this is a no-op. For ON, it uses only the fresh stage:
+the OFF service/edge/Caddy inputs and baseline Compose image prepared by open.
+The original ON files, including management credentials, remain byte-exact in
+that stage. Start is recorded before the first mutation; end follows successful
+ON probes and memory gate. This conservatively includes container work/probes.
+
+```sh
+# step: hm37-mcp-transition-off
+set -euo pipefail
+trap 'echo "FAIL hm37-mcp-transition-off REQ 99: unexpected transition failure; run hm37-oauth-rollback; STOP" >&2' ERR
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+if test "$BASELINE_MCP_MODE" = on; then
+  test ! -e "$PROOF_DIR/mcp-503-start.epoch" || { echo 'FAIL hm37-mcp-transition-off REQ 1: transition already attempted; STOP' >&2; exit 1; }
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/mcp-503-start.utc"
+  date -u +%s >"$PROOF_DIR/mcp-503-start.epoch"
+  if ! baseline_rollback_off; then
+    recover_baseline || exit 1
+    echo 'FAIL hm37-mcp-transition-off REQ 2: transition failed; baseline ON restored; STOP' >&2
+    exit 1
+  fi
+fi
+```
+
+Run `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off` next, then (b)-(d).
+Any failure after the transition requires (e); do not close a failed ON-baseline
+window while the new image is merely OFF. Recovery restores the baseline ON,
+or reports a verified baseline OFF if ON restoration fails.
 
 ## (b) Build the exact-SHA image on the box
 
@@ -545,49 +784,23 @@ docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e
 
 No secret appears in argv, environment, output, evidence or the source tree.
 Read the existing edge file with Python, never `source` it. Reject ambiguous
-env syntax/duplicate names. No management credential is read, staged or
-installed in (c)/(d); that work belongs exclusively to switch-on (f).
+env syntax/duplicate names. No new management credential is produced or installed in (c)/(d).
+For an ON baseline, open already retained its original credential in the fresh stage.
 The least-privilege OAuth artifact credential remains unchanged.
-Service/edge OFF files are exact byte copies of the open snapshots, including
-an absent public flag, quoting and line endings; absent means disabled.
-Only Compose OFF inputs change to select the new image. Enable edits separate
-ON copies (adding a missing flag); disable/automatic OFF rollback restores the
-exact service/edge snapshots and compares their bytes. Compose stays on the
-new OFF image; only full rollback restores the original Compose env/image.
+For an OFF baseline, service/edge OFF files are exact byte copies, preserving
+absent flags and line endings. For ON, open creates separate OFF copies with
+both flags 0 and a dark Caddy site; original ON bytes are preserved for (e).
+The shared preparer selects the new image for (c). Enable edits separate ON
+copies; disable restores the OFF inputs and compares their bytes. Compose
+stays on the new OFF image until (e) selects the original baseline image.
 
 ```sh
 # step: hm37-oauth-inputs
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-inputs line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-python3 - "$SECRET_STAGE" "$PROOF_DIR/oauth-image.id" <<'PY'
-import os, pathlib, re, sys
-stage=pathlib.Path(sys.argv[1]); image=pathlib.Path(sys.argv[2]).read_text().strip()
-def env(path):
-    result={}
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith('#'): continue
-        name, sep, value=line.partition('=')
-        assert sep and re.fullmatch(r'[A-Z][A-Z0-9_]*',name) and name not in result, 'env syntax or duplicate'
-        if len(value)>=2 and value[0]==value[-1] and value[0] in "'\"": value=value[1:-1]
-        result[name]=value
-    return result
-def save(path, source, updates):
-    text=source.read_text()
-    for name,value in updates.items():
-        text,count=re.subn(r'^'+name+r'=.*$',name+'='+value,text,flags=re.M)
-        assert count<=1
-        if count==0: text=text.rstrip('\n')+'\n'+name+'='+value+'\n'
-    path.write_text(text); os.chmod(path,0o600)
-edge=env(stage/'edge.env'); compose=env(stage/'compose.env'); service=env(stage/'service.env')
-assert edge.get('SWARM_MCP_PUBLIC_ENABLED')!='1' and service.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED')!='1'
-assert service.get('SUPABASE_URL') and service.get('SUPABASE_ANON_KEY')
-save(stage/'compose.off.env',stage/'compose.env',{'MCP_OAUTH_IMAGE':image,'MCP_OAUTH_ENV_FILE':'/etc/commonswarm-oauth/service.env'})
-for name in ('service','edge'):
-    target=stage/(name+'.off.env')
-    target.write_bytes((stage/(name+'.env')).read_bytes()); os.chmod(target,0o600)
-print('input names validated; secret values retained only in protected files')
-PY
+IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || exit 1
+prepare_off_inputs "$IMAGE" || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || exit 1
 install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || exit 1
 ```
@@ -642,6 +855,7 @@ if test "$MCP_EXPECTED_MODE" = on; then
     rollback_to_off || { echo 'FAIL: rollback-to-OFF; stop and report' >&2; exit 1; }
     exit 1
   fi
+  outage_receipt || { echo 'FAIL hm37-mcp-route-probes REQ 93: ON verified but receipt failed; retain stage; STOP' >&2; exit 1; }
 else
   mcp_route_probes || exit 1
 fi
@@ -654,58 +868,59 @@ workspace readiness are rechecked after the ON-only mount is installed.
 
 ## (e) ROLLBACK to the measured BASELINE_OAUTH_* and original env/Caddy
 
-This block applies after a failed release or switch-on. It restores **both**
-original OFF env files, baseline image/measured Compose release and exact Caddy file, retains
-the deployed edge override, recreates both containers, and verifies health.
-Then run the marked route probe with `MCP_EXPECTED_MODE=off` before cleanup.
+Run after any failure following the ON-to-OFF transition, including a failure
+before enable. The shared recovery helper selects the measured baseline image
+and base Compose, restores OFF inputs, removes management credentials with the
+existing guarded helper, darkens Caddy, checks effective OFF consistency and
+verifies OFF probes. For an ON baseline it then restores exact original
+service/compose/edge/Caddy/management bytes with original management permissions,
+selects the baseline management override, verifies the image and both healthy
+services, and runs ON consistency/probes/memory. ON restore failure retries
+baseline OFF recovery and verifies 503 before a named FAIL. An OFF baseline
+ends OFF without invoking ON restoration. No prior window's stage is consulted.
 
 ```sh
 # step: hm37-oauth-rollback
 set -euo pipefail
-trap 'echo "FAIL: hm37-oauth-rollback line $LINENO" >&2' ERR
+trap 'echo "FAIL hm37-oauth-rollback REQ 99: unexpected recovery failure; STOP" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-caddy_sites_import || exit 1
-python3 - "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY'
-import pathlib, re, sys
-def require(ok, number, description):
-    if not ok: raise SystemExit(f"FAIL hm37-oauth-rollback REQ {number}: {description}; STOP")
-sha,image,directory,compose=sys.argv[1:]; release=pathlib.Path(directory); file=pathlib.Path(compose)
-require(re.fullmatch(r'[0-9a-f]{40}',sha) and re.fullmatch(r'sha256:[0-9a-f]{64}',image),1,'saved baseline inputs have valid immutable identities')
-require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains BASELINE_OAUTH_SHA')
-require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved measured baseline Compose file exists in that release')
-PY
-docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || exit 1
-install -o root -g root -m 0600 "$SECRET_STAGE/service.env" /etc/commonswarm-oauth/service.env || exit 1
-install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env || exit 1
-cat "$SECRET_STAGE/edge.env" >/home/commonswarm/.env || exit 1
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" || exit 1
-cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" || exit 1
-cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || exit 1
-install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || exit 1
-runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || exit 1
-systemctl reload caddy || exit 1
-MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
-  -f "$BASELINE_OAUTH_COMPOSE" config --quiet || exit 1
-MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
-  -f "$BASELINE_OAUTH_COMPOSE" up -d --no-deps --force-recreate --pull never oauth || exit 1
-remove_management_credentials || exit 1
-edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || exit 1
-healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || exit 1
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || exit 1
-docker exec commonswarm-oauth-oauth-1 node -e 'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED==="1" ? 1 : 0)' || exit 1
-docker exec commonswarm-edge-edge-runtime-1 /bin/bash -c 'test "${SWARM_MCP_PUBLIC_ENABLED:-0}" != 1' || exit 1
-test -L /home/commonswarm/oauth/current || exit 1
-ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || exit 1
+recover_baseline || exit 1
 ```
 
-OAuth-release rollback uses only the baseline base Compose captured from the
-running container labels during open, not a reconstructed or historical path.
-It restores the original compose.env and explicitly selects BASELINE_OAUTH_IMAGE,
-verifies the actual recreated image against BASELINE_OAUTH_IMAGE, returns current to the
-measured BASELINE_OAUTH_DIR, and removes the exact
-management credential path with `/usr/bin/rm` after the root binary and
-literal no-symlink boundary checks. Failed cleanup stops; report the exact error.
-No migration, app/stack, site, signing key, artifact credential or timer change.
+The baseline release/base Compose path is captured from running labels. The
+same Compose helpers are reused with that validated baseline release directory;
+the image is explicitly `BASELINE_OAUTH_IMAGE`. Original compose.env bytes are
+restored, and current returns to `BASELINE_OAUTH_DIR`. Existing source/proofs
+are preserved. No migration, stack, site, signing key or timer changes occur.
+
+Standalone recovery retry uses the same helper and includes baseline OFF first:
+
+```sh
+# step: hm37-mcp-restore-on
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+test "$BASELINE_MCP_MODE" = on || { echo 'FAIL hm37-mcp-restore-on REQ 1: ON baseline required; STOP' >&2; exit 1; }
+recover_baseline || exit 1
+```
+
+| Failure branch | Required recovery and end state |
+| --- | --- |
+| Baseline measurement/preflight failure | No service mutation; baseline untouched (mixed state is refused). STOP. |
+| Open/snapshot preparation failure, before transition | Baseline service state untouched; retain any incomplete stage/proofs, report and STOP. Cleanup only via marked close when its state exists. |
+| ON transition failure | Automatic baseline recovery: baseline ON with ON probes; if restoration fails, verified baseline OFF (REQ 92). STOP. |
+| Build, inputs, OFF deploy or OFF probe failure after ON transition | Run (e): baseline image ON with ON probes; ON restoration failure ends verified baseline OFF (REQ 92). STOP. |
+| Enable/readiness or ON probe/memory failure, ON baseline | Automatic new-image OFF is containment only; explicit disable/OFF probes, then mandatory (e) restores baseline ON. Restore failure ends baseline OFF/503 (REQ 92). STOP. |
+| Release failure, OFF baseline | Run (e): baseline image OFF and OFF probes. STOP. |
+| Enable or ON probe failure, OFF baseline | Disable/OFF probes: new image OFF; (e) restores baseline image OFF if release reversion is needed. STOP. |
+| Baseline OFF recovery or OFF containment itself fails | REQ 90/91: end state UNVERIFIED; retain secret stage for recovery, report exact failure, STOP. Never claim OFF or close the window without verified probes. |
+| Receipt or cleanup fails after verified ON/OFF | Service remains in the last verified state; retain remaining evidence/stage, report exact error, STOP. |
+
+Failure recovery does not authorize forward retries. A verified OFF fallback
+has no window end time: MCP remains unavailable, and HezLead must arrange
+recovery before any new release. A successful release or baseline ON recovery
+writes `mcp-503-receipt.txt` with UTC start/end and duration seconds. The interval
+begins before transition and ends after ON checks; it bounds the 503 outage.
+For an OFF baseline no new 503 interval is claimed.
 
 ## (f) MCP SWITCH-ON
 
@@ -743,8 +958,8 @@ set -euo pipefail
 test "${TOM_ENABLE_APPROVAL:-}" = 2026-09-29 || { echo 'FAIL: named HezLead switch-on approval missing' >&2; exit 1; }
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 caddy_sites_import || exit 1
-cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
-cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
+cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.off.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.off.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
 test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
 switch_on() {
@@ -791,7 +1006,7 @@ function env(path, number, description) {
 }
 try {
   requireCheck(process.getuid() === 0, 1, "producer runs as root");
-  requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.env", "utf8"), 2, "edge env matches the window snapshot");
+  requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.off.env", "utf8"), 2, "edge env matches the window snapshot");
   const edge = env("/home/commonswarm/.env", 3, "edge env syntax is valid and names are unique");
   const compose = env("/secret-stage/compose.off.env", 4, "OFF compose env syntax is valid and names are unique");
   requireCheck(compose.MCP_OAUTH_UID === "996" && compose.MCP_OAUTH_GID === "986", 5, "OAuth runtime UID:GID matches the measured identity");
@@ -891,7 +1106,7 @@ for source,target,flag in [('service.off.env','service.on.env','MCP_OAUTH_PUBLIC
     assert count<=1, 'flag inventory conflict'
     if count==0: text=text.rstrip('\n')+'\n'+flag+'=1\n'
     (stage/target).write_text(text); os.chmod(stage/target,0o600)
-text=(stage/'mcp.caddy').read_text()
+text=(stage/'mcp.off.caddy').read_text()
 assert text.count('import mcp_oauth_active')==1 and 'import mcp_resource_active' not in text
 pattern=r'\t\t@mcp_unavailable path /mcp /\.well-known/oauth-protected-resource/mcp\n\t\thandle @mcp_unavailable \{\n(?:[^\n]*\n)*?\t\t\}'
 text,count=re.subn(pattern,'\t\timport mcp_resource_active',text)
@@ -969,12 +1184,16 @@ documents and JWKS 200; invalid authorization 400; token 400/401; public
 If any probe fails, run `hm37-mcp-disable` (base Compose, both flags OFF,
 exact checked management-file removal), then the OFF probe; authorization, token,
 MCP and protected-resource metadata must all return disabled 503 JSON again.
-The rollback restores both flags, recreates both services, and restores Caddy.
-Step (e) is available when the OAuth release itself must also revert.
+Disable restores OFF flags/inputs, recreates both services, and darkens Caddy.
+Step (e) is mandatory after an ON-baseline release failure, restoring baseline ON
+or the documented verified OFF fallback; OFF-baseline release reversion also uses (e).
 
 ## Close and remove secret staging
 
-Run only after the appropriate ON or rollback-OFF route checks pass. On any
+Run only after successful ON or verified baseline recovery route checks pass.
+For ON-baseline failures, finish (e) before closing; automatic new-image OFF is
+not the recovery end state. After REQ 92 (verified baseline OFF), close only after
+reporting the OFF fallback; after REQ 90/91 retain the stage and STOP. On any
 cleanup failure, retain the path, report the exact error, and stop cleanup.
 No copyback of secret backups or raw docker inspect/env output.
 
