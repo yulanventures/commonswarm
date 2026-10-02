@@ -14,11 +14,15 @@ The done-test follows separately; route readiness is not a completed sign-in.
 
 ## Measurement limits and release inputs
 
-The allowed read-only command `ssh -o BatchMode=yes -o ConnectTimeout=10
+The original allowed read-only command `ssh -o BatchMode=yes -o ConnectTimeout=10
 ops@100.115.66.74 ...` failed with `Operation not permitted` at port 22 in
 this worker's sandbox. **No live path, image, port, env file, container or
-health was measured here.** The following are repository/handoff baselines,
-which the preflight below must reconcile before any production mutation:
+health was measured by this preparation worker.** The following are repository/handoff baselines,
+which the preflight below must reconcile before any production mutation.
+Later HezLead measurements in `~/work/hm37-live-release/OAUTH-REPORT.md`
+and TASK-5 supply the equivalent Caddy import, JWKS type, box rm binary,
+transport modes and Compose UID:GID used below; this worker has not rerun
+those live checks:
 
 | Input | Repository / HezLead evidence |
 | --- | --- |
@@ -72,8 +76,10 @@ commands during the window. No Actions, HOME changes, Mac Docker or browser.
 ## (a) Archive and read-only preflight
 
 Mac input: reviewed landed `OAUTH_RELEASE_SHA`. Run from a clean checkout.
-The public archive is copied to `/private/tmp` on the box; HezLead supplies
-its printed `OAUTH_ARCHIVE_SHA256` to the box shell.
+The public archive is copied as a mode-0600 file to the box's `/tmp` (1777),
+using a fresh suffix chosen by Mac `mktemp`. HezLead supplies its printed
+`OAUTH_ARCHIVE_SHA256` and `BOX_ARCHIVE_PATH` to the box shell. Mac staging
+remains under `/private/tmp`; the box's `/private` is root-only (0700).
 
 ```sh
 # step: hm37-oauth-archive
@@ -86,21 +92,37 @@ test -z "$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1
 git merge-base --is-ancestor "$OAUTH_RELEASE_SHA" origin/main || exit 1
 ARCHIVE_DIR=$(mktemp -d /private/tmp/hm37-oauth-archive.XXXXXX) || exit 1
 git archive --format=tar "$OAUTH_RELEASE_SHA" >"$ARCHIVE_DIR/release.tar" || exit 1
+chmod 0600 "$ARCHIVE_DIR/release.tar" || exit 1
+BOX_ARCHIVE_PATH=/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}-${ARCHIVE_DIR##*.}.tar
 shasum -a 256 "$ARCHIVE_DIR/release.tar" || exit 1
-scp "$ARCHIVE_DIR/release.tar" "ops@100.115.66.74:/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" || exit 1
+ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 \
+  "test \"\$(stat -c '%a' /tmp)\" = 1777 && (set -C; umask 077; : > '$BOX_ARCHIVE_PATH')" || exit 1
+scp -p "$ARCHIVE_DIR/release.tar" "ops@100.115.66.74:$BOX_ARCHIVE_PATH" || exit 1
+printf 'BOX_ARCHIVE_PATH=%s\n' "$BOX_ARCHIVE_PATH"
 printf 'Retain public archive until box reconciliation: %s\n' "$ARCHIVE_DIR"
 ```
 
 Preflight reads values only inside the process; it prints env **names** and
 safe identities. It creates no secret backups and changes no service. If
 any baseline differs, report the conflict and stop before opening the window.
+The sites import is resolved against `/etc/caddy`: both `sites/*.caddy`
+and `/etc/caddy/sites/*.caddy` match. Box `/tmp` is 1777 and ops can write
+there; retained proofs are root-only 0700, reached only by the root block.
+Snapshot, switch-on and rollback use
+the same check; no step rewrites `/etc/caddy/Caddyfile`.
 
 ```sh
 # step: hm37-oauth-preflight
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-preflight line $LINENO" >&2' ERR
+test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
+  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
+  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
+  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
+  echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
+}
 python3 - <<'PY'
-import json, pathlib, subprocess
+import json, pathlib, posixpath, shlex, subprocess
 def inspect(name):
     return json.loads(subprocess.check_output(['docker','inspect',name], text=True))[0]
 for name, project, service, sha in [
@@ -123,6 +145,7 @@ for name, project, service, sha in [
     files=str(work/'compose.yaml') + (','+str(work/'compose.override.yaml') if service=='edge-runtime' else '')
     assert labels['com.docker.compose.project.config_files']==files, 'compose files differ'
     if service=='oauth':
+        assert data['Config']['User']=='996:986', 'OAuth Compose runtime identity differs'
         assert 'MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE' not in env
         assert all(m['Destination']!='/run/commonswarm-oauth/management-database-credentials' for m in data['Mounts'])
         assert not pathlib.Path('/etc/commonswarm-oauth/management-database-credentials').exists()
@@ -147,18 +170,29 @@ for file in ['/etc/commonswarm-oauth/compose.env','/etc/commonswarm-oauth/servic
 site=pathlib.Path('/etc/caddy/sites/20-commonswarm-mcp.caddy').read_text()
 assert 'import mcp_oauth_active' in site and '@mcp_unavailable' in site and '(mcp_resource_active)' in site
 assert 'import mcp_resource_active' not in site and 'reverse_proxy 127.0.0.1:3490' in site
-assert 'import /etc/caddy/sites/*.caddy' in pathlib.Path('/etc/caddy/Caddyfile').read_text()
+imports=[]
+for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
+    fields=shlex.split(line, comments=True)
+    if len(fields)==2 and fields[0]=='import':
+        imports.append(posixpath.normpath(posixpath.join('/etc/caddy', fields[1])))
+assert '/etc/caddy/sites/*.caddy' in imports, 'Caddy sites import differs after resolving against /etc/caddy'
 print('preflight baseline reconciled; no production mutation')
 PY
 ```
 
 ## Open window and retain rollback inputs
 
-Additional prompt inputs: `OAUTH_ARCHIVE_SHA256` and `BOX_RM_GUARD` (the exact
-installed guarded-rm path, verified by HezLead; not measured by this worker).
+Additional prompt inputs: `OAUTH_ARCHIVE_SHA256` and `BOX_ARCHIVE_PATH`.
+HezLead measured `command -v rm` as `/usr/bin/rm` for root and ops;
+no `/usr/local/bin/rm` or `/usr/local/sbin/rm` exists. The box has no rm
+wrapper. Preflight, open and each removal recheck root's binary and the
+absence of local wrappers, stopping with `FAIL: box-rm-preflight` on drift.
+All box removals run as root with absolute `/usr/bin/rm`; no step runs rm
+as ops. Each checks its exact literal or mktemp-created path, rejects
+symlinks, `/` and home directories, and stops on failed cleanup.
 Secret backups stay in a fresh mode-0700 `/private/tmp/anvil-secret.*`.
-If the guard refuses cleanup, leave the directory and report its exact path
-and refusal. Never bypass it. Retain old release/image and original files.
+The Mac archive cleanup retains the installed Mac guard unchanged. Retain
+old release/image and original files; report failed cleanup paths and errors.
 
 ```sh
 # step: hm37-oauth-open
@@ -166,18 +200,44 @@ set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-open line $LINENO" >&2' ERR
 : "${OAUTH_RELEASE_SHA:?FAIL: reviewed landed SHA missing}"
 : "${OAUTH_ARCHIVE_SHA256:?FAIL: Mac archive hash missing}"
-: "${BOX_RM_GUARD:?FAIL: box rm guard not confirmed}"
+: "${BOX_ARCHIVE_PATH:?FAIL: Mac-chosen box transport path missing}"
 case "$OAUTH_RELEASE_SHA" in ''|*[!0-9a-f]*) echo 'FAIL: SHA format' >&2; exit 1;; esac
 test "${#OAUTH_RELEASE_SHA}" -eq 40 || exit 1
-test "$(command -v rm)" = "$BOX_RM_GUARD" && test -x "$BOX_RM_GUARD" || exit 1
+test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
+  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
+  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
+  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
+  echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
+}
 OAUTH_RELEASE_DIR=/home/commonswarm/oauth/releases/$OAUTH_RELEASE_SHA
 PROOF_DIR=/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA
 test ! -e "$OAUTH_RELEASE_DIR" && test ! -e "$PROOF_DIR" || { echo 'FAIL: window already exists; do not overwrite it' >&2; exit 1; }
-test -f "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" || exit 1
-ACTUAL=$(sha256sum "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar") || exit 1
+python3 - "$BOX_ARCHIVE_PATH" "$OAUTH_RELEASE_SHA" <<'PY'
+import pathlib, re, sys
+path=pathlib.Path(sys.argv[1])
+assert re.fullmatch(r'/tmp/hm37-oauth-'+re.escape(sys.argv[2])+r'-[A-Za-z0-9]{6}\.tar',str(path)), 'archive transport boundary'
+assert path not in (pathlib.Path('/'), pathlib.Path.home())
+assert path.is_file() and not path.is_symlink() and path.resolve(strict=True)==path
+assert path.stat().st_mode & 0o777==0o600, 'archive transport mode must be 0600'
+PY
+ACTUAL=$(sha256sum "$BOX_ARCHIVE_PATH") || exit 1
 test "${ACTUAL%% *}" = "$OAUTH_ARCHIVE_SHA256" || exit 1
+sudo -n install -d -m 0700 "$PROOF_DIR" || exit 1
+sudo -n install -o root -g root -m 0600 "$BOX_ARCHIVE_PATH" "$PROOF_DIR/release.tar" || exit 1
+ACTUAL=$(sha256sum "$PROOF_DIR/release.tar") || exit 1
+test "${ACTUAL%% *}" = "$OAUTH_ARCHIVE_SHA256" || exit 1
+test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
+  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
+  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
+  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
+  echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
+}
+test -f "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH" &&
+  test "$(readlink -f "$BOX_ARCHIVE_PATH")" = "$BOX_ARCHIVE_PATH" || { echo 'FAIL: archive cleanup boundary' >&2; exit 1; }
+/usr/bin/rm -- "$BOX_ARCHIVE_PATH" || { echo "FAIL: box archive cleanup failed $BOX_ARCHIVE_PATH; report exact error" >&2; exit 1; }
+test ! -e "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH" || exit 1
 install -d -m 0755 "$OAUTH_RELEASE_DIR" || exit 1
-tar -xf "/private/tmp/hm37-oauth-${OAUTH_RELEASE_SHA}.tar" -C "$OAUTH_RELEASE_DIR" || exit 1
+tar -xf "$PROOF_DIR/release.tar" -C "$OAUTH_RELEASE_DIR" || exit 1
 printf '%s\n' "$OAUTH_RELEASE_SHA" >"$OAUTH_RELEASE_DIR/RELEASE_SHA"
 install -d -m 0700 "$PROOF_DIR" || exit 1
 install -d -m 1777 /private/tmp || exit 1
@@ -186,7 +246,8 @@ chmod 0700 "$SECRET_STAGE" || exit 1
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib, re, sys
 path=pathlib.Path(sys.argv[1])
-assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]+',str(path))
+assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(path))
+assert path not in (pathlib.Path('/'), pathlib.Path.home())
 assert path.resolve(strict=True)==path and path.is_dir() and not path.is_symlink()
 assert path.stat().st_mode & 0o777==0o700
 PY
@@ -200,9 +261,42 @@ EDGE_DIR=$(readlink -f /home/commonswarm/edge/current) || exit 1
 OLD_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1) || exit 1
 STATE=$PROOF_DIR/hm37-window.sh
 umask 077
-printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nOLD_OAUTH_DIR=%q\nEDGE_DIR=%q\nOLD_IMAGE=%q\nBOX_RM_GUARD=%q\n' \
-  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$OLD_OAUTH_DIR" "$EDGE_DIR" "$OLD_IMAGE" "$BOX_RM_GUARD" >"$STATE"
+printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nOLD_OAUTH_DIR=%q\nEDGE_DIR=%q\nOLD_IMAGE=%q\n' \
+  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$OLD_OAUTH_DIR" "$EDGE_DIR" "$OLD_IMAGE" >"$STATE"
 cat >>"$STATE" <<'SH'
+box_rm_preflight() {
+test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
+  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
+  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
+  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
+  echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; return 1;
+}
+}
+remove_management_credentials() {
+  box_rm_preflight || return 1
+  python3 - <<'PY' || { echo 'FAIL: management cleanup boundary' >&2; return 1; }
+import pathlib
+path=pathlib.Path('/etc/commonswarm-oauth/management-database-credentials')
+assert path not in (pathlib.Path('/'), pathlib.Path.home())
+assert not path.is_symlink() and path.resolve(strict=False)==path
+assert not path.exists() or path.is_file()
+PY
+  /usr/bin/rm -f /etc/commonswarm-oauth/management-database-credentials || {
+    echo 'FAIL: box removal failed /etc/commonswarm-oauth/management-database-credentials; report exact error' >&2; return 1;
+  }
+  test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
+}
+caddy_sites_import() {
+python3 - <<'PY' || return 1
+import pathlib, posixpath, shlex
+imports=[]
+for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
+    fields=shlex.split(line, comments=True)
+    if len(fields)==2 and fields[0]=='import':
+        imports.append(posixpath.normpath(posixpath.join('/etc/caddy', fields[1])))
+assert '/etc/caddy/sites/*.caddy' in imports, 'Caddy sites import differs after resolving against /etc/caddy'
+PY
+}
 oauth_compose() {
   docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
     -f "$OAUTH_RELEASE_DIR/deploy/mcp-auth/compose.yaml" "$@"
@@ -228,6 +322,7 @@ healthy() {
   echo "FAIL: unhealthy container $1" >&2; return 1
 }
 rollback_to_off() {
+  caddy_sites_import || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/compose.off.env" /etc/commonswarm-oauth/compose.env || return 1
   cat "$SECRET_STAGE/edge.off.env" >/home/commonswarm/.env || return 1
@@ -236,17 +331,13 @@ rollback_to_off() {
   systemctl reload caddy || return 1
   oauth_compose config --quiet || return 1
   oauth_compose up -d --no-deps --force-recreate --pull never oauth || return 1
-  test "$(command -v rm)" = "$BOX_RM_GUARD" || return 1
-  rm -f /etc/commonswarm-oauth/management-database-credentials || {
-    echo 'FAIL: guarded removal refused /etc/commonswarm-oauth/management-database-credentials; report exact guard message' >&2; return 1;
-  }
-  test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
+  remove_management_credentials || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
 }
 mcp_route_probes() {
 python3 - "$MCP_EXPECTED_MODE" <<'PY' || return 1
-import json, sys, urllib.error, urllib.request
+import json, re, sys, urllib.error, urllib.request
 enabled=sys.argv[1]=='on'
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs): return None
@@ -266,7 +357,13 @@ for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
             except urllib.error.HTTPError as error: response=error
             with response:
                 body=response.read(131073); code=response.code
-                assert len(body)<=131072 and 'application/json' in response.headers.get('Content-Type',''), 'non-JSON or oversized response'
+                content_type=response.headers.get('Content-Type','')
+                if path=='/jwks':
+                    assert len(body)<=131072 and re.fullmatch(
+                        r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
+                        content_type.strip(), re.I), 'invalid JWKS content type or oversized response'
+                else:
+                    assert len(body)<=131072 and 'application/json' in content_type, 'non-JSON or oversized response'
                 value=json.loads(body)
                 assert code==expected if expected is not None else code in (400,401), 'unexpected status'
                 if path=='/health': assert value.get('status')=='ok'
@@ -299,6 +396,9 @@ print('OAuth memory <80%: PASS')
 PY
 }
 SH
+. "$STATE"
+caddy_sites_import || exit 1
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
 
@@ -447,6 +547,7 @@ Then run the marked route probe with `MCP_EXPECTED_MODE=off` before cleanup.
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-rollback line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+caddy_sites_import || exit 1
 test "$OLD_OAUTH_DIR" = /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05 || exit 1
 test "$OLD_IMAGE" = sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a || exit 1
 docker image inspect "$OLD_IMAGE" >/dev/null || exit 1
@@ -459,11 +560,7 @@ systemctl reload caddy || exit 1
 OAUTH_RELEASE_DIR=$OLD_OAUTH_DIR
 oauth_compose config --quiet || exit 1
 oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
-test "$(command -v rm)" = "$BOX_RM_GUARD" || exit 1
-rm -f /etc/commonswarm-oauth/management-database-credentials || {
-  echo 'FAIL: guarded removal refused /etc/commonswarm-oauth/management-database-credentials; report exact guard message' >&2; exit 1;
-}
-test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || exit 1
+remove_management_credentials || exit 1
 edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || exit 1
 healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || exit 1
 test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$OLD_IMAGE" || exit 1
@@ -474,8 +571,8 @@ ln -sfn "$OLD_OAUTH_DIR" /home/commonswarm/oauth/current || exit 1
 ```
 
 OAuth-release rollback uses only the old base Compose and removes the exact
-management credential path with the verified guard. A refused removal is a
-failed rollback cleanup: retain it and report the guard message.
+management credential path with `/usr/bin/rm` after the root binary and
+literal no-symlink boundary checks. Failed cleanup stops; report the exact error.
 No migration, app/stack, site, signing key, artifact credential or timer change.
 
 ## (f) MCP SWITCH-ON
@@ -491,10 +588,11 @@ The URL preserves the existing login/password/database, replacing only its
 host with that name. Query overrides/non-5432 ports fail closed. Both the
 producer and the bundled management client receive `ssl.ca`,
 `ssl.servername=db.commonswarm.internal`, and `ssl.rejectUnauthorized=true`.
-Runtime ownership is measured from Dockerfile `USER 10001:10001` and live
-`Config.User`/`process.getuid()`/`process.getgid()`; any drift stops.
-Install `0440 root:10001`: root owns it, only root and the runtime group can
-read it, and no user can write it via mode bits. The ON-only bind is read-only;
+HezLead measured runtime UID:GID `996:986` in OAUTH-REPORT.md. Compose's
+explicit `user` overrides Dockerfile `USER 10001:10001`; retain that existing
+unprivileged identity and recheck `Config.User`/`process.getuid()`/`process.getgid()`.
+Any drift stops. Install `0440 root:986`: root owns it, only root and the
+runtime group can read it, and no user can write it via mode bits. The ON-only bind is read-only;
 OFF has neither the env input nor mount. No management 1Password item exists.
 
 Requires HezLead's named `TOM_ENABLE_APPROVAL=2026-09-29` prompt input and
@@ -509,18 +607,19 @@ Keep the OAuth loopback upstream, certificate, log filters and method bounds.
 set -euo pipefail
 test "${TOM_ENABLE_APPROVAL:-}" = 2026-09-29 || { echo 'FAIL: named HezLead switch-on approval missing' >&2; exit 1; }
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+caddy_sites_import || exit 1
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
 test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
 switch_on() {
   OAUTH_USER=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
-  test "$OAUTH_USER" = 10001:10001 || { echo 'FAIL: OAuth runtime must be UID:GID 10001:10001; stop on drift' >&2; return 1; }
+  test "$OAUTH_USER" = 996:986 || { echo 'FAIL: OAuth runtime must be UID:GID 996:986; stop on drift' >&2; return 1; }
   IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || return 1
   test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$IMAGE" || return 1
   docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import dns from "node:dns/promises";
-if(process.getuid()!==10001 || process.getgid()!==10001 ||
+if(process.getuid()!==996 || process.getgid()!==986 ||
    process.env.MCP_OAUTH_DATABASE_HOST!=="db.commonswarm.internal" ||
    (await dns.lookup("db.commonswarm.internal")).address!=="172.31.0.10") process.exit(1);
 ' || return 1
@@ -557,7 +656,7 @@ try {
   requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.env", "utf8"));
   const edge = env("/home/commonswarm/.env");
   const compose = env("/secret-stage/compose.off.env");
-  requireCheck(compose.MCP_OAUTH_UID === "10001" && compose.MCP_OAUTH_GID === "10001");
+  requireCheck(compose.MCP_OAUTH_UID === "996" && compose.MCP_OAUTH_GID === "986");
   requireCheck(compose.MCP_OAUTH_DATABASE_HOST === "db.commonswarm.internal" && compose.MCP_OAUTH_DATABASE_ADDRESS === "172.31.0.10");
   const url = new URL(edge.SWARM_DATABASE_URL);
   requireCheck(["postgres:", "postgresql:"].includes(url.protocol) && url.username && url.password && !url.search && !url.hash);
@@ -653,10 +752,10 @@ assert count==1 and '@mcp_unavailable' not in text, 'live Caddy differs; stop'
 (stage/'mcp.on.caddy').write_text(text); os.chmod(stage/'mcp.on.caddy',0o600)
 PY
   test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
-  # Dockerfile and measured Config.User are 10001:10001. Read only for root
-  # and that runtime group; root retains ownership and nobody has write bits.
-  install -o root -g 10001 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:10001:440 || return 1
+  # Compose overrides the image default; measured Config.User is 996:986.
+  # Read only for root and that runtime group; root retains ownership and nobody has write bits.
+  install -o root -g 986 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
+  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
   cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
   oauth_management_compose config --quiet || return 1
@@ -675,7 +774,7 @@ try {
   const fs=await import("node:fs");
   const file=process.env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE;
   const stat=fs.statSync(file);
-  if(process.getuid()!==10001 || process.getgid()!==10001 || stat.uid!==0 || stat.gid!==10001 || (stat.mode & 0o777)!==0o440) throw new Error("management file permissions");
+  if(process.getuid()!==996 || process.getgid()!==986 || stat.uid!==0 || stat.gid!==986 || (stat.mode & 0o777)!==0o440) throw new Error("management file permissions");
   fs.accessSync(file, fs.constants.R_OK);
   const {db}=await import("./src/management-command.generated.js");
   const rows=await db`SELECT pg_has_role(current_user, '\''swarm_command'\'', '\''MEMBER'\'') AS command,
@@ -721,7 +820,7 @@ Run the marked route probe with `MCP_EXPECTED_MODE=on`: health, both discovery
 documents and JWKS 200; invalid authorization 400; token 400/401; public
 `/mcp` POST 401 and protected-resource metadata 200 through Caddy/Cloudflare.
 If any probe fails, run `hm37-mcp-disable` (base Compose, both flags OFF,
-exact guarded management-file removal), then the OFF probe; authorization, token,
+exact checked management-file removal), then the OFF probe; authorization, token,
 MCP and protected-resource metadata must all return disabled 503 JSON again.
 The rollback restores both flags, recreates both services, and restores Caddy.
 Step (e) is available when the OAuth release itself must also revert.
@@ -729,24 +828,25 @@ Step (e) is available when the OAuth release itself must also revert.
 ## Close and remove secret staging
 
 Run only after the appropriate ON or rollback-OFF route checks pass. On any
-cleanup refusal, retain the path, report the guard's exact message, and stop
-cleanup. No copyback of secret backups or raw docker inspect/env output.
+cleanup failure, retain the path, report the exact error, and stop cleanup.
+No copyback of secret backups or raw docker inspect/env output.
 
 ```sh
 # step: hm37-oauth-close
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-close line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(command -v rm)" = "$BOX_RM_GUARD" || exit 1
+box_rm_preflight || exit 1
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib, re, sys
 path=pathlib.Path(sys.argv[1])
-assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]+',str(path))
+assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(path))
+assert path not in (pathlib.Path('/'), pathlib.Path.home())
 assert path.resolve(strict=True)==path and path.is_dir() and not path.is_symlink()
 assert path.stat().st_mode & 0o777==0o700
 PY
-rm -rf "$SECRET_STAGE" || { echo "FAIL: guarded cleanup refused $SECRET_STAGE; report exact guard message" >&2; exit 1; }
-test ! -e "$SECRET_STAGE" || exit 1
+/usr/bin/rm -rf -- "$SECRET_STAGE" || { echo "FAIL: box secret cleanup failed $SECRET_STAGE; report exact error" >&2; exit 1; }
+test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE" || exit 1
 printf 'Secret staging removed. Retain SHA/image IDs and status-only probe evidence at %s\n' "$PROOF_DIR"
 ```
 
