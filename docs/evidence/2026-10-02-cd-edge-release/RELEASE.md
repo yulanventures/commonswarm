@@ -248,7 +248,7 @@ STACK_RELEASE=$PROOF_DIR/source
 test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
 install -d -m 0700 -o root -g root "$PROOF_DIR"
 python3 - "$CD_BOX_ARCHIVE_PATH" "$PROOF_DIR" "$RELEASE_SHA" <<'PYCODE'
-import hashlib,pathlib,shutil,sys,tarfile
+import hashlib,os,pathlib,shutil,sys,tarfile
 archive,proof,sha=sys.argv[1:]; proof=pathlib.Path(proof); source=proof/'source'
 source.mkdir(mode=0o700)
 with tarfile.open(archive) as tar:
