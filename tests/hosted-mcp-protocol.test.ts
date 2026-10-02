@@ -148,6 +148,43 @@ test("Claude initialization negotiates versions before initialized and tools/lis
   assert.equal(get.headers.get("allow"), "POST");
 });
 
+test("tools/list accepts optional cursor and metadata without pagination", async (t) => {
+  const fixture = await authenticatedHandler();
+  const logging = t.mock.method(console, "error", () => undefined);
+  const cases: Array<{ name: string; params?: unknown; status: number }> = [
+    { name: "omitted params", status: 200 },
+    { name: "empty compatibility control", params: {}, status: 200 },
+    { name: "cursor", params: { cursor: "x" }, status: 200 },
+    { name: "empty metadata", params: { _meta: {} }, status: 200 },
+    { name: "progress metadata", params: { _meta: { progressToken: 1 } }, status: 200 },
+    { name: "cursor and metadata", params: { cursor: "", _meta: { progressToken: "progress" } }, status: 200 },
+    { name: "unknown key", params: { bogus: 1 }, status: 400 },
+    { name: "unknown key with cursor", params: { cursor: "x", bogus: 1 }, status: 400 },
+    ...[null, [], "x", 1, false].map((params) => ({ name: `non-object ${JSON.stringify(params)}`, params, status: 400 })),
+    ...[null, 1, [], {}].map((cursor) => ({ name: `invalid cursor ${JSON.stringify(cursor)}`, params: { cursor }, status: 400 })),
+    ...[null, 1, [], "x"].map((_meta) => ({ name: `invalid metadata ${JSON.stringify(_meta)}`, params: { _meta }, status: 400 })),
+  ];
+  for (const { name, params, status } of cases) {
+    await t.test(name, async () => {
+      const response = await fixture.serve(post({
+        jsonrpc: "2.0", id: name, method: "tools/list",
+        ...(params === undefined ? {} : { params }),
+      }, { ...fixture.headers, "mcp-protocol-version": "2025-06-18" }));
+      assert.equal(response.status, status);
+      const envelope = await response.json();
+      assert.equal(envelope.id, name);
+      assert.equal(envelope.jsonrpc, "2.0");
+      if (status === 200) {
+        assert.deepEqual(envelope.result, { tools: HOSTED_TOOL_TABLE });
+        assert.equal("nextCursor" in envelope.result, false);
+      } else {
+        assert.deepEqual(envelope.error, { code: -32602, message: "Invalid params" });
+      }
+    });
+  }
+  assert.equal(logging.mock.callCount(), cases.filter(({ status }) => status === 400).length);
+});
+
 test("MCP denials log only stable error codes and known method names", async (t) => {
   const fixture = await authenticatedHandler();
   const logging = t.mock.method(console, "error", () => undefined);
