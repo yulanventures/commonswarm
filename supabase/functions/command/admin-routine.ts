@@ -1,4 +1,5 @@
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
+import { restoreAdminRoutineWorkspace } from "./admin-routine-workspace.ts";
 import type postgres from "npm:postgres@3.4.9";
 import {
   reduceWorkspace,
@@ -112,6 +113,7 @@ export async function prepareAdminRoutine(
         m.role === "owner" && m.revoked_at === null
       ).length,
     };
+    workspace = await restoreAdminRoutineWorkspace(tx, workspace, streams[0].stream_id);
   }
   const [owned] = await tx<
     { n: string }[]

@@ -1,6 +1,6 @@
 -- Migration source mirrored in 20261001000003_admin_recovery_read.sql.
--- Human JWT claims are installed by the read edge; no caller-selected
--- account ID, no admin/worker credentials, and no direct private-table grants.
+-- The read edge installs verified human claims; the definer needs no auth schema.
+-- No caller-selected account ID, admin/worker credentials or private-table grants.
 CREATE FUNCTION swarm_read.admin_recovery_page(
   p_resource text, p_workspace_id uuid, p_limit integer, p_before text
 ) RETURNS jsonb
@@ -8,7 +8,7 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog
 AS $fn$
 DECLARE
-  viewer uuid := auth.uid();
+  viewer uuid := NULLIF(NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub', '')::uuid;
   workspace_owner boolean := false;
   before_time timestamptz;
   before_id uuid;

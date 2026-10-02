@@ -1,4 +1,5 @@
-// Real adapters and database; stdout is restricted to fixed assertion labels.
+// Real adapters/database; diagnostics select counts/statuses, never raw bodies.
+import { AdminServerDiagnostics } from './admin-server-diagnostics.ts';
 const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
 for (const target of [config.local.API_URL, config.local.DB_URL]) {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(target).hostname)) {
@@ -32,16 +33,27 @@ const b64 = (bytes) =>
     .replaceAll("=", "");
 const encode = (value) => b64(new TextEncoder().encode(JSON.stringify(value)));
 let stage = "setup";
-function check(ok, label) {
+const diagnostics = new AdminServerDiagnostics();
+function check(ok, label, observed) {
   stage = label;
-  if (!ok) throw new Error("assertion");
+  diagnostics.check(ok, observed);
 }
 const {
   db,
   handleRequest,
-  handleAdminRuntimeCommand,
-  handleAdminWorkerRuntimeCommand,
+  handleAdminRuntimeCommand: adminRuntime,
+  handleAdminWorkerRuntimeCommand: workerRuntime,
 } = await import("../../supabase/functions/command/index.ts");
+async function handleAdminRuntimeCommand(input, ...args) {
+  const result = await adminRuntime(input, ...args);
+  diagnostics.response(input.command.kind, result.status, result.body);
+  return result;
+}
+async function handleAdminWorkerRuntimeCommand(input, ...args) {
+  const result = await workerRuntime(input, ...args);
+  diagnostics.response(input.command.kind, result.status, result.body);
+  return result;
+}
 const { adminTransaction } = await import(
   "../../supabase/functions/command/admin-delegation.ts"
 );
@@ -53,8 +65,10 @@ async function recovery(resource, workspace_id = null, before = null) {
     headers: { Authorization: `Bearer ${config.jwt}`, "Content-Type": "application/json" },
     body: JSON.stringify({ resource, workspace_id, before, limit: 1 }),
   }));
+  const body = await response.json();
+  diagnostics.response(resource, response.status, body);
   check(response.status === 200, "human routine recovery positive control");
-  return response.json();
+  return body;
 }
 async function history(workspace = null) {
   const actions = [];
@@ -81,11 +95,14 @@ const human = {
     csrf_verified: true,
   },
 };
-const transact = (input, auth) =>
-  db.begin(async (tx) => {
+const transact = async (input, auth) => {
+  const outcome = await db.begin(async (tx) => {
     await tx`SELECT set_config('role','swarm_command',true),set_config('search_path','swarm,pg_catalog',true)`;
     return adminTransaction(tx, input, auth);
   });
+  diagnostics.response(input.command.kind, outcome.result.status, outcome.result.body);
+  return outcome;
+};
 async function http(input, token) {
   const response = await handleRequest(
     new Request("http://127.0.0.1/functions/v1/command", {
@@ -97,7 +114,9 @@ async function http(input, token) {
       body: JSON.stringify(input),
     }),
   );
-  return { status: response.status, body: await response.json() };
+  const result = { status: response.status, body: await response.json() };
+  diagnostics.response(input.command.kind, result.status, result.body);
+  return result;
 }
 try {
   const scenario = Deno.args[1], now = Date.now(), connection = id();
@@ -205,6 +224,7 @@ try {
   const events = async () => {
     const [row] =
       await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid`;
+    diagnostics.count("account_events", row.n);
     return row.n;
   };
   if (scenario === "workspace") {
@@ -222,10 +242,10 @@ try {
     check(results.every((r) => r.status === 200), "concurrent creation retry");
     const [row] =
       await db`SELECT count(*)::integer AS n FROM swarm.workspaces WHERE workspace_id=${workspace}::uuid`;
-    check(row.n === 1, "single durable workspace");
+    check(row.n === 1, "single durable workspace", { workspace_count: row.n });
     const [stream] =
       await db`SELECT head_seq FROM swarm.streams WHERE workspace_id=${workspace}::uuid AND kind='workspace'`;
-    check(Number(stream.head_seq) === 2, "reducer complete workspace event");
+    check(Number(stream.head_seq) === 2, "reducer complete workspace event", { head_seq: Number(stream.head_seq) });
     const access = await recovery("admin_grants", workspace);
     check(access.grants.length === 1 && access.grants[0].grant_id === grant &&
       access.active.grant_count === 1, "granular created workspace has visible grant and indicator");
@@ -307,7 +327,10 @@ try {
     check(
       invitation.recipient_user_id === config.recipient &&
         invitation.projection.delivery_state === "awaiting_authorization",
-      "recipient-bound pending invitation",
+      "recipient-bound pending invitation", {
+        recipient_matches: invitation.recipient_user_id === config.recipient,
+        awaiting_authorization: invitation.projection.delivery_state === "awaiting_authorization",
+      },
     );
     check(
       (await http(
@@ -353,7 +376,7 @@ try {
       await db`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${config.owner}::uuid`;
     check(
       state.projection.routine.spend[grant].invitations === 2,
-      "revocation never refunds issuance",
+      "revocation never refunds issuance", { invitation_spend: state.projection.routine.spend[grant].invitations },
     );
   } else {
     const principal = await create(),
@@ -391,9 +414,10 @@ try {
         method: "POST", headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
         body: JSON.stringify({ resource: "members", workspace_id: config.workspace }),
       }));
+      const body = await response.json();
+      diagnostics.response("members", response.status, body);
       check([200, 401, 403].includes(response.status), "worker read reaches authentication boundary");
       if (response.status !== 200) return false;
-      const body = await response.json();
       check(body.identity?.credential_valid === true && body.identity.principal_id === principal &&
         body.identity.owner_user_id === config.owner && body.identity.workspace_id === config.workspace,
         "worker read verifies recipient identity");
@@ -609,7 +633,7 @@ try {
       check(reached && await events() === before, "rollback no account event");
       const [row] =
         await db`SELECT count(*)::integer AS n FROM swarm.agent_principals WHERE workspace_id=${config.workspace}::uuid AND name='Rolled back'`;
-      check(row.n === 0, "rollback no principal");
+      check(row.n === 0, "rollback no principal", { principal_count: row.n });
     } else if (scenario === "rights") {
       await db`UPDATE swarm.memberships SET role='member' WHERE workspace_id=${config.workspace}::uuid AND user_id=${config.owner}::uuid`;
       check(!await auth(worker.credential), "role loss fences descendant");
@@ -640,7 +664,9 @@ try {
   const stored = await db`SELECT event_id, event FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid ORDER BY seq`;
   const audits = stored.filter(row => row.event.type === "AdminActionRecorded");
   check(cards.length === audits.length && new Set(cards.map(card => card.event_id)).size === audits.length &&
-    audits.every(row => cards.some(card => card.event_id === row.event_id)), "routine audit pagination has no gaps or duplicates");
+    audits.every(row => cards.some(card => card.event_id === row.event_id)), "routine audit pagination has no gaps or duplicates", {
+      card_count: cards.length, audit_count: audits.length, distinct_count: new Set(cards.map(card => card.event_id)).size,
+    });
   const byId = new Map(stored.map(row => [row.event_id, row.event]));
   for (const card of cards) {
     const event = byId.get(card.event_id);
@@ -648,7 +674,16 @@ try {
       card.workspace_id === event.payload.workspace_id && card.actor_user === event.actor_user &&
       card.grant_id === event.grant_id && card.admin_identity_id === event.admin_identity_id &&
       JSON.stringify(card.related_event_ids) === JSON.stringify(event.payload.related_event_ids),
-      "routine history retains action outcome actor and linked domain event IDs");
+      "routine history retains action outcome actor and linked domain event IDs", {
+        action_matches: card.action === event.payload.action,
+        outcome_matches: card.outcome === event.payload.outcome,
+        workspace_matches: card.workspace_id === event.payload.workspace_id,
+        actor_matches: card.actor_user === event.actor_user,
+        grant_matches: card.grant_id === event.grant_id,
+        admin_identity_matches: card.admin_identity_id === event.admin_identity_id,
+        related_ids_match: JSON.stringify(card.related_event_ids) === JSON.stringify(event.payload.related_event_ids),
+        related_id_count: card.related_event_ids.length,
+      });
   }
   check(stored.filter(row => policy.ADMIN_ROUTINE_EVENT_TYPES.includes(row.event.type)).every(row =>
     cards.some(card => card.related_event_ids.includes(row.event_id))), "all routine domain events have a visible linked card");
@@ -660,8 +695,8 @@ try {
       "human history shows accepted seat and credential revoke");
   }
   console.log("ADMIN_ROUTINE_SERVER_OK");
-} catch {
-  console.log("ADMIN_ROUTINE_SERVER_FAILED " + stage);
+} catch (error) {
+  console.log("ADMIN_ROUTINE_SERVER_FAILED " + stage + " " + JSON.stringify(diagnostics.failure(error)));
   Deno.exitCode = 1;
 } finally {
   await db.end();

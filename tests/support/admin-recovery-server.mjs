@@ -1,4 +1,5 @@
-// Real adapters, real command transactions, fixed assertion labels only.
+// Real adapters/transactions; diagnostics select counts/statuses, never raw bodies.
+import { AdminServerDiagnostics } from './admin-server-diagnostics.ts';
 const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
 for (const value of [config.local.API_URL, config.local.DB_URL]) {
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(value).hostname)) throw new Error('local stack required');
@@ -12,14 +13,17 @@ const { db, handleRequest: command } = await import('../../supabase/functions/co
 const { handleRequest: read } = await import('../../supabase/functions/read/index.ts');
 const policy = await import('../../supabase/functions/_shared/protocol.js');
 let stage = 'initialization';
-const check = (condition, label) => { stage = label; if (!condition) throw new Error('assertion'); };
+const diagnostics = new AdminServerDiagnostics();
+const check = (condition, label, observed) => { stage = label; diagnostics.check(condition, observed); };
 const id = () => crypto.randomUUID();
 const person = config.people[0], owner = config.people[1], member = config.people[2];
 async function invoke(handler, body, jwt = person.jwt) {
   const response = await handler(new Request('http://127.0.0.1/functions/v1/test', {
     method: 'POST', headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json', Origin: 'https://commonswarm.com' }, body: JSON.stringify(body),
   }));
-  return { status: response.status, body: await response.json() };
+  const result = { status: response.status, body: await response.json() };
+  diagnostics.response(body.resource === policy.ADMIN_RESOURCE ? body.command.kind : body.resource, result.status, result.body);
+  return result;
 }
 const view = (resource, workspace_id = null, before = null) => ({ resource, workspace_id, before, limit: 1 });
 const wire = value => ({ command_id: id(), stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE, command: value });
@@ -51,7 +55,11 @@ try {
   check(permissions?.prosecdef && permissions.owner === 'swarm_admin' &&
     permissions.proconfig.includes('search_path=pg_catalog') && permissions.read_execute &&
     !permissions.anon_execute && !permissions.human_execute && !permissions.command_execute,
-    'human recovery function has pinned definer and narrow execute grant');
+    'human recovery function has pinned definer and narrow execute grant', {
+      security_definer: permissions?.prosecdef, read_execute: permissions?.read_execute,
+      anon_execute: permissions?.anon_execute, human_execute: permissions?.human_execute,
+      command_execute: permissions?.command_execute,
+    });
   const privateTables = ['admin_grants', 'admin_events', 'admin_created_workspaces', 'admin_routine_invitations'];
   const tables = await db`SELECT c.relname, c.relrowsecurity,
     has_table_privilege('swarm_read', c.oid, 'SELECT') AS read_select,
@@ -59,17 +67,22 @@ try {
     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='swarm' AND c.relname=ANY(${privateTables})`;
   check(tables.length === privateTables.length && tables.every(t => t.relrowsecurity && !t.read_select && !t.human_select),
-    'recovery migration retains private table RLS and no direct reads');
+    'recovery migration retains private table RLS and no direct reads', {
+      table_count: tables.length, rls_count: tables.filter(t => t.relrowsecurity).length,
+      direct_read_count: tables.filter(t => t.read_select || t.human_select).length,
+    });
   const grants = [await grant(), await grant(true), await grant()];
   let page = await invoke(read, view('admin_grants'));
-  check(page.status === 200 && page.body.grants.length === 1 && page.body.active.grant_count === 3 && page.body.active.full_account_count === 1, 'active summary independent of page');
+  check(page.status === 200 && page.body.grants?.length === 1 && page.body.active?.grant_count === 3 && page.body.active?.full_account_count === 1, 'active summary independent of page');
   const seen = [];
   while (true) {
     seen.push(page.body.grants[0].grant_id);
     if (!page.body.next_before) break;
     page = await invoke(read, view('admin_grants', null, page.body.next_before));
   }
-  check(seen.length === 3 && new Set(seen).size === 3 && grants.every(g => seen.includes(g)), 'grant cursor has no gaps or duplicates');
+  check(seen.length === 3 && new Set(seen).size === 3 && grants.every(g => seen.includes(g)), 'grant cursor has no gaps or duplicates', {
+    seen_count: seen.length, distinct_count: new Set(seen).size, expected_count: grants.length,
+  });
   const privatePage = await invoke(read, view('admin_grants'), owner.jwt);
   check(privatePage.status === 200 && privatePage.body.grants.length === 0, 'foreign account grants remain private');
   const workspacePage = await invoke(read, view('admin_grants', config.workspace), owner.jwt);
@@ -91,13 +104,15 @@ try {
     allActions.push(...next.body.actions); before = next.body.next_before;
   } while (before);
   const stored = await db`SELECT event_id FROM swarm.admin_events WHERE owner_user_id = ${person.user_id}::uuid AND event->>'type' = 'AdminActionRecorded'`;
-  check(allActions.length === stored.length && new Set(allActions.map(a => a.event_id)).size === stored.length, 'audit cursor reconciles the complete set');
+  check(allActions.length === stored.length && new Set(allActions.map(a => a.event_id)).size === stored.length, 'audit cursor reconciles the complete set', {
+    action_count: allActions.length, stored_count: stored.length, distinct_count: new Set(allActions.map(a => a.event_id)).size,
+  });
   const material = JSON.stringify(allActions);
   check(!/request_digest|manifest_digest|policy_check|session_binding|access_hash|refresh_hash/.test(material), 'history excludes private payload fields');
   const last = await grant(false, Date.now() + 5000);
   await new Promise(resolve => setTimeout(resolve, 5500));
   const expired = await invoke(read, { ...view('admin_grants'), limit: 100 });
-  check(expired.body.grants.find(g => g.grant_id === last)?.state === 'expired', 'expiry enforced before materialization');
+  check(expired.status === 200 && expired.body.grants?.find(g => g.grant_id === last)?.state === 'expired', 'expiry enforced before materialization');
   await db`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid AND user_id = ${person.user_id}::uuid`;
   await db`UPDATE swarm.workspaces SET archived_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid`;
   check((await invoke(read, view('admin_grants'))).status === 200, 'account recovery survives archived workspace and membership loss');
@@ -108,10 +123,10 @@ try {
   const count = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${person.user_id}::uuid`;
   check((await invoke(command, revokeWire)).status === 200, 'same revocation request replays');
   const after = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${person.user_id}::uuid`;
-  check(after[0].n === count[0].n, 'revocation retry adds no audit duplicate');
+  check(after[0].n === count[0].n, 'revocation retry adds no audit duplicate', { before_count: count[0].n, after_count: after[0].n });
   const final = await invoke(read, { ...view('admin_grants'), limit: 100 });
-  check(final.body.grants.find(g => g.grant_id === grants[1])?.state === 'revoked', 'durable revocation displayed');
+  check(final.status === 200 && final.body.grants?.find(g => g.grant_id === grants[1])?.state === 'revoked', 'durable revocation displayed');
   console.log('ADMIN_RECOVERY_SERVER_OK');
-} catch {
-  console.log('ADMIN_RECOVERY_SERVER_FAILED:' + stage); Deno.exitCode = 1;
+} catch (error) {
+  console.log('ADMIN_RECOVERY_SERVER_FAILED:' + stage + ' ' + JSON.stringify(diagnostics.failure(error))); Deno.exitCode = 1;
 } finally { await db.end({ timeout: 2 }); }

@@ -9,6 +9,7 @@ import { ADMIN_PAGE_MAX, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRe
 import { AdminRevokeUncertain, readAdminDelegations, revokeAdminDelegation } from "../../src/cloud/admin-delegations.js";
 import { CLI_BUILD_VERSION } from "../../src/cloud/client-build.js";
 import { ADMIN_RESOURCE } from "../../src/protocol/admin-policy.js";
+import { AdminHarnessAssertion, AdminServerDiagnostics } from "../support/admin-server-diagnostics.js";
 
 const id = randomUUID(), time = "2026-10-01T00:00:00.000Z";
 const active = { grant_count: 1, full_account_count: 0, expires_at: time, full_account_expires_at: null };
@@ -69,4 +70,28 @@ test("built CLI exposes human recovery help and refuses worker/profile options b
     assert.equal(result.status, 1); assert.match(result.stderr, /unsupported option|does not accept|unknown option|is supported by|full grant ID|integer in/);
   }
   for (const transport of ["http", "stdio"] as const) assert.ok(!agentToolsForTransport(transport).some(tool => tool.name.startsWith("admin")));
+});
+
+test("server failure diagnostics retain observed status and summary while excluding credentials and raw errors", () => {
+  const diagnostics = new AdminServerDiagnostics();
+  const secret = "swm_adm_" + "a".repeat(43);
+  diagnostics.count("account_events", 3);
+  diagnostics.count("account_events", secret);
+  diagnostics.response("admin_grants", 500, { error: "internal_error", status: "refused",
+    grants: [grant], actions: [], next_before: `${time}|${id}`, active,
+    access_credential: secret, projection: { secret } });
+  assert.throws(() => diagnostics.check(false, { stored_count: 3, secret, secret_count: secret }), AdminHarnessAssertion);
+  const failure = diagnostics.failure({ code: "42501", message: secret, detail: secret, query: secret });
+  const responses = failure.responses as Array<Record<string, unknown>>;
+  assert.equal(responses[0]?.status, 500);
+  assert.equal(responses[0]?.error_code, "internal_error");
+  assert.equal(responses[0]?.grant_page_size, 1);
+  assert.equal(responses[0]?.action_page_size, 0);
+  assert.deepEqual(responses[0]?.active, active);
+  assert.equal(failure.sqlstate, "42501");
+  assert.deepEqual(failure.counts, [{ operation: "account_events", value: 3 }, { operation: "account_events", value: null }]);
+  assert.deepEqual(failure.assertion, { condition: false, stored_count: 3 });
+  assert.ok(!JSON.stringify(failure).includes(secret));
+  diagnostics.response("admin_grants", 403, { error: secret, grants: secret, active: { grant_count: secret } });
+  assert.ok(!JSON.stringify(diagnostics.failure(null)).includes(secret));
 });
