@@ -43,6 +43,8 @@ export function assertAllowedOrigin(origin, allowedOrigins) {
 export const INTERACTION_SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
   "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "referrer-policy": "no-referrer",
+  // same-origin, not no-referrer: under no-referrer the Fetch standard serializes the Origin of a form POST
+  // as "null", so the strict Origin check below refused every real consent submission (live, 2026-10-02).
+  "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 });
