@@ -1,7 +1,10 @@
 /** M2 first-approval verification lock: real PostgreSQL, CI/Docker only. */
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { test } from 'node:test';
-import { catalog, dbAssert, refuses, runSql } from '../support/admin-schema-db.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { catalog, databaseContainer, dbAssert, refuses, runSql } from '../support/admin-schema-db.js';
 
 function verification(client: string, version = 1, active = true): string {
   return `SET LOCAL ROLE commonswarm_admin_release;
@@ -69,9 +72,13 @@ SET LOCAL ROLE swarm_command;
 ${dbAssert(`SELECT NOT active AND withdrawn_at IS NOT NULL AND verification_version=1 AND metadata_digest=repeat('a',64)
   AND redirect_class='hosted_https' FROM commonswarm_oauth.lock_admin_client_verification('${client}',1)`, 'withdrawn status is returned, not hidden')}
 RESET ROLE;
+-- Resolve the exact function while schema lookup is permitted. A denied role
+-- must still prove its EXECUTE ACL, even when it also lacks schema USAGE.
+SELECT set_config('lock_test.function_oid',
+  'commonswarm_oauth.lock_admin_client_verification(text,integer)'::regprocedure::oid::text,true);
 ${['commonswarm_oauth_runtime', 'swarm_read', 'anon', 'authenticated', 'commonswarm_admin_release',
     'commonswarm_dpop_verifier', 'commonswarm_oauth_maintenance'].map(role => `SET LOCAL ROLE ${role};
-${dbAssert(`SELECT NOT has_function_privilege(current_user,'commonswarm_oauth.lock_admin_client_verification(text,integer)','EXECUTE')`, `${role} lacks EXECUTE`)}
+${dbAssert("SELECT NOT has_function_privilege(current_user,current_setting('lock_test.function_oid')::oid,'EXECUTE')", `${role} lacks EXECUTE`)}
 ${refuses(`SELECT * FROM commonswarm_oauth.lock_admin_client_verification('${client}',1)`, '42501')}
 RESET ROLE;`).join('\n')}
 -- Pair denied execution with existing runtime/read status execution; both roles
@@ -81,6 +88,7 @@ ${dbAssert("SELECT has_schema_privilege(current_user,'commonswarm_oauth','USAGE'
 ${dbAssert("SELECT commonswarm_oauth.issuer_key_allowed('https://mcp.commonswarm.com','lock-test-kid')", `${role} permitted function control`)}
 RESET ROLE;`).join('\n')}
 SET LOCAL ROLE swarm_command;
+${dbAssert("SELECT has_schema_privilege(current_user,'commonswarm_oauth','USAGE')", 'command schema usage control')}
 ${dbAssert(`SELECT NOT active FROM commonswarm_oauth.lock_admin_client_verification('${client}',1)`, 'command execution still permitted')}
 RESET ROLE;
 ${catalog('20261003000002')}
@@ -92,23 +100,146 @@ ${catalog('20261003000002')}
 `);
 });
 
-test('admin-schema-isolation: verification locking retains a transaction-held RowShareLock after return', () => {
+/** Persistent psql backends inside the CI database container; no auth files. */
+class LockSession {
+  private readonly child;
+  private readonly exited: Promise<void>;
+  private pending?: { marker: string; rows: string[]; resolve: (rows: string[]) => void; reject: (error: Error) => void };
+  private buffer = '';
+  private stderr = '';
+  private stopped = false;
+
+  constructor(container: string) {
+    this.child = spawn('docker', ['exec', '-i', container, 'psql', '-X', '-Atq',
+      '-U', 'supabase_admin', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1']);
+    this.child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      this.buffer += chunk;
+      let newline: number;
+      while ((newline = this.buffer.indexOf('\n')) !== -1) {
+        const line = this.buffer.slice(0, newline).replace(/\r$/, '');
+        this.buffer = this.buffer.slice(newline + 1);
+        if (line === this.pending?.marker) {
+          const query = this.pending;
+          this.pending = undefined;
+          query.resolve(query.rows);
+        } else if (this.pending) this.pending.rows.push(line);
+      }
+    });
+    this.child.stderr.setEncoding('utf8').on('data', (chunk: string) => { this.stderr += chunk; });
+    this.exited = new Promise(resolve => {
+      const stop = (error: Error) => {
+        this.stopped = true;
+        this.pending?.reject(error);
+        this.pending = undefined;
+        resolve();
+      };
+      this.child.once('error', stop);
+      this.child.once('close', (code, signal) => stop(new Error(`lock session exited: ${code}/${signal}; ${this.stderr}`)));
+    });
+  }
+
+  query(sql: string): Promise<string[]> {
+    assert.equal(this.stopped, false, `live lock session required: ${this.stderr}`);
+    assert.equal(this.pending, undefined, 'one in-flight query per backend');
+    return new Promise((resolve, reject) => {
+      const marker = `lock_marker_${randomUUID().replaceAll('-', '')}`;
+      this.pending = { marker, rows: [], resolve, reject };
+      this.child.stdin.write(`${sql}\n\\echo ${marker}\n`);
+    });
+  }
+
+  async close(): Promise<void> {
+    // Closing a caller with a pending query must also be bounded on failures.
+    const timeout = setTimeout(() => this.child.kill('SIGTERM'), 3000);
+    try { this.child.stdin.end(); await this.exited; }
+    finally { clearTimeout(timeout); }
+  }
+}
+
+test('admin-schema-isolation: verification FOR SHARE blocks release row locks until the caller commits', { timeout: 40_000 }, async () => {
   const client = `https://client.example/${randomUUID()}`;
-  // runSql creates the real schemas and fixtures inside one rollback transaction.
-  // A second backend cannot see those uncommitted schemas/rows; a two-session
-  // withdrawal race would test DDL visibility instead of the verification lock.
-  // Use the task-approved pg_locks alternative. RowShareLock proves a locking
-  // SELECT survives function return; the release catalog pins the exact FOR SHARE
-  // body. pg_locks does not normally expose uncontended tuple locks, so this
-  // relation lock alone does not distinguish FOR SHARE from FOR KEY SHARE.
-  runSql(`${verification(client)}
-${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation'
-  AND relation='commonswarm_oauth.admin_verified_clients'::regclass AND mode='RowShareLock' AND granted)`, 'no pre-existing locking SELECT control')}
-SET LOCAL ROLE swarm_command;
-SELECT * FROM commonswarm_oauth.lock_admin_client_verification('${client}',1);
-${dbAssert(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation'
-  AND relation='commonswarm_oauth.admin_verified_clients'::regclass AND mode='RowShareLock' AND granted)`, 'transaction retains verification RowShareLock')}
-RESET ROLE;
-${catalog('20261003000002')}
-`);
+  const sessions = Array.from({ length: 3 }, () => new LockSession(databaseContainer()));
+  const [caller, release, monitor] = sessions as [LockSession, LockSession, LockSession];
+  const retainedLock = `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation'
+    AND relation='commonswarm_oauth.admin_verified_clients'::regclass AND mode='RowShareLock' AND granted);`;
+  try {
+    for (const session of sessions) await session.query("SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s';");
+    // Commit only reviewed verification fixtures in the CI database so every
+    // backend sees the real table/rows. No cloned-schema DDL lock can interfere.
+    // Verification history is immutable: withdraw these rows in finally, retain
+    // them for history, and never delete them or enable issuance.
+    await monitor.query(`BEGIN; ${verification(client)} ${verification(client, 2)} COMMIT;`);
+    const callerPid = Number((await caller.query('SELECT pg_backend_pid();'))[0]);
+    const releasePid = Number((await release.query('SELECT pg_backend_pid();'))[0]);
+    assert.ok(Number.isInteger(callerPid) && callerPid > 0);
+    assert.ok(Number.isInteger(releasePid) && releasePid > 0 && releasePid !== callerPid);
+
+    for (const mode of ['UPDATE', 'NO KEY UPDATE']) {
+      const competingLock = `SELECT verification_version FROM commonswarm_oauth.admin_verified_clients
+        WHERE client_id='${client}' AND verification_version=1 FOR ${mode};`;
+      await caller.query('BEGIN; SET LOCAL ROLE swarm_command;');
+      // Negative control: a real nonlocking command read must not block the
+      // same release-role query; NOWAIT fails immediately if setup holds a lock.
+      assert.deepEqual(await caller.query(`SELECT verification_version FROM commonswarm_oauth.admin_verified_clients
+        WHERE client_id='${client}' AND verification_version=1;`), ['1']);
+      assert.deepEqual(await caller.query(retainedLock), ['f'], 'unlocked read has no RowShareLock');
+      await release.query('BEGIN; SET LOCAL ROLE commonswarm_admin_release;');
+      assert.deepEqual(await release.query(competingLock.replace(/;$/, ' NOWAIT;')), ['1'], 'unlocked read permits the competing lock');
+      await release.query('COMMIT;');
+
+      assert.deepEqual(await caller.query(`SELECT verification_version FROM commonswarm_oauth.lock_admin_client_verification('${client}',1);`), ['1']);
+      assert.deepEqual(await caller.query(retainedLock), ['t'], 'function retains RowShareLock after return');
+      await release.query('BEGIN; SET LOCAL ROLE commonswarm_admin_release;');
+      assert.deepEqual(await release.query(`SELECT verification_version FROM commonswarm_oauth.admin_verified_clients
+        WHERE client_id='${client}' AND verification_version=2 FOR ${mode} NOWAIT;`), ['2'], 'other version stays unlocked');
+      await release.query('COMMIT;');
+
+      await release.query('BEGIN; SET LOCAL ROLE commonswarm_admin_release;');
+      let settled = false;
+      const contender = release.query(competingLock).then(
+        rows => { settled = true; return rows; },
+        error => { settled = true; throw error; });
+      // Attach a rejection handler while observing; still await the original
+      // result below so an early SQL failure cannot masquerade as blocking.
+      void contender.catch(() => {});
+      try {
+        const deadline = performance.now() + 5000;
+        let blocked = false;
+        while (performance.now() < deadline) {
+          assert.equal(settled, false, 'competing row lock must remain pending until commit');
+          const rows = await monitor.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
+            WHERE a.pid=${releasePid} AND a.wait_event_type='Lock' AND a.wait_event='transactionid'
+              AND ${callerPid}=ANY(pg_blocking_pids(a.pid))
+              AND EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='transactionid'
+                AND NOT l.granted AND l.transactionid=(SELECT transactionid FROM pg_locks
+                  WHERE pid=${callerPid} AND locktype='transactionid' AND mode='ExclusiveLock' AND granted)));
+          `);
+          assert.equal(settled, false, 'row-lock query cannot finish during the blocking observation');
+          if (rows[0] === 't') { blocked = true; break; }
+          await delay(25);
+        }
+        assert.equal(blocked, true, `release FOR ${mode} waits on the exact caller transaction`);
+        // NO KEY UPDATE also conflicts with SHARE, but not KEY SHARE. This
+        // catches an accidental weakening that a FOR UPDATE probe alone misses.
+      } finally {
+        await caller.query('COMMIT;');
+        assert.deepEqual(await contender, ['1'], 'release lock succeeds after caller commit');
+        await release.query('COMMIT;');
+      }
+      assert.deepEqual(await caller.query(retainedLock), ['f'], 'commit releases the caller lock');
+    }
+    await monitor.query(`${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${client}'`, 'locking creates no owner approval')}
+      ${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.admin_grant_bindings WHERE client_id='${client}'`, 'locking creates no provider binding')}
+      ${dbAssert('SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state', 'issuance remains closed')}`);
+    await monitor.query(catalog('20261003000002'));
+  } finally {
+    // Release any holder first, even when an assertion or contender fails.
+    await caller.close();
+    await release.close();
+    try {
+      await monitor.query(`BEGIN; SET LOCAL ROLE commonswarm_admin_release;
+        UPDATE commonswarm_oauth.admin_verified_clients SET active=false,withdrawn_at=statement_timestamp(),withdrawal_reason='lock_test_complete'
+          WHERE client_id='${client}' AND active; COMMIT;`);
+    } finally { await monitor.close(); }
+  }
 });
