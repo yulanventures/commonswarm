@@ -89,29 +89,42 @@ FROM swarm.admin_grants WHERE grant_id='${grant}';` : ''}
 export function issuance(f: ReturnType<typeof fixture>, generation = 0) {
   const jti = `access-${randomUUID()}`, event = randomUUID(), audit = randomUUID();
   const tokenDigest = '42'.repeat(32);
-  const sql = `
-SET LOCAL ROLE swarm_command;
-INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
+  const eventInsert = `INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
 VALUES('${f.owner}',${generation + 2},'${event}','issue-${generation}',jsonb_build_object('stream_kind','account','owner_user_id','${f.owner}',
   'seq',${generation + 2},'type','${generation === 0 ? 'AdminCredentialIssued' : 'AdminCredentialRotated'}','grant_id','${f.grant}',
   'payload',jsonb_build_object('provider_grant_id','${f.provider}','generation',${generation},'version',2)));
-RESET ROLE;
-SET LOCAL ROLE commonswarm_oauth_runtime;
-INSERT INTO commonswarm_oauth.admin_oauth_audit(audit_id,owner_user_id,admin_identity_id,admin_grant_id,connection_id,
+`;
+  const auditInsert = `INSERT INTO commonswarm_oauth.admin_oauth_audit(audit_id,owner_user_id,admin_identity_id,admin_grant_id,connection_id,
   provider_grant_id,manifest_digest,event_kind,outcome,related_event_ids)
 VALUES('${audit}','${f.owner}','${f.identity}','${f.grant}','${f.connection}','${f.provider}','${f.digest}',
   '${generation === 0 ? 'issued' : 'rotated'}','committed',ARRAY['${event}']::uuid[]);
-INSERT INTO commonswarm_oauth.admin_access_issuances(access_jti,access_token_digest,provider_grant_id,admin_grant_id,generation,
+`;
+  const accessInsert = `INSERT INTO commonswarm_oauth.admin_access_issuances(access_jti,access_token_digest,provider_grant_id,admin_grant_id,generation,
   client_id,resource,jkt,manifest_digest,scope_names,issuer,kid,issued_at,expires_at,event_id,audit_id)
 SELECT '${jti}',decode('${tokenDigest}','hex'),provider_grant_id,admin_grant_id,${generation},client_id,resource,jkt,manifest_digest,
   scope_names,'https://mcp.commonswarm.com','test-kid',date_trunc('second',statement_timestamp()),
   date_trunc('second',statement_timestamp())+interval '5 minutes','${event}','${audit}'
 FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id='${f.provider}';
-RESET ROLE;
 `;
+  const sql = `SET LOCAL ROLE swarm_command;\n${eventInsert}\nRESET ROLE;\nSET LOCAL ROLE commonswarm_oauth_runtime;\n${auditInsert}\n${accessInsert}\nRESET ROLE;\n`;
   const active = (overrides: { jti?: string; owner?: string; digest?: string } = {}) =>
     `SELECT commonswarm_oauth.admin_access_is_active('${overrides.jti ?? jti}',decode('${overrides.digest ?? tokenDigest}','hex'),
     '${f.provider}','${f.grant}','${overrides.owner ?? f.owner}',${generation},'${f.client}','https://api.commonswarm.com/admin',
     '${f.jkt}','${f.digest}',i.issued_at,i.expires_at,'test-kid') FROM commonswarm_oauth.admin_access_issuances i WHERE i.access_jti='${jti}'`;
-  return { jti, event, audit, sql, active };
+  return { jti, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
 }
+
+/** Test-only transaction, rolled back by runSql. Uses the real fence and release constraints. */
+export const openIssuanceForTest = `
+SET LOCAL ROLE commonswarm_admin_release;
+SELECT commonswarm_oauth.apply_legacy_admin_fence('test-only-cutover');
+UPDATE commonswarm_oauth.admin_cutover_state SET approved_edge_release_sha=repeat('a',40),auth_contract_version=2,
+  required_migrations=jsonb_build_object('20261003000001',repeat('a',64),'20261003000002',repeat('b',64),'20261003000003',repeat('c',64)),
+  lane8_evidence_digest=repeat('d',64),measured_edge_release_sha=repeat('a',40),
+  measured_edge_target='/home/commonswarm/edge/releases/'||repeat('a',40),
+  measured_mount='/home/commonswarm/edge/releases/'||repeat('a',40),measured_artifact_digest=repeat('e',64),
+  measured_image_digest='sha256:'||repeat('f',64),measured_generation=release_generation,
+  measured_at=statement_timestamp(),measurement_evidence_ref='test-only-measurement',invalidated_at=NULL;
+UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true;
+RESET ROLE;
+`;

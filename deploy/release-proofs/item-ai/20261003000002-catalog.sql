@@ -153,6 +153,11 @@ SELECT COALESCE((
   AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('commonswarm_oauth.admin_client_owner_approvals') AND tgname='admin_owner_approval_guard' AND tgenabled='O' AND NOT tgisinternal AND tgtype=31 AND tgfoid=to_regprocedure('commonswarm_oauth.guard_owner_approval()'))
   AND NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance') AND (rolsuper OR rolcanlogin OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
   AND (SELECT count(*) FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))=3
+  AND NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
+    WHERE parent.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
+      AND (NOT m.admin_option OR m.inherit_option OR m.set_option))
+  AND NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member
+    WHERE member.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))
   AND EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('commonswarm_oauth.dpop_proof_replays') AND c.contype='p' AND (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(c.conkey) WITH ORDINALITY k(num,ord) JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num)=ARRAY['jti','jkt']::text[])
   AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polrelid IN (to_regclass('commonswarm_oauth.dpop_proof_replays'),to_regclass('commonswarm_oauth.dpop_nonces')))
   AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('commonswarm_oauth.admin_verified_clients') AND attname='client_id' AND NOT attisdropped AND atttypid='text'::regtype AND attnotnull=true)

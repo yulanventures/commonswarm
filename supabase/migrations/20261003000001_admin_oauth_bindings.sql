@@ -3,6 +3,7 @@
 ALTER TABLE swarm.admin_grants DROP CONSTRAINT admin_grants_registry_version_check;
 ALTER TABLE swarm.admin_grants ADD CONSTRAINT admin_grants_registry_version_check CHECK (registry_version >= 1);
 ALTER TABLE commonswarm_oauth.interactions DROP CONSTRAINT interactions_resource_check;
+-- Spec M1 reserves both resources; the live AS still refuses admin in getResourceServerInfo.
 ALTER TABLE commonswarm_oauth.interactions ADD CONSTRAINT interactions_resource_check
   CHECK (resource IN ('https://mcp.commonswarm.com/mcp','https://api.commonswarm.com/admin'));
 
@@ -250,13 +251,15 @@ BEGIN
   END IF;
   SELECT * INTO r FROM commonswarm_oauth.provider_grant_resources WHERE provider_grant_id=family;
   resource_map:=NEW.payload->'resources';
-  IF NOT FOUND THEN
-    -- Ordinary pre-cutover artifacts remain unchanged until the adapter lane
-    -- binds them. An unbound payload can never introduce admin authority.
+  IF NOT FOUND OR r.grant_class='hosted_mcp' THEN
+    -- MCP payloads (including backfilled families) retain the provider's native
+    -- optional principals and scalar/array/absent resource fields. Only admin
+    -- authority and immutable family changes are guarded here. In particular,
+    -- consume/expiry bookkeeping must not revalidate an ordinary MCP payload.
     IF NEW.payload->'resource' @> to_jsonb('https://api.commonswarm.com/admin'::text)
       OR NEW.payload->'aud' @> to_jsonb('https://api.commonswarm.com/admin'::text) OR NEW.payload->>'grant_class'='delegated_admin'
       OR (jsonb_typeof(resource_map)='object' AND resource_map ? 'https://api.commonswarm.com/admin') THEN
-      RAISE EXCEPTION 'admin artifact requires durable binding' USING ERRCODE='23514';
+      RAISE EXCEPTION 'admin artifact requires admin binding' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
   END IF;
@@ -303,6 +306,7 @@ DECLARE t text; f text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['provider_grant_resources','admin_grant_bindings','admin_interactions','admin_consent_orchestration'] LOOP
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I OWNER TO swarm_admin',t);
+    -- RLS is intentionally not FORCE: owner-definer guards need private reads/writes (C+D).
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I ENABLE ROW LEVEL SECURITY',t);
     EXECUTE format('REVOKE ALL ON commonswarm_oauth.%I FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime',t);
     EXECUTE format('CREATE POLICY oauth_runtime_select ON commonswarm_oauth.%I FOR SELECT TO commonswarm_oauth_runtime USING(true)',t);

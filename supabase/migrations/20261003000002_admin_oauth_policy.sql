@@ -1,8 +1,9 @@
 -- M2: client policy, shared DPoP admission and bounded lifecycle boundaries.
 -- No client is seeded, no runtime gets swarm membership, no issuance is enabled.
 DO $roles$
-DECLARE n text;
+DECLARE n text; creator_is_cluster_administrator boolean;
 BEGIN
+  SELECT rolsuper INTO creator_is_cluster_administrator FROM pg_catalog.pg_roles WHERE rolname=current_user;
   FOREACH n IN ARRAY ARRAY['commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=n) THEN
       SET LOCAL createrole_self_grant='';
@@ -14,6 +15,22 @@ BEGIN
         WHERE r.rolname=n AND (m.inherit_option OR m.set_option))
       OR EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.member WHERE r.rolname=n) THEN
       RAISE EXCEPTION 'unsafe admin policy role: %',n;
+    END IF;
+    -- Preserve the oauth-store creator-membership contract (20260928000003:48-95),
+    -- including pre-existing roles: only a non-superuser creator's admin-only edge.
+    IF creator_is_cluster_administrator AND EXISTS (
+      SELECT 1 FROM pg_catalog.pg_auth_members m
+      JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid
+      JOIN pg_catalog.pg_roles member ON member.oid=m.member
+      WHERE parent.rolname=n AND member.rolname=current_user) THEN
+      RAISE EXCEPTION 'admin policy administrator membership is unnecessary: %',n;
+    ELSIF NOT creator_is_cluster_administrator AND (
+      SELECT count(*)<>1 OR NOT coalesce(bool_and(m.admin_option AND NOT m.inherit_option AND NOT m.set_option),false)
+      FROM pg_catalog.pg_auth_members m
+      JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid
+      JOIN pg_catalog.pg_roles member ON member.oid=m.member
+      WHERE parent.rolname=n AND member.rolname=current_user) THEN
+      RAISE EXCEPTION 'admin policy creator membership is unsafe: %',n;
     END IF;
   END LOOP;
 END $roles$;
@@ -313,6 +330,7 @@ DECLARE t text; f text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['admin_verified_clients','admin_client_owner_approvals','dpop_proof_replays','dpop_nonces','issuer_key_denials'] LOOP
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I OWNER TO swarm_admin',t);
+    -- RLS is intentionally not FORCE: owner-definer proof/lifecycle functions need it (C+D).
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I ENABLE ROW LEVEL SECURITY',t);
     EXECUTE format('REVOKE ALL ON commonswarm_oauth.%I FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,commonswarm_admin_release',t);
   END LOOP;
@@ -399,3 +417,4 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- REVOKE SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verification_version) ON commonswarm_oauth.admin_grant_bindings FROM swarm_command;
 -- REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
+-- -- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.

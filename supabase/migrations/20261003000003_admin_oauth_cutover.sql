@@ -113,6 +113,12 @@ CREATE TRIGGER admin_cutover_guard BEFORE UPDATE OR DELETE ON commonswarm_oauth.
 CREATE FUNCTION commonswarm_oauth.guard_oauth_audit() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $fn$
 BEGIN
+  IF NEW.event_kind IN ('issued','rotated') THEN
+    -- Serialize issuance with a release-role closure; terminal/refusal audit stays available.
+    PERFORM 1 FROM commonswarm_oauth.admin_cutover_state
+      WHERE singleton AND admin_issuance_enabled AND legacy_closed FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'admin issuance closed' USING ERRCODE='23514'; END IF;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM commonswarm_oauth.admin_grant_bindings b WHERE b.provider_grant_id=NEW.provider_grant_id
     AND ROW(b.owner_user_id,b.admin_identity_id,b.admin_grant_id,b.connection_id,b.manifest_digest) IS NOT DISTINCT FROM
       ROW(NEW.owner_user_id,NEW.admin_identity_id,NEW.admin_grant_id,NEW.connection_id,NEW.manifest_digest)) THEN
@@ -127,6 +133,9 @@ CREATE FUNCTION commonswarm_oauth.guard_access_issuance() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $fn$
 DECLARE b commonswarm_oauth.admin_grant_bindings%ROWTYPE; e jsonb;
 BEGIN
+  PERFORM 1 FROM commonswarm_oauth.admin_cutover_state
+    WHERE singleton AND admin_issuance_enabled AND legacy_closed FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'admin issuance closed' USING ERRCODE='23514'; END IF;
   IF NOT EXISTS (SELECT 1 FROM commonswarm_oauth.resolve_admin_grant_status(NEW.provider_grant_id,
     (SELECT owner_user_id FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=NEW.provider_grant_id),NEW.kid)
       WHERE active AND NEW.expires_at<=expires_at) THEN
@@ -159,7 +168,8 @@ CREATE FUNCTION commonswarm_oauth.admin_access_is_active(p_jti text,p_digest byt
   p_jkt text,p_manifest_digest text,p_issued_at timestamptz,p_expires_at timestamptz,p_kid text)
 RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
 BEGIN
-  RETURN EXISTS(SELECT 1 FROM commonswarm_oauth.resolve_admin_grant_status(p_provider_grant_id,p_owner_user_id,p_kid) s
+  RETURN EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND admin_issuance_enabled AND legacy_closed)
+    AND EXISTS(SELECT 1 FROM commonswarm_oauth.resolve_admin_grant_status(p_provider_grant_id,p_owner_user_id,p_kid) s
     JOIN commonswarm_oauth.admin_access_issuances i ON i.provider_grant_id=p_provider_grant_id
     WHERE s.active AND i.access_jti=p_jti AND i.access_token_digest=p_digest AND i.admin_grant_id=p_admin_grant_id
       AND i.generation=p_generation AND i.client_id=p_client_id AND i.resource=p_resource
@@ -302,6 +312,7 @@ DECLARE t text; f text;
 BEGIN
   FOREACH t IN ARRAY ARRAY['admin_oauth_audit','admin_access_issuances','admin_cutover_state'] LOOP
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I OWNER TO swarm_admin',t);
+    -- RLS is intentionally not FORCE: owner-definer ledger/recovery functions need it (C+D).
     EXECUTE format('ALTER TABLE commonswarm_oauth.%I ENABLE ROW LEVEL SECURITY',t);
     EXECUTE format('REVOKE ALL ON commonswarm_oauth.%I FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance',t);
   END LOOP;

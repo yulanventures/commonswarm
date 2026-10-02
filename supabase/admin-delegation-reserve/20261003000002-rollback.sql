@@ -47,3 +47,4 @@ DROP POLICY command_binding_read ON commonswarm_oauth.admin_grant_bindings;
 REVOKE SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verification_version) ON commonswarm_oauth.admin_grant_bindings FROM swarm_command;
 REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
+-- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.
