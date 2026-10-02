@@ -372,6 +372,19 @@ signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
 click-through or reduced-control fallback. Close stops only the task-owned
 headless process and removes its private profile through guarded rm.
 
+Preflight uses a unique named harness daemon and private runtime directory;
+its EXIT trap stops that daemon on success or failure, never the default daemon.
+The headless process/profile remain available to later controls on success.
+Raw harness output and daemon logs stay under the private secret-staging root
+until failure cleanup or window close. Only a sanitized mode-0600 summary is
+retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
+stderr categories, with arbitrary error details withheld. STEP 0 means harness
+setup failed before Python started. Steps 1–13 are attachment, navigation,
+document load, app readiness, state snapshot, keychain/challenge check, branch
+selection, account label, user identity, starting workspace, workspace switch,
+switch wait, and receipt write. STEP 4 requires a non-loading dashboard state
+and exactly one visible panel before reading sign-in state.
+
 ```sh
 # step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium identity and workspace preflight
 # readonly: no
@@ -386,9 +399,24 @@ headless process and removes its private profile through guarded rm.
   browser_root="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
   case "$browser_root" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   chrome_pid=
+  harness_started=0
+  keep_browser=0
   cleanup_browser_preflight() {
     status=$?
     trap - EXIT
+    if [ "$harness_started" -eq 1 ]; then
+      # --reload only stops; these exact name/runtime settings never address default.
+      if ! BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+        BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+        BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
+        browser-harness --reload >"$private_evidence/harness-stop.stdout" \
+        2>"$private_evidence/harness-stop.stderr"; then
+        printf '%s\n' 'STOP: named preflight daemon cleanup failed; details withheld' >&2
+        status=1
+        keep_browser=0
+      fi
+    fi
+    if [ "$keep_browser" -eq 1 ] && [ "$status" -eq 0 ]; then exit 0; fi
     if [ -n "$chrome_pid" ]; then kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; fi
     if ! rm -r -- "$browser_root"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
@@ -400,6 +428,14 @@ headless process and removes its private profile through guarded rm.
   trap 'exit 130' INT
   trap 'exit 143' TERM
   chmod 0700 "$browser_root"
+  private_evidence="$browser_root/evidence"
+  harness_runtime="$browser_root/harness-runtime"
+  harness_name="site-preflight-${browser_root##*.}"
+  mkdir -m 0700 "$private_evidence" "$harness_runtime"
+  harness_stdout="$private_evidence/harness.stdout"
+  harness_stderr="$private_evidence/harness.stderr"
+  : >"$harness_stdout"; : >"$harness_stderr"
+  chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
@@ -435,13 +471,52 @@ NODE
   } >>"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
   export CLI_USER_ID SITE_EVIDENCE
-  BU_CDP_URL="$endpoint" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import json, os, pathlib, time
+  harness_status=0
+  harness_started=1
+  BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
+    BH_RUNTIME_DIR="$harness_runtime" BH_RUNTIME_DIR_SHARED=1 \
+    BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 BH_TAB_MARKER=0 \
+    browser-harness >"$harness_stdout" 2>"$harness_stderr" <<'PY' || harness_status=$?
+import json, os, pathlib, time, urllib.request
 expected_user = "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
 start_workspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 control_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+print("STEP 1", flush=True)
+endpoint = os.environ["BU_CDP_URL"]
+def endpoint_json(path):
+    # Loopback only; bypass ambient HTTP proxies. Never print endpoint responses.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(endpoint + path, timeout=5) as response:
+        return json.load(response)
+version = endpoint_json("/json/version")
+attached_version = cdp("Browser.getVersion")
+attached_target = current_tab()["targetId"]
+if (not version.get("webSocketDebuggerUrl", "").startswith(
+        endpoint.replace("http://", "ws://", 1) + "/devtools/browser/")
+    or "HeadlessChrome/" not in attached_version.get("userAgent", "")
+    or attached_version.get("product") != version.get("Browser")
+    or attached_version.get("userAgent") != version.get("User-Agent")
+    or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
+    raise SystemExit("STOP: STEP 1 endpoint ownership")
+print("STEP 2", flush=True)
 new_tab("https://commonswarm.com/app")
-wait_for_load()
+print("STEP 3", flush=True)
+if not wait_for_load(): raise SystemExit("STOP: STEP 3 document load timeout")
+print("STEP 4", flush=True)
+deadline = time.monotonic() + 30
+ready = False
+while time.monotonic() < deadline:
+    ready = js("""(() => {
+      const app=document.querySelector('live-dashboard[data-state]');
+      if(!app || !app.dataset.state || app.dataset.state==='loading') return false;
+      if(!app.querySelector('[data-panel="signed-out"]')) return false;
+      const visible=[...app.querySelectorAll('.dashboard__root > [data-panel]')]
+        .filter(panel=>!panel.hidden && panel.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}));
+      return visible.length===1 && visible[0].dataset.panel===app.dataset.state;
+    })()""")
+    if ready: break
+    time.sleep(.25)
+if not ready: raise SystemExit("STOP: STEP 4 app readiness timeout")
 def state():
     return js("""(() => {
       let userId='';
@@ -456,12 +531,15 @@ def state():
         display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
         signedOut:!document.querySelector('[data-panel="signed-out"]')?.hasAttribute('hidden')};
     })()""")
+print("STEP 5", flush=True)
 observed=state()
 signin_attempted=False
 # A fresh profile has no inherited operator SSO. This view-only control never
 # initiates sign-in. Signed-out state selects the existing reduced branch.
-if js("/keychain/i.test(document.body?.innerText||'')"): raise SystemExit('STOP: keychain dialog')
+print("STEP 6", flush=True)
+if js("/keychain/i.test(document.body?.innerText||'')"): raise SystemExit('STOP: STEP 6 keychain dialog')
 challenge=js("/two-factor|2fa|verification code/i.test(document.body?.innerText||'')")
+print("STEP 7", flush=True)
 if observed.get("signedOut") or challenge:
     result={"branch":"REDUCED-CONTROL","signin_attempted":signin_attempted,
       "reason":"signed-out-or-interactive-challenge",
@@ -469,14 +547,19 @@ if observed.get("signedOut") or challenge:
       "signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED",
       "mobile_320":"NOT PROVED","mobile_390":"NOT PROVED"}
 else:
+    print("STEP 8", flush=True)
     if observed["display"] != "Ridgeio": raise SystemExit(1)
+    print("STEP 9", flush=True)
     if observed["userId"] != expected_user or observed["userId"] != os.environ["CLI_USER_ID"]: raise SystemExit(1)
+    print("STEP 10", flush=True)
     if observed["selectedWorkspace"] != start_workspace: raise SystemExit(1)
+    print("STEP 11", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     switched=js("""(() => { const target=document.querySelector(
       '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
       if(!target)return false; target.click(); return true; })()""")
     if not switched: raise SystemExit(1)
+    print("STEP 12", flush=True)
     for _ in range(60):
         time.sleep(.5); observed=state()
         if observed.get("selectedWorkspace")==control_workspace: break
@@ -484,10 +567,59 @@ else:
     result={"branch":"FULL-CONTROL","account_label":"Ridgeio",
       "cli_user_id":expected_user,"web_user_id":expected_user,
       "start_workspace_id":start_workspace,"control_workspace_id":control_workspace}
+print("STEP 13", flush=True)
 path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
-  trap - EXIT INT TERM
+  python3 - "$harness_stdout" "$harness_stderr" "$harness_status" "$SITE_EVIDENCE" <<'PY'
+import collections, pathlib, re, sys
+stdout, stderr = map(pathlib.Path, sys.argv[1:3])
+code = int(sys.argv[3])
+names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
+    4:"app readiness", 5:"state snapshot", 6:"keychain/challenge", 7:"branch selection",
+    8:"account label", 9:"user identity", 10:"starting workspace", 11:"workspace switch",
+    12:"switch wait", 13:"receipt write"}
+step = 0
+with stdout.open(encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        match = re.fullmatch(r"STEP ([1-9]|1[0-3])\n?", line)
+        if match: step = int(match[1])
+# Reject sensitive-looking lines, then emit only fixed categories/line numbers.
+# No arbitrary message, source-code line, URL, file path or exception detail passes.
+unsafe = re.compile(r"token|jwt|email|cookie|session|bearer|credential|password|secret|"
+    r"authorization|localstorage|@|https?://|wss?://|eyJ[A-Za-z0-9_-]*\.|"
+    r"[A-Za-z0-9_+/=-]{24,}|[\x00-\x08\x0b-\x1f\x7f]", re.I)
+classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefusedError",
+    "OSError", "PermissionError", "FileNotFoundError", "KeyError", "ValueError",
+    "TypeError", "AssertionError", "SyntaxError", "ImportError", "ModuleNotFoundError")
+named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
+    "STOP: STEP 4 app readiness timeout", "STOP: STEP 6 keychain dialog"}
+with stderr.open(encoding="utf-8", errors="replace") as stream:
+    tail = collections.deque(stream, maxlen=20)
+safe = []
+for raw in tail:
+    line = raw.rstrip("\n")
+    if unsafe.search(line): continue
+    if line in named:
+        safe.append(line)
+        continue
+    for kind in classes:
+        if line == kind or line.startswith(kind + ":"):
+            safe.append(kind + " (details withheld)")
+            break
+    else:
+        match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
+        if match: safe.append("Python line " + match[1])
+summary = [f"site-03-browser-preflight: STEP {step} ({names[step]}); exit code {code}"]
+summary += ["stderr: " + line for line in safe[-8:]]
+if not safe: summary.append("stderr: no safe detail retained")
+text = "\n".join(summary) + "\n"
+path = pathlib.Path(sys.argv[4]) / "site-03-browser-preflight-summary.txt"
+path.write_text(text, encoding="utf-8"); path.chmod(0o600)
+print(text, end="")
+PY
+  if [ "$harness_status" -ne 0 ]; then exit "$harness_status"; fi
+  keep_browser=1
 )
 ```
 
