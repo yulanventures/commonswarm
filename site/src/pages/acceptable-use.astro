@@ -1,5 +1,29 @@
 ---
 /* The release owner updates both dates if the planned site release slips. */
+/* Enforcement pointers for the published caps; kept in frontmatter, outside the legal text.
+ *   10 live workspaces per verified identity -> FREE_TIER_WORKSPACE_LIMIT,
+ *                                               supabase/functions/command/index.ts:823
+ *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :699
+ *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :700
+ *   fixed clock hour, not rolling           -> incrementRateBucket, :5393 uses
+ *                                              date_trunc('hour', statement_timestamp())
+ *   body 1-8000                             -> supabase/migrations/20260827000001_expand_signal_body.sql
+ *   about <= 500                            -> index.ts:2138-2141
+ *   until <= 30d                            -> index.ts:2145-2148 (SIGNAL_MAX_UNTIL_MS)
+ *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :684
+ *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :689
+ *   file version <= 25 MB                   -> FILE_MAX_VERSION_BYTES,
+ *   workspace file bytes <= 1 GB            -> FILE_WORKSPACE_MAX_BYTES,
+ *                                              supabase/functions/command/file-artifacts.ts:52-55
+ *   500 unpurged names / workspace          -> FILE_WORKSPACE_MAX_NAMES,
+ *   20 live or in-flight versions / name    -> FILE_MAX_VERSIONS_PER_NAME, :55
+ *   brain topic: 20 live plus in-flight     -> src/protocol/brain-version-window.ts,
+ *                                              BRAIN_LIVE_VERSION_LIMIT
+ *   600 version creates / identity / hour   -> FILE_CREATE_RATE_LIMIT_PER_HOUR, :81
+ *   2000 version creates / ws / hour        -> FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR, :101
+ * Refresh these pointers whenever enforcement moves; tests/p1-cli/file-create-rate-limit.test.ts
+ * checks the cited lines and the published values against enforcement.
+ */
 
 import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
