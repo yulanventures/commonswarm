@@ -122,11 +122,17 @@ function hiddenCallback() {
     const input = process.stdin;
     const wasRaw = input.isRaw;
     let value = '';
+    let finished = false;
     const finish = (error) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       input.off('data', data); input.off('end', ended); input.off('error', failed);
       if (input.isTTY) input.setRawMode(wasRaw === true);
       input.pause();
+      // Stdin is consumed only once. Pausing an open pipe can retain its handle
+      // after the receipt, so close the reader without waiting for producer EOF.
+      input.destroy();
       if (error) reject(error); else resolve(value);
     };
     const data = (chunk) => {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 // Standalone Node tool intentionally has no TypeScript/dependency requirement.
@@ -90,3 +90,97 @@ test('CLI dry run emits planned requests and cannot call fetch', () => {
   assert.match(invalid.stderr, /Usage:/u);
   assert.equal(invalid.stdout, '');
 });
+
+for (const outcome of ['success', 'invalid_callback', 'cancelled', 'token_failure'] as const) {
+  test(`CLI exits after ${outcome} with its callback pipe left open`, async () => {
+    const script = fileURLToPath(new URL('../../scripts/dcr-roundtrip.mjs', import.meta.url));
+    // Replace fetch before executing the real CLI; no service or production hook.
+    const preload = 'data:text/javascript,' + encodeURIComponent(`
+      globalThis.fetch = async (url, options) => {
+        const issuer = 'https://mcp.commonswarm.com';
+        let body, status = 200;
+        switch (String(url)) {
+          case issuer + '/.well-known/oauth-authorization-server':
+            body = { issuer, registration_endpoint: issuer + '/register',
+              authorization_endpoint: issuer + '/authorize', token_endpoint: issuer + '/token',
+              code_challenge_methods_supported: ['S256'], scopes_supported: ['mcp'] };
+            break;
+          case issuer + '/.well-known/oauth-protected-resource/mcp':
+            body = { resource: issuer + '/mcp', authorization_servers: [issuer], scopes_supported: ['mcp'] };
+            break;
+          case issuer + '/register':
+            status = 201;
+            body = { client_id: 'synthetic-client-1234567890123456', token_endpoint_auth_method: 'none',
+              redirect_uris: ['https://dcr-release-probe.invalid/callback'] };
+            break;
+          case issuer + '/token':
+            if (${JSON.stringify(outcome)} === 'token_failure') throw new Error('synthetic-private-error');
+            body = { access_token: 'synthetic-private-token', token_type: 'Bearer', expires_in: 300, scope: 'mcp' };
+            break;
+          case issuer + '/mcp': {
+            const rpc = JSON.parse(options.body);
+            switch (rpc.method) {
+              case 'initialize':
+                body = { jsonrpc: '2.0', id: rpc.id, result: { protocolVersion: '2025-06-18',
+                  serverInfo: { name: 'commonswarm' } } };
+                break;
+              case 'notifications/initialized': return new Response(null, { status: 202 });
+              case 'tools/list': body = { jsonrpc: '2.0', id: rpc.id, result: { tools: [{ name: 'claim_seat' }] } }; break;
+              default: throw new Error('unexpected_stub_rpc');
+            }
+            break;
+          }
+          default: throw new Error('unexpected_stub_url');
+        }
+        return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+      };
+    `);
+    const child = spawn(process.execPath, ['--import', preload, script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', sent = false, timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 3000);
+    try {
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+        const newline = stdout.indexOf('\n');
+        if (sent || newline < 0) return;
+        sent = true;
+        const authorization = new URL(stdout.slice(0, newline));
+        const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('state', authorization.searchParams.get('state')!);
+        callback.searchParams.set('code', 'synthetic-private-code');
+        const line = outcome === 'invalid_callback' ? 'synthetic-private-invalid-url\n'
+          : outcome === 'cancelled' ? '\u0003' : `${callback.href}\n`;
+        child.stdin.write(line); // Deliberately never end the pipe.
+      });
+      const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', (code, signal) => resolve([code, signal]));
+      });
+      assert.ok(sent, 'CLI must reach consent input');
+      const receipt = JSON.parse(stdout.slice(stdout.indexOf('\n') + 1));
+      assert.equal(receipt.ok, outcome === 'success', 'CLI must print its final receipt');
+      assert.equal(timedOut, false, 'CLI printed its receipt but kept the callback pipe alive');
+      assert.equal(signal, null);
+      assert.equal(code, outcome === 'success' ? 0 : 1);
+      if (outcome === 'success') {
+        assert.equal(receipt.tool_count, 1);
+        assert.equal(receipt.requests.tools_list.status, 200);
+      } else {
+        const reason = outcome === 'token_failure' ? 'request_or_runtime_failed'
+          : outcome === 'invalid_callback' ? 'invalid_callback_url' : 'cancelled';
+        assert.ok(stderr.includes(reason), 'failure must have a safe reason');
+      }
+      for (const privateValue of ['synthetic-private-token', 'synthetic-private-code',
+        'synthetic-private-invalid-url', 'synthetic-private-error']) {
+        assert.ok(!(stdout + stderr).includes(privateValue), 'CLI must not print private input or remote errors');
+      }
+    } finally {
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      child.stdin.destroy();
+    }
+  });
+}
