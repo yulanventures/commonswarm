@@ -148,6 +148,45 @@ test("Claude initialization negotiates versions before initialized and tools/lis
   assert.equal(get.headers.get("allow"), "POST");
 });
 
+test("tools/list advertises exact hosted titles and safety annotations after 2025-06-18 negotiation", async (t) => {
+  const fixture = await authenticatedHandler();
+  const initialized = await fixture.serve(post({
+    jsonrpc: "2.0", id: "metadata-initialize", method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "metadata-reviewer", version: "1.0.0" } },
+  }, fixture.headers));
+  assert.equal(initialized.status, 200);
+  const protocolVersion = (await initialized.json()).result.protocolVersion;
+  assert.equal(protocolVersion, "2025-06-18");
+  const response = await fixture.serve(post({
+    jsonrpc: "2.0", id: "metadata-list", method: "tools/list",
+  }, { ...fixture.headers, "mcp-protocol-version": protocolVersion }));
+  assert.equal(response.status, 200);
+  const envelope = await response.json();
+  assert.equal(envelope.id, "metadata-list");
+  // Independent review contract: read-only, destructive, idempotent.
+  // check can acknowledge a batch and advance the durable inbox cursor.
+  const expected = [
+    ["claim_seat", "Claim a named seat", false, false, true],
+    ["whoami", "Show seat identity", true, false, true],
+    ["check", "Check and acknowledge inbox", false, true, false],
+    ["ask", "Ask workspace participants", false, false, true],
+    ["note", "Share a workspace note", false, false, true],
+    ["reply", "Reply to a signal", false, false, true],
+    ["working_on", "Share current work", false, false, true],
+    ["members", "List workspace participants", true, false, true],
+  ] as const;
+  const tools = envelope.result.tools;
+  assert.deepEqual(tools.map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
+  for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
+    await t.test(name, () => {
+      assert.deepEqual({ title: tools[index].title, annotations: tools[index].annotations }, {
+        title,
+        annotations: { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint: false },
+      });
+    });
+  }
+});
+
 test("tools/list accepts optional cursor and metadata without pagination", async (t) => {
   const fixture = await authenticatedHandler();
   const logging = t.mock.method(console, "error", () => undefined);

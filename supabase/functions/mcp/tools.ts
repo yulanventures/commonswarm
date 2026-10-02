@@ -27,14 +27,56 @@ const recipient = objectSchema({ kind: { type: "string", enum: ["user", "agent"]
 const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 };
 
 export const HOSTED_TOOL_TABLE = [
-  { name: "claim_seat", description: "Create or reuse a named hosted seat. Omit workspace_id to use the grant's home workspace chosen at consent, or provide another consented workspace ID. Retry with the same request_id.", inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]) },
-  { name: "whoami", description: "Show the selected hosted seat identity.", inputSchema: objectSchema({ seat: handle }, ["seat"]) },
-  { name: "check", description: "Read a durable batch of directed messages, optionally acknowledging the prior batch.", inputSchema: objectSchema({ seat: handle, ack: uuid }, ["seat"]) },
-  { name: "ask", description: "Ask one or more workspace participants. Retry with the same request_id.", inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "recipients", "body", "request_id"]) },
-  { name: "note", description: "Share a note, optionally with recipients. Retry with the same request_id.", inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]) },
-  { name: "reply", description: "Reply privately to a signal. Retry with the same request_id.", inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), request_id: requestId }, ["seat", "signal_id", "body", "request_id"]) },
-  { name: "working_on", description: "Share current work. Retry with the same request_id.", inputSchema: objectSchema({ seat: handle, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]) },
-  { name: "members", description: "List members and agents in the selected seat's workspace.", inputSchema: objectSchema({ seat: handle }, ["seat"]) },
+  {
+    name: "claim_seat", title: "Claim a named seat",
+    description: "Create or reuse a named seat. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.",
+    annotations: { title: "Claim a named seat", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]),
+  },
+  {
+    name: "whoami", title: "Show seat identity",
+    description: "Show the selected hosted seat identity.",
+    annotations: { title: "Show seat identity", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle }, ["seat"]),
+  },
+  {
+    name: "check", title: "Check and acknowledge inbox",
+    description: "Open a durable inbox batch, optionally acknowledging the prior batch and permanently advancing delivery.",
+    // ACK replaces durable cursor state; later calls can create new batches.
+    // See command/index.ts handleHostedCheck and mcp/index.ts executeTool.
+    annotations: { title: "Check and acknowledge inbox", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, ack: uuid }, ["seat"]),
+  },
+  {
+    name: "ask", title: "Ask workspace participants",
+    description: "Ask one or more workspace participants. Retry with the same request_id.",
+    annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "recipients", "body", "request_id"]),
+  },
+  {
+    name: "note", title: "Share a workspace note",
+    description: "Share a note, optionally with recipients. Retry with the same request_id.",
+    annotations: { title: "Share a workspace note", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]),
+  },
+  {
+    name: "reply", title: "Reply to a signal",
+    description: "Reply privately to a signal. Retry with the same request_id.",
+    annotations: { title: "Reply to a signal", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
+  },
+  {
+    name: "working_on", title: "Share current work",
+    description: "Share current work. Retry with the same request_id.",
+    annotations: { title: "Share current work", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]),
+  },
+  {
+    name: "members", title: "List workspace participants",
+    description: "List members and agents in the selected seat's workspace.",
+    annotations: { title: "List workspace participants", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: objectSchema({ seat: handle }, ["seat"]),
+  },
 ] as const;
 
 export type HostedToolName = typeof HOSTED_TOOL_TABLE[number]["name"];
