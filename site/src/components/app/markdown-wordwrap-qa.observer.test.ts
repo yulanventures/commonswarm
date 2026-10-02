@@ -376,6 +376,8 @@ interface Harness {
 }
 
 const startHarness = async (): Promise<Harness> => {
+  // Browser admission and selection must succeed before opening any server.
+  const chrome = await findChrome();
   const bundle = await build({
     absWorkingDir: siteRoot,
     bundle: true,
@@ -431,7 +433,7 @@ const startHarness = async (): Promise<Harness> => {
   const address = server.address();
   assert.ok(address && typeof address !== "string", "the markdown-qa server must bind a port");
   return {
-    chrome: await findChrome(),
+    chrome,
     origin: `http://127.0.0.1:${address.port}`,
     markdownScript,
     close: () => new Promise<void>((resolve, reject) => {
@@ -593,16 +595,17 @@ const measureAll = async (): Promise<Results> => {
   return { harness, shipped, controls };
 };
 
-const resultsPromise = measureAll();
+let resultsPromise: Promise<Results> | undefined;
+const results = (): Promise<Results> => resultsPromise ??= measureAll();
 const allRows = async (): Promise<Row[]> =>
-  [...(await resultsPromise).shipped.values()].flatMap((entry) => entry.rows);
+  [...(await results()).shipped.values()].flatMap((entry) => entry.rows);
 
 const failuresIn = (rows: Row[], family: Family): string[] => rows
   .filter((r) => r.family === family && !r.pass)
   .map((r) => `${r.key}: measured ${r.measured}, target ${r.target}`);
 
 test("the corpus renders at both widths in both themes with the requested viewport", async () => {
-  const { shipped } = await resultsPromise;
+  const { shipped } = await results();
   const expectedLoads = renders.length * VIEWPORTS.length * THEMES.length;
   assert.equal(shipped.size, expectedLoads, `expected ${expectedLoads} shipped loads`);
   for (const { load, measurement } of shipped.values()) {
@@ -620,7 +623,7 @@ test("the corpus renders at both widths in both themes with the requested viewpo
 });
 
 test("the spec's pixel targets are the shipped tokens at a 16px root", async () => {
-  const { shipped } = await resultsPromise;
+  const { shipped } = await results();
   const [{ measurement }] = [...shipped.values()];
   assert.ok(measurement, "at least one load must be measured");
   assert.equal(measurement.tokens.rootPx, ROOT_PX);
@@ -632,7 +635,7 @@ test("the spec's pixel targets are the shipped tokens at a 16px root", async () 
 });
 
 test("every fixture measures every pair the spec names", async () => {
-  const { shipped } = await resultsPromise;
+  const { shipped } = await results();
   /* A row that is not produced cannot fail, so the pairs each fixture must yield are pinned. */
   const required: Record<string, string[]> = {
     "01": ["paragraph→paragraph", "paragraph→list", "item→item", "item→item (nested)"],
@@ -656,7 +659,7 @@ test("block gaps: 12 between blocks, 4 between items, 24 above and 8 below a hea
 });
 
 test("CONTROL: with the paragraph gap overridden to 40px the gap row fails", async () => {
-  const { controls } = await resultsPromise;
+  const { controls } = await results();
   const control = controls.get("gap");
   assert.ok(control, "the gap control was not measured");
   const broken = control.rows.find((r) => r.measurement === "gap paragraph→paragraph");
@@ -671,7 +674,7 @@ test("wrap: no horizontal overflow at either width except inside a table's own b
   assert.deepEqual(failures, [], `wrap rows failed:\n${failures.join("\n")}`);
   /* The table exemption is used, not merely allowed: at 390 the 6×4 table is wider than the phone
    * and scrolls inside itself. Without this, "no overflow" could be a table that happened to fit. */
-  const { shipped } = await resultsPromise;
+  const { shipped } = await results();
   const phoneTable = [...shipped.values()]
     .find((entry) => entry.load.render.fixture.id === "03" && entry.load.viewport.name === "390");
   assert.ok(phoneTable?.measurement.table, "fixture 3 at 390 must render a table");
@@ -682,7 +685,7 @@ test("wrap: no horizontal overflow at either width except inside a table's own b
 });
 
 test("CONTROL: with the p wrap rule overridden the long tokens run past the message", async () => {
-  const { controls } = await resultsPromise;
+  const { controls } = await results();
   const control = controls.get("wrap");
   assert.ok(control, "the wrap control was not measured");
   const failed = control.rows.filter((r) => r.family === "wrap" && !r.pass).map((r) => r.measurement);
@@ -703,7 +706,7 @@ test("the last line is body-coloured at full opacity with no mask on the way up"
 });
 
 test("CONTROL: with a gradient mask and a faded last block the last-line rows fail", async () => {
-  const { controls } = await resultsPromise;
+  const { controls } = await results();
   const control = controls.get("fade");
   assert.ok(control, "the fade control was not measured");
   const failed = control.rows.filter((r) => r.family === "light" && !r.pass).map((r) => r.measurement);
@@ -715,7 +718,7 @@ test("CONTROL: with a gradient mask and a faded last block the last-line rows fa
  * assertions read, and each screenshot is its own Chrome process against the same URL the DOM run
  * measured. */
 test("RESULTS.md and the screenshots are written from the measured rows", async () => {
-  const { harness, shipped, controls } = await resultsPromise;
+  const { harness, shipped, controls } = await results();
   try {
     mkdirSync(evidenceDir, { recursive: true });
     const screenshots: string[] = [];

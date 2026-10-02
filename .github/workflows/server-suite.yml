@@ -211,7 +211,9 @@ jobs:
           npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
           cd ..
           npm --prefix site run build
-          npm --prefix site test 2>&1 | tee site.log
+          # Runner CHROME_BIN may name installed Chrome; discover the bundled shell instead.
+          unset CHROME_BIN
+          npm --prefix site run test:ci 2>&1 | tee site.log
       - name: Service-free test suite
         if: matrix.suite == 'unit'
         run: |

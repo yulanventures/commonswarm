@@ -63,7 +63,7 @@ interface Snapshot {
   proseRoadmapIsPlainText: boolean;
 }
 
-const snapshotPromise = (async (): Promise<Snapshot> => {
+const renderSnapshot = async (): Promise<Snapshot> => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-brain-links-"));
   const fixture = join(directory, "index.html");
   const bundleOf = async (entry: string, globalName: string): Promise<string> => {
@@ -156,10 +156,13 @@ const snapshotPromise = (async (): Promise<Snapshot> => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-})();
+};
+
+let snapshotPromise: Promise<Snapshot> | undefined;
+const getSnapshot = (): Promise<Snapshot> => snapshotPromise ??= renderSnapshot();
 
 test("only the validated, gated mentions become controls in a real rendered message", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.deepEqual(
     snapshot.controlTopics,
     ["commonswarm-roadmap", "shared-host", "releases", "shared-host", "releases"],
@@ -172,7 +175,7 @@ test("only the validated, gated mentions become controls in a real rendered mess
 });
 
 test("NEGATIVE CONTROL: a name that is not a topic stays plain text in the DOM", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.ok(snapshot.controlTopics.length > 0, "controls must exist for a negative to mean anything");
   assert.equal(
     snapshot.madeUpTopicIsPlainText,
@@ -182,7 +185,7 @@ test("NEGATIVE CONTROL: a name that is not a topic stays plain text in the DOM",
 });
 
 test("a one-word topic stays prose no matter what words sit around it", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* Line 2 of the body reads "The brain roadmap slipped": "roadmap" is a live one-word topic
      with the word "brain" immediately in front of it, in the same text node. Only a code span
      that IS the name admits a one-word topic, and this one is prose. An earlier revision of
@@ -193,7 +196,7 @@ test("a one-word topic stays prose no matter what words sit around it", async ()
 });
 
 test("a code span must BE a one-word topic, not merely contain it", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* "brain" and "get" are live one-word topics in this fixture. The span
      `cswarm brain get shared-host` contains both, and must offer neither: only the slug-shaped
      name in it links. A span-contains rule would drop controls into a command a reader copies. */
@@ -204,7 +207,7 @@ test("a code span must BE a one-word topic, not merely contain it", async () => 
 });
 
 test("a topic name inside a URL query or fragment is left alone, even inside code", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* A code span marks a one-word name as a literal, so the whole URL is scanned with the gate
      open. The run must swallow "?", "=", "&" and "#" or a button lands inside a command a reader
      is meant to copy.
@@ -221,18 +224,18 @@ test("a topic name inside a URL query or fragment is left alone, even inside cod
 });
 
 test("a fenced block keeps the exact text the author typed", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.controlsInsidePre, 0);
   assert.equal(snapshot.preText, "cswarm brain get brain-how-to");
 });
 
 test("a control is never nested inside a link", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.controlsInsideAnchor, 0);
 });
 
 test("a control is a real button and clicking it asks for that canonical topic", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.equal(snapshot.firstControlTag, "BUTTON");
   assert.equal(snapshot.firstControlType, "button");
   assert.deepEqual(snapshot.clicked, ["commonswarm-roadmap"]);
