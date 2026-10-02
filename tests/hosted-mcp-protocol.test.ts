@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
-import { MCP_ISSUER, MCP_RESOURCE } from "../supabase/functions/mcp/auth.ts";
+import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/mcp/auth.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
@@ -42,6 +42,170 @@ function post(body: unknown, headers: Record<string, string> = {}): Request {
     body: JSON.stringify(body),
   });
 }
+
+async function authenticatedHandler() {
+  const now = 1_800_000_000;
+  const pair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"],
+  );
+  const publicJwk = {
+    ...await crypto.subtle.exportKey("jwk", pair.publicKey),
+    kid: "claude-fixture", alg: "ES256", use: "sig",
+  };
+  const verifier = new McpJwtVerifier({
+    now: () => now,
+    fetch: async () => new Response(JSON.stringify({ keys: [publicJwk] })),
+  });
+  const header = Buffer.from(JSON.stringify({
+    alg: "ES256", kid: publicJwk.kid, typ: "at+jwt",
+  })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: verified.subject,
+    grant_id: verified.providerGrantId, iat: now, exp: now + 300,
+  })).toString("base64url");
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" }, pair.privateKey,
+    Buffer.from(`${header}.${payload}`),
+  );
+  const authorization = `Bearer ${header}.${payload}.${Buffer.from(signature).toString("base64url")}`;
+  const serve = createMcpProtocolHandler({
+    issuer: MCP_ISSUER, resource: MCP_RESOURCE, publicEnabled: true,
+    allowedOrigins: new Set(["https://claude.ai"]),
+    limits: {
+      maxBodyBytes: 4096, maxResponseBytes: 64 * 1024,
+      requestTimeoutMs: 2_000, maxConcurrentRequests: 2,
+    },
+    verifyToken: (token: string, signal: AbortSignal) => verifier.verify(token, signal),
+    executeTool: async () => { throw new Error("initialize and list must not execute a tool"); },
+  });
+  return {
+    serve,
+    headers: {
+      authorization, "user-agent": "Claude-User",
+      accept: "application/json, text/event-stream",
+    },
+  };
+}
+
+test("Claude initialization negotiates versions before initialized and tools/list", async (t) => {
+  const fixture = await authenticatedHandler();
+  const logging = t.mock.method(console, "error", () => undefined);
+  const id = "x".repeat(26);
+  for (const requested of ["2025-03-26", "2025-06-18", "2025-11-25", "2099-01-01"]) {
+    for (const withHeader of [false, true]) {
+      await t.test(`${requested}, initialize header ${withHeader ? "present" : "absent"}`, async () => {
+        const response = await fixture.serve(post({
+          jsonrpc: "2.0", id, method: "initialize",
+          params: {
+            protocolVersion: requested,
+            capabilities: {
+              roots: { listChanged: true }, sampling: {},
+              experimental: { futureCapability: { enabled: true } },
+            },
+            clientInfo: { name: "claude-ai", version: "0.1.0" },
+          },
+        }, {
+          ...fixture.headers,
+          ...(withHeader ? { "mcp-protocol-version": requested } : {}),
+          "content-type": withHeader ? "application/json; charset=utf-8" : "application/json",
+        }));
+        assert.equal(response.status, 200);
+        assert.match(response.headers.get("content-type")!, /^application\/json/u);
+        const initialize = await response.json();
+        const negotiated = requested === "2025-03-26" ? requested : "2025-06-18";
+        assert.deepEqual(initialize, {
+          jsonrpc: "2.0", id,
+          result: {
+            protocolVersion: negotiated,
+            capabilities: { tools: { listChanged: false } },
+            serverInfo: { name: "commonswarm", version: "1.0.0" },
+            instructions: "Use an explicit seat handle for every CommonSwarm tool call.",
+          },
+        });
+        const headers = { ...fixture.headers, "mcp-protocol-version": negotiated };
+        const initialized = await fixture.serve(post({
+          jsonrpc: "2.0", method: "notifications/initialized",
+        }, headers));
+        assert.equal(initialized.status, 202);
+        assert.equal(await initialized.text(), "");
+        const listed = await fixture.serve(post({
+          jsonrpc: "2.0", id: `${id}-list`, method: "tools/list", params: {},
+        }, headers));
+        assert.equal(listed.status, 200);
+        const tools = await listed.json();
+        assert.equal(tools.id, `${id}-list`);
+        assert.equal(tools.result.tools.length, 8);
+        assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
+          typeof tool.name === "string" && typeof tool.inputSchema === "object"));
+      });
+    }
+  }
+  assert.equal(logging.mock.callCount(), 0, "successful negotiation and discovery do not log failures");
+  const get = await fixture.serve(new Request(MCP_RESOURCE, {
+    headers: { ...fixture.headers, accept: "text/event-stream" },
+  }));
+  assert.equal(get.status, 405);
+  assert.equal(get.headers.get("allow"), "POST");
+});
+
+test("MCP denials log only stable error codes and known method names", async (t) => {
+  const fixture = await authenticatedHandler();
+  const logging = t.mock.method(console, "error", () => undefined);
+  const id = "private-id-must-not-be-logged";
+  const initialize = (params: unknown) => ({ jsonrpc: "2.0", id, method: "initialize", params });
+  // The body, not an early header, controls initialization negotiation.
+  const good = await fixture.serve(post(initialize({ protocolVersion: "2025-03-26" }), {
+    ...fixture.headers, "mcp-protocol-version": "2099-01-01",
+  }));
+  assert.equal(good.status, 200);
+  assert.equal((await good.json()).result.protocolVersion, "2025-03-26");
+  assert.equal(logging.mock.callCount(), 0);
+
+  for (const params of [{}, { protocolVersion: null }, { protocolVersion: 42 }, { protocolVersion: {} }]) {
+    const invalid = await fixture.serve(post(initialize(params), fixture.headers));
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error.code, -32602);
+  }
+  const list = { jsonrpc: "2.0", id, method: "tools/list" };
+  const later = await fixture.serve(post(list, {
+    ...fixture.headers, "mcp-protocol-version": "2099-01-01",
+  }));
+  assert.equal(later.status, 400);
+  assert.equal((await later.json()).error.code, -32600);
+
+  const unauthenticated = await fixture.serve(post(initialize({ protocolVersion: "2099-01-01" }), {
+    ...fixture.headers, authorization: "Bearer invalid.jwt.value",
+    "mcp-protocol-version": "2099-01-01",
+  }));
+  assert.equal(unauthenticated.status, 401, "authentication precedes version negotiation");
+  const forbidden = await fixture.serve(post(list, {
+    ...fixture.headers, origin: "https://attacker.invalid",
+  }));
+  assert.equal(forbidden.status, 403);
+  const parse = await fixture.serve(new Request(MCP_RESOURCE, {
+    method: "POST",
+    headers: { ...fixture.headers, "content-type": "application/json" },
+    body: "private-body-must-not-be-logged",
+  }));
+  assert.equal(parse.status, 400);
+  const unknown = await fixture.serve(post({
+    jsonrpc: "2.0", id, method: "private-method-must-not-be-logged",
+  }, fixture.headers));
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => {
+    assert.equal(args.length, 1);
+    return JSON.parse(args[0]);
+  }), [
+    ...Array.from({ length: 4 }, () => ({
+      event: "request_failed", error_code: -32602, method: "initialize",
+    })),
+    { event: "request_failed", error_code: -32600, method: "tools/list" },
+    { event: "request_failed", error_code: "unauthorized", method: null },
+    { event: "request_failed", error_code: "origin_not_allowed", method: null },
+    { event: "request_failed", error_code: -32700, method: null },
+    { event: "request_failed", error_code: -32601, method: "unknown" },
+  ]);
+});
 
 test("protected-resource metadata and the unauthenticated challenge name exact URLs", async () => {
   const serve = handler();

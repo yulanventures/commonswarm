@@ -8,7 +8,12 @@ export const RESOURCE_METADATA_URL =
   `https://mcp.commonswarm.com${PROTECTED_RESOURCE_METADATA_PATH}`;
 export const WWW_AUTHENTICATE =
   `Bearer resource_metadata="${RESOURCE_METADATA_URL}"`;
+// Keep versions oldest to newest for initialize fallback. The 2025-11-25
+// initialize/tools/list shapes are compatible, but its tool input-error semantics
+// differ from our legacy JSON-RPC validation errors. Negotiate down until those
+// semantics are implemented rather than advertising that revision.
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18"] as const;
+const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1];
 
 const INTERNAL_METADATA_PATH = `/mcp${PROTECTED_RESOURCE_METADATA_PATH}`;
 const REQUEST_NODE_LIMIT = 1_000;
@@ -187,10 +192,24 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
   let concurrent = 0;
   return async function handleRequest(request: Request): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    let method: string | null = null;
+    const logFailure = (error_code: string | number) => {
+      if (pathname === "/mcp") {
+        console.error(JSON.stringify({ event: "request_failed", error_code, method }));
+      }
+    };
+    const failed = (
+      status: number,
+      value: { error: string; feature?: string; message?: string } | ReturnType<typeof rpcError>,
+      extra: HeadersInit = {},
+    ) => {
+      logFailure(typeof value.error === "string" ? value.error : value.error.code);
+      return json(status, value, extra);
+    };
     const metadata = pathname === PROTECTED_RESOURCE_METADATA_PATH ||
       pathname === INTERNAL_METADATA_PATH;
     if ((pathname === "/mcp" || metadata) && !options.publicEnabled) {
-      return json(503, {
+      return failed(503, {
         error: "feature_disabled",
         feature: "hosted_mcp",
         message: "Hosted MCP is not available yet.",
@@ -198,27 +217,27 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
     }
     if (metadata) {
       if (request.method !== "GET" && request.method !== "HEAD") {
-        return json(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+        return failed(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
       }
       const response = json(200, protectedResourceMetadata(options.issuer, options.resource));
       return request.method === "HEAD"
         ? new Response(null, { status: response.status, headers: response.headers })
         : response;
     }
-    if (pathname !== "/mcp") return json(404, { error: "not_found" });
+    if (pathname !== "/mcp") return failed(404, { error: "not_found" });
     if (request.method !== "POST") {
-      return json(405, { error: "method_not_allowed" }, { allow: "POST" });
+      return failed(405, { error: "method_not_allowed" }, { allow: "POST" });
     }
     const origin = request.headers.get("origin");
     if (origin !== null && !options.allowedOrigins.has(origin)) {
-      return json(403, { error: "origin_not_allowed" });
+      return failed(403, { error: "origin_not_allowed" });
     }
     if (concurrent >= options.limits.maxConcurrentRequests) {
-      return json(429, { error: "too_many_requests" }, { "retry-after": "1" });
+      return failed(429, { error: "too_many_requests" }, { "retry-after": "1" });
     }
     const token = bearer(request);
     if (token === null) {
-      return json(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
+      return failed(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
     }
     concurrent += 1;
     const lifetime = requestSignal(request, options.limits.requestTimeoutMs);
@@ -229,27 +248,33 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       try {
         verified = await beforeAbort(options.verifyToken(token, lifetime.signal), lifetime.signal);
       } catch {
-        return json(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
+        return failed(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
       }
       if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
-        return json(415, { error: "unsupported_media_type" });
+        return failed(415, { error: "unsupported_media_type" });
       }
       let value: unknown;
       try {
         const source = await readBody(request, options.limits.maxBodyBytes, lifetime.signal);
         value = JSON.parse(source);
       } catch (error) {
-        if (error instanceof RangeError) return json(413, { error: "request_too_large" });
-        if (lifetime.signal.aborted) return json(504, { error: "request_timeout" });
-        return json(400, rpcError(null, -32700, "Parse error"));
+        if (error instanceof RangeError) return failed(413, { error: "request_too_large" });
+        if (lifetime.signal.aborted) return failed(504, { error: "request_timeout" });
+        return failed(400, rpcError(null, -32700, "Parse error"));
       }
-      if (!boundedJsonTree(value)) return json(400, rpcError(null, -32600, "Invalid Request"));
+      if (!boundedJsonTree(value)) return failed(400, rpcError(null, -32600, "Invalid Request"));
       const message = parsedRpc(value);
-      if (message === null) return json(400, rpcError(null, -32600, "Invalid Request"));
+      if (message === null) return failed(400, rpcError(null, -32600, "Invalid Request"));
+      // Never log an arbitrary client-supplied method that might contain secrets.
+      method = ["initialize", "notifications/initialized", "ping", "tools/list", "tools/call"].includes(message.method)
+        ? message.method
+        : "unknown";
       const protocolHeader = request.headers.get("mcp-protocol-version");
-      if (protocolHeader !== null &&
+      // The initialize body negotiates the version; the header is for subsequent
+      // requests and cannot veto that negotiation, even if a client sends it early.
+      if (message.method !== "initialize" && protocolHeader !== null &&
           !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolHeader as typeof SUPPORTED_PROTOCOL_VERSIONS[number])) {
-        return json(400, rpcError(message.id ?? null, -32600, "Unsupported protocol version"));
+        return failed(400, rpcError(message.id ?? null, -32600, "Unsupported protocol version"));
       }
       if (message.method === "notifications/initialized") {
         return new Response(null, { status: 202, headers: { "cache-control": "no-store" } });
@@ -258,12 +283,13 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       let result: unknown;
       if (message.method === "initialize") {
         const requested = message.params?.protocolVersion;
-        if (typeof requested !== "string" ||
-            !SUPPORTED_PROTOCOL_VERSIONS.includes(requested as typeof SUPPORTED_PROTOCOL_VERSIONS[number])) {
-          return json(400, rpcError(message.id, -32602, "Unsupported protocol version"));
+        if (typeof requested !== "string") {
+          return failed(400, rpcError(message.id, -32602, "Unsupported protocol version"));
         }
         result = {
-          protocolVersion: requested,
+          protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested as typeof SUPPORTED_PROTOCOL_VERSIONS[number])
+            ? requested
+            : LATEST_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "commonswarm", version: "1.0.0" },
           instructions: "Use an explicit seat handle for every CommonSwarm tool call.",
@@ -272,14 +298,14 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
         result = {};
       } else if (message.method === "tools/list") {
         if (message.params !== undefined && Object.keys(message.params).length !== 0) {
-          return json(400, rpcError(message.id, -32602, "Invalid params"));
+          return failed(400, rpcError(message.id, -32602, "Invalid params"));
         }
         result = { tools: HOSTED_TOOL_TABLE };
       } else if (message.method === "tools/call") {
         const params = message.params;
         if (params === undefined || Object.keys(params).some((key) => !["name", "arguments"].includes(key)) ||
             typeof params.name !== "string" || !hostedToolName(params.name)) {
-          return json(400, rpcError(message.id, -32602, "Invalid params"));
+          return failed(400, rpcError(message.id, -32602, "Invalid params"));
         }
         try {
           const args = validateHostedToolArguments(params.name, params.arguments ?? {});
@@ -296,25 +322,26 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
           const output = await beforeAbort(toolOperation, lifetime.signal);
           result = { content: [{ type: "text", text: JSON.stringify(output) }] };
         } catch (error) {
-          if (lifetime.signal.aborted) return json(504, { error: "request_timeout" });
+          if (lifetime.signal.aborted) return failed(504, { error: "request_timeout" });
           if (error instanceof HostedToolInputError) {
-            return json(400, rpcError(message.id, -32602, error.message));
+            return failed(400, rpcError(message.id, -32602, error.message));
           }
           const code = error instanceof Error && /^hosted_[a-z0-9_]+$/u.test(error.message)
             ? error.message
             : "tool_failed";
+          logFailure("tool_failed");
           result = {
             isError: true,
             content: [{ type: "text", text: JSON.stringify({ error: code }) }],
           };
         }
       } else {
-        return json(404, rpcError(message.id, -32601, "Method not found"));
+        return failed(404, rpcError(message.id, -32601, "Method not found"));
       }
       const envelope = { jsonrpc: "2.0", id: message.id, result };
       const encoded = JSON.stringify(envelope);
       if (new TextEncoder().encode(encoded).byteLength > options.limits.maxResponseBytes) {
-        return json(500, rpcError(message.id, -32603, "Response exceeds limit"));
+        return failed(500, rpcError(message.id, -32603, "Response exceeds limit"));
       }
       return new Response(encoded, {
         status: 200,
@@ -325,8 +352,8 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       });
     } catch {
       return lifetime.signal.aborted
-        ? json(504, { error: "request_timeout" })
-        : json(500, { error: "internal_error" });
+        ? failed(504, { error: "request_timeout" })
+        : failed(500, { error: "internal_error" });
     } finally {
       lifetime.close();
       if (toolOperation !== null && !toolSettled) {
