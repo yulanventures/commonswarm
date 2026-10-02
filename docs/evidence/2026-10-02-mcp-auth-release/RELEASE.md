@@ -454,22 +454,34 @@ for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
             with response:
                 body=response.read(131073); code=response.code
                 content_type=response.headers.get('Content-Type','')
+                facts=f'method={method} base={base} path={path} UA={ua} status={code} content-type={content_type!r}'
+                assert len(body)<=131072, f'oversized response: {facts}'
                 if path=='/jwks':
-                    assert len(body)<=131072 and re.fullmatch(
+                    assert re.fullmatch(
                         r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
-                        content_type.strip(), re.I), 'invalid JWKS content type or oversized response'
+                        content_type.strip(), re.I), f'invalid JWKS content type: {facts}'
                 else:
-                    assert len(body)<=131072 and 'application/json' in content_type, 'non-JSON or oversized response'
-                value=json.loads(body)
-                assert code==expected if expected is not None else code in (400,401), 'unexpected status'
-                if path=='/health': assert value.get('status')=='ok'
+                    media_type='text/html' if enabled and path=='/authorize' else 'application/json'
+                    assert re.fullmatch(re.escape(media_type)+
+                        r'(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
+                        content_type.strip(), re.I), f'unexpected content type: {facts}'
+                if enabled and path=='/authorize':
+                    assert b'    at ' not in body and b'node_modules' not in body, f'HTML stack trace marker: {facts}'
+                    value=None
+                else:
+                    try: value=json.loads(body)
+                    except (ValueError, UnicodeError):
+                        raise AssertionError(f'invalid JSON: {facts}') from None
+                    assert isinstance(value,dict), f'JSON response is not an object: {facts}'
+                assert code==expected if expected is not None else code in (400,401), f'unexpected status: {facts}'
+                if path=='/health': assert value.get('status')=='ok', f'unhealthy response: {facts}'
                 if path.startswith('/.well-known/') and code==200:
                     if path.endswith('/mcp'):
-                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp'
-                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[])
-                    else: assert value.get('issuer')=='https://mcp.commonswarm.com'
-                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys'])
-                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled')
+                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp', f'unexpected resource: {facts}'
+                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[]), f'unexpected authorization servers: {facts}'
+                    else: assert value.get('issuer')=='https://mcp.commonswarm.com', f'unexpected issuer: {facts}'
+                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys']), f'invalid public JWKS: {facts}'
+                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled'), f'unexpected disabled error: {facts}'
                 print(method,base+path,ua,code,'PASS')
 PY
 }
@@ -612,8 +624,10 @@ ln -sfn "$OAUTH_RELEASE_DIR" /home/commonswarm/oauth/current || exit 1
 Use the same probe in OFF, ON and rollback states. Every request has a bounded
 timeout, no credentials, no redirect following and a non-browser UA. No body
 is printed; a 502, HTML challenge, 1010 or unexpected status fails. Enabled
-authorization is deliberately an invalid request (400), and MCP is a proper
-POST without a bearer (401); GET `/mcp` would only test method refusal.
+authorization is deliberately an invalid request (400) with `text/html` from
+oidc-provider's default error renderer; its bounded body must have no stack trace
+markers. All other routes require JSON (JWKS also accepts `application/jwk-set+json`).
+MCP is a proper POST without a bearer (401); GET `/mcp` would only test method refusal.
 
 ```sh
 # step: hm37-mcp-route-probes
