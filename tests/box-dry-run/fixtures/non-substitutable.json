@@ -1643,7 +1643,7 @@
     "step": "site-05-browser-acceptance",
     "surface": "browser-harness",
     "reason": "The block drives the signed-in production page through browser-harness: identity, assets, Connected apps empty state, console, and 320px/390px geometry.",
-    "live_proof": "Anvil's live run of this block (docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1028-1400), with automatic rollback to the pinned release on failure.",
+    "live_proof": "Anvil's live run of this block (docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1040-1413), with automatic rollback to the pinned release on failure.",
     "unproduced": [
       {
         "output": "site-05-connected-empty.png",
@@ -1666,7 +1666,7 @@
         "branch": "FULL-CONTROL",
         "plan_documented": {
           "evidence": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md",
-          "source_lines": "1286-1291, 1294-1296 (FULL-CONTROL and REDUCED-CONTROL writer branches)",
+          "source_lines": "1298-1303, 1306-1308 (FULL-CONTROL and REDUCED-CONTROL writer branches)",
           "label": "plan-documented shape; no live evidence yet; replace with Anvil's live output after the lane 8 window",
           "json": {
             "branch": "FULL-CONTROL",
@@ -1742,6 +1742,6 @@
       }
     ]
   },
-  {"step": "site-06", "surface": "browser-harness", "reason": "The block verifies rollback bytes over ssh and then re-checks the browser branch through browser-harness; on the success path it records rollback=not-needed before any browser code. The unit is the whole block, and a browser part cannot run.", "live_proof": "Anvil's live run of this block (docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1412-1693).", "unproduced": [{"output": "site-06-rollback-verify.txt", "reason": "no committed evidence holds this file; its not-needed line is written by the plan, which the harness does not run for this block"}]},
+  {"step": "site-06", "surface": "browser-harness", "reason": "The block verifies rollback bytes over ssh and then re-checks the browser branch through browser-harness; on the success path it records rollback=not-needed before any browser code. The unit is the whole block, and a browser part cannot run.", "live_proof": "Anvil's live run of this block (docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1425-1707).", "unproduced": [{"output": "site-06-rollback-verify.txt", "reason": "no committed evidence holds this file; its not-needed line is written by the plan, which the harness does not run for this block"}]},
   {"surface": "site build: npm ci and npm run build inside deploy/site/deploy.sh", "reason": "the dry run cannot prove a real site build; deploy.sh's own validation and Anvil's live readback prove it.", "live_proof": "Anvil's live site-04 run builds from the exact release SHA and deploy.sh validates the built /start page; site-05's public-byte and browser controls read the release back.", "shape_evidence": [{"file": "deploy/site/vercel-reference.json", "shape": "artifacts: the 25 stable files of a real build"}, {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the five real /_astro assets, and the app and download pages"}, {"file": "docs/evidence/2026-09-27-release-9b085c823523/run.log", "shape": "line 2: /guides/grok-bot answers 200"}, {"file": "site/src/layouts/Base.astro", "shape": "the commonswarm:url meta the build inlines from PUBLIC_SUPABASE_URL"}]}
 ]

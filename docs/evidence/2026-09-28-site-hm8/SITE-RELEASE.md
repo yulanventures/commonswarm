@@ -678,7 +678,8 @@ the switch.
   set -E
   trap 'printf "FAIL site-03-pin-previous: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
+  printf -v box_command '%q ' /bin/bash -s -- "$SITE_WINDOW_ID"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site-03-pin.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -827,8 +828,12 @@ PY
   pin=$(cat "$SITE_EVIDENCE/previous.release")
   test "$previous" = /srv/commonswarm/site/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5
   test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
-    "test \"\$(readlink -f /srv/commonswarm/site/current)\" = '$previous' && test -f '$pin/app/index.html'"
+  printf -v box_command '%q ' /bin/bash -s -- "$previous" "$pin"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" <<'BOX'
+set -euo pipefail
+test "$(readlink -f /srv/commonswarm/site/current)" = "$1"
+test -f "$2/app/index.html"
+BOX
   test ! -e "$SITE_EVIDENCE/deploy.log"
   set +e
   env -u PUBLIC_SUPABASE_URL -u PUBLIC_SUPABASE_ANON_KEY -u PUBLIC_H0_LINK_JOIN \
@@ -848,7 +853,11 @@ PY
   if test "$deploy_status" -ne 0 || test "$read_status" -ne 0; then exit 70; fi
   after=$(cat "$SITE_EVIDENCE/after.release")
   case "$after" in /srv/commonswarm/site/releases/????????T??????Z-603a206e52f3-????????????????) ;; *) exit 1 ;; esac
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "test -f '$pin/app/index.html'"
+  printf -v box_command '%q ' /bin/bash -s -- "$pin"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" <<'BOX'
+set -euo pipefail
+test -f "$1/app/index.html"
+BOX
   printf '%s\n' 'PIN_AFTER_DEPLOY=PASS' >"$SITE_EVIDENCE/pin-after-deploy.txt"
   chmod 0600 "$SITE_EVIDENCE/pin-after-deploy.txt"
 )
@@ -875,7 +884,8 @@ immediate rollback; a third state stops for incident handling.
       >"$SITE_EVIDENCE/site-04-reconciliation.txt"
   else
     case "$current" in /srv/commonswarm/site/releases/????????T??????Z-603a206e52f3-????????????????) ;; *) exit 1 ;; esac
-    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
+    printf -v box_command '%q ' /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID"
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -951,7 +961,8 @@ that path does not require a running browser.
     trap - EXIT
     set -e
     after=$(cat "$SITE_EVIDENCE/after.release")
-    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
+    printf -v box_command '%q ' /bin/bash -s -- "$after"
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site-05-public.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -995,7 +1006,8 @@ BOX
   if [ -f "$SITE_EVIDENCE/site-05-public.txt" ]; then chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"; fi
   if test "$control_status" -ne 0; then
     pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
-    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
+    printf -v box_command '%q ' /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID"
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -1384,7 +1396,8 @@ PY
   if test "$browser_status" -ne 0 &&
     grep -qFx 'blocking=yes' "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; then
     pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
-    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
+    printf -v box_command '%q ' /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID"
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -1501,7 +1514,8 @@ PY
     chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"; exit 0
   fi
   pin=$(cat "$SITE_EVIDENCE/previous.release")
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" \
+  printf -v box_command '%q ' /bin/bash -s -- "$pin"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site-06-rollback-verify.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -1717,6 +1731,36 @@ reconciliation and `site-06`. A partial pin failure needs HezLead reconciliation
 never delete its marker or use the pre-pin path to bypass it. Do not retry the
 failed release step within the closing window.
 
+`site-07-manifest-close` also resumes a close whose SSH command never ran. It
+requires no `CLOSE.txt`, an absent or empty regular `site-07-pin-close.txt`, the
+matching Mac and box window files, and the original pin still present. It
+revalidates the public/browser/rollback receipts, checks an existing outcome
+byte for byte, and regenerates the manifest deterministically. The manifest
+excludes itself and `CLOSE.txt`; the final version includes the completed box
+pin-close receipt. `CLOSE.txt` is written only after all cleanup succeeds. A
+nonempty close receipt, missing pin/window, or unexpected live target stops for
+HezLead reconciliation; this block never repeats a partial box close.
+
+For retained lane 8 try 9, HezLead runs **only `site-07-manifest-close`**, extracted
+by that step ID from this reviewed plan, with `/bin/bash` on the Mac mini. No
+new prompt inputs or credentials are needed: it sources the retained
+`$HOME/.commonswarm-site-window.env`. Its `SITE_EVIDENCE` must be
+`/private/tmp/hm37-lane8-try9.0xnbrK/evidence/`, `SITE_WINDOW_ID` must be
+`20261002T051147Z`, and `SITE_RELEASE_REPO` remains the retained exact-SHA
+checkout named in that file. `after.release` must name
+`/srv/commonswarm/site/releases/20261002T051239Z-603a206e52f3-8497828122597214`.
+The browser inputs remain `SITE_BROWSER_ROOT=/private/tmp/anvil-secret.n1DtyP`,
+`SITE_CHROME_PID=8362`, and the recorded binary/profile; the process ownership
+check still applies. Retain the existing outcome/manifest and empty pin-close
+file; do not erase receipts, reopen the window, redeploy, or rerun browser work.
+
+Every variable-bearing SSH call constructs one remote command with
+`printf -v box_command '%q ' /bin/bash -s -- ...`, then passes only that command
+to SSH. Bash on the box recovers each value as a positional argument; the BOX
+heredoc remains literal script text on stdin. Free acceptance text is never
+passed as unquoted remote command text. Static date/readlink/open calls use
+only fixed commands. The close additionally allowlists its values on the box.
+
 ```sh
 # step: site-07-pre-pin-manifest-close — Mac mini /bin/bash 3.2; Anvil; close a failure before pin invocation
 # readonly: no
@@ -1765,7 +1809,8 @@ assert target.name==".env" and target.parent.resolve(strict=True)==repo/"site"
 assert not target.is_symlink()
 if target.exists(): assert target.is_file()
 PY
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
+  printf -v box_command '%q ' /bin/bash -s -- "$SITE_WINDOW_ID"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site-07-pre-pin-close.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -1861,7 +1906,27 @@ PY
   set -euo pipefail
   set -E
   trap 'printf "FAIL site-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  test -f "$HOME/.commonswarm-site-window.env" && test ! -L "$HOME/.commonswarm-site-window.env"
+  test "$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")" = 600
   . "$HOME/.commonswarm-site-window.env"
+  test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  for input_path in "$SITE_EVIDENCE" "$SITE_RELEASE_REPO"; do
+    case "$input_path" in /*) ;; *) exit 1 ;; esac
+    test -d "$input_path" && test ! -L "$input_path"
+  done
+  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
+  # Retry only an attempt that has no box-close receipt and no completed close.
+  test ! -e "$SITE_EVIDENCE/CLOSE.txt" && test ! -L "$SITE_EVIDENCE/CLOSE.txt"
+  test ! -L "$SITE_EVIDENCE/site-07-pin-close.txt"
+  if test -e "$SITE_EVIDENCE/site-07-pin-close.txt"; then
+    test -f "$SITE_EVIDENCE/site-07-pin-close.txt"
+    test ! -s "$SITE_EVIDENCE/site-07-pin-close.txt"
+  fi
   pin=$(cat "$SITE_EVIDENCE/previous.release"); previous=$(cat "$SITE_EVIDENCE/previous.original")
   if test -f "$SITE_EVIDENCE/rollback-auto.txt"; then
     grep -qFx 'ROLLBACK_PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
@@ -1887,19 +1952,50 @@ else:
 PY
     outcome=released
   fi
-  # This outcome/acceptance receipt is hashed by the manifest; CLOSE.txt mirrors it.
-  {
-    printf 'OUTCOME=%s\n' "$outcome"
-    if test "$outcome" = released; then cat "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; fi
-  } >"$SITE_EVIDENCE/site-07-outcome.txt"
-  chmod 0600 "$SITE_EVIDENCE/site-07-outcome.txt"
+  test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
+  test "$previous" = /srv/commonswarm/site/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5
+  after=''
+  if test "$outcome" = released; then
+    grep -qFx 'rollback=not-needed' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+    after=$(cat "$SITE_EVIDENCE/after.release")
+    python3 - "$after" <<'PY'
+import re,sys
+assert re.fullmatch(r"/srv/commonswarm/site/releases/[0-9]{8}T[0-9]{6}Z-603a206e52f3-[0-9a-f]{16}",sys.argv[1])
+PY
+  fi
+  # Retained outcome must exactly match the receipts; never overwrite a conflict.
+  python3 - "$SITE_EVIDENCE" "$outcome" <<'PY'
+import pathlib,sys
+root=pathlib.Path(sys.argv[1]); outcome=sys.argv[2]
+expected=("OUTCOME="+outcome+"\n").encode()
+if outcome=="released": expected+=(root/"site-05-browser-acceptance-receipt.txt").read_bytes()
+target=root/"site-07-outcome.txt"
+assert not target.is_symlink()
+if target.exists(): assert target.is_file() and target.read_bytes()==expected
+else: target.write_bytes(expected)
+target.chmod(0o600)
+PY
   browser_acceptance_line=$(sed -n '/^browser_acceptance=/p' "$SITE_EVIDENCE/site-07-outcome.txt")
+  python3 - "$SITE_RELEASE_REPO" "$SITE_EVIDENCE" <<'PY'
+import pathlib,sys
+repo=pathlib.Path(sys.argv[1]).resolve(strict=True); root=pathlib.Path(sys.argv[2])
+assert repo not in {pathlib.Path("/"),pathlib.Path.home().resolve()}
+target=repo/"site/.env"
+assert target.parent.resolve(strict=True)==repo/"site" and not target.is_symlink()
+if target.exists(): assert target.is_file()
+for name in ("manifest.json","site-07-outcome.txt"):
+    path=root/name; assert not path.is_symlink()
+    if path.exists(): assert path.is_file()
+PY
+  write_site_manifest() {
   python3 - "$SITE_EVIDENCE" <<'PY'
 import hashlib,json,pathlib,re,stat,sys
 root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
 for path in sorted(root.rglob("*")):
-    if path.name=="chrome-launch.log" or path.is_dir(): continue
-    if path.is_symlink() or not path.is_file(): raise SystemExit(1)
+    if path.is_symlink(): raise SystemExit(1)
+    if path.name in {"chrome-launch.log","manifest.json","CLOSE.txt"} or path.is_dir(): continue
+    if not path.is_file(): raise SystemExit(1)
+    if path.name=="site-07-pin-close.txt" and path.stat().st_size==0: continue
     data=path.read_bytes()
     if path.suffix.lower() in {".html",".har"}: raise SystemExit(1)
     if path.suffix.lower() in {".txt",".json",".log",""}:
@@ -1911,17 +2007,52 @@ for path in sorted(root.rglob("*")):
       "mode":format(stat.S_IMODE(path.stat().st_mode),"04o"),"sha256":hashlib.sha256(data).hexdigest()})
 if not rows: raise SystemExit(1)
 manifest=root/"manifest.json"; manifest.write_text(json.dumps(rows,sort_keys=True,indent=2)+"\n",encoding="utf-8"); manifest.chmod(0o600)
+assert json.loads(manifest.read_text(encoding="utf-8"))==rows
+for row in rows:
+    path=root/row["path"]; data=path.read_bytes()
+    assert len(data)==row["bytes"] and hashlib.sha256(data).hexdigest()==row["sha256"]
+    assert format(stat.S_IMODE(path.stat().st_mode),"04o")==row["mode"]
 PY
-  manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" "$browser_acceptance_line" \
+  }
+  write_site_manifest
+  printf -v box_command '%q ' /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" "$browser_acceptance_line" "$after"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site-07-pin-close.txt" <<'BOX'
 set -euo pipefail
 set -E
 trap 'printf "FAIL site-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-pin=$1; previous=$2; window_id=$3; outcome=$4; browser_acceptance_line=$5; root=/srv/commonswarm/site
+test "$#" -eq 6
+pin=$1; previous=$2; window_id=$3; outcome=$4; browser_acceptance_line=$5; after=$6; root=/srv/commonswarm/site
+python3 - "$window_id" "$outcome" "$browser_acceptance_line" "$after" <<'PY'
+import re,sys
+window,outcome,acceptance,after=sys.argv[1:]
+assert re.fullmatch(r"[0-9]{8}T[0-9]{6}Z",window)
+assert outcome in {"released","rolled-back","failed-before-switch"}
+if outcome=="released":
+    assert re.fullmatch(r"browser_acceptance=(?:PASS|NOT_PROVED) reason=(?:STEP [0-9]{1,2} \([A-Za-z /-]+\)|STOP[^\n]+)",acceptance)
+    assert re.fullmatch(r"/srv/commonswarm/site/releases/[0-9]{8}T[0-9]{6}Z-603a206e52f3-[0-9a-f]{16}",after)
+else: assert acceptance==after==""
+PY
+test "$(id -un)" = commonswarm
+test -f /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
+test "$(stat -c '%a' /tmp/commonswarm-site-window.env)" = 600
+(
+  . /tmp/commonswarm-site-window.env
+  test "$SITE_WINDOW_ID" = "$3"
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
+)
+test -d "$pin" && test ! -L "$pin"
+test -f "$pin/app/index.html"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
 test "$previous" = "$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+test -L "$root/current"
 current=$(readlink -f "$root/current")
+case "$outcome" in
+  released) test "$current" = "$after"; test -d "$after" && test ! -L "$after" ;;
+  rolled-back) test "$current" = "$pin" ;;
+  failed-before-switch) test "$current" = "$previous" ;;
+esac
+test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
 if test "$current" = "$pin"; then
   if test -d "$previous" && test ! -L "$previous"; then target="$previous"
   else test ! -e "$previous" && test ! -L "$previous"; mv "$pin" "$previous"; target="$previous"; pin=''; fi
@@ -1938,31 +2069,17 @@ PY
   rm -r -- "$pin"
   test ! -e "$pin"
 fi
-rm -f /tmp/commonswarm-site-window.env
+rm -f -- /tmp/commonswarm-site-window.env
+test ! -e /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
 printf 'pin_released=yes\noutcome=%s\nOUTCOME=%s\n' "$outcome" "$outcome"
 if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-07-pin-close.txt"
-  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
-  {
-    printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
-    printf 'BROWSER_BRANCH=%s\n' "$branch"
-    if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
-    if test "$branch" = FULL-CONTROL && test "$outcome" = released &&
-      grep -q '^browser_acceptance=PASS reason=' "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; then
-      printf '%s\n' \
-        'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
-        'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
-        'BROWSER_RESTORED_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
-        'NOT_PROVED=[]'
-    else
-      printf '%s\n' \
-        'NOT_PROVED=[signed-in Connected apps load; signed-in empty state; signed-in no-creation-action; signed-in console clean; 320px header; 390px header]'
-    fi
-    printf 'MANIFEST_SHA256=%s\nPIN_RELEASED=yes\nCLOSED_AT=%s\n' \
-      "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } >"$SITE_EVIDENCE/CLOSE.txt"
-  chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
+  grep -qFx 'pin_released=yes' "$SITE_EVIDENCE/site-07-pin-close.txt"
+  grep -qFx "OUTCOME=$outcome" "$SITE_EVIDENCE/site-07-pin-close.txt"
+  if test "$outcome" = released; then
+    grep -qFx "$browser_acceptance_line" "$SITE_EVIDENCE/site-07-pin-close.txt"
+  fi
   python3 - "$SITE_RELEASE_REPO/site/.env" <<'PY'
 import pathlib,sys
 build_env=pathlib.Path(sys.argv[1])
@@ -1974,6 +2091,9 @@ PY
   if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test ! -L "$SITE_BROWSER_ROOT"
+    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    case "$SITE_CHROME_PID" in ''|*[!0-9]*) exit 1 ;; esac
+    test "$SITE_CHROME_PID" -gt 1
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
       browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
@@ -2000,7 +2120,30 @@ PY
     fi
     test ! -e "$SITE_BROWSER_ROOT"
   fi
-  rm -f "$SITE_WINDOW_FILE"
+  rm -f -- "$SITE_WINDOW_FILE"
+  test ! -e "$SITE_WINDOW_FILE" && test ! -L "$SITE_WINDOW_FILE"
+  write_site_manifest
+  manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  {
+    printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
+    printf 'BROWSER_BRANCH=%s\n' "$branch"
+    if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
+    if test "$branch" = FULL-CONTROL && test "$outcome" = released &&
+      grep -q '^browser_acceptance=PASS reason=' "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; then
+      printf '%s\n' \
+        'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
+        'BROWSER_RESTORED_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'NOT_PROVED=[]'
+    else
+      printf '%s\n' \
+        'NOT_PROVED=[signed-in Connected apps load; signed-in empty state; signed-in no-creation-action; signed-in console clean; 320px header; 390px header]'
+    fi
+    printf 'MANIFEST_SHA256=%s\nPIN_RELEASED=yes\nCLOSED_AT=%s\n' \
+      "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$SITE_EVIDENCE/CLOSE.txt"
+  chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
 )
 ```
 
