@@ -11,6 +11,7 @@ import {
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
 import { renderConsentPage } from "./interaction-page.js";
+import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE_SCOPES } from "./provider.js";
 
 function respond(response, status, body, headers = {}) {
@@ -88,11 +89,20 @@ function identity(session) {
   };
 }
 
+async function findClient(provider, clientId) {
+  if (!provider?.Client?.find) return undefined;
+  try {
+    return await provider.Client.find(clientId);
+  } catch {
+    return undefined;
+  }
+}
+
 async function clientConsentDisplay(provider, clientId, redirectUri) {
-  const client = await provider.Client.find(clientId);
-  if (client?.clientIdMetadataDocument) {
+  if (metadataUrlAllowed(clientId)) {
     return { verified: true, primary: new URL(clientId).host };
   }
+  const client = await findClient(provider, clientId);
   const redirect = new URL(redirectUri);
   return {
     verified: false,
@@ -235,7 +245,7 @@ export function createInteractionHandler({
       // HTTP is only a native-client loopback exception. Client metadata has
       // already passed the provider's policy before this interaction exists.
       const client = new URL(redirectUri).protocol === "http:"
-        ? await provider.Client.find(details.params.client_id)
+        ? await findClient(provider, details.params.client_id)
         : null;
       return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
     }
