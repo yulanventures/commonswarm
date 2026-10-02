@@ -104,14 +104,17 @@ Enabled startup additionally requires
 `/etc/commonswarm-oauth/management-database-credentials`. Install it only
 at switch-on with `compose.yaml` plus `compose.management.yaml`. OFF and
 both rollback paths use base Compose alone and remove the exact host file
-with the verified rm guard. Its JSON document
+with absolute `/usr/bin/rm` after the release plan checks root binary resolution,
+absence of local wrappers, and the literal no-symlink path boundary. The Mac
+rm guard remains unchanged. Its JSON document
 contains `databaseUrl`, read from the existing box edge configuration's
 `SWARM_DATABASE_URL` only. A root program reads it inside the exact OAuth
 image on the box at switch-on; it first checks membership, SET ROLE and
 effective schema/table grants in read-only transactions. Missing grants stop
 with the exact privilege/object/role; never widen grants. Install the file
-`0440 root:10001` after verifying the runtime is UID:GID `10001:10001`, as
-declared in the Dockerfile and required by this procedure. Only root and
+`0440 root:986` after verifying the measured box runtime UID:GID `996:986`.
+Compose explicitly overrides Dockerfile `USER 10001:10001`; preserve the
+existing unprivileged service identity and stop on drift. Only root and
 that runtime group can read it; its ON-only bind mount is read-only.
 No management 1Password item is created or used. The login must be able to set
 `swarm_command` and `swarm_read`; do not broaden the OAuth artifact role.
