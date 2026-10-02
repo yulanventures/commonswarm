@@ -39,7 +39,7 @@
 
 	@oauth_authorize {
 		method GET HEAD
-		path /authorize
+		path /authorize /authorize/*
 	}
 	handle @oauth_authorize {
 		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
@@ -179,7 +179,7 @@ mcp.commonswarm.com {
 			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp\",\"message\":\"Hosted MCP is not available yet.\"}" 503
 		}
 
-		@oauth_wrong_method path /health /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks /authorize /token /interaction/* /oauth/callback/gotrue
+		@oauth_wrong_method path /health /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks /authorize /authorize/* /token /interaction/* /oauth/callback/gotrue
 		handle @oauth_wrong_method {
 			header Content-Type "application/json; charset=utf-8"
 			respond "{\"error\":\"method_not_allowed\"}" 405
