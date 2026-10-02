@@ -6,22 +6,24 @@ import { chmodSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { approvalCatalog, approvalFailureDetail } from '../support/admin-db-diagnostic.js';
-import { dbAssert, emptyApplicationSchema, fixture, refuses } from '../support/admin-schema-db.js';
+import { dbAssert, emptyApplicationSchema, fixture, localClusterAdminUrl, refuses } from '../support/admin-schema-db.js';
 
 test('admin-owner-approval-scoped: Bob approval cannot authorize Alice; real owner commands are retryable and atomically fence only her families', { timeout: 180000 }, () => {
   // This suite is intentionally NOT RUN LOCALLY (Docker).
   const local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
   })) as { DB_URL: string };
-  assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(local.DB_URL).hostname));
+  const fixtureUrl = localClusterAdminUrl(local.DB_URL);
   const secretRoot = process.platform === 'darwin' ? '/private/tmp' : '/tmp';
   const secretDir = execFileSync('mktemp', ['-d', join(secretRoot, 'anvil-secret.XXXXXX')], { encoding: 'utf8' }).trim();
   chmodSync(secretDir, 0o700);
   const f = fixture(), aliceGrant = randomUUID(), aliceConnection = randomUUID(), aliceFamily = `family-${randomUUID()}`;
-  const prepare = `${f.sql}
+  const grantPrep = `
 INSERT INTO swarm.admin_grants SELECT (jsonb_populate_record(NULL::swarm.admin_grants,to_jsonb(g)||
   jsonb_build_object('grant_id','${aliceGrant}','owner_user_id','${f.foreign}','connection_id','${aliceConnection}'))).*
   FROM swarm.admin_grants g WHERE grant_id='${f.grant}';
+`;
+  const resourcePrep = `
 SET LOCAL ROLE commonswarm_oauth_runtime;
 INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,admin_grant_id)
 VALUES('${aliceFamily}','https://api.commonswarm.com/admin','delegated_admin','${f.foreign}','${f.client}','${aliceConnection}','${aliceGrant}');
@@ -56,9 +58,14 @@ try {
  sql = postgres(config.url, { prepare: false, max: 1 });
  await sql.begin(async tx => {
   step = 'schema-isolation';
+  const [administrator] = await tx\`SELECT current_user AS role, rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user\`;
+  assert.equal(administrator.role,'supabase_admin');
+  assert.equal(administrator.rolsuper,true);
   await tx.unsafe(config.schema);
-  step = 'fixture-prepare';
-  await tx.unsafe(config.prepare);
+  for (const part of config.preparation) {
+   step = part.step;
+   await tx.unsafe(part.sql);
+  }
   step = 'verification-prepare';
   await tx.unsafe(config.verificationPrep);
   step = 'projection-prepare';
@@ -78,11 +85,20 @@ try {
   const approve = wire({ kind:'approve_admin_client',client_id:config.client,verification_version:1 });
   async function run(input, auth=human, scope=tx) {
    await scope.unsafe('SET LOCAL ROLE swarm_command');
+   const [commandRole] = await scope\`SELECT current_user AS role, rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user\`;
+   assert.equal(commandRole.role,'swarm_command');
+   assert.equal(commandRole.rolsuper,false);
    // On an SQL failure the enclosing savepoint restores the role. RESET in
    // an aborted transaction would replace the original failure with 25P02.
    const outcome = (await adminTransaction(scope,input,auth)).result;
    await scope.unsafe('RESET ROLE');
    return outcome;
+  }
+  async function policyStatus(family, owner) {
+   await tx.unsafe('SET LOCAL ROLE commonswarm_oauth_runtime');
+   const [policy] = await tx\`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(\${family},\${owner},'test-kid')\`;
+   await tx.unsafe('RESET ROLE');
+   return policy;
   }
   const verificationBefore = await tx\`SELECT * FROM commonswarm_oauth.admin_verified_clients ORDER BY verification_version\`;
   step = 'actor-refusals';
@@ -118,7 +134,7 @@ try {
   step = 'alice-binding';
   await tx.unsafe(config.binding);
   step = 'active-control';
-  const [policy] = await tx\`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(\${config.aliceFamily},\${config.alice},'test-kid')\`;
+  const policy = await policyStatus(config.aliceFamily,config.alice);
   assert.equal(policy.active,true);
   const withdraw = wire({kind:'withdraw_admin_client_approval',client_id:config.client,verification_version:1,reason_code:'owner_withdrew'});
   const beforeRollback = (await tx\`SELECT seq,projection FROM swarm.admin_accounts WHERE owner_user_id=\${config.alice}::uuid\`)[0];
@@ -149,7 +165,7 @@ try {
   assert.equal(projection.projection.grants[config.aliceGrant].state,'revoked');
   step = 'bob-control';
   assert.equal((await tx\`SELECT state FROM swarm.admin_grants WHERE grant_id=\${config.bobGrant}::uuid\`)[0].state,'active');
-  assert.equal((await tx\`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(\${config.bobFamily},\${config.bob},'test-kid')\`)[0].active,true);
+  assert.equal((await policyStatus(config.bobFamily,config.bob)).active,true);
   assert.equal((await tx\`SELECT withdrawn_at FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id=\${config.bob}::uuid\`)[0].withdrawn_at,null);
   assert.equal((await tx\`SELECT count(*)::int AS count FROM commonswarm_oauth.admin_oauth_audit WHERE provider_grant_id=\${config.aliceFamily} AND event_kind='revoked'\`)[0].count,1);
   step = 'no-resurrection';
@@ -173,7 +189,9 @@ if (!Deno.exitCode) console.log('ADMIN_OWNER_APPROVAL_OK');
   try {
     const configPath = join(secretDir, 'config.json'), harnessPath = join(secretDir, 'harness.mjs');
     const schema = emptyApplicationSchema();
-    writeFileSync(configPath, JSON.stringify({ url: local.DB_URL, schema, prepare, verificationPrep, binding,
+    const preparation = [...f.preparation,
+      { step: 'fixture-prepare:grant', sql: grantPrep }, { step: 'fixture-prepare:resource', sql: resourcePrep }];
+    writeFileSync(configPath, JSON.stringify({ url: fixtureUrl, schema, preparation, verificationPrep, binding,
       bob: f.owner, alice: f.foreign, client: f.client, bobGrant: f.grant, aliceGrant, bobFamily: f.provider, aliceFamily }), { mode: 0o600 });
     writeFileSync(harnessPath, harness, { mode: 0o600 });
     const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
