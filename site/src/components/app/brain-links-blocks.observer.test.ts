@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { build } from "esbuild";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 

@@ -201,10 +201,15 @@ jobs:
           npm run test:p1-cli 2>&1 | tee p1-cli.log
       - name: Site build and site suite
         if: matrix.suite == 'site'
-        # The observer tests read the built pages, so the build runs first; they find /usr/bin/google-chrome.
+        # Observers use only Playwright's bundled headless shell, after building the pages.
+        env:
+          RUN_BROWSER_TESTS: "1"
         run: |
           set -o pipefail
           npm ci --prefix site
+          cd site
+          npx --yes playwright@1.63.0 install --with-deps chromium-headless-shell
+          cd ..
           npm --prefix site run build
           npm --prefix site test 2>&1 | tee site.log
       - name: Service-free test suite

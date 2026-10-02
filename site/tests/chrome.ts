@@ -2,12 +2,24 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { test, type TestFn, type TestOptions } from "node:test";
 
-const systemChromeCandidates = [
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-];
+export const browserSkipMessage = "browser test skipped: set RUN_BROWSER_TESTS=1 (CI only; never on the Mac mini)";
+
+/** Register browser cases without running their setup or callbacks on local gates. */
+export function browserTest(name: string, fn: TestFn): Promise<void>;
+export function browserTest(name: string, options: TestOptions, fn: TestFn): Promise<void>;
+export function browserTest(name: string, optionsOrFn: TestOptions | TestFn, fn?: TestFn): Promise<void> {
+  const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
+  return test(name, {
+    ...options,
+    skip: process.env.RUN_BROWSER_TESTS === "1" ? options.skip : browserSkipMessage,
+  }, typeof optionsOrFn === "function" ? optionsOrFn : fn!);
+}
+
+export function requireBrowserTests(): void {
+  if (process.env.RUN_BROWSER_TESTS !== "1") throw new Error(browserSkipMessage);
+}
 
 export function playwrightCachePaths(
   env: NodeJS.ProcessEnv,
@@ -37,6 +49,7 @@ const playwrightChromeCandidates = async (cache: string): Promise<string[]> => {
       join(cache, install, "chrome-headless-shell-mac-x64", "chrome-headless-shell"),
       join(cache, install, "chrome-mac", "headless_shell"),
       join(cache, install, "chrome-headless-shell-linux64", "chrome-headless-shell"),
+      join(cache, install, "chrome-linux", "headless_shell"),
     ]);
   } catch {
     return [];
@@ -44,21 +57,43 @@ const playwrightChromeCandidates = async (cache: string): Promise<string[]> => {
 };
 
 /** Check both the supplied path and its realpath, so symlinks cannot bypass Browser work. */
-export function allowedChromePath(candidate: string, resolved: string = candidate): string {
+export function allowedChromePath(
+  candidate: string,
+  resolved: string = candidate,
+  caches: readonly string[] = playwrightCachePaths(process.env, userInfo().homedir, homedir()),
+): string {
   for (const path of [candidate, resolved]) {
     if (/^\/Applications(?:\/|$)/iu.test(resolve(path))) {
       throw new Error("AGENTS.md Browser work: tests must never start the installed Chrome app or any browser under /Applications (including CHROME_BIN)");
     }
   }
+  if (!caches.some((cache) => resolve(resolved).startsWith(`${resolve(cache)}/`))) {
+    throw new Error("AGENTS.md Browser work: only Playwright's bundled Chromium inside a ms-playwright cache is allowed (including CHROME_BIN); installed and other non-Playwright browsers are forbidden");
+  }
   return resolved;
+}
+
+async function resolvedPlaywrightCaches(): Promise<string[]> {
+  return Promise.all(playwrightCachePaths(process.env, userInfo().homedir, homedir()).map(async (cache) => {
+    try { return await realpath(cache); } catch { return resolve(cache); }
+  }));
+}
+
+/** Validate the executable again at launch, even when the caller bypasses findChrome. */
+export async function resolveChromePath(chrome: string): Promise<string> {
+  const caches = await resolvedPlaywrightCaches();
+  // Reject Applications without inspecting any installed app.
+  if (/^\/Applications(?:\/|$)/iu.test(resolve(chrome))) allowedChromePath(chrome, chrome, caches);
+  return allowedChromePath(chrome, await realpath(chrome), caches);
 }
 
 export async function findChromeFromCandidates(
   candidates: readonly string[],
   resolvePath: (path: string) => Promise<string> = realpath,
+  caches: readonly string[] = playwrightCachePaths(process.env, userInfo().homedir, homedir()),
 ): Promise<string> {
   for (const candidate of candidates) {
-    allowedChromePath(candidate);
+    if (/^\/Applications(?:\/|$)/iu.test(resolve(candidate))) allowedChromePath(candidate, candidate, caches);
     let resolved: string;
     try {
       resolved = await resolvePath(candidate);
@@ -66,27 +101,22 @@ export async function findChromeFromCandidates(
       // A real browser DOM is required because source-shaped doubles hide rendering defects.
       continue;
     }
-    return allowedChromePath(candidate, resolved);
+    return allowedChromePath(candidate, resolved, caches);
   }
   throw new Error("install Playwright's bundled Chromium: npx playwright install chromium-headless-shell; the installed Chrome app is never used");
 }
 
 export const findChrome = async (): Promise<string> => {
+  requireBrowserTests();
   const override = process.env.CHROME_BIN;
-  // Reject a forbidden override even when the path does not exist.
-  if (override) allowedChromePath(override);
-  return findChromeFromCandidates([
-    ...(override ? [override] : []),
-    ...await defaultChromeCandidates(),
-  ]);
+  // Overrides must resolve inside the cache; an invalid override never silently falls back.
+  if (override) return resolveChromePath(override);
+  return findChromeFromCandidates(await defaultChromeCandidates(), realpath, await resolvedPlaywrightCaches());
 };
 
 async function defaultChromeCandidates(): Promise<string[]> {
   const caches = playwrightCachePaths(process.env, userInfo().homedir, homedir());
-  return [
-    ...(await Promise.all(caches.map(playwrightChromeCandidates))).flat(),
-    ...systemChromeCandidates,
-  ];
+  return (await Promise.all(caches.map(playwrightChromeCandidates))).flat();
 }
 
 const hasFlag = (flags: readonly string[], name: string): boolean =>
@@ -167,6 +197,8 @@ export async function launchChrome(
   flagsAndUrl: readonly string[],
   options: ChromeLaunchOptions = {},
 ): Promise<ChromeLaunchResult> {
+  requireBrowserTests();
+  chrome = await resolveChromePath(chrome);
   const profile = hasFlag(flagsAndUrl, "--user-data-dir")
     ? undefined
     : await mkdtemp(join(tmpdir(), "site-chrome-"));

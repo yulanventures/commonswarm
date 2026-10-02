@@ -1,6 +1,6 @@
 /** Reached by `npm --prefix site test` through the recursive component-observer glob. */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { startComposerPolishServer } from "./composer-polish.fixture.js";
 
