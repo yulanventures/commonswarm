@@ -388,6 +388,9 @@ export async function handleRequest(request: Request): Promise<Response> {
   // Refuse foreign credentials before routing, parsing, authentication or tools.
   // Keep the protocol module independent of the account authority bundle.
   if (presentsAdminCredential(request)) {
+    if (new URL(request.url).pathname === "/mcp") {
+      console.error(JSON.stringify({ event: "request_failed", error_code: "unauthorized", method: null }));
+    }
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
       headers: {
