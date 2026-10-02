@@ -165,12 +165,15 @@ export async function startServer({
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
   }
   const pool = createPool(config);
-  const registrationStore = createPostgresRegistrationStore(pool);
-  await registrationStore.cleanup();
+  let registrationStore;
+  if (config.publicAuthorizationEnabled) {
+    registrationStore = createPostgresRegistrationStore(pool);
+    await registrationStore.cleanup();
+  }
   const metadataFetch = createPostgresCimdFetch(pool, createPinnedMetadataFetch());
   const provider = await createMcpProvider({
     adapter: createPostgresAdapter(pool),
-    registrationStore,
+    ...(registrationStore ? { registrationStore } : {}),
     registrationEnabled: config.publicAuthorizationEnabled,
     cookieKeys: config.cookieKeys,
     jwks: config.jwks,
@@ -236,13 +239,15 @@ export async function startServer({
     server.once("error", reject);
     server.listen(config.port, "0.0.0.0", resolve);
   });
-  // Expiry is enforced in every lookup; deletion also runs while the service
-  // is idle. Restart performs cleanup before accepting requests.
-  const registrationCleanup = setInterval(() => {
-    void registrationStore.cleanup().catch(() => logger.info({ event: "registration_cleanup_failed" }));
-  }, 60 * 60 * 1000);
-  registrationCleanup.unref();
-  server.once("close", () => clearInterval(registrationCleanup));
+  if (registrationStore) {
+    // Expiry is enforced in every lookup; deletion also runs while the service
+    // is idle. Restart performs cleanup before accepting requests.
+    const registrationCleanup = setInterval(() => {
+      void registrationStore.cleanup().catch(() => logger.info({ event: "registration_cleanup_failed" }));
+    }, 60 * 60 * 1000);
+    registrationCleanup.unref();
+    server.once("close", () => clearInterval(registrationCleanup));
+  }
   return { server, provider, pool, registrationStore };
 }
 
