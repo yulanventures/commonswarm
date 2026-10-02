@@ -7,6 +7,8 @@ SELECT COALESCE((
   AND to_regclass('commonswarm_oauth.issuer_key_denials') IS NULL
   AND to_regprocedure('commonswarm_oauth.register_dpop_nonce(bytea,text,text)') IS NULL
   AND to_regprocedure('commonswarm_oauth.resolve_provider_grant_status(text,uuid,text)') IS NULL
+  AND to_regtype('commonswarm_oauth.dpop_admission_status') IS NULL
+  AND to_regprocedure('commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid)') IS NULL
   AND to_regprocedure('commonswarm_oauth.admit_dpop_proof(text,text,text,bigint,bytea)') IS NULL
   AND to_regprocedure('commonswarm_oauth.purge_expired_dpop(integer)') IS NULL
   AND to_regprocedure('commonswarm_oauth.issuer_key_allowed(text,text)') IS NULL

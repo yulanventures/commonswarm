@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { catalog, databaseContainer, dbAssert, refuses, runSql } from '../support/admin-schema-db.js';
+import { catalog, databaseContainer, dbAssert, fixture, refuses, runSql } from '../support/admin-schema-db.js';
 
 function verification(client: string, version = 1, active = true): string {
   return `SET LOCAL ROLE commonswarm_admin_release;
@@ -100,6 +100,44 @@ ${catalog('20261003000002')}
 `);
 });
 
+test('admin-schema-isolation: AS locks consent policy before a family exists without granting approval or verification writes', () => {
+  const f = fixture();
+  const familyStart = f.sql.indexOf('SET LOCAL ROLE commonswarm_oauth_runtime;');
+  assert.ok(familyStart>0, 'fixture contains the family creation step');
+  runSql(`${f.sql.slice(0, familyStart)}
+${dbAssert('SELECT count(*)=0 FROM commonswarm_oauth.admin_grant_bindings', 'consent policy needs no family binding')}
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${refuses(`SELECT * FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${f.client}' FOR SHARE`, '42501')}
+${dbAssert(`SELECT active AND owner_approved AND client_id='${f.client}' AND verification_version=1
+  AND metadata_digest='${f.digest}' AND scope_ceiling=ARRAY['admin:read']
+  AND redirect_uris=ARRAY['https://client.example/callback'] AND NOT full_account_eligible
+  FROM commonswarm_oauth.lock_admin_consent_policy('${f.client}',1,'${f.owner}')`, 'AS exact consenting-owner policy control')}
+${dbAssert(`SELECT active AND NOT owner_approved FROM commonswarm_oauth.lock_admin_consent_policy('${f.client}',1,'${f.foreign}')`, 'another owner cannot borrow approval')}
+${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.lock_admin_consent_policy('${f.client}',2,'${f.owner}')`, 'missing verification version hidden')}
+${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.lock_admin_consent_policy(NULL,1,'${f.owner}')`, 'invalid lookup is empty')}
+${refuses(`UPDATE commonswarm_oauth.admin_verified_clients SET active=false WHERE client_id='${f.client}'`, '42501')}
+${refuses(`UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at=statement_timestamp() WHERE client_id='${f.client}'`, '42501')}
+RESET ROLE;
+${dbAssert(`SELECT count(*)=1 AND bool_and(withdrawn_at IS NULL) FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${f.client}'`, 'policy reads preserve human approval')}
+SELECT set_config('lock_test.consent_oid','commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid)'::regprocedure::oid::text,true);
+${['swarm_command','swarm_read','anon','authenticated','commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'].map(role => `SET LOCAL ROLE ${role};
+${dbAssert("SELECT NOT has_function_privilege(current_user,current_setting('lock_test.consent_oid')::oid,'EXECUTE')", `${role} lacks AS policy execution`)}
+${refuses(`SELECT * FROM commonswarm_oauth.lock_admin_consent_policy('${f.client}',1,'${f.owner}')`, '42501')}
+RESET ROLE;`).join('\n')}
+SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_verified_clients SET active=false,withdrawn_at=statement_timestamp(),withdrawal_reason='policy_test';
+RESET ROLE;
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert(`SELECT NOT active AND owner_approved FROM commonswarm_oauth.lock_admin_consent_policy('${f.client}',1,'${f.owner}')`, 'withdrawn verification cannot authorize even with approval')}
+RESET ROLE;
+${catalog('20261003000002')}
+GRANT EXECUTE ON FUNCTION commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid) TO swarm_command;
+${catalog('20261003000002',false,false)}
+REVOKE EXECUTE ON FUNCTION commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid) FROM swarm_command;
+${catalog('20261003000002')}
+`);
+});
+
 /** Persistent psql backends inside the CI database container; no auth files. */
 class LockSession {
   private readonly child;
@@ -156,7 +194,7 @@ class LockSession {
   }
 }
 
-test('admin-schema-isolation: verification FOR SHARE blocks release row locks until the caller commits', { timeout: 40_000 }, async () => {
+test('admin-schema-isolation: command and AS consent FOR SHARE block release row locks until the caller commits', { timeout: 40_000 }, async () => {
   const client = `https://client.example/${randomUUID()}`;
   const sessions = Array.from({ length: 3 }, () => new LockSession(databaseContainer()));
   const [caller, release, monitor] = sessions as [LockSession, LockSession, LockSession];
@@ -179,10 +217,13 @@ test('admin-schema-isolation: verification FOR SHARE blocks release row locks un
     assert.ok(Number.isInteger(callerPid) && callerPid > 0);
     assert.ok(Number.isInteger(releasePid) && releasePid > 0 && releasePid !== callerPid);
 
-    for (const mode of ['UPDATE', 'NO KEY UPDATE']) {
+    for (const [callerRole, policyCall] of [
+      ['swarm_command', `commonswarm_oauth.lock_admin_client_verification('${client}',1)`],
+      ['commonswarm_oauth_runtime', `commonswarm_oauth.lock_admin_consent_policy('${client}',1,'${randomUUID()}')`],
+    ]) for (const mode of ['UPDATE', 'NO KEY UPDATE']) {
       const competingLock = `SELECT verification_version FROM commonswarm_oauth.admin_verified_clients
         WHERE client_id='${client}' AND verification_version=1 FOR ${mode};`;
-      await caller.query('BEGIN; SET LOCAL ROLE swarm_command;');
+      await caller.query(`BEGIN; SET LOCAL ROLE ${callerRole};`);
       // Negative control: a real nonlocking command read must not block the
       // same release-role query; NOWAIT fails immediately if setup holds a lock.
       assert.deepEqual(await caller.query(`SELECT verification_version FROM commonswarm_oauth.admin_verified_clients
@@ -192,7 +233,7 @@ test('admin-schema-isolation: verification FOR SHARE blocks release row locks un
       assert.deepEqual(await release.query(competingLock.replace(/;$/, ' NOWAIT;')), ['1'], 'unlocked read permits the competing lock');
       await release.query('COMMIT;');
 
-      assert.deepEqual(await caller.query(`SELECT verification_version FROM commonswarm_oauth.lock_admin_client_verification('${client}',1);`), ['1']);
+      assert.deepEqual(await caller.query(`SELECT verification_version FROM ${policyCall};`), ['1']);
       assert.deepEqual(await caller.query(retainedLock), ['t'], 'function retains RowShareLock after return');
       await release.query('BEGIN; SET LOCAL ROLE commonswarm_admin_release;');
       assert.deepEqual(await release.query(`SELECT verification_version FROM commonswarm_oauth.admin_verified_clients

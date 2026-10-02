@@ -152,21 +152,23 @@ BEGIN
       FROM commonswarm_oauth.resolve_hosted_grant_status(p_provider_grant_id) s WHERE s.owner_user_id=p_owner_user_id;
   END IF;
 END $fn$;
-CREATE FUNCTION commonswarm_oauth.admit_dpop_proof(p_jti text,p_jkt text,p_domain text,p_iat bigint,p_nonce_digest bytea) RETURNS boolean
+CREATE TYPE commonswarm_oauth.dpop_admission_status AS ENUM ('accepted','nonce_required','stale_proof','replay');
+
+CREATE FUNCTION commonswarm_oauth.admit_dpop_proof(p_jti text,p_jkt text,p_domain text,p_iat bigint,p_nonce_digest bytea) RETURNS commonswarm_oauth.dpop_admission_status
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
 DECLARE n integer; at_time timestamptz:=clock_timestamp(); nonce_domain text;
 BEGIN
   IF p_jti IS NULL OR octet_length(p_jti) NOT BETWEEN 1 AND 200 OR p_jkt IS NULL OR p_jkt !~ '^[A-Za-z0-9_-]{43}$'
     OR p_domain IS NULL OR p_domain NOT IN ('as','admin_mcp','admin_command') OR p_iat IS NULL
-    OR p_iat<extract(epoch FROM at_time)-60 OR p_iat>extract(epoch FROM at_time)+5
-    OR p_nonce_digest IS NULL OR octet_length(p_nonce_digest)<>32 THEN RETURN false; END IF;
+    OR p_iat<extract(epoch FROM at_time)-60 OR p_iat>extract(epoch FROM at_time)+5 THEN RETURN 'stale_proof'; END IF;
+  IF p_nonce_digest IS NULL OR octet_length(p_nonce_digest)<>32 THEN RETURN 'nonce_required'; END IF;
   nonce_domain:=CASE WHEN p_domain='as' THEN 'as' ELSE 'admin_resource' END;
   IF NOT EXISTS (SELECT 1 FROM commonswarm_oauth.dpop_nonces WHERE nonce_digest=p_nonce_digest
-    AND jkt=p_jkt AND verifier_domain=nonce_domain AND issued_at<=at_time AND expires_at>at_time) THEN RETURN false; END IF;
+    AND jkt=p_jkt AND verifier_domain=nonce_domain AND issued_at<=at_time AND expires_at>at_time) THEN RETURN 'nonce_required'; END IF;
   INSERT INTO commonswarm_oauth.dpop_proof_replays(jti,jkt,verifier_domain,accepted_at,expires_at)
-    VALUES(p_jti,p_jkt,p_domain,at_time,at_time+interval '5 minutes') ON CONFLICT DO NOTHING;
-  GET DIAGNOSTICS n=ROW_COUNT;
-  RETURN n=1;
+    VALUES(p_jti,p_jkt,p_domain,at_time,at_time+interval '5 minutes') ON CONFLICT DO NOTHING RETURNING 1 INTO n;
+  RETURN CASE WHEN n=1 THEN 'accepted'::commonswarm_oauth.dpop_admission_status
+    ELSE 'replay'::commonswarm_oauth.dpop_admission_status END;
 END $fn$;
 CREATE FUNCTION commonswarm_oauth.purge_expired_dpop(p_limit integer DEFAULT 1000)
 RETURNS TABLE(replays_deleted integer,nonces_deleted integer)
@@ -218,6 +220,28 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'admin client verification not found'; END IF;
   RETURN QUERY SELECT v.client_id,v.verification_version,v.active,v.withdrawn_at,
     v.metadata_digest,v.application_type,v.redirect_uris,'hosted_https'::text;
+END $fn$;
+
+-- AS consent has no family yet. Lock verification before owner/grant locks,
+-- then the consenting account and its exact approval; never create authority.
+-- Facts are explicit scalars, not a private row type. Missing approval is false.
+CREATE FUNCTION commonswarm_oauth.lock_admin_consent_policy(p_client_id text,p_verification_version integer,p_owner_user_id uuid)
+RETURNS TABLE(client_id text,verification_version integer,metadata_digest text,redirect_uris text[],scope_ceiling text[],
+  full_account_eligible boolean,active boolean,owner_approved boolean)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE; approved boolean:=false;
+BEGIN
+  IF p_client_id IS NULL OR octet_length(p_client_id) NOT BETWEEN 1 AND 2048
+    OR p_verification_version IS NULL OR p_verification_version<=0 OR p_owner_user_id IS NULL THEN RETURN; END IF;
+  SELECT c.* INTO v FROM commonswarm_oauth.admin_verified_clients c
+    WHERE c.client_id=p_client_id AND c.verification_version=p_verification_version FOR SHARE;
+  IF NOT FOUND THEN RETURN; END IF;
+  PERFORM 1 FROM swarm.admin_accounts WHERE owner_user_id=p_owner_user_id FOR UPDATE;
+  PERFORM 1 FROM commonswarm_oauth.admin_client_owner_approvals a WHERE a.owner_user_id=p_owner_user_id
+    AND a.client_id=p_client_id AND a.verification_version=p_verification_version AND a.withdrawn_at IS NULL FOR SHARE;
+  approved:=FOUND;
+  RETURN QUERY SELECT v.client_id,v.verification_version,v.metadata_digest,v.redirect_uris,v.scope_ceiling,
+    v.full_account_eligible,v.active AND v.withdrawn_at IS NULL,approved;
 END $fn$;
 
 CREATE FUNCTION commonswarm_oauth.resolve_admin_grant_status(p_provider_grant_id text,p_owner_user_id uuid,p_kid text)
@@ -357,13 +381,18 @@ BEGIN
   END LOOP;
   FOREACH f IN ARRAY ARRAY['register_dpop_nonce(bytea,text,text)','admit_dpop_proof(text,text,text,bigint,bytea)',
     'purge_expired_dpop(integer)','issuer_key_allowed(text,text)','lock_issuer_key_denial()',
-    'lock_admin_client_verification(text,integer)',
+    'lock_admin_client_verification(text,integer)','lock_admin_consent_policy(text,integer,uuid)',
     'resolve_admin_grant_status(text,uuid,text)','resolve_provider_grant_status(text,uuid,text)',
     'fence_admin_family(text,uuid,text,text)','guard_verified_client()','guard_owner_approval()'] LOOP
     EXECUTE 'ALTER FUNCTION commonswarm_oauth.'||f||' OWNER TO swarm_admin';
     EXECUTE 'REVOKE ALL ON FUNCTION commonswarm_oauth.'||f||' FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,commonswarm_admin_release';
   END LOOP;
 END $permissions$;
+ALTER TYPE commonswarm_oauth.dpop_admission_status OWNER TO swarm_admin;
+REVOKE ALL ON TYPE commonswarm_oauth.dpop_admission_status FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_admin_release,commonswarm_oauth_maintenance;
+GRANT USAGE ON TYPE commonswarm_oauth.dpop_admission_status TO commonswarm_oauth_runtime,commonswarm_dpop_verifier;
+GRANT EXECUTE ON FUNCTION commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid) TO commonswarm_oauth_runtime;
+
 CREATE POLICY verification_release ON commonswarm_oauth.admin_verified_clients FOR ALL TO commonswarm_admin_release USING(true) WITH CHECK(true);
 GRANT SELECT,INSERT,UPDATE ON commonswarm_oauth.admin_verified_clients TO commonswarm_admin_release;
 CREATE POLICY approval_insert ON commonswarm_oauth.admin_client_owner_approvals FOR INSERT TO swarm_command WITH CHECK(true);
@@ -427,12 +456,14 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- DROP FUNCTION commonswarm_oauth.guard_verified_client();
 -- DROP FUNCTION commonswarm_oauth.resolve_provider_grant_status(text,uuid,text);
 -- DROP FUNCTION commonswarm_oauth.lock_admin_client_verification(text,integer);
+-- DROP FUNCTION commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid);
 -- DROP FUNCTION commonswarm_oauth.resolve_admin_grant_status(text,uuid,text);
 -- DROP FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,text);
 -- DROP FUNCTION commonswarm_oauth.lock_issuer_key_denial();
 -- DROP FUNCTION commonswarm_oauth.issuer_key_allowed(text,text);
 -- DROP FUNCTION commonswarm_oauth.purge_expired_dpop(integer);
 -- DROP FUNCTION commonswarm_oauth.admit_dpop_proof(text,text,text,bigint,bytea);
+-- DROP TYPE commonswarm_oauth.dpop_admission_status;
 -- DROP FUNCTION commonswarm_oauth.register_dpop_nonce(bytea,text,text);
 -- DROP POLICY command_binding_read ON commonswarm_oauth.admin_grant_bindings;
 -- REVOKE SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verification_version) ON commonswarm_oauth.admin_grant_bindings FROM swarm_command;
