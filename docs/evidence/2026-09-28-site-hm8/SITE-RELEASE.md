@@ -376,7 +376,9 @@ Each browser step uses a unique named harness daemon derived from the window ID,
 step, and private-root suffix, with its own private runtime directory. Its EXIT
 trap stops only that exact named daemon on success or failure. Later controls
 reuse the task-owned headless process/profile and leave removal to window close.
-The headless process/profile remain available to later controls on success.
+Chromium starts in its own session/process group with stdin closed, so ending a
+marked block's process group does not stop it. The saved PID stays the same
+through setsid and exec; later controls reuse that process/profile on success.
 Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
 retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
@@ -449,11 +451,8 @@ retaining raw browser output in the public evidence directory.
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
-  chrome="$(node - "$(npm root -g)/playwright" <<'NODE'
-const { chromium } = require(process.argv[2]);
-console.log(chromium.executablePath());
-NODE
-  )"
+  chrome="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' \
+    "$(npm root -g)/playwright")"
   case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac
   test -x "$chrome"
   CLI_USER_ID="$(cswarm status \
@@ -461,10 +460,12 @@ NODE
   test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
   chrome_port=9335
   if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
-  "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
+  # setsid detaches from the block executor's process group; exec preserves $!.
+  python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+    "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
     --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
-    >"$browser_root/chromium-launch.log" 2>&1 &
+    </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
   chrome_pid=$!
   port_file="$profile/DevToolsActivePort"
   tries=0
@@ -899,7 +900,28 @@ BOX
 
 Every scripted public request uses `User-Agent:
 commonswarm-release-probe/1.0`. A failed public control automatically restores
-the pin.
+the pin. Browser state cannot prevent these page/asset checks from running.
+
+HezLead's acceptance decision table uses the mode selected by `site-03`.
+"Before assertions" means no `ASSERTIONS_STARTED` marker was written; attachment,
+navigation and app readiness are browser infrastructure checks. Once any product
+assertion starts, FULL-CONTROL failures remain blocking, including later cleanup.
+A non-blocking result requires the separate `site-05-public.txt` PASS receipt;
+it never converts a public-byte or deployment failure into a success.
+
+| Mode | Failure type | Blocking? | Automatic rollback? |
+|---|---|---|---|
+| Either | Deployment failure or public page/asset byte failure | Yes | Yes (site-04 reconciliation restores the pin if switched) |
+| REDUCED-CONTROL | Any browser step: setup, harness, attachment, readiness, Chromium gone, assertion or daemon cleanup | No; `browser_acceptance=NOT_PROVED reason=<named STEP or STOP line>` | No |
+| FULL-CONTROL | Browser infrastructure failure before any product assertion ran | No; same `NOT_PROVED` receipt | No |
+| FULL-CONTROL | Browser failure after product assertions started | Yes | Yes |
+| Either | Browser acceptance passed | No | No |
+
+`site-06` verifies rollback public bytes before attempting its browser re-check.
+Its browser failures use the same mode/phase rule, record `NOT_PROVED` when
+non-blocking, and do not perform another rollback. A public-byte verification
+failure remains blocking in both modes. No rollback marker means `not-needed`;
+that path does not require a running browser.
 
 ```sh
 # step: site-05 — Mac mini /bin/bash 3.2; Anvil; public bytes with automatic rollback
@@ -910,9 +932,26 @@ the pin.
   set -E
   trap 'printf "FAIL site-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
-  pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-05-public-summary.txt"
+  printf '%s\n' 'site-05: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_public_control() {
+    status=$1
+    trap - EXIT
+    # Covers setup, control, daemon cleanup and rollback failures, even before Python.
+    printf 'site-05: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  trap 'finish_public_control "$?"' EXIT
   set +e
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
+  trap - ERR
+  (
+    trap - EXIT
+    set -e
+    after=$(cat "$SITE_EVIDENCE/after.release")
+    ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$after" \
     >"$SITE_EVIDENCE/site-05-public.txt" <<'BOX'
 set -euo pipefail
 set -E
@@ -950,10 +989,12 @@ print("download_sha256="+hashlib.sha256(download).hexdigest())
 print("PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
+  )
   control_status=$?
   set -e
-  chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"
+  if [ -f "$SITE_EVIDENCE/site-05-public.txt" ]; then chmod 0600 "$SITE_EVIDENCE/site-05-public.txt"; fi
   if test "$control_status" -ne 0; then
+    pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
@@ -977,8 +1018,11 @@ creation action, clean console, and
 shipped bundle has the surface and no creation action, and records the four
 signed-in claims as `NOT PROVED`. All actions are view-only: do not click a
 revoke control, create action, or Sign out. The full branch switches back to
-the recorded start workspace before it finishes. Failure rolls back
-automatically.
+the recorded start workspace before it finishes. The decision table above governs
+failure. Every completed attempt writes a sanitized summary and mode-0600
+`site-05-browser-acceptance-receipt.txt`, including a named STEP/STOP reason for `NOT_PROVED`.
+The receipt records the raw browser exit code separately from the step exit code;
+a non-blocking browser failure exits zero so the release continues to close.
 
 ```sh
 # step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium acceptance
@@ -989,19 +1033,67 @@ automatically.
   set -E
   trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-05-browser-acceptance-summary.txt"
+  printf '%s\n' 'site-05-browser-acceptance: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_browser_acceptance() {
+    status=$1
+    trap - EXIT
+    # Covers setup, control, daemon cleanup and rollback failures, even before Python.
+    printf 'site-05-browser-acceptance: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  trap 'finish_browser_acceptance "$?"' EXIT
+  # Public acceptance is a prerequisite, regardless of browser outcome.
+  grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-05-public.txt"
+  test ! -f "$SITE_EVIDENCE/rollback-auto.txt"
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
+  test ! -e "$SITE_EVIDENCE/site-05-browser-acceptance-assertions-started.txt"
+  check_task_browser() {
+    browser_reason=
+    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
+    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_reason='pid gone'
+    fi
+    if [ -z "$browser_reason" ]; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
+      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+        browser_reason='not ours'
+      else
+        case "$browser_command" in
+          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+          *) browser_reason='not ours' ;;
+        esac
+      fi
+    fi
+    if [ -z "$browser_reason" ]; then
+      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
+        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
+        browser_reason='endpoint down'
+      fi
+    fi
+    if [ -n "$browser_reason" ]; then
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >>"$control_summary"
+      printf 'STOP site-05: task-owned Chromium is not running (%s)\n' "$browser_reason" >&2
+      return 1
+    fi
+  }
   export SITE_EVIDENCE SITE_CHROME_ENDPOINT
   set +e
   # Capture the complete control failure without echoing its Python/source text.
   trap - ERR
   (
+    trap - EXIT
     set -e
+    check_task_browser
     umask 077
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
     test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-    case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
     endpoint="$SITE_CHROME_ENDPOINT"
     private_evidence="$SITE_BROWSER_ROOT/site-05-browser-acceptance-evidence"
     harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-05"
@@ -1022,6 +1114,7 @@ automatically.
           BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
           browser-harness --reload >"$private_evidence/harness-stop.stdout" \
           2>"$private_evidence/harness-stop.stderr"; then
+          printf '%s\n' 'STOP: named site-05-browser-acceptance daemon cleanup failed; details withheld' >>"$control_summary"
           printf '%s\n' 'STOP: named site-05-browser-acceptance daemon cleanup failed; details withheld' >&2
           status=1
         fi
@@ -1102,6 +1195,9 @@ print("STEP 5", flush=True)
 branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
 observed=inspect()
 print("STEP 6", flush=True)
+# Durable marker precedes the first product assertion, not infrastructure checks.
+marker=evidence/"site-05-browser-acceptance-assertions-started.txt"
+marker.write_text("ASSERTIONS_STARTED\n",encoding="utf-8"); marker.chmod(0o600)
 if branch=="FULL-CONTROL":
     print("STEP 7", flush=True)
     if observed["userId"]!=expected_user or observed["workspaceId"]!=expected_workspace: raise SystemExit(1)
@@ -1252,8 +1348,41 @@ PY
   )
   browser_status=$?
   set -e
-  trap 'printf "FAIL site-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-  if test "$browser_status" -ne 0; then
+  python3 - "$SITE_EVIDENCE" site-05-browser-acceptance "$branch" "$browser_status" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1]); label=sys.argv[2]; branch=sys.argv[3]; code=int(sys.argv[4])
+assert branch in {"FULL-CONTROL","REDUCED-CONTROL"}
+summary=root/(label+"-summary.txt")
+lines=summary.read_text(encoding="utf-8").splitlines()
+started=(root/(label+"-assertions-started.txt")).is_file()
+reason="STEP 0 (control setup)"
+for line in lines:
+    match=re.fullmatch(re.escape(label)+r": (STEP [0-9]{1,2} \([A-Za-z /-]+\)); exit code (?:pending|[0-9]+)",line)
+    if match: reason=match[1]
+    if line in {"STOP site-05: task-owned Chromium is not running (pid gone)",
+                "STOP site-05: task-owned Chromium is not running (not ours)",
+                "STOP site-05: task-owned Chromium is not running (endpoint down)",
+                "STOP site-06: task-owned Chromium is not running (pid gone)",
+                "STOP site-06: task-owned Chromium is not running (not ours)",
+                "STOP site-06: task-owned Chromium is not running (endpoint down)",
+                "STOP: named site-05-browser-acceptance daemon cleanup failed; details withheld",
+                "STOP: named site-06 daemon cleanup failed; details withheld",
+                "stderr: STOP: STEP 1 endpoint ownership",
+                "stderr: STOP: STEP 3 document load timeout",
+                "stderr: STOP: STEP 4 app readiness timeout"}:
+        reason=line.removeprefix("stderr: ")
+nonblocking=branch=="REDUCED-CONTROL" or not started
+acceptance="PASS" if code==0 else "NOT_PROVED" if nonblocking else "FAIL"
+rows=["BROWSER_BRANCH="+branch,"browser_acceptance="+acceptance+" reason="+reason,
+      "browser_control_exit="+str(code),"assertions_started="+("yes" if started else "no"),
+      "blocking="+("yes" if code and not nonblocking else "no")]
+text="\n".join(rows)+"\n"
+receipt=root/(label+"-receipt.txt"); receipt.write_text(text,encoding="utf-8"); receipt.chmod(0o600)
+with summary.open("a",encoding="utf-8") as stream: stream.write(text)
+summary.chmod(0o600)
+PY
+  if test "$browser_status" -ne 0 &&
+    grep -qFx 'blocking=yes' "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; then
     pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
@@ -1275,7 +1404,9 @@ BOX
 
 `site-06` always runs before either close path. It records `not-needed`, or
 verifies pinned baseline bytes through the public boundary and rechecks the
-appropriate browser branch.
+appropriate browser branch. Public-byte failure stays blocking. The browser
+summary and `site-06-browser-receipt.txt` retain `NOT_PROVED` on a non-blocking
+browser re-check, with the original browser exit code and a named STEP/STOP reason.
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; verify automatic rollback or record not-needed
@@ -1286,6 +1417,85 @@ appropriate browser branch.
   set -E
   trap 'printf "FAIL site-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
+  umask 077
+  control_summary="$SITE_EVIDENCE/site-06-browser-summary.txt"
+  printf '%s\n' 'site-06-browser: STEP 0 (control setup); exit code pending' >"$control_summary"
+  chmod 0600 "$control_summary"
+  finish_rollback_control() {
+    status=$1
+    trap - EXIT
+    # Only the browser phase can be non-blocking; public-byte errors keep status.
+    if [ "$rollback_phase" = browser ]; then
+      python3 - "$SITE_EVIDENCE" site-06-browser "$branch" "$status" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1]); label=sys.argv[2]; branch=sys.argv[3]; code=int(sys.argv[4])
+assert branch in {"FULL-CONTROL","REDUCED-CONTROL"}
+summary=root/(label+"-summary.txt")
+lines=summary.read_text(encoding="utf-8").splitlines()
+started=(root/(label+"-assertions-started.txt")).is_file()
+reason="STEP 0 (control setup)"
+for line in lines:
+    match=re.fullmatch(re.escape(label)+r": (STEP [0-9]{1,2} \([A-Za-z /-]+\)); exit code (?:pending|[0-9]+)",line)
+    if match: reason=match[1]
+    if line in {"STOP site-05: task-owned Chromium is not running (pid gone)",
+                "STOP site-05: task-owned Chromium is not running (not ours)",
+                "STOP site-05: task-owned Chromium is not running (endpoint down)",
+                "STOP site-06: task-owned Chromium is not running (pid gone)",
+                "STOP site-06: task-owned Chromium is not running (not ours)",
+                "STOP site-06: task-owned Chromium is not running (endpoint down)",
+                "STOP: named site-05-browser-acceptance daemon cleanup failed; details withheld",
+                "STOP: named site-06 daemon cleanup failed; details withheld",
+                "stderr: STOP: STEP 1 endpoint ownership",
+                "stderr: STOP: STEP 3 document load timeout",
+                "stderr: STOP: STEP 4 app readiness timeout"}:
+        reason=line.removeprefix("stderr: ")
+nonblocking=branch=="REDUCED-CONTROL" or not started
+acceptance="PASS" if code==0 else "NOT_PROVED" if nonblocking else "FAIL"
+rows=["BROWSER_BRANCH="+branch,"browser_acceptance="+acceptance+" reason="+reason,
+      "browser_control_exit="+str(code),"assertions_started="+("yes" if started else "no"),
+      "blocking="+("yes" if code and not nonblocking else "no")]
+text="\n".join(rows)+"\n"
+receipt=root/(label+"-receipt.txt"); receipt.write_text(text,encoding="utf-8"); receipt.chmod(0o600)
+with summary.open("a",encoding="utf-8") as stream: stream.write(text)
+summary.chmod(0o600)
+PY
+      if grep -qFx 'blocking=no' "$SITE_EVIDENCE/site-06-browser-receipt.txt"; then status=0; fi
+    fi
+    printf 'site-06-browser: final exit code %s\n' "$status" >>"$control_summary"
+    chmod 0600 "$control_summary"
+    exit "$status"
+  }
+  rollback_phase=public
+  trap 'finish_rollback_control "$?"' EXIT
+  check_task_browser() {
+    browser_reason=
+    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
+    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_reason='pid gone'
+    fi
+    if [ -z "$browser_reason" ]; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
+      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+        browser_reason='not ours'
+      else
+        case "$browser_command" in
+          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+          *) browser_reason='not ours' ;;
+        esac
+      fi
+    fi
+    if [ -z "$browser_reason" ]; then
+      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
+        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
+        browser_reason='endpoint down'
+      fi
+    fi
+    if [ -n "$browser_reason" ]; then
+      printf 'STOP site-06: task-owned Chromium is not running (%s)\n' "$browser_reason" >>"$control_summary"
+      printf 'STOP site-06: task-owned Chromium is not running (%s)\n' "$browser_reason" >&2
+      return 1
+    fi
+  }
   if test ! -f "$SITE_EVIDENCE/rollback-auto.txt"; then
     printf '%s\n' 'rollback=not-needed' >"$SITE_EVIDENCE/site-06-rollback-verify.txt"
     chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"; exit 0
@@ -1308,14 +1518,18 @@ assert remote==local; print("ROLLBACK_PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+  grep -qFx 'ROLLBACK_PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
+  test ! -e "$SITE_EVIDENCE/site-06-browser-assertions-started.txt"
+  rollback_phase=browser
+  check_task_browser
   export SITE_EVIDENCE
   umask 077
   case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
   test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
   test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-  browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-  case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
   endpoint="$SITE_CHROME_ENDPOINT"
   private_evidence="$SITE_BROWSER_ROOT/site-06-evidence"
   harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-06"
@@ -1336,12 +1550,13 @@ BOX
         BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 \
         browser-harness --reload >"$private_evidence/harness-stop.stdout" \
         2>"$private_evidence/harness-stop.stderr"; then
+        printf '%s\n' 'STOP: named site-06 daemon cleanup failed; details withheld' >>"$control_summary"
         printf '%s\n' 'STOP: named site-06 daemon cleanup failed; details withheld' >&2
         status=1
       fi
     fi
     # The headless process/profile belong to the window; only close removes them.
-    exit "$status"
+    finish_rollback_control "$status"
   }
   trap cleanup_browser_control EXIT
   trap 'exit 130' INT
@@ -1394,6 +1609,8 @@ while time.monotonic() < deadline:
 if not ready: raise SystemExit("STOP: STEP 4 app readiness timeout")
 print("STEP 5", flush=True)
 branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+marker=evidence/"site-06-browser-assertions-started.txt"
+marker.write_text("ASSERTIONS_STARTED\n",encoding="utf-8"); marker.chmod(0o600)
 if branch=="FULL-CONTROL":
     print("STEP 6", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
@@ -1479,8 +1696,13 @@ PY
 ## 7. Manifest, pin release, and close
 
 Closure is mechanical. It rejects credentials, raw HTML, HAR content, email
-addresses, and private browser state. It records the browser branch. On success
-the pin is guardedly removed. After rollback, `current` first returns to the
+addresses, and private browser state. It records the browser branch. A public-byte
+PASS plus a non-blocking browser `NOT_PROVED` receipt closes as `OUTCOME=released`.
+The sanitized acceptance line appears in `CLOSE.txt`, the pin-close receipt, and
+`site-07-outcome.txt` inside the hashed manifest. Signed-in claims keep their
+existing `NOT_PROVED` line on this path, even in FULL-CONTROL; closure never
+claims a workspace restore or signed-in assertion that the browser did not prove.
+On success the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
 The task-owned headless browser is stopped and its private profile is removed through guarded rm. The
 temporary build `site/.env` is removed at close.
@@ -1490,7 +1712,7 @@ creates it before its SSH call, even if that call fails. If the marker is absent
 and `site-03-pin-previous` never ran, run `site-06`, then
 `site-07-pre-pin-manifest-close` below. This path needs no `previous.release`
 and verifies the live baseline without changing `current`. If the pin step ran,
-use the unchanged `site-07-manifest-close` instead after the applicable failure
+use `site-07-manifest-close` instead after the applicable failure
 reconciliation and `site-06`. A partial pin failure needs HezLead reconciliation;
 never delete its marker or use the pre-pin path to bypass it. Do not retry the
 failed release step within the closing window.
@@ -1578,13 +1800,22 @@ BOX
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
       browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
-      kill "$SITE_CHROME_PID"
+      case "$browser_command" in
+        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+        *) exit 1 ;;
+      esac
+      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-pre-pin-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
+        exit 1
+      fi
       for tries in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
         sleep 1
       done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-pre-pin-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
+        exit 1
+      fi
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
@@ -1639,8 +1870,30 @@ PY
     grep -qFx 'DEPLOYMENT=failed-before-switch' "$SITE_EVIDENCE/site-04-reconciliation.txt"; outcome=failed-before-switch
   else
     grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-05-public.txt"
-    test -f "$SITE_EVIDENCE/site-05-browser.json"; outcome=released
+    python3 - "$SITE_EVIDENCE" <<'PY'
+import json,pathlib,re,sys
+root=pathlib.Path(sys.argv[1]); label="site-05-browser-acceptance"
+branch=json.loads((root/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+assert branch in {"FULL-CONTROL","REDUCED-CONTROL"}
+rows=(root/(label+"-receipt.txt")).read_text(encoding="utf-8").splitlines()
+assert "BROWSER_BRANCH="+branch in rows and "blocking=no" in rows
+acceptance=[line for line in rows if line.startswith("browser_acceptance=")]; assert len(acceptance)==1
+if acceptance[0].startswith("browser_acceptance=PASS reason="):
+    assert "browser_control_exit=0" in rows
+    assert json.loads((root/"site-05-browser.json").read_text(encoding="utf-8"))["branch"]==branch
+else:
+    assert re.fullmatch(r"browser_acceptance=NOT_PROVED reason=(?:STEP [0-9]{1,2} \([A-Za-z /-]+\)|STOP[^\n]+)",acceptance[0])
+    assert branch=="REDUCED-CONTROL" or ("assertions_started=no" in rows and not (root/(label+"-assertions-started.txt")).exists())
+PY
+    outcome=released
   fi
+  # This outcome/acceptance receipt is hashed by the manifest; CLOSE.txt mirrors it.
+  {
+    printf 'OUTCOME=%s\n' "$outcome"
+    if test "$outcome" = released; then cat "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; fi
+  } >"$SITE_EVIDENCE/site-07-outcome.txt"
+  chmod 0600 "$SITE_EVIDENCE/site-07-outcome.txt"
+  browser_acceptance_line=$(sed -n '/^browser_acceptance=/p' "$SITE_EVIDENCE/site-07-outcome.txt")
   python3 - "$SITE_EVIDENCE" <<'PY'
 import hashlib,json,pathlib,re,stat,sys
 root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
@@ -1660,12 +1913,12 @@ if not rows: raise SystemExit(1)
 manifest=root/"manifest.json"; manifest.write_text(json.dumps(rows,sort_keys=True,indent=2)+"\n",encoding="utf-8"); manifest.chmod(0o600)
 PY
   manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
-  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" \
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" "$browser_acceptance_line" \
     >"$SITE_EVIDENCE/site-07-pin-close.txt" <<'BOX'
 set -euo pipefail
 set -E
 trap 'printf "FAIL site-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-pin=$1; previous=$2; window_id=$3; outcome=$4; root=/srv/commonswarm/site
+pin=$1; previous=$2; window_id=$3; outcome=$4; browser_acceptance_line=$5; root=/srv/commonswarm/site
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
 test "$previous" = "$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
 current=$(readlink -f "$root/current")
@@ -1686,14 +1939,17 @@ PY
   test ! -e "$pin"
 fi
 rm -f /tmp/commonswarm-site-window.env
-printf 'pin_released=yes\noutcome=%s\n' "$outcome"
+printf 'pin_released=yes\noutcome=%s\nOUTCOME=%s\n' "$outcome" "$outcome"
+if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-07-pin-close.txt"
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
   {
     printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
     printf 'BROWSER_BRANCH=%s\n' "$branch"
-    if test "$branch" = FULL-CONTROL; then
+    if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
+    if test "$branch" = FULL-CONTROL && test "$outcome" = released &&
+      grep -q '^browser_acceptance=PASS reason=' "$SITE_EVIDENCE/site-05-browser-acceptance-receipt.txt"; then
       printf '%s\n' \
         'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
         'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
@@ -1721,13 +1977,22 @@ PY
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
       browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
-      kill "$SITE_CHROME_PID"
+      case "$browser_command" in
+        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
+        *) exit 1 ;;
+      esac
+      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
+        exit 1
+      fi
       for tries in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
         sleep 1
       done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+        printf '%s\n' 'WARN site-07-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
+        exit 1
+      fi
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
@@ -1756,7 +2021,7 @@ PY
 | P2-K2-07 | `site-03-pin-previous` creates/proves the retention-proof copy; close releases it. |
 | P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
 | P2-K2-09 | The marked browser steps use only Anvil's task-owned fresh headless profile and restore its starting workspace. |
-| P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
+| P2-K2-10 | Deploy/public failures and blocking FULL-CONTROL browser failures auto-switch; `site-06` requires public rollback bytes and records non-blocking browser failures as NOT_PROVED. |
 | P2-K2-11 | `site-07-manifest-close`, or `site-07-pre-pin-manifest-close` before pin invocation, scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site-01` produces the evidence directory. |
 | P2-K3-02 | `site-00-source-checkout` produces the checkout. |
@@ -1776,7 +2041,7 @@ PY
 | P2-K5-04 | Static exact-SHA deletion-guard assertion in `site-02`. |
 | P2-K5-05 | Static hold list consumed by GO; missing evidence stops. |
 | P2-K5-06 | Static exact SHA/base authorization consumed by `site-04`. |
-| P2-K5-07 | Static automatic rollback in both controls and failed-deploy reconciliation. |
+| P2-K5-07 | Static rollback for deploy/public failures and blocking FULL-CONTROL browser failures; non-blocking browser failures record NOT_PROVED. |
 | P2-K5-08 | Static mechanical close after required readbacks. |
 | P2-K6 | Empty by audit. |
 | Pre-seed: start/evidence | `site-01` measures time and creates the named destination. |
