@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import {
   assertAllowedOrigin,
+  consentSecurityHeaders,
   INTERACTION_SECURITY_HEADERS,
   hashOpaque,
   opaqueMatches,
@@ -241,4 +242,34 @@ test("interaction pages send a same-origin referrer policy so form POSTs carry a
   assert.doesNotMatch(csp, /(^|;)\s*sandbox\b/);
   assert.match(csp, /form-action 'self'/);
   assert.throws(() => assertAllowedOrigin("null", new Set(["https://mcp.commonswarm.com"])), { code: "origin_forbidden" });
+});
+
+test("consent CSP serializes only a safe HTTPS or explicitly allowed loopback origin", () => {
+  for (const [uri, options, origin] of [
+    ["https://claude.ai/api/mcp/auth_callback?state=synthetic", {}, "https://claude.ai"],
+    ["https://client.example:8443/callback", {}, "https://client.example:8443"],
+    ["http://127.0.0.1:49152/callback", { allowLoopback: true }, "http://127.0.0.1:49152"],
+    ["http://localhost:49152/callback", { allowLoopback: true }, "http://localhost:49152"],
+    ["http://[::1]:49152/callback", { allowLoopback: true }, "http://[::1]:49152"],
+  ]) {
+    const headers = consentSecurityHeaders(uri, options);
+    assert.equal(headers["content-security-policy"],
+      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${origin}; frame-ancestors 'none'; base-uri 'none'`);
+    for (const name of ["cache-control", "referrer-policy", "x-content-type-options"]) {
+      assert.equal(headers[name], INTERACTION_SECURITY_HEADERS[name]);
+    }
+  }
+  for (const uri of [
+    undefined, "not-a-url", "https://claude.ai;form-action *", "https://claude.ai/\n; form-action *",
+    "https://claude.ai/callback\u0000", "https://claude.ai/callback\u007f",
+    "https://claude.ai%3bform-action.example/callback", "https://claude.ai/callback#fragment",
+    "https://user:password@claude.ai/callback", "https://claude.ai\\@attacker.example/callback",
+    "https://bad_host.example/callback", "https://[2001:db8::1]/callback",
+    "javascript:alert(1)", "data:text/html,hello", "file:///callback", "custom:/callback",
+    "http://attacker.example/callback", "http://127.0.0.2/callback",
+    "http://127.0.0.1.attacker.example/callback",
+  ]) {
+    assert.throws(() => consentSecurityHeaders(uri, { allowLoopback: true }), TypeError, String(uri));
+  }
+  assert.throws(() => consentSecurityHeaders("http://127.0.0.1:49152/callback"), TypeError);
 });

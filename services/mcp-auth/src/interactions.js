@@ -3,6 +3,7 @@ import { errors } from "oidc-provider";
 
 import {
   assertAllowedOrigin,
+  consentSecurityHeaders,
   INTERACTION_SECURITY_HEADERS,
   parseCookies,
   SESSION_COOKIE,
@@ -21,10 +22,11 @@ function respond(response, status, body, headers = {}) {
   response.end(JSON.stringify(body));
 }
 
-function respondHtml(response, status, body) {
+function respondHtml(response, status, body, headers) {
   response.writeHead(status, {
     ...INTERACTION_SECURITY_HEADERS,
     "content-type": "text/html; charset=utf-8",
+    ...headers,
   });
   response.end(body);
 }
@@ -215,6 +217,16 @@ export function createInteractionHandler({
     );
     const session = await store.requireSession(browser.id);
 
+    async function consentHeaders() {
+      const redirectUri = details.params.redirect_uri;
+      // HTTP is only a native-client loopback exception. Client metadata has
+      // already passed the provider's policy before this interaction exists.
+      const client = new URL(redirectUri).protocol === "http:"
+        ? await provider.Client.find(details.params.client_id)
+        : null;
+      return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
+    }
+
     if (request.method === "GET" && operation === "view") {
       if (!session?.user_id) {
         const signIn = gotrue.begin({ callbackUrl, interactionUid });
@@ -247,7 +259,7 @@ export function createInteractionHandler({
         selectionVersion: csrf.selectionVersion,
         csrfToken: csrf.token,
         progress,
-      }));
+      }), await consentHeaders());
       return true;
     }
 
@@ -292,7 +304,7 @@ export function createInteractionHandler({
         selectionVersion: csrf.selectionVersion,
         csrfToken: csrf.token,
         validationError: message,
-      }));
+      }), await consentHeaders());
     }
     if (!Number.isSafeInteger(body.selection_version)) {
       await invalidRequest("Reload the workspace selection and try again.", [], undefined, true);
@@ -433,7 +445,7 @@ export function createInteractionHandler({
         csrfToken: retry.token,
         progress,
         failure: "CommonSwarm could not finish every consent step.",
-      }));
+      }), await consentHeaders());
       return true;
     }
     await store.complete(interactionUid);

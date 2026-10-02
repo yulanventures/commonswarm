@@ -48,3 +48,24 @@ export const INTERACTION_SECURITY_HEADERS = Object.freeze({
   "referrer-policy": "same-origin",
   "x-content-type-options": "nosniff",
 });
+
+export function consentSecurityHeaders(redirectUri, { allowLoopback = false } = {}) {
+  // Use only the provider-validated interaction URI. Reject URL parser
+  // normalization tricks before serializing a single CSP origin source.
+  if (typeof redirectUri !== "string" || /[\s\u0000-\u001f\u007f\\]/u.test(redirectUri)) {
+    throw new TypeError("invalid consent redirect URI");
+  }
+  const url = new URL(redirectUri);
+  const origin = url.origin;
+  const https = /^https:\/\/[a-z0-9.-]+(:\d+)?$/u.test(origin);
+  const loopback = allowLoopback &&
+    /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/u.test(origin);
+  if (url.username || url.password || url.hash || (!https && !loopback)) {
+    throw new TypeError("invalid consent redirect origin");
+  }
+  return {
+    ...INTERACTION_SECURITY_HEADERS,
+    "content-security-policy": INTERACTION_SECURITY_HEADERS["content-security-policy"]
+      .replace("form-action 'self'", `form-action 'self' ${origin}`),
+  };
+}
