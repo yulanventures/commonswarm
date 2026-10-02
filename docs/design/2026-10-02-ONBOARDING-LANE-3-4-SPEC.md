@@ -35,7 +35,7 @@ not verified.
 | **From code:** `supabase/functions/command/admin-delegation.ts:257`, `:404`; `supabase/functions/command/index.ts:14291` | Retries return a body-free receipt, not old secrets. Private delivery failure stops the parent grant. Storage delivery remains pending and is not proof that the receiving agent read setup. Completion and safe bounded delivery recovery still need their own transitions. |
 | **From code:** `services/mcp-auth/src/management-bindings.js:3`, `:19`; `services/mcp-auth/src/provider.js:91` | Production OAuth management admits existing hosted human grant commands, not a public delegated runtime enrollment route. Existing MCP consent/audience must remain separate from delegated admin consent. |
 | **From code:** `supabase/functions/mcp/tools.ts:28`; `src/cloud/agent-onboarding-contract.ts:5`, `:8`, `:46` | Hosted tools remain the eight seat tools. Local bootstrap prints configuration; receive and wake registries differ. There is no common delegated enrollment receipt or measured installer for all named hosts. A seat ACK cannot attest which shared connector chat read it. |
-| **From code:** `src/protocol/admin-authority.ts:323`; `supabase/migrations/20261001000002_admin_routine.sql:163` | Parent terminal events stop invitations and access ancestry is enforced. New pending attempts must also stop on parent termination and workspace withdrawal; lazy expiry must be checked on use. |
+| **From code:** `src/protocol/admin-authority.ts:323`; `supabase/migrations/20261001000002_admin_routine.sql:122` | Parent terminal events stop invitations and access ancestry is enforced. New pending attempts must also stop on parent termination and workspace withdrawal; lazy expiry must be checked on use. |
 
 ## Smallest ordered commit set
 
@@ -71,9 +71,12 @@ cancel matching attempts in the account reducer. Deadline checks also refuse
 use before expiry has been materialized.
 
 Files: `src/protocol/admin-authority.ts`, `src/protocol/admin-routine.ts`,
-`tests/p1-cli/admin-routine.test.ts`, and generated protocol/admin declarations
+`supabase/functions/command/admin-delegation.ts`,
+`supabase/functions/command/admin-connection-result.ts`,
+`tests/p1-cli/admin-routine.test.ts`, `tests/p1-cli/admin-protocol-bundle.test.ts`, and generated protocol/admin declarations
 and OAuth management bundle. No extra package script is needed when extending
-the existing test file, already named literally in `package.json`.
+these existing test files, both named literally in `package.json`. The Node
+management bundle is generated but gitignored; rebuild it for the auth image.
 
 Tests: exercise real decision → account reducer → replay/retry/cancel, both local
 and hosted *pending* routes. Valid controls must produce one retained attempt,
@@ -90,6 +93,13 @@ An eventual reviewed edge release and matching Node management bundle release
 are required to make this command live. Real transaction/concurrency/idempotency
 proof on a disposable server workspace remains a release gate, not established
 by the service-free reducer tests.
+
+**Proposed replay response:** render current projection state through the same
+receipt boundary as fresh intake. A stored pending reply cannot conceal a later
+cancel or expired attempt. Recheck current workspace rights, grant scope and
+target coverage before returning a receipt; refuse an expired pending attempt.
+Historical events remain historical. The response allowlist excludes unrecognized
+fields even if a projection acquires private fields in a later implementation.
 
 ### 3.2 — Owner-enrolled runtime and single-use challenge foundation
 

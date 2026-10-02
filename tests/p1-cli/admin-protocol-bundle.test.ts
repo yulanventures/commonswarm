@@ -50,7 +50,11 @@ test("the generated edge bundle can issue a consented account grant and refuses 
 
 test("the generated bundle enforces separate routine creation permission and folds both streams", () => {
   const f = adminCoreFixture();
-  f.manifest.scope_names = ["admin:read", "workspaces:create"];
+  f.manifest.scope_names = ["admin:read", "workspaces:create", "onboarding:connect"];
+  f.manifest.created_workspace_policy.scope_names = ["onboarding:connect"];
+  f.manifest.target_rules.recipient_user_ids = [f.owner];
+  f.manifest.target_rules.recipient_connection_ids = [f.manifest.connection_id];
+  f.manifest.target_rules.transports = ["local"];
   const granted = bundle.decideAdminAuthority(
     {
       kind: "grant_admin_delegation",
@@ -120,6 +124,25 @@ test("the generated bundle enforces separate routine creation permission and fol
   assert.deepEqual(
     workspace!.admin_routine!.created_workspaces[command.workspace_id]!
       .scope_names,
-    [],
+    ["onboarding:connect"],
   );
+  const prepare = {
+    kind: "admin_prepare_connection" as const, grant_id: f.grantId,
+    workspace_id: command.workspace_id, intended_owner_user_id: f.owner,
+    intended_agent_id: randomUUID(), recipient_connection_id: f.manifest.connection_id,
+    requested_name: "Bundled recipient", transport: "local" as const, ttl_seconds: 3600,
+  };
+  const connectedContext = { ...context, workspace, workspace_seq: 2, recipient_exists: true };
+  assert.equal(bundle.decideAdminRoutine(prepare, account, { ...connectedContext, actor: { kind: "worker" } }).reason,
+    "credential_kind_forbidden");
+  const prepared = bundle.decideAdminRoutine(prepare, account, connectedContext);
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.workspace_events.length, 0);
+  const pending = prepared.events.reduce(bundle.reduceAdminAuthority, account);
+  const id = Object.keys(pending.connections!)[0]!;
+  assert.equal(pending.connections![id]!.state, "awaiting_authorization");
+  const cancelled = bundle.decideAdminRoutine({ kind: "admin_cancel_connection", grant_id: f.grantId,
+    workspace_id: command.workspace_id, attempt_id: id, reason_code: "cancelled" }, pending, connectedContext);
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.events.reduce(bundle.reduceAdminAuthority, pending).connections![id]!.state, "cancelled");
 });

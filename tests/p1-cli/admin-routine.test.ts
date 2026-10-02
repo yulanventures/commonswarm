@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { adminCoreFixture } from "../support/admin-fixture.js";
+// @ts-expect-error TS5097: exercise the Deno response boundary without a service.
+import { adminConnectionResult } from "../../supabase/functions/command/admin-connection-result.ts";
 import {
   ADMIN_RESOURCE,
   ADMIN_SCOPE_NAMES,
@@ -9,6 +11,7 @@ import {
   type AdminRoutineCommand,
   type AdminRoutineContext,
   decideAdminRoutine,
+  decideAdminAuthority,
   reduceAdminAuthority,
   reduceWorkspace,
   type WorkspaceState,
@@ -192,6 +195,139 @@ test("routine workspace creation requires its separate scope and new spaces inhe
     "workspace_limit_reached",
   );
   assert.equal(next.routine!.spend[x.f.grantId]!.workspaces, 1);
+});
+
+function connectionRequest(x: ReturnType<typeof fixture>, transport: "local" | "hosted_mcp" = "local") {
+  return {
+    ...x.base, kind: "admin_prepare_connection" as const,
+    intended_owner_user_id: x.f.owner, intended_agent_id: randomUUID(),
+    recipient_connection_id: x.f.manifest.connection_id,
+    requested_name: "Receiving agent", transport, ttl_seconds: 86400,
+  };
+}
+
+test("connection preparation persists one pending target without seats or credentials, and retries do not slide expiry", () => {
+  for (const transport of ["local", "hosted_mcp"] as const) {
+    const x = fixture(), command = connectionRequest(x, transport);
+    assert.equal(Object.hasOwn(x.state(), "connections"), false, "historical projection control");
+    const d = x.run(command);
+    const prepared = d.events.find(e => e.type === "AdminConnectionPrepared")!;
+    const id = String(prepared.payload.attempt_id);
+    const attempt = x.state().connections![id]!;
+    assert.equal(attempt.state, "awaiting_authorization");
+    assert.equal(attempt.expires_at, x.f.manifest.expires_at);
+    assert.equal(attempt.parent_admin_grant_id, x.f.grantId);
+    assert.deepEqual(attempt.capability_set, [], "no invented runtime capabilities");
+    assert.equal(d.workspace_events.length, 0, "pending intake has no workspace mutation");
+    assert.equal(Object.keys(x.workspace().principals).length, 0);
+    assert.equal(Object.keys(x.state().routine!.credentials).length, 0);
+    assert.equal(d.events.at(-1)!.payload.outcome, "pending");
+    const retry = x.decide(command, { now: x.f.now + 1000 });
+    assert.equal(retry.ok, true);
+    assert.equal(retry.events.length, 1, "new command ID reuses target without another preparation");
+    assert.equal(retry.events[0]!.payload.attempt_id, id);
+    assert.equal(retry.events[0]!.payload.delivery_state, "awaiting_authorization");
+    assert.equal(Object.keys(retry.events.reduce(reduceAdminAuthority, x.state()).connections!).length, 1);
+    assert.deepEqual(x.state().connections![id], attempt, "deadline and target remain unchanged");
+    assert.ok(d.events.every(e => e.actor_user === null && e.actor_agent_principal === null));
+  }
+});
+
+test("pending enrollment validates permission and target beside a valid control", () => {
+  const x = fixture(), command = connectionRequest(x), actor = x.ctx.actor;
+  assert.equal(actor.kind, "delegated_admin");
+  if (actor.kind !== "delegated_admin") throw new Error("fixture actor");
+  for (const [override, reason] of [
+    [{ actor: { kind: "worker" } }, "credential_kind_forbidden"],
+    [{ actor: { kind: "hosted_seat" } }, "credential_kind_forbidden"],
+    [{ actor: { ...actor, scope_names: actor.scope_names.filter(s => s !== "onboarding:connect") } }, "scope_forbidden"],
+    [{ now: x.f.manifest.expires_at }, "grant_inactive"],
+    [{ recipient_exists: false }, "recipient_forbidden"],
+  ] as [Partial<AdminRoutineContext>, string][]) assert.equal(x.decide(command, override).reason, reason);
+  assert.equal(x.decide({ ...command, intended_owner_user_id: randomUUID() }).reason, "human_confirmation_required");
+  assert.equal(x.decide({ ...command, recipient_connection_id: randomUUID() }).reason, "recipient_forbidden");
+  assert.equal(x.decide({ ...command, ttl_seconds: 86401 }).reason, "connection_ttl_invalid");
+  assert.equal(x.decide({ ...command, ttl_seconds: 0 }).reason, "invalid_request");
+  assert.equal(x.decide({ ...command, runtime_key: "untrusted" } as unknown as AdminRoutineCommand).reason, "invalid_request");
+  const lostRights = structuredClone(x.workspace());
+  lostRights.members[x.f.owner]!.revoked_at = x.f.now;
+  assert.equal(x.decide(command, { workspace: lostRights }).reason, "current_rights_required");
+  x.run(command);
+  for (const change of [{ requested_name: "Changed" }, { transport: "hosted_mcp" as const }, { ttl_seconds: 3600 }]) {
+    assert.equal(x.decide({ ...command, ...change }).reason, "connection_target_conflict");
+  }
+  assert.equal(x.decide(command).ok, true, "valid retry still passes after negative probes");
+  assert.equal(Object.keys(x.state().connections!).length, 1);
+});
+
+test("cancellation and expiry never revive a target or refund the lifetime attempt budget", () => {
+  const x = fixture(), command = connectionRequest(x);
+  // A human-confirmed lower ceiling: use one slot, cancel it, then prove no refund.
+  const grant = x.state().grants[x.f.grantId]!;
+  grant.issuance_limits = { ...grant.issuance_limits, connection_attempts: 1 };
+  const d = x.run({ ...command, ttl_seconds: 60 });
+  const id = String(d.events[0]!.payload.attempt_id);
+  const pending = structuredClone(x.state());
+  const cancel = { ...x.base, kind: "admin_cancel_connection" as const, attempt_id: id, reason_code: "cancelled" };
+  assert.equal(x.decide({ ...cancel, attempt_id: randomUUID() }).reason, "connection_attempt_forbidden");
+  assert.equal(x.decide({ ...command, ttl_seconds: 60 }, { now: x.f.now + 60000 }, pending).reason, "connection_attempt_expired");
+  assert.equal(x.decide(command, {}, pending).reason, "connection_target_conflict");
+  const cancelled = x.run(cancel);
+  assert.equal(x.state().connections![id]!.state, "cancelled");
+  assert.deepEqual(cancelled.events[0]!.payload.attempt_owned_seat_ids, []);
+  assert.deepEqual(cancelled.events[0]!.payload.revoked_attempt_credential_ids, []);
+  assert.equal(x.run(cancel).events.length, 1, "repeat cancel is an audited no-op");
+  assert.equal(x.decide({ ...command, ttl_seconds: 60 }).reason, "connection_attempt_cancelled");
+  assert.equal(x.decide({ ...command, intended_agent_id: randomUUID() }).reason, "connection_attempt_limit_reached");
+  assert.equal(Object.keys(x.state().connections!).length, 1);
+});
+
+test("human parent termination and workspace withdrawal stop pending attempts and retain history", () => {
+  for (const kind of ["revoke_admin_delegation", "suspend_admin_delegation", "expire_admin_delegation", "withdraw_admin_workspace_access"] as const) {
+    const x = fixture(), request = connectionRequest(x);
+    x.run(request);
+    const id = Object.keys(x.state().connections!)[0]!;
+    const before = structuredClone(x.state());
+    const context = { ...x.f.ctx, withdrawing_workspace_owner: true,
+      actor: kind === "expire_admin_delegation" ? { kind: "system" as const } : x.f.ctx.actor,
+      now: kind === "expire_admin_delegation" ? x.f.manifest.expires_at : x.f.now + 1 };
+    const command = kind === "expire_admin_delegation" ? { kind, grant_id: x.f.grantId }
+      : kind === "withdraw_admin_workspace_access" ? { kind, grant_id: x.f.grantId, workspace_id: x.base.workspace_id, reason_code: "withdrawn" }
+      : { kind, grant_id: x.f.grantId, reason_code: "stopped" };
+    const termination = decideAdminAuthority(command, before, context);
+    assert.equal(termination.ok, true, kind);
+    if (kind !== "withdraw_admin_workspace_access") {
+      assert.deepEqual(termination.events[0]!.payload.cancelled_attempt_ids, [id]);
+    }
+    const stopped = termination.events.reduce(reduceAdminAuthority, before);
+    assert.equal(stopped.connections![id]!.state, "cancelled", kind);
+    assert.equal(Object.keys(stopped.connections!).length, 1, "history preserves spend");
+    assert.equal(before.connections![id]!.state, "awaiting_authorization", "reducer does not mutate prior state");
+    assert.equal(x.decide(request, { now: context.now }, stopped).reason,
+      kind === "withdraw_admin_workspace_access" ? "workspace_forbidden" : "grant_inactive");
+  }
+});
+
+test("connection response renders current pending or cancelled state and refuses expired intake without exposing extra fields", () => {
+  const x = fixture(), request = { ...connectionRequest(x), ttl_seconds: 60 };
+  x.run(request);
+  const id = Object.keys(x.state().connections!)[0]!;
+  const attempt = x.state().connections![id]!;
+  const contaminated = { ...attempt, credential: "must-stay-private", session_proof: "must-stay-private" };
+  const pending = adminConnectionResult(contaminated, x.f.now);
+  assert.equal(pending.status, 200);
+  assert.equal(pending.body.status, "pending");
+  assert.deepEqual(pending.body.connection_attempt, attempt);
+  assert.ok(!JSON.stringify(pending).includes("must-stay-private"));
+  assert.equal(adminConnectionResult(attempt, x.f.now + 60000).body.error, "connection_attempt_expired");
+  assert.equal(adminConnectionResult(undefined, x.f.now).status, 403);
+  assert.equal(adminConnectionResult(attempt, x.f.now + 59999).body.status, "pending", "positive deadline control");
+  x.run({ ...x.base, kind: "admin_cancel_connection", attempt_id: id, reason_code: "cancelled" });
+  const current = adminConnectionResult(x.state().connections![id], x.f.now + 60000);
+  assert.equal(current.status, 200);
+  assert.equal(current.body.status, "accepted");
+  assert.equal((current.body.connection_attempt as { state: string }).state, "cancelled");
+  assert.ok(!String(current.body.next_action).includes("connected"));
 });
 
 test("routine seat provisioning preserves delegated attribution, own targets, worker ceilings and runtime delivery", () => {

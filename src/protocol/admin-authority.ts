@@ -28,16 +28,26 @@ export interface AdminCredentialLineage {
   state: 'active' | 'revoked'; delivery_state: 'awaiting_delivery';
 }
 export interface AdminAccountState {
+  // Absent on pre-enrollment projections; no earlier command could create an attempt.
+  connections?: Record<string, AdminConnectionAttempt>;
   routine?: AdminRoutineState;
   grants: Record<string, AdminGrant>; consents: Record<string, AdminConsent>;
   lineages: Record<string, AdminCredentialLineage>;
   rate_buckets: Record<string, { hour_start: number; attempts: number }>;
+}
+export interface AdminConnectionAttempt {
+  attempt_id: string; parent_admin_grant_id: string; workspace_id: string;
+  intended_owner_user_id: string; intended_agent_id: string; recipient_connection_id: string;
+  requested_name: string; transport: 'local' | 'hosted_mcp'; ttl_seconds: number;
+  capability_set: string[]; state: 'awaiting_authorization' | 'cancelled';
+  created_at: number; expires_at: number; cancelled_at: number | null; reason_code: string | null;
 }
 export const ADMIN_EVENT_TYPES = [
   'AdminConsentPrepared', 'AdminDelegationGranted', 'AdminDelegationNarrowed',
   'AdminDelegationRevoked', 'AdminDelegationSuspended', 'AdminDelegationExpired',
   'AdminWorkspaceAccessWithdrawn', 'AdminCredentialIssued', 'AdminCredentialRotated',
   'AdminCredentialReplayDetected', 'AdminMetadataRead', 'AdminActionRecorded',
+  'AdminConnectionPrepared', 'AdminConnectionCancelled',
 ] as const;
 export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEventType;
 export interface AdminAccountEvent {
@@ -277,7 +287,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
 function terminalPayload(grant: AdminGrant, state: AdminAccountState, now: number, reason: string): Record<string, unknown> {
   return { grant_id: grant.grant_id, reason_code: reason, effective_at: now,
     credential_lineage_id: Object.values(state.lineages).find(l => l.grant_id === grant.grant_id)?.credential_lineage_id ?? null,
-    cancelled_attempt_ids: [], dependent_child_ids: [
+    cancelled_attempt_ids: Object.values(state.connections ?? {}).filter(a => a.parent_admin_grant_id === grant.grant_id && a.state === 'awaiting_authorization').map(a => a.attempt_id), dependent_child_ids: [
       ...Object.entries(state.routine?.seats ?? {}).filter(([,s])=>s.grant_id===grant.grant_id).map(([id])=>id),
       ...Object.values(state.routine?.credentials ?? {}).filter(c=>c.parent_admin_grant_id===grant.grant_id).map(c=>c.credential_id),
       ...Object.values(state.routine?.invitations ?? {}).filter(i=>i.parent_admin_grant_id===grant.grant_id).map(i=>i.invitation_id),
@@ -288,6 +298,32 @@ function terminalPayload(grant: AdminGrant, state: AdminAccountState, now: numbe
 export function reduceAdminAuthority(previous: AdminAccountState | null, event: AdminAccountEvent): AdminAccountState {
   if (event.schema_version !== 1 || event.stream_kind !== 'account' || !(ADMIN_EVENT_TYPES as readonly string[]).includes(event.type) && !(ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) throw new Error('unsupported admin event');
   const state = previous ?? emptyAdminAccount(), p = event.payload;
+  if (event.type === 'AdminConnectionPrepared') {
+    const attempt = p as unknown as AdminConnectionAttempt;
+    if (!event.grant_id || attempt.parent_admin_grant_id !== event.grant_id ||
+        !state.grants[event.grant_id] || state.connections?.[attempt.attempt_id] ||
+        attempt.state !== 'awaiting_authorization' || attempt.cancelled_at !== null ||
+        !Number.isSafeInteger(attempt.expires_at) || attempt.expires_at <= event.occurred_at_server) {
+      throw new Error('invalid connection preparation event');
+    }
+    // Project only the receipt fields; delivery hints are not durable attempt state.
+    const { attempt_id, parent_admin_grant_id, workspace_id, intended_owner_user_id,
+      intended_agent_id, recipient_connection_id, requested_name, transport, ttl_seconds,
+      capability_set, state: status, created_at, expires_at, cancelled_at, reason_code } = attempt;
+    return { ...state, connections: { ...state.connections, [attempt_id]: {
+      attempt_id, parent_admin_grant_id, workspace_id, intended_owner_user_id, intended_agent_id,
+      recipient_connection_id, requested_name, transport, ttl_seconds, capability_set,
+      state: status, created_at, expires_at, cancelled_at, reason_code,
+    } } };
+  }
+  if (event.type === 'AdminConnectionCancelled') {
+    const attempt = state.connections?.[String(p.attempt_id)];
+    if (!attempt || attempt.parent_admin_grant_id !== event.grant_id) throw new Error('unknown connection attempt');
+    return { ...state, connections: { ...state.connections, [attempt.attempt_id]: {
+      ...attempt, state: 'cancelled', cancelled_at: attempt.cancelled_at ?? event.occurred_at_server,
+      reason_code: attempt.reason_code ?? String(p.reason_code),
+    } } };
+  }
   if ((ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event) };
   if (event.type === 'AdminConsentPrepared') {
     const c = { ...p, session_binding: '', consumed_at: null } as unknown as AdminConsent;
@@ -314,7 +350,9 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
   if (event.type === 'AdminMetadataRead' || event.type === 'AdminCredentialReplayDetected') return state;
   const id = String(p.grant_id), grant = state.grants[id];
   if (!grant) throw new Error('unknown admin grant');
-  if (event.type === 'AdminWorkspaceAccessWithdrawn') return { ...state, grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [...new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } } };
+  if (event.type === 'AdminWorkspaceAccessWithdrawn') return { ...state,
+    ...cancelPendingConnections(state, id, event.occurred_at_server, 'workspace_withdrawn', String(p.workspace_id)),
+    grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [...new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } } };
   if (event.type === 'AdminDelegationNarrowed') {
     const receipt = String(p.consent_receipt_id), consent = state.consents[receipt];
     if (!consent) throw new Error('missing narrowing consent');
@@ -323,8 +361,18 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
   const status = event.type === 'AdminDelegationRevoked' ? 'revoked' : event.type === 'AdminDelegationSuspended' ? 'suspended' : 'expired';
   const cancelledAt = status === 'expired' ? grant.expires_at : event.occurred_at_server;
   const routine = state.routine ? { ...state.routine, invitations: Object.fromEntries(Object.entries(state.routine.invitations).map(([key, invitation]) => [key, invitation.parent_admin_grant_id === id && invitation.accepted_at === null ? { ...invitation, revoked_at: invitation.revoked_at ?? cancelledAt } : invitation])) } : undefined;
-  return { ...state, ...(routine ? {routine} : {}), grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: String(p.reason_code),
+  return { ...state, ...(routine ? {routine} : {}),
+    ...cancelPendingConnections(state, id, cancelledAt, String(p.reason_code)),
+    grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: String(p.reason_code),
     revoked_at: status === 'revoked' ? event.occurred_at_server : grant.revoked_at,
     suspended_at: status === 'suspended' ? event.occurred_at_server : grant.suspended_at } },
     lineages: Object.fromEntries(Object.entries(state.lineages).map(([key, l]) => [key, l.grant_id === id ? { ...l, state: 'revoked' as const } : l])) };
+}
+
+function cancelPendingConnections(state: AdminAccountState, grantId: string, at: number, reason: string, workspaceId?: string): Pick<AdminAccountState, 'connections'> {
+  if (!state.connections) return {};
+  return { connections: Object.fromEntries(Object.entries(state.connections).map(([key, attempt]) => [key,
+    attempt.parent_admin_grant_id === grantId && attempt.state === 'awaiting_authorization' &&
+      (workspaceId === undefined || attempt.workspace_id === workspaceId)
+      ? { ...attempt, state: 'cancelled' as const, cancelled_at: at, reason_code: reason } : attempt])) };
 }

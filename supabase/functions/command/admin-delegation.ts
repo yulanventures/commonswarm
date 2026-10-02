@@ -1,4 +1,5 @@
 import { prepareAdminRoutine, applyAdminRoutine, type AdminWorkerDelivery } from './admin-routine.ts';
+import { adminConnectionResult } from './admin-connection-result.ts';
 import type { AdminRoutineCommand, AdminRoutineDecision } from '../_shared/admin-routine.d.ts';
 import { AdminRuntimeJwtVerifier, type VerifiedAdminRuntime } from './admin-runtime-auth.ts';
 import type postgres from 'npm:postgres@3.4.9';
@@ -263,6 +264,29 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
           !actor.scope_names.every(scope => g.scope_names.includes(scope)) || state.lineages[credential!.credential_lineage_id]?.generation !== credential!.generation) return { result: errorResult(403, 'grant_inactive') };
       if (prior[0].response.status === 200 && raw?.kind === 'admin_read_metadata' && adminRecord(prior[0].response.body.grant)?.manifest_digest !== g.manifest_digest) return { result: errorResult(403, 'grant_changed') };
       if (raw?.kind === 'admin_read_metadata' && id(raw.workspace_id) && (!g.workspace_ids.includes(raw.workspace_id) || g.withdrawn_workspace_ids.includes(raw.workspace_id) || !await currentRights(tx, owner, [raw.workspace_id]))) return { result: errorResult(403, 'workspace_forbidden') };
+      if (proposed?.kind === 'admin_prepare_connection' || proposed?.kind === 'admin_cancel_connection') {
+        if (!actor.scope_names.includes('onboarding:connect') || !g.scope_names.includes('onboarding:connect')) return { result: errorResult(403, 'scope_forbidden') };
+        const selected = g.workspace_ids.includes(proposed.workspace_id);
+        const created = state.routine?.created_workspaces[proposed.workspace_id];
+        const owned = g.workspace_selector === 'owned_and_selected' ? await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${proposed.workspace_id}::uuid AND user_id=${owner}::uuid AND role='owner' AND revoked_at IS NULL FOR SHARE` : [];
+        if (g.withdrawn_workspace_ids.includes(proposed.workspace_id) ||
+            !(selected || owned.length === 1 || created?.grant_id === g.grant_id) ||
+            (created?.grant_id === g.grant_id && (!created.scope_names.includes('onboarding:connect') || !g.created_workspace_policy.scope_names.includes('onboarding:connect'))) ||
+            !await currentRights(tx, owner, [proposed.workspace_id], ['onboarding:connect'])) return { result: errorResult(403, 'workspace_forbidden') };
+        // A refused command replay remains refused. Accepted intake replies are
+        // refreshed from the projection so cancellation/expiry cannot be hidden.
+        if (prior[0].response.status === 200) {
+          const saved = adminRecord(prior[0].response.body.connection_attempt);
+          const attempt = state.connections?.[String(saved?.attempt_id)];
+          if (!attempt || attempt.parent_admin_grant_id !== g.grant_id || attempt.workspace_id !== proposed.workspace_id) return { result: errorResult(403, 'connection_attempt_forbidden') };
+          if (proposed.kind === 'admin_prepare_connection' &&
+              (!g.target_rules.recipient_user_ids.includes(attempt.intended_owner_user_id) ||
+               !g.target_rules.recipient_connection_ids.includes(attempt.recipient_connection_id) ||
+               !g.target_rules.transports.includes(attempt.transport))) return { result: errorResult(403, 'recipient_forbidden') };
+          const result = adminConnectionResult(attempt, now);
+          return { result: result.status === 200 ? { ...result, body: { ...prior[0].response.body, ...result.body } } : result };
+        }
+      }
     }
     if (actor.kind === 'credential_runtime' && proposed && 'grant_id' in proposed) {
       const g = state.grants[proposed.grant_id];
@@ -400,7 +424,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     await tx`INSERT INTO swarm.admin_credentials(credential_id, grant_id, credential_lineage_id, generation, access_hash, refresh_hash, access_expires_at, refresh_deadline, scope_names)
       VALUES (${crypto.randomUUID()}::uuid, ${g.grant_id}::uuid, ${lineage.credential_lineage_id}::uuid, ${lineage.generation}, ${await digest(delivery.access_credential)}, ${await digest(delivery.refresh_credential)}, ${new Date(lineage.access_expires_at)}, ${new Date(lineage.refresh_deadline)}, ${lineage.scope_names})`;
   }
-  const result: Result = decision.ok ? { status: 200, body: {
+  let result: Result = decision.ok ? { status: 200, body: {
     status: delivery || workerDelivery || decision.events.some(e => e.payload.delivery_state) ? 'pending' : 'accepted', events: decision.events,
     ...(workerDelivery ? { delivery_state: 'awaiting_delivery', next_action: 'The authenticated recipient runtime must store the credential and verify its connection.' } : {}),
     ...(delivery ? { delivery_state: 'awaiting_delivery', next_action: 'The authenticated runtime must store the credentials.' } : {}),
@@ -408,6 +432,12 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     ...(command?.kind === 'admin_read_metadata' ? { grant: { ...next.grants[command.grant_id],
       state: next.grants[command.grant_id]?.state === 'active' && (next.grants[command.grant_id]!.expires_at <= now || next.grants[command.grant_id]!.refresh_deadline <= now) ? 'expired' : next.grants[command.grant_id]?.state } } : {}),
   } } : errorResult(decision.reason === 'rate_limited' ? 429 : decision.reason === 'invalid_request' ? 400 : 403, decision.reason ?? 'forbidden');
+  if (decision.ok && (command?.kind === 'admin_prepare_connection' || command?.kind === 'admin_cancel_connection')) {
+    const attemptId = command.kind === 'admin_cancel_connection' ? command.attempt_id
+      : decision.events.find(e => e.type === 'AdminActionRecorded')?.payload.attempt_id;
+    const current = adminConnectionResult(next.connections?.[String(attemptId)], now);
+    result = current.status === 200 ? { ...current, body: { ...result.body, ...current.body } } : current;
+  }
   await tx`INSERT INTO swarm.admin_command_results(owner_user_id, actor_key, command_id, request_digest, response) VALUES (${owner}::uuid, ${actorKey}, ${commandId}, ${requestDigest}, ${tx.json(result as unknown as postgres.JSONValue)})`;
   return { result, ...(delivery ? { delivery } : {}), ...(workerDelivery ? { worker_delivery: workerDelivery } : {}) };
 }

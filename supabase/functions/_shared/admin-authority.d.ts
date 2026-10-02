@@ -56,6 +56,7 @@ export interface AdminCredentialLineage {
     delivery_state: 'awaiting_delivery';
 }
 export interface AdminAccountState {
+    connections?: Record<string, AdminConnectionAttempt>;
     routine?: AdminRoutineState;
     grants: Record<string, AdminGrant>;
     consents: Record<string, AdminConsent>;
@@ -65,7 +66,24 @@ export interface AdminAccountState {
         attempts: number;
     }>;
 }
-export declare const ADMIN_EVENT_TYPES: readonly ["AdminConsentPrepared", "AdminDelegationGranted", "AdminDelegationNarrowed", "AdminDelegationRevoked", "AdminDelegationSuspended", "AdminDelegationExpired", "AdminWorkspaceAccessWithdrawn", "AdminCredentialIssued", "AdminCredentialRotated", "AdminCredentialReplayDetected", "AdminMetadataRead", "AdminActionRecorded"];
+export interface AdminConnectionAttempt {
+    attempt_id: string;
+    parent_admin_grant_id: string;
+    workspace_id: string;
+    intended_owner_user_id: string;
+    intended_agent_id: string;
+    recipient_connection_id: string;
+    requested_name: string;
+    transport: 'local' | 'hosted_mcp';
+    ttl_seconds: number;
+    capability_set: string[];
+    state: 'awaiting_authorization' | 'cancelled';
+    created_at: number;
+    expires_at: number;
+    cancelled_at: number | null;
+    reason_code: string | null;
+}
+export declare const ADMIN_EVENT_TYPES: readonly ["AdminConsentPrepared", "AdminDelegationGranted", "AdminDelegationNarrowed", "AdminDelegationRevoked", "AdminDelegationSuspended", "AdminDelegationExpired", "AdminWorkspaceAccessWithdrawn", "AdminCredentialIssued", "AdminCredentialRotated", "AdminCredentialReplayDetected", "AdminMetadataRead", "AdminActionRecorded", "AdminConnectionPrepared", "AdminConnectionCancelled"];
 export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEventType;
 export interface AdminAccountEvent {
     stream_kind: 'account';
