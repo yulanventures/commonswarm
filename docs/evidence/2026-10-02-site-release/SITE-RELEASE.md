@@ -11,6 +11,13 @@ Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
 blocks use `/bin/bash` 3.2. They never assign `HOME`, print a credential, run
 Docker, deploy a second SHA, change Caddy or DNS, or restart a service.
 
+Every headless browser launch in this plan or any plan copied from it passes
+`--no-sandbox` with `--password-store=basic`, `--use-mock-keychain`, and a fresh
+temporary profile: Chromium's macOS seatbelt cannot start inside the release
+worker's `sandbox-exec` profile (`~/.config/agent-sandbox/no-real-chrome.sb`),
+which supplies containment. Use only Playwright's bundled Chromium, never the
+installed Chrome. See the REDUCED-CONTROL rule under "Fresh headless Chromium session".
+
 Hosted MCP must be ON. `site2-00-a-close-ingest` now records the live
 protected-resource metadata and unauthenticated MCP POST checks that replace
 the historical Window A handoff; `site2-03-go-record` repeats them before GO.
