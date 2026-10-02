@@ -1421,7 +1421,9 @@ var ADMIN_EVENT_TYPES = [
   "AdminCredentialRotated",
   "AdminCredentialReplayDetected",
   "AdminMetadataRead",
-  "AdminActionRecorded"
+  "AdminActionRecorded",
+  "AdminConnectionPrepared",
+  "AdminConnectionCancelled"
 ];
 function emptyAdminAccount() {
   return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} };
@@ -1687,7 +1689,7 @@ function terminalPayload(grant, state, now, reason) {
     reason_code: reason,
     effective_at: now,
     credential_lineage_id: Object.values(state.lineages).find((l) => l.grant_id === grant.grant_id)?.credential_lineage_id ?? null,
-    cancelled_attempt_ids: [],
+    cancelled_attempt_ids: Object.values(state.connections ?? {}).filter((a) => a.parent_admin_grant_id === grant.grant_id && a.state === "awaiting_authorization").map((a) => a.attempt_id),
     dependent_child_ids: [
       ...Object.entries(state.routine?.seats ?? {}).filter(([, s]) => s.grant_id === grant.grant_id).map(([id]) => id),
       ...Object.values(state.routine?.credentials ?? {}).filter((c) => c.parent_admin_grant_id === grant.grant_id).map((c) => c.credential_id),
@@ -1698,6 +1700,56 @@ function terminalPayload(grant, state, now, reason) {
 function reduceAdminAuthority(previous, event2) {
   if (event2.schema_version !== 1 || event2.stream_kind !== "account" || !ADMIN_EVENT_TYPES.includes(event2.type) && !ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) throw new Error("unsupported admin event");
   const state = previous ?? emptyAdminAccount(), p = event2.payload;
+  if (event2.type === "AdminConnectionPrepared") {
+    const attempt = p;
+    if (!event2.grant_id || attempt.parent_admin_grant_id !== event2.grant_id || !state.grants[event2.grant_id] || state.connections?.[attempt.attempt_id] || attempt.state !== "awaiting_authorization" || attempt.cancelled_at !== null || !Number.isSafeInteger(attempt.expires_at) || attempt.expires_at <= event2.occurred_at_server) {
+      throw new Error("invalid connection preparation event");
+    }
+    const {
+      attempt_id,
+      parent_admin_grant_id,
+      workspace_id,
+      intended_owner_user_id,
+      intended_agent_id,
+      recipient_connection_id,
+      requested_name,
+      transport,
+      ttl_seconds,
+      capability_set,
+      state: status2,
+      created_at,
+      expires_at,
+      cancelled_at,
+      reason_code
+    } = attempt;
+    return { ...state, connections: { ...state.connections, [attempt_id]: {
+      attempt_id,
+      parent_admin_grant_id,
+      workspace_id,
+      intended_owner_user_id,
+      intended_agent_id,
+      recipient_connection_id,
+      requested_name,
+      transport,
+      ttl_seconds,
+      capability_set,
+      state: status2,
+      created_at,
+      expires_at,
+      cancelled_at,
+      reason_code
+    } } };
+  }
+  if (event2.type === "AdminConnectionCancelled") {
+    const attempt = state.connections?.[String(p.attempt_id)];
+    if (!attempt || attempt.parent_admin_grant_id !== event2.grant_id) throw new Error("unknown connection attempt");
+    return { ...state, connections: { ...state.connections, [attempt.attempt_id]: {
+      ...attempt,
+      state: "cancelled",
+      cancelled_at: attempt.cancelled_at ?? event2.occurred_at_server,
+      reason_code: attempt.reason_code ?? String(p.reason_code)
+    } } };
+  }
   if (ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event2) };
   if (event2.type === "AdminConsentPrepared") {
     const c = { ...p, session_binding: "", consumed_at: null };
@@ -1724,7 +1776,11 @@ function reduceAdminAuthority(previous, event2) {
   if (event2.type === "AdminMetadataRead" || event2.type === "AdminCredentialReplayDetected") return state;
   const id = String(p.grant_id), grant = state.grants[id];
   if (!grant) throw new Error("unknown admin grant");
-  if (event2.type === "AdminWorkspaceAccessWithdrawn") return { ...state, grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [.../* @__PURE__ */ new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } } };
+  if (event2.type === "AdminWorkspaceAccessWithdrawn") return {
+    ...state,
+    ...cancelPendingConnections(state, id, event2.occurred_at_server, "workspace_withdrawn", String(p.workspace_id)),
+    grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [.../* @__PURE__ */ new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } }
+  };
   if (event2.type === "AdminDelegationNarrowed") {
     const receipt = String(p.consent_receipt_id), consent = state.consents[receipt];
     if (!consent) throw new Error("missing narrowing consent");
@@ -1736,6 +1792,7 @@ function reduceAdminAuthority(previous, event2) {
   return {
     ...state,
     ...routine ? { routine } : {},
+    ...cancelPendingConnections(state, id, cancelledAt, String(p.reason_code)),
     grants: { ...state.grants, [id]: {
       ...grant,
       state: status,
@@ -1745,6 +1802,13 @@ function reduceAdminAuthority(previous, event2) {
     } },
     lineages: Object.fromEntries(Object.entries(state.lineages).map(([key2, l]) => [key2, l.grant_id === id ? { ...l, state: "revoked" } : l]))
   };
+}
+function cancelPendingConnections(state, grantId, at, reason, workspaceId) {
+  if (!state.connections) return {};
+  return { connections: Object.fromEntries(Object.entries(state.connections).map(([key2, attempt]) => [
+    key2,
+    attempt.parent_admin_grant_id === grantId && attempt.state === "awaiting_authorization" && (workspaceId === void 0 || attempt.workspace_id === workspaceId) ? { ...attempt, state: "cancelled", cancelled_at: at, reason_code: reason } : attempt
+  ])) };
 }
 
 // src/protocol/admin-routine.ts
@@ -1768,6 +1832,12 @@ function parseAdminRoutineCommand(value) {
   const exact = (keys) => adminExactKeys(c, ["kind", "grant_id", "workspace_id", ...keys]);
   let valid = false;
   switch (c.kind) {
+    case "admin_prepare_connection":
+      valid = exact(["intended_owner_user_id", "intended_agent_id", "recipient_connection_id", "requested_name", "transport", "ttl_seconds"]) && uuid(c.intended_owner_user_id) && uuid(c.intended_agent_id) && uuid(c.recipient_connection_id) && text(c.requested_name, 80) && ["local", "hosted_mcp"].includes(String(c.transport)) && positive(c.ttl_seconds);
+      break;
+    case "admin_cancel_connection":
+      valid = exact(["attempt_id", "reason_code"]) && uuid(c.attempt_id) && code(c.reason_code);
+      break;
     case "admin_create_workspace":
       valid = exact(["name"]) && text(c.name, 80);
       break;
@@ -1825,6 +1895,7 @@ function parseAdminRoutineCommand(value) {
 function decideAdminRoutine(command, account, ctx) {
   const events = [], workspace_events = [];
   const actor = ctx.actor, grant = account.grants[command.grant_id];
+  let pendingConnection;
   const routine = account.routine ?? emptyAdminRoutine();
   const auditedGrant = actor.kind === "delegated_admin" ? account.grants[actor.grant_id] : grant;
   const rateGrant = auditedGrant && (account.routine?.created_workspaces[command.workspace_id]?.grant_id === auditedGrant.grant_id || auditedGrant.workspace_selector === "owned_and_selected" && ctx.workspace?.members[ctx.owner_user_id]?.role === "owner" && ctx.workspace.members[ctx.owner_user_id].revoked_at === null) ? {
@@ -1868,7 +1939,7 @@ function decideAdminRoutine(command, account, ctx) {
       occurred_at_server: ctx.now,
       payload
     });
-    if (type !== "AdminActionRecorded") workspaceEmit(type, payload);
+    if (type !== "AdminActionRecorded" && type !== "AdminConnectionPrepared" && type !== "AdminConnectionCancelled") workspaceEmit(type, payload);
   };
   const workspaceEmit = (type, payload) => workspace_events.push({
     workspace_id: command.workspace_id,
@@ -1895,12 +1966,12 @@ function decideAdminRoutine(command, account, ctx) {
       admin_identity_id: auditedGrant?.admin_identity_id ?? null,
       connection_id: auditedGrant?.connection_id ?? null,
       action: command.kind,
-      target_kind: "principal_id" in command ? "seat" : "invitation_id" in command ? "invitation" : "workspace",
-      target_id: "principal_id" in command ? command.principal_id : "invitation_id" in command ? command.invitation_id : command.workspace_id,
+      target_kind: pendingConnection || "attempt_id" in command ? "connection" : "principal_id" in command ? "seat" : "invitation_id" in command ? "invitation" : "workspace",
+      target_id: pendingConnection?.attempt_id ?? ("attempt_id" in command ? command.attempt_id : "principal_id" in command ? command.principal_id : "invitation_id" in command ? command.invitation_id : command.workspace_id),
       workspace_id: command.workspace_id,
       manifest_digest: auditedGrant?.manifest_digest ?? null,
       request_digest: ctx.request_digest,
-      outcome: reason ? "refused" : events.some(
+      outcome: reason ? "refused" : pendingConnection || events.some(
         (e) => [
           "AdminSeatProvisioned",
           "AdminSeatRenewed",
@@ -1910,6 +1981,7 @@ function decideAdminRoutine(command, account, ctx) {
         ].includes(e.type)
       ) ? "pending" : "accepted",
       reason_code: reason,
+      ...!reason && pendingConnection ? { attempt_id: pendingConnection.attempt_id, delivery_state: pendingConnection.state } : {},
       policy_check: {
         result: reason ?? "passed",
         buckets: rates.map(({ key: key2, hour_start, attempts }) => ({
@@ -1919,7 +1991,7 @@ function decideAdminRoutine(command, account, ctx) {
         }))
       },
       related_event_ids: related,
-      next_action: reason ? "Ask the granting person to review access." : events.some((e) => e.payload.delivery_state) ? "The recipient must authorize setup and verify its connection." : "none",
+      next_action: reason ? "Ask the granting person to review access." : pendingConnection || events.some((e) => e.payload.delivery_state) ? "The recipient must authorize setup and verify its connection." : "none",
       recovery_kind: reason ? "human" : "none"
     });
     return { ok: reason === null, reason, events, workspace_events };
@@ -1961,6 +2033,55 @@ function decideAdminRoutine(command, account, ctx) {
     ctx.live_agent_invitations_workspace
   ].every((n) => Number.isSafeInteger(n) && n >= 0)) return finish("counter_invalid");
   const budget = (key2, used) => used < grant.issuance_limits[key2];
+  if (command.kind === "admin_prepare_connection") {
+    if (command.intended_owner_user_id !== ctx.owner_user_id) return finish("human_confirmation_required");
+    if (!ctx.recipient_exists || !grant.target_rules.recipient_user_ids.includes(command.intended_owner_user_id) || !grant.target_rules.recipient_connection_ids.includes(command.recipient_connection_id) || !grant.target_rules.transports.includes(command.transport)) return finish("recipient_forbidden");
+    if (command.ttl_seconds > ADMIN_INVITATION_AND_ATTEMPT_TTL.attempt_seconds) return finish("connection_ttl_invalid");
+    const attempts = Object.values(account.connections ?? {}).filter((a) => a.parent_admin_grant_id === grant.grant_id);
+    const prior2 = attempts.find((a) => a.workspace_id === command.workspace_id && a.intended_owner_user_id === command.intended_owner_user_id && a.intended_agent_id === command.intended_agent_id);
+    if (prior2) {
+      if (prior2.recipient_connection_id !== command.recipient_connection_id || prior2.requested_name !== command.requested_name || prior2.transport !== command.transport || prior2.ttl_seconds !== command.ttl_seconds) return finish("connection_target_conflict");
+      if (prior2.state === "cancelled") return finish("connection_attempt_cancelled");
+      if (prior2.expires_at <= ctx.now) return finish("connection_attempt_expired");
+      pendingConnection = prior2;
+      return finish(null);
+    }
+    if (!budget("connection_attempts", attempts.length)) return finish("connection_attempt_limit_reached");
+    pendingConnection = {
+      attempt_id: ctx.nextResourceId(),
+      parent_admin_grant_id: grant.grant_id,
+      workspace_id: command.workspace_id,
+      intended_owner_user_id: command.intended_owner_user_id,
+      intended_agent_id: command.intended_agent_id,
+      recipient_connection_id: command.recipient_connection_id,
+      requested_name: command.requested_name,
+      transport: command.transport,
+      ttl_seconds: command.ttl_seconds,
+      capability_set: [],
+      state: "awaiting_authorization",
+      created_at: ctx.now,
+      expires_at: Math.min(ctx.now + command.ttl_seconds * 1e3, grant.expires_at, grant.refresh_deadline),
+      cancelled_at: null,
+      reason_code: null
+    };
+    emit("AdminConnectionPrepared", { ...pendingConnection, delivery_state: pendingConnection.state });
+    return finish(null);
+  }
+  if (command.kind === "admin_cancel_connection") {
+    const attempt = account.connections?.[command.attempt_id];
+    if (!attempt || attempt.parent_admin_grant_id !== grant.grant_id || attempt.workspace_id !== command.workspace_id) {
+      return finish("connection_attempt_forbidden");
+    }
+    if (attempt.state === "cancelled") return finish(null);
+    emit("AdminConnectionCancelled", {
+      attempt_id: attempt.attempt_id,
+      cancelled_at: ctx.now,
+      reason_code: command.reason_code,
+      revoked_attempt_credential_ids: [],
+      attempt_owned_seat_ids: []
+    });
+    return finish(null);
+  }
   if (command.kind === "admin_create_workspace") {
     if (ctx.workspace) return finish("workspace_exists");
     if (!budget("workspaces", spend.workspaces) || ctx.owned_workspaces >= ADMIN_EXISTING_RESOURCE_CEILINGS.owned_workspaces || ctx.workspace_creations_last_day >= ADMIN_WORKSPACE_CREATE_PER_DAY) return finish("workspace_limit_reached");

@@ -8,6 +8,18 @@ interface Base {
     workspace_id: string;
 }
 export type AdminRoutineCommand = Base & ({
+    kind: "admin_prepare_connection";
+    intended_owner_user_id: string;
+    intended_agent_id: string;
+    recipient_connection_id: string;
+    requested_name: string;
+    transport: "local" | "hosted_mcp";
+    ttl_seconds: number;
+} | {
+    kind: "admin_cancel_connection";
+    attempt_id: string;
+    reason_code: string;
+} | {
     kind: "admin_create_workspace";
     name: string;
 } | {
