@@ -3,7 +3,8 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 
 import { createPool, loadConfig } from "./config.js";
-import { ClientError } from "./client-error.js";
+import { ClientError, InteractionStateError } from "./client-error.js";
+import { INTERACTION_SECURITY_HEADERS } from "./browser-security.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
@@ -39,7 +40,7 @@ function rejectOversizedRequest(request, response) {
 }
 
 function clientErrorResponse(error) {
-  if (!(error instanceof ClientError)) return null;
+  if (!(error instanceof ClientError) && !(error instanceof InteractionStateError)) return null;
   return {
     status: error.status,
     body: { error: error.code },
@@ -92,7 +93,16 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
         path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });
       if (!response.headersSent) {
-        json(response, status, clientResponse?.body ?? { error: "internal_error", request_id: requestId });
+        if (error instanceof InteractionStateError && request.method === "GET" &&
+            !String(request.headers.accept ?? "").includes("application/json")) {
+          response.writeHead(status, {
+            ...INTERACTION_SECURITY_HEADERS,
+            "content-type": "text/html; charset=utf-8",
+          });
+          response.end("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Start the connection again</title><p>This connection attempt expired or was opened in another window. Start the connection again from your app.</p></html>");
+        } else {
+          json(response, status, clientResponse?.body ?? { error: "internal_error", request_id: requestId });
+        }
       }
       else response.end();
     } finally {

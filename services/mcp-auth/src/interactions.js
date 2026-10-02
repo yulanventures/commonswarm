@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { errors } from "oidc-provider";
 
 import {
   assertAllowedOrigin,
@@ -7,7 +8,7 @@ import {
   SESSION_COOKIE,
   sessionCookie,
 } from "./browser-security.js";
-import { ClientError } from "./client-error.js";
+import { ClientError, InteractionStateError } from "./client-error.js";
 import { renderConsentPage } from "./interaction-page.js";
 
 function respond(response, status, body, headers = {}) {
@@ -95,7 +96,7 @@ async function ensureSession(request, response, store) {
   return { id, session: await store.requireSession(id) };
 }
 
-function bindingFromDetails(uid, sessionId, details) {
+function bindingFromDetails(uid, sessionId, details, session) {
   const params = details?.params;
   if (!params || typeof params !== "object" || Array.isArray(params) ||
       Array.isArray(params.resource) || typeof params.resource !== "string" ||
@@ -106,6 +107,9 @@ function bindingFromDetails(uid, sessionId, details) {
   return {
     interactionUid: uid,
     sessionId,
+    // Only the validated CommonSwarm session supplies identity. Provider
+    // sessions and request parameters cannot authenticate this browser.
+    userId: session?.authenticated_at != null ? session.user_id : null,
     clientId: params.client_id,
     redirectUri: params.redirect_uri,
     resource: params.resource,
@@ -154,8 +158,7 @@ export function createInteractionHandler({
       const code = url.searchParams.get("code");
       const sessionId = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
       if (!interactionUid || !state || !code || !sessionId) {
-        respond(response, 400, { error: "invalid_callback" });
-        return true;
+        throw new InteractionStateError("invalid_callback");
       }
       const pending = await store.consumeSignIn(interactionUid, sessionId, state);
       const result = await gotrue.exchange({ code, verifier: pending.signin_pkce_verifier });
@@ -176,7 +179,13 @@ export function createInteractionHandler({
 
     const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
     if (!match) return false;
-    const interactionUid = decodeURIComponent(match[1]);
+    let interactionUid;
+    try {
+      interactionUid = decodeURIComponent(match[1]);
+    } catch (error) {
+      if (!(error instanceof URIError)) throw error;
+      throw new InteractionStateError("interaction_expired");
+    }
     const operation = match[2] ?? "view";
     let parsed;
     let body;
@@ -188,12 +197,21 @@ export function createInteractionHandler({
       }
     }
     const browser = await ensureSession(request, response, store);
-    const details = await provider.interactionDetails(request, response);
-    if (details.uid !== interactionUid) {
-      respond(response, 403, { error: "interaction_mismatch" });
-      return true;
+    let details;
+    try {
+      details = await provider.interactionDetails(request, response);
+    } catch (error) {
+      // The pinned provider uses this class for missing/expired interactions,
+      // missing interaction cookies, and unavailable/changed provider sessions.
+      if (!(error instanceof errors.SessionNotFound)) throw error;
+      throw new InteractionStateError("interaction_expired", undefined, { cause: error });
     }
-    const bound = await store.bindInteraction(bindingFromDetails(interactionUid, browser.id, details));
+    if (details.uid !== interactionUid) {
+      throw new InteractionStateError("interaction_mismatch");
+    }
+    const bound = await store.bindInteraction(
+      bindingFromDetails(interactionUid, browser.id, details, browser.session),
+    );
     const session = await store.requireSession(browser.id);
 
     if (request.method === "GET" && operation === "view") {
