@@ -1,4 +1,5 @@
 # CommonSwarm release procedure for `yulan-vps-1`
+Mac blocks must not call setuid/setgid tools.
 
 This is the repository procedure for releasing CommonSwarm to the production
 box. The cross-repository `hetzner-handoff/HETZNER-OPERATIONS.md` remains the

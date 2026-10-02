@@ -1,4 +1,5 @@
 # Edge-only release from the MCP ON baseline
+Mac blocks must not call setuid/setgid tools.
 
 **Option (b): prepared, not executed.** HezLead supplies the reviewed, landed
 edge SHA and separately authorizes execution. This worker has made no live

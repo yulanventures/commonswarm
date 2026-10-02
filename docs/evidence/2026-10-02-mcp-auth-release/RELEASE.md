@@ -1,4 +1,5 @@
 # HM37 OAuth binding release and MCP switch-on
+Mac blocks must not call setuid/setgid tools.
 
 **Prepared, not executed.** Base: origin/main `68a0d2a6715bfb4c874655cda6a4c490eea5baae`.
 That tree has no production lane-2 composition: Docker CMD and npm start run

@@ -1,4 +1,5 @@
 # C+D edge-only follow-up with migrations already applied
+Mac blocks must not call setuid/setgid tools.
 
 **Prepared, not executed.** HezLead must independently review, land this lane,
 provide exact-SHA gate evidence, and separately authorize a new live window.
