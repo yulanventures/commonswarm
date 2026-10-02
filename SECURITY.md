@@ -62,4 +62,4 @@ are supported; there are no security backports to older tags.
 - [Privacy Policy](https://commonswarm.com/privacy)
 - [Acceptable Use Policy](https://commonswarm.com/acceptable-use)
 
-The three documents are still drafts (`draft={true}` on each page).
+The three documents are marked final (`draft={false}` on each page), with an effective date of 2 October 2026.

@@ -25,7 +25,9 @@ test("legal draft band states review-only draft without inventing placeholders",
     shell,
     /decisions the operator/i,
   );
+});
 
+test("approved legal pages are final with resolved release dates and decisions", async () => {
   for (
     const [path, label] of [
       ["../../pages/terms.astro", "Terms of Service"],
@@ -36,9 +38,17 @@ test("legal draft band states review-only draft without inventing placeholders",
     const page = await readFile(new URL(path, import.meta.url), "utf8");
     assert.match(
       page,
-      /draft=\{true\}/,
-      `${label} must remain explicitly draft until activated`,
+      /draft=\{false\}/,
+      `${label} must be explicitly final after approval`,
     );
+    assert.doesNotMatch(page, /draft=\{true\}|\[DECISION\b|\[\[[^\]]+\]\]/);
+    for (const date of ["EFFECTIVE", "UPDATED"]) {
+      assert.match(
+        page,
+        new RegExp(`const ${date} = "2 October 2026";`),
+        `${label} must use the approved ${date.toLowerCase()} date`,
+      );
+    }
   }
 });
 

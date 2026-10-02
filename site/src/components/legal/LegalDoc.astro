@@ -106,8 +106,7 @@ function inline(raw: string): string {
  *
  * Scans every user-visible field (title, lede, dates, section ids/titles, and all nested
  * block/list strings) via scanLegalDocPlaceholders — not only section bodies. This cannot
- * fire while a document is draft={true}, which all three are today. It exists for the day
- * one of them is flipped.
+ * fire while a document is draft={true}. It applies to every final document.
  */
 if (!draft) {
   const found = scanLegalDocPlaceholders({
