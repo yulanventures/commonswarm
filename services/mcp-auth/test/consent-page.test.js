@@ -222,7 +222,11 @@ test("GET reload restores and locks the home workspace from begin progress", asy
 test("failed form consent keeps the submitted home workspace on its retry page", async () => {
   const handler = createInteractionHandler({
     provider: {
-      interactionDetails: async () => interactionDetails("interaction-failure"),
+      interactionDetails: async () => {
+        const details = interactionDetails("interaction-failure");
+        details.params.redirect_uri = "https://claude.ai/api/mcp/auth_callback";
+        return details;
+      },
       Grant: { find: async () => ({}) },
     },
     store: {
@@ -261,6 +265,8 @@ test("failed form consent keeps the submitted home workspace on its retry page",
   await handler(postRequest(form.toString(), "application/x-www-form-urlencoded"), response,
     new URL("https://mcp.commonswarm.com/interaction/interaction-failure/consent"));
   assert.equal(response.status, 502);
+  assert.equal(response.headers["content-security-policy"],
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
   assert.match(response.body,
     new RegExp(`type="hidden" name="home_workspace_id" value="${W2}"`, "u"));
   assert.match(response.body,

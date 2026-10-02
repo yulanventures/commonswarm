@@ -22,9 +22,9 @@ const VERIFIER = "synthetic-pkce-verifier-with-at-least-43-characters";
 const W1 = "20000000-0000-4000-8000-000000000001";
 const W2 = "20000000-0000-4000-8000-000000000002";
 
-function authorize(prompt, scope = "openid mcp") {
+function authorize(prompt, scope = "openid mcp", redirectUri = REDIRECT) {
   const params = new URLSearchParams({
-    client_id: CLIENT, redirect_uri: REDIRECT, resource: RESOURCE,
+    client_id: CLIENT, redirect_uri: redirectUri, resource: RESOURCE,
     response_type: "code", scope, state: STATE,
     code_challenge: createHash("sha256").update(VERIFIER).digest("base64url"),
     code_challenge_method: "S256",
@@ -49,7 +49,7 @@ function exchange(url, cookies = new Map(), body = "") {
   return { request, response };
 }
 
-async function harness({ findAccount } = {}) {
+async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnabled = false } = {}) {
   const logs = [];
   const queries = [];
   const commands = [];
@@ -131,12 +131,14 @@ async function harness({ findAccount } = {}) {
     },
   };
   const provider = await createMcpProvider({
+    nativeLoopbackEnabled,
     findAccount: findAccount ?? createProductionFindAccount(pool),
     fetch: async (url) => {
       assert.equal(String(url), CLIENT);
       return Response.json({
         client_id: CLIENT, client_name: "Claude", client_uri: "https://claude.ai",
-        grant_types: ["authorization_code", "refresh_token"], redirect_uris: [REDIRECT],
+        grant_types: ["authorization_code", "refresh_token"], redirect_uris: [redirectUri],
+        application_type: nativeLoopbackEnabled ? "native" : "web",
         response_types: ["code"], token_endpoint_auth_method: "none",
       });
     },
@@ -175,7 +177,7 @@ async function harness({ findAccount } = {}) {
     return response;
   }
   async function completedLogin() {
-    const start = await run(authorize("login"));
+    const start = await run(authorize("login", "openid mcp", redirectUri));
     assert.equal(start.statusCode, 303);
     const login = await run(start.getHeader("location"));
     assert.equal(login.statusCode, 303);
@@ -304,6 +306,12 @@ test("provider error events log a thrown hook with request id and source locatio
     entry.request_id === expiredInteraction.getHeader("x-request-id")));
 });
 
+function assertConsentPolicy(response) {
+  assert.equal(response.getHeader("content-security-policy"),
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
+  assert.equal(response.getHeader("referrer-policy"), "same-origin");
+}
+
 // Full OAuth boundary: the provider makes interactions and issues/exchanges the
 // code; production handlers and InteractionStore own consent. Only DB and the
 // lane-2 command transport use in-memory fixtures. No sockets or provider mocks.
@@ -324,8 +332,9 @@ test("one workspace consent completes Claude authorization and token exchange", 
           const start = await h.run(authorize(prompt, "openid offline_access mcp"));
           assert.equal(start.statusCode, 303);
           const path = start.getHeader("location");
-          const page = await h.run(path);
+          const page = await h.run(`${path}?redirect_uri=https://attacker.example/callback`);
           assert.equal(page.statusCode, 200);
+          assertConsentPolicy(page);
           const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
           const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
           const form = new URLSearchParams({ csrf_token: token, selection_version: version, workspace_ids: W1 });
@@ -397,13 +406,15 @@ test("consent validation preserves a usable form and rejects non-member workspac
       const page = await h.run(path);
       const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
       const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
-      const form = new URLSearchParams({ csrf_token: token, selection_version: row.version ?? version });
+      const form = new URLSearchParams({ csrf_token: token, selection_version: row.version ?? version,
+        redirect_uri: "https://attacker.example/callback" });
       for (const workspace of row.selected) form.append("workspace_ids", workspace);
       if (row.home) form.set("home_workspace_id", row.home);
       const response = await h.run(`${path}/consent`, "POST", form.toString());
       assert.equal(response.statusCode, row.status ?? 400);
       if (row.message) {
         assert.match(response.getHeader("content-type"), /^text\/html/u);
+        assertConsentPolicy(response);
         assert.ok(response.body.includes(row.message));
         assert.match(response.body, /role="alert"/u);
         if (!row.version) assert.ok(response.body.includes(`name="csrf_token" value="${token}"`));
@@ -423,4 +434,32 @@ test("consent validation preserves a usable form and rejects non-member workspac
       assert.equal(h.commands.length, 3);
     });
   }
+});
+
+test("consent CSP allows provider-approved native loopback origins", async (t) => {
+  for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+    await t.test(host, async () => {
+      const redirectUri = `http://${host}:49152/callback`;
+      const h = await harness({ redirectUri, nativeLoopbackEnabled: true });
+      await h.completedLogin();
+      const start = await h.run(authorize("consent", "openid mcp", redirectUri));
+      assert.equal(start.statusCode, 303);
+      const page = await h.run(start.getHeader("location"));
+      assert.equal(page.statusCode, 200);
+      assert.equal(page.getHeader("content-security-policy"),
+        `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://${host}:49152; frame-ancestors 'none'; base-uri 'none'`);
+    });
+  }
+  await t.test("web loopback does not get the native exception", async () => {
+    const redirectUri = "http://127.0.0.1:49152/callback";
+    const h = await harness({ redirectUri });
+    await h.completedLogin();
+    const start = await h.run(authorize("consent", "openid mcp", redirectUri));
+    assert.equal(start.statusCode, 303);
+    const page = await h.run(start.getHeader("location"));
+    assert.equal(page.statusCode, 500);
+    assert.equal(JSON.parse(page.body).error, "internal_error");
+    assert.ok(h.logs.some((entry) => entry.event === "interaction.error" && entry.error_name === "TypeError"));
+    assert.equal(h.commands.length, 0);
+  });
 });
