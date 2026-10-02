@@ -67,7 +67,7 @@ interface Snapshot {
   bodyCellCount: number;
 }
 
-const snapshotPromise = (async (): Promise<Snapshot> => {
+const renderSnapshot = async (): Promise<Snapshot> => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-brain-links-blocks-"));
   const fixture = join(directory, "index.html");
   const bundleOf = async (entry: string, globalName: string): Promise<string> => {
@@ -182,10 +182,13 @@ const snapshotPromise = (async (): Promise<Snapshot> => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-})();
+};
+
+let snapshotPromise: Promise<Snapshot> | undefined;
+const getSnapshot = (): Promise<Snapshot> => snapshotPromise ??= renderSnapshot();
 
 test("the link pass reaches table cells, task items, and sublists, and only the gated mentions link", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* Document order. The second row's anchor label is a topic name and produces nothing, because
    * an anchor is opaque; the same row's "releases" is prose in a cell and stays prose. */
   assert.deepEqual(snapshot.controlTopics, [
@@ -206,7 +209,7 @@ test("the link pass reaches table cells, task items, and sublists, and only the 
 });
 
 test("no control lands inside an opaque element, and none is nested in another control", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   assert.ok(snapshot.controlTopics.length > 0, "controls must exist for a negative to mean anything");
   /* The anchor's own label IS "shared-host", so this is the case that would break first if the
    * opaque set stopped covering the new tree. */
@@ -219,7 +222,7 @@ test("no control lands inside an opaque element, and none is nested in another c
 });
 
 test("a task item's ballot marker stays outside the control, so the control is not a checkbox", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* The whole item still reads as the author wrote it... */
   assert.equal(snapshot.taskItemText, "☐ read shared-host");
   /* ...and the marker sits in the text node BEFORE the control, never inside its label. A control
@@ -235,7 +238,7 @@ test("a task item's ballot marker stays outside the control, so the control is n
 });
 
 test("the one-word gate still works through a table cell", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* Positive: a code span in a cell that IS the name links. */
   assert.deepEqual(snapshot.cellCodeSpanControls, ["releases"]);
   /* Negative, on the same word in the same table: prose in a cell does not. */
@@ -244,7 +247,7 @@ test("the one-word gate still works through a table cell", async () => {
 });
 
 test("building controls inside cells leaves the table intact", async () => {
-  const snapshot = await snapshotPromise;
+  const snapshot = await getSnapshot();
   /* The control first: the probe reads text the parser moved out of a table, so it has to see
    * that text when the table really is broken. Without this the empty reading below would be
    * evidence about nothing. */
