@@ -385,6 +385,9 @@ var WORKSPACE_EVENT_TYPES = [
   "CommandRejected"
 ];
 
+// src/protocol/admin-policy.ts
+import { createHash as createHash2 } from "node:crypto";
+
 // src/protocol/workspace-commands.ts
 var INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1e3;
@@ -1306,7 +1309,7 @@ function decideWorkspace(state, cmd, ctx) {
 
 // src/protocol/admin-policy.ts
 var ADMIN_RESOURCE = "https://api.commonswarm.com/admin";
-var ADMIN_REGISTRY_VERSION = 1;
+var ADMIN_REGISTRY_VERSION = 2;
 var ADMIN_ACCESS_TTL_SECONDS = 300;
 var ADMIN_REFRESH_MAX_LIFETIME_SECONDS = 2592e3;
 var ADMIN_GRANT_TTL_SECONDS = 2592e3;
@@ -1323,20 +1326,80 @@ var ADMIN_WORKER_RENEWAL_LIMITS = { bearer_seconds: 3600, horizon_seconds: 2592e
 var ADMIN_CONNECTION_ATTEMPTS_PER_GRANT = 50;
 var ADMIN_INVITATION_AND_ATTEMPT_TTL = { member_seconds: 604800, agent_min_seconds: 3600, agent_max_seconds: 86400, agent_seats: 10, attempt_seconds: 86400 };
 var ADMIN_EXISTING_RESOURCE_CEILINGS = { owned_workspaces: 10, members_and_invitations: 25, principals: 50, joins_per_person: 5, joins_per_workspace: 20, hosted_seats: 10 };
-var ADMIN_SCOPE_REGISTRY = {
-  "admin:read": ["admin_read_metadata"],
-  "workspaces:create": ["admin_create_workspace"],
-  "workspaces:archive": ["admin_archive_workspace"],
-  "seats:create": ["admin_create_seat", "admin_provision_seat", "admin_replace_undelivered_seat_credential"],
-  "seats:renew": ["admin_renew_seat"],
-  "seats:manage": ["admin_set_seat_model", "admin_enable_seat_management", "admin_recover_seat_session"],
-  "seats:revoke": ["admin_revoke_seat", "admin_revoke_seat_credential"],
-  "invites:create": ["admin_invite_member", "admin_issue_agent_invitation"],
-  "invites:revoke": ["admin_revoke_invitation", "admin_revoke_agent_invitation"],
-  "members:manage": ["admin_remove_member", "admin_change_member_role"],
-  "onboarding:connect": ["admin_prepare_connection", "redeem_agent_connection", "record_agent_connection_progress", "admin_cancel_connection"]
+var ADMIN_AVAILABILITY_V2 = {
+  admin_read_metadata: { scope: "admin:read", label: "Read-only", available: true, authority_revision: 1 },
+  admin_create_workspace: { scope: "workspaces:create", label: "Create workspaces", available: true, authority_revision: 1 },
+  admin_archive_workspace: { scope: "workspaces:archive", label: "Archive workspaces", available: false, authority_revision: 1 },
+  admin_create_seat: { scope: "seats:create", label: "Create seats", available: true, authority_revision: 1 },
+  admin_provision_seat: { scope: "seats:create", label: "Create seats", available: true, authority_revision: 1 },
+  admin_replace_undelivered_seat_credential: { scope: "seats:create", label: "Create seats", available: true, authority_revision: 1 },
+  admin_renew_seat: { scope: "seats:renew", label: "Renew seats", available: true, authority_revision: 1 },
+  admin_set_seat_model: { scope: "seats:manage", label: "Manage seats", available: false, authority_revision: 1 },
+  admin_enable_seat_management: { scope: "seats:manage", label: "Manage seats", available: false, authority_revision: 1 },
+  admin_recover_seat_session: { scope: "seats:manage", label: "Manage seats", available: false, authority_revision: 1 },
+  admin_revoke_seat: { scope: "seats:revoke", label: "Stop seat access", available: true, authority_revision: 1 },
+  admin_revoke_seat_credential: { scope: "seats:revoke", label: "Stop seat access", available: true, authority_revision: 1 },
+  admin_invite_member: { scope: "invites:create", label: "Invite members", available: true, authority_revision: 1 },
+  admin_issue_agent_invitation: { scope: "invites:create", label: "Invite members", available: true, authority_revision: 1 },
+  admin_revoke_invitation: { scope: "invites:revoke", label: "Cancel invitations", available: true, authority_revision: 1 },
+  admin_revoke_agent_invitation: { scope: "invites:revoke", label: "Cancel invitations", available: true, authority_revision: 1 },
+  admin_remove_member: { scope: "members:manage", label: "Manage members", available: false, authority_revision: 1 },
+  admin_change_member_role: { scope: "members:manage", label: "Manage members", available: false, authority_revision: 1 },
+  admin_prepare_connection: { scope: "onboarding:connect", label: "Set up connections", available: true, authority_revision: 1 },
+  redeem_agent_connection: { scope: "onboarding:connect", label: "Set up connections", available: false, authority_revision: 1 },
+  record_agent_connection_progress: { scope: "onboarding:connect", label: "Set up connections", available: false, authority_revision: 1 },
+  admin_cancel_connection: { scope: "onboarding:connect", label: "Set up connections", available: true, authority_revision: 1 }
 };
-var ADMIN_SCOPE_NAMES = Object.keys(ADMIN_SCOPE_REGISTRY);
+var ADMIN_AVAILABILITY = Object.freeze({
+  [ADMIN_REGISTRY_VERSION]: Object.freeze(Object.fromEntries(Object.entries(ADMIN_AVAILABILITY_V2).map(([name, definition]) => [name, Object.freeze(definition)])))
+});
+var ADMIN_SCOPE_REGISTRY = Object.freeze(Object.fromEntries(
+  [...new Set(Object.values(ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION]).map((d) => d.scope))].map((scope) => [
+    scope,
+    Object.freeze(Object.entries(ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION]).filter(([, d]) => d.scope === scope).map(([name]) => name))
+  ])
+));
+var ADMIN_SCOPE_NAMES = Object.freeze(Object.keys(ADMIN_SCOPE_REGISTRY));
+function adminAvailabilityDigest(version) {
+  const definitions = ADMIN_AVAILABILITY[version];
+  return definitions ? createHash2("sha256").update(canonicalAdminJson({ version, definitions })).digest("hex") : null;
+}
+function adminConsentOptions(version = ADMIN_REGISTRY_VERSION) {
+  const definitions = ADMIN_AVAILABILITY[version];
+  if (!definitions) return [];
+  return [...new Set(Object.values(definitions).map((d) => d.scope))].sort().map((scope) => {
+    const entries = Object.entries(definitions).filter(([, d]) => d.scope === scope);
+    const capability_names = entries.filter(([, d]) => d.available).map(([name]) => name).sort();
+    return {
+      resource: ADMIN_RESOURCE,
+      scope,
+      label: entries[0][1].label,
+      available: capability_names.length > 0,
+      capability_names
+    };
+  });
+}
+var ADMIN_BILLING_CONSENT = Object.freeze({
+  label: "Renew seats",
+  description: "Billing changes are not available",
+  available: false,
+  scope_names: Object.freeze([]),
+  capability_names: Object.freeze([])
+});
+function adminAvailableCapabilities(scopeNames, version = ADMIN_REGISTRY_VERSION) {
+  return Object.entries(ADMIN_AVAILABILITY[version] ?? {}).filter(([, d]) => d.available && scopeNames.includes(d.scope)).map(([name]) => name).sort();
+}
+function adminCapabilityAvailable(command, version = ADMIN_REGISTRY_VERSION) {
+  return Object.hasOwn(ADMIN_AVAILABILITY, version) && ADMIN_AVAILABILITY[version]?.[command]?.available === true;
+}
+function adminEffectiveCapabilities(manifest, actorScopes = manifest.scope_names) {
+  const consented = ADMIN_AVAILABILITY[manifest.registry_version], current = ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION];
+  if (!consented || !current || manifest.resource !== ADMIN_RESOURCE || manifest.availability_digest !== adminAvailabilityDigest(manifest.registry_version) || !Array.isArray(manifest.capability_names)) return [];
+  return manifest.capability_names.filter((name) => {
+    const prior = consented[name], live = current[name];
+    return prior?.available && live?.available && prior.scope === live.scope && prior.authority_revision === live.authority_revision && manifest.scope_names.includes(prior.scope) && actorScopes.includes(prior.scope);
+  }).sort();
+}
 var ADMIN_ISSUANCE_CEILINGS = {
   workspaces: ADMIN_WORKSPACES_CREATED_PER_GRANT,
   live_seats: ADMIN_SEATS_PER_GRANT.live,
@@ -1357,8 +1420,9 @@ var ADMIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 function adminIds(value) {
   return Array.isArray(value) && value.length <= 100 && value.every((id) => typeof id === "string" && ADMIN_UUID_RE.test(id)) && new Set(value).size === value.length;
 }
-function adminScopes(value) {
-  return Array.isArray(value) && value.every((scope) => typeof scope === "string" && Object.hasOwn(ADMIN_SCOPE_REGISTRY, scope)) && new Set(value).size === value.length;
+function adminScopes(value, version = ADMIN_REGISTRY_VERSION) {
+  const definitions = ADMIN_AVAILABILITY[version];
+  return !!definitions && Array.isArray(value) && value.every((scope) => typeof scope === "string" && Object.values(definitions).some((d) => d.scope === scope)) && new Set(value).size === value.length;
 }
 var MANIFEST_KEYS = [
   "admin_identity_id",
@@ -1367,6 +1431,8 @@ var MANIFEST_KEYS = [
   "resource",
   "mode",
   "registry_version",
+  "capability_names",
+  "availability_digest",
   "scope_names",
   "workspace_selector",
   "workspace_ids",
@@ -1384,9 +1450,14 @@ function adminManifestValid(value, now, initial = true) {
   if (!m || !adminExactKeys(m, MANIFEST_KEYS)) return false;
   const target = adminRecord(m.target_rules), created = adminRecord(m.created_workspace_policy);
   const renewal = adminRecord(m.renewal_limits), issuance = adminRecord(m.issuance_limits);
-  if (!ADMIN_UUID_RE.test(String(m.admin_identity_id)) || !ADMIN_UUID_RE.test(String(m.connection_id)) || typeof m.client_id !== "string" || m.client_id.length < 1 || m.client_id.length > 2048 || m.resource !== ADMIN_RESOURCE || m.registry_version !== ADMIN_REGISTRY_VERSION || !adminScopes(m.scope_names) || !m.scope_names.includes("admin:read") || !adminIds(m.workspace_ids) || m.role_ceiling !== "member" || !["granular", "full_account"].includes(String(m.mode)) || m.workspace_selector !== (m.mode === "granular" ? "selected" : "owned_and_selected")) return false;
-  if (m.mode === "full_account" && !ADMIN_SCOPE_NAMES.every((scope) => m.scope_names.includes(scope))) return false;
-  if (!created || !adminExactKeys(created, ["scope_names"]) || !adminScopes(created.scope_names) || !created.scope_names.every((scope) => m.scope_names.includes(scope)) || created.scope_names.length > 0 && !m.scope_names.includes("workspaces:create")) return false;
+  if (!ADMIN_UUID_RE.test(String(m.admin_identity_id)) || !ADMIN_UUID_RE.test(String(m.connection_id)) || typeof m.client_id !== "string" || m.client_id.length < 1 || m.client_id.length > 2048 || m.resource !== ADMIN_RESOURCE || typeof m.registry_version !== "number" || !Object.hasOwn(ADMIN_AVAILABILITY, m.registry_version) || initial && m.registry_version !== ADMIN_REGISTRY_VERSION || m.availability_digest !== adminAvailabilityDigest(m.registry_version) || !adminScopes(m.scope_names, m.registry_version) || !m.scope_names.includes("admin:read") || !adminIds(m.workspace_ids) || m.role_ceiling !== "member" || !["granular", "full_account"].includes(String(m.mode)) || m.workspace_selector !== (m.mode === "granular" ? "selected" : "owned_and_selected")) return false;
+  const definitions = ADMIN_AVAILABILITY[m.registry_version];
+  if (!Array.isArray(m.capability_names) || !m.capability_names.every((name, i, names) => typeof name === "string" && (i === 0 || names[i - 1] < name) && definitions[name]?.available === true && m.scope_names.includes(definitions[name].scope)) || !m.capability_names.includes("admin_read_metadata") || !m.scope_names.every((scope) => m.capability_names.some((name) => definitions[name]?.scope === scope))) return false;
+  if (m.mode === "full_account") {
+    const available = Object.entries(definitions).filter(([, d]) => d.available).map(([name]) => name).sort();
+    if (canonicalAdminJson(m.capability_names) !== canonicalAdminJson(available)) return false;
+  }
+  if (!created || !adminExactKeys(created, ["scope_names"]) || !adminScopes(created.scope_names, m.registry_version) || !created.scope_names.every((scope) => m.scope_names.includes(scope)) || created.scope_names.length > 0 && !m.scope_names.includes("workspaces:create")) return false;
   if (!target || !adminExactKeys(target, ["seat_ids", "own_seats", "grant_created_seats", "recipient_user_ids", "recipient_connection_ids", "transports"]) || !adminIds(target.seat_ids) || !adminIds(target.recipient_user_ids) || !adminIds(target.recipient_connection_ids) || typeof target.own_seats !== "boolean" || typeof target.grant_created_seats !== "boolean" || !Array.isArray(target.transports) || !target.transports.every((t) => t === "local" || t === "hosted_mcp") || new Set(target.transports).size !== target.transports.length) return false;
   if (!Array.isArray(m.worker_scope_ceiling) || m.worker_scope_ceiling.length > 100 || !m.worker_scope_ceiling.every((scope) => typeof scope === "string" && /^[a-z][a-z0-9_:.-]{0,79}$/u.test(scope)) || m.worker_scope_ceiling.some((scope) => isAgentScopeDenylisted(String(scope))) || new Set(m.worker_scope_ceiling).size !== m.worker_scope_ceiling.length) return false;
   if (!renewal || !adminExactKeys(renewal, [...Object.keys(ADMIN_RENEWAL_CEILINGS), "grant_kinds", "principal_ids"]) || !adminIds(renewal.principal_ids) || !Array.isArray(renewal.grant_kinds) || !renewal.grant_kinds.every((kind) => kind === "timeboxed" || kind === "standing") || new Set(renewal.grant_kinds).size !== renewal.grant_kinds.length || !issuance || !adminExactKeys(issuance, Object.keys(ADMIN_ISSUANCE_CEILINGS))) return false;
@@ -1447,7 +1518,7 @@ function subset(a, b) {
   return a.every((x) => b.includes(x));
 }
 function narrowing(next, prior, now) {
-  if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id || next.connection_id !== prior.connection_id || next.client_id !== prior.client_id || next.resource !== prior.resource || next.registry_version !== prior.registry_version || prior.mode === "granular" && next.mode !== "granular" || next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline || !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) || !subset(next.created_workspace_policy.scope_names, prior.created_workspace_policy.scope_names) || !subset(next.worker_scope_ceiling, prior.worker_scope_ceiling)) return false;
+  if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id || next.connection_id !== prior.connection_id || next.client_id !== prior.client_id || next.resource !== prior.resource || next.registry_version !== prior.registry_version || next.availability_digest !== prior.availability_digest || !subset(next.capability_names, prior.capability_names) || prior.mode === "granular" && next.mode !== "granular" || next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline || !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) || !subset(next.created_workspace_policy.scope_names, prior.created_workspace_policy.scope_names) || !subset(next.worker_scope_ceiling, prior.worker_scope_ceiling)) return false;
   const a = next.target_rules, b = prior.target_rules;
   if (!subset(a.seat_ids, b.seat_ids) || !subset(a.recipient_user_ids, b.recipient_user_ids) || !subset(a.recipient_connection_ids, b.recipient_connection_ids) || !subset(a.transports, b.transports) || a.own_seats && !b.own_seats || a.grant_created_seats && !b.grant_created_seats || !subset(next.renewal_limits.grant_kinds, prior.renewal_limits.grant_kinds) || !subset(next.renewal_limits.principal_ids, prior.renewal_limits.principal_ids)) return false;
   for (const key2 of ["bearer_seconds", "horizon_seconds", "successors_per_worker", "successors_per_grant"]) {
@@ -1570,7 +1641,7 @@ function decideAdminAuthority(command, state, ctx) {
   }
   if (!grant || grant.owner_user_id !== ctx.owner_user_id) return finish("grant_unavailable");
   if (actor.kind === "delegated_admin" && (actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id || actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE)) return finish("grant_binding_mismatch");
-  if (actor.kind === "delegated_admin" && (!adminScopes(actor.scope_names) || !subset(actor.scope_names, grant.scope_names))) return finish("scope_expansion_forbidden");
+  if (actor.kind === "delegated_admin" && (!adminScopes(actor.scope_names, grant.registry_version) || !subset(actor.scope_names, grant.scope_names))) return finish("scope_expansion_forbidden");
   if (command.kind === "revoke_admin_delegation" || command.kind === "suspend_admin_delegation" || command.kind === "surrender_admin_delegation") {
     if (command.kind === "surrender_admin_delegation" ? actor.kind !== "delegated_admin" : !humanOwner && actor.kind !== "system") return finish("human_confirmation_required");
     if (actor.kind === "delegated_admin" && actor.access_expires_at <= ctx.now) return finish("credential_expired");
@@ -1627,6 +1698,7 @@ function decideAdminAuthority(command, state, ctx) {
     return finish(null);
   }
   if (command.kind === "admin_read_metadata") {
+    if (actor.kind === "delegated_admin" && !adminEffectiveCapabilities(grant, actor.scope_names).includes(command.kind)) return finish("capability_forbidden");
     if (!humanOwner && (actor.kind !== "delegated_admin" || actor.access_expires_at <= ctx.now || !actor.scope_names.includes("admin:read") || !grant.scope_names.includes("admin:read") || command.resource_kind !== "grant")) return finish("credential_kind_forbidden");
     if (command.workspace_id !== null && (!grant.workspace_ids.includes(command.workspace_id) || grant.withdrawn_workspace_ids.includes(command.workspace_id) || !ctx.current_workspace_rights)) return finish("workspace_forbidden");
     emit("AdminMetadataRead", {
@@ -1671,7 +1743,7 @@ function decideAdminAuthority(command, state, ctx) {
     emit("AdminDelegationRevoked", terminalPayload(grant, state, ctx.now, "refresh_replay"));
     return finish("refresh_replay");
   }
-  if (!adminScopes(command.scope_names) || !command.scope_names.includes("admin:read") || !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish("scope_expansion_forbidden");
+  if (!adminScopes(command.scope_names, grant.registry_version) || !command.scope_names.includes("admin:read") || !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish("scope_expansion_forbidden");
   if (!ctx.current_workspace_rights) return finish("current_rights_required");
   emit("AdminCredentialRotated", {
     grant_id: grant.grant_id,
@@ -1828,7 +1900,7 @@ var scopes = (x) => Array.isArray(x) && x.length > 0 && x.length <= 100 && x.eve
 var code = (x) => typeof x === "string" && /^[a-z][a-z0-9_]{0,79}$/u.test(x);
 function parseAdminRoutineCommand(value) {
   const c = adminRecord(value);
-  if (!c || !uuid(c.grant_id) || !uuid(c.workspace_id)) return null;
+  if (!c || typeof c.kind !== "string" || !adminCapabilityAvailable(c.kind) || !uuid(c.grant_id) || !uuid(c.workspace_id)) return null;
   const exact = (keys) => adminExactKeys(c, ["kind", "grant_id", "workspace_id", ...keys]);
   let valid = false;
   switch (c.kind) {
@@ -2009,10 +2081,9 @@ function decideAdminRoutine(command, account, ctx) {
   if (!actor.scope_names.every((s) => grant.scope_names.includes(s))) {
     return finish("scope_expansion_forbidden");
   }
-  const scope = Object.entries(ADMIN_SCOPE_REGISTRY).find(
-    ([, commands]) => commands.includes(command.kind)
-  )?.[0];
+  const scope = ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION]?.[command.kind]?.scope;
   if (!scope || !grant.scope_names.includes(scope) || !actor.scope_names.includes(scope)) return finish("scope_forbidden");
+  if (!adminEffectiveCapabilities(grant, actor.scope_names).includes(command.kind)) return finish("capability_forbidden");
   const created = routine.created_workspaces[command.workspace_id];
   if (command.kind !== "admin_create_workspace") {
     const selected = grant.workspace_ids.includes(command.workspace_id);
@@ -3499,6 +3570,8 @@ function planFileVersionWindow(name, liveCount, inFlightCount) {
 }
 export {
   ADMIN_ACCESS_TTL_SECONDS,
+  ADMIN_AVAILABILITY,
+  ADMIN_BILLING_CONSENT,
   ADMIN_CONNECTION_ATTEMPTS_PER_GRANT,
   ADMIN_EVENT_TYPES,
   ADMIN_EXISTING_RESOURCE_CEILINGS,
@@ -3554,6 +3627,11 @@ export {
   UpcastError,
   WORKSPACE_EVENT_TYPES,
   WORKSPACE_ROLES,
+  adminAvailabilityDigest,
+  adminAvailableCapabilities,
+  adminCapabilityAvailable,
+  adminConsentOptions,
+  adminEffectiveCapabilities,
   adminExactKeys,
   adminGrantManifest,
   adminIds,

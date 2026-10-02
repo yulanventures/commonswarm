@@ -2,7 +2,7 @@ import { ADMIN_ROUTINE_EVENT_TYPES, reduceAdminRoutine, emptyAdminRoutine, type 
 import {
   ADMIN_ACCESS_TTL_SECONDS, ADMIN_RESOURCE, adminManifestValid, adminScopes,
   ADMIN_READ_RATE_PER_HOUR, ADMIN_MUTATION_RATE_PER_HOUR, ADMIN_REFRESH_RATE_PER_HOUR,
-  canonicalAdminJson, type AdminManifest, type AdminScope,
+  canonicalAdminJson, adminEffectiveCapabilities, type AdminManifest, type AdminScope,
 } from './admin-policy.js';
 
 export type AdminActor =
@@ -102,6 +102,7 @@ function narrowing(next: AdminManifest, prior: AdminGrant, now: number): boolean
   if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id ||
       next.connection_id !== prior.connection_id || next.client_id !== prior.client_id ||
       next.resource !== prior.resource || next.registry_version !== prior.registry_version ||
+      next.availability_digest !== prior.availability_digest || !subset(next.capability_names, prior.capability_names) ||
       (prior.mode === 'granular' && next.mode !== 'granular') ||
       next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline ||
       !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) ||
@@ -203,7 +204,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
   if (!grant || grant.owner_user_id !== ctx.owner_user_id) return finish('grant_unavailable');
   if (actor.kind === 'delegated_admin' && (actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id ||
       actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE)) return finish('grant_binding_mismatch');
-  if (actor.kind === 'delegated_admin' && (!adminScopes(actor.scope_names) || !subset(actor.scope_names, grant.scope_names))) return finish('scope_expansion_forbidden');
+  if (actor.kind === 'delegated_admin' && (!adminScopes(actor.scope_names, grant.registry_version) || !subset(actor.scope_names, grant.scope_names))) return finish('scope_expansion_forbidden');
   if (command.kind === 'revoke_admin_delegation' || command.kind === 'suspend_admin_delegation' || command.kind === 'surrender_admin_delegation') {
     if (command.kind === 'surrender_admin_delegation' ? actor.kind !== 'delegated_admin' : !humanOwner && actor.kind !== 'system') return finish('human_confirmation_required');
     if (actor.kind === 'delegated_admin' && actor.access_expires_at <= ctx.now) return finish('credential_expired');
@@ -244,6 +245,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
     return finish(null);
   }
   if (command.kind === 'admin_read_metadata') {
+    if (actor.kind === 'delegated_admin' && !adminEffectiveCapabilities(grant, actor.scope_names).includes(command.kind)) return finish('capability_forbidden');
     if (!humanOwner && (actor.kind !== 'delegated_admin' || actor.access_expires_at <= ctx.now ||
         !actor.scope_names.includes('admin:read') || !grant.scope_names.includes('admin:read') ||
         command.resource_kind !== 'grant')) return finish('credential_kind_forbidden');
@@ -275,7 +277,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
     emit('AdminDelegationRevoked', terminalPayload(grant, state, ctx.now, 'refresh_replay'));
     return finish('refresh_replay');
   }
-  if (!adminScopes(command.scope_names) || !command.scope_names.includes('admin:read') ||
+  if (!adminScopes(command.scope_names, grant.registry_version) || !command.scope_names.includes('admin:read') ||
       !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish('scope_expansion_forbidden');
   if (!ctx.current_workspace_rights) return finish('current_rights_required');
   emit('AdminCredentialRotated', { grant_id: grant.grant_id, credential_lineage_id: lineage.credential_lineage_id,

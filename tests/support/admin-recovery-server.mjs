@@ -28,9 +28,12 @@ async function invoke(handler, body, jwt = person.jwt) {
 const view = (resource, workspace_id = null, before = null) => ({ resource, workspace_id, before, limit: 1 });
 const wire = value => ({ command_id: id(), stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE, command: value });
 async function grant(full = false, expires = Date.now() + 86400000) {
+  const scope_names = full ? policy.adminConsentOptions().filter(option => option.available).map(option => option.scope) : ['admin:read'];
   const manifest = { connection_id: id(), client_id: '<img src=x onerror=alert(1)>\u001b[2J', resource: policy.ADMIN_RESOURCE,
     mode: full ? 'full_account' : 'granular', registry_version: policy.ADMIN_REGISTRY_VERSION,
-    scope_names: full ? policy.ADMIN_SCOPE_NAMES : ['admin:read'], workspace_selector: full ? 'owned_and_selected' : 'selected', workspace_ids: [config.workspace],
+    scope_names, capability_names: policy.adminAvailableCapabilities(scope_names),
+    availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
+    workspace_selector: full ? 'owned_and_selected' : 'selected', workspace_ids: [config.workspace],
     created_workspace_policy: { scope_names: [] }, target_rules: { seat_ids: [], own_seats: false, grant_created_seats: false, recipient_user_ids: [], recipient_connection_ids: [], transports: [] },
     worker_scope_ceiling: [], role_ceiling: 'member', renewal_limits: { ...policy.ADMIN_RENEWAL_CEILINGS, grant_kinds: [], principal_ids: [] },
     issuance_limits: { ...policy.ADMIN_ISSUANCE_CEILINGS }, expires_at: expires, refresh_deadline: Date.now() + 86400000 };
