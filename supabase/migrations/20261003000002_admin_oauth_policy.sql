@@ -464,7 +464,7 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- BEGIN
 --   FOREACH t IN ARRAY ARRAY['provider_grant_resources','admin_grant_bindings','admin_interactions','admin_consent_orchestration',
 --     'admin_verified_clients','admin_client_owner_approvals','dpop_proof_replays','dpop_nonces','issuer_key_denials',
---     'admin_access_issuances','admin_oauth_audit'] LOOP
+--     'admin_access_issuances','admin_oauth_audit','admin_oauth_audit_daily'] LOOP
 --     IF to_regclass('commonswarm_oauth.'||t) IS NOT NULL THEN
 --       EXECUTE format('SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.%I)',t) INTO occupied;
 --       IF occupied THEN RAISE EXCEPTION 'reserve rollback refused: durable artifacts in %',t USING ERRCODE='55000'; END IF;
