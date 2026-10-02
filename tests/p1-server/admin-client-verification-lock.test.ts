@@ -162,13 +162,18 @@ test('admin-schema-isolation: verification FOR SHARE blocks release row locks un
   const [caller, release, monitor] = sessions as [LockSession, LockSession, LockSession];
   const retainedLock = `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation'
     AND relation='commonswarm_oauth.admin_verified_clients'::regclass AND mode='RowShareLock' AND granted);`;
+  let failed = false;
+  let firstError: unknown;
+  const recordFailure = (error: unknown) => {
+    if (!failed) { failed = true; firstError = error; }
+  };
   try {
     for (const session of sessions) await session.query("SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s';");
     // Commit only reviewed verification fixtures in the CI database so every
     // backend sees the real table/rows. No cloned-schema DDL lock can interfere.
     // Verification history is immutable: withdraw these rows in finally, retain
     // them for history, and never delete them or enable issuance.
-    await monitor.query(`BEGIN; ${verification(client)} ${verification(client, 2)} COMMIT;`);
+    await monitor.query(`BEGIN; ${verification(client)} ${verification(client, 2, false)} COMMIT;`);
     const callerPid = Number((await caller.query('SELECT pg_backend_pid();'))[0]);
     const releasePid = Number((await release.query('SELECT pg_backend_pid();'))[0]);
     assert.ok(Number.isInteger(callerPid) && callerPid > 0);
@@ -221,6 +226,11 @@ test('admin-schema-isolation: verification FOR SHARE blocks release row locks un
         assert.equal(blocked, true, `release FOR ${mode} waits on the exact caller transaction`);
         // NO KEY UPDATE also conflicts with SHARE, but not KEY SHARE. This
         // catches an accidental weakening that a FOR UPDATE probe alone misses.
+      } catch (error) {
+        // Keep the blocking observation's failure if releasing a dead caller
+        // or awaiting the contender also fails in the following finally.
+        recordFailure(error);
+        throw error;
       } finally {
         await caller.query('COMMIT;');
         assert.deepEqual(await contender, ['1'], 'release lock succeeds after caller commit');
@@ -232,14 +242,25 @@ test('admin-schema-isolation: verification FOR SHARE blocks release row locks un
       ${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.admin_grant_bindings WHERE client_id='${client}'`, 'locking creates no provider binding')}
       ${dbAssert('SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state', 'issuance remains closed')}`);
     await monitor.query(catalog('20261003000002'));
+  } catch (error) {
+    recordFailure(error);
   } finally {
-    // Release any holder first, even when an assertion or contender fails.
-    await caller.close();
-    await release.close();
+    // Close every holder/observer before cleanup, including failed sessions.
+    // Never reuse the monitor: ON_ERROR_STOP may already have killed it.
+    const closed = await Promise.allSettled(sessions.map(session => session.close()));
+    for (const result of closed) if (result.status === 'rejected') recordFailure(result.reason);
     try {
-      await monitor.query(`BEGIN; SET LOCAL ROLE commonswarm_admin_release;
-        UPDATE commonswarm_oauth.admin_verified_clients SET active=false,withdrawn_at=statement_timestamp(),withdrawal_reason='lock_test_complete'
-          WHERE client_id='${client}' AND active; COMMIT;`);
-    } finally { await monitor.close(); }
+      const cleanup = new LockSession(databaseContainer());
+      try {
+        await cleanup.query("SET statement_timeout='10s'; SET idle_in_transaction_session_timeout='15s';");
+        await cleanup.query(`BEGIN; SET LOCAL ROLE commonswarm_admin_release;
+          UPDATE commonswarm_oauth.admin_verified_clients SET active=false,withdrawn_at=statement_timestamp(),withdrawal_reason='lock_test_complete'
+            WHERE client_id='${client}' AND verification_version IN (1,2) AND withdrawn_at IS NULL;
+          COMMIT;
+          ${dbAssert(`SELECT count(*)=0 FROM commonswarm_oauth.admin_verified_clients
+            WHERE client_id='${client}' AND verification_version IN (1,2) AND (active OR withdrawn_at IS NULL)`, 'both exact fixture versions withdrawn')}`);
+      } finally { await cleanup.close(); }
+    } catch (error) { recordFailure(error); }
   }
+  if (failed) throw firstError;
 });
