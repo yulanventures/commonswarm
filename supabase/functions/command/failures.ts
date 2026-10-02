@@ -44,6 +44,20 @@ export function safeError(error: unknown): string {
   return "unknown error";
 }
 
+/** Admin diagnostics must never echo SQL values, bearer material or URLs.
+ * Read only the class/message, never postgres detail, query or parameters.
+ */
+export function safeAdminError(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown error";
+  const redact = (value: string) => value
+    .replace(/swm_[A-Za-z0-9_-]+/gu, "[credential]")
+    .replace(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/gu, "[token]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/giu, "[url]")
+    .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.|'')*'/gu, "[value]")
+    .replace(/\b(?:password|secret|token|credential|authorization)\s*[:=]\s*\S+/giu, "[secret]");
+  return boundedSafeText(redact(`${error.name}: ${error.message}`), 512);
+}
+
 /** Preserve the current response classification while making it explicit for tests. */
 export function classifyCommandFailure(
   isTestRollback: boolean,

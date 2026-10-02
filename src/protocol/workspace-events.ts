@@ -6,6 +6,8 @@
 // events carry only token identifiers.
 
 import { EventEnvelope } from './events.js';
+import { ADMIN_ROUTINE_EVENT_TYPES, type AdminRoutineEventType } from './admin-routine-events.js';
+import type { AdminRoutineState } from './admin-routine.js';
 
 export type WorkspaceRole = 'owner' | 'admin' | 'member';
 export const WORKSPACE_ROLES: readonly WorkspaceRole[] = ['owner', 'admin', 'member'] as const;
@@ -13,7 +15,7 @@ export const WORKSPACE_ROLES: readonly WorkspaceRole[] = ['owner', 'admin', 'mem
 export type AgentTransport = 'local' | 'hosted_mcp';
 export const AGENT_TRANSPORTS: readonly AgentTransport[] = ['local', 'hosted_mcp'] as const;
 
-export type WorkspaceEventType =
+export type WorkspaceEventType = AdminRoutineEventType
   | 'WorkspaceCreated'
   | 'WorkspaceArchived'
   | 'MemberInvited'
@@ -37,6 +39,7 @@ export type WorkspaceEventType =
   | 'CommandRejected';
 
 export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
+  ...ADMIN_ROUTINE_EVENT_TYPES,
   'WorkspaceCreated',
   'WorkspaceArchived',
   'MemberInvited',
@@ -117,6 +120,7 @@ export interface WorkspaceAgentToken {
 }
 
 export interface WorkspaceState {
+  admin_routine?: AdminRoutineState;
   workspace: WorkspaceRecord;
   members: Record<string, WorkspaceMember>;
   invitations: Record<string, WorkspaceInvitation>;

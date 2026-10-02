@@ -1,3 +1,4 @@
+import { ADMIN_ROUTINE_EVENT_TYPES, reduceAdminRoutine, emptyAdminRoutine, type AdminRoutineState, type AdminRoutineEventType } from './admin-routine.js';
 import {
   ADMIN_ACCESS_TTL_SECONDS, ADMIN_RESOURCE, adminManifestValid, adminScopes,
   ADMIN_READ_RATE_PER_HOUR, ADMIN_MUTATION_RATE_PER_HOUR, ADMIN_REFRESH_RATE_PER_HOUR,
@@ -27,6 +28,7 @@ export interface AdminCredentialLineage {
   state: 'active' | 'revoked'; delivery_state: 'awaiting_delivery';
 }
 export interface AdminAccountState {
+  routine?: AdminRoutineState;
   grants: Record<string, AdminGrant>; consents: Record<string, AdminConsent>;
   lineages: Record<string, AdminCredentialLineage>;
   rate_buckets: Record<string, { hour_start: number; attempts: number }>;
@@ -37,7 +39,7 @@ export const ADMIN_EVENT_TYPES = [
   'AdminWorkspaceAccessWithdrawn', 'AdminCredentialIssued', 'AdminCredentialRotated',
   'AdminCredentialReplayDetected', 'AdminMetadataRead', 'AdminActionRecorded',
 ] as const;
-export type AdminEventType = typeof ADMIN_EVENT_TYPES[number];
+export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEventType;
 export interface AdminAccountEvent {
   stream_kind: 'account'; owner_user_id: string; stream_id: string; seq: number;
   event_id: string; command_id: string; type: AdminEventType; schema_version: 1;
@@ -275,13 +277,18 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
 function terminalPayload(grant: AdminGrant, state: AdminAccountState, now: number, reason: string): Record<string, unknown> {
   return { grant_id: grant.grant_id, reason_code: reason, effective_at: now,
     credential_lineage_id: Object.values(state.lineages).find(l => l.grant_id === grant.grant_id)?.credential_lineage_id ?? null,
-    cancelled_attempt_ids: [], dependent_child_ids: [] }; // Lane B cannot provision children.
+    cancelled_attempt_ids: [], dependent_child_ids: [
+      ...Object.entries(state.routine?.seats ?? {}).filter(([,s])=>s.grant_id===grant.grant_id).map(([id])=>id),
+      ...Object.values(state.routine?.credentials ?? {}).filter(c=>c.parent_admin_grant_id===grant.grant_id).map(c=>c.credential_id),
+      ...Object.values(state.routine?.invitations ?? {}).filter(i=>i.parent_admin_grant_id===grant.grant_id).map(i=>i.invitation_id),
+    ] };
 }
 
 /** Consent session bindings are separate private adapter facts, excluded from canonical events. */
 export function reduceAdminAuthority(previous: AdminAccountState | null, event: AdminAccountEvent): AdminAccountState {
-  if (event.schema_version !== 1 || event.stream_kind !== 'account' || !ADMIN_EVENT_TYPES.includes(event.type)) throw new Error('unsupported admin event');
+  if (event.schema_version !== 1 || event.stream_kind !== 'account' || !(ADMIN_EVENT_TYPES as readonly string[]).includes(event.type) && !(ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) throw new Error('unsupported admin event');
   const state = previous ?? emptyAdminAccount(), p = event.payload;
+  if ((ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event) };
   if (event.type === 'AdminConsentPrepared') {
     const c = { ...p, session_binding: '', consumed_at: null } as unknown as AdminConsent;
     return { ...state, consents: { ...state.consents, [c.consent_receipt_id]: c } };
@@ -291,7 +298,7 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
     if (state.grants[grant.grant_id]) throw new Error('duplicate admin grant');
     const consent = state.consents[grant.consent_receipt_id];
     if (!consent) throw new Error('missing admin consent');
-    return { ...state, grants: { ...state.grants, [grant.grant_id]: grant }, consents: { ...state.consents, [consent.consent_receipt_id]: { ...consent, consumed_at: event.occurred_at_server } } };
+    return { ...state, routine: { ...(state.routine ?? emptyAdminRoutine()), spend: { ...state.routine?.spend, [grant.grant_id]: {workspaces:0,total_seats:0,invitations:0,worker_credentials:0,successors:0} } }, grants: { ...state.grants, [grant.grant_id]: grant }, consents: { ...state.consents, [consent.consent_receipt_id]: { ...consent, consumed_at: event.occurred_at_server } } };
   }
   if (event.type === 'AdminCredentialIssued' || event.type === 'AdminCredentialRotated') {
     const id = String(p.credential_lineage_id), old = state.lineages[id];
@@ -314,7 +321,9 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
     return { ...state, grants: { ...state.grants, [id]: { ...grant, ...p.manifest as AdminManifest, manifest_digest: String(p.new_manifest_digest), consent_receipt_id: receipt } }, consents: { ...state.consents, [receipt]: { ...consent, consumed_at: event.occurred_at_server } } };
   }
   const status = event.type === 'AdminDelegationRevoked' ? 'revoked' : event.type === 'AdminDelegationSuspended' ? 'suspended' : 'expired';
-  return { ...state, grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: String(p.reason_code),
+  const cancelledAt = status === 'expired' ? grant.expires_at : event.occurred_at_server;
+  const routine = state.routine ? { ...state.routine, invitations: Object.fromEntries(Object.entries(state.routine.invitations).map(([key, invitation]) => [key, invitation.parent_admin_grant_id === id && invitation.accepted_at === null ? { ...invitation, revoked_at: invitation.revoked_at ?? cancelledAt } : invitation])) } : undefined;
+  return { ...state, ...(routine ? {routine} : {}), grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: String(p.reason_code),
     revoked_at: status === 'revoked' ? event.occurred_at_server : grant.revoked_at,
     suspended_at: status === 'suspended' ? event.occurred_at_server : grant.suspended_at } },
     lineages: Object.fromEntries(Object.entries(state.lineages).map(([key, l]) => [key, l.grant_id === id ? { ...l, state: 'revoked' as const } : l])) };

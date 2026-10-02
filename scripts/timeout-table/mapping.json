@@ -3391,6 +3391,56 @@
             "removes": [],
             "reason": "The local process inspection has no client HTTP endpoint."
           }
+        },
+        "site/src/lib/admin-delegations.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "site/src/lib/admin-delegations.ts:22",
+          "detail": "Human account/workspace grant and action-history read, including the response body.",
+          "operation": {
+            "name": "admin-recovery-read-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
+          }
+        },
+        "src/cloud/admin-delegations.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/admin-delegations.ts:24",
+          "detail": "Human account/workspace grant and action-history read, including the response body.",
+          "operation": {
+            "name": "admin-recovery-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
+          }
+        },
+        "src/cloud/admin-delegations.ts:AbortSignal.timeout#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/admin-delegations.ts:40",
+          "detail": "Human account-level delegation revocation, including the response body.",
+          "operation": {
+            "name": "admin-recovery-revoke",
+            "class": "not-run",
+            "writes": [
+              "revoke the admin grant and its dependent access"
+            ],
+            "removes": [],
+            "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
+          }
         }
       }
     }

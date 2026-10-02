@@ -343,10 +343,25 @@ function upcastEnvelope(raw) {
 }
 registerUpcaster("TaskCreated", 0, (p) => ({ task_id: p.id, slug: p.name }));
 
+// src/protocol/admin-routine-events.ts
+var ADMIN_ROUTINE_EVENT_TYPES = [
+  "AdminWorkspaceCreated",
+  "AdminSeatCreated",
+  "AdminSeatProvisioned",
+  "AdminSeatRenewed",
+  "AdminSeatCredentialReplaced",
+  "AdminSeatRevoked",
+  "AdminSeatCredentialRevoked",
+  "AdminMemberInvited",
+  "AdminAgentInvitationIssued",
+  "AdminInvitationRevoked"
+];
+
 // src/protocol/workspace-events.ts
 var WORKSPACE_ROLES = ["owner", "admin", "member"];
 var AGENT_TRANSPORTS = ["local", "hosted_mcp"];
 var WORKSPACE_EVENT_TYPES = [
+  ...ADMIN_ROUTINE_EVENT_TYPES,
   "WorkspaceCreated",
   "WorkspaceArchived",
   "MemberInvited",
@@ -369,476 +384,6 @@ var WORKSPACE_EVENT_TYPES = [
   "HostedMcpSeatRevoked",
   "CommandRejected"
 ];
-
-// src/protocol/workspace-reducer.ts
-function req2(payload, keys, type, seq) {
-  if (!payload || typeof payload !== "object") {
-    throw new StreamIntegrityError(`event "${type}" at seq ${seq} has a non-object payload`);
-  }
-  for (const key2 of keys) {
-    if (payload[key2] === void 0) {
-      throw new StreamIntegrityError(
-        `event "${type}" at seq ${seq} is missing payload field "${String(key2)}"`
-      );
-    }
-  }
-  return payload;
-}
-function ownerDelta(from, to) {
-  return (to === "owner" ? 1 : 0) - (from === "owner" ? 1 : 0);
-}
-function assertRole(value, field, type, seq) {
-  if (!WORKSPACE_ROLES.includes(value)) {
-    throw new StreamIntegrityError(
-      `event "${type}" at seq ${seq} has invalid ${field} "${String(value)}"`
-    );
-  }
-}
-function assertOwnerCount(state, env3) {
-  const actual = Object.values(state.members).filter(
-    (member) => member.revoked_at === null && member.role === "owner"
-  ).length;
-  if (state.owners_count !== actual || actual < 1) {
-    throw new StreamIntegrityError(
-      `event "${env3.type}" at seq ${env3.seq} violates owner count invariant (projected ${state.owners_count}, actual ${actual})`
-    );
-  }
-}
-function reduceWorkspace(prev, env3) {
-  if (!WORKSPACE_EVENT_TYPES.includes(env3.type)) {
-    throw new UnknownEventTypeError(env3.type, env3.seq);
-  }
-  if (env3.schema_version !== SCHEMA_VERSION) {
-    throw new StreamIntegrityError(
-      `event "${env3.type}" at seq ${env3.seq} is schema v${env3.schema_version}, expected v${SCHEMA_VERSION} (upcast before reduce)`
-    );
-  }
-  if (env3.type === "CommandRejected") {
-    req2(
-      env3.payload,
-      ["workspace_id", "command", "reason", "detail"],
-      env3.type,
-      env3.seq
-    );
-    if (!prev) {
-      throw new StreamIntegrityError(`CommandRejected before WorkspaceCreated (seq ${env3.seq})`);
-    }
-    return prev;
-  }
-  if (env3.type === "WorkspaceCreated") {
-    if (prev) {
-      throw new StreamIntegrityError(`WorkspaceCreated for an existing workspace (seq ${env3.seq})`);
-    }
-    const p = req2(
-      env3.payload,
-      ["workspace_id", "name", "created_by", "created_at"],
-      env3.type,
-      env3.seq
-    );
-    return {
-      workspace: {
-        workspace_id: p.workspace_id,
-        name: p.name,
-        created_by: p.created_by,
-        created_at: p.created_at,
-        archived_at: null
-      },
-      members: {
-        [p.created_by]: {
-          user_id: p.created_by,
-          role: "owner",
-          invited_by: null,
-          joined_at: p.created_at,
-          revoked_at: null
-        }
-      },
-      invitations: {},
-      principals: {},
-      tokens: {},
-      owners_count: 1
-    };
-  }
-  if (!prev) {
-    throw new StreamIntegrityError(`event "${env3.type}" before WorkspaceCreated (seq ${env3.seq})`);
-  }
-  const s = prev;
-  let next;
-  switch (env3.type) {
-    case "WorkspaceArchived": {
-      const p = req2(env3.payload, ["archived_at"], env3.type, env3.seq);
-      if (s.workspace.archived_at !== null) {
-        throw new StreamIntegrityError(`workspace archived twice at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        workspace: { ...s.workspace, archived_at: p.archived_at }
-      };
-      break;
-    }
-    case "MemberInvited": {
-      const p = req2(
-        env3.payload,
-        [
-          "invitation_id",
-          "email",
-          "role",
-          "token_hash",
-          "expires_at",
-          "created_by",
-          "created_at"
-        ],
-        env3.type,
-        env3.seq
-      );
-      if (s.invitations[p.invitation_id]) {
-        throw new StreamIntegrityError(`duplicate invitation "${p.invitation_id}" at seq ${env3.seq}`);
-      }
-      if (Object.values(s.invitations).some(
-        (invitation) => invitation.token_hash === p.token_hash
-      )) {
-        throw new StreamIntegrityError(`duplicate invitation token_hash at seq ${env3.seq}`);
-      }
-      assertRole(p.role, "role", env3.type, env3.seq);
-      next = {
-        ...s,
-        invitations: {
-          ...s.invitations,
-          [p.invitation_id]: {
-            ...p,
-            consumed_at: null,
-            consumed_by: null,
-            revoked_at: null
-          }
-        }
-      };
-      break;
-    }
-    case "InvitationRevoked": {
-      const p = req2(env3.payload, ["invitation_id", "revoked_at"], env3.type, env3.seq);
-      const invitation = s.invitations[p.invitation_id];
-      if (!invitation) {
-        throw new StreamIntegrityError(`unknown invitation "${p.invitation_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        invitations: {
-          ...s.invitations,
-          [p.invitation_id]: { ...invitation, revoked_at: p.revoked_at }
-        }
-      };
-      break;
-    }
-    case "InvitationAccepted": {
-      const p = req2(
-        env3.payload,
-        ["invitation_id", "consumed_by", "consumed_at"],
-        env3.type,
-        env3.seq
-      );
-      const invitation = s.invitations[p.invitation_id];
-      if (!invitation) {
-        throw new StreamIntegrityError(`unknown invitation "${p.invitation_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        invitations: {
-          ...s.invitations,
-          [p.invitation_id]: {
-            ...invitation,
-            consumed_at: p.consumed_at,
-            consumed_by: p.consumed_by
-          }
-        }
-      };
-      break;
-    }
-    case "MemberJoined": {
-      const p = req2(
-        env3.payload,
-        ["user_id", "role", "invited_by", "joined_at"],
-        env3.type,
-        env3.seq
-      );
-      const existing = s.members[p.user_id];
-      assertRole(p.role, "role", env3.type, env3.seq);
-      if (existing?.revoked_at === null) {
-        throw new StreamIntegrityError(`live member "${p.user_id}" joined twice at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        members: {
-          ...s.members,
-          [p.user_id]: { ...p, revoked_at: null }
-        },
-        owners_count: s.owners_count + ownerDelta(null, p.role)
-      };
-      break;
-    }
-    case "MemberRemoved": {
-      const p = req2(env3.payload, ["user_id", "revoked_at"], env3.type, env3.seq);
-      const member = s.members[p.user_id];
-      if (!member || member.revoked_at !== null) {
-        throw new StreamIntegrityError(`cannot remove non-live member "${p.user_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        members: {
-          ...s.members,
-          [p.user_id]: { ...member, revoked_at: p.revoked_at }
-        },
-        owners_count: s.owners_count + ownerDelta(member.role, null)
-      };
-      break;
-    }
-    case "MemberRoleChanged": {
-      const p = req2(
-        env3.payload,
-        ["user_id", "from_role", "to_role"],
-        env3.type,
-        env3.seq
-      );
-      const member = s.members[p.user_id];
-      assertRole(p.from_role, "from_role", env3.type, env3.seq);
-      assertRole(p.to_role, "to_role", env3.type, env3.seq);
-      if (!member || member.revoked_at !== null || member.role !== p.from_role) {
-        throw new StreamIntegrityError(`role change has stale member state at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        members: {
-          ...s.members,
-          [p.user_id]: { ...member, role: p.to_role }
-        },
-        owners_count: s.owners_count + ownerDelta(p.from_role, p.to_role)
-      };
-      break;
-    }
-    case "AgentPrincipalCreated": {
-      const p = req2(
-        env3.payload,
-        ["principal_id", "owner_user_id", "name", "created_at"],
-        env3.type,
-        env3.seq
-      );
-      if (s.principals[p.principal_id]) {
-        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
-      const transport = p.transport ?? "local";
-      const turnOnly = p.turn_only ?? false;
-      if (!AGENT_TRANSPORTS.includes(transport)) {
-        throw new StreamIntegrityError(
-          `event "${env3.type}" at seq ${env3.seq} has invalid transport "${String(transport)}"`
-        );
-      }
-      if (typeof turnOnly !== "boolean") {
-        throw new StreamIntegrityError(
-          `event "${env3.type}" at seq ${env3.seq} has non-boolean turn_only`
-        );
-      }
-      if (transport === "hosted_mcp" && !turnOnly) {
-        throw new StreamIntegrityError(
-          `event "${env3.type}" at seq ${env3.seq} gives hosted_mcp a non-turn-only transport`
-        );
-      }
-      next = {
-        ...s,
-        principals: {
-          ...s.principals,
-          [p.principal_id]: {
-            ...p,
-            model: p.model ?? null,
-            transport,
-            turn_only: turnOnly,
-            revoked_at: null
-          }
-        }
-      };
-      break;
-    }
-    case "FeedbackSubmitted": {
-      req2(
-        env3.payload,
-        ["feedback_id", "category", "body", "reporter_kind", "reporter_id", "submitted_at"],
-        env3.type,
-        env3.seq
-      );
-      next = s;
-      break;
-    }
-    case "AgentModelDeclared": {
-      const p = req2(
-        env3.payload,
-        ["principal_id", "declared_at"],
-        env3.type,
-        env3.seq
-      );
-      const declaredFor = s.principals[p.principal_id];
-      if (!declaredFor) {
-        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        principals: {
-          ...s.principals,
-          [p.principal_id]: { ...declaredFor, model: p.model ?? null }
-        }
-      };
-      break;
-    }
-    case "AgentPrincipalRevoked": {
-      const p = req2(
-        env3.payload,
-        ["principal_id", "revoked_at"],
-        env3.type,
-        env3.seq
-      );
-      const principal = s.principals[p.principal_id];
-      if (!principal) {
-        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        principals: {
-          ...s.principals,
-          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
-        }
-      };
-      break;
-    }
-    case "AgentTokenMinted": {
-      const p = req2(
-        env3.payload,
-        [
-          "token_id",
-          "principal_id",
-          "run_id",
-          "task_id",
-          "epoch",
-          "scopes",
-          "issued_at",
-          "expires_at"
-        ],
-        env3.type,
-        env3.seq
-      );
-      if (s.tokens[p.token_id]) {
-        throw new StreamIntegrityError(`duplicate token "${p.token_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        tokens: {
-          ...s.tokens,
-          [p.token_id]: { ...p, scopes: [...p.scopes], revoked_at: null }
-        }
-      };
-      break;
-    }
-    case "AgentTokenRevoked": {
-      const p = req2(env3.payload, ["token_id", "revoked_at"], env3.type, env3.seq);
-      const token = s.tokens[p.token_id];
-      if (!token) {
-        throw new StreamIntegrityError(`unknown token "${p.token_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        tokens: {
-          ...s.tokens,
-          [p.token_id]: { ...token, revoked_at: p.revoked_at }
-        }
-      };
-      break;
-    }
-    case "HostedMcpSeatClaimed": {
-      const p = req2(
-        env3.payload,
-        [
-          "seat_id",
-          "grant_id",
-          "workspace_id",
-          "owner_user_id",
-          "principal_id",
-          "name",
-          "handle",
-          "transport",
-          "turn_only",
-          "created_at"
-        ],
-        env3.type,
-        env3.seq
-      );
-      if (p.workspace_id !== s.workspace.workspace_id) {
-        throw new StreamIntegrityError(`hosted seat workspace mismatch at seq ${env3.seq}`);
-      }
-      if (s.principals[p.principal_id]) {
-        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
-      if (p.transport !== "hosted_mcp" || p.turn_only !== true) {
-        throw new StreamIntegrityError(`hosted seat has invalid transport at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        principals: {
-          ...s.principals,
-          [p.principal_id]: {
-            principal_id: p.principal_id,
-            owner_user_id: p.owner_user_id,
-            name: p.name,
-            model: null,
-            transport: "hosted_mcp",
-            turn_only: true,
-            created_at: p.created_at,
-            revoked_at: null
-          }
-        }
-      };
-      break;
-    }
-    case "HostedMcpSeatRevoked": {
-      const p = req2(
-        env3.payload,
-        ["seat_id", "principal_id", "revoked_at"],
-        env3.type,
-        env3.seq
-      );
-      const principal = s.principals[p.principal_id];
-      if (!principal) {
-        throw new StreamIntegrityError(`unknown hosted principal "${p.principal_id}" at seq ${env3.seq}`);
-      }
-      next = {
-        ...s,
-        principals: {
-          ...s.principals,
-          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
-        }
-      };
-      break;
-    }
-    case "HostedMcpGrantBegun":
-    case "HostedMcpWorkspaceConsented":
-    case "HostedMcpGrantActivated":
-    case "HostedMcpGrantRevoked":
-      next = s;
-      break;
-    default:
-      throw new UnknownEventTypeError(env3.type, env3.seq);
-  }
-  assertOwnerCount(next, env3);
-  return next;
-}
-function reduceWorkspaceStream(events) {
-  let state = null;
-  let lastSeq = -Infinity;
-  for (const event2 of events) {
-    if (event2.seq <= lastSeq) {
-      throw new StreamIntegrityError(
-        `events out of order or duplicated: seq ${event2.seq} after ${lastSeq}`
-      );
-    }
-    lastSeq = event2.seq;
-    state = reduceWorkspace(state, event2);
-  }
-  return state;
-}
 
 // src/protocol/workspace-commands.ts
 var INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
@@ -1759,6 +1304,1612 @@ function decideWorkspace(state, cmd, ctx) {
   }
 }
 
+// src/protocol/admin-policy.ts
+var ADMIN_RESOURCE = "https://api.commonswarm.com/admin";
+var ADMIN_REGISTRY_VERSION = 1;
+var ADMIN_ACCESS_TTL_SECONDS = 300;
+var ADMIN_REFRESH_MAX_LIFETIME_SECONDS = 2592e3;
+var ADMIN_GRANT_TTL_SECONDS = 2592e3;
+var ADMIN_READ_RATE_PER_HOUR = { lineage: 120, connection: 120, account: 1e3, workspace: 1e3 };
+var ADMIN_MUTATION_RATE_PER_HOUR = { lineage: 20, connection: 20, account: 60, workspace: 60 };
+var ADMIN_REFRESH_RATE_PER_HOUR = 20;
+var ADMIN_WORKSPACE_CREATE_PER_DAY = 20;
+var ADMIN_INVITATION_ISSUE_PER_DAY = 10;
+var ADMIN_WORKSPACES_CREATED_PER_GRANT = 10;
+var ADMIN_SEATS_PER_GRANT = { live: 10, total: 50 };
+var ADMIN_INVITATIONS_PER_GRANT = { total: 10, live_agent: 5 };
+var ADMIN_WORKER_CREDENTIAL_ISSUES_PER_GRANT = 50;
+var ADMIN_WORKER_RENEWAL_LIMITS = { bearer_seconds: 3600, horizon_seconds: 2592e3, successors_per_worker: 800, successors_per_grant: 8e3 };
+var ADMIN_CONNECTION_ATTEMPTS_PER_GRANT = 50;
+var ADMIN_INVITATION_AND_ATTEMPT_TTL = { member_seconds: 604800, agent_min_seconds: 3600, agent_max_seconds: 86400, agent_seats: 10, attempt_seconds: 86400 };
+var ADMIN_EXISTING_RESOURCE_CEILINGS = { owned_workspaces: 10, members_and_invitations: 25, principals: 50, joins_per_person: 5, joins_per_workspace: 20, hosted_seats: 10 };
+var ADMIN_SCOPE_REGISTRY = {
+  "admin:read": ["admin_read_metadata"],
+  "workspaces:create": ["admin_create_workspace"],
+  "workspaces:archive": ["admin_archive_workspace"],
+  "seats:create": ["admin_create_seat", "admin_provision_seat", "admin_replace_undelivered_seat_credential"],
+  "seats:renew": ["admin_renew_seat"],
+  "seats:manage": ["admin_set_seat_model", "admin_enable_seat_management", "admin_recover_seat_session"],
+  "seats:revoke": ["admin_revoke_seat", "admin_revoke_seat_credential"],
+  "invites:create": ["admin_invite_member", "admin_issue_agent_invitation"],
+  "invites:revoke": ["admin_revoke_invitation", "admin_revoke_agent_invitation"],
+  "members:manage": ["admin_remove_member", "admin_change_member_role"],
+  "onboarding:connect": ["admin_prepare_connection", "redeem_agent_connection", "record_agent_connection_progress", "admin_cancel_connection"]
+};
+var ADMIN_SCOPE_NAMES = Object.keys(ADMIN_SCOPE_REGISTRY);
+var ADMIN_ISSUANCE_CEILINGS = {
+  workspaces: ADMIN_WORKSPACES_CREATED_PER_GRANT,
+  live_seats: ADMIN_SEATS_PER_GRANT.live,
+  total_seats: ADMIN_SEATS_PER_GRANT.total,
+  invitations: ADMIN_INVITATIONS_PER_GRANT.total,
+  live_agent_invitations: ADMIN_INVITATIONS_PER_GRANT.live_agent,
+  worker_credentials: ADMIN_WORKER_CREDENTIAL_ISSUES_PER_GRANT,
+  connection_attempts: ADMIN_CONNECTION_ATTEMPTS_PER_GRANT
+};
+var ADMIN_RENEWAL_CEILINGS = ADMIN_WORKER_RENEWAL_LIMITS;
+function adminRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function adminExactKeys(value, keys) {
+  return Object.keys(value).length === keys.length && keys.every((key2) => Object.hasOwn(value, key2));
+}
+var ADMIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+function adminIds(value) {
+  return Array.isArray(value) && value.length <= 100 && value.every((id) => typeof id === "string" && ADMIN_UUID_RE.test(id)) && new Set(value).size === value.length;
+}
+function adminScopes(value) {
+  return Array.isArray(value) && value.every((scope) => typeof scope === "string" && Object.hasOwn(ADMIN_SCOPE_REGISTRY, scope)) && new Set(value).size === value.length;
+}
+var MANIFEST_KEYS = [
+  "admin_identity_id",
+  "connection_id",
+  "client_id",
+  "resource",
+  "mode",
+  "registry_version",
+  "scope_names",
+  "workspace_selector",
+  "workspace_ids",
+  "created_workspace_policy",
+  "target_rules",
+  "worker_scope_ceiling",
+  "role_ceiling",
+  "renewal_limits",
+  "issuance_limits",
+  "expires_at",
+  "refresh_deadline"
+];
+function adminManifestValid(value, now, initial = true) {
+  const m = adminRecord(value);
+  if (!m || !adminExactKeys(m, MANIFEST_KEYS)) return false;
+  const target = adminRecord(m.target_rules), created = adminRecord(m.created_workspace_policy);
+  const renewal = adminRecord(m.renewal_limits), issuance = adminRecord(m.issuance_limits);
+  if (!ADMIN_UUID_RE.test(String(m.admin_identity_id)) || !ADMIN_UUID_RE.test(String(m.connection_id)) || typeof m.client_id !== "string" || m.client_id.length < 1 || m.client_id.length > 2048 || m.resource !== ADMIN_RESOURCE || m.registry_version !== ADMIN_REGISTRY_VERSION || !adminScopes(m.scope_names) || !m.scope_names.includes("admin:read") || !adminIds(m.workspace_ids) || m.role_ceiling !== "member" || !["granular", "full_account"].includes(String(m.mode)) || m.workspace_selector !== (m.mode === "granular" ? "selected" : "owned_and_selected")) return false;
+  if (m.mode === "full_account" && !ADMIN_SCOPE_NAMES.every((scope) => m.scope_names.includes(scope))) return false;
+  if (!created || !adminExactKeys(created, ["scope_names"]) || !adminScopes(created.scope_names) || !created.scope_names.every((scope) => m.scope_names.includes(scope)) || created.scope_names.length > 0 && !m.scope_names.includes("workspaces:create")) return false;
+  if (!target || !adminExactKeys(target, ["seat_ids", "own_seats", "grant_created_seats", "recipient_user_ids", "recipient_connection_ids", "transports"]) || !adminIds(target.seat_ids) || !adminIds(target.recipient_user_ids) || !adminIds(target.recipient_connection_ids) || typeof target.own_seats !== "boolean" || typeof target.grant_created_seats !== "boolean" || !Array.isArray(target.transports) || !target.transports.every((t) => t === "local" || t === "hosted_mcp") || new Set(target.transports).size !== target.transports.length) return false;
+  if (!Array.isArray(m.worker_scope_ceiling) || m.worker_scope_ceiling.length > 100 || !m.worker_scope_ceiling.every((scope) => typeof scope === "string" && /^[a-z][a-z0-9_:.-]{0,79}$/u.test(scope)) || m.worker_scope_ceiling.some((scope) => isAgentScopeDenylisted(String(scope))) || new Set(m.worker_scope_ceiling).size !== m.worker_scope_ceiling.length) return false;
+  if (!renewal || !adminExactKeys(renewal, [...Object.keys(ADMIN_RENEWAL_CEILINGS), "grant_kinds", "principal_ids"]) || !adminIds(renewal.principal_ids) || !Array.isArray(renewal.grant_kinds) || !renewal.grant_kinds.every((kind) => kind === "timeboxed" || kind === "standing") || new Set(renewal.grant_kinds).size !== renewal.grant_kinds.length || !issuance || !adminExactKeys(issuance, Object.keys(ADMIN_ISSUANCE_CEILINGS))) return false;
+  for (const [limits, ceilings] of [[renewal, ADMIN_RENEWAL_CEILINGS], [issuance, ADMIN_ISSUANCE_CEILINGS]]) {
+    for (const [key2, ceiling] of Object.entries(ceilings)) {
+      const n = limits[key2];
+      if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > ceiling) return false;
+    }
+  }
+  return typeof m.expires_at === "number" && Number.isSafeInteger(m.expires_at) && typeof m.refresh_deadline === "number" && Number.isSafeInteger(m.refresh_deadline) && m.expires_at > now && m.expires_at <= m.refresh_deadline && (!initial || m.expires_at >= now + 1e3 && m.refresh_deadline <= now + ADMIN_REFRESH_MAX_LIFETIME_SECONDS * 1e3 && m.expires_at <= now + ADMIN_GRANT_TTL_SECONDS * 1e3);
+}
+function canonicalAdminJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalAdminJson).join(",")}]`;
+  const r = adminRecord(value);
+  if (r) return `{${Object.keys(r).sort().map((key2) => `${JSON.stringify(key2)}:${canonicalAdminJson(r[key2])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+function adminGrantManifest(value) {
+  return Object.fromEntries(MANIFEST_KEYS.map((key2) => [key2, value[key2]]));
+}
+
+// src/protocol/admin-authority.ts
+var ADMIN_EVENT_TYPES = [
+  "AdminConsentPrepared",
+  "AdminDelegationGranted",
+  "AdminDelegationNarrowed",
+  "AdminDelegationRevoked",
+  "AdminDelegationSuspended",
+  "AdminDelegationExpired",
+  "AdminWorkspaceAccessWithdrawn",
+  "AdminCredentialIssued",
+  "AdminCredentialRotated",
+  "AdminCredentialReplayDetected",
+  "AdminMetadataRead",
+  "AdminActionRecorded"
+];
+function emptyAdminAccount() {
+  return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} };
+}
+function adminRatePolicy(actor, grant, action, workspaceId, lineageId, requestedGrantId) {
+  if (actor.kind === "human" || actor.kind === "system" || action === "surrender_admin_delegation" && actor.kind === "delegated_admin" && actor.grant_id === grant.grant_id && requestedGrantId === actor.grant_id) return [];
+  if (actor.kind === "credential_runtime" && lineageId !== null) return [
+    { key: `refresh:lineage:${lineageId}`, limit: ADMIN_REFRESH_RATE_PER_HOUR },
+    { key: `refresh:connection:${grant.connection_id}`, limit: ADMIN_REFRESH_RATE_PER_HOUR }
+  ];
+  const kind = action === "admin_read_metadata" ? "read" : "mutation";
+  const limits = kind === "read" ? ADMIN_READ_RATE_PER_HOUR : ADMIN_MUTATION_RATE_PER_HOUR;
+  return [
+    { key: `${kind}:grant:${grant.grant_id}`, limit: limits.lineage },
+    { key: `${kind}:connection:${grant.connection_id}`, limit: limits.connection },
+    { key: `${kind}:account:${grant.owner_user_id}`, limit: limits.account },
+    ...workspaceId === null || !grant.workspace_ids.includes(workspaceId) ? [] : [{ key: `${kind}:workspace:${workspaceId}`, limit: limits.workspace }]
+  ];
+}
+function subset(a, b) {
+  return a.every((x) => b.includes(x));
+}
+function narrowing(next, prior, now) {
+  if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id || next.connection_id !== prior.connection_id || next.client_id !== prior.client_id || next.resource !== prior.resource || next.registry_version !== prior.registry_version || prior.mode === "granular" && next.mode !== "granular" || next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline || !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) || !subset(next.created_workspace_policy.scope_names, prior.created_workspace_policy.scope_names) || !subset(next.worker_scope_ceiling, prior.worker_scope_ceiling)) return false;
+  const a = next.target_rules, b = prior.target_rules;
+  if (!subset(a.seat_ids, b.seat_ids) || !subset(a.recipient_user_ids, b.recipient_user_ids) || !subset(a.recipient_connection_ids, b.recipient_connection_ids) || !subset(a.transports, b.transports) || a.own_seats && !b.own_seats || a.grant_created_seats && !b.grant_created_seats || !subset(next.renewal_limits.grant_kinds, prior.renewal_limits.grant_kinds) || !subset(next.renewal_limits.principal_ids, prior.renewal_limits.principal_ids)) return false;
+  for (const key2 of ["bearer_seconds", "horizon_seconds", "successors_per_worker", "successors_per_grant"]) {
+    if (next.renewal_limits[key2] > prior.renewal_limits[key2]) return false;
+  }
+  return Object.keys(next.issuance_limits).every((key2) => next.issuance_limits[key2] <= prior.issuance_limits[key2]);
+}
+function decideAdminAuthority(command, state, ctx) {
+  const events = [];
+  const grant = "grant_id" in command ? state.grants[command.grant_id] : void 0;
+  let auditGrant = ctx.actor.kind === "delegated_admin" ? state.grants[ctx.actor.grant_id] : grant;
+  const auditId = ctx.nextEventId();
+  const actor = ctx.actor;
+  const buckets = auditGrant ? adminRatePolicy(
+    actor,
+    auditGrant,
+    command.kind,
+    "workspace_id" in command ? command.workspace_id : null,
+    actor.kind === "credential_runtime" && "generation" in command ? command.credential_lineage_id : null,
+    "grant_id" in command ? command.grant_id : null
+  ).map(({ key: key2, limit }) => {
+    const prior = state.rate_buckets[key2], hour_start = Math.floor(ctx.now / 36e5);
+    return { key: key2, limit, hour_start, attempts: prior?.hour_start === hour_start ? prior.attempts + 1 : 1 };
+  }) : [];
+  const emit = (type, payload) => {
+    const eventGrant = typeof payload.grant_id === "string" ? state.grants[payload.grant_id] ?? auditGrant : auditGrant;
+    const e = {
+      stream_kind: "account",
+      owner_user_id: ctx.owner_user_id,
+      stream_id: ctx.stream_id,
+      seq: ctx.nextSeq(),
+      event_id: ctx.nextEventId(),
+      command_id: ctx.command_id,
+      type,
+      schema_version: 1,
+      actor_user: actor.kind === "human" ? actor.user_id : null,
+      actor_agent_principal: null,
+      actor_run: null,
+      admin_identity_id: typeof payload.admin_identity_id === "string" ? payload.admin_identity_id : eventGrant?.admin_identity_id ?? (actor.kind === "delegated_admin" ? actor.admin_identity_id : null),
+      grant_id: typeof payload.grant_id === "string" ? payload.grant_id : "grant_id" in command ? command.grant_id : null,
+      grant_manifest_digest: typeof payload.manifest_digest === "string" ? payload.manifest_digest : eventGrant?.manifest_digest ?? null,
+      occurred_at_server: ctx.now,
+      payload
+    };
+    events.push(e);
+    return e;
+  };
+  const finish = (reason) => {
+    const related = events.map((e) => e.event_id);
+    emit("AdminActionRecorded", {
+      audit_record_id: auditId,
+      grant_id: auditGrant?.grant_id ?? ("grant_id" in command ? command.grant_id : null),
+      admin_identity_id: auditGrant?.admin_identity_id ?? null,
+      connection_id: auditGrant?.connection_id ?? null,
+      action: command.kind,
+      target_kind: "admin_grant",
+      target_id: auditGrant?.grant_id ?? null,
+      workspace_id: "workspace_id" in command ? command.workspace_id : null,
+      manifest_digest: auditGrant?.manifest_digest ?? null,
+      request_digest: ctx.request_digest,
+      outcome: reason === null ? "accepted" : "refused",
+      reason_code: reason,
+      policy_check: { result: reason ?? "passed", buckets: buckets.map(({ key: key2, hour_start, attempts }) => ({ key: key2, hour_start, attempts })) },
+      related_event_ids: related,
+      next_action: reason === null ? "none" : "Ask the granting person to review this connection.",
+      recovery_kind: reason === null ? "none" : "human"
+    });
+    return { ok: reason === null, reason, events };
+  };
+  const humanOwner = actor.kind === "human" && actor.user_id === ctx.owner_user_id;
+  if (actor.kind === "worker" || actor.kind === "hosted_seat") return finish("credential_kind_forbidden");
+  const replayLineage = "credential_lineage_id" in command ? state.lineages[command.credential_lineage_id] : void 0;
+  const verifiedReplay = actor.kind === "credential_runtime" && grant && replayLineage?.grant_id === grant.grant_id && (command.kind === "rotate_admin_credential" || command.kind === "record_admin_credential_replay") && ctx.presenting_refresh_lineage_id === command.credential_lineage_id && ctx.presenting_refresh_generation === command.generation && command.generation < replayLineage.generation && actor.connection_id === grant.connection_id && actor.client_id === grant.client_id && actor.resource === ADMIN_RESOURCE;
+  if (!verifiedReplay && buckets.some((bucket) => !Number.isSafeInteger(bucket.attempts) || bucket.attempts < 1 || bucket.attempts > bucket.limit)) return finish("rate_limited");
+  if (command.kind === "prepare_admin_consent") {
+    const c = command.consent;
+    if (!humanOwner || actor.kind !== "human" || c.owner_user_id !== ctx.owner_user_id || c.session_binding !== actor.session_binding) return finish("human_confirmation_required");
+    if (!adminManifestValid(c.manifest, ctx.now) || c.consumed_at !== null || c.expires_at <= ctx.now || c.expires_at > ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3 || c.manifest.mode === "full_account" && !c.full_account_selected || !ctx.current_workspace_rights || state.consents[c.consent_receipt_id]) return finish("consent_invalid");
+    emit("AdminConsentPrepared", {
+      consent_receipt_id: c.consent_receipt_id,
+      owner_user_id: c.owner_user_id,
+      manifest: c.manifest,
+      manifest_digest: c.manifest_digest,
+      full_account_selected: c.full_account_selected,
+      expires_at: c.expires_at
+    });
+    return finish(null);
+  }
+  if (command.kind === "grant_admin_delegation") {
+    const c = state.consents[command.consent_receipt_id];
+    if (!humanOwner || actor.kind !== "human") return finish("human_confirmation_required");
+    if (!c || c.owner_user_id !== ctx.owner_user_id || c.session_binding !== actor.session_binding || c.consumed_at !== null || c.expires_at <= ctx.now || !adminManifestValid(c.manifest, ctx.now) || c.manifest.mode === "full_account" && !c.full_account_selected || !ctx.current_workspace_rights || state.grants[command.grant_id]) return finish("consent_invalid");
+    const previous = command.replaces_grant_id === null ? null : state.grants[command.replaces_grant_id];
+    if (Object.values(state.grants).some((g) => g.connection_id === c.manifest.connection_id && g.state === "active" && g.grant_id !== command.replaces_grant_id)) return finish("replacement_required");
+    if (command.replaces_grant_id !== null && (!previous || previous.owner_user_id !== ctx.owner_user_id || previous.connection_id !== c.manifest.connection_id)) return finish("replacement_invalid");
+    if (previous && (previous.state === "active" || previous.state === "suspended")) emit("AdminDelegationRevoked", terminalPayload(previous, state, ctx.now, "replaced"));
+    emit("AdminDelegationGranted", {
+      ...c.manifest,
+      grant_id: command.grant_id,
+      owner_user_id: ctx.owner_user_id,
+      consent_receipt_id: c.consent_receipt_id,
+      manifest_digest: c.manifest_digest,
+      replaces_grant_id: command.replaces_grant_id,
+      created_at: ctx.now
+    });
+    auditGrant = {
+      ...c.manifest,
+      grant_id: command.grant_id,
+      owner_user_id: ctx.owner_user_id,
+      consent_receipt_id: c.consent_receipt_id,
+      manifest_digest: c.manifest_digest,
+      created_at: ctx.now,
+      state: "active",
+      suspended_at: null,
+      revoked_at: null,
+      reason_code: null,
+      withdrawn_workspace_ids: []
+    };
+    return finish(null);
+  }
+  if (!grant || grant.owner_user_id !== ctx.owner_user_id) return finish("grant_unavailable");
+  if (actor.kind === "delegated_admin" && (actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id || actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE)) return finish("grant_binding_mismatch");
+  if (actor.kind === "delegated_admin" && (!adminScopes(actor.scope_names) || !subset(actor.scope_names, grant.scope_names))) return finish("scope_expansion_forbidden");
+  if (command.kind === "revoke_admin_delegation" || command.kind === "suspend_admin_delegation" || command.kind === "surrender_admin_delegation") {
+    if (command.kind === "surrender_admin_delegation" ? actor.kind !== "delegated_admin" : !humanOwner && actor.kind !== "system") return finish("human_confirmation_required");
+    if (actor.kind === "delegated_admin" && actor.access_expires_at <= ctx.now) return finish("credential_expired");
+    if (grant.state === "revoked" || grant.state === "expired" || grant.state === "suspended" && command.kind === "suspend_admin_delegation") return finish(null);
+    emit(command.kind === "suspend_admin_delegation" ? "AdminDelegationSuspended" : "AdminDelegationRevoked", terminalPayload(grant, state, ctx.now, command.reason_code));
+    return finish(null);
+  }
+  if (command.kind === "expire_admin_delegation") {
+    if (actor.kind !== "system") return finish("credential_kind_forbidden");
+    if (grant.expires_at > ctx.now && grant.refresh_deadline > ctx.now) return finish("deadline_not_reached");
+    if (grant.state === "active") emit("AdminDelegationExpired", { ...terminalPayload(grant, state, ctx.now, "expired"), expires_at: grant.expires_at, detected_at: ctx.now });
+    return finish(null);
+  }
+  if (command.kind === "withdraw_admin_workspace_access") {
+    if (actor.kind !== "human" || !ctx.withdrawing_workspace_owner) return finish("workspace_owner_required");
+    if (!grant.workspace_ids.includes(command.workspace_id) && !(grant.workspace_selector === "owned_and_selected" && ctx.target_workspace_owned_by_grantor)) return finish("workspace_forbidden");
+    if (!grant.withdrawn_workspace_ids.includes(command.workspace_id)) emit("AdminWorkspaceAccessWithdrawn", {
+      grant_id: grant.grant_id,
+      workspace_id: command.workspace_id,
+      withdrawing_user_id: actor.user_id,
+      effective_at: ctx.now,
+      reason_code: command.reason_code
+    });
+    return finish(null);
+  }
+  if (command.kind === "admin_read_metadata" && humanOwner) {
+    emit("AdminMetadataRead", {
+      resource_kind: "grant",
+      workspace_id: null,
+      target_filter_digest: ctx.request_digest,
+      projection_version: 1,
+      result_count: 1,
+      audit_record_id: auditId
+    });
+    return finish(null);
+  }
+  if (grant.state !== "active" || grant.expires_at <= ctx.now || grant.refresh_deadline <= ctx.now) return finish("grant_inactive");
+  if (command.kind === "narrow_admin_delegation") {
+    const c = state.consents[command.consent_receipt_id];
+    if (!humanOwner || actor.kind !== "human") return finish("human_confirmation_required");
+    if (!c || c.session_binding !== actor.session_binding || c.consumed_at !== null || c.expires_at <= ctx.now || c.manifest_digest !== command.manifest_digest || canonicalAdminJson(c.manifest) !== canonicalAdminJson(command.manifest) || !narrowing(command.manifest, grant, ctx.now)) return finish("scope_expansion_forbidden");
+    emit("AdminDelegationNarrowed", {
+      grant_id: grant.grant_id,
+      prior_manifest_digest: grant.manifest_digest,
+      new_manifest_digest: command.manifest_digest,
+      removed_scopes: grant.scope_names.filter((s) => !command.manifest.scope_names.includes(s)),
+      removed_workspace_ids: grant.workspace_ids.filter((id) => !command.manifest.workspace_ids.includes(id)),
+      new_target_rules: command.manifest.target_rules,
+      new_limits: { issuance_limits: command.manifest.issuance_limits, renewal_limits: command.manifest.renewal_limits },
+      new_expires_at: command.manifest.expires_at,
+      consent_receipt_id: command.consent_receipt_id,
+      manifest: command.manifest
+    });
+    return finish(null);
+  }
+  if (command.kind === "admin_read_metadata") {
+    if (!humanOwner && (actor.kind !== "delegated_admin" || actor.access_expires_at <= ctx.now || !actor.scope_names.includes("admin:read") || !grant.scope_names.includes("admin:read") || command.resource_kind !== "grant")) return finish("credential_kind_forbidden");
+    if (command.workspace_id !== null && (!grant.workspace_ids.includes(command.workspace_id) || grant.withdrawn_workspace_ids.includes(command.workspace_id) || !ctx.current_workspace_rights)) return finish("workspace_forbidden");
+    emit("AdminMetadataRead", {
+      resource_kind: "grant",
+      workspace_id: command.workspace_id,
+      target_filter_digest: ctx.request_digest,
+      projection_version: 1,
+      result_count: 1,
+      audit_record_id: auditId
+    });
+    return finish(null);
+  }
+  if (command.kind !== "issue_admin_credential" && command.kind !== "rotate_admin_credential" && command.kind !== "record_admin_credential_replay") return finish("human_confirmation_required");
+  if (actor.kind !== "credential_runtime" || actor.connection_id !== grant.connection_id || actor.client_id !== grant.client_id || actor.resource !== ADMIN_RESOURCE) return finish("credential_runtime_required");
+  const lineage = state.lineages[command.credential_lineage_id];
+  if (command.kind === "issue_admin_credential") {
+    if (!ctx.current_workspace_rights) return finish("current_rights_required");
+    if (Object.values(state.lineages).some((l) => l.grant_id === grant.grant_id) || lineage) return finish("credential_already_issued");
+    emit("AdminCredentialIssued", {
+      grant_id: grant.grant_id,
+      credential_lineage_id: command.credential_lineage_id,
+      connection_id: grant.connection_id,
+      resource: ADMIN_RESOURCE,
+      generation: 0,
+      scope_names: grant.scope_names,
+      access_expires_at: Math.min(ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3, grant.expires_at, grant.refresh_deadline),
+      refresh_deadline: grant.refresh_deadline,
+      delivery_state: "awaiting_delivery"
+    });
+    return finish(null);
+  }
+  if (!lineage || lineage.grant_id !== grant.grant_id || lineage.state !== "active" || ctx.presenting_refresh_lineage_id !== command.credential_lineage_id || ctx.presenting_refresh_generation === null || ctx.presenting_refresh_generation !== command.generation) return finish("refresh_invalid");
+  if (command.kind === "record_admin_credential_replay" || command.generation !== lineage.generation) {
+    if (command.generation >= lineage.generation) return finish("refresh_invalid");
+    emit("AdminCredentialReplayDetected", {
+      grant_id: grant.grant_id,
+      credential_lineage_id: lineage.credential_lineage_id,
+      replayed_generation: command.generation,
+      detected_at: ctx.now,
+      reason_code: "refresh_replay"
+    });
+    emit("AdminDelegationRevoked", terminalPayload(grant, state, ctx.now, "refresh_replay"));
+    return finish("refresh_replay");
+  }
+  if (!adminScopes(command.scope_names) || !command.scope_names.includes("admin:read") || !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish("scope_expansion_forbidden");
+  if (!ctx.current_workspace_rights) return finish("current_rights_required");
+  emit("AdminCredentialRotated", {
+    grant_id: grant.grant_id,
+    credential_lineage_id: lineage.credential_lineage_id,
+    generation: lineage.generation + 1,
+    scope_names: command.scope_names,
+    access_expires_at: Math.min(ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3, grant.expires_at, lineage.refresh_deadline),
+    refresh_deadline: lineage.refresh_deadline
+  });
+  return finish(null);
+}
+function terminalPayload(grant, state, now, reason) {
+  return {
+    grant_id: grant.grant_id,
+    reason_code: reason,
+    effective_at: now,
+    credential_lineage_id: Object.values(state.lineages).find((l) => l.grant_id === grant.grant_id)?.credential_lineage_id ?? null,
+    cancelled_attempt_ids: [],
+    dependent_child_ids: [
+      ...Object.entries(state.routine?.seats ?? {}).filter(([, s]) => s.grant_id === grant.grant_id).map(([id]) => id),
+      ...Object.values(state.routine?.credentials ?? {}).filter((c) => c.parent_admin_grant_id === grant.grant_id).map((c) => c.credential_id),
+      ...Object.values(state.routine?.invitations ?? {}).filter((i) => i.parent_admin_grant_id === grant.grant_id).map((i) => i.invitation_id)
+    ]
+  };
+}
+function reduceAdminAuthority(previous, event2) {
+  if (event2.schema_version !== 1 || event2.stream_kind !== "account" || !ADMIN_EVENT_TYPES.includes(event2.type) && !ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) throw new Error("unsupported admin event");
+  const state = previous ?? emptyAdminAccount(), p = event2.payload;
+  if (ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event2) };
+  if (event2.type === "AdminConsentPrepared") {
+    const c = { ...p, session_binding: "", consumed_at: null };
+    return { ...state, consents: { ...state.consents, [c.consent_receipt_id]: c } };
+  }
+  if (event2.type === "AdminDelegationGranted") {
+    const grant2 = { ...p, state: "active", suspended_at: null, revoked_at: null, reason_code: null, withdrawn_workspace_ids: [] };
+    if (state.grants[grant2.grant_id]) throw new Error("duplicate admin grant");
+    const consent = state.consents[grant2.consent_receipt_id];
+    if (!consent) throw new Error("missing admin consent");
+    return { ...state, routine: { ...state.routine ?? emptyAdminRoutine(), spend: { ...state.routine?.spend, [grant2.grant_id]: { workspaces: 0, total_seats: 0, invitations: 0, worker_credentials: 0, successors: 0 } } }, grants: { ...state.grants, [grant2.grant_id]: grant2 }, consents: { ...state.consents, [consent.consent_receipt_id]: { ...consent, consumed_at: event2.occurred_at_server } } };
+  }
+  if (event2.type === "AdminCredentialIssued" || event2.type === "AdminCredentialRotated") {
+    const id2 = String(p.credential_lineage_id), old = state.lineages[id2];
+    if (event2.type === "AdminCredentialRotated" && (!old || p.generation !== old.generation + 1)) throw new Error("invalid admin credential generation");
+    return { ...state, lineages: { ...state.lineages, [id2]: { ...old, ...p, state: "active", delivery_state: "awaiting_delivery" } } };
+  }
+  if (event2.type === "AdminActionRecorded") {
+    const policy = p.policy_check;
+    const rates = { ...state.rate_buckets };
+    for (const bucket of policy?.buckets ?? []) rates[bucket.key] = { hour_start: bucket.hour_start, attempts: bucket.attempts };
+    return { ...state, rate_buckets: rates };
+  }
+  if (event2.type === "AdminMetadataRead" || event2.type === "AdminCredentialReplayDetected") return state;
+  const id = String(p.grant_id), grant = state.grants[id];
+  if (!grant) throw new Error("unknown admin grant");
+  if (event2.type === "AdminWorkspaceAccessWithdrawn") return { ...state, grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [.../* @__PURE__ */ new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } } };
+  if (event2.type === "AdminDelegationNarrowed") {
+    const receipt = String(p.consent_receipt_id), consent = state.consents[receipt];
+    if (!consent) throw new Error("missing narrowing consent");
+    return { ...state, grants: { ...state.grants, [id]: { ...grant, ...p.manifest, manifest_digest: String(p.new_manifest_digest), consent_receipt_id: receipt } }, consents: { ...state.consents, [receipt]: { ...consent, consumed_at: event2.occurred_at_server } } };
+  }
+  const status = event2.type === "AdminDelegationRevoked" ? "revoked" : event2.type === "AdminDelegationSuspended" ? "suspended" : "expired";
+  const cancelledAt = status === "expired" ? grant.expires_at : event2.occurred_at_server;
+  const routine = state.routine ? { ...state.routine, invitations: Object.fromEntries(Object.entries(state.routine.invitations).map(([key2, invitation]) => [key2, invitation.parent_admin_grant_id === id && invitation.accepted_at === null ? { ...invitation, revoked_at: invitation.revoked_at ?? cancelledAt } : invitation])) } : void 0;
+  return {
+    ...state,
+    ...routine ? { routine } : {},
+    grants: { ...state.grants, [id]: {
+      ...grant,
+      state: status,
+      reason_code: String(p.reason_code),
+      revoked_at: status === "revoked" ? event2.occurred_at_server : grant.revoked_at,
+      suspended_at: status === "suspended" ? event2.occurred_at_server : grant.suspended_at
+    } },
+    lineages: Object.fromEntries(Object.entries(state.lineages).map(([key2, l]) => [key2, l.grant_id === id ? { ...l, state: "revoked" } : l]))
+  };
+}
+
+// src/protocol/admin-routine.ts
+var emptyAdminRoutine = () => ({
+  spend: {},
+  created_workspaces: {},
+  seats: {},
+  credentials: {},
+  invitations: {}
+});
+var uuid = (x) => typeof x === "string" && ADMIN_UUID_RE.test(x);
+var text = (x, max) => typeof x === "string" && x.length > 0 && x.length <= max && x.trim() === x && !/[\u0000-\u001f\u007f]/u.test(x);
+var positive = (x) => Number.isSafeInteger(x) && Number(x) > 0;
+var scopes = (x) => Array.isArray(x) && x.length > 0 && x.length <= 100 && x.every(
+  (s) => text(s, 80) && /^[a-z][a-z0-9_:.-]*$/u.test(s) && !isAgentScopeDenylisted(s)
+) && new Set(x).size === x.length;
+var code = (x) => typeof x === "string" && /^[a-z][a-z0-9_]{0,79}$/u.test(x);
+function parseAdminRoutineCommand(value) {
+  const c = adminRecord(value);
+  if (!c || !uuid(c.grant_id) || !uuid(c.workspace_id)) return null;
+  const exact = (keys) => adminExactKeys(c, ["kind", "grant_id", "workspace_id", ...keys]);
+  let valid = false;
+  switch (c.kind) {
+    case "admin_create_workspace":
+      valid = exact(["name"]) && text(c.name, 80);
+      break;
+    case "admin_create_seat":
+      valid = exact(["name", "model", "transport"]) && text(c.name, 80) && (c.model === null || text(c.model, 120)) && ["local", "hosted_mcp"].includes(String(c.transport));
+      break;
+    case "admin_provision_seat":
+      valid = exact([
+        "principal_id",
+        "recipient_connection_id",
+        "worker_scope_names",
+        "bearer_seconds",
+        "horizon_seconds",
+        "max_successors"
+      ]) && uuid(c.principal_id) && uuid(c.recipient_connection_id) && scopes(c.worker_scope_names) && positive(c.bearer_seconds) && positive(c.horizon_seconds) && positive(c.max_successors);
+      break;
+    case "admin_renew_seat":
+      valid = exact([
+        "principal_id",
+        "predecessor_credential_id",
+        "recipient_connection_id",
+        "worker_scope_names",
+        "bearer_seconds"
+      ]) && uuid(c.principal_id) && uuid(c.predecessor_credential_id) && uuid(c.recipient_connection_id) && scopes(c.worker_scope_names) && positive(c.bearer_seconds);
+      break;
+    case "admin_replace_undelivered_seat_credential":
+      valid = exact(["principal_id", "credential_id", "recipient_connection_id"]) && uuid(c.principal_id) && uuid(c.credential_id) && uuid(c.recipient_connection_id);
+      break;
+    case "admin_revoke_seat":
+      valid = exact(["principal_id", "reason_code"]) && uuid(c.principal_id) && code(c.reason_code);
+      break;
+    case "admin_revoke_seat_credential":
+      valid = exact(["principal_id", "credential_id", "reason_code"]) && uuid(c.principal_id) && uuid(c.credential_id) && code(c.reason_code);
+      break;
+    case "admin_invite_member":
+      valid = exact(["recipient_user_id", "role", "ttl_seconds"]) && uuid(c.recipient_user_id) && c.role === "member" && positive(c.ttl_seconds);
+      break;
+    case "admin_issue_agent_invitation":
+      valid = exact([
+        "intended_owner_user_id",
+        "recipient_connection_id",
+        "transport",
+        "seat_limit",
+        "worker_scope_names",
+        "ttl_seconds"
+      ]) && uuid(c.intended_owner_user_id) && uuid(c.recipient_connection_id) && ["local", "hosted_mcp"].includes(String(c.transport)) && positive(c.seat_limit) && scopes(c.worker_scope_names) && positive(c.ttl_seconds);
+      break;
+    case "admin_revoke_invitation":
+    case "admin_revoke_agent_invitation":
+      valid = exact(["invitation_id", "reason_code"]) && uuid(c.invitation_id) && code(c.reason_code);
+      break;
+  }
+  return valid ? c : null;
+}
+function decideAdminRoutine(command, account, ctx) {
+  const events = [], workspace_events = [];
+  const actor = ctx.actor, grant = account.grants[command.grant_id];
+  const routine = account.routine ?? emptyAdminRoutine();
+  const auditedGrant = actor.kind === "delegated_admin" ? account.grants[actor.grant_id] : grant;
+  const rateGrant = auditedGrant && (account.routine?.created_workspaces[command.workspace_id]?.grant_id === auditedGrant.grant_id || auditedGrant.workspace_selector === "owned_and_selected" && ctx.workspace?.members[ctx.owner_user_id]?.role === "owner" && ctx.workspace.members[ctx.owner_user_id].revoked_at === null) ? {
+    ...auditedGrant,
+    workspace_ids: [
+      .../* @__PURE__ */ new Set([...auditedGrant.workspace_ids, command.workspace_id])
+    ]
+  } : auditedGrant;
+  const rates = rateGrant ? adminRatePolicy(
+    actor,
+    rateGrant,
+    command.kind,
+    command.workspace_id,
+    null,
+    command.grant_id
+  ).map(({ key: key2, limit }) => {
+    const start = Math.floor(ctx.now / 36e5), old = account.rate_buckets[key2];
+    return {
+      key: key2,
+      limit,
+      hour_start: start,
+      attempts: old?.hour_start === start ? old.attempts + 1 : 1
+    };
+  }) : [];
+  const emit = (type, payload) => {
+    events.push({
+      stream_kind: "account",
+      owner_user_id: ctx.owner_user_id,
+      stream_id: ctx.stream_id,
+      seq: ctx.nextSeq(),
+      event_id: ctx.nextEventId(),
+      command_id: ctx.command_id,
+      type,
+      schema_version: 1,
+      actor_user: null,
+      actor_agent_principal: null,
+      actor_run: null,
+      admin_identity_id: auditedGrant?.admin_identity_id ?? null,
+      grant_id: auditedGrant?.grant_id ?? null,
+      grant_manifest_digest: auditedGrant?.manifest_digest ?? null,
+      occurred_at_server: ctx.now,
+      payload
+    });
+    if (type !== "AdminActionRecorded") workspaceEmit(type, payload);
+  };
+  const workspaceEmit = (type, payload) => workspace_events.push({
+    workspace_id: command.workspace_id,
+    stream_id: ctx.workspace_stream_id,
+    seq: ctx.workspace_seq + workspace_events.length + 1,
+    event_id: ctx.nextEventId(),
+    command_id: ctx.command_id,
+    type,
+    schema_version: 1,
+    actor_user: null,
+    actor_agent_principal: null,
+    actor_run: null,
+    occurred_at_server: ctx.now,
+    admin_identity_id: grant.admin_identity_id,
+    grant_id: grant.grant_id,
+    grant_manifest_digest: grant.manifest_digest,
+    payload
+  });
+  const finish = (reason) => {
+    const related = [...events, ...workspace_events].map((e) => e.event_id);
+    emit("AdminActionRecorded", {
+      audit_record_id: ctx.nextEventId(),
+      grant_id: auditedGrant?.grant_id ?? null,
+      admin_identity_id: auditedGrant?.admin_identity_id ?? null,
+      connection_id: auditedGrant?.connection_id ?? null,
+      action: command.kind,
+      target_kind: "principal_id" in command ? "seat" : "invitation_id" in command ? "invitation" : "workspace",
+      target_id: "principal_id" in command ? command.principal_id : "invitation_id" in command ? command.invitation_id : command.workspace_id,
+      workspace_id: command.workspace_id,
+      manifest_digest: auditedGrant?.manifest_digest ?? null,
+      request_digest: ctx.request_digest,
+      outcome: reason ? "refused" : events.some(
+        (e) => [
+          "AdminSeatProvisioned",
+          "AdminSeatRenewed",
+          "AdminSeatCredentialReplaced",
+          "AdminMemberInvited",
+          "AdminAgentInvitationIssued"
+        ].includes(e.type)
+      ) ? "pending" : "accepted",
+      reason_code: reason,
+      policy_check: {
+        result: reason ?? "passed",
+        buckets: rates.map(({ key: key2, hour_start, attempts }) => ({
+          key: key2,
+          hour_start,
+          attempts
+        }))
+      },
+      related_event_ids: related,
+      next_action: reason ? "Ask the granting person to review access." : events.some((e) => e.payload.delivery_state) ? "The recipient must authorize setup and verify its connection." : "none",
+      recovery_kind: reason ? "human" : "none"
+    });
+    return { ok: reason === null, reason, events, workspace_events };
+  };
+  if (!parseAdminRoutineCommand(command)) return finish("invalid_request");
+  if (actor.kind !== "delegated_admin") {
+    return finish("credential_kind_forbidden");
+  }
+  if (!grant || grant.owner_user_id !== ctx.owner_user_id || actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id || actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE) return finish("grant_binding_mismatch");
+  if (grant.state !== "active" || !adminManifestValid(adminGrantManifest(grant), ctx.now, false)) return finish("grant_inactive");
+  if (actor.access_expires_at <= ctx.now) return finish("credential_expired");
+  if (rates.some((b) => !positive(b.attempts) || b.attempts > b.limit)) {
+    return finish("rate_limited");
+  }
+  if (!actor.scope_names.every((s) => grant.scope_names.includes(s))) {
+    return finish("scope_expansion_forbidden");
+  }
+  const scope = Object.entries(ADMIN_SCOPE_REGISTRY).find(
+    ([, commands]) => commands.includes(command.kind)
+  )?.[0];
+  if (!scope || !grant.scope_names.includes(scope) || !actor.scope_names.includes(scope)) return finish("scope_forbidden");
+  const created = routine.created_workspaces[command.workspace_id];
+  if (command.kind !== "admin_create_workspace") {
+    const selected = grant.workspace_ids.includes(command.workspace_id);
+    const owned = grant.workspace_selector === "owned_and_selected" && ctx.workspace?.members[ctx.owner_user_id]?.role === "owner";
+    if (grant.withdrawn_workspace_ids.includes(command.workspace_id) || !(selected || owned || created?.grant_id === grant.grant_id) || created?.grant_id === grant.grant_id && (!created.scope_names.includes(scope) || !grant.created_workspace_policy.scope_names.includes(scope))) return finish("workspace_forbidden");
+    const member = ctx.workspace?.members[ctx.owner_user_id];
+    if (!ctx.workspace || ctx.workspace.workspace.archived_at !== null || !member || member.revoked_at !== null || !["owner", "admin"].includes(member.role)) return finish("current_rights_required");
+  }
+  const spend = routine.spend[grant.grant_id];
+  if (!spend) return finish("counter_invalid");
+  if (!Object.values(spend).every((n) => Number.isSafeInteger(n) && n >= 0) || ![
+    ctx.owned_workspaces,
+    ctx.workspace_creations_last_day,
+    ctx.invitations_last_day,
+    ctx.live_principals,
+    ctx.live_members_and_invitations,
+    ctx.live_agent_invitations_person,
+    ctx.live_agent_invitations_workspace
+  ].every((n) => Number.isSafeInteger(n) && n >= 0)) return finish("counter_invalid");
+  const budget = (key2, used) => used < grant.issuance_limits[key2];
+  if (command.kind === "admin_create_workspace") {
+    if (ctx.workspace) return finish("workspace_exists");
+    if (!budget("workspaces", spend.workspaces) || ctx.owned_workspaces >= ADMIN_EXISTING_RESOURCE_CEILINGS.owned_workspaces || ctx.workspace_creations_last_day >= ADMIN_WORKSPACE_CREATE_PER_DAY) return finish("workspace_limit_reached");
+    workspaceEmit("WorkspaceCreated", {
+      workspace_id: command.workspace_id,
+      name: command.name,
+      created_by: ctx.owner_user_id,
+      created_at: ctx.now
+    });
+    emit("AdminWorkspaceCreated", {
+      workspace_id: command.workspace_id,
+      name: command.name,
+      owner_user_id: ctx.owner_user_id,
+      created_workspace_policy: grant.created_workspace_policy,
+      applied_scope_names: grant.created_workspace_policy.scope_names,
+      created_at: ctx.now
+    });
+    return finish(null);
+  }
+  const principal = "principal_id" in command ? ctx.workspace.principals[command.principal_id] : void 0;
+  if ("principal_id" in command) {
+    if (!principal || principal.owner_user_id !== ctx.owner_user_id || !(grant.target_rules.seat_ids.includes(principal.principal_id) || grant.target_rules.own_seats || grant.target_rules.grant_created_seats && routine.seats[principal.principal_id]?.grant_id === grant.grant_id)) return finish("target_forbidden");
+    if (!grant.target_rules.transports.includes(principal.transport)) {
+      return finish("transport_forbidden");
+    }
+    if (principal.revoked_at !== null && command.kind !== "admin_revoke_seat") {
+      return finish("principal_revoked");
+    }
+  }
+  if (command.kind === "admin_create_seat") {
+    const live = Object.values(routine.seats).filter(
+      (s) => s.grant_id === grant.grant_id && s.revoked_at === null
+    ).length;
+    if (!grant.target_rules.grant_created_seats || !grant.target_rules.transports.includes(command.transport)) {
+      return finish("target_forbidden");
+    }
+    if (!budget("total_seats", spend.total_seats) || !budget("live_seats", live) || ctx.live_principals >= ADMIN_EXISTING_RESOURCE_CEILINGS.principals) {
+      return finish("seat_limit_reached");
+    }
+    if (Object.values(ctx.workspace.principals).some(
+      (p) => p.name === command.name
+    )) {
+      return finish("principal_name_taken");
+    }
+    const principal_id = ctx.nextResourceId();
+    const payload = {
+      workspace_id: command.workspace_id,
+      principal_id,
+      owner_user_id: ctx.owner_user_id,
+      name: command.name,
+      model: command.model,
+      transport: command.transport,
+      turn_only: command.transport === "hosted_mcp",
+      created_at: ctx.now,
+      connection_attempt_id: null
+    };
+    workspaceEmit("AgentPrincipalCreated", payload);
+    emit("AdminSeatCreated", payload);
+    return finish(null);
+  }
+  if (command.kind === "admin_invite_member" || command.kind === "admin_issue_agent_invitation") {
+    const agent = command.kind === "admin_issue_agent_invitation";
+    const recipient = agent ? command.intended_owner_user_id : command.recipient_user_id;
+    if (!ctx.recipient_exists || !grant.target_rules.recipient_user_ids.includes(recipient)) return finish("recipient_forbidden");
+    if (!budget("invitations", spend.invitations) || ctx.invitations_last_day >= ADMIN_INVITATION_ISSUE_PER_DAY) return finish("invitation_limit_reached");
+    if (!agent && (ctx.recipient_is_member || ctx.live_members_and_invitations >= ADMIN_EXISTING_RESOURCE_CEILINGS.members_and_invitations)) return finish("member_limit_reached");
+    if (agent) {
+      if (!actor.scope_names.includes("seats:create") || !grant.scope_names.includes("seats:create")) return finish("scope_forbidden");
+      if (recipient !== ctx.owner_user_id) {
+        return finish("human_confirmation_required");
+      }
+      if (!grant.target_rules.recipient_connection_ids.includes(
+        command.recipient_connection_id
+      ) || !grant.target_rules.transports.includes(command.transport) || !command.worker_scope_names.every(
+        (s) => grant.worker_scope_ceiling.includes(s) && ctx.human_worker_scopes.includes(s)
+      )) return finish("recipient_forbidden");
+      const live = Object.values(routine.invitations).filter(
+        (i) => i.parent_admin_grant_id === grant.grant_id && i.invitation_kind === "agent" && i.revoked_at === null && i.accepted_at === null && i.expires_at > ctx.now
+      ).length;
+      if (!budget("live_agent_invitations", live) || ctx.live_agent_invitations_person >= ADMIN_EXISTING_RESOURCE_CEILINGS.joins_per_person || ctx.live_agent_invitations_workspace >= ADMIN_EXISTING_RESOURCE_CEILINGS.joins_per_workspace || command.seat_limit > ADMIN_INVITATION_AND_ATTEMPT_TTL.agent_seats || command.ttl_seconds < ADMIN_INVITATION_AND_ATTEMPT_TTL.agent_min_seconds || command.ttl_seconds > ADMIN_INVITATION_AND_ATTEMPT_TTL.agent_max_seconds) {
+        return finish("invitation_limit_reached");
+      }
+    } else if (command.ttl_seconds > ADMIN_INVITATION_AND_ATTEMPT_TTL.member_seconds) return finish("invitation_ttl_invalid");
+    const invitation_id = ctx.nextResourceId(), expires_at2 = Math.min(
+      ctx.now + command.ttl_seconds * 1e3,
+      grant.expires_at,
+      grant.refresh_deadline
+    );
+    emit(agent ? "AdminAgentInvitationIssued" : "AdminMemberInvited", {
+      invitation_id,
+      workspace_id: command.workspace_id,
+      recipient_ref: recipient,
+      recipient_user_id: recipient,
+      intended_owner_user_id: recipient,
+      recipient_connection_id: agent ? command.recipient_connection_id : null,
+      invitation_kind: agent ? "agent" : "member",
+      role: "member",
+      transport: agent ? command.transport : null,
+      seat_limit: agent ? command.seat_limit : null,
+      worker_scope_ceiling: agent ? command.worker_scope_names : [],
+      worker_policy: agent ? grant.renewal_limits : null,
+      expires_at: expires_at2,
+      parent_admin_grant_id: grant.grant_id,
+      delivery_state: "awaiting_authorization"
+    });
+    return finish(null);
+  }
+  if (command.kind === "admin_revoke_invitation" || command.kind === "admin_revoke_agent_invitation") {
+    const invitation = routine.invitations[command.invitation_id];
+    if (!invitation || invitation.workspace_id !== command.workspace_id || invitation.parent_admin_grant_id !== grant.grant_id || invitation.invitation_kind !== (command.kind === "admin_revoke_agent_invitation" ? "agent" : "member") || !grant.target_rules.recipient_user_ids.includes(
+      invitation.recipient_user_id
+    )) return finish("target_forbidden");
+    if (invitation.accepted_at !== null) {
+      return finish("invitation_already_accepted");
+    }
+    if (invitation.revoked_at !== null || invitation.expires_at <= ctx.now) {
+      return finish(null);
+    }
+    emit("AdminInvitationRevoked", {
+      invitation_id: invitation.invitation_id,
+      invitation_kind: invitation.invitation_kind,
+      workspace_id: command.workspace_id,
+      revoked_at: ctx.now,
+      reason_code: command.reason_code
+    });
+    return finish(null);
+  }
+  if (command.kind === "admin_revoke_seat" || command.kind === "admin_revoke_seat_credential") {
+    const credentials = Object.values(routine.credentials).filter(
+      (c) => c.principal_id === principal.principal_id && c.revoked_at === null
+    );
+    const target = ctx.target_credential;
+    if (command.kind === "admin_revoke_seat_credential" && (!target || target.principal_id !== principal.principal_id || target.workspace_id !== command.workspace_id)) return finish("target_forbidden");
+    if (command.kind === "admin_revoke_seat" && principal.revoked_at !== null || command.kind === "admin_revoke_seat_credential" && target.revoked_at !== null) return finish(null);
+    const affected = command.kind === "admin_revoke_seat" ? [
+      ...ctx.principal_lineage_ids,
+      ...credentials.map((c) => c.worker_lineage_id)
+    ] : [target.worker_lineage_id];
+    workspaceEmit(
+      command.kind === "admin_revoke_seat" ? "AgentPrincipalRevoked" : "AgentTokenRevoked",
+      command.kind === "admin_revoke_seat" ? { principal_id: principal.principal_id, revoked_at: ctx.now } : { token_id: command.credential_id, revoked_at: ctx.now }
+    );
+    emit(
+      command.kind === "admin_revoke_seat" ? "AdminSeatRevoked" : "AdminSeatCredentialRevoked",
+      {
+        principal_id: principal.principal_id,
+        credential_id: command.kind === "admin_revoke_seat" ? null : command.credential_id,
+        transport: principal.transport,
+        affected_lineage_ids: [...new Set(affected)],
+        revoked_at: ctx.now,
+        reason_code: command.reason_code
+      }
+    );
+    return finish(null);
+  }
+  if (command.kind !== "admin_provision_seat" && command.kind !== "admin_renew_seat" && command.kind !== "admin_replace_undelivered_seat_credential") return finish("human_confirmation_required");
+  if (principal.transport !== "local") {
+    return finish("hosted_runtime_authorization_required");
+  }
+  if (!grant.target_rules.recipient_connection_ids.includes(
+    command.recipient_connection_id
+  ) || ctx.delivery_connection_id !== command.recipient_connection_id) return finish("recipient_runtime_required");
+  if (!budget("worker_credentials", spend.worker_credentials)) {
+    return finish("credential_limit_reached");
+  }
+  const prior = ctx.target_credential;
+  if (command.kind !== "admin_provision_seat") {
+    const predecessorId = command.kind === "admin_renew_seat" ? command.predecessor_credential_id : command.credential_id;
+    if (!prior || prior.credential_id !== predecessorId || prior.workspace_id !== command.workspace_id || prior.principal_id !== principal.principal_id || prior.recipient_connection_id !== command.recipient_connection_id || prior.revoked_at !== null || prior.superseded || prior.suspended || !prior.device_valid || prior.expires_at <= ctx.now || prior.parent_admin_grant_id !== null && prior.parent_admin_grant_id !== grant.grant_id) return finish("predecessor_unavailable");
+    if (!Number.isSafeInteger(prior.successors_used) || prior.successors_used < 0 || !positive(prior.bearer_seconds) || !uuid(prior.run_id) || !uuid(prior.task_id) || !Number.isSafeInteger(prior.epoch) || prior.epoch < 0 || (prior.kind === "timeboxed" ? !positive(prior.max_successors) : prior.max_successors !== null || prior.horizon_expires_at !== null)) return finish("renewal_policy_invalid");
+    if (!grant.renewal_limits.grant_kinds.includes(prior.kind) || !grant.renewal_limits.principal_ids.includes(prior.principal_id) && routine.seats[prior.principal_id]?.grant_id !== grant.grant_id) return finish("renewal_policy_forbidden");
+    if (prior.kind === "timeboxed" && (prior.horizon_expires_at === null || prior.horizon_expires_at <= ctx.now || prior.horizon_expires_at - ctx.now > grant.renewal_limits.horizon_seconds * 1e3)) return finish("renewal_horizon_reached");
+    if (command.kind === "admin_renew_seat" ? prior.first_used_at === null : prior.first_used_at !== null) return finish("credential_delivery_state_forbidden");
+    if (spend.successors >= grant.renewal_limits.successors_per_grant || prior.successors_used >= Math.min(
+      prior.max_successors ?? Infinity,
+      grant.renewal_limits.successors_per_worker
+    )) return finish("renewal_successors_exhausted");
+  } else if (Object.values(routine.credentials).some(
+    (c) => c.principal_id === principal.principal_id
+  ) || Object.values(ctx.workspace.tokens).some(
+    (t) => t.principal_id === principal.principal_id
+  )) return finish("credential_already_issued");
+  const requestedScopes = command.kind === "admin_replace_undelivered_seat_credential" ? prior.worker_scope_names : command.worker_scope_names;
+  if (!requestedScopes.every(
+    (s) => grant.worker_scope_ceiling.includes(s) && ctx.human_worker_scopes.includes(s) && (prior === null || prior.worker_scope_names.includes(s))
+  )) return finish("worker_scope_forbidden");
+  const seconds = command.kind === "admin_replace_undelivered_seat_credential" ? prior.bearer_seconds : command.bearer_seconds;
+  if (!positive(seconds) || seconds > grant.renewal_limits.bearer_seconds || prior !== null && seconds > prior.bearer_seconds) return finish("renewal_policy_forbidden");
+  if (command.kind === "admin_provision_seat" && (!grant.renewal_limits.grant_kinds.includes("timeboxed") || command.horizon_seconds > grant.renewal_limits.horizon_seconds || command.max_successors > grant.renewal_limits.successors_per_worker)) return finish("renewal_policy_forbidden");
+  const credential_id = ctx.nextResourceId();
+  const horizon = prior?.horizon_expires_at ?? Math.min(
+    ctx.now + (command.kind === "admin_provision_seat" ? command.horizon_seconds : 0) * 1e3,
+    grant.expires_at,
+    grant.refresh_deadline
+  );
+  const expires_at = Math.min(
+    ctx.now + seconds * 1e3,
+    grant.expires_at,
+    grant.refresh_deadline,
+    prior?.kind === "standing" ? Infinity : horizon,
+    command.kind === "admin_replace_undelivered_seat_credential" ? prior.expires_at : Infinity
+  );
+  const credential = {
+    credential_id,
+    workspace_id: command.workspace_id,
+    principal_id: principal.principal_id,
+    worker_lineage_id: prior?.worker_lineage_id ?? ctx.nextResourceId(),
+    parent_admin_grant_id: prior ? prior.parent_admin_grant_id : grant.grant_id,
+    recipient_connection_id: command.recipient_connection_id,
+    worker_scope_names: [...requestedScopes],
+    expires_at,
+    horizon_expires_at: prior?.kind === "standing" ? null : horizon,
+    bearer_seconds: seconds,
+    max_successors: prior ? prior.max_successors : command.kind === "admin_provision_seat" ? command.max_successors : 0,
+    successors_used: (prior?.successors_used ?? 0) + (prior ? 1 : 0),
+    kind: prior?.kind ?? "timeboxed",
+    revoked_at: null,
+    first_used_at: null,
+    superseded: false,
+    suspended: false,
+    device_valid: true,
+    run_id: prior?.run_id ?? ctx.nextResourceId(),
+    task_id: prior?.task_id ?? ctx.nextResourceId(),
+    epoch: prior?.epoch ?? 0,
+    renewal_grant_id: prior?.renewal_grant_id ?? ctx.nextResourceId(),
+    device_id: prior?.device_id ?? ctx.nextResourceId()
+  };
+  if (command.kind === "admin_replace_undelivered_seat_credential") {
+    workspaceEmit("AgentTokenRevoked", {
+      token_id: prior.credential_id,
+      revoked_at: ctx.now
+    });
+  }
+  workspaceEmit("AgentTokenMinted", {
+    token_id: credential_id,
+    principal_id: principal.principal_id,
+    run_id: credential.run_id,
+    task_id: credential.task_id,
+    epoch: credential.epoch,
+    scopes: requestedScopes,
+    issued_at: ctx.now,
+    expires_at
+  });
+  emit(
+    command.kind === "admin_provision_seat" ? "AdminSeatProvisioned" : command.kind === "admin_renew_seat" ? "AdminSeatRenewed" : "AdminSeatCredentialReplaced",
+    {
+      ...credential,
+      credential,
+      predecessor_credential_id: prior?.credential_id ?? null,
+      successor_credential_id: credential_id,
+      revoked_credential_id: prior?.credential_id ?? null,
+      replacement_credential_id: credential_id,
+      worker_policy: {
+        kind: credential.kind,
+        horizon_expires_at: credential.horizon_expires_at,
+        max_successors: credential.max_successors,
+        bearer_seconds: seconds
+      },
+      dependent_on_admin_grant: credential.parent_admin_grant_id !== null,
+      credential_expires_at: expires_at,
+      remaining_budget: Math.min(
+        grant.renewal_limits.successors_per_worker - credential.successors_used,
+        grant.renewal_limits.successors_per_grant - spend.successors - (prior ? 1 : 0)
+      ),
+      delivery_state: "awaiting_delivery",
+      policy_digest: ctx.request_digest,
+      worker_policy_digest: ctx.request_digest
+    }
+  );
+  return finish(null);
+}
+function reduceAdminRoutine(previous, event2) {
+  const state = previous ?? emptyAdminRoutine(), p = event2.payload, id = event2.grant_id;
+  const required = {
+    AdminWorkspaceCreated: [
+      "workspace_id",
+      "name",
+      "owner_user_id",
+      "created_workspace_policy",
+      "applied_scope_names",
+      "created_at"
+    ],
+    AdminSeatCreated: [
+      "workspace_id",
+      "principal_id",
+      "owner_user_id",
+      "name",
+      "model",
+      "transport",
+      "turn_only",
+      "created_at",
+      "connection_attempt_id"
+    ],
+    AdminSeatProvisioned: [
+      "principal_id",
+      "credential_id",
+      "recipient_connection_id",
+      "worker_scope_names",
+      "worker_policy",
+      "parent_admin_grant_id",
+      "dependent_on_admin_grant",
+      "credential_expires_at",
+      "delivery_state",
+      "credential"
+    ],
+    AdminSeatRenewed: [
+      "principal_id",
+      "worker_lineage_id",
+      "predecessor_credential_id",
+      "successor_credential_id",
+      "parent_admin_grant_id",
+      "worker_scope_names",
+      "expires_at",
+      "remaining_budget",
+      "policy_digest",
+      "credential"
+    ],
+    AdminSeatCredentialReplaced: [
+      "principal_id",
+      "revoked_credential_id",
+      "replacement_credential_id",
+      "recipient_connection_id",
+      "parent_admin_grant_id",
+      "worker_scope_names",
+      "worker_policy_digest",
+      "expires_at",
+      "remaining_budget",
+      "delivery_state",
+      "credential"
+    ],
+    AdminSeatRevoked: [
+      "principal_id",
+      "credential_id",
+      "transport",
+      "affected_lineage_ids",
+      "revoked_at",
+      "reason_code"
+    ],
+    AdminSeatCredentialRevoked: [
+      "principal_id",
+      "credential_id",
+      "transport",
+      "affected_lineage_ids",
+      "revoked_at",
+      "reason_code"
+    ],
+    AdminMemberInvited: [
+      "invitation_id",
+      "workspace_id",
+      "recipient_ref",
+      "role",
+      "expires_at",
+      "delivery_state",
+      "recipient_user_id"
+    ],
+    AdminAgentInvitationIssued: [
+      "invitation_id",
+      "workspace_id",
+      "intended_owner_user_id",
+      "recipient_connection_id",
+      "transport",
+      "seat_limit",
+      "worker_scope_ceiling",
+      "worker_policy",
+      "expires_at",
+      "delivery_state",
+      "recipient_user_id"
+    ],
+    AdminInvitationRevoked: [
+      "invitation_id",
+      "invitation_kind",
+      "workspace_id",
+      "revoked_at",
+      "reason_code"
+    ]
+  };
+  if (!required[event2.type]?.every(
+    (key2) => Object.hasOwn(p, key2)
+  )) throw new Error("incomplete routine event");
+  if (!id) throw new Error("routine event without grant");
+  const spend = {
+    ...state.spend[id] ?? {
+      workspaces: 0,
+      total_seats: 0,
+      invitations: 0,
+      worker_credentials: 0,
+      successors: 0
+    }
+  };
+  const next = {
+    ...state,
+    spend: { ...state.spend, [id]: spend },
+    created_workspaces: { ...state.created_workspaces },
+    seats: { ...state.seats },
+    credentials: { ...state.credentials },
+    invitations: { ...state.invitations }
+  };
+  switch (event2.type) {
+    case "AdminWorkspaceCreated":
+      spend.workspaces++;
+      next.created_workspaces[String(p.workspace_id)] = {
+        grant_id: id,
+        scope_names: p.applied_scope_names
+      };
+      break;
+    case "AdminSeatCreated":
+      spend.total_seats++;
+      next.seats[String(p.principal_id)] = {
+        grant_id: id,
+        workspace_id: String(p.workspace_id),
+        revoked_at: null
+      };
+      break;
+    case "AdminSeatProvisioned":
+    case "AdminSeatRenewed":
+    case "AdminSeatCredentialReplaced": {
+      const c = p.credential;
+      spend.worker_credentials++;
+      if (event2.type !== "AdminSeatProvisioned") spend.successors++;
+      next.credentials[c.credential_id] = c;
+      const prior = next.credentials[String(p.predecessor_credential_id)];
+      if (prior) {
+        next.credentials[prior.credential_id] = {
+          ...prior,
+          superseded: true,
+          revoked_at: event2.type === "AdminSeatCredentialReplaced" ? event2.occurred_at_server : prior.revoked_at
+        };
+      }
+      break;
+    }
+    case "AdminSeatRevoked":
+    case "AdminSeatCredentialRevoked":
+      if (event2.type === "AdminSeatRevoked" && next.seats[String(p.principal_id)]) {
+        next.seats[String(p.principal_id)] = {
+          ...next.seats[String(p.principal_id)],
+          revoked_at: event2.occurred_at_server
+        };
+      }
+      for (const [key2, c] of Object.entries(next.credentials)) {
+        if (c.principal_id === p.principal_id && (event2.type === "AdminSeatRevoked" || p.affected_lineage_ids.includes(c.worker_lineage_id))) {
+          next.credentials[key2] = {
+            ...c,
+            revoked_at: event2.occurred_at_server
+          };
+        }
+      }
+      break;
+    case "AdminMemberInvited":
+    case "AdminAgentInvitationIssued":
+      spend.invitations++;
+      next.invitations[String(p.invitation_id)] = {
+        invitation_id: String(p.invitation_id),
+        workspace_id: String(p.workspace_id),
+        parent_admin_grant_id: id,
+        invitation_kind: event2.type === "AdminMemberInvited" ? "member" : "agent",
+        recipient_user_id: String(p.recipient_user_id),
+        recipient_connection_id: p.recipient_connection_id,
+        expires_at: Number(p.expires_at),
+        accepted_at: null,
+        revoked_at: null
+      };
+      break;
+    case "AdminInvitationRevoked": {
+      const i = next.invitations[String(p.invitation_id)];
+      if (!i) throw new Error("unknown routine invitation");
+      next.invitations[i.invitation_id] = {
+        ...i,
+        revoked_at: event2.occurred_at_server
+      };
+      break;
+    }
+  }
+  return next;
+}
+
+// src/protocol/workspace-reducer.ts
+function req2(payload, keys, type, seq) {
+  if (!payload || typeof payload !== "object") {
+    throw new StreamIntegrityError(`event "${type}" at seq ${seq} has a non-object payload`);
+  }
+  for (const key2 of keys) {
+    if (payload[key2] === void 0) {
+      throw new StreamIntegrityError(
+        `event "${type}" at seq ${seq} is missing payload field "${String(key2)}"`
+      );
+    }
+  }
+  return payload;
+}
+function ownerDelta(from, to) {
+  return (to === "owner" ? 1 : 0) - (from === "owner" ? 1 : 0);
+}
+function assertRole(value, field, type, seq) {
+  if (!WORKSPACE_ROLES.includes(value)) {
+    throw new StreamIntegrityError(
+      `event "${type}" at seq ${seq} has invalid ${field} "${String(value)}"`
+    );
+  }
+}
+function assertOwnerCount(state, env3) {
+  const actual = Object.values(state.members).filter(
+    (member) => member.revoked_at === null && member.role === "owner"
+  ).length;
+  if (state.owners_count !== actual || actual < 1) {
+    throw new StreamIntegrityError(
+      `event "${env3.type}" at seq ${env3.seq} violates owner count invariant (projected ${state.owners_count}, actual ${actual})`
+    );
+  }
+}
+function reduceWorkspace(prev, env3) {
+  if (!WORKSPACE_EVENT_TYPES.includes(env3.type)) {
+    throw new UnknownEventTypeError(env3.type, env3.seq);
+  }
+  if (env3.schema_version !== SCHEMA_VERSION) {
+    throw new StreamIntegrityError(
+      `event "${env3.type}" at seq ${env3.seq} is schema v${env3.schema_version}, expected v${SCHEMA_VERSION} (upcast before reduce)`
+    );
+  }
+  if (env3.type === "CommandRejected") {
+    req2(
+      env3.payload,
+      ["workspace_id", "command", "reason", "detail"],
+      env3.type,
+      env3.seq
+    );
+    if (!prev) {
+      throw new StreamIntegrityError(`CommandRejected before WorkspaceCreated (seq ${env3.seq})`);
+    }
+    return prev;
+  }
+  if (env3.type === "WorkspaceCreated") {
+    if (prev) {
+      throw new StreamIntegrityError(`WorkspaceCreated for an existing workspace (seq ${env3.seq})`);
+    }
+    const p = req2(
+      env3.payload,
+      ["workspace_id", "name", "created_by", "created_at"],
+      env3.type,
+      env3.seq
+    );
+    return {
+      workspace: {
+        workspace_id: p.workspace_id,
+        name: p.name,
+        created_by: p.created_by,
+        created_at: p.created_at,
+        archived_at: null
+      },
+      members: {
+        [p.created_by]: {
+          user_id: p.created_by,
+          role: "owner",
+          invited_by: null,
+          joined_at: p.created_at,
+          revoked_at: null
+        }
+      },
+      invitations: {},
+      principals: {},
+      tokens: {},
+      owners_count: 1
+    };
+  }
+  if (!prev) {
+    throw new StreamIntegrityError(`event "${env3.type}" before WorkspaceCreated (seq ${env3.seq})`);
+  }
+  if (ADMIN_ROUTINE_EVENT_TYPES.includes(env3.type)) {
+    if (!env3.grant_id || !env3.admin_identity_id || !env3.grant_manifest_digest || env3.actor_user !== null || env3.actor_agent_principal !== null) throw new StreamIntegrityError("invalid delegated workspace actor");
+    return { ...prev, admin_routine: reduceAdminRoutine(prev.admin_routine, env3) };
+  }
+  const s = prev;
+  let next;
+  switch (env3.type) {
+    case "WorkspaceArchived": {
+      const p = req2(env3.payload, ["archived_at"], env3.type, env3.seq);
+      if (s.workspace.archived_at !== null) {
+        throw new StreamIntegrityError(`workspace archived twice at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        workspace: { ...s.workspace, archived_at: p.archived_at }
+      };
+      break;
+    }
+    case "MemberInvited": {
+      const p = req2(
+        env3.payload,
+        [
+          "invitation_id",
+          "email",
+          "role",
+          "token_hash",
+          "expires_at",
+          "created_by",
+          "created_at"
+        ],
+        env3.type,
+        env3.seq
+      );
+      if (s.invitations[p.invitation_id]) {
+        throw new StreamIntegrityError(`duplicate invitation "${p.invitation_id}" at seq ${env3.seq}`);
+      }
+      if (Object.values(s.invitations).some(
+        (invitation) => invitation.token_hash === p.token_hash
+      )) {
+        throw new StreamIntegrityError(`duplicate invitation token_hash at seq ${env3.seq}`);
+      }
+      assertRole(p.role, "role", env3.type, env3.seq);
+      next = {
+        ...s,
+        invitations: {
+          ...s.invitations,
+          [p.invitation_id]: {
+            ...p,
+            consumed_at: null,
+            consumed_by: null,
+            revoked_at: null
+          }
+        }
+      };
+      break;
+    }
+    case "InvitationRevoked": {
+      const p = req2(env3.payload, ["invitation_id", "revoked_at"], env3.type, env3.seq);
+      const invitation = s.invitations[p.invitation_id];
+      if (!invitation) {
+        throw new StreamIntegrityError(`unknown invitation "${p.invitation_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        invitations: {
+          ...s.invitations,
+          [p.invitation_id]: { ...invitation, revoked_at: p.revoked_at }
+        }
+      };
+      break;
+    }
+    case "InvitationAccepted": {
+      const p = req2(
+        env3.payload,
+        ["invitation_id", "consumed_by", "consumed_at"],
+        env3.type,
+        env3.seq
+      );
+      const invitation = s.invitations[p.invitation_id];
+      if (!invitation) {
+        throw new StreamIntegrityError(`unknown invitation "${p.invitation_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        invitations: {
+          ...s.invitations,
+          [p.invitation_id]: {
+            ...invitation,
+            consumed_at: p.consumed_at,
+            consumed_by: p.consumed_by
+          }
+        }
+      };
+      break;
+    }
+    case "MemberJoined": {
+      const p = req2(
+        env3.payload,
+        ["user_id", "role", "invited_by", "joined_at"],
+        env3.type,
+        env3.seq
+      );
+      const existing = s.members[p.user_id];
+      assertRole(p.role, "role", env3.type, env3.seq);
+      if (existing?.revoked_at === null) {
+        throw new StreamIntegrityError(`live member "${p.user_id}" joined twice at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        members: {
+          ...s.members,
+          [p.user_id]: { ...p, revoked_at: null }
+        },
+        owners_count: s.owners_count + ownerDelta(null, p.role)
+      };
+      break;
+    }
+    case "MemberRemoved": {
+      const p = req2(env3.payload, ["user_id", "revoked_at"], env3.type, env3.seq);
+      const member = s.members[p.user_id];
+      if (!member || member.revoked_at !== null) {
+        throw new StreamIntegrityError(`cannot remove non-live member "${p.user_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        members: {
+          ...s.members,
+          [p.user_id]: { ...member, revoked_at: p.revoked_at }
+        },
+        owners_count: s.owners_count + ownerDelta(member.role, null)
+      };
+      break;
+    }
+    case "MemberRoleChanged": {
+      const p = req2(
+        env3.payload,
+        ["user_id", "from_role", "to_role"],
+        env3.type,
+        env3.seq
+      );
+      const member = s.members[p.user_id];
+      assertRole(p.from_role, "from_role", env3.type, env3.seq);
+      assertRole(p.to_role, "to_role", env3.type, env3.seq);
+      if (!member || member.revoked_at !== null || member.role !== p.from_role) {
+        throw new StreamIntegrityError(`role change has stale member state at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        members: {
+          ...s.members,
+          [p.user_id]: { ...member, role: p.to_role }
+        },
+        owners_count: s.owners_count + ownerDelta(p.from_role, p.to_role)
+      };
+      break;
+    }
+    case "AgentPrincipalCreated": {
+      const p = req2(
+        env3.payload,
+        ["principal_id", "owner_user_id", "name", "created_at"],
+        env3.type,
+        env3.seq
+      );
+      if (s.principals[p.principal_id]) {
+        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      const transport = p.transport ?? "local";
+      const turnOnly = p.turn_only ?? false;
+      if (!AGENT_TRANSPORTS.includes(transport)) {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} has invalid transport "${String(transport)}"`
+        );
+      }
+      if (typeof turnOnly !== "boolean") {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} has non-boolean turn_only`
+        );
+      }
+      if (transport === "hosted_mcp" && !turnOnly) {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} gives hosted_mcp a non-turn-only transport`
+        );
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: {
+            ...p,
+            model: p.model ?? null,
+            transport,
+            turn_only: turnOnly,
+            revoked_at: null
+          }
+        }
+      };
+      break;
+    }
+    case "FeedbackSubmitted": {
+      req2(
+        env3.payload,
+        ["feedback_id", "category", "body", "reporter_kind", "reporter_id", "submitted_at"],
+        env3.type,
+        env3.seq
+      );
+      next = s;
+      break;
+    }
+    case "AgentModelDeclared": {
+      const p = req2(
+        env3.payload,
+        ["principal_id", "declared_at"],
+        env3.type,
+        env3.seq
+      );
+      const declaredFor = s.principals[p.principal_id];
+      if (!declaredFor) {
+        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...declaredFor, model: p.model ?? null }
+        }
+      };
+      break;
+    }
+    case "AgentPrincipalRevoked": {
+      const p = req2(
+        env3.payload,
+        ["principal_id", "revoked_at"],
+        env3.type,
+        env3.seq
+      );
+      const principal = s.principals[p.principal_id];
+      if (!principal) {
+        throw new StreamIntegrityError(`unknown principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
+        }
+      };
+      break;
+    }
+    case "AgentTokenMinted": {
+      const p = req2(
+        env3.payload,
+        [
+          "token_id",
+          "principal_id",
+          "run_id",
+          "task_id",
+          "epoch",
+          "scopes",
+          "issued_at",
+          "expires_at"
+        ],
+        env3.type,
+        env3.seq
+      );
+      if (s.tokens[p.token_id]) {
+        throw new StreamIntegrityError(`duplicate token "${p.token_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        tokens: {
+          ...s.tokens,
+          [p.token_id]: { ...p, scopes: [...p.scopes], revoked_at: null }
+        }
+      };
+      break;
+    }
+    case "AgentTokenRevoked": {
+      const p = req2(env3.payload, ["token_id", "revoked_at"], env3.type, env3.seq);
+      const token = s.tokens[p.token_id];
+      if (!token) {
+        throw new StreamIntegrityError(`unknown token "${p.token_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        tokens: {
+          ...s.tokens,
+          [p.token_id]: { ...token, revoked_at: p.revoked_at }
+        }
+      };
+      break;
+    }
+    case "HostedMcpSeatClaimed": {
+      const p = req2(
+        env3.payload,
+        [
+          "seat_id",
+          "grant_id",
+          "workspace_id",
+          "owner_user_id",
+          "principal_id",
+          "name",
+          "handle",
+          "transport",
+          "turn_only",
+          "created_at"
+        ],
+        env3.type,
+        env3.seq
+      );
+      if (p.workspace_id !== s.workspace.workspace_id) {
+        throw new StreamIntegrityError(`hosted seat workspace mismatch at seq ${env3.seq}`);
+      }
+      if (s.principals[p.principal_id]) {
+        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      if (p.transport !== "hosted_mcp" || p.turn_only !== true) {
+        throw new StreamIntegrityError(`hosted seat has invalid transport at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: {
+            principal_id: p.principal_id,
+            owner_user_id: p.owner_user_id,
+            name: p.name,
+            model: null,
+            transport: "hosted_mcp",
+            turn_only: true,
+            created_at: p.created_at,
+            revoked_at: null
+          }
+        }
+      };
+      break;
+    }
+    case "HostedMcpSeatRevoked": {
+      const p = req2(
+        env3.payload,
+        ["seat_id", "principal_id", "revoked_at"],
+        env3.type,
+        env3.seq
+      );
+      const principal = s.principals[p.principal_id];
+      if (!principal) {
+        throw new StreamIntegrityError(`unknown hosted principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
+        }
+      };
+      break;
+    }
+    case "HostedMcpGrantBegun":
+    case "HostedMcpWorkspaceConsented":
+    case "HostedMcpGrantActivated":
+    case "HostedMcpGrantRevoked":
+      next = s;
+      break;
+    default:
+      throw new UnknownEventTypeError(env3.type, env3.seq);
+  }
+  assertOwnerCount(next, env3);
+  return next;
+}
+function reduceWorkspaceStream(events) {
+  let state = null;
+  let lastSeq = -Infinity;
+  for (const event2 of events) {
+    if (event2.seq <= lastSeq) {
+      throw new StreamIntegrityError(
+        `events out of order or duplicated: seq ${event2.seq} after ${lastSeq}`
+      );
+    }
+    lastSeq = event2.seq;
+    state = reduceWorkspace(state, event2);
+  }
+  return state;
+}
+
 // src/protocol/hosted-authority.ts
 var HOSTED_MCP_RESOURCE = "https://mcp.commonswarm.com/mcp";
 var HOSTED_MCP_SEAT_LIMIT = 10;
@@ -2225,438 +3376,6 @@ function planFileVersionWindow(name, liveCount, inFlightCount) {
     retireOnCommitCount: brainTopic ? Math.max(0, liveCount - BRAIN_LIVE_VERSION_LIMIT + 1) : 0
   };
 }
-
-// src/protocol/admin-policy.ts
-var ADMIN_RESOURCE = "https://api.commonswarm.com/admin";
-var ADMIN_REGISTRY_VERSION = 1;
-var ADMIN_ACCESS_TTL_SECONDS = 300;
-var ADMIN_REFRESH_MAX_LIFETIME_SECONDS = 2592e3;
-var ADMIN_GRANT_TTL_SECONDS = 2592e3;
-var ADMIN_READ_RATE_PER_HOUR = { lineage: 120, connection: 120, account: 1e3, workspace: 1e3 };
-var ADMIN_MUTATION_RATE_PER_HOUR = { lineage: 20, connection: 20, account: 60, workspace: 60 };
-var ADMIN_REFRESH_RATE_PER_HOUR = 20;
-var ADMIN_WORKSPACE_CREATE_PER_DAY = 20;
-var ADMIN_INVITATION_ISSUE_PER_DAY = 10;
-var ADMIN_WORKSPACES_CREATED_PER_GRANT = 10;
-var ADMIN_SEATS_PER_GRANT = { live: 10, total: 50 };
-var ADMIN_INVITATIONS_PER_GRANT = { total: 10, live_agent: 5 };
-var ADMIN_WORKER_CREDENTIAL_ISSUES_PER_GRANT = 50;
-var ADMIN_WORKER_RENEWAL_LIMITS = { bearer_seconds: 3600, horizon_seconds: 2592e3, successors_per_worker: 800, successors_per_grant: 8e3 };
-var ADMIN_CONNECTION_ATTEMPTS_PER_GRANT = 50;
-var ADMIN_INVITATION_AND_ATTEMPT_TTL = { member_seconds: 604800, agent_min_seconds: 3600, agent_max_seconds: 86400, agent_seats: 10, attempt_seconds: 86400 };
-var ADMIN_EXISTING_RESOURCE_CEILINGS = { owned_workspaces: 10, members_and_invitations: 25, principals: 50, joins_per_person: 5, joins_per_workspace: 20, hosted_seats: 10 };
-var ADMIN_SCOPE_REGISTRY = {
-  "admin:read": ["admin_read_metadata"],
-  "workspaces:create": ["admin_create_workspace"],
-  "workspaces:archive": ["admin_archive_workspace"],
-  "seats:create": ["admin_create_seat", "admin_provision_seat", "admin_replace_undelivered_seat_credential"],
-  "seats:renew": ["admin_renew_seat"],
-  "seats:manage": ["admin_set_seat_model", "admin_enable_seat_management", "admin_recover_seat_session"],
-  "seats:revoke": ["admin_revoke_seat", "admin_revoke_seat_credential"],
-  "invites:create": ["admin_invite_member", "admin_issue_agent_invitation"],
-  "invites:revoke": ["admin_revoke_invitation", "admin_revoke_agent_invitation"],
-  "members:manage": ["admin_remove_member", "admin_change_member_role"],
-  "onboarding:connect": ["admin_prepare_connection", "redeem_agent_connection", "record_agent_connection_progress", "admin_cancel_connection"]
-};
-var ADMIN_SCOPE_NAMES = Object.keys(ADMIN_SCOPE_REGISTRY);
-var ADMIN_ISSUANCE_CEILINGS = {
-  workspaces: ADMIN_WORKSPACES_CREATED_PER_GRANT,
-  live_seats: ADMIN_SEATS_PER_GRANT.live,
-  total_seats: ADMIN_SEATS_PER_GRANT.total,
-  invitations: ADMIN_INVITATIONS_PER_GRANT.total,
-  live_agent_invitations: ADMIN_INVITATIONS_PER_GRANT.live_agent,
-  worker_credentials: ADMIN_WORKER_CREDENTIAL_ISSUES_PER_GRANT,
-  connection_attempts: ADMIN_CONNECTION_ATTEMPTS_PER_GRANT
-};
-var ADMIN_RENEWAL_CEILINGS = ADMIN_WORKER_RENEWAL_LIMITS;
-function adminRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-function adminExactKeys(value, keys) {
-  return Object.keys(value).length === keys.length && keys.every((key2) => Object.hasOwn(value, key2));
-}
-var ADMIN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-function adminIds(value) {
-  return Array.isArray(value) && value.length <= 100 && value.every((id) => typeof id === "string" && ADMIN_UUID_RE.test(id)) && new Set(value).size === value.length;
-}
-function adminScopes(value) {
-  return Array.isArray(value) && value.every((scope) => typeof scope === "string" && Object.hasOwn(ADMIN_SCOPE_REGISTRY, scope)) && new Set(value).size === value.length;
-}
-var MANIFEST_KEYS = [
-  "admin_identity_id",
-  "connection_id",
-  "client_id",
-  "resource",
-  "mode",
-  "registry_version",
-  "scope_names",
-  "workspace_selector",
-  "workspace_ids",
-  "created_workspace_policy",
-  "target_rules",
-  "worker_scope_ceiling",
-  "role_ceiling",
-  "renewal_limits",
-  "issuance_limits",
-  "expires_at",
-  "refresh_deadline"
-];
-function adminManifestValid(value, now, initial = true) {
-  const m = adminRecord(value);
-  if (!m || !adminExactKeys(m, MANIFEST_KEYS)) return false;
-  const target = adminRecord(m.target_rules), created = adminRecord(m.created_workspace_policy);
-  const renewal = adminRecord(m.renewal_limits), issuance = adminRecord(m.issuance_limits);
-  if (!ADMIN_UUID_RE.test(String(m.admin_identity_id)) || !ADMIN_UUID_RE.test(String(m.connection_id)) || typeof m.client_id !== "string" || m.client_id.length < 1 || m.client_id.length > 2048 || m.resource !== ADMIN_RESOURCE || m.registry_version !== ADMIN_REGISTRY_VERSION || !adminScopes(m.scope_names) || !m.scope_names.includes("admin:read") || !adminIds(m.workspace_ids) || m.role_ceiling !== "member" || !["granular", "full_account"].includes(String(m.mode)) || m.workspace_selector !== (m.mode === "granular" ? "selected" : "owned_and_selected")) return false;
-  if (m.mode === "full_account" && !ADMIN_SCOPE_NAMES.every((scope) => m.scope_names.includes(scope))) return false;
-  if (!created || !adminExactKeys(created, ["scope_names"]) || !adminScopes(created.scope_names) || !created.scope_names.every((scope) => m.scope_names.includes(scope)) || created.scope_names.length > 0 && !m.scope_names.includes("workspaces:create")) return false;
-  if (!target || !adminExactKeys(target, ["seat_ids", "own_seats", "grant_created_seats", "recipient_user_ids", "recipient_connection_ids", "transports"]) || !adminIds(target.seat_ids) || !adminIds(target.recipient_user_ids) || !adminIds(target.recipient_connection_ids) || typeof target.own_seats !== "boolean" || typeof target.grant_created_seats !== "boolean" || !Array.isArray(target.transports) || !target.transports.every((t) => t === "local" || t === "hosted_mcp") || new Set(target.transports).size !== target.transports.length) return false;
-  if (!Array.isArray(m.worker_scope_ceiling) || m.worker_scope_ceiling.length > 100 || !m.worker_scope_ceiling.every((scope) => typeof scope === "string" && /^[a-z][a-z0-9_:.-]{0,79}$/u.test(scope)) || m.worker_scope_ceiling.some((scope) => isAgentScopeDenylisted(String(scope))) || new Set(m.worker_scope_ceiling).size !== m.worker_scope_ceiling.length) return false;
-  if (!renewal || !adminExactKeys(renewal, [...Object.keys(ADMIN_RENEWAL_CEILINGS), "grant_kinds", "principal_ids"]) || !adminIds(renewal.principal_ids) || !Array.isArray(renewal.grant_kinds) || !renewal.grant_kinds.every((kind) => kind === "timeboxed" || kind === "standing") || new Set(renewal.grant_kinds).size !== renewal.grant_kinds.length || !issuance || !adminExactKeys(issuance, Object.keys(ADMIN_ISSUANCE_CEILINGS))) return false;
-  for (const [limits, ceilings] of [[renewal, ADMIN_RENEWAL_CEILINGS], [issuance, ADMIN_ISSUANCE_CEILINGS]]) {
-    for (const [key2, ceiling] of Object.entries(ceilings)) {
-      const n = limits[key2];
-      if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0 || n > ceiling) return false;
-    }
-  }
-  return typeof m.expires_at === "number" && Number.isSafeInteger(m.expires_at) && typeof m.refresh_deadline === "number" && Number.isSafeInteger(m.refresh_deadline) && m.expires_at > now && m.expires_at <= m.refresh_deadline && (!initial || m.expires_at >= now + 1e3 && m.refresh_deadline <= now + ADMIN_REFRESH_MAX_LIFETIME_SECONDS * 1e3 && m.expires_at <= now + ADMIN_GRANT_TTL_SECONDS * 1e3);
-}
-function canonicalAdminJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalAdminJson).join(",")}]`;
-  const r = adminRecord(value);
-  if (r) return `{${Object.keys(r).sort().map((key2) => `${JSON.stringify(key2)}:${canonicalAdminJson(r[key2])}`).join(",")}}`;
-  return JSON.stringify(value);
-}
-
-// src/protocol/admin-authority.ts
-var ADMIN_EVENT_TYPES = [
-  "AdminConsentPrepared",
-  "AdminDelegationGranted",
-  "AdminDelegationNarrowed",
-  "AdminDelegationRevoked",
-  "AdminDelegationSuspended",
-  "AdminDelegationExpired",
-  "AdminWorkspaceAccessWithdrawn",
-  "AdminCredentialIssued",
-  "AdminCredentialRotated",
-  "AdminCredentialReplayDetected",
-  "AdminMetadataRead",
-  "AdminActionRecorded"
-];
-function emptyAdminAccount() {
-  return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} };
-}
-function adminRatePolicy(actor, grant, action, workspaceId, lineageId, requestedGrantId) {
-  if (actor.kind === "human" || actor.kind === "system" || action === "surrender_admin_delegation" && actor.kind === "delegated_admin" && actor.grant_id === grant.grant_id && requestedGrantId === actor.grant_id) return [];
-  if (actor.kind === "credential_runtime" && lineageId !== null) return [
-    { key: `refresh:lineage:${lineageId}`, limit: ADMIN_REFRESH_RATE_PER_HOUR },
-    { key: `refresh:connection:${grant.connection_id}`, limit: ADMIN_REFRESH_RATE_PER_HOUR }
-  ];
-  const kind = action === "admin_read_metadata" ? "read" : "mutation";
-  const limits = kind === "read" ? ADMIN_READ_RATE_PER_HOUR : ADMIN_MUTATION_RATE_PER_HOUR;
-  return [
-    { key: `${kind}:grant:${grant.grant_id}`, limit: limits.lineage },
-    { key: `${kind}:connection:${grant.connection_id}`, limit: limits.connection },
-    { key: `${kind}:account:${grant.owner_user_id}`, limit: limits.account },
-    ...workspaceId === null || !grant.workspace_ids.includes(workspaceId) ? [] : [{ key: `${kind}:workspace:${workspaceId}`, limit: limits.workspace }]
-  ];
-}
-function subset(a, b) {
-  return a.every((x) => b.includes(x));
-}
-function narrowing(next, prior, now) {
-  if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id || next.connection_id !== prior.connection_id || next.client_id !== prior.client_id || next.resource !== prior.resource || next.registry_version !== prior.registry_version || prior.mode === "granular" && next.mode !== "granular" || next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline || !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) || !subset(next.created_workspace_policy.scope_names, prior.created_workspace_policy.scope_names) || !subset(next.worker_scope_ceiling, prior.worker_scope_ceiling)) return false;
-  const a = next.target_rules, b = prior.target_rules;
-  if (!subset(a.seat_ids, b.seat_ids) || !subset(a.recipient_user_ids, b.recipient_user_ids) || !subset(a.recipient_connection_ids, b.recipient_connection_ids) || !subset(a.transports, b.transports) || a.own_seats && !b.own_seats || a.grant_created_seats && !b.grant_created_seats || !subset(next.renewal_limits.grant_kinds, prior.renewal_limits.grant_kinds) || !subset(next.renewal_limits.principal_ids, prior.renewal_limits.principal_ids)) return false;
-  for (const key2 of ["bearer_seconds", "horizon_seconds", "successors_per_worker", "successors_per_grant"]) {
-    if (next.renewal_limits[key2] > prior.renewal_limits[key2]) return false;
-  }
-  return Object.keys(next.issuance_limits).every((key2) => next.issuance_limits[key2] <= prior.issuance_limits[key2]);
-}
-function decideAdminAuthority(command, state, ctx) {
-  const events = [];
-  const grant = "grant_id" in command ? state.grants[command.grant_id] : void 0;
-  let auditGrant = ctx.actor.kind === "delegated_admin" ? state.grants[ctx.actor.grant_id] : grant;
-  const auditId = ctx.nextEventId();
-  const actor = ctx.actor;
-  const buckets = auditGrant ? adminRatePolicy(
-    actor,
-    auditGrant,
-    command.kind,
-    "workspace_id" in command ? command.workspace_id : null,
-    actor.kind === "credential_runtime" && "generation" in command ? command.credential_lineage_id : null,
-    "grant_id" in command ? command.grant_id : null
-  ).map(({ key: key2, limit }) => {
-    const prior = state.rate_buckets[key2], hour_start = Math.floor(ctx.now / 36e5);
-    return { key: key2, limit, hour_start, attempts: prior?.hour_start === hour_start ? prior.attempts + 1 : 1 };
-  }) : [];
-  const emit = (type, payload) => {
-    const eventGrant = typeof payload.grant_id === "string" ? state.grants[payload.grant_id] ?? auditGrant : auditGrant;
-    const e = {
-      stream_kind: "account",
-      owner_user_id: ctx.owner_user_id,
-      stream_id: ctx.stream_id,
-      seq: ctx.nextSeq(),
-      event_id: ctx.nextEventId(),
-      command_id: ctx.command_id,
-      type,
-      schema_version: 1,
-      actor_user: actor.kind === "human" ? actor.user_id : null,
-      actor_agent_principal: null,
-      actor_run: null,
-      admin_identity_id: typeof payload.admin_identity_id === "string" ? payload.admin_identity_id : eventGrant?.admin_identity_id ?? (actor.kind === "delegated_admin" ? actor.admin_identity_id : null),
-      grant_id: typeof payload.grant_id === "string" ? payload.grant_id : "grant_id" in command ? command.grant_id : null,
-      grant_manifest_digest: typeof payload.manifest_digest === "string" ? payload.manifest_digest : eventGrant?.manifest_digest ?? null,
-      occurred_at_server: ctx.now,
-      payload
-    };
-    events.push(e);
-    return e;
-  };
-  const finish = (reason) => {
-    const related = events.map((e) => e.event_id);
-    emit("AdminActionRecorded", {
-      audit_record_id: auditId,
-      grant_id: auditGrant?.grant_id ?? ("grant_id" in command ? command.grant_id : null),
-      admin_identity_id: auditGrant?.admin_identity_id ?? null,
-      connection_id: auditGrant?.connection_id ?? null,
-      action: command.kind,
-      target_kind: "admin_grant",
-      target_id: auditGrant?.grant_id ?? null,
-      workspace_id: "workspace_id" in command ? command.workspace_id : null,
-      manifest_digest: auditGrant?.manifest_digest ?? null,
-      request_digest: ctx.request_digest,
-      outcome: reason === null ? "accepted" : "refused",
-      reason_code: reason,
-      policy_check: { result: reason ?? "passed", buckets: buckets.map(({ key: key2, hour_start, attempts }) => ({ key: key2, hour_start, attempts })) },
-      related_event_ids: related,
-      next_action: reason === null ? "none" : "Ask the granting person to review this connection.",
-      recovery_kind: reason === null ? "none" : "human"
-    });
-    return { ok: reason === null, reason, events };
-  };
-  const humanOwner = actor.kind === "human" && actor.user_id === ctx.owner_user_id;
-  if (actor.kind === "worker" || actor.kind === "hosted_seat") return finish("credential_kind_forbidden");
-  const replayLineage = "credential_lineage_id" in command ? state.lineages[command.credential_lineage_id] : void 0;
-  const verifiedReplay = actor.kind === "credential_runtime" && grant && replayLineage?.grant_id === grant.grant_id && (command.kind === "rotate_admin_credential" || command.kind === "record_admin_credential_replay") && ctx.presenting_refresh_lineage_id === command.credential_lineage_id && ctx.presenting_refresh_generation === command.generation && command.generation < replayLineage.generation && actor.connection_id === grant.connection_id && actor.client_id === grant.client_id && actor.resource === ADMIN_RESOURCE;
-  if (!verifiedReplay && buckets.some((bucket) => !Number.isSafeInteger(bucket.attempts) || bucket.attempts < 1 || bucket.attempts > bucket.limit)) return finish("rate_limited");
-  if (command.kind === "prepare_admin_consent") {
-    const c = command.consent;
-    if (!humanOwner || actor.kind !== "human" || c.owner_user_id !== ctx.owner_user_id || c.session_binding !== actor.session_binding) return finish("human_confirmation_required");
-    if (!adminManifestValid(c.manifest, ctx.now) || c.consumed_at !== null || c.expires_at <= ctx.now || c.expires_at > ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3 || c.manifest.mode === "full_account" && !c.full_account_selected || !ctx.current_workspace_rights || state.consents[c.consent_receipt_id]) return finish("consent_invalid");
-    emit("AdminConsentPrepared", {
-      consent_receipt_id: c.consent_receipt_id,
-      owner_user_id: c.owner_user_id,
-      manifest: c.manifest,
-      manifest_digest: c.manifest_digest,
-      full_account_selected: c.full_account_selected,
-      expires_at: c.expires_at
-    });
-    return finish(null);
-  }
-  if (command.kind === "grant_admin_delegation") {
-    const c = state.consents[command.consent_receipt_id];
-    if (!humanOwner || actor.kind !== "human") return finish("human_confirmation_required");
-    if (!c || c.owner_user_id !== ctx.owner_user_id || c.session_binding !== actor.session_binding || c.consumed_at !== null || c.expires_at <= ctx.now || !adminManifestValid(c.manifest, ctx.now) || c.manifest.mode === "full_account" && !c.full_account_selected || !ctx.current_workspace_rights || state.grants[command.grant_id]) return finish("consent_invalid");
-    const previous = command.replaces_grant_id === null ? null : state.grants[command.replaces_grant_id];
-    if (Object.values(state.grants).some((g) => g.connection_id === c.manifest.connection_id && g.state === "active" && g.grant_id !== command.replaces_grant_id)) return finish("replacement_required");
-    if (command.replaces_grant_id !== null && (!previous || previous.owner_user_id !== ctx.owner_user_id || previous.connection_id !== c.manifest.connection_id)) return finish("replacement_invalid");
-    if (previous && (previous.state === "active" || previous.state === "suspended")) emit("AdminDelegationRevoked", terminalPayload(previous, state, ctx.now, "replaced"));
-    emit("AdminDelegationGranted", {
-      ...c.manifest,
-      grant_id: command.grant_id,
-      owner_user_id: ctx.owner_user_id,
-      consent_receipt_id: c.consent_receipt_id,
-      manifest_digest: c.manifest_digest,
-      replaces_grant_id: command.replaces_grant_id,
-      created_at: ctx.now
-    });
-    auditGrant = {
-      ...c.manifest,
-      grant_id: command.grant_id,
-      owner_user_id: ctx.owner_user_id,
-      consent_receipt_id: c.consent_receipt_id,
-      manifest_digest: c.manifest_digest,
-      created_at: ctx.now,
-      state: "active",
-      suspended_at: null,
-      revoked_at: null,
-      reason_code: null,
-      withdrawn_workspace_ids: []
-    };
-    return finish(null);
-  }
-  if (!grant || grant.owner_user_id !== ctx.owner_user_id) return finish("grant_unavailable");
-  if (actor.kind === "delegated_admin" && (actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id || actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE)) return finish("grant_binding_mismatch");
-  if (actor.kind === "delegated_admin" && (!adminScopes(actor.scope_names) || !subset(actor.scope_names, grant.scope_names))) return finish("scope_expansion_forbidden");
-  if (command.kind === "revoke_admin_delegation" || command.kind === "suspend_admin_delegation" || command.kind === "surrender_admin_delegation") {
-    if (command.kind === "surrender_admin_delegation" ? actor.kind !== "delegated_admin" : !humanOwner && actor.kind !== "system") return finish("human_confirmation_required");
-    if (actor.kind === "delegated_admin" && actor.access_expires_at <= ctx.now) return finish("credential_expired");
-    if (grant.state === "revoked" || grant.state === "expired" || grant.state === "suspended" && command.kind === "suspend_admin_delegation") return finish(null);
-    emit(command.kind === "suspend_admin_delegation" ? "AdminDelegationSuspended" : "AdminDelegationRevoked", terminalPayload(grant, state, ctx.now, command.reason_code));
-    return finish(null);
-  }
-  if (command.kind === "expire_admin_delegation") {
-    if (actor.kind !== "system") return finish("credential_kind_forbidden");
-    if (grant.expires_at > ctx.now && grant.refresh_deadline > ctx.now) return finish("deadline_not_reached");
-    if (grant.state === "active") emit("AdminDelegationExpired", { ...terminalPayload(grant, state, ctx.now, "expired"), expires_at: grant.expires_at, detected_at: ctx.now });
-    return finish(null);
-  }
-  if (command.kind === "withdraw_admin_workspace_access") {
-    if (actor.kind !== "human" || !ctx.withdrawing_workspace_owner) return finish("workspace_owner_required");
-    if (!grant.workspace_ids.includes(command.workspace_id) && !(grant.workspace_selector === "owned_and_selected" && ctx.target_workspace_owned_by_grantor)) return finish("workspace_forbidden");
-    if (!grant.withdrawn_workspace_ids.includes(command.workspace_id)) emit("AdminWorkspaceAccessWithdrawn", {
-      grant_id: grant.grant_id,
-      workspace_id: command.workspace_id,
-      withdrawing_user_id: actor.user_id,
-      effective_at: ctx.now,
-      reason_code: command.reason_code
-    });
-    return finish(null);
-  }
-  if (command.kind === "admin_read_metadata" && humanOwner) {
-    emit("AdminMetadataRead", {
-      resource_kind: "grant",
-      workspace_id: null,
-      target_filter_digest: ctx.request_digest,
-      projection_version: 1,
-      result_count: 1,
-      audit_record_id: auditId
-    });
-    return finish(null);
-  }
-  if (grant.state !== "active" || grant.expires_at <= ctx.now || grant.refresh_deadline <= ctx.now) return finish("grant_inactive");
-  if (command.kind === "narrow_admin_delegation") {
-    const c = state.consents[command.consent_receipt_id];
-    if (!humanOwner || actor.kind !== "human") return finish("human_confirmation_required");
-    if (!c || c.session_binding !== actor.session_binding || c.consumed_at !== null || c.expires_at <= ctx.now || c.manifest_digest !== command.manifest_digest || canonicalAdminJson(c.manifest) !== canonicalAdminJson(command.manifest) || !narrowing(command.manifest, grant, ctx.now)) return finish("scope_expansion_forbidden");
-    emit("AdminDelegationNarrowed", {
-      grant_id: grant.grant_id,
-      prior_manifest_digest: grant.manifest_digest,
-      new_manifest_digest: command.manifest_digest,
-      removed_scopes: grant.scope_names.filter((s) => !command.manifest.scope_names.includes(s)),
-      removed_workspace_ids: grant.workspace_ids.filter((id) => !command.manifest.workspace_ids.includes(id)),
-      new_target_rules: command.manifest.target_rules,
-      new_limits: { issuance_limits: command.manifest.issuance_limits, renewal_limits: command.manifest.renewal_limits },
-      new_expires_at: command.manifest.expires_at,
-      consent_receipt_id: command.consent_receipt_id,
-      manifest: command.manifest
-    });
-    return finish(null);
-  }
-  if (command.kind === "admin_read_metadata") {
-    if (!humanOwner && (actor.kind !== "delegated_admin" || actor.access_expires_at <= ctx.now || !actor.scope_names.includes("admin:read") || !grant.scope_names.includes("admin:read") || command.resource_kind !== "grant")) return finish("credential_kind_forbidden");
-    if (command.workspace_id !== null && (!grant.workspace_ids.includes(command.workspace_id) || grant.withdrawn_workspace_ids.includes(command.workspace_id) || !ctx.current_workspace_rights)) return finish("workspace_forbidden");
-    emit("AdminMetadataRead", {
-      resource_kind: "grant",
-      workspace_id: command.workspace_id,
-      target_filter_digest: ctx.request_digest,
-      projection_version: 1,
-      result_count: 1,
-      audit_record_id: auditId
-    });
-    return finish(null);
-  }
-  if (command.kind !== "issue_admin_credential" && command.kind !== "rotate_admin_credential" && command.kind !== "record_admin_credential_replay") return finish("human_confirmation_required");
-  if (actor.kind !== "credential_runtime" || actor.connection_id !== grant.connection_id || actor.client_id !== grant.client_id || actor.resource !== ADMIN_RESOURCE) return finish("credential_runtime_required");
-  const lineage = state.lineages[command.credential_lineage_id];
-  if (command.kind === "issue_admin_credential") {
-    if (!ctx.current_workspace_rights) return finish("current_rights_required");
-    if (Object.values(state.lineages).some((l) => l.grant_id === grant.grant_id) || lineage) return finish("credential_already_issued");
-    emit("AdminCredentialIssued", {
-      grant_id: grant.grant_id,
-      credential_lineage_id: command.credential_lineage_id,
-      connection_id: grant.connection_id,
-      resource: ADMIN_RESOURCE,
-      generation: 0,
-      scope_names: grant.scope_names,
-      access_expires_at: Math.min(ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3, grant.expires_at, grant.refresh_deadline),
-      refresh_deadline: grant.refresh_deadline,
-      delivery_state: "awaiting_delivery"
-    });
-    return finish(null);
-  }
-  if (!lineage || lineage.grant_id !== grant.grant_id || lineage.state !== "active" || ctx.presenting_refresh_lineage_id !== command.credential_lineage_id || ctx.presenting_refresh_generation === null || ctx.presenting_refresh_generation !== command.generation) return finish("refresh_invalid");
-  if (command.kind === "record_admin_credential_replay" || command.generation !== lineage.generation) {
-    if (command.generation >= lineage.generation) return finish("refresh_invalid");
-    emit("AdminCredentialReplayDetected", {
-      grant_id: grant.grant_id,
-      credential_lineage_id: lineage.credential_lineage_id,
-      replayed_generation: command.generation,
-      detected_at: ctx.now,
-      reason_code: "refresh_replay"
-    });
-    emit("AdminDelegationRevoked", terminalPayload(grant, state, ctx.now, "refresh_replay"));
-    return finish("refresh_replay");
-  }
-  if (!adminScopes(command.scope_names) || !command.scope_names.includes("admin:read") || !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish("scope_expansion_forbidden");
-  if (!ctx.current_workspace_rights) return finish("current_rights_required");
-  emit("AdminCredentialRotated", {
-    grant_id: grant.grant_id,
-    credential_lineage_id: lineage.credential_lineage_id,
-    generation: lineage.generation + 1,
-    scope_names: command.scope_names,
-    access_expires_at: Math.min(ctx.now + ADMIN_ACCESS_TTL_SECONDS * 1e3, grant.expires_at, lineage.refresh_deadline),
-    refresh_deadline: lineage.refresh_deadline
-  });
-  return finish(null);
-}
-function terminalPayload(grant, state, now, reason) {
-  return {
-    grant_id: grant.grant_id,
-    reason_code: reason,
-    effective_at: now,
-    credential_lineage_id: Object.values(state.lineages).find((l) => l.grant_id === grant.grant_id)?.credential_lineage_id ?? null,
-    cancelled_attempt_ids: [],
-    dependent_child_ids: []
-  };
-}
-function reduceAdminAuthority(previous, event2) {
-  if (event2.schema_version !== 1 || event2.stream_kind !== "account" || !ADMIN_EVENT_TYPES.includes(event2.type)) throw new Error("unsupported admin event");
-  const state = previous ?? emptyAdminAccount(), p = event2.payload;
-  if (event2.type === "AdminConsentPrepared") {
-    const c = { ...p, session_binding: "", consumed_at: null };
-    return { ...state, consents: { ...state.consents, [c.consent_receipt_id]: c } };
-  }
-  if (event2.type === "AdminDelegationGranted") {
-    const grant2 = { ...p, state: "active", suspended_at: null, revoked_at: null, reason_code: null, withdrawn_workspace_ids: [] };
-    if (state.grants[grant2.grant_id]) throw new Error("duplicate admin grant");
-    const consent = state.consents[grant2.consent_receipt_id];
-    if (!consent) throw new Error("missing admin consent");
-    return { ...state, grants: { ...state.grants, [grant2.grant_id]: grant2 }, consents: { ...state.consents, [consent.consent_receipt_id]: { ...consent, consumed_at: event2.occurred_at_server } } };
-  }
-  if (event2.type === "AdminCredentialIssued" || event2.type === "AdminCredentialRotated") {
-    const id2 = String(p.credential_lineage_id), old = state.lineages[id2];
-    if (event2.type === "AdminCredentialRotated" && (!old || p.generation !== old.generation + 1)) throw new Error("invalid admin credential generation");
-    return { ...state, lineages: { ...state.lineages, [id2]: { ...old, ...p, state: "active", delivery_state: "awaiting_delivery" } } };
-  }
-  if (event2.type === "AdminActionRecorded") {
-    const policy = p.policy_check;
-    const rates = { ...state.rate_buckets };
-    for (const bucket of policy?.buckets ?? []) rates[bucket.key] = { hour_start: bucket.hour_start, attempts: bucket.attempts };
-    return { ...state, rate_buckets: rates };
-  }
-  if (event2.type === "AdminMetadataRead" || event2.type === "AdminCredentialReplayDetected") return state;
-  const id = String(p.grant_id), grant = state.grants[id];
-  if (!grant) throw new Error("unknown admin grant");
-  if (event2.type === "AdminWorkspaceAccessWithdrawn") return { ...state, grants: { ...state.grants, [id]: { ...grant, withdrawn_workspace_ids: [.../* @__PURE__ */ new Set([...grant.withdrawn_workspace_ids, String(p.workspace_id)])] } } };
-  if (event2.type === "AdminDelegationNarrowed") {
-    const receipt = String(p.consent_receipt_id), consent = state.consents[receipt];
-    if (!consent) throw new Error("missing narrowing consent");
-    return { ...state, grants: { ...state.grants, [id]: { ...grant, ...p.manifest, manifest_digest: String(p.new_manifest_digest), consent_receipt_id: receipt } }, consents: { ...state.consents, [receipt]: { ...consent, consumed_at: event2.occurred_at_server } } };
-  }
-  const status = event2.type === "AdminDelegationRevoked" ? "revoked" : event2.type === "AdminDelegationSuspended" ? "suspended" : "expired";
-  return {
-    ...state,
-    grants: { ...state.grants, [id]: {
-      ...grant,
-      state: status,
-      reason_code: String(p.reason_code),
-      revoked_at: status === "revoked" ? event2.occurred_at_server : grant.revoked_at,
-      suspended_at: status === "suspended" ? event2.occurred_at_server : grant.suspended_at
-    } },
-    lineages: Object.fromEntries(Object.entries(state.lineages).map(([key2, l]) => [key2, l.grant_id === id ? { ...l, state: "revoked" } : l]))
-  };
-}
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_CONNECTION_ATTEMPTS_PER_GRANT,
@@ -2674,6 +3393,7 @@ export {
   ADMIN_REGISTRY_VERSION,
   ADMIN_RENEWAL_CEILINGS,
   ADMIN_RESOURCE,
+  ADMIN_ROUTINE_EVENT_TYPES,
   ADMIN_SCOPE_NAMES,
   ADMIN_SCOPE_REGISTRY,
   ADMIN_SEATS_PER_GRANT,
@@ -2714,6 +3434,7 @@ export {
   WORKSPACE_EVENT_TYPES,
   WORKSPACE_ROLES,
   adminExactKeys,
+  adminGrantManifest,
   adminIds,
   adminManifestValid,
   adminRatePolicy,
@@ -2726,10 +3447,12 @@ export {
   compareHostedCheckCursor,
   decide,
   decideAdminAuthority,
+  decideAdminRoutine,
   decideHostedAuthority,
   decideHostedCheck,
   decideWorkspace,
   emptyAdminAccount,
+  emptyAdminRoutine,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
   hostedCheckMillisecondTimestamp,
@@ -2741,9 +3464,11 @@ export {
   leaseLive,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
+  parseAdminRoutineCommand,
   planFileVersionWindow,
   publicHostedCommandForbidden,
   reduceAdminAuthority,
+  reduceAdminRoutine,
   reduceHostedAuthority,
   reduceHostedAuthorityStream,
   reduceStream,

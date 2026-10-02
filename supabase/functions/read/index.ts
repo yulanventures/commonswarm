@@ -6,6 +6,7 @@ import {
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import { isAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { adminReadRequest, readAdminRecovery, type AdminReadRequest } from "./admin-recovery.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   extractSafeDiagnostics,
@@ -232,9 +233,10 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | null {
+  WakeLeaseReadRequest | AdminReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (body.resource === "admin_grants" || body.resource === "admin_history") return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
       exactKeys(body, ["resource", "workspace_id"]) &&
       typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) {
@@ -463,8 +465,10 @@ async function handle(
     });
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);
+  const adminRecovery = body.resource === "admin_grants" || body.resource === "admin_history";
+  if (adminRecovery && agentCredential) return json(403, { error: "credential_kind_forbidden" });
   if (!agentCredential && body.resource !== "renewal_grants" &&
-    body.resource !== "pending_access") {
+    body.resource !== "pending_access" && !adminRecovery) {
     return json(401, { error: "unauthenticated" });
   }
   let humanUserId: string | null = null;
@@ -491,6 +495,11 @@ async function handle(
           true
         )
       `;
+      if (body.resource === "admin_grants" || body.resource === "admin_history") {
+        setPhase("query");
+        const page = await readAdminRecovery(tx, body);
+        return json(page.error === "forbidden" ? 403 : 200, page);
+      }
       if (body.resource === "pending_access") {
         const pending = await tx<Record<string, unknown>[]>`
           SELECT kind, principal_id, principal_name, join_credential_id,
@@ -506,6 +515,8 @@ async function handle(
       `;
       return json(200, { grants });
     }
+
+    if (body.resource === "admin_grants" || body.resource === "admin_history") return json(403, { error: "credential_kind_forbidden" });
 
     setPhase("credential_lookup");
     const contextRows = await tx<ReadAgentContext[]>`

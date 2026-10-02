@@ -649,7 +649,7 @@ export const KNOWN_FLAGS = new Set([
   "about", "agent-token-file", "agent-token-stdin", "all-devices", "allow-unattended", "anon-key", "attach", "branch", "capability-id",
   "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
-  "broadcast-to-channel", "channel",
+  "broadcast-to-channel", "channel", "before", "grant-id",
   "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
   "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
@@ -10187,7 +10187,16 @@ async function runProfileLs(args: Arguments): Promise<void> {
  * while flag-selected modes stay behind one key and are chosen by select().
  */
 export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
+export const ADMIN_READ_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "limit", "before", "json"] as const;
+export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "request-id", "json"] as const;
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
+  admin: group({
+    grants: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "List your admin grants.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin grants [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
+    history: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "See your account actions or workspace admin history.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin history [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
+    revoke: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRevoke, description: "Revoke an admin grant without a workspace.", mutates: true, flags: ADMIN_REVOKE_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin revoke --grant-id <uuid> [--request-id <uuid>] [--json]"] }),
+  }, args => args.positionals[1], (_args, names) => new UsageError(`cswarm admin takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: ADMIN_READ_ACCEPTED_FLAGS, ...REFUSE_PROFILE },
+  }),
   profile: group({
     ls: commandEntry({ ...noTool("local profile inventory; no network or credential read"), handler: runProfileLs,
       description: "List saved agent profiles on this host.", mutates: false,
@@ -10393,6 +10402,9 @@ function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly stri
 }
 
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
+  "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
+  "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,
   "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
   "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
   "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
@@ -10834,4 +10846,48 @@ export function isFollowRenewalCredentialFailure(error: unknown): boolean {
     error instanceof RenewalCredentialCheckError ||
     error instanceof RenewalRevoked ||
     error instanceof RenewalSuspended;
+}
+
+/** Human account recovery deliberately skips workspace discovery/default selection. */
+async function runAdminRead(args: Arguments): Promise<void> {
+  args.assertShape(ADMIN_READ_ACCEPTED_FLAGS, 2);
+  await runAdminRecovery(args);
+}
+async function runAdminRevoke(args: Arguments): Promise<void> {
+  args.assertShape(ADMIN_REVOKE_ACCEPTED_FLAGS, 2);
+  await runAdminRecovery(args);
+}
+async function runAdminRecovery(args: Arguments): Promise<void> {
+  const action = args.positionals[1];
+  const { readAdminDelegations, revokeAdminDelegation } = await import("./cloud/admin-delegations.js");
+  const { ADMIN_PAGE_DEFAULT, ADMIN_PAGE_MAX, adminReadRequest } = await import("./cloud/admin-delegations-contract.js");
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+  const grantId = action === "revoke" ? args.required("grant-id") : null;
+  const requestId = args.optional("request-id");
+  if (grantId !== null && (!uuid.test(grantId) || (requestId !== undefined && !uuid.test(requestId)))) throw new UsageError("Use the full grant ID and a UUID request ID.");
+  const request = action === "revoke" ? null : adminReadRequest({
+    resource: action === "grants" ? "admin_grants" : "admin_history",
+    workspace_id: args.optional("workspace-id") ?? null,
+    limit: args.has("limit") ? integer(args, "limit", { minimum: 1, maximum: ADMIN_PAGE_MAX }) : ADMIN_PAGE_DEFAULT,
+    before: args.optional("before") ?? null,
+  });
+  if (action !== "revoke" && request === null) throw new UsageError("Choose a valid workspace ID, page size, and cursor.");
+  const cloud = await target(args), human = await humanCredential(args, cloud);
+  if (grantId !== null) {
+    const receipt = await revokeAdminDelegation(cloud, human.accessToken, grantId, requestId);
+    if (args.has("json")) printJson(receipt);
+    else process.stdout.write(`Admin grant ${grantId} is revoked. Review prior actions with cswarm admin history.\n`);
+    return;
+  }
+  const page = await readAdminDelegations(cloud, human.accessToken, request!);
+  if (args.has("json")) { printJson({ ...page }); return; }
+  if (action === "grants") {
+    process.stdout.write(`${page.active.grant_count} active admin grants; ${page.active.full_account_count} cover the full account.\n`);
+    for (const g of page.grants) process.stdout.write(`${g.grant_id} · ${g.client_id} · ${g.mode} · ${g.state} · expires ${g.expires_at}\n  Operations: ${g.scope_names.join(", ")}\n  Workspaces: ${g.workspace_selector === "owned_and_selected" ? "existing and future owned spaces; selected shared spaces: " : "selected spaces: "}${g.workspace_ids.join(", ") || "none"}\n  Withdrawn spaces: ${g.withdrawn_workspace_ids.join(", ") || "none"}\n`);
+    if (page.grants.length === 0) process.stdout.write("No grants are visible in this view.\n");
+  } else {
+    for (const a of page.actions) process.stdout.write(`${a.occurred_at_server} · ${a.action} · ${a.outcome} · ${a.target_kind} ${a.target_id ?? ""}${a.reason_code ? ` · ${a.reason_code}` : ""}\n  Next: ${a.next_action}\n`);
+    if (page.actions.length === 0) process.stdout.write("No admin actions are visible in this view.\n");
+  }
+  if (page.next_before) process.stdout.write(`More rows are available. Use --before '${page.next_before}' to continue this view.\n`);
 }

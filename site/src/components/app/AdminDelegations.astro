@@ -1,0 +1,220 @@
+<admin-delegations hidden>
+  <button type="button" class="admin-indicator" data-admin-indicator hidden aria-haspopup="dialog">
+    <strong data-admin-indicator-title>Admin access</strong>
+    <span data-admin-indicator-detail>View actions or revoke</span>
+  </button>
+  <dialog aria-labelledby="admin-access-title">
+    <header>
+      <div><p class="eyebrow">Your account</p><h2 id="admin-access-title">Admin access and history</h2></div>
+      <button type="button" data-admin-close aria-label="Close admin access">Close</button>
+    </header>
+    <p>Review what your connections can do and the actions CommonSwarm recorded. Revoking a grant stops its dependent access. Prior actions and data already read remain.</p>
+    <nav aria-label="Admin access views">
+      <button type="button" data-admin-view="account" aria-pressed="true">Your account</button>
+      <button type="button" data-admin-view="workspace" aria-pressed="false" hidden>This workspace</button>
+      <button type="button" data-admin-refresh>Refresh</button>
+    </nav>
+    <p role="status" aria-live="polite" data-admin-status></p>
+    <section aria-labelledby="admin-grants-title">
+      <h3 id="admin-grants-title">Your grants</h3><div data-admin-grants></div>
+      <button type="button" data-admin-more-grants hidden>More grants</button>
+    </section>
+    <section aria-labelledby="admin-history-title">
+      <h3 id="admin-history-title">Recorded actions</h3><ol data-admin-actions></ol>
+      <button type="button" data-admin-more-actions hidden>Older actions</button>
+    </section>
+  </dialog>
+</admin-delegations>
+
+<script>
+  import type { Session } from "@supabase/supabase-js";
+  import { client, currentSession, uuid } from "../../lib/commonswarm";
+  import { loadAdminRecovery, revokeAdminGrant, AdminGrantRevokeRefused, AdminRecoveryReadError, type AdminGrantView, type AdminActionView } from "../../lib/admin-delegations";
+
+  const root = document.querySelector<HTMLElement>("admin-delegations");
+  if (root) {
+    const one = <T extends Element>(selector: string): T => root.querySelector<T>(selector)!;
+    const dialog = one<HTMLDialogElement>("dialog");
+    let session: Session | null = null, workspaceId: string | null = document.querySelector("live-dashboard")?.getAttribute("data-admin-workspace") ?? null;
+    one<HTMLElement>("[data-admin-view=workspace]").hidden = !workspaceId;
+    let scope: "account" | "workspace" = "account", generation = 0;
+    let grants: AdminGrantView[] = [], actions: AdminActionView[] = [];
+    let grantsBefore: string | null = null, actionsBefore: string | null = null;
+    let busy = false;
+    let indicatorView: "account" | "workspace" = "account";
+    const requestIds = new Map<string, string>();
+    const status = (message: string): void => { one<HTMLElement>("[data-admin-status]").textContent = message; };
+    const clear = (): void => {
+      ++generation; grants = []; actions = []; grantsBefore = actionsBefore = null; busy = false;
+      one("[data-admin-grants]").replaceChildren(); one("[data-admin-actions]").replaceChildren();
+      one<HTMLElement>("[data-admin-more-grants]").hidden = true; one<HTMLElement>("[data-admin-more-actions]").hidden = true;
+      status("");
+    };
+    const text = (tag: string, content: string): HTMLElement => {
+      // Server labels remain literal text, including markup supplied by users or agents.
+      const element = document.createElement(tag); element.textContent = content; return element;
+    };
+    const state = (g: AdminGrantView): string => g.state === "active" && Date.parse(g.expires_at) <= Date.now() ? "expired" : g.state;
+    const render = (): void => {
+      const grantRoot = one<HTMLElement>("[data-admin-grants]"); grantRoot.replaceChildren();
+      if (!grants.length) grantRoot.append(text("p", "No grants of yours are visible in this view. Workspace owners can see relevant actions below."));
+      for (const g of grants) {
+        const card = document.createElement("article"); card.dataset.mode = g.mode;
+        card.append(text("h4", g.client_id), text("p", `${g.mode === "full_account" ? "Full-account" : "Selected workspaces"} · ${state(g)} · expires ${g.expires_at}`));
+        card.append(text("p", `Operations: ${g.scope_names.join(", ")}`));
+        card.append(text("p", `${g.workspace_selector === "owned_and_selected" ? "Existing and future owned workspaces. Selected shared workspaces" : "Selected workspaces"}: ${g.workspace_ids.join(", ") || "none"}.`));
+        if (g.withdrawn_workspace_ids.length) card.append(text("p", `Workspace access withdrawn: ${g.withdrawn_workspace_ids.join(", ")}.`));
+        card.append(text("p", `Grant ${g.grant_id}. Connection ${g.connection_id}.`));
+        if (g.reason_code) card.append(text("p", `Reason: ${g.reason_code}`));
+        if (g.state !== "revoked") {
+          const button = document.createElement("button"); button.type = "button"; button.textContent = "Revoke grant"; button.disabled = busy;
+          button.addEventListener("click", async () => {
+            if (!session || busy) return;
+            const ownSession = session, at = generation;
+            const requestId = requestIds.get(g.grant_id) ?? uuid(); requestIds.set(g.grant_id, requestId);
+            busy = true; render(); status("Revoking grant…");
+            try {
+              await revokeAdminGrant(ownSession, g.grant_id, requestId);
+              if (generation !== at) return;
+              // An accepted account command is a durable revoke, even if a later read fails.
+              g.state = "revoked"; busy = false; render();
+              status("The grant is revoked. Refresh to review its recorded actions.");
+              await indicator();
+            } catch (error) {
+              if (generation !== at) return;
+              if (error instanceof AdminGrantRevokeRefused) requestIds.delete(g.grant_id);
+              busy = false; render(); status(error instanceof Error ? error.message : "The revocation result is unavailable. Refresh before retrying.");
+            }
+          });
+          card.append(button);
+        }
+        grantRoot.append(card);
+      }
+      const actionRoot = one<HTMLOListElement>("[data-admin-actions]"); actionRoot.replaceChildren();
+      if (!actions.length) actionRoot.append(text("li", "No admin actions are visible in this view."));
+      for (const a of actions) {
+        const card = document.createElement("li"); card.dataset.outcome = a.outcome;
+        card.append(text("strong", `${a.action.replaceAll("_", " ")} · ${a.outcome}`));
+        card.append(text("p", `${a.occurred_at_server} · ${a.actor_user ? "Person" : "Connection or system"} ${a.actor_user ?? a.admin_identity_id ?? ""}`));
+        card.append(text("p", `${a.target_kind}: ${a.target_id ?? "none"}${a.reason_code ? ` · ${a.reason_code}` : ""}`));
+        if (a.next_action !== "none") card.append(text("p", `Next: ${a.next_action}`));
+        card.append(text("small", `Event ${a.event_id}${a.grant_id ? ` · Grant ${a.grant_id}` : ""}`));
+        actionRoot.append(card);
+      }
+      one<HTMLElement>("[data-admin-more-grants]").hidden = grantsBefore === null;
+      one<HTMLElement>("[data-admin-more-actions]").hidden = actionsBefore === null;
+    };
+    let indicatorGeneration = 0;
+    const indicator = async (): Promise<void> => {
+      if (!session) return;
+      const ownSession = session, at = generation, ticket = ++indicatorGeneration;
+      const button = one<HTMLButtonElement>("[data-admin-indicator]");
+      try {
+        const account = await loadAdminRecovery(ownSession, "admin_grants");
+        const workspace = workspaceId ? await loadAdminRecovery(ownSession, "admin_grants", workspaceId).catch(error => {
+          if (error instanceof AdminRecoveryReadError && error.status === 403) return null;
+          throw error;
+        }) : null;
+        if (generation !== at || ticket !== indicatorGeneration) return;
+        const full = account.active.full_account_count;
+        const count = account.active.grant_count, workspaceCount = workspace?.active.grant_count ?? 0;
+        indicatorView = count > 0 ? "account" : "workspace";
+        button.hidden = count === 0 && workspaceCount === 0; button.dataset.fullAccount = String(full > 0);
+        one<HTMLElement>("[data-admin-indicator-title]").textContent = full ? `${full} full-account admin ${full === 1 ? "grant" : "grants"} active` :
+          count > 0 ? `${count} active admin ${count === 1 ? "grant" : "grants"} in your account` : `${workspaceCount} active admin ${workspaceCount === 1 ? "grant" : "grants"} in this workspace`;
+        const expiry = full ? account.active.full_account_expires_at : account.active.expires_at ?? workspace?.active.expires_at;
+        one<HTMLElement>("[data-admin-indicator-detail]").textContent = `${full ? "Full-account grants: earliest expiry" : "Earliest expiry"} ${expiry ?? "unavailable"}.${count > 0 && workspaceCount > 0 ? ` This workspace: ${workspaceCount} active grants.` : ""} View actions or revoke.`;
+      } catch {
+        if (generation !== at || ticket !== indicatorGeneration) return;
+        button.hidden = false;
+        one<HTMLElement>("[data-admin-indicator-title]").textContent = "Admin access status unavailable";
+        one<HTMLElement>("[data-admin-indicator-detail]").textContent = "Review access or try again.";
+      }
+    };
+    const load = async (more?: "grants" | "actions"): Promise<void> => {
+      if (!session || busy) return;
+      const ownSession = session, at = ++generation, selected = scope === "workspace" ? workspaceId : null;
+      busy = true; render(); status("Loading admin access and recorded actions…");
+      try {
+        const [grantPage, actionPage] = await Promise.all([
+          more === "actions" ? null : loadAdminRecovery(ownSession, "admin_grants", selected, more ? grantsBefore : null),
+          more === "grants" ? null : loadAdminRecovery(ownSession, "admin_history", selected, more ? actionsBefore : null),
+        ]);
+        if (generation !== at) return;
+        if (grantPage) { grants = more ? [...grants, ...grantPage.grants] : grantPage.grants; grantsBefore = grantPage.next_before; }
+        if (actionPage) { actions = more ? [...actions, ...actionPage.actions] : actionPage.actions; actionsBefore = actionPage.next_before; }
+        busy = false; render(); status("Showing recorded server outcomes. Revoke ends future access; prior actions remain.");
+      } catch (error) {
+        if (generation !== at) return;
+        busy = false; render(); status(error instanceof Error ? error.message : "Admin access could not be read. Try again.");
+      }
+    };
+    const open = (view: "account" | "workspace" = "account"): void => {
+      if (!session) return;
+      scope = view === "workspace" && workspaceId ? "workspace" : "account";
+      clear();
+      for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-view]")) button.setAttribute("aria-pressed", String(button.dataset.adminView === scope));
+      if (!dialog.open) dialog.showModal(); void load();
+    };
+    one("[data-admin-indicator]").addEventListener("click", () => open(indicatorView));
+    one("[data-admin-close]").addEventListener("click", () => dialog.close());
+    one("[data-admin-refresh]").addEventListener("click", () => { void load(); void indicator(); });
+    one("[data-admin-more-grants]").addEventListener("click", () => { void load("grants"); });
+    one("[data-admin-more-actions]").addEventListener("click", () => { void load("actions"); });
+    for (const button of root.querySelectorAll<HTMLButtonElement>("[data-admin-view]")) button.addEventListener("click", () => open(button.dataset.adminView === "workspace" ? "workspace" : "account"));
+    document.addEventListener("click", event => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-admin-access-open]") : null;
+      if (button) {
+        // Close the launching dialog so Escape/focus belong to this view.
+        button.closest("dialog")?.close();
+        open(button.dataset.adminAccessScope === "workspace" ? "workspace" : "account");
+      }
+    });
+    window.addEventListener("commonswarm:workspace-selected", event => {
+      const detail = (event as CustomEvent<{ workspaceId: string | null; sample?: boolean }>).detail;
+      workspaceId = detail.sample ? null : detail.workspaceId;
+      one<HTMLElement>("[data-admin-view=workspace]").hidden = !workspaceId;
+      clear(); if (dialog.open) open(scope); void indicator();
+    });
+    const auth = client();
+    auth?.auth.onAuthStateChange((_event, next) => {
+      const changed = session?.user.id !== next?.user.id;
+      session = next; root.hidden = !session;
+      if (changed) { clear(); requestIds.clear(); dialog.close(); one<HTMLElement>("[data-admin-indicator]").hidden = true; }
+      if (session) window.setTimeout(() => { void indicator(); }, 0);
+    });
+    const initialGeneration = generation;
+    void currentSession().then(next => {
+      if (generation !== initialGeneration) return;
+      session = next; root.hidden = !next; if (next) void indicator();
+    }).catch(() => { if (generation === initialGeneration) root.hidden = true; });
+    // Human-facing status refresh, independent of the delegated runtime being online.
+    window.setInterval(() => { if (!document.hidden) void indicator(); }, 30_000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) void indicator(); });
+  }
+</script>
+
+<style>
+  admin-delegations[hidden], [hidden] { display: none !important; }
+  .admin-indicator { position: fixed; z-index: 30; left: 1rem; bottom: 4.5rem; max-width: min(15rem, calc(100vw - 2rem)); text-align: left; display: grid; gap: .3rem; box-shadow: var(--shadow-md); }
+  button { font: inherit; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-interactive); border-radius: .5rem; padding: .6rem .85rem; cursor: pointer; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  button:disabled { opacity: .6; cursor: wait; }
+  .admin-indicator[data-full-account=true], article[data-mode=full_account] { border: 2px solid var(--warning); background: var(--surface-2); }
+  .admin-indicator span, small, .eyebrow { color: var(--text-muted); font-size: .8rem; }
+  dialog { color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-interactive); border-radius: .8rem; padding: 1.5rem; width: min(46rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow: auto; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
+  h2, h3, h4 { margin: 0 0 .6rem; }
+  p { margin: .5rem 0; }
+  nav { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+  nav [aria-pressed=true] { border-color: var(--text-primary); font-weight: 700; }
+  section { margin-top: 1.5rem; }
+  article, li { border: 1px solid var(--border); padding: 1rem; margin: .75rem 0; border-radius: .6rem; overflow-wrap: anywhere; }
+  ol { padding: 0; list-style: none; }
+  [data-outcome=refused], [data-outcome=failed] { border-inline-start: 3px solid var(--warning); }
+  [data-admin-status] { min-height: 1.5em; }
+  @media (max-width: 52rem) {
+    .admin-indicator { left: auto; right: .75rem; bottom: 10rem; max-width: min(20rem, calc(100vw - 1.5rem)); }
+  }
+</style>

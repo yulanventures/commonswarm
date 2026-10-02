@@ -1,5 +1,5 @@
-// Pure fold for the workspace-authority stream (§3.4).
-
+import { ADMIN_ROUTINE_EVENT_TYPES, reduceAdminRoutine } from './admin-routine.js';
+import type { AdminAccountEvent } from './admin-authority.js';
 import { SCHEMA_VERSION } from './events.js';
 import { StreamIntegrityError, UnknownEventTypeError } from './reducer.js';
 import {
@@ -135,8 +135,8 @@ export function reduceWorkspace(
   if (!prev) {
     throw new StreamIntegrityError(`event "${env.type}" before WorkspaceCreated (seq ${env.seq})`);
   }
-  const s = prev;
-  let next: WorkspaceState;
+  if ((ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(env.type)) { if (!env.grant_id || !env.admin_identity_id || !env.grant_manifest_digest || env.actor_user !== null || env.actor_agent_principal !== null) throw new StreamIntegrityError('invalid delegated workspace actor'); return { ...prev, admin_routine: reduceAdminRoutine(prev.admin_routine, env as unknown as AdminAccountEvent) }; }
+  const s = prev; let next: WorkspaceState;
 
   switch (env.type) {
     case 'WorkspaceArchived': {

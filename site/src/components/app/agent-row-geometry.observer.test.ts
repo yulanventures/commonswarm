@@ -117,9 +117,13 @@ const renderGeometry = async (): Promise<Geometry> => {
       timeout: 15_000,
       killSignal: "SIGKILL",
     });
-    const encoded = stdout.match(/data-metrics="([^"]+)"/)?.[1];
-    assert.ok(encoded, "headless Chrome must return the rendered geometry payload");
-    return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
+    // Read only the rendered root attribute, never an attribute in fixture source.
+    const encoded = stdout.match(/^\s*(?:<!doctype html>\s*)?<html\b[^>]*\bdata-metrics="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
+    assert.ok(encoded, `headless Chrome must return the rendered geometry payload (stdout: ${stdout.length} characters)`);
+    const payload = Buffer.from(encoded, "base64");
+    assert.equal(payload.toString("base64"), encoded, "Chrome returned an incomplete geometry payload");
+    assert.ok(payload.length > 0, "Chrome returned an empty geometry payload");
+    return JSON.parse(payload.toString("utf8")) as Geometry;
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -1,3 +1,5 @@
+import { prepareAdminRoutine, applyAdminRoutine, type AdminWorkerDelivery } from './admin-routine.ts';
+import type { AdminRoutineCommand, AdminRoutineDecision } from '../_shared/admin-routine.d.ts';
 import { AdminRuntimeJwtVerifier, type VerifiedAdminRuntime } from './admin-runtime-auth.ts';
 import type postgres from 'npm:postgres@3.4.9';
 import { hasFreshInteractiveAuth } from './fresh-auth.ts';
@@ -5,7 +7,7 @@ import {
   ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, ADMIN_GRANT_TTL_SECONDS,
   ADMIN_MUTATION_RATE_PER_HOUR, ADMIN_SCOPE_REGISTRY, adminRatePolicy,
   ADMIN_UUID_RE, adminRecord, adminExactKeys, adminManifestValid, adminScopes,
-  canonicalAdminJson, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
+  canonicalAdminJson, parseAdminRoutineCommand, decideAdminRoutine, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
 } from '../_shared/protocol.js';
 import type { AdminActor, AdminCommand, AdminAccountState, AdminAccountEvent, AdminConsent } from '../_shared/admin-authority.d.ts';
 import type { AdminScope } from '../_shared/admin-policy.d.ts';
@@ -26,7 +28,7 @@ export interface AdminCredentialDelivery {
 }
 export type AdminAuthentication =
   | { kind: 'human'; identity: AdminHumanIdentity }
-  | { kind: 'access'; credential: string }
+  | { kind: 'access'; credential: string; recipient_runtime_credential?: string }
   | { kind: 'runtime'; credential: string; refresh_credential?: string }
   | { kind: 'system'; owner_user_id: string };
 interface CredentialRow extends Record<string, unknown> {
@@ -59,7 +61,8 @@ function opaque(prefix: string): string {
   return prefix + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
     .replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
-function parseCommand(input: unknown): AdminCommand | null {
+function parseCommand(input: unknown): AdminCommand | AdminRoutineCommand | null {
+  const routine = parseAdminRoutineCommand(input); if (routine) return routine;
   const c = adminRecord(input);
   if (!c || !id(c.grant_id)) return null;
   if (c.kind === 'grant_admin_delegation') return adminExactKeys(c, ['kind', 'grant_id', 'consent_receipt_id', 'replaces_grant_id']) && id(c.consent_receipt_id) && (c.replaces_grant_id === null || id(c.replaces_grant_id)) ? c as unknown as AdminCommand : null;
@@ -143,7 +146,7 @@ async function persistEvents(tx: Sql, owner: string, state: AdminAccountState, e
 /** Called only within the command API transaction, with server-verified identity.
  * Credential material is returned privately to its runtime caller, never in result.body.
  */
-export async function adminTransaction(tx: Sql, input: AdminInput, authentication: AdminAuthentication): Promise<{ result: Result; delivery?: AdminCredentialDelivery }> {
+export async function adminTransaction(tx: Sql, input: AdminInput, authentication: AdminAuthentication): Promise<{ result: Result; delivery?: AdminCredentialDelivery; worker_delivery?: AdminWorkerDelivery }> {
   // Verify at the transaction boundary too: importing this adapter cannot
   // bypass proof by fabricating an identity object or using the private wrapper.
   let runtime: VerifiedAdminRuntime | undefined;
@@ -200,6 +203,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     owner = rows[0]?.owner_user_id;
   }
   if (!owner || !id(owner)) return { result: errorResult(403, 'forbidden') };
+  await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR UPDATE`;
   // Only humans create account streams. No grant ID chosen by an admin creates state.
   if (authentication.kind === 'human') await tx`INSERT INTO swarm.admin_accounts(owner_user_id, stream_id) VALUES (${owner}::uuid, ${crypto.randomUUID()}::uuid) ON CONFLICT(owner_user_id) DO NOTHING`;
   const accounts = await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE`;
@@ -303,7 +307,29 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       AND user_id = ${owner}::uuid AND role = 'owner' AND revoked_at IS NULL FOR SHARE`;
     context.target_workspace_owned_by_grantor = owned.length === 1;
   }
-  let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : null;
+  const routineCommand = parseAdminRoutineCommand(command);
+  let recipientRuntime: VerifiedAdminRuntime | undefined;
+  if (authentication.kind === 'access' && authentication.recipient_runtime_credential !== undefined) {
+    try { recipientRuntime = await runtimeVerifier.verify(authentication.recipient_runtime_credential); } catch { /* Core refuses without verified delivery. */ }
+    if (!grant || recipientRuntime?.grant_id !== grant.grant_id || recipientRuntime.owner_user_id !== owner || recipientRuntime.expires_at <= now || !grant.target_rules.recipient_connection_ids.includes(recipientRuntime.connection_id) || recipientRuntime.client_id !== grant.client_id) recipientRuntime = undefined;
+  }
+  let routineRefusal: string | null = null;
+  if (routineCommand) {
+    if (actor.kind !== 'delegated_admin') routineRefusal = 'credential_kind_forbidden';
+    else if (!grant || routineCommand.grant_id !== actor.grant_id) routineRefusal = 'grant_binding_mismatch';
+    else if (grant.state !== 'active' || grant.expires_at <= now || grant.refresh_deadline <= now) routineRefusal = 'grant_inactive';
+    else {
+      const scope = Object.entries(ADMIN_SCOPE_REGISTRY).find(([,commands]) => (commands as readonly string[]).includes(routineCommand.kind))?.[0] as AdminScope | undefined;
+      if (!scope || !grant.scope_names.includes(scope) || !actor.scope_names.includes(scope)) routineRefusal = 'scope_forbidden';
+      if (routineCommand.kind !== 'admin_create_workspace' && !grant.workspace_ids.includes(routineCommand.workspace_id) && state.routine?.created_workspaces[routineCommand.workspace_id]?.grant_id !== grant.grant_id) {
+        const owned = grant.workspace_selector === 'owned_and_selected' ? await tx`SELECT user_id FROM swarm.memberships WHERE workspace_id=${routineCommand.workspace_id}::uuid AND user_id=${owner}::uuid AND role='owner' AND revoked_at IS NULL FOR SHARE` : [];
+        if (owned.length !== 1) routineRefusal = 'workspace_forbidden';
+      }
+      if (grant.withdrawn_workspace_ids.includes(routineCommand.workspace_id)) routineRefusal = 'workspace_forbidden';
+    }
+  }
+  const routineContext = routineCommand && routineRefusal === null ? await prepareAdminRoutine(tx, routineCommand, state, context, recipientRuntime?.connection_id ?? null) : null;
+  let refusal: string | null = !wireValid ? 'invalid_request' : command === null ? actor.kind === 'delegated_admin' ? 'human_confirmation_required' : 'invalid_request' : routineRefusal;
   let allowance: Awaited<ReturnType<typeof charge>> | null = null;
   if (authentication.kind === 'human' && (prepare || command?.kind === 'grant_admin_delegation' || command?.kind === 'narrow_admin_delegation') && (!hasFreshInteractiveAuth(authentication.identity.interactive_at_seconds, now) || !authentication.identity.csrf_verified || !/^[0-9a-f]{64}$/u.test(authentication.identity.session_binding))) refusal = 'human_confirmation_required';
   if (authentication.kind === 'access' && (credential!.revoked_at !== null || credential!.access_expires_at.getTime() <= now || state.lineages[credential!.credential_lineage_id]?.generation !== credential!.generation)) refusal = 'credential_expired';
@@ -312,7 +338,8 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   if (authentication.kind === 'runtime' && credential && (credential.revoked_at !== null || credential.refresh_deadline.getTime() <= now)) refusal = 'refresh_invalid';
   if (command?.kind === 'narrow_admin_delegation' && await adminDigest(command.manifest) !== command.manifest_digest) refusal = 'manifest_mismatch';
   if (grant) {
-    const buckets = adminRatePolicy(actor, grant, String(raw?.kind), id(raw?.workspace_id) ? raw.workspace_id : null,
+    const rateGrant = routineContext && (state.routine?.created_workspaces[routineCommand!.workspace_id]?.grant_id === grant.grant_id || grant.workspace_selector === 'owned_and_selected' && routineContext.workspace?.members[owner]?.role === 'owner' && routineContext.workspace?.members[owner]?.revoked_at === null) ? {...grant,workspace_ids:[...new Set([...grant.workspace_ids,routineCommand!.workspace_id])]} : grant;
+    const buckets = adminRatePolicy(actor, rateGrant, String(raw?.kind), id(raw?.workspace_id) ? raw.workspace_id : null,
       authentication.kind === 'runtime' ? credential?.credential_lineage_id ?? null : null,
       command && 'grant_id' in command ? command.grant_id : null);
     allowance = await charge(tx, buckets, now);
@@ -327,7 +354,7 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   }
   // Verified malformed/refused requests still produce an account action record,
   // without resolving targets outside the authenticated account.
-  const decision = refusal === null && command ? decideAdminAuthority(command, state, context) : {
+  const decision = refusal === null && command ? routineCommand && routineContext ? decideAdminRoutine(routineCommand, state, routineContext) : decideAdminAuthority(command as AdminCommand, state, context) : {
     ok: false, reason: refusal ?? 'invalid_request', events: [] as AdminAccountEvent[],
   };
   if (decision.events.length === 0) decision.events.push({
@@ -348,6 +375,14 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
     const audit = decision.events.find(e => e.type === 'AdminActionRecorded');
     if (audit) audit.payload.policy_check = { result: decision.reason ?? 'passed', buckets: allowance.buckets };
   }
+  for (const event of decision.events) {
+    if (event.payload.worker_policy) {
+      const policyDigest = await adminDigest(event.payload.worker_policy);
+      if ('policy_digest' in event.payload) event.payload.policy_digest = policyDigest;
+      if ('worker_policy_digest' in event.payload) event.payload.worker_policy_digest = policyDigest;
+    }
+  }
+  const workerDelivery = routineCommand && routineContext ? await applyAdminRoutine(tx, routineCommand, routineContext, decision as AdminRoutineDecision) : undefined;
   const next = await persistEvents(tx, owner, state, decision.events);
   if (command?.kind === 'prepare_admin_consent' && decision.ok) {
     const c = command.consent;
@@ -366,14 +401,15 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
       VALUES (${crypto.randomUUID()}::uuid, ${g.grant_id}::uuid, ${lineage.credential_lineage_id}::uuid, ${lineage.generation}, ${await digest(delivery.access_credential)}, ${await digest(delivery.refresh_credential)}, ${new Date(lineage.access_expires_at)}, ${new Date(lineage.refresh_deadline)}, ${lineage.scope_names})`;
   }
   const result: Result = decision.ok ? { status: 200, body: {
-    status: delivery ? 'pending' : 'accepted', events: decision.events,
+    status: delivery || workerDelivery || decision.events.some(e => e.payload.delivery_state) ? 'pending' : 'accepted', events: decision.events,
+    ...(workerDelivery ? { delivery_state: 'awaiting_delivery', next_action: 'The authenticated recipient runtime must store the credential and verify its connection.' } : {}),
     ...(delivery ? { delivery_state: 'awaiting_delivery', next_action: 'The authenticated runtime must store the credentials.' } : {}),
     ...(command?.kind === 'prepare_admin_consent' ? { consent_receipt_id: command.consent.consent_receipt_id, manifest_digest: command.consent.manifest_digest, manifest: command.consent.manifest, expires_at: command.consent.expires_at } : {}),
     ...(command?.kind === 'admin_read_metadata' ? { grant: { ...next.grants[command.grant_id],
       state: next.grants[command.grant_id]?.state === 'active' && (next.grants[command.grant_id]!.expires_at <= now || next.grants[command.grant_id]!.refresh_deadline <= now) ? 'expired' : next.grants[command.grant_id]?.state } } : {}),
   } } : errorResult(decision.reason === 'rate_limited' ? 429 : decision.reason === 'invalid_request' ? 400 : 403, decision.reason ?? 'forbidden');
   await tx`INSERT INTO swarm.admin_command_results(owner_user_id, actor_key, command_id, request_digest, response) VALUES (${owner}::uuid, ${actorKey}, ${commandId}, ${requestDigest}, ${tx.json(result as unknown as postgres.JSONValue)})`;
-  return { result, ...(delivery ? { delivery } : {}) };
+  return { result, ...(delivery ? { delivery } : {}), ...(workerDelivery ? { worker_delivery: workerDelivery } : {}) };
 }
 
 /** A failed transaction retains only its failure card, in a new transaction.
@@ -418,6 +454,7 @@ export async function recordAdminFailure(tx: Sql, input: AdminInput, authenticat
         AND resource = ${runtime.resource}`;
     if (bound.length !== 1) return;
   }
+  if (owner) await tx`SELECT user_id FROM swarm.users WHERE user_id=${owner}::uuid FOR UPDATE`;
   const rows = owner ? await tx<{ stream_id: string; seq: string | number; projection: AdminAccountState }[]>`
     SELECT stream_id, seq, projection FROM swarm.admin_accounts WHERE owner_user_id = ${owner}::uuid FOR UPDATE
   ` : [];
