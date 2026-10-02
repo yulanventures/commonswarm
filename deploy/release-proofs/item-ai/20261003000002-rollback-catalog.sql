@@ -22,5 +22,14 @@ SELECT COALESCE((
   AND to_regclass('swarm.admin_events') IS NOT NULL
   AND to_regclass('swarm.admin_grants') IS NOT NULL
   AND to_regclass('commonswarm_oauth.refresh_family_tombstones') IS NOT NULL
+  -- The reserve keeps constrained operator roles and safe creator edges.
+  AND (SELECT count(*) FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))=3
+  AND NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
+    AND (rolsuper OR rolcanlogin OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
+  AND NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
+    WHERE parent.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
+      AND (NOT m.admin_option OR m.inherit_option OR m.set_option))
+  AND NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member
+    WHERE member.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))
 ),false) AS rollback_ok
 \gset

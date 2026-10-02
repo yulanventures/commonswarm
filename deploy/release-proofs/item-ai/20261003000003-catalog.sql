@@ -63,19 +63,19 @@ SELECT COALESCE((
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_oauth_audit()')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
-  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='1c80edf5f468d3bd3b14e8a27eda446f'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='cf9ad1db05bd2a76fe6db07c200443d3'
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY[]::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_access_issuance()')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
-  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='3acbf21c3713aa2809a544f1efc3d8af'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='65e605a56064b680e33e79993fc02c00'
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY[]::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.admin_access_is_active(text,bytea,text,uuid,uuid,integer,text,text,text,text,timestamptz,timestamptz,text)')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
-  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='5f0fc3824793f3d04372f484cd4056ba'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='ce9856166b92f801dd5e2a90112a1d5f'
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY['commonswarm_oauth_runtime','swarm_command','swarm_read']::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=3)

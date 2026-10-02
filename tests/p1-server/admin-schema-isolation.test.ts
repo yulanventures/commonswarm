@@ -1,10 +1,12 @@
 /** admin-schema-isolation: real migration/ACL/lifecycle boundary, Docker gate only. */
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { catalog, dbAssert, fixture, issuance, migrationNames, refuses, repoSql, runSql, versions } from '../support/admin-schema-db.js';
+import { catalog, dbAssert, fixture, issuance, migrationNames, openIssuanceForTest, refuses, repoSql, runSql, versions } from '../support/admin-schema-db.js';
 
 test('admin-schema-isolation: prerequisite upgrade as a non-superuser and data-free reverse reserves', () => {
   const role = `ai_migration_${randomUUID().replaceAll('-', '')}`;
+  const noncreator = `ai_noncreator_${randomUUID().replaceAll('-', '')}`;
+  const roleGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$roles\$[\s\S]*?END \$roles\$;/)![0];
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), provider = randomUUID();
   runSql(`
 ${versions.map(v => catalog(v)).join('\n')}
@@ -24,6 +26,13 @@ GRANT swarm_admin TO ${role};
 SET LOCAL ROLE ${role};
 ${dbAssert(`SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user`, 'migration role must be constrained')}
 ${migrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
+${dbAssert(`SELECT count(*)=3 AND bool_and(m.admin_option AND NOT m.inherit_option AND NOT m.set_option)
+  FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
+  WHERE parent.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance') AND member.rolname='${role}'`, 'constrained creator memberships retained')}
+RESET ROLE;
+CREATE ROLE ${noncreator} NOLOGIN INHERIT CREATEROLE;
+SET LOCAL ROLE ${noncreator};
+${refuses(roleGuard, 'P0001')}
 RESET ROLE;
 ${versions.map(v => catalog(v)).join('\n')}
 ${dbAssert('SELECT NOT admin_issuance_enabled AND NOT legacy_closed AND measured_at IS NULL FROM commonswarm_oauth.admin_cutover_state', 'upgrade must remain dormant')}
@@ -176,7 +185,7 @@ RESET ROLE;
 
 test('admin-schema-isolation: committed issuance required, exact token binding, old live generation, key denial and audited atomic revocation', () => {
   const f = fixture(), token = issuance(f);
-  runSql(`${f.sql}${token.sql}
+  runSql(`${f.sql}${openIssuanceForTest}${token.sql}
 SET LOCAL ROLE swarm_read;
 ${dbAssert(token.active(), 'committed access positive')}
 ${dbAssert(`NOT (${token.active({ jti: 'unrecorded' })})`, 'signed but unrecorded refused')}
