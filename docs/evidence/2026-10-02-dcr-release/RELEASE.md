@@ -39,7 +39,9 @@ exact-path checks. Never bypass refusal: report exact path/message and leave it.
 | BASELINE_OAUTH_IMAGE | **sha256:09a8f6c0d8d85fb5f0e6880eec440dd329374e9c8cfc98df805c1359827d71f1** | Checked running image / recovery |
 | DCR_BASELINE_EDGE_SHA | Measured once from canonical edge/current | Replace old eb2a87ac template pin; preserve existing edge source |
 | MAX_MCP_OUTAGE_SECONDS | **240**, fixed | Transition-through-ON receipt including rollback |
-| BACKUP_MAX_AGE_SECONDS | **3600**, fixed | Latest complete backup <=3600s old |
+| BACKUP_MAX_AGE_SECONDS | **3600**, fixed | Latest COMPLETE backup start <=3600s old |
+| BACKUP_NOT_BEFORE_UTC | HezLead UTC second when he started the fresh backup | Newest COMPLETE backup start >= this time; no clock skew |
+| CADDY_FORWARD_SECONDS | **30**, fixed share of the 180s forward budget | Validate/reload/OFF route probes; 60s remains reserved for recovery |
 | TOM_ENABLE_APPROVAL | Named HezLead prompt input 2026-09-29 | Existing switch-on authorization |
 | MCP_EXPECTED_MODE | off after transition/release-off, on after enable | Referenced route probes |
 | HM37_STEP | dcr-oauth-reference allowlist ID | Reuse unchanged block |
@@ -53,42 +55,65 @@ exact-path checks. Never bypass refusal: report exact path/message and leave it.
 
 1. **SCHEMA WINDOW:** dcr-archive; dcr-transport for dcr-stage, dcr-session,
    dcr-preflight, dcr-backup-gate, dcr-apply, dcr-schema-verify.
-   HezLead starts a fresh backup when he receives the SHA. The plan waits and
-   measures its newest complete status; schema steps never change services.
+   HezLead starts a fresh backup and supplies BACKUP_NOT_BEFORE_UTC. Both gates
+   require the newest offsite COMPLETE backup's actual start >= that input,
+   start age <=3600s, and verified database/object bytes. No service changes.
 2. **OAUTH SERVICE from ON:** dcr-oauth-inputs on Mac/box; dcr-oauth-baseline-state
-   on box; reference hm37-oauth-archive on Mac; supply its BOX_ARCHIVE_PATH and
-   full OAUTH_ARCHIVE_SHA256 to root; dcr-oauth-preflight; dcr-oauth-open;
+   on box; reference hm37-oauth-archive on Mac; supply BOX_ARCHIVE_PATH and
+   OAUTH_ARCHIVE_SHA256 to root; dcr-oauth-preflight; dcr-oauth-open;
+   dcr-public-helper (also prepares marked recovery extraction before OFF);
    reference hm37-mcp-transition-off; reference hm37-mcp-route-probes off;
    reference hm37-oauth-build; reference hm37-oauth-inputs;
-   reference hm37-oauth-release-off; reference hm37-mcp-route-probes off;
-   dcr-oauth-enable; reference hm37-mcp-route-probes on; dcr-oauth-verify;
-   reference hm37-oauth-close. References run via dcr-oauth-reference/HM37_STEP.
-   This preserves baseline-state -> archive -> preflight -> open -> transition-off
-   -> probes off -> build -> inputs -> release-off -> probes off -> enable ->
-   probes on -> close. MCP Caddy remains byte-identical throughout part 2.
-3. **MCP CADDY CHANGE:** dcr-public-helper, dcr-caddy-apply, then dcr-caddy-probes. Only part 3
-   installs the archived DCR route lists, preserving resource ON / upstream 3490.
-4. **PUBLIC PROBES:** dcr-public-probes; dcr-transport dcr-schema-final-readback;
-   dcr-schema-close; reference hm37-oauth-mac-close on Mac; dcr-mac-close.
-   Keep DCR_ARCHIVE_DIR until the reference extractor finishes Mac OAuth cleanup.
+   reference hm37-oauth-release-off; reference hm37-mcp-route-probes off.
+   References run via dcr-oauth-reference/HM37_STEP. Keep both secret stages and
+   every baseline snapshot until verified ON success or verified ON recovery.
+3. **MCP CADDY CHANGE inside the OFF transition:** dcr-caddy-apply validates,
+   reloads and runs dcr-caddy-probes OFF before any enable. This step has at most
+   30s, included in the shared 180s forward budget; overrun requires recovery.
+   Then dcr-oauth-enable; reference hm37-mcp-route-probes on; dcr-oauth-verify.
+   Order: release-off -> probes off -> Caddy apply/OFF probes -> enable -> probes on.
+   Apex stays unchanged. Total outage budget stays 240s: 180s forward + 60s recovery.
+4. **PUBLIC PROBES and final close:** dcr-public-probes;
+   dcr-transport dcr-schema-final-readback; dcr-oauth-close (gated reference
+   hm37-oauth-close); dcr-transport dcr-schema-close;
+   reference hm37-oauth-mac-close on Mac; dcr-mac-close.
+   Keep DCR_ARCHIVE_DIR until reference extraction finishes Mac cleanup.
    Retain safe receipts. HezLead runs the Grok connector retest afterward.
 
 ## Failure paths
 
-| Failure | Required marked path / end state |
+A slow build aborts forward work by design; after recovery the run stops as
+failed, with no retry inside the same window (180s forward + 60s recovery = 240s).
+Every forward failure after OFF uses marked recovery before any close. Caddy
+rollback runs first (in the current flag mode), then hm37-oauth-rollback when
+OAuth must return to baseline; failed forward runs here always restore baseline.
+Only verified ON at RELEASE_SHA with parts 3/4 passed, or verified baseline ON,
+permits snapshot/secret close. Never close an OFF or unverified recovery state.
+
+| Step / failure | Required marked path / end state |
 | --- | --- |
-| Schema preflight/backup | No DDL; schema/mac close; STOP |
-| Stage before state exists | dcr-stage-abort/mac-close; retain incomplete proof tree |
-| Session/open before helpers exist | dcr-secret-abort exact printed path; state close if available |
-| Apply transaction | DDL+ledger roll back together; dcr-preflight proves absent/f; unexplained state goes to HezLead |
-| Applied schema, later failure | Prefer additive schema and restored baseline; inverse only on explicit instruction |
-| OAuth after transition, including timeout/build/inputs | Reference hm37-oauth-rollback: baseline OFF/probes then exact ON/probes/memory; no retry |
-| Enable/ON probes | Automatic OFF containment; reference disable/probes off; mandatory baseline rollback |
-| Baseline recovery | REQ 92 verified baseline OFF fallback: report outage; REQ 90/91 UNVERIFIED: retain stage for recovery and STOP |
-| Caddy apply/validate/reload/probes | dcr-caddy-rollback restores saved bytes, validates, reloads, outside probes |
-| Final probe after OAuth close | Caddy rollback remains; OAuth snapshots removed, so HezLead directs a fresh recovery window |
-| Explicit schema reserve | dcr-schema-rollback after verified baseline image/source, empty registrations; verbatim inverse + rollback-catalog + ledger delete |
-| Cleanup/receipt failure or >240s | Report exact error/path/verified state; never bypass cleanup or retry forward |
+| dcr-archive / dcr-transport before staging | No production change; dcr-mac-close if archive exists; retain/report any transport path |
+| dcr-stage before state exists | dcr-stage-abort then dcr-mac-close; retain incomplete proof tree |
+| dcr-session before helpers exist | dcr-secret-abort exact printed schema path; dcr-schema-close then dcr-mac-close; services untouched |
+| dcr-preflight / dcr-backup-gate | No DDL/services; dcr-schema-close then dcr-mac-close; STOP |
+| dcr-apply transaction failure | DDL+ledger roll back together; dcr-preflight proves absent/f, then schema/mac close; unexplained state stays open for HezLead |
+| dcr-schema-verify / post-commit apply check | Keep additive schema; baseline services untouched; reserve inverse only on instruction; schema/mac close after readback |
+| dcr-oauth-inputs / baseline-state / archive / preflight | No service change; report measured state; schema/mac close; OAuth archive cleanup only if created |
+| dcr-oauth-open / dcr-public-helper before OFF | Baseline untouched; dcr-baseline-verify then dcr-oauth-close if open-ready exists; otherwise dcr-secret-abort only with baseline ON proved |
+| dcr-oauth-reference extraction/provenance failure | Before OFF services stay untouched; after OFF use dcr-recover-baseline; never run an unverified reference |
+| hm37-mcp-disable / hm37-mcp-restore-on (reserve references) | Restore exact Caddy first; dcr-recover-baseline restores/verifies baseline ON before close |
+| hm37-mcp-transition-off / OFF probes / build / inputs / release-off | dcr-recover-baseline: dcr-caddy-rollback (saved baseline is valid even before candidate exists), hm37-oauth-rollback, dcr-baseline-verify, dcr-oauth-close; STOP failed |
+| dcr-caddy-apply / dcr-caddy-probes, including 30s/shared-budget overrun | dcr-caddy-failure: dcr-caddy-rollback then hm37-oauth-rollback, verified baseline ON, close; STOP failed |
+| dcr-oauth-enable / ON probes / dcr-oauth-verify | Automatic OFF containment where provided, then dcr-recover-baseline (Caddy first, OAuth baseline second), verified baseline ON, close; STOP failed |
+| dcr-public-probes / dcr-schema-final-readback | dcr-public-failure: dcr-caddy-rollback then hm37-oauth-rollback, verified baseline ON, close; STOP failed |
+| dcr-recover-baseline / baseline-verify / Caddy restore/reload failure | REQ 92 baseline OFF fallback or REQ 90/91 UNVERIFIED: retain both stages/snapshots, report outage; no close; HezLead recovery |
+| Explicit schema reserve | dcr-schema-rollback after verified baseline ON/image/source and empty registrations; inverse + rollback-catalog + ledger delete + cron equality |
+| dcr-oauth-close / dcr-schema-close / OAuth Mac close / dcr-mac-close / abort cleanup | Report exact path/error and verified state; stop refused cleanup, never bypass it; no forward retry |
+| Receipt failure or outage >240s | Run dcr-recover-baseline if not already baseline ON; baseline-verify allows cleanup of verified ON but run stays failed; never kill recovery for budget; a second recovery outage has its own receipt and counts toward 240s |
+
+After marked recovery closes OAuth, run dcr-transport dcr-schema-close,
+reference hm37-oauth-mac-close and dcr-mac-close. Keep additive schema unless
+HezLead explicitly authorizes dcr-schema-rollback before schema close.
 
 Baseline 00e89738 does not use the additive table and remains compatible.
 Reserve is not a data-byte restore: refuse nonempty registrations, never CASCADE
@@ -107,7 +132,7 @@ ON startup calls cleanup(), so schema presence is mandatory before enable.
 # host: Mac /bin/bash 3.2
 set -euo pipefail
 trap 'echo "FAIL dcr-archive: line $LINENO; STOP before window" >&2' ERR
-: "${RELEASE_SHA:?}" "${DCR_PLAN_FILE:?}" "${OAUTH_PLAN_FILE:?}" "${GATE_EVIDENCE_FILE:?}"
+: "${RELEASE_SHA:?}" "${DCR_PLAN_FILE:?}" "${OAUTH_PLAN_FILE:?}" "${GATE_EVIDENCE_FILE:?}" "${BACKUP_NOT_BEFORE_UTC:?}"
 case "$RELEASE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#RELEASE_SHA}" = 40
 test -z "$(git status --porcelain)"
@@ -167,9 +192,9 @@ found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
 assert len(found)==1, 'FAIL dcr-transport: duplicate/missing step'
 print(found[0])
 PYCODE
-printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q %q %q %q %q' \
+printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q %q %q %q %q %q' \
  "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" \
- "$BACKUP_MAX_AGE_SECONDS" "$MIGRATION_WINDOW_END_UTC" "${SCHEMA_ROLLBACK_APPROVAL:-no}" "${ROLLBACK_VERSION:-}" "${SECRET_STAGE:-}"
+ "$BACKUP_MAX_AGE_SECONDS" "$MIGRATION_WINDOW_END_UTC" "${SCHEMA_ROLLBACK_APPROVAL:-no}" "${ROLLBACK_VERSION:-}" "${SECRET_STAGE:-}" "${BACKUP_NOT_BEFORE_UTC:?}"
 ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE_COMMAND" <"$DCR_ARCHIVE_DIR/box-step.sh"
 ```
 
@@ -180,17 +205,20 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE_COMMAND" <"
 set -euo pipefail
 trap 'echo "FAIL dcr-stage: line $LINENO; no schema/service change; STOP" >&2' ERR
 RELEASE_SHA=${1:?}; DCR_WINDOW_ID=${2:?}; DCR_BOX_ARCHIVE_PATH=${3:?}; DCR_ARCHIVE_SHA256=${4:?}
-BACKUP_MAX_AGE_SECONDS=${5:?}; MIGRATION_WINDOW_END_UTC=${6:?}
+BACKUP_MAX_AGE_SECONDS=${5:?}; MIGRATION_WINDOW_END_UTC=${6:?}; BACKUP_NOT_BEFORE_UTC=${10:?}
 test "$(id -u)" = 0
-python3 - "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$BACKUP_MAX_AGE_SECONDS" "$MIGRATION_WINDOW_END_UTC" <<'PYCODE'
+python3 - "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$BACKUP_MAX_AGE_SECONDS" "$MIGRATION_WINDOW_END_UTC" "$BACKUP_NOT_BEFORE_UTC" <<'PYCODE'
 import datetime,pathlib,re,sys
-s,w,a,h,age,end=sys.argv[1:]
+s,w,a,h,age,end,not_before=sys.argv[1:]
 assert re.fullmatch('[0-9a-f]{40}',s)
 assert re.fullmatch('[A-Za-z0-9]{6}',w) and a==f'/tmp/dcr-release-{s}-{w}.tar'
 assert re.fullmatch('[0-9a-f]{64}',h) and age=='3600'
 assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',end)
 until=datetime.datetime.strptime(end,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
 assert 0<(until-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=21600
+assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',not_before)
+start=datetime.datetime.strptime(not_before,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
+assert 0<=(datetime.datetime.now(datetime.timezone.utc)-start).total_seconds()<=3600
 p=pathlib.Path(a); assert not p.is_symlink() and p.is_file() and p.stat().st_mode & 0o777==0o600
 PYCODE
 test "$(sha256sum "$DCR_BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$DCR_ARCHIVE_SHA256"
@@ -248,7 +276,7 @@ print('PASS dcr-stage: exact archive and all three reviewed proofs and migration
 PYCODE
 # Persist paths only; never persist credential contents in proof state.
 {
- for name in RELEASE_SHA DCR_WINDOW_ID DCR_BOX_ARCHIVE_PATH DCR_ARCHIVE_SHA256 BACKUP_MAX_AGE_SECONDS MIGRATION_WINDOW_END_UTC PROOF_DIR NEW_STACK STACK_RELEASE; do printf '%s=%q\n' "$name" "${!name}"; done
+ for name in RELEASE_SHA DCR_WINDOW_ID DCR_BOX_ARCHIVE_PATH DCR_ARCHIVE_SHA256 BACKUP_MAX_AGE_SECONDS MIGRATION_WINDOW_END_UTC BACKUP_NOT_BEFORE_UTC PROOF_DIR NEW_STACK STACK_RELEASE; do printf '%s=%q\n' "$name" "${!name}"; done
 } >"$PROOF_DIR/state.sh"
 chmod 0600 "$PROOF_DIR/state.sh"
 ```
@@ -451,15 +479,48 @@ while :; do
 done
 test "$(systemctl is-active commonswarm-postgres-backup.service || true)" = inactive
 test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
-python3 - /var/backups/commonswarm-postgres/status.json >"$PROOF_DIR/backup-gate.json" <<'PYCODE'
-import datetime,json,sys
-v=json.load(open(sys.argv[1]))
-assert all(v.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified'))
-verified=datetime.datetime.fromisoformat(v['verified_at'].replace('Z','+00:00'))
-age=(datetime.datetime.now(datetime.timezone.utc)-verified).total_seconds()
-assert 0<=age<=3600, 'FAIL: newest backup older than 3600s or clock drift; STOP'
-assert v.get('destination','').startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/')
-print(json.dumps({'backup_gate':'PASS','verified_at':verified.isoformat(),'age_seconds':age,'max_age_seconds':3600}))
+python3 - /var/backups/commonswarm-postgres/status.json "$BACKUP_NOT_BEFORE_UTC" >"$PROOF_DIR/backup-gate.json" <<'PYCODE'
+import datetime,json,pathlib,re,subprocess,sys
+root=pathlib.Path('/var/backups/commonswarm-postgres'); prefix='r2:yulan-vps-1-backups/000-commonswarm-postgres'
+def read_remote(args):
+ result=subprocess.run(['rclone']+args,text=True,capture_output=True,timeout=60)
+ assert result.returncode==0, 'FAIL: backup inventory/COMPLETE read failed; STOP'
+ return result.stdout
+entries=read_remote(['lsf',prefix,'--dirs-only','--max-depth','1']).splitlines()
+names=sorted([n.rstrip('/') for n in entries if re.fullmatch(r'\d{8}T\d{6}Z-[a-f0-9]{32}/?',n)],reverse=True)
+complete=None
+for name in names:
+ destination=prefix+'/'+name
+ files=read_remote(['lsf',destination,'--files-only','--max-depth','1']).splitlines()
+ if 'COMPLETE.json' in files:
+  complete=json.loads(read_remote(['cat',destination+'/COMPLETE.json'])); break
+assert isinstance(complete,dict), 'FAIL: no COMPLETE backup; STOP'
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert v['ok'] is True
+for k in ('database_bytes_verified','object_bytes_verified'):
+ assert v[k] is True and complete[k] is True
+assert complete['format']=='commonswarm-backup-v1' and complete['destination']==destination==v['destination']
+assert type(complete['objects']) is int and complete['objects']>=0 and complete['objects']==v['objects']
+assert complete['verified_at']==v['verified_at']
+# run-backup.sh names the artifact immediately before dump-database.sh. The
+# COMPLETE/status contract has no started_at field; derive start from that
+# canonical artifact basename, matched byte-for-byte to the offsite marker.
+local=[f for f in root.glob('*/COMPLETE.json') if re.fullmatch(r'\d{8}T\d{6}Z-[a-f0-9]{12}',f.parent.name)
+       and not f.is_symlink() and json.loads(f.read_text())==complete]
+assert len(local)==1, 'FAIL: missing/ambiguous COMPLETE start artifact; STOP'
+assert not local[0].parent.is_symlink() and local[0].resolve(strict=True)==local[0]
+utc=datetime.timezone.utc
+started=datetime.datetime.strptime(local[0].parent.name[:16],'%Y%m%dT%H%M%SZ').replace(tzinfo=utc)
+assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',sys.argv[2])
+not_before=datetime.datetime.strptime(sys.argv[2],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=utc)
+verified=datetime.datetime.fromisoformat(complete['verified_at'].replace('Z','+00:00'))
+assert verified.utcoffset()==datetime.timedelta(0)
+now=datetime.datetime.now(utc); age=(now-started).total_seconds()
+uploaded=datetime.datetime.strptime(name[:16],'%Y%m%dT%H%M%SZ').replace(tzinfo=utc)
+assert not_before<=started<=uploaded<=verified<=now and 0<=age<=3600, 'FAIL: stale/pre-request backup or clock skew; STOP'
+print(json.dumps({'backup_gate':'PASS','started_at':started.isoformat(),'not_before':not_before.isoformat(),
+ 'verified_at':verified.isoformat(),'age_seconds':age,'max_age_seconds':3600,'complete':True,
+ 'database_bytes_verified':True,'object_bytes_verified':True}))
 PYCODE
 test "$(date -u +%s)" -le "$(date -u -d "$MIGRATION_WINDOW_END_UTC" +%s)"
 touch "$PROOF_DIR/backup-ready.txt"
@@ -481,15 +542,48 @@ test "$(date -u +%s)" -le "$(date -u -d "$MIGRATION_WINDOW_END_UTC" +%s)"
 test -f "$PROOF_DIR/preflight.txt" && test -f "$PROOF_DIR/backup-ready.txt"
 test "$(systemctl is-active commonswarm-postgres-backup.service || true)" = inactive
 test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
-python3 - /var/backups/commonswarm-postgres/status.json >"$PROOF_DIR/backup-gate.json" <<'PYCODE'
-import datetime,json,sys
-v=json.load(open(sys.argv[1]))
-assert all(v.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified'))
-verified=datetime.datetime.fromisoformat(v['verified_at'].replace('Z','+00:00'))
-age=(datetime.datetime.now(datetime.timezone.utc)-verified).total_seconds()
-assert 0<=age<=3600, 'FAIL: newest backup older than 3600s or clock drift; STOP'
-assert v.get('destination','').startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/')
-print(json.dumps({'backup_gate':'PASS','verified_at':verified.isoformat(),'age_seconds':age,'max_age_seconds':3600}))
+python3 - /var/backups/commonswarm-postgres/status.json "$BACKUP_NOT_BEFORE_UTC" >"$PROOF_DIR/backup-gate.json" <<'PYCODE'
+import datetime,json,pathlib,re,subprocess,sys
+root=pathlib.Path('/var/backups/commonswarm-postgres'); prefix='r2:yulan-vps-1-backups/000-commonswarm-postgres'
+def read_remote(args):
+ result=subprocess.run(['rclone']+args,text=True,capture_output=True,timeout=60)
+ assert result.returncode==0, 'FAIL: backup inventory/COMPLETE read failed; STOP'
+ return result.stdout
+entries=read_remote(['lsf',prefix,'--dirs-only','--max-depth','1']).splitlines()
+names=sorted([n.rstrip('/') for n in entries if re.fullmatch(r'\d{8}T\d{6}Z-[a-f0-9]{32}/?',n)],reverse=True)
+complete=None
+for name in names:
+ destination=prefix+'/'+name
+ files=read_remote(['lsf',destination,'--files-only','--max-depth','1']).splitlines()
+ if 'COMPLETE.json' in files:
+  complete=json.loads(read_remote(['cat',destination+'/COMPLETE.json'])); break
+assert isinstance(complete,dict), 'FAIL: no COMPLETE backup; STOP'
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert v['ok'] is True
+for k in ('database_bytes_verified','object_bytes_verified'):
+ assert v[k] is True and complete[k] is True
+assert complete['format']=='commonswarm-backup-v1' and complete['destination']==destination==v['destination']
+assert type(complete['objects']) is int and complete['objects']>=0 and complete['objects']==v['objects']
+assert complete['verified_at']==v['verified_at']
+# run-backup.sh names the artifact immediately before dump-database.sh. The
+# COMPLETE/status contract has no started_at field; derive start from that
+# canonical artifact basename, matched byte-for-byte to the offsite marker.
+local=[f for f in root.glob('*/COMPLETE.json') if re.fullmatch(r'\d{8}T\d{6}Z-[a-f0-9]{12}',f.parent.name)
+       and not f.is_symlink() and json.loads(f.read_text())==complete]
+assert len(local)==1, 'FAIL: missing/ambiguous COMPLETE start artifact; STOP'
+assert not local[0].parent.is_symlink() and local[0].resolve(strict=True)==local[0]
+utc=datetime.timezone.utc
+started=datetime.datetime.strptime(local[0].parent.name[:16],'%Y%m%dT%H%M%SZ').replace(tzinfo=utc)
+assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',sys.argv[2])
+not_before=datetime.datetime.strptime(sys.argv[2],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=utc)
+verified=datetime.datetime.fromisoformat(complete['verified_at'].replace('Z','+00:00'))
+assert verified.utcoffset()==datetime.timedelta(0)
+now=datetime.datetime.now(utc); age=(now-started).total_seconds()
+uploaded=datetime.datetime.strptime(name[:16],'%Y%m%dT%H%M%SZ').replace(tzinfo=utc)
+assert not_before<=started<=uploaded<=verified<=now and 0<=age<=3600, 'FAIL: stale/pre-request backup or clock skew; STOP'
+print(json.dumps({'backup_gate':'PASS','started_at':started.isoformat(),'not_before':not_before.isoformat(),
+ 'verified_at':verified.isoformat(),'age_seconds':age,'max_age_seconds':3600,'complete':True,
+ 'database_bytes_verified':True,'object_bytes_verified':True}))
 PYCODE
 test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 0
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$APPLY_SQL"
@@ -610,6 +704,8 @@ test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = f
 
 printf '\\i /proof/20261002000001-rollback-catalog.sql\nSELECT :\x27rollback_ok\x27::boolean;\n' >"$APPLY_SQL"
 test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
+release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' >"$PROOF_DIR/cron-after.txt"
+cmp -s "$PROOF_DIR/cron-before.txt" "$PROOF_DIR/cron-after.txt"
 printf 'version=20261002000001 ledger=0 rollback=t forward=f\n' >"$PROOF_DIR/schema-rollback.txt"
 ```
 
@@ -618,7 +714,8 @@ printf 'version=20261002000001 ledger=0 rollback=t forward=f\n' >"$PROOF_DIR/sch
 The adapted baseline/preflight/open/enable blocks retain the existing procedure:
 require ON; measure edge source instead of eb2a87ac; use curl/8.7.1 only with
 status-only JSON receipts; keep Caddy active and byte-identical while both
-flags enforce OFF; enforce the 240s receipt. Other blocks are referenced
+flags enforce OFF; Caddy routes are installed before enable; enforce the 240s
+receipt. Other blocks are referenced
 **unchanged** from RELEASE_SHA through dcr-oauth-reference. Never run original
 baseline/preflight/open/enable alongside these. Snapshot recovery is preserved.
 
@@ -807,6 +904,14 @@ print('reference='+sys.argv[2]+' sha256='+hashlib.sha256(p.read_bytes()).hexdige
 PYCODE
 /bin/bash -n "$STEP_FILE"
 case "$HM37_STEP" in
+ hm37-oauth-close)
+  test "${DCR_CLOSE_VERIFIED:-}" = yes
+  test -f "$DCR_SCHEMA_PROOF/close-on-verified.txt"
+  . "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"
+  test "$(hm37_baseline_mode)" = on
+  . "$STEP_FILE"
+  touch "$DCR_SCHEMA_PROOF/oauth-closed.txt"
+  ;;
  hm37-oauth-build|hm37-oauth-inputs|hm37-oauth-release-off|hm37-mcp-route-probes)
   . "$DCR_SCHEMA_PROOF/state.sh"; . "$DB_SESSION"
   test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
@@ -1027,6 +1132,20 @@ printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%
   "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" \
   "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" "$EDGE_DIR" >"$STATE"
 cat >>"$STATE" <<'SH'
+dcr_run_step() {
+  local step_file="$DCR_SCHEMA_PROOF/marked-$1.sh"
+  python3 - "$DCR_SCHEMA_PROOF/source/docs/evidence/2026-10-02-dcr-release/RELEASE.md" "$1" "$step_file" <<'PYCODE'
+import os,pathlib,re,sys
+fence=chr(96)*3
+blocks=re.findall(r'^'+fence+r'sh\n(.*?)^'+fence+'$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
+assert len(found)==1
+p=pathlib.Path(sys.argv[3]); assert not p.is_symlink()
+p.write_text(found[0]); os.chmod(p,0o600)
+PYCODE
+  /bin/bash -n "$step_file"
+  . "$step_file"
+}
 prepare_off_inputs() {
 python3 - "$SECRET_STAGE" "$1" "$BASELINE_MCP_MODE" "$OAUTH_RELEASE_DIR" <<'PY' || return 1
 import os, pathlib, re, sys
@@ -1126,7 +1245,8 @@ healthy() {
 rollback_to_off() {
   local off_compose_input="${1:-compose.off.env}"
   caddy_sites_import || return 1
-  cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
+  { cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" ||
+    cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy"; } || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.off.env" /etc/commonswarm-oauth/service.env || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/$off_compose_input" /etc/commonswarm-oauth/compose.env || return 1
   cat "$SECRET_STAGE/edge.off.env" >/home/commonswarm/.env || return 1
@@ -1203,18 +1323,25 @@ recover_baseline() {
   fi
 }
 outage_receipt() {
-  test -f "$PROOF_DIR/mcp-503-start.epoch" || return 0
-  test ! -e "$PROOF_DIR/mcp-503-receipt.txt" || return 0
-  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/mcp-503-end.utc" || return 1
-  date -u +%s >"$PROOF_DIR/mcp-503-end.epoch" || return 1
-  python3 - "$PROOF_DIR" <<'PY' || return 1
+  local prefix="${DCR_OUTAGE_PREFIX:-mcp-503}"
+  test -f "$PROOF_DIR/$prefix-start.epoch" || return 0
+  test ! -e "$PROOF_DIR/$prefix-receipt.txt" || return 0
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/$prefix-end.utc" || return 1
+  date -u +%s >"$PROOF_DIR/$prefix-end.epoch" || return 1
+  python3 - "$PROOF_DIR" "$prefix" <<'PY' || return 1
 import pathlib, sys
-proof=pathlib.Path(sys.argv[1]); start=int((proof/'mcp-503-start.epoch').read_text()); end=int((proof/'mcp-503-end.epoch').read_text())
+proof=pathlib.Path(sys.argv[1]); prefix=sys.argv[2]; assert prefix in ('mcp-503','mcp-recovery-503')
+start=int((proof/(prefix+'-start.epoch')).read_text()); end=int((proof/(prefix+'-end.epoch')).read_text())
 assert end>=start, 'UTC clock moved backwards'
-receipt='503 window start='+ (proof/'mcp-503-start.utc').read_text().strip()+' end='+ (proof/'mcp-503-end.utc').read_text().strip()+' duration_seconds='+str(end-start)+'\n'
-(proof/'mcp-503-receipt.txt').write_text(receipt)
-print(receipt,end='')
-assert end-start<=240, 'FAIL: MCP outage exceeded MAX_MCP_OUTAGE_SECONDS=240; STOP'
+receipt='503 window start='+ (proof/(prefix+'-start.utc')).read_text().strip()+' end='+ (proof/(prefix+'-end.utc')).read_text().strip()+' duration_seconds='+str(end-start)+'\n'
+(proof/(prefix+'-receipt.txt')).write_text(receipt)
+total=end-start
+if prefix=='mcp-recovery-503':
+ forward_start=int((proof/'mcp-503-start.epoch').read_text()); forward_end=int((proof/'mcp-503-end.epoch').read_text())
+ assert forward_start<=forward_end<=start
+ total+=forward_end-forward_start
+print(receipt+'total_outage_seconds='+str(total),end='\n')
+assert total<=240, 'FAIL: MCP outage exceeded MAX_MCP_OUTAGE_SECONDS=240; STOP'
 PY
 }
 oauth_memory_gate() {
@@ -1243,6 +1370,7 @@ prepare_off_inputs "$BASELINE_OAUTH_IMAGE" || { echo 'FAIL hm37-oauth-open REQ 2
 cp "$SECRET_STAGE/compose.env" "$SECRET_STAGE/compose.baseline.off.env" || exit 1
 caddy_sites_import || exit 1
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
+touch "$PROOF_DIR/open-ready.txt"
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
 
@@ -1262,7 +1390,8 @@ REMAINING=$((180 - $(date -u +%s) + $(cat "$PROOF_DIR/mcp-503-start.epoch")))
 test "$REMAINING" -gt 0 && test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
 
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.off.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
-cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy changed since snapshot; stop and report' >&2; exit 1; }
+test -f "$DCR_SCHEMA_PROOF/caddy-applied.txt" && test -f "$DCR_SCHEMA_PROOF/caddy-off-verified.txt"
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy" || { echo 'FAIL: Caddy candidate changed; stop and report' >&2; exit 1; }
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
 test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
 switch_on() {
@@ -1447,7 +1576,7 @@ try {
 } catch { console.error("FAIL: management binding readiness"); process.exitCode=1; }
 finally { await bindings.closeManagement(); }
 ' || return 1
-  cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
+  cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy" || return 1
 }
 declare -f switch_on >"$PROOF_DIR/dcr-enable-helper.sh"
 chmod 0600 "$PROOF_DIR/dcr-enable-helper.sh"
@@ -1467,13 +1596,13 @@ fi
 set -euo pipefail
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 test "$(hm37_baseline_mode)" = on
-cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-before.caddy"
+cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy"
 (cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
 python3 - "$PROOF_DIR" "$DCR_SCHEMA_PROOF" <<'PYCODE'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); schema=pathlib.Path(sys.argv[2]); text=(p/'mcp-503-receipt.txt').read_text()
 m=re.search(r'duration_seconds=([0-9]+)',text); assert m and int(m[1])<=240
-(schema/'oauth-verified.txt').write_text('ON; MCP/apex Caddy unchanged; outage<=240\n')
+(schema/'oauth-verified.txt').write_text('ON; reviewed MCP candidate/apex unchanged; outage<=240\n')
 PYCODE
 ```
 
@@ -1487,7 +1616,10 @@ Only /etc/caddy/sites/20-commonswarm-mcp.caddy is replaced. Apex
 five checked 3490 placeholders and replaces the dark template resource block
 with the already-live ON import. Comparison to old bytes plus only these three
 substitutions refuses unrelated changes, including certificates/log filters.
-Copy + SHA-256 survives OAuth close for exact rollback.
+Copy + SHA-256 and secret baseline snapshots remain available through part 4.
+The candidate keeps the active resource import while flags enforce OFF.
+Validation, reload and OFF probes together have a 30s share of the 180s forward
+budget (TERM at the cap, at most 1s kill grace; no next forward step on timeout). Failure or overrun goes to dcr-caddy-failure; no forward retry.
 
 ```sh
 # step: dcr-public-helper
@@ -1500,12 +1632,14 @@ python3 - "$DCR_SCHEMA_PROOF" "$1" <<'PY'
 import json,pathlib,re,sys,urllib.error,urllib.parse,urllib.request
 proof=pathlib.Path(sys.argv[1]); phase=sys.argv[2]; rows=[]
 receipt=proof/('public-'+phase+'.json'); issuer='https://mcp.commonswarm.com'
+off=phase in ('caddy-off','rollback-off'); rollback=phase in ('rollback','rollback-off')
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kwargs): return None
 opener=urllib.request.build_opener(NoRedirect())
 def request(label,url,method='GET',payload=None,form=False):
  parsed=urllib.parse.urlsplit(url)
- assert parsed.scheme=='https' and parsed.netloc=='mcp.commonswarm.com' and not parsed.fragment
+ assert ((parsed.scheme=='https' and parsed.netloc=='mcp.commonswarm.com') or
+         (phase=='caddy-off' and parsed.scheme=='http' and parsed.netloc=='127.0.0.1:3490')) and not parsed.fragment
  headers={'User-Agent':'curl/8.7.1','Accept':'application/json','Content-Type':'application/x-www-form-urlencoded' if form else 'application/json'}
  data=payload if isinstance(payload,bytes) else json.dumps(payload).encode() if payload is not None else None
  try:
@@ -1530,23 +1664,36 @@ try:
  discovery=None
  for path in ['/.well-known/openid-configuration','/.well-known/oauth-authorization-server']:
   s,t,v,_,_=request(path,issuer+path); assert s==200 and t=='application/json' and v.get('issuer')==issuer
-  if phase!='rollback':
+  if not rollback and not off:
    assert 'registration_endpoint' in v and 'pushed_authorization_request_endpoint' not in v
    assert v.get('userinfo_endpoint')==issuer+'/me' and v.get('end_session_endpoint')==issuer+'/session/end'
    assert v.get('registration_endpoint')==issuer+'/reg'
   if discovery is None: discovery=v
- s,t,v,_,h=request('mcp-anonymous',issuer+'/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}})
- assert s==401 and t=='application/json'
- challenge=h.get('WWW-Authenticate','')
- assert re.search(r'\bBearer\b',challenge,re.I) and 'resource_metadata="https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp"' in challenge
- s,t,v,_,_=request('resource-metadata',issuer+'/.well-known/oauth-protected-resource/mcp')
- assert s==200 and t=='application/json' and v.get('resource')==issuer+'/mcp'
- if phase!='rollback':
-  for method in ['GET','POST']:
-   s,t,v,_,_=request('userinfo-'+method,discovery['userinfo_endpoint'],method,b'' if method=='POST' else None,form=True)
-   assert s==401 and t=='application/json' and v.get('error')=='invalid_token'
-  s,t,v,body,_=request('end-session',discovery['end_session_endpoint']); assert s==200 and t=='text/html'
-  assert b'/session/end/confirm' in body and b'node_modules' not in body
+ if off:
+  s,t,v,_,_=request('mcp-off',issuer+'/mcp','POST',{})
+  assert s==503 and t=='application/json' and v.get('error')=='feature_disabled'
+  s,t,v,_,_=request('resource-metadata-off',issuer+'/.well-known/oauth-protected-resource/mcp')
+  assert s==503 and t=='application/json' and v.get('error')=='feature_disabled'
+  if not rollback:
+   routes=[('/reg','POST'),('/me','GET'),('/me','POST'),('/session/end','GET'),
+           ('/session/end/confirm','POST'),('/session/end/success','GET')]
+   for path,method in routes:
+    for base in ['http://127.0.0.1:3490',issuer]:
+     s,t,v,_,_=request(('local' if base.startswith('http:') else 'public')+path+'-'+method,base+path,method,b'' if method=='POST' else None,form=True)
+     assert s==503 and t=='application/json' and v.get('error')=='authorization_service_disabled'
+ else:
+  s,t,v,_,h=request('mcp-anonymous',issuer+'/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}})
+  assert s==401 and t=='application/json'
+  challenge=h.get('WWW-Authenticate','')
+  assert re.search(r'\bBearer\b',challenge,re.I) and 'resource_metadata="https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp"' in challenge
+  s,t,v,_,_=request('resource-metadata',issuer+'/.well-known/oauth-protected-resource/mcp')
+  assert s==200 and t=='application/json' and v.get('resource')==issuer+'/mcp'
+  if not rollback:
+   for method in ['GET','POST']:
+    s,t,v,_,_=request('userinfo-'+method,discovery['userinfo_endpoint'],method,b'' if method=='POST' else None,form=True)
+    assert s==401 and t=='application/json' and v.get('error')=='invalid_token'
+   s,t,v,body,_=request('end-session',discovery['end_session_endpoint']); assert s==200 and t=='text/html'
+   assert b'/session/end/confirm' in body and b'node_modules' not in body
  if phase=='dcr':
   payload={'redirect_uris':['https://dcr-release-probe.invalid/callback'],'token_endpoint_auth_method':'none','grant_types':['authorization_code'],'response_types':['code']}
   # POST target comes from discovery, never hard-coded /register.
@@ -1561,6 +1708,7 @@ except Exception:
  raise SystemExit('FAIL DCR public status/media/contract; see receipt; STOP') from None
 PY
 }
+
 declare -f dcr_public_probe >"$DCR_SCHEMA_PROOF/public-helper.sh"
 chmod 0600 "$DCR_SCHEMA_PROOF/public-helper.sh"
 ```
@@ -1570,9 +1718,16 @@ chmod 0600 "$DCR_SCHEMA_PROOF/public-helper.sh"
 # readonly: no
 # host: box root /bin/bash
 set -euo pipefail
-trap 'echo "FAIL dcr-caddy-apply line $LINENO; run dcr-caddy-rollback; STOP" >&2' ERR
+trap 'echo "FAIL dcr-caddy-apply line $LINENO; run dcr-caddy-failure; STOP" >&2' ERR
 : "${DCR_SCHEMA_PROOF:?}"
-test -f "$DCR_SCHEMA_PROOF/oauth-verified.txt" && test ! -e "$DCR_SCHEMA_PROOF/closed.txt"
+test ! -e "$DCR_SCHEMA_PROOF/closed.txt"
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+test "$(hm37_baseline_mode)" = off
+REMAINING=$((180 - $(date -u +%s) + $(cat "$PROOF_DIR/mcp-503-start.epoch")))
+test "$REMAINING" -gt 0 && test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+CADDY_FORWARD_SECONDS=30
+if test "$REMAINING" -lt "$CADDY_FORWARD_SECONDS"; then CADDY_FORWARD_SECONDS=$REMAINING; fi
+dcr_caddy_forward() {
 (cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-before.caddy"
 test ! -L /etc/caddy/sites/20-commonswarm-mcp.caddy
@@ -1602,10 +1757,24 @@ systemctl reload caddy
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy"
 sha256sum /etc/caddy/sites/20-commonswarm-mcp.caddy >"$DCR_SCHEMA_PROOF/mcp-after.sha256"
 touch "$DCR_SCHEMA_PROOF/caddy-applied.txt"
+. "$DCR_SCHEMA_PROOF/public-helper.sh"
+dcr_run_step dcr-caddy-probes
+}
+declare -f dcr_caddy_forward >"$DCR_SCHEMA_PROOF/caddy-forward.sh"
+chmod 0600 "$DCR_SCHEMA_PROOF/caddy-forward.sh"
+export DCR_SCHEMA_PROOF OAUTH_RELEASE_SHA
+# Includes validation/reload/probes, bounded by both the Caddy share and global budget.
+timeout --signal=TERM --kill-after=1 "$CADDY_FORWARD_SECONDS" /bin/bash -euo pipefail -c \
+ '. "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"; . "$DCR_SCHEMA_PROOF/caddy-forward.sh"; dcr_caddy_forward'
+test $(( $(date -u +%s) - $(cat "$PROOF_DIR/mcp-503-start.epoch") )) -lt 180
+test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
 ```
 
-dcr-public-helper writes the helper before apply, so rollback probes work even
-if candidate installation/validation fails. dcr-caddy-probes runs its read-only branch.
+dcr-public-helper runs before OFF, so marked rollback extraction/probes are ready
+even if candidate generation/installation/validation fails. dcr-caddy-probes
+requires OFF and compares new routes with the service OFF response; it creates no client.
+OFF provider disables registration discovery; registration metadata is asserted
+only after enable in part 4.
 All public requests use curl/8.7.1, bounded timeout/body, no redirects/bearer.
 Part 4's single unused public client has a reserved .invalid redirect:
 no authenticated user, consent, grant or token. It expires after **30 days**;
@@ -1621,7 +1790,12 @@ route. Never retain client_id, metadata, cookies, Location or response body.
 set -euo pipefail
 : "${DCR_SCHEMA_PROOF:?}"
 . "$DCR_SCHEMA_PROOF/public-helper.sh"
-dcr_public_probe caddy
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+test "$(hm37_baseline_mode)" = off
+(cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
+dcr_public_probe caddy-off
+(cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
+touch "$DCR_SCHEMA_PROOF/caddy-off-verified.txt"
 ```
 
 ```sh
@@ -1639,9 +1813,12 @@ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-before.c
 runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl reload caddy
 (cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
+touch "$DCR_SCHEMA_PROOF/caddy-rollback-reloaded.txt"
 . "$DCR_SCHEMA_PROOF/public-helper.sh"
-dcr_public_probe rollback
-printf 'Exact previous MCP Caddy restored; outside ON boundary probes PASS\n'
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+MODE=$(hm37_baseline_mode)
+case "$MODE" in on) dcr_public_probe rollback;; off) dcr_public_probe rollback-off;; *) exit 1;; esac
+printf 'Exact previous MCP Caddy restored; outside probes PASS in mode %s\n' "$MODE"
 ```
 
 ## 4. PUBLIC PROBES
@@ -1659,7 +1836,7 @@ retest; these boundary probes do not claim them.
 # host: box root /bin/bash
 set -euo pipefail
 : "${DCR_SCHEMA_PROOF:?}"
-test -f "$DCR_SCHEMA_PROOF/caddy-applied.txt" && test ! -e "$DCR_SCHEMA_PROOF/public-dcr.json"
+test -f "$DCR_SCHEMA_PROOF/caddy-applied.txt" && test -f "$DCR_SCHEMA_PROOF/oauth-verified.txt" && test ! -e "$DCR_SCHEMA_PROOF/public-dcr.json"
 . "$DCR_SCHEMA_PROOF/public-helper.sh"
 dcr_public_probe dcr
 touch "$DCR_SCHEMA_PROOF/public-verified.txt"
@@ -1684,6 +1861,118 @@ test -f "$PROOF_DIR/public-verified.txt"
 release_psql_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/closed-ledger.txt"
 release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' >"$PROOF_DIR/cron-final.txt"
 cmp -s "$PROOF_DIR/cron-before.txt" "$PROOF_DIR/cron-final.txt"
+touch "$PROOF_DIR/final-readback-verified.txt"
+```
+
+Recovery and close use these marked blocks. dcr_run_step extracts only the
+exact archived plan's marked block; the reference wrapper extracts the original
+hm37-oauth-rollback unchanged. Both failure entries stop the forward run.
+Caddy rollback alone can be used while diagnosing without changing OAuth;
+these failed-run paths then return OAuth to baseline and close only verified ON.
+
+```sh
+# step: dcr-caddy-failure
+# readonly: no
+# host: box root /bin/bash; Caddy apply/probe failure only
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+dcr_run_step dcr-recover-baseline
+```
+
+```sh
+# step: dcr-public-failure
+# readonly: no
+# host: box root /bin/bash; public/final-readback failure only
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+dcr_run_step dcr-recover-baseline
+```
+
+```sh
+# step: dcr-recover-baseline
+# readonly: no
+# host: box root /bin/bash; any failed forward work, no retry
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+. "$DCR_SCHEMA_PROOF/public-helper.sh"
+export OAUTH_RELEASE_SHA DCR_SCHEMA_PROOF
+# Public checks may fail after an earlier ON receipt: measure the second OFF
+# interruption too, and count it with the original outage against 240s.
+if test -f "$PROOF_DIR/mcp-503-receipt.txt"; then
+ DCR_OUTAGE_PREFIX=mcp-recovery-503
+ test ! -e "$PROOF_DIR/$DCR_OUTAGE_PREFIX-start.epoch"
+ date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/$DCR_OUTAGE_PREFIX-start.utc"
+ date -u +%s >"$PROOF_DIR/$DCR_OUTAGE_PREFIX-start.epoch"
+ export DCR_OUTAGE_PREFIX
+fi
+# Restore Caddy BEFORE OAuth helpers, which require exact baseline Caddy bytes.
+# Probe failure in an unhealthy/mixed mode must not prevent baseline recovery.
+test ! -e "$DCR_SCHEMA_PROOF/caddy-rollback-reloaded.txt"
+if /bin/bash -euo pipefail -c '. "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"; dcr_run_step dcr-caddy-rollback'; then
+ printf 'Caddy rollback/reload/current-mode probes PASS\n'
+else
+ test -f "$DCR_SCHEMA_PROOF/caddy-rollback-reloaded.txt"
+ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-before.caddy"
+ (cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
+ echo 'Caddy bytes restored/reloaded; current-mode probes failed; baseline ON probes remain mandatory' >&2
+fi
+HM37_STEP=hm37-oauth-rollback
+export HM37_STEP OAUTH_RELEASE_SHA DCR_SCHEMA_PROOF
+# Receipt/budget failure may return nonzero after baseline ON was restored.
+# Preserve that failure while allowing explicit ON verification and safe close.
+if /bin/bash -euo pipefail -c '. "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"; dcr_run_step dcr-oauth-reference'; then
+ printf 'baseline rollback completed\n' >"$DCR_SCHEMA_PROOF/recovery-result.txt"
+else
+ printf 'baseline rollback reported failure; explicit ON verification required\n' >"$DCR_SCHEMA_PROOF/recovery-result.txt"
+fi
+dcr_run_step dcr-baseline-verify
+dcr_run_step dcr-oauth-close
+printf 'Recovered verified baseline ON and closed OAuth secrets; forward run FAILED\n'
+exit 1
+```
+
+```sh
+# step: dcr-baseline-verify
+# readonly: yes
+# host: box root /bin/bash
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+test "$(hm37_baseline_mode)" = on
+test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"
+test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE"
+for pair in 'service.env /etc/commonswarm-oauth/service.env' 'compose.env /etc/commonswarm-oauth/compose.env' 'edge.env /home/commonswarm/.env' 'mcp.caddy /etc/caddy/sites/20-commonswarm-mcp.caddy' 'management.baseline /etc/commonswarm-oauth/management-database-credentials'; do
+ read -r saved live <<<"$pair"
+ cmp -s "$SECRET_STAGE/$saved" "$live"
+done
+(cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
+MCP_EXPECTED_MODE=on mcp_route_probes
+oauth_memory_gate
+printf 'Verified baseline source/image/ON snapshots and ON probes\n' >"$DCR_SCHEMA_PROOF/baseline-on-verified.txt"
+```
+
+```sh
+# step: dcr-oauth-close
+# readonly: no
+# host: box root /bin/bash; ONLY final success or verified baseline recovery
+set -euo pipefail
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+test "$(hm37_baseline_mode)" = on
+if test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"; then
+ dcr_run_step dcr-baseline-verify
+else
+ test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_RELEASE_DIR"
+ test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")"
+ test -f "$DCR_SCHEMA_PROOF/oauth-verified.txt" && test -f "$DCR_SCHEMA_PROOF/public-verified.txt"
+ test -f "$DCR_SCHEMA_PROOF/final-readback-verified.txt"
+ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_SCHEMA_PROOF/mcp-candidate.caddy"
+ (cd "$DCR_SCHEMA_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
+ MCP_EXPECTED_MODE=on mcp_route_probes
+ oauth_memory_gate
+fi
+printf 'ON source/image/probes verified immediately before snapshot close\n' >"$DCR_SCHEMA_PROOF/close-on-verified.txt"
+DCR_CLOSE_VERIFIED=yes
+HM37_STEP=hm37-oauth-close
+dcr_run_step dcr-oauth-reference
 ```
 
 Cleanup is available beyond forward deadlines. Retain proofs, ledger/catalog
@@ -1700,6 +1989,10 @@ trap 'echo "FAIL dcr-schema-close: line $LINENO; report exact path/error; STOP" 
 test "$(id -u)" = 0
 test "$(command -v rm)" = /usr/bin/rm && test -x /usr/bin/rm && test ! -L /usr/bin/rm
 if test -f "$PROOF_DIR/closed.txt"; then echo 'dcr-schema-close: already closed'; exit 0; fi
+# Before OAuth open no service was changed; afterward OAuth close must prove ON first.
+if test -f "/home/commonswarm/oauth/release-proofs/$RELEASE_SHA/open-ready.txt"; then
+ test -f "$PROOF_DIR/oauth-closed.txt" && test -f "$PROOF_DIR/close-on-verified.txt"
+fi
 CLOSE_READBACK_FAILED=0
 if test -f "$PROOF_DIR/session-ready.txt"; then
  . "$DB_SESSION"
@@ -1772,7 +2065,18 @@ rm -f -- "$DCR_BOX_ARCHIVE_PATH" || { printf 'FAIL dcr-stage-abort: cleanup refu
 # host: box root /bin/bash
 set -euo pipefail
 : "${SECRET_STAGE:?exact reported path required}"
-test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm
+test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
+  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
+  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
+  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm
+# A completed OAuth open must use the gated close; partial open needs baseline ON proof.
+if test -n "${OAUTH_RELEASE_SHA:-}" && test -n "${DCR_SCHEMA_PROOF:-}"; then
+ test ! -f "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/open-ready.txt"
+ test "$(hm37_baseline_mode)" = on
+ test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$BASELINE_OAUTH_SHA"
+ test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE"
+ MCP_EXPECTED_MODE=on mcp_route_probes
+fi
 python3 - "$SECRET_STAGE" <<'PYCODE'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); pattern=r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}'
