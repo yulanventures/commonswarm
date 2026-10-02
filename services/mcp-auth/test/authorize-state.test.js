@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { ServerResponse } from "node:http";
-import { Readable } from "node:stream";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { PassThrough, Readable } from "node:stream";
 import { test } from "node:test";
 import { createLocalJWKSet, jwtVerify } from "jose";
 
@@ -33,19 +33,37 @@ function authorize(prompt, scope = "openid mcp", redirectUri = REDIRECT) {
   return `/authorize?${params}`;
 }
 
-function exchange(url, cookies = new Map(), body = "") {
-  const request = Readable.from(body ? [Buffer.from(body)] : []);
+function exchange(url, cookies = new Map(), body = "", { bufferedBody = false } = {}) {
+  const socket = new PassThrough();
+  socket.encrypted = true;
+  const request = bufferedBody ? new IncomingMessage(socket)
+    : Readable.from(body ? [Buffer.from(body)] : []);
+  if (bufferedBody) {
+    // HTTP headers can arrive with the first body bytes already buffered.
+    // The rest arrives in a later I/O turn, without opening a socket.
+    const bytes = Buffer.from(body);
+    request.push(bytes.subarray(0, Math.ceil(bytes.length / 2)));
+    setImmediate(() => {
+      request.push(bytes.subarray(Math.ceil(bytes.length / 2)));
+      request.complete = true;
+      request.push(null);
+    });
+  }
   Object.assign(request, {
     method: "GET", url, httpVersionMajor: 1, httpVersionMinor: 1,
     headers: { host: new URL(ISSUER).host, "x-forwarded-proto": "https",
       cookie: [...cookies].map(([key, value]) => `${key}=${value}`).join("; "), accept: "text/html" },
-    socket: { encrypted: true },
+    socket,
   });
   // Real Node headers/status semantics, but no socket and no listen(). Koa and
   // the production wrapper both run; only the final response bytes are captured.
   const response = new ServerResponse(request);
   response.body = "";
-  response.end = (body = "") => { response.body += String(body); };
+  response.end = (body = "") => {
+    response.body += String(body);
+    response.finished = true;
+    response.emit("finish");
+  };
   return { request, response };
 }
 
@@ -159,16 +177,26 @@ async function harness({ findAccount, redirectUri = REDIRECT, nativeLoopbackEnab
     }),
   });
   const cookies = new Map([[SESSION_COOKIE, BROWSER]]);
-  async function run(url, method = "GET", body = "", contentType = "application/x-www-form-urlencoded") {
-    const { request, response } = exchange(url, cookies, body);
+  async function run(url, method = "GET", body = "", contentType = "application/x-www-form-urlencoded",
+    options = {}) {
+    const { request, response } = exchange(url, cookies, body, options);
     request.method = method;
     if (method === "POST") {
       request.headers["content-type"] = contentType;
       if (url === "/token") request.headers.accept = "application/json";
       if (url.startsWith("/interaction/")) request.headers.origin = ISSUER;
-      request.headers["content-length"] = String(Buffer.byteLength(body));
+      if (options.chunked) request.headers["transfer-encoding"] = "chunked";
+      else request.headers["content-length"] = String(Buffer.byteLength(body));
     }
-    await handler(request, response);
+    if (options.bufferedBody) {
+      // A server request callback starts in an I/O turn, before nextTick stream
+      // events; invoking it from a promise continuation masks premature drains.
+      await new Promise((resolve, reject) => process.nextTick(() => {
+        handler(request, response).then(resolve, reject);
+      }));
+    } else {
+      await handler(request, response);
+    }
     for (const cookie of response.getHeader("set-cookie") ?? []) {
       const [pair] = cookie.split(";", 1);
       const index = pair.indexOf("=");
@@ -316,74 +344,99 @@ function assertConsentPolicy(response) {
 // code; production handlers and InteractionStore own consent. Only DB and the
 // lane-2 command transport use in-memory fixtures. No sockets or provider mocks.
 test("one workspace consent completes Claude authorization and token exchange", async (t) => {
-  for (const prompt of ["consent", undefined]) {
-    for (const home of ["explicit", "omitted"]) {
-      for (const priorGrant of ["none", "oidc-only", "resource-only", ...(prompt === "consent" ? ["complete"] : [])]) {
-        await t.test(`prompt ${prompt ?? "absent"}, home ${home}, prior grant ${priorGrant}`, async () => {
-          const h = await harness();
-          const session = await h.completedLogin();
-          if (priorGrant !== "none") {
-            const grant = new h.provider.Grant({ accountId: USER, clientId: CLIENT });
-            if (priorGrant !== "resource-only") grant.addOIDCScope("openid offline_access mcp");
-            if (priorGrant !== "oidc-only") grant.addResourceScope(RESOURCE, "mcp");
-            session.grantIdFor(CLIENT, await grant.save());
-            await session.persist();
-          }
-          const start = await h.run(authorize(prompt, "openid offline_access mcp"));
-          assert.equal(start.statusCode, 303);
-          const path = start.getHeader("location");
-          const page = await h.run(`${path}?redirect_uri=https://attacker.example/callback`);
-          assert.equal(page.statusCode, 200);
-          assertConsentPolicy(page);
-          const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
-          const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
-          const form = new URLSearchParams({ csrf_token: token, selection_version: version, workspace_ids: W1 });
-          if (home === "explicit") form.set("home_workspace_id", W1);
-          const consent = await h.run(`${path}/consent`, "POST", form.toString());
-          assert.equal(consent.statusCode, 303, "one valid workspace selection must be accepted");
-          const resume = new URL(consent.getHeader("location"));
-          assert.match(resume.pathname, /^\/authorize\/[^/]+$/u);
-          const finished = await h.run(resume.pathname);
-          assert.equal(finished.statusCode, 303);
-          const callback = new URL(finished.getHeader("location"), ISSUER);
-          assert.equal(callback.origin + callback.pathname, REDIRECT, "resume must issue a code, not another consent prompt");
-          assert.equal(callback.searchParams.get("error"), null);
-          assert.equal(callback.searchParams.get("state"), STATE);
-          assert.equal(callback.searchParams.get("iss"), ISSUER);
-          const code = callback.searchParams.get("code");
-          assert.ok(code);
-          const tokenResponse = await h.run("/token", "POST", new URLSearchParams({
-            grant_type: "authorization_code", client_id: CLIENT, redirect_uri: REDIRECT,
-            resource: RESOURCE, code, code_verifier: VERIFIER,
-          }).toString());
-          assert.equal(tokenResponse.statusCode, 200, "issued code must exchange successfully");
-          const tokens = JSON.parse(tokenResponse.body);
-          if (prompt === "consent") assert.ok(tokens.refresh_token);
-          assert.ok(tokens.id_token);
-          const jwks = JSON.parse((await h.run("/jwks")).body);
-          const verified = await jwtVerify(tokens.access_token, createLocalJWKSet(jwks), {
-            algorithms: ["ES256"], issuer: ISSUER, audience: RESOURCE,
+  for (const contentType of ["application/x-www-form-urlencoded", "application/x-www-form-urlencoded;charset=UTF-8"]) {
+    for (const prompt of ["consent", undefined]) {
+      for (const home of ["explicit", "omitted"]) {
+        for (const priorGrant of ["none", "oidc-only", "resource-only", ...(prompt === "consent" ? ["complete"] : [])]) {
+          await t.test(`${contentType}, prompt ${prompt ?? "absent"}, home ${home}, prior grant ${priorGrant}`, async () => {
+            const h = await harness();
+            const session = await h.completedLogin();
+            if (priorGrant !== "none") {
+              const grant = new h.provider.Grant({ accountId: USER, clientId: CLIENT });
+              if (priorGrant !== "resource-only") grant.addOIDCScope("openid offline_access mcp");
+              if (priorGrant !== "oidc-only") grant.addResourceScope(RESOURCE, "mcp");
+              session.grantIdFor(CLIENT, await grant.save());
+              await session.persist();
+            }
+            const start = await h.run(authorize(prompt, "openid offline_access mcp"));
+            assert.equal(start.statusCode, 303);
+            const path = start.getHeader("location");
+            const page = await h.run(`${path}?redirect_uri=https://attacker.example/callback`);
+            assert.equal(page.statusCode, 200);
+            assertConsentPolicy(page);
+            const token = /name="csrf_token" value="([^"]+)"/u.exec(page.body)[1];
+            const version = /name="selection_version" value="([^"]+)"/u.exec(page.body)[1];
+            const form = new URLSearchParams({ csrf_token: token, selection_version: version, workspace_ids: W1 });
+            if (home === "explicit") form.set("home_workspace_id", W1);
+            const consent = await h.run(`${path}/consent`, "POST", form.toString());
+            assert.equal(consent.statusCode, 303, "one valid workspace selection must be accepted");
+            const resume = new URL(consent.getHeader("location"));
+            assert.match(resume.pathname, /^\/authorize\/[^/]+$/u);
+            const finished = await h.run(resume.pathname);
+            assert.equal(finished.statusCode, 303);
+            const callback = new URL(finished.getHeader("location"), ISSUER);
+            assert.equal(callback.origin + callback.pathname, REDIRECT, "resume must issue a code, not another consent prompt");
+            assert.equal(callback.searchParams.get("error"), null);
+            assert.equal(callback.searchParams.get("state"), STATE);
+            assert.equal(callback.searchParams.get("iss"), ISSUER);
+            const code = callback.searchParams.get("code");
+            assert.ok(code);
+            const tokenParameters = {
+              grant_type: "authorization_code", client_id: CLIENT, redirect_uri: REDIRECT,
+              resource: RESOURCE, code, code_verifier: VERIFIER,
+            };
+            // Probe rejection with a real, redeemable code, then redeem it below:
+            // these errors must precede client auth/grant redemption and never be 500.
+            if (contentType === "application/x-www-form-urlencoded" && prompt === "consent" &&
+                home === "explicit" && priorGrant === "none") {
+              const rejectedJson = await h.run("/token", "POST", JSON.stringify(tokenParameters),
+                "application/json", { bufferedBody: true });
+              assert.equal(rejectedJson.statusCode, 400);
+              assert.equal(JSON.parse(rejectedJson.body).error, "invalid_request");
+              assert.match(JSON.parse(rejectedJson.body).error_description,
+                /only application\/x-www-form-urlencoded content-type bodies are supported/u);
+              for (const route of ["/token", "/health", "/authorize", `${path}/consent`]) {
+                // Routes without a body parser reject declared oversized bodies;
+                // both readers also enforce the bound for chunked requests.
+                for (const chunked of route === "/token" || route.endsWith("/consent") ? [false, true] : [false]) {
+                  const oversized = await h.run(route, "POST", "x".repeat(64 * 1024 + 1),
+                    contentType, { bufferedBody: true, chunked });
+                  assert.equal(oversized.statusCode, 413, `${route}, chunked ${chunked}`);
+                  assert.deepEqual(JSON.parse(oversized.body), { error: "request_too_large" });
+                }
+              }
+            }
+            const tokenResponse = await h.run("/token", "POST", new URLSearchParams(tokenParameters).toString(),
+              contentType, { bufferedBody: true });
+            assert.equal(tokenResponse.statusCode, 200, tokenResponse.body);
+            const tokens = JSON.parse(tokenResponse.body);
+            if (prompt === "consent") assert.ok(tokens.refresh_token);
+            assert.ok(tokens.id_token);
+            const jwks = JSON.parse((await h.run("/jwks")).body);
+            const verified = await jwtVerify(tokens.access_token, createLocalJWKSet(jwks), {
+              algorithms: ["ES256"], issuer: ISSUER, audience: RESOURCE,
+            });
+            assert.equal(verified.payload.sub, USER);
+            assert.equal(verified.payload.scope, "mcp");
+            const bound = h.interactions.get(path.split("/").at(-1));
+            assert.equal(verified.payload.grant_id, bound.provider_grant_id);
+            assert.equal(bound.completed, true);
+            assert.equal(bound.selection_version, Number(version) + 1);
+            assert.ok(bound.consent_token_consumed_at);
+            assert.deepEqual(h.commands.map(({ body }) => body.command.kind), [
+              "begin_hosted_mcp_grant", "consent_hosted_mcp_workspace", "activate_hosted_mcp_grant",
+            ]);
+            const begin = h.commands[0];
+            assert.equal(begin.identity.userId, USER);
+            assert.equal(begin.body.command.home_workspace_id, W1);
+            assert.equal(begin.body.command.provider_grant_id, bound.provider_grant_id);
+            assert.equal(begin.body.command.grant_id, bound.commonswarm_grant_id);
+            assert.equal(begin.body.command.manifest_digest, bound.manifest_digest.toString("hex"));
+            const replay = await h.run(`${path}/consent`, "POST", form.toString());
+            assert.equal(replay.statusCode, 410);
+            assert.equal(h.commands.length, 3);
           });
-          assert.equal(verified.payload.sub, USER);
-          assert.equal(verified.payload.scope, "mcp");
-          const bound = h.interactions.get(path.split("/").at(-1));
-          assert.equal(verified.payload.grant_id, bound.provider_grant_id);
-          assert.equal(bound.completed, true);
-          assert.equal(bound.selection_version, Number(version) + 1);
-          assert.ok(bound.consent_token_consumed_at);
-          assert.deepEqual(h.commands.map(({ body }) => body.command.kind), [
-            "begin_hosted_mcp_grant", "consent_hosted_mcp_workspace", "activate_hosted_mcp_grant",
-          ]);
-          const begin = h.commands[0];
-          assert.equal(begin.identity.userId, USER);
-          assert.equal(begin.body.command.home_workspace_id, W1);
-          assert.equal(begin.body.command.provider_grant_id, bound.provider_grant_id);
-          assert.equal(begin.body.command.grant_id, bound.commonswarm_grant_id);
-          assert.equal(begin.body.command.manifest_digest, bound.manifest_digest.toString("hex"));
-          const replay = await h.run(`${path}/consent`, "POST", form.toString());
-          assert.equal(replay.statusCode, 410);
-          assert.equal(h.commands.length, 3);
-        });
+        }
       }
     }
   }
