@@ -14,7 +14,7 @@ import { renderConsentPage } from "./interaction-page.js";
 import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE_SCOPES } from "./provider.js";
 
-function respond(response, status, body, headers = {}) {
+export function respond(response, status, body, headers = {}) {
   response.writeHead(status, {
     ...INTERACTION_SECURITY_HEADERS,
     "content-type": "application/json; charset=utf-8",
@@ -32,7 +32,7 @@ function respondHtml(response, status, body, headers) {
   response.end(body);
 }
 
-async function readBody(request, maximumBytes, timeoutMs) {
+export async function readBody(request, maximumBytes, timeoutMs) {
   const chunks = [];
   let received = 0;
   let timedOut = false;
@@ -63,10 +63,12 @@ async function readBody(request, maximumBytes, timeoutMs) {
     return {
       format: "form",
       value: {
+        ...Object.fromEntries(parameters),
         selection_version: Number(parameters.get("selection_version")),
         csrf_token: parameters.get("csrf_token"),
         workspace_ids: parameters.getAll("workspace_ids"),
         home_workspace_id: parameters.get("home_workspace_id"),
+        scope_names: parameters.getAll("scope_names"),
       },
     };
   }
@@ -77,7 +79,7 @@ async function readBody(request, maximumBytes, timeoutMs) {
   }
 }
 
-function identity(session) {
+export function identity(session) {
   return {
     userId: session.user_id,
     email: session.user_email,
@@ -111,7 +113,7 @@ async function clientConsentDisplay(provider, clientId, redirectUri) {
   };
 }
 
-async function ensureSession(request, response, store) {
+export async function ensureSession(request, response, store) {
   const supplied = parseCookies(request.headers.cookie).get(SESSION_COOKIE);
   if (supplied) {
     const session = await store.requireSession(supplied);
@@ -122,7 +124,7 @@ async function ensureSession(request, response, store) {
   return { id, session: await store.requireSession(id) };
 }
 
-function bindingFromDetails(uid, sessionId, details, session) {
+export function bindingFromDetails(uid, sessionId, details, session) {
   const params = details?.params;
   if (!params || typeof params !== "object" || Array.isArray(params) ||
       Array.isArray(params.resource) || typeof params.resource !== "string" ||
@@ -177,7 +179,7 @@ export function createInteractionHandler({
   maxBodyBytes = 64 * 1024,
   bodyReadTimeoutMs = 10_000,
 }) {
-  return async function handleInteraction(request, response, url) {
+  return async function handleInteraction(request, response, url, suppliedDetails) {
     if (url.pathname === "/oauth/callback/gotrue") {
       const interactionUid = url.searchParams.get("interaction");
       const state = url.searchParams.get("state");
@@ -225,7 +227,7 @@ export function createInteractionHandler({
     const browser = await ensureSession(request, response, store);
     let details;
     try {
-      details = await provider.interactionDetails(request, response);
+      details = suppliedDetails ?? await provider.interactionDetails(request, response);
     } catch (error) {
       // The pinned provider uses this class for missing/expired interactions,
       // missing interaction cookies, and unavailable/changed provider sessions.
@@ -234,6 +236,14 @@ export function createInteractionHandler({
     }
     if (details.uid !== interactionUid) {
       throw new InteractionStateError("interaction_mismatch");
+    }
+    // Permanent defense: this handler can only create hosted MCP authority.
+    // Never rely on resource metadata or an issuance flag to enforce this.
+    const resources = Array.isArray(details.params?.resource)
+      ? details.params.resource : [details.params?.resource];
+    if (resources.includes("https://api.commonswarm.com/admin")) {
+      respond(response, 400, { error: "invalid_target" });
+      return true;
     }
     const bound = await store.bindInteraction(
       bindingFromDetails(interactionUid, browser.id, details, browser.session),
