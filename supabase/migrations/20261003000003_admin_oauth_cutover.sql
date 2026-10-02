@@ -148,7 +148,7 @@ BEGIN
     OR b.initial_issued_at IS NULL OR NEW.issued_at<b.initial_issued_at
     OR NEW.issued_at>clock_timestamp()+interval '5 seconds' OR NEW.expires_at>least(b.expires_at,b.refresh_deadline)
     OR NOT (NEW.scope_names<@b.scope_names) OR e IS NULL
-    OR e->>'type' IS DISTINCT FROM CASE WHEN NEW.generation=0 THEN 'AdminCredentialIssued' ELSE 'AdminCredentialRotated' END
+    OR e->>'type' IS DISTINCT FROM (CASE WHEN NEW.generation=0 THEN 'AdminCredentialIssued' ELSE 'AdminCredentialRotated' END)
     OR e->>'grant_id' IS DISTINCT FROM b.admin_grant_id::text
     OR e->'payload'->>'provider_grant_id' IS DISTINCT FROM b.provider_grant_id
     OR e->'payload'->>'generation' IS DISTINCT FROM NEW.generation::text
