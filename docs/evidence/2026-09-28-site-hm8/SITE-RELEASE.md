@@ -1,6 +1,6 @@
 # CommonSwarm site release — HM lane 8
 
-**Release:** `4d6a06509f9abf1aefac8c88ec00280d025df673`
+**Release:** `603a206e52f363cff74127d6143c5fcd3ec2770a`
 
 **Baseline source:** `109e4db75f673ddd8003662dc1882159dd72b1b2`
 
@@ -11,13 +11,14 @@ Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
 blocks use `/bin/bash` 3.2. They never assign `HOME`, print a credential, run
 Docker, deploy a second SHA, change Caddy or DNS, or restart a service.
 
-Lane 8 starts only after HM37 WINDOW A closes with
-`eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` live and hosted MCP dark. It does
-not wait for WINDOW B. The site SHA is an ancestor of that edge SHA. While MCP
-is dark, no hosted connection exists, so customers see Connected apps empty and
-cannot reach a revoke. The live grant-and-seat revoke control moves to HM37
-WINDOW B before MCP enable; lane 8 keeps only the headless-browser empty-state
-control.
+Lane 8 requires the successful HM37 WINDOW A close receipt for
+`eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`. Its recorded dark state is
+historical. Hosted MCP is now ON under HezLead's ruling; `site-03-go-record`
+checks current protected-resource metadata and the unauthenticated MCP POST
+before GO. Lane 8 does not wait for WINDOW B. Connected apps may be EMPTY or
+POPULATED; the full headless-browser control records the actual successful
+list state. All browser actions remain view-only; live grant-and-seat revoke
+behavior is outside this site release's proof.
 
 ## 1. Named prompt inputs
 
@@ -29,7 +30,7 @@ by an absolute path and is read without printing it.
 | `HM37_A_CLOSE_RECEIPT` | Anvil, produced only by WINDOW A | absolute regular non-symlink mode-`0600` WINDOW A close receipt; the only A-to-lane-8 handoff |
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
-| `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `4d6a06509f9abf1aefac8c88ec00280d025df673` |
+| `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `603a206e52f363cff74127d6143c5fcd3ec2770a` |
 | `SITE_BASE_SHA` | Anvil, full SHA from baseline receipt | `109e4db75f673ddd8003662dc1882159dd72b1b2` |
 | `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
 | `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute task-owned empty directory before `site-00-source-checkout` |
@@ -41,7 +42,7 @@ by an absolute path and is read without printing it.
 {"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
 {"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for the lane 8 release."}
 {"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing the lane 8 plan."}
-{"name":"SITE_RELEASE_SHA","format":"literal:4d6a06509f9abf1aefac8c88ec00280d025df673","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
+{"name":"SITE_RELEASE_SHA","format":"literal:603a206e52f363cff74127d6143c5fcd3ec2770a","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
 {"name":"SITE_BASE_SHA","format":"literal:109e4db75f673ddd8003662dc1882159dd72b1b2","supplier":"Anvil","meaning":"Measured full baseline source commit."}
 {"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
 {"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
@@ -74,7 +75,7 @@ close=PASS
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_BASE_SHA:?named input missing}"
   case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
-  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
   test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
   test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
   test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
@@ -108,7 +109,7 @@ and derives the ID. Nobody types a time or ID.
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
   : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
-  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
   test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
   for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
@@ -324,7 +325,7 @@ positive controls.
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
-  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
   test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
   git merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
@@ -453,7 +454,7 @@ def state():
       return {userId, selectedWorkspace:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
         workspaceIds:workspaces.map(item=>item.dataset.workspaceId),
         display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
-        signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden')};
+        signedOut:!document.querySelector('[data-panel="signed-out"]')?.hasAttribute('hidden')};
     })()""")
 observed=state()
 signin_attempted=False
@@ -607,7 +608,7 @@ These are fixed assertions, not window decisions:
   test "${#SITE_PLAN_COMMIT}" -eq 40
   case "$SITE_PLAN_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
   case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
-  test "$SITE_RELEASE_SHA" = 4d6a06509f9abf1aefac8c88ec00280d025df673
+  test "$SITE_RELEASE_SHA" = 603a206e52f363cff74127d6143c5fcd3ec2770a
   test "$SITE_BASE_SHA" = 109e4db75f673ddd8003662dc1882159dd72b1b2
   grep -qFx 'close=PASS' "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
   grep -qFx 'PIN=PASS' "$SITE_EVIDENCE/site-03-pin.txt"
@@ -615,11 +616,38 @@ These are fixed assertions, not window decisions:
   test -f "$SITE_EVIDENCE/site-03-browser-preflight.json"
   test ! -e "$SITE_EVIDENCE/GO.txt"
   umask 077
+  python3 - >"$SITE_EVIDENCE/site-03-mcp-live.txt" <<'PY'
+import json, urllib.error, urllib.request
+UA = "commonswarm-release-probe/1.0"
+RESOURCE = "https://mcp.commonswarm.com/mcp"
+def fetch(url, method="GET", data=None):
+    request = urllib.request.Request(url, method=method, data=data, headers={
+        "User-Agent": UA, "Accept": "application/json",
+        "Content-Type": "application/json", "Accept-Encoding": "identity",
+    })
+    try:
+        return urllib.request.urlopen(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        return error
+with fetch("https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp") as response:
+    if response.status != 200 or response.headers.get_content_type() != "application/json":
+        raise SystemExit("STOP: MCP protected-resource metadata must be 200 JSON before GO")
+    raw = response.read(1048577)
+    if len(raw) > 1048576 or json.loads(raw).get("resource") != RESOURCE:
+        raise SystemExit("STOP: MCP protected-resource metadata resource mismatch before GO")
+print("MCP_METADATA=PASS status=200 media_type=application/json resource=" + RESOURCE)
+with fetch(RESOURCE, method="POST", data=b"{}") as response:
+    if response.status != 401:
+        raise SystemExit("STOP: unauthenticated MCP POST must be 401 before GO")
+print("MCP_POST=PASS status=401 authenticated=no")
+print("MCP_LIVE=PASS user_agent=" + UA)
+PY
+  chmod 0600 "$SITE_EVIDENCE/site-03-mcp-live.txt"
   {
     printf 'APPROVER=%s\nPLAN_COMMIT=%s\nSHA=%s\nBASE_SHA=%s\nPROMPT_NUMBER=%s\n' \
       "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$SITE_BASE_SHA" "$SITE_PROMPT_NUMBER"
-    printf '%s\n' 'HM37_WINDOW_A_LIVE=yes' 'HM37_MCP_DARK=yes'
-    printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-state-only' 'LIVE_REVOKE_CONTROL=HM37_WINDOW_B'
+    printf '%s\n' 'HM37_WINDOW_A_LIVE=yes' 'HM37_MCP_LIVE=yes'
+    printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-or-populated-view-only' 'LIVE_REVOKE_CONTROL=NOT_PROVED_BY_SITE_RELEASE'
     jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site-03-browser-preflight.json"
     printf '%s\n' 'ROLLBACK_PIN=verified' 'All release holds resolved'
   } >"$SITE_EVIDENCE/GO.txt"
@@ -676,7 +704,7 @@ PY
   chmod 0600 "$SITE_EVIDENCE/after.release"
   if test "$deploy_status" -ne 0 || test "$read_status" -ne 0; then exit 70; fi
   after=$(cat "$SITE_EVIDENCE/after.release")
-  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06509f9a-????????????????) ;; *) exit 1 ;; esac
+  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-603a206e52f3-????????????????) ;; *) exit 1 ;; esac
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "test -f '$pin/app/index.html'"
   printf '%s\n' 'PIN_AFTER_DEPLOY=PASS' >"$SITE_EVIDENCE/pin-after-deploy.txt"
   chmod 0600 "$SITE_EVIDENCE/pin-after-deploy.txt"
@@ -703,7 +731,7 @@ immediate rollback; a third state stops for incident handling.
     printf '%s\n' 'DEPLOYMENT=failed-before-switch' 'RETRY=forbidden' \
       >"$SITE_EVIDENCE/site-04-reconciliation.txt"
   else
-    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06509f9a-????????????????) ;; *) exit 1 ;; esac
+    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-603a206e52f3-????????????????) ;; *) exit 1 ;; esac
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
@@ -752,7 +780,7 @@ python3 - "$expected" <<'PY'
 import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
 UA="commonswarm-release-probe/1.0"; root=pathlib.Path("/srv/commonswarm/site")
 release=(root/"current").resolve(strict=True); assert str(release)==sys.argv[1]
-assert re.fullmatch(r"\d{8}T\d{6}Z-4d6a06509f9a-[0-9a-f]{16}",release.name)
+assert re.fullmatch(r"\d{8}T\d{6}Z-603a206e52f3-[0-9a-f]{16}",release.name)
 def fetch(path,media):
     request=urllib.request.Request("https://commonswarm.com"+path,headers={
       "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
@@ -801,7 +829,8 @@ BOX
 ```
 
 Full control verifies the signed-in production page, exact owner/workspace,
-release assets, empty Connected apps, no creation action, clean console, and
+release assets, a successful EMPTY or POPULATED Connected apps list, no
+creation action, clean console, and
 320px/390px one-row geometry. Reduced control stays signed out, proves the
 shipped bundle has the surface and no creation action, and records the four
 signed-in claims as `NOT PROVED`. All actions are view-only: do not click a
@@ -843,9 +872,9 @@ def inspect():
       return {userId,workspaceId:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
       workspaceCount:document.querySelectorAll('[data-workspace-list] [data-workspace-id]').length,
       display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
-      signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden'),
+      signedOut:!document.querySelector('[data-panel="signed-out"]')?.hasAttribute('hidden'),
       connectedSurface:!!document.querySelector('[data-connected-apps-open]'),
-      connectedCreateAction:!!dialog&&[...dialog.querySelectorAll('button,a')].some(x=>/connect|create|add app/i.test(x.textContent||'')),
+      connectedCreateAction:!!dialog&&[...dialog.querySelectorAll('button,a')].some(x=>/^(?:connect\\b|create\\b|add app\\b)/i.test((x.textContent||'').trim())),
       errors:window.__siteControlErrors||[]};})()""")
 for _ in range(60):
     observed=inspect()
@@ -874,20 +903,33 @@ if branch=="FULL-CONTROL":
     if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
     js("document.querySelector('[data-user-menu-trigger]').click()")
     js("document.querySelector('[data-connected-apps-open]').click()")
-    empty=""
+    connected_list={}
     for _ in range(60):
-        empty=js("document.querySelector('[data-connected-apps-list]')?.textContent?.trim()||''")
-        status=js("document.querySelector('[data-connected-apps-status]')?.textContent?.trim()||''")
-        if empty or "Nothing was changed" in status: break
+        connected_list=js("""(() => {
+          const list=document.querySelector('[data-connected-apps-list]');
+          const status=document.querySelector('[data-connected-apps-status]');
+          return {text:list?.textContent?.trim()||'',
+            cardCount:list?.querySelectorAll(':scope > .dashboard__connected-app').length||0,
+            status:status?.textContent?.trim()||'',
+            failed:status?.classList.contains('dashboard__form-error')||false};
+        })()""")
+        if connected_list["failed"] or "Nothing was changed" in connected_list["status"]: break
+        if connected_list["text"] and not connected_list["status"]: break
         time.sleep(.5)
-    if empty!="No apps are connected to this account.": raise SystemExit(1)
+    if connected_list["failed"] or connected_list["status"]: raise SystemExit(1)
+    if connected_list["text"]=="No apps are connected to this account." and connected_list["cardCount"]==0:
+        connected_apps_state="EMPTY"
+    elif connected_list["cardCount"]>0 and connected_list["text"]!="No apps are connected to this account.":
+        connected_apps_state="POPULATED"
+    else:
+        raise SystemExit(1)
     if js("!document.querySelector('[data-connected-apps-retry]').hidden"): raise SystemExit(1)
     if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
     if inspect()["connectedCreateAction"] or inspect()["errors"]: raise SystemExit(1)
     dialog_clip=js("""(() => {const r=document.querySelector('[data-connected-apps-dialog]').getBoundingClientRect();
       return{x:r.x,y:r.y,width:r.width,height:r.height,scale:1};})()""")
     dialog_png=cdp("Page.captureScreenshot",format="png",fromSurface=True,clip=dialog_clip)["data"]
-    dialog_path=evidence/"site-05-connected-empty.png"; dialog_path.write_bytes(base64.b64decode(dialog_png)); dialog_path.chmod(0o600)
+    dialog_path=evidence/"site-05-connected-apps.png"; dialog_path.write_bytes(base64.b64decode(dialog_png)); dialog_path.chmod(0o600)
     geometry={}
     for width,height in ((320,568),(390,844)):
         cdp("Emulation.setDeviceMetricsOverride",width=width,height=height,deviceScaleFactor=1,mobile=True); time.sleep(.5)
@@ -918,9 +960,10 @@ if branch=="FULL-CONTROL":
     if inspect()["workspaceId"]!=start_workspace: raise SystemExit(1)
     result={"branch":"FULL-CONTROL","identity":"PASS","workspace":expected_workspace,
       "start_workspace_id":start_workspace,"restored_workspace_id":start_workspace,
-      "assets_loaded":"PASS","feed_roster_local_h0":"PASS","connected_apps_empty_state":"PASS",
+      "assets_loaded":"PASS","feed_roster_local_h0":"PASS","connected_apps_load":"PASS",
+      "connected_apps_list_state":connected_apps_state,"connected_apps_count":connected_list["cardCount"],
       "connection_creation_action_absent":"PASS","console":"PASS","mobile_geometry":geometry,
-      "screenshots":["site-05-connected-empty.png","site-05-mobile-320.png","site-05-mobile-390.png"]}
+      "screenshots":["site-05-connected-apps.png","site-05-mobile-320.png","site-05-mobile-390.png"]}
 else:
     if not observed["signedOut"] or not observed["connectedSurface"] or observed["connectedCreateAction"]: raise SystemExit(1)
     result={"branch":"REDUCED-CONTROL","signed_out_bundle_connected_apps_surface":"PASS",
@@ -1014,7 +1057,7 @@ if branch=="FULL-CONTROL":
         time.sleep(.5)
     if restored!=start: raise SystemExit(1)
 else:
-    if not js("!document.querySelector('[data-panel=\"auth\"]')?.hasAttribute('hidden')"): raise SystemExit(1)
+    if not js("!document.querySelector('[data-panel=\"signed-out\"]')?.hasAttribute('hidden')"): raise SystemExit(1)
 PY
 )
 ```
@@ -1178,7 +1221,7 @@ PY
 | P2-K4-03 | Branch selection is automatic from the fresh headless Chromium session; signed-out/2FA state selects reduced control; a keychain dialog is STOP. |
 | P2-K5-01 | Named `HM37_A_CLOSE_RECEIPT`; no WINDOW B wait. |
 | P2-K5-02 | Static Connected apps exposure acceptance in GO. |
-| P2-K5-03 | Live revoke moved to HM37 WINDOW B; lane 8 uses empty state only. |
+| P2-K5-03 | Lane 8 records successful EMPTY or POPULATED Connected apps; view-only controls do not prove live revoke behavior. |
 | P2-K5-04 | Static exact-SHA deletion-guard assertion in `site-02`. |
 | P2-K5-05 | Static hold list consumed by GO; missing evidence stops. |
 | P2-K5-06 | Static exact SHA/base authorization consumed by `site-04`. |
@@ -1196,5 +1239,8 @@ PY
 `CLOSE.txt` separately records outcome, browser branch, manifest digest, pin
 release, and closure. The evidence set separately records build/upload/switch,
 public bytes, browser controls, and any rollback. A successful site release
-does not claim hosted MCP availability or live revoke behavior; both remain
-WINDOW B work.
+records the pre-GO MCP metadata/401 status check separately from site controls.
+Those read-only probes establish public MCP routing and its unauthenticated
+challenge; they do not prove an authenticated MCP session or live revoke
+behavior. Connected apps evidence records the actual EMPTY or POPULATED list
+when full control runs; reduced-control `NOT PROVED` claims remain explicit.

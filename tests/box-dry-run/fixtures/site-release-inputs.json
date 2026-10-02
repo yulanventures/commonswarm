@@ -1,6 +1,6 @@
 {
   "site_base_sha": "109e4db75f673ddd8003662dc1882159dd72b1b2",
-  "site_release_sha": "4d6a06509f9abf1aefac8c88ec00280d025df673",
+  "site_release_sha": "603a206e52f363cff74127d6143c5fcd3ec2770a",
   "baseline_release": "20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5",
   "provenance": {
     "kind": "task-supplied release input pins; not a new live measurement",
