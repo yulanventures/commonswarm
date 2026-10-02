@@ -40,7 +40,7 @@ interface JsonRpcRequest {
   jsonrpc: "2.0";
   id?: string | number;
   method: string;
-  params?: Record<string, unknown>;
+  params?: unknown;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -121,6 +121,7 @@ async function readBody(request: Request, maximum: number, signal: AbortSignal):
 }
 
 function parsedRpc(value: unknown): JsonRpcRequest | null {
+  // tools/list validates its own params so non-objects receive -32602.
   const row = record(value);
   if (row === null || row.jsonrpc !== "2.0" || typeof row.method !== "string" ||
       row.method.length < 1 || row.method.length > 128 ||
@@ -128,7 +129,7 @@ function parsedRpc(value: unknown): JsonRpcRequest | null {
       (row.id !== undefined &&
         !(typeof row.id === "string" && row.id.length <= 256) &&
         !(typeof row.id === "number" && Number.isSafeInteger(row.id))) ||
-      (row.params !== undefined && record(row.params) === null)) return null;
+      (row.params !== undefined && record(row.params) === null && row.method !== "tools/list")) return null;
   return row as unknown as JsonRpcRequest;
 }
 
@@ -282,7 +283,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       if (message.id === undefined) return new Response(null, { status: 202, headers: { "cache-control": "no-store" } });
       let result: unknown;
       if (message.method === "initialize") {
-        const requested = message.params?.protocolVersion;
+        const requested = record(message.params)?.protocolVersion;
         if (typeof requested !== "string") {
           return failed(400, rpcError(message.id, -32602, "Unsupported protocol version"));
         }
@@ -297,13 +298,17 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       } else if (message.method === "ping") {
         result = {};
       } else if (message.method === "tools/list") {
-        if (message.params !== undefined && Object.keys(message.params).length !== 0) {
+        const params = message.params === undefined ? {} : record(message.params);
+        if (params === null || Object.keys(params).some((key) => !["cursor", "_meta"].includes(key)) ||
+            (params.cursor !== undefined && typeof params.cursor !== "string") ||
+            (params._meta !== undefined && record(params._meta) === null)) {
           return failed(400, rpcError(message.id, -32602, "Invalid params"));
         }
+        // Pagination is not implemented: every valid cursor receives the full list.
         result = { tools: HOSTED_TOOL_TABLE };
       } else if (message.method === "tools/call") {
-        const params = message.params;
-        if (params === undefined || Object.keys(params).some((key) => !["name", "arguments"].includes(key)) ||
+        const params = record(message.params);
+        if (params === null || Object.keys(params).some((key) => !["name", "arguments"].includes(key)) ||
             typeof params.name !== "string" || !hostedToolName(params.name)) {
           return failed(400, rpcError(message.id, -32602, "Invalid params"));
         }
