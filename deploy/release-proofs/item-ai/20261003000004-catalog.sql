@@ -7,12 +7,13 @@ SELECT COALESCE((
       WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
         SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND false)))
     AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
-  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_ops.migration_checksum_failures(jsonb)')
+  AND to_regprocedure('commonswarm_ops.migration_checksum_failures(jsonb)') IS NULL
+  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_ops.migration_checksum_failures()')
     AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true AND p.prorettype='record'::regtype AND p.proretset AND p.provolatile='s'
-    AND p.proargnames=ARRAY['p_required','version','required_sha256','recorded_sha256','reason']::text[]
-    AND p.proargmodes=ARRAY['i','t','t','t','t']::"char"[]
-    AND p.proallargtypes=ARRAY['jsonb'::regtype,'text'::regtype,'text'::regtype,'text'::regtype,'text'::regtype]::oid[]
-    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='acf7000b1063511067d0f5fe6694cab8'
+    AND p.pronargs=0 AND p.proargnames=ARRAY['version','required_sha256','recorded_sha256','reason']::text[]
+    AND p.proargmodes=ARRAY['t','t','t','t']::"char"[]
+    AND p.proallargtypes=ARRAY['text'::regtype,'text'::regtype,'text'::regtype,'text'::regtype]::oid[]
+    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='9a4c3387e09bea3ce1462c93e870d981'
     AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
       WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
         SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]))))

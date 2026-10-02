@@ -224,6 +224,7 @@ INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true);
 
 CREATE FUNCTION commonswarm_oauth.guard_cutover_state() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE checksum_failed boolean;
 BEGIN
   IF TG_OP='DELETE' OR (TG_OP='UPDATE' AND OLD.legacy_closed AND
     ROW(NEW.legacy_closed,NEW.legacy_closed_at) IS DISTINCT FROM ROW(OLD.legacy_closed,OLD.legacy_closed_at)) THEN
@@ -243,6 +244,23 @@ BEGIN
     OR has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE')
     OR EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active')) THEN
     RAISE EXCEPTION 'legacy database fence must precede closure' USING ERRCODE='23514';
+  END IF;
+  IF NEW.admin_issuance_enabled THEN
+    -- M4 is applied in a later window. Resolve dynamically so M3 installs
+    -- without it, but cannot enable issuance until the real gate exists.
+    IF to_regprocedure('commonswarm_ops.migration_checksum_failures()') IS NULL THEN
+      RAISE EXCEPTION 'migration checksum gate unavailable' USING ERRCODE='23514';
+    END IF;
+    -- The predicate reads the persisted release measurement, not NEW or any
+    -- check-time caller argument. Record expected hashes in a closed update
+    -- before enabling; otherwise the predicate would see the previous row.
+    IF NEW.required_migrations IS DISTINCT FROM OLD.required_migrations THEN
+      RAISE EXCEPTION 'record migration requirements while issuance is closed' USING ERRCODE='23514';
+    END IF;
+    EXECUTE 'SELECT EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures())' INTO checksum_failed;
+    IF checksum_failed THEN
+      RAISE EXCEPTION 'migration checksum evidence incomplete or mismatched' USING ERRCODE='23514';
+    END IF;
   END IF;
   RETURN NEW;
 END $fn$;

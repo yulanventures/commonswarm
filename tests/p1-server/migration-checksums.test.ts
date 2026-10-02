@@ -1,10 +1,9 @@
 /** D2 independently recorded release hashes and the live ledger, CI/Docker only. */
 import { test } from 'node:test';
-import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
+import { catalog, checksumVersions, dbAssert, expectedMigrationHashes, recordChecksumEvidenceForTest, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const version = '29991003000004';
-const req = `'[{"version":"${version}","sha256":"${'a'.repeat(64)}"}]'::jsonb`;
-const call = `commonswarm_ops.migration_checksum_failures(${req})`;
+const call = `commonswarm_ops.migration_checksum_failures()`;
 const checksum = `INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha)
 VALUES('${version}',repeat('a',64),'release',repeat('b',40))`;
 
@@ -48,38 +47,57 @@ ${dbAssert(`SELECT source='backfill' FROM commonswarm_ops.migration_checksums WH
 `);
 });
 
-test('migration-checksums: predicate positive, missing ledger/checksum and mismatch negatives; malformed requirements refuse', () => {
-  runSql(`SET LOCAL ROLE commonswarm_admin_release;
+test('migration-checksums: full fixed set positive; every required ledger/checksum/digest negative; missing/subset expectations refuse; unrelated rows ignored', () => {
+  const expected = `'${expectedMigrationHashes}'::jsonb`;
+  runSql(`${recordChecksumEvidenceForTest}
+SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations=${expected};
+RESET ROLE;
+${['commonswarm_oauth_runtime','swarm_command'].map(role => `SET LOCAL ROLE ${role};
+${dbAssert(`SELECT count(*)=0 FROM ${call}`,`${role} full required set positive`)}
+${refuses('SELECT * FROM supabase_migrations.schema_migrations','42501')}
+${refuses(`UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations='{}'`,'42501')}
+-- No caller-selected version subset or expected digest API remains.
+${refuses(`SELECT * FROM commonswarm_ops.migration_checksum_failures('[{"version":"${version}","sha256":"${'a'.repeat(64)}"}]'::jsonb)`,'42883')}
+RESET ROLE;`).join('\n')}
+-- Extra unrelated evidence cannot change completeness of the required set.
+INSERT INTO supabase_migrations.schema_migrations(version) VALUES('${version}');
+SET LOCAL ROLE commonswarm_admin_release;
 ${checksum};
 RESET ROLE;
-SET LOCAL ROLE commonswarm_oauth_runtime;
-${dbAssert(`SELECT reason='missing_ledger' AND version='${version}' AND recorded_sha256=repeat('a',64) FROM ${call}`, 'checksum alone cannot establish application')}
-RESET ROLE;
-INSERT INTO supabase_migrations.schema_migrations(version) VALUES('${version}');
-${['commonswarm_oauth_runtime','swarm_command'].map(role => `SET LOCAL ROLE ${role};
-${dbAssert(`SELECT count(*)=0 FROM ${call}`,`${role} complete ledger positive`)}
-${dbAssert(`SELECT reason='checksum_mismatch' FROM commonswarm_ops.migration_checksum_failures(
- '[{"version":"${version}","sha256":"${'c'.repeat(64)}"}]')`,`${role} wrong expected digest`)}
-${refuses('SELECT * FROM supabase_migrations.schema_migrations','42501')}
-${['NULL',"'[]'::jsonb","'{}'::jsonb","'[{}]'::jsonb",`(${req}||${req})`,"'[{\"version\":\"bad\",\"sha256\":\"bad\"}]'::jsonb"].map(invalid => refuses(`SELECT * FROM commonswarm_ops.migration_checksum_failures(${invalid})`,'22023')).join('\n')}
-RESET ROLE;`).join('\n')}
--- In this rollback-only fixture, the owner exception removes independently
--- recorded evidence without removing the applied migration ledger row.
+${dbAssert(`SELECT count(*)=0 FROM ${call}`, 'unrelated rows ignored')}
+${checksumVersions.map(v => `
+SAVEPOINT required_version;
+DELETE FROM supabase_migrations.schema_migrations WHERE version='${v}';
+${dbAssert(`SELECT count(*)=1 AND bool_and(reason='missing_ledger' AND version='${v}') FROM ${call}`, `${v} missing ledger`)}
+ROLLBACK TO SAVEPOINT required_version;
 SET LOCAL ROLE swarm_admin;
-DELETE FROM commonswarm_ops.migration_checksums WHERE version='${version}';
+DELETE FROM commonswarm_ops.migration_checksums WHERE version='${v}';
 RESET ROLE;
-SET LOCAL ROLE commonswarm_oauth_runtime;
-${dbAssert(`SELECT reason='missing_checksum' AND recorded_sha256 IS NULL FROM ${call}`, 'ledger alone cannot establish digest')}
+${dbAssert(`SELECT count(*)=1 AND bool_and(reason='missing_checksum' AND version='${v}' AND recorded_sha256 IS NULL) FROM ${call}`, `${v} missing checksum`)}
+ROLLBACK TO SAVEPOINT required_version;
+SET LOCAL ROLE swarm_admin;
+UPDATE commonswarm_ops.migration_checksums SET sha256=repeat('0',64) WHERE version='${v}';
 RESET ROLE;
+${dbAssert(`SELECT count(*)=1 AND bool_and(reason='checksum_mismatch' AND version='${v}' AND required_sha256<>recorded_sha256) FROM ${call}`, `${v} wrong recorded digest`)}
+ROLLBACK TO SAVEPOINT required_version;
+RELEASE SAVEPOINT required_version;`).join('\n')}
+SAVEPOINT expected_measurement;
 SET LOCAL ROLE commonswarm_admin_release;
-INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha)
-VALUES('${version}',repeat('a',64),'backfill',repeat('b',40));
-${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('bad-hash','BAD','release',repeat('b',40))`,'23514')}
-${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('bad-source',repeat('a',64),'expected',repeat('b',40))`,'23514')}
-${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('bad-sha',repeat('a',64),'release','BAD')`,'23514')}
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations='{}'::jsonb;
 RESET ROLE;
-SET LOCAL ROLE commonswarm_oauth_runtime;
-${dbAssert(`SELECT count(*)=0 FROM ${call}`, 'verified backfill is accepted evidence')}
+${dbAssert(`SELECT count(*)=${checksumVersions.length} AND bool_and(reason='missing_expected') FROM ${call}`, 'all fixed identities require reviewed expectations')}
+SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations=(
+ SELECT jsonb_object_agg(key,value) FROM jsonb_each(${expected})
+ WHERE key IN ('20261003000001','20261003000002','20261003000003'));
+RESET ROLE;
+${dbAssert(`SELECT count(*)=${checksumVersions.length - 3} AND bool_and(reason='missing_expected') FROM ${call}`, 'M1-M3 caller-style subset cannot establish completeness')}
+ROLLBACK TO SAVEPOINT expected_measurement;
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('29991003000005','BAD','release',repeat('b',40))`,'23514')}
+${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('29991003000005',repeat('a',64),'expected',repeat('b',40))`,'23514')}
+${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('29991003000005',repeat('a',64),'release','BAD')`,'23514')}
 RESET ROLE;
 ${catalog('20261003000004')}
 GRANT UPDATE ON commonswarm_ops.migration_checksums TO commonswarm_oauth_runtime;

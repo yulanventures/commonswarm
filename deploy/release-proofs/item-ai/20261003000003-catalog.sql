@@ -124,7 +124,7 @@ SELECT COALESCE((
   AND (SELECT count(*) FROM pg_constraint WHERE conrelid=to_regclass('commonswarm_oauth.admin_cutover_state') AND contype='c')=14
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_cutover_state()')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
-  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='01d4fec1172784e8adb94f106aabbef6'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='edc692e62a814ac2fe4dd4962c6cd6f8'
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY[]::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)

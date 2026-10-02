@@ -43,42 +43,41 @@ REVOKE ALL ON FUNCTION commonswarm_ops.guard_migration_checksums() FROM PUBLIC,a
 CREATE TRIGGER migration_checksums_append_only BEFORE UPDATE OR DELETE ON commonswarm_ops.migration_checksums
   FOR EACH ROW EXECUTE FUNCTION commonswarm_ops.guard_migration_checksums();
 
--- A nonempty JSON array of exact {version,sha256} records. Reject malformed or
--- duplicate requirements, rather than letting an empty/NULL list look complete.
--- Activation callers must supply all five admin prerequisites, OAuth store,
--- DCR and M1-M3 from their reviewed required set, on every gate call.
+-- Required identities are database-owned, never a caller-selected subset.
+-- Expected reviewed hashes come from release-role-owned admin_cutover_state,
+-- written with the activation measurement while issuance is closed. They are
+-- distinct from the independently recorded release/backfill checksum evidence.
+-- Include this gate migration itself: its installed function is insufficient
+-- without proof that M4 was applied and recorded at the reviewed checksum.
 GRANT USAGE ON SCHEMA supabase_migrations TO swarm_admin;
 GRANT SELECT ON supabase_migrations.schema_migrations TO swarm_admin;
-CREATE FUNCTION commonswarm_ops.migration_checksum_failures(p_required jsonb)
+CREATE FUNCTION commonswarm_ops.migration_checksum_failures()
 RETURNS TABLE(version text,required_sha256 text,recorded_sha256 text,reason text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
 BEGIN
-  IF p_required IS NULL OR jsonb_typeof(p_required) IS DISTINCT FROM 'array' THEN
-    RAISE EXCEPTION 'invalid migration requirements' USING ERRCODE='22023';
-  END IF;
-  IF jsonb_array_length(p_required) NOT BETWEEN 1 AND 512 THEN
-    RAISE EXCEPTION 'invalid migration requirement count' USING ERRCODE='22023';
-  END IF;
-  IF EXISTS(SELECT 1 FROM jsonb_array_elements(p_required) e WHERE jsonb_typeof(e) IS DISTINCT FROM 'object'
-    OR e->>'version' IS NULL OR e->>'version' !~ '^[0-9]{14}$'
-    OR e->>'sha256' IS NULL OR e->>'sha256' !~ '^[0-9a-f]{64}$'
-    OR (e-ARRAY['version','sha256'])<>'{}'::jsonb)
-    OR (SELECT count(*)<>count(DISTINCT e->>'version') FROM jsonb_array_elements(p_required) e) THEN
-    RAISE EXCEPTION 'invalid migration requirement entry' USING ERRCODE='22023';
-  END IF;
   RETURN QUERY
-    SELECT r->>'version',r->>'sha256',c.sha256,
+    WITH required(version) AS (VALUES
+      ('20261001000001'),('20261001000002'),('20261001000003'),('20261001000004'),('20261001000005'),
+      ('20260928000003'),('20261002000001'),
+      ('20261003000001'),('20261003000002'),('20261003000003'),('20261003000004')),
+    expected AS (SELECT s.required_migrations FROM commonswarm_oauth.admin_cutover_state s WHERE s.singleton)
+    SELECT r.version,e.required_migrations->>r.version,c.sha256,
       CASE WHEN l.version IS NULL THEN 'missing_ledger'
-           WHEN c.version IS NULL THEN 'missing_checksum' ELSE 'checksum_mismatch' END
-    FROM jsonb_array_elements(p_required) r
-    LEFT JOIN commonswarm_ops.migration_checksums c ON c.version=r->>'version'
-    LEFT JOIN supabase_migrations.schema_migrations l ON l.version=r->>'version'
-    WHERE l.version IS NULL OR c.version IS NULL OR c.sha256 IS DISTINCT FROM r->>'sha256'
-    ORDER BY r->>'version';
+           WHEN c.version IS NULL THEN 'missing_checksum'
+           WHEN e.required_migrations->>r.version IS NULL THEN 'missing_expected'
+           ELSE 'checksum_mismatch' END
+    FROM required r
+    LEFT JOIN expected e ON true
+    LEFT JOIN commonswarm_ops.migration_checksums c ON c.version=r.version
+    LEFT JOIN supabase_migrations.schema_migrations l ON l.version=r.version
+    WHERE l.version IS NULL OR c.version IS NULL
+      OR e.required_migrations->>r.version IS NULL
+      OR c.sha256 IS DISTINCT FROM e.required_migrations->>r.version
+    ORDER BY r.version;
 END $fn$;
-ALTER FUNCTION commonswarm_ops.migration_checksum_failures(jsonb) OWNER TO swarm_admin;
-REVOKE ALL ON FUNCTION commonswarm_ops.migration_checksum_failures(jsonb) FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release;
-GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_checksum_failures(jsonb) TO commonswarm_oauth_runtime,swarm_command;
+ALTER FUNCTION commonswarm_ops.migration_checksum_failures() OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION commonswarm_ops.migration_checksum_failures() FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release;
+GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_checksum_failures() TO commonswarm_oauth_runtime,swarm_command;
 
 -- Reserve rollback (verbatim sibling reserve; data-free only):
 -- -- Data-free reserve ONLY. Never drops data once OAuth/admin artifacts exist.
@@ -89,7 +88,7 @@ GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_checksum_failures(jsonb) TO 
 --   END IF;
 -- END $reserve$;
 -- DROP TABLE commonswarm_ops.migration_checksums;
--- DROP FUNCTION commonswarm_ops.migration_checksum_failures(jsonb);
+-- DROP FUNCTION commonswarm_ops.migration_checksum_failures();
 -- DROP FUNCTION commonswarm_ops.guard_migration_checksums();
 -- REVOKE USAGE ON SCHEMA commonswarm_ops FROM commonswarm_admin_release,commonswarm_oauth_runtime,swarm_command;
 -- -- Retain the possibly pre-existing schema and owner's migration-ledger read ACL.

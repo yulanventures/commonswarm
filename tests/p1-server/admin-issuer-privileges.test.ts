@@ -7,7 +7,9 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 const literal = JSON.stringify(allowlist).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
-// System catalogs are PostgreSQL's platform baseline. PUBLIC grants on user
+// Default PUBLIC EXECUTE on system functions is the platform baseline. Explicit
+// grants to issuer/parents and PUBLIC grants beyond initial ACLs are inventoried.
+// PUBLIC grants on user
 // objects remain in the inventory; only pinned extension-member EXECUTE and
 // built-in language/database/schema privileges are allowed below. Extension
 // signatures are literal PostgreSQL 17 contrib definitions (REL_17_STABLE);
@@ -22,7 +24,7 @@ WITH objects(kind,name,owner,acl,object_id) AS (
  WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema' AND a.attnum>0 AND NOT a.attisdropped
  UNION ALL SELECT 'SCHEMA',nspname,nspowner,nspacl,oid FROM pg_namespace WHERE nspname !~ '^(pg_|ai_saved_)' AND nspname<>'information_schema'
  UNION ALL SELECT 'FUNCTION',n.nspname||'.'||p.proname||'('||regexp_replace(oidvectortypes(p.proargtypes),'\\s','','g')||')',p.proowner,coalesce(p.proacl,acldefault('f',p.proowner)),p.oid
- FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema'
+ FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^ai_saved_'
  UNION ALL SELECT 'TYPE',n.nspname||'.'||t.typname,t.typowner,t.typacl,t.oid FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
  WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema'
  UNION ALL SELECT 'DATABASE',datname,datdba,datacl,oid FROM pg_database
@@ -44,7 +46,12 @@ LEFT JOIN LATERAL (SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oi
  WHERE d.classid=CASE WHEN o.kind='FUNCTION' THEN 'pg_proc'::regclass ELSE 'pg_class'::regclass END
    AND o.kind IN ('FUNCTION','TABLE','SEQUENCE') AND d.objid=o.object_id AND d.deptype='e'
    AND e.extname IN ('pgcrypto','uuid-ossp','pg_stat_statements','pg_trgm')) ext ON true
-WHERE a.grantee<>o.owner AND (r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+WHERE a.grantee<>o.owner
+ AND NOT (o.kind='FUNCTION' AND split_part(o.name,'.',1) IN ('pg_catalog','information_schema') AND a.grantee=0
+   AND EXISTS(SELECT 1 FROM aclexplode(coalesce((SELECT i.initprivs FROM pg_init_privs i
+     WHERE i.classoid='pg_proc'::regclass AND i.objoid=o.object_id AND i.objsubid=0 AND i.privtype='i'),acldefault('f',o.owner))) initial
+     WHERE initial.grantee=a.grantee AND initial.privilege_type=a.privilege_type AND initial.is_grantable=a.is_grantable))
+ AND (r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
  OR (a.grantee=0 AND (position('.' in o.name)=0
    OR EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname=split_part(o.name,'.',1)
      AND (has_schema_privilege('commonswarm_admin_issuer',n.oid,'USAGE')
@@ -109,6 +116,9 @@ REVOKE ALL ON FUNCTION public.issuer_function_mutation() FROM PUBLIC;
 GRANT USAGE ON TYPE commonswarm_oauth.admin_security_reason TO PUBLIC;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE USAGE ON TYPE commonswarm_oauth.admin_security_reason FROM PUBLIC;
+${['commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command'].map(role => `GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO ${role};
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) FROM ${role};`).join('\n')}
 ALTER ROLE commonswarm_admin_issuer INHERIT;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 ALTER ROLE commonswarm_admin_issuer NOINHERIT;

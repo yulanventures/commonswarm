@@ -1,7 +1,7 @@
 /** Isolated local PostgreSQL boundary. No service credentials or browser use. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 export const versions = ['20261003000001', '20261003000002', '20261003000003'] as const;
@@ -143,17 +143,46 @@ END $capture$;
   return { jti, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
 }
 
-/** Test-only transaction, rolled back by runSql. Uses the real fence and release constraints. */
-export const openIssuanceForTest = `
+/** Exact reviewed activation set, including the migration that installs the gate. */
+export const checksumVersions = [
+  '20261001000001', '20261001000002', '20261001000003', '20261001000004', '20261001000005',
+  '20260928000003', '20261002000001', ...versions, '20261003000004',
+] as const;
+const checksumMigrationNames = [
+  '20261001000001_admin_delegation.sql', '20261001000002_admin_routine.sql',
+  '20261001000003_admin_recovery_read.sql', '20261001000004_admin_worker_read_fence.sql',
+  '20261001000005_admin_routine_workspace_history.sql', '20260928000003_hm_oauth_store.sql',
+  '20261002000001_oauth_registered_clients.sql', ...migrationNames, '20261003000004_migration_checksums.sql',
+] as const;
+const reviewedChecksums = checksumMigrationNames.map((name, i) => [checksumVersions[i]!,
+  createHash('sha256').update(repoSql(`supabase/migrations/${name}`)).digest('hex')]);
+export const expectedMigrationHashes = JSON.stringify(Object.fromEntries(reviewedChecksums));
+/** Release evidence and ledger recorded together inside runSql's rollback transaction. */
+export const recordChecksumEvidenceForTest = `
+INSERT INTO supabase_migrations.schema_migrations(version)
+VALUES ${checksumVersions.map(v => `('${v}')`).join(',')} ON CONFLICT(version) DO NOTHING;
+SET LOCAL ROLE commonswarm_admin_release;
+INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha)
+VALUES ${reviewedChecksums.map(([v, hash]) => `('${v}','${hash}','backfill',repeat('a',40))`).join(',')};
+RESET ROLE;
+`;
+
+/** Test-only measurement, recorded while closed; uses real release constraints. */
+export const measureIssuanceForTest = `
 SET LOCAL ROLE commonswarm_admin_release;
 SELECT commonswarm_oauth.apply_legacy_admin_fence('test-only-cutover');
 UPDATE commonswarm_oauth.admin_cutover_state SET approved_edge_release_sha=repeat('a',40),auth_contract_version=2,
-  required_migrations=jsonb_build_object('20261003000001',repeat('a',64),'20261003000002',repeat('b',64),'20261003000003',repeat('c',64)),
+  required_migrations='${expectedMigrationHashes}'::jsonb,
   lane8_evidence_digest=repeat('d',64),measured_edge_release_sha=repeat('a',40),
   measured_edge_target='/home/commonswarm/edge/releases/'||repeat('a',40),
   measured_mount='/home/commonswarm/edge/releases/'||repeat('a',40),measured_artifact_digest=repeat('e',64),
   measured_image_digest='sha256:'||repeat('f',64),measured_generation=release_generation,
   measured_at=statement_timestamp(),measurement_evidence_ref='test-only-measurement',invalidated_at=NULL;
-UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true;
 RESET ROLE;
 `;
+export const prepareIssuanceForTest = `${recordChecksumEvidenceForTest}${measureIssuanceForTest}`;
+export const enableIssuanceForTest = `SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true;
+RESET ROLE;`;
+/** Test-only transaction, rolled back by runSql. Uses the real fence and release constraints. */
+export const openIssuanceForTest = `${prepareIssuanceForTest}${enableIssuanceForTest}`;
