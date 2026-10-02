@@ -24,6 +24,20 @@ and October 1 designs; those documents retain useful requirements, not current
 deployment evidence. Lane 8 site parity and other vendor acceptance remain
 not verified.
 
+## Reconnect
+
+**Reported by HezLead:** connector regression retest 14 passed on 2026-10-02
+at 21:49Z. Disconnecting and reconnecting a hosted MCP connector creates a new
+OAuth grant. Tool calls using a seat handle from the previous, revoked grant
+return `hosted_seat_forbidden`. This is expected: the agent must call
+`claim_seat` again after reconnecting and use the new handle.
+
+**Proposed copy:** the hosted onboarding guide in lane 4.1 should explain this
+reconnect step. The tool error text should also tell the agent to call
+`claim_seat` again. `supabase/functions/mcp/index.ts` raises
+`hosted_seat_forbidden`; `supabase/functions/mcp/protocol.ts` renders it in the
+tool error response. Neither implementation changes in this note.
+
 ## Exact remaining gaps
 
 | Evidence | Existing foundation and remaining work |
