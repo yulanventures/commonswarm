@@ -66,6 +66,10 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
       const interactionReadsBody = request.method === "POST" &&
         /^\/interaction\/[^/]+\/(?:selection|consent)$/u.test(path);
       if (!interactionReadsBody) {
+        // Observe bytes only when the route's reader pulls them. Adding a data
+        // listener to an unpaused IncomingMessage starts flowing and can discard
+        // buffered bytes during the await before the provider installs its parser.
+        request.pause();
         let streamedBytes = 0;
         request.on("data", (chunk) => {
           streamedBytes += chunk.length;
