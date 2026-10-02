@@ -993,8 +993,9 @@ BOX
 
 ## 6. Rollback verification
 
-`site-06` always runs. It records `not-needed`, or verifies pinned baseline
-bytes through the public boundary and rechecks the appropriate browser branch.
+`site-06` always runs before either close path. It records `not-needed`, or
+verifies pinned baseline bytes through the public boundary and rechecks the
+appropriate browser branch.
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; verify automatic rollback or record not-needed
@@ -1070,6 +1071,143 @@ the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
 The task-owned headless browser is stopped and its private profile is removed through guarded rm. The
 temporary build `site/.env` is removed at close.
+
+Choose the close by the pin invocation marker, `site-03-pin.txt`: the pin step
+creates it before its SSH call, even if that call fails. If the marker is absent
+and `site-03-pin-previous` never ran, run `site-06`, then
+`site-07-pre-pin-manifest-close` below. This path needs no `previous.release`
+and verifies the live baseline without changing `current`. If the pin step ran,
+use the unchanged `site-07-manifest-close` instead after the applicable failure
+reconciliation and `site-06`. A partial pin failure needs HezLead reconciliation;
+never delete its marker or use the pre-pin path to bypass it. Do not retry the
+failed release step within the closing window.
+
+```sh
+# step: site-07-pre-pin-manifest-close — Mac mini /bin/bash 3.2; Anvil; close a failure before pin invocation
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  set -E
+  trap 'printf "FAIL site-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  test -f "$HOME/.commonswarm-site-window.env"
+  test ! -L "$HOME/.commonswarm-site-window.env"
+  . "$HOME/.commonswarm-site-window.env"
+  test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+  esac
+  for input_path in "$SITE_EVIDENCE" "$SITE_RELEASE_REPO"; do
+    case "$input_path" in /*) ;; *) exit 1 ;; esac
+    test -d "$input_path"
+    test ! -L "$input_path"
+  done
+  for marker in site-03-pin.txt previous.release previous.original GO.txt after.release; do
+    test ! -e "$SITE_EVIDENCE/$marker"
+    test ! -L "$SITE_EVIDENCE/$marker"
+  done
+  grep -qFx 'rollback=not-needed' "$SITE_EVIDENCE/site-06-rollback-verify.txt"
+  # Reject unsafe evidence before changing either window state file.
+  python3 - "$SITE_EVIDENCE" <<'PY'
+import pathlib,re,sys
+root=pathlib.Path(sys.argv[1]).resolve()
+for path in sorted(root.rglob("*")):
+    if path.is_symlink(): raise SystemExit(1)
+    if path.name=="chrome-launch.log" or path.is_dir(): continue
+    if not path.is_file() or path.suffix.lower() in {".html",".har"}: raise SystemExit(1)
+    if path.suffix.lower() in {".txt",".json",".log",""}:
+        text=path.read_bytes().decode("utf-8"); patterns=(r"Authorization:\s*Bearer",
+          r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",
+          r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",r"<!doctype\s+html|<html[ >]",r'"log"\s*:\s*\{\s*"version"')
+        if any(re.search(pattern,text,re.I) for pattern in patterns): raise SystemExit(1)
+PY
+  python3 - "$SITE_RELEASE_REPO/site/.env" "$SITE_RELEASE_REPO" <<'PY'
+import pathlib,sys
+repo=pathlib.Path(sys.argv[2]).resolve(strict=True); target=pathlib.Path(sys.argv[1])
+assert repo!=pathlib.Path.home().resolve() and repo!=pathlib.Path("/")
+assert target.name==".env" and target.parent.resolve(strict=True)==repo/"site"
+assert not target.is_symlink()
+if target.exists(): assert target.is_file()
+PY
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
+    >"$SITE_EVIDENCE/site-07-pre-pin-close.txt" <<'BOX'
+set -euo pipefail
+set -E
+trap 'printf "FAIL site-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+window_id=$1; root=/srv/commonswarm/site
+case "$window_id" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
+esac
+previous="$root/releases/20261001T160313Z-109e4db75f67-0e6aa0bfe4eaf1e5"
+test -L "$root/current"
+test "$(readlink -f "$root/current")" = "$previous"
+test -d "$previous"
+test ! -L "$previous"
+test ! -e "$root/releases/.site-window-pin-$window_id"
+test ! -L "$root/releases/.site-window-pin-$window_id"
+test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -f /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+rm -f -- /tmp/commonswarm-site-window.env
+test ! -e /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+printf 'closed_before_pin=true\nBASELINE_UNCHANGED=PASS\ncurrent_release=%s\noutcome=failed-before-pin\n' "$previous"
+BOX
+  chmod 0600 "$SITE_EVIDENCE/site-07-pre-pin-close.txt"
+  rm -f -- "$SITE_RELEASE_REPO/site/.env"
+  test ! -e "$SITE_RELEASE_REPO/site/.env"
+  test ! -L "$SITE_RELEASE_REPO/site/.env"
+  # Same task-owned headless process/profile cleanup as the normal close.
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
+    if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
+      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
+      kill "$SITE_CHROME_PID"
+      for tries in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+    fi
+    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SITE_BROWSER_ROOT"
+  fi
+  # Write the manifest after the box receipt and cleanup; CLOSE.txt stays outside it.
+  python3 - "$SITE_EVIDENCE" <<'PY'
+import hashlib,json,pathlib,stat,sys
+root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
+for path in sorted(root.rglob("*")):
+    if path.is_symlink(): raise SystemExit(1)
+    if path.name in {"chrome-launch.log","manifest.json","CLOSE.txt"} or path.is_dir(): continue
+    if not path.is_file(): raise SystemExit(1)
+    data=path.read_bytes()
+    rows.append({"path":path.relative_to(root).as_posix(),"bytes":len(data),
+      "mode":format(stat.S_IMODE(path.stat().st_mode),"04o"),"sha256":hashlib.sha256(data).hexdigest()})
+if not rows: raise SystemExit(1)
+manifest=root/"manifest.json"; manifest.write_text(json.dumps(rows,sort_keys=True,indent=2)+"\n",encoding="utf-8"); manifest.chmod(0o600)
+PY
+  manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
+  {
+    printf 'CLOSED=yes\nOUTCOME=failed-before-pin\nclosed_before_pin=true\n'
+    printf 'BASELINE_UNCHANGED=PASS\nPIN_RELEASED=not-created\n'
+    printf 'MANIFEST_SHA256=%s\nCLOSED_AT=%s\n' "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >"$SITE_EVIDENCE/CLOSE.txt"
+  chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
+  test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
+  test -f "$SITE_WINDOW_FILE"
+  test ! -L "$SITE_WINDOW_FILE"
+  rm -f -- "$SITE_WINDOW_FILE"
+  test ! -e "$SITE_WINDOW_FILE"
+  test ! -L "$SITE_WINDOW_FILE"
+)
+```
 
 ```sh
 # step: site-07-manifest-close — Mac mini /bin/bash 3.2; Anvil; sanitize, release pin, and close
@@ -1206,7 +1344,7 @@ PY
 | P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
 | P2-K2-09 | The marked browser steps use only Anvil's task-owned fresh headless profile and restore its starting workspace. |
 | P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
-| P2-K2-11 | `site-07-manifest-close` scans, hashes, closes, and cleans inputs. |
+| P2-K2-11 | `site-07-manifest-close`, or `site-07-pre-pin-manifest-close` before pin invocation, scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site-01` produces the evidence directory. |
 | P2-K3-02 | `site-00-source-checkout` produces the checkout. |
 | P2-K3-03 | `site-00-build-env` produces `site/.env`. |
@@ -1237,8 +1375,12 @@ PY
 ## 9. Recorded outcomes
 
 `CLOSE.txt` separately records outcome, browser branch, manifest digest, pin
-release, and closure. The evidence set separately records build/upload/switch,
-public bytes, browser controls, and any rollback. A successful site release
+release, and closure. A pre-pin failure instead records `OUTCOME=failed-before-pin`,
+`closed_before_pin=true`, `BASELINE_UNCHANGED=PASS`, and `PIN_RELEASED=not-created`;
+it makes no release or browser-acceptance claim. Its manifest includes the box
+baseline/close receipt, with `CLOSE.txt` outside the hashed set. The evidence set
+separately records build/upload/switch, public bytes, browser controls, and any
+rollback. A successful site release
 records the pre-GO MCP metadata/401 status check separately from site controls.
 Those read-only probes establish public MCP routing and its unauthenticated
 challenge; they do not prove an authenticated MCP session or live revoke
