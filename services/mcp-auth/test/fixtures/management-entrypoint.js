@@ -1,5 +1,6 @@
 // Run in a fresh child so ESM caches cannot hide an OFF-mode import.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 
 const enabled = process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1";
@@ -16,6 +17,7 @@ const postgresStub = moduleUrl(`
     const probe = globalThis.managementProbe;
     probe.pools += 1;
     probe.max = options.max;
+    probe.ssl = options.ssl;
     async function sql(strings, ...values) {
       const text = strings.join("?").replace(/\\s+/gu, " ").trim();
       probe.queries.push({ text, values });
@@ -86,6 +88,11 @@ try {
     assert.deepEqual(result, { status: 403, body: { error: "forbidden" } });
     assert.equal(probe.pools, 1);
     assert.equal(probe.max, 2, "management pool must cap at two connections");
+    assert.deepEqual(probe.ssl, {
+      ca: readFileSync(process.env.MCP_OAUTH_DATABASE_TLS_CA_FILE, "utf8").trim(),
+      servername: "db.commonswarm.internal",
+      rejectUnauthorized: true,
+    }, "real bundled postgres client must receive the CA and verified TLS servername");
     assert.deepEqual(probe.transactions, ["isolation level read committed"]);
     assert.ok(probe.queries.some(({ text }) => text.includes("'swarm_command'")));
     assert.ok(probe.queries.some(({ text, values }) => text.includes("INSERT INTO swarm.users") && values[0] === userId));

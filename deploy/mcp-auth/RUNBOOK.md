@@ -106,10 +106,21 @@ at switch-on with `compose.yaml` plus `compose.management.yaml`. OFF and
 both rollback paths use base Compose alone and remove the exact host file
 with the verified rm guard. Its JSON document
 contains `databaseUrl`, read from the existing box edge configuration's
-`SWARM_DATABASE_URL` (or `SUPABASE_DB_URL`). The login must be able to set
+`SWARM_DATABASE_URL` only. A root program reads it inside the exact OAuth
+image on the box at switch-on; it first checks membership, SET ROLE and
+effective schema/table grants in read-only transactions. Missing grants stop
+with the exact privilege/object/role; never widen grants. Install the file
+`0440 root:10001` after verifying the runtime is UID:GID `10001:10001`, as
+declared in the Dockerfile and required by this procedure. Only root and
+that runtime group can read it; its ON-only bind mount is read-only.
+No management 1Password item is created or used. The login must be able to set
 `swarm_command` and `swarm_read`; do not broaden the OAuth artifact role.
 The URL must use `MCP_OAUTH_DATABASE_HOST`, contain a login/password, and
-have no query overrides. The same verified CA applies. `SUPABASE_URL` and
+have no query overrides. The producer changes only the edge URL host to
+`db.commonswarm.internal`, which base Compose maps to `172.31.0.10` through
+`extra_hosts`; verify the live DNS mapping. The bundled postgres.js client
+receives the mounted CA, explicit `servername=db.commonswarm.internal`, and
+`rejectUnauthorized=true` from the management runtime adapter. `SUPABASE_URL` and
 `SUPABASE_ANON_KEY` come from the existing service env file. Signing/cookie
 keys and the OAuth artifact database credential are unchanged. No new
 1Password item name is defined here; HezLead supplies existing item references
@@ -121,8 +132,8 @@ use the same digest-pinned base. `git archive` excludes untracked files,
 including local credentials; the Dockerfile copies only the needed source
 paths and package manifests. The command pool is lazy and capped at two
 connections; switch-on checks `docker stats --no-stream` against the inspected
-memory limit and rolls back to OFF above 80%. Build only on the box, retaining
-the old image; the release procedure contains the exact pull and build commands:
+memory limit after ON and route probes, and rolls back to OFF at or above 80%.
+Build only on the box, retaining the old image; the release procedure contains the exact pull and build commands:
 
 ```sh
 # step: oauth-image-build

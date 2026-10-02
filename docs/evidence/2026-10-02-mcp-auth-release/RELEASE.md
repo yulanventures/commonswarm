@@ -45,8 +45,13 @@ path `/run/commonswarm-oauth/management-database-credentials`). Only step (f)
 installs it and adds `compose.management.yaml`; OFF uses the unchanged base
 Compose file and has no management credential on host or in container. Its value
 source is a protected on-box file, not an environment secret or management
-bearer. `SWARM_DATABASE_URL` (fallback `SUPABASE_DB_URL`) already lives in
-`/home/commonswarm/.env`. That login must set `swarm_command` and `swarm_read`;
+bearer. Only `SWARM_DATABASE_URL` in `/home/commonswarm/.env` supplies the edge login.
+A root program reads it on the box at switch-on; there is no fallback, new
+1Password item, secret shell variable, secret argv or credential output.
+Before writing even the staged credential it checks membership, SET ROLE and
+the management path's schema/table privileges with that login in read-only
+transactions. A missing grant prints only its exact privilege/object/role and
+stops; never widen grants. That login must set `swarm_command` and `swarm_read`;
 do not grant these to `commonswarm_oauth_runtime`. Existing
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, GoTrue config, signing/cookie inputs and
 CA remain in their named service files/mounts. The repo does not name exact
@@ -239,6 +244,60 @@ rollback_to_off() {
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
 }
+mcp_route_probes() {
+python3 - "$MCP_EXPECTED_MODE" <<'PY' || return 1
+import json, sys, urllib.error, urllib.request
+enabled=sys.argv[1]=='on'
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
+    for ua in ['Python-urllib/3.12','curl/8.7.1']:
+        paths=[('/health','GET',200),('/.well-known/openid-configuration','GET',200),
+            ('/.well-known/oauth-authorization-server','GET',200),('/jwks','GET',200),
+            ('/authorize','GET',400 if enabled else 503),('/token','POST',None if enabled else 503)]
+        if base.startswith('https:'):
+            paths += [('/mcp','POST',401 if enabled else 503),
+                ('/.well-known/oauth-protected-resource/mcp','GET',200 if enabled else 503)]
+        for path,method,expected in paths:
+            req=urllib.request.Request(base+path, data=b'' if method=='POST' else None, method=method,
+                headers={'User-Agent':ua,'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'})
+            try: response=opener.open(req, timeout=15)
+            except urllib.error.HTTPError as error: response=error
+            with response:
+                body=response.read(131073); code=response.code
+                assert len(body)<=131072 and 'application/json' in response.headers.get('Content-Type',''), 'non-JSON or oversized response'
+                value=json.loads(body)
+                assert code==expected if expected is not None else code in (400,401), 'unexpected status'
+                if path=='/health': assert value.get('status')=='ok'
+                if path.startswith('/.well-known/') and code==200:
+                    if path.endswith('/mcp'):
+                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp'
+                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[])
+                    else: assert value.get('issuer')=='https://mcp.commonswarm.com'
+                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys'])
+                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled')
+                print(method,base+path,ua,code,'PASS')
+PY
+}
+oauth_memory_gate() {
+  docker inspect --format '{{.HostConfig.Memory}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-memory-limit.bytes" || return 1
+  docker stats --no-stream --format '{{json .}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-stats.json" || return 1
+  python3 - "$PROOF_DIR" <<'PY' || return 1
+import decimal, json, pathlib, re, sys
+proof=pathlib.Path(sys.argv[1]); limit=int((proof/'oauth-memory-limit.bytes').read_text())
+assert limit>0, 'OAuth container has no memory limit'
+stats=json.loads((proof/'oauth-stats.json').read_text())
+assert stats['Name']=='commonswarm-oauth-oauth-1', 'stats container identity mismatch'
+match=re.fullmatch(r'\s*([0-9.]+)\s*(B|KiB|MiB|GiB|TiB|kB|MB|GB|TB)\s*',stats['MemUsage'].split('/')[0])
+assert match, 'unrecognized Docker memory units'
+units={'B':1,'KiB':1024,'MiB':1024**2,'GiB':1024**3,'TiB':1024**4,'kB':1000,'MB':1000**2,'GB':1000**3,'TB':1000**4}
+used=decimal.Decimal(match[1])*units[match[2]]
+print('OAuth docker stats memory bytes='+str(used)+' inspected limit bytes='+str(limit))
+assert used*5<limit*4, 'OAuth memory is at or above 80% of inspected limit; rollback required'
+print('OAuth memory <80%: PASS')
+PY
+}
 SH
 printf 'Window state (paths and code only): %s\n' "$STATE"
 ```
@@ -359,45 +418,22 @@ set -euo pipefail
 trap 'echo "FAIL: hm37-mcp-route-probes line $LINENO" >&2' ERR
 : "${MCP_EXPECTED_MODE:?FAIL: supply off or on for this marked probe}"
 case "$MCP_EXPECTED_MODE" in off|on) ;; *) echo 'FAIL: probe mode' >&2; exit 1;; esac
-python3 - "$MCP_EXPECTED_MODE" <<'PY'
-import json, sys, urllib.error, urllib.request
-enabled=sys.argv[1]=='on'
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self,*args,**kwargs): return None
-opener=urllib.request.build_opener(NoRedirect())
-for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
-    for ua in ['Python-urllib/3.12','curl/8.7.1']:
-        paths=[('/health','GET',200),('/.well-known/openid-configuration','GET',200),
-            ('/.well-known/oauth-authorization-server','GET',200),('/jwks','GET',200),
-            ('/authorize','GET',400 if enabled else 503),('/token','POST',None if enabled else 503)]
-        if base.startswith('https:'):
-            paths += [('/mcp','POST',401 if enabled else 503),
-                ('/.well-known/oauth-protected-resource/mcp','GET',200 if enabled else 503)]
-        for path,method,expected in paths:
-            req=urllib.request.Request(base+path, data=b'' if method=='POST' else None, method=method,
-                headers={'User-Agent':ua,'Accept':'application/json','Content-Type':'application/x-www-form-urlencoded'})
-            try: response=opener.open(req, timeout=15)
-            except urllib.error.HTTPError as error: response=error
-            with response:
-                body=response.read(131073); code=response.code
-                assert len(body)<=131072 and 'application/json' in response.headers.get('Content-Type',''), 'non-JSON or oversized response'
-                value=json.loads(body)
-                assert code==expected if expected is not None else code in (400,401), 'unexpected status'
-                if path=='/health': assert value.get('status')=='ok'
-                if path.startswith('/.well-known/') and code==200:
-                    if path.endswith('/mcp'):
-                        assert value.get('resource')=='https://mcp.commonswarm.com/mcp'
-                        assert 'https://mcp.commonswarm.com' in value.get('authorization_servers',[])
-                    else: assert value.get('issuer')=='https://mcp.commonswarm.com'
-                if path=='/jwks': assert value.get('keys') and all('d' not in key for key in value['keys'])
-                if code==503: assert value.get('error') in ('authorization_service_disabled','feature_disabled')
-                print(method,base+path,ua,code,'PASS')
-PY
+. "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+if test "$MCP_EXPECTED_MODE" = on; then
+  if ! mcp_route_probes || ! oauth_memory_gate; then
+    echo 'FAIL: ON probes/memory; rolling back to OFF' >&2
+    rollback_to_off || { echo 'FAIL: rollback-to-OFF; stop and report' >&2; exit 1; }
+    exit 1
+  fi
+else
+  mcp_route_probes || exit 1
+fi
 ```
 
 For step (d) supply `MCP_EXPECTED_MODE=off` and run the probe. Do not enable
-either flag until the OFF startup check and all OFF probes pass. Management
-role/workspace readiness runs only after the credential is installed in (f).
+either flag until the OFF startup check and all OFF probes pass. The read-only grant
+preflight runs before writing the management credential in (f); binding and
+workspace readiness are rechecked after the ON-only mount is installed.
 
 ## (e) ROLLBACK to 826db6a3 and original env/Caddy
 
@@ -444,6 +480,23 @@ No migration, app/stack, site, signing key, artifact credential or timer change.
 
 ## (f) MCP SWITCH-ON
 
+The management producer uses the edge runtime's existing `SWARM_DATABASE_URL`,
+read by a root Node program inside a transient instance of the exact OAuth
+image on the box. Its only added capability is `DAC_READ_SEARCH`, needed
+to read the service-owned mode-0600 edge env despite dropping all other
+capabilities; the source env/CA binds are read-only, and only the protected
+staging bind is writable. Base Compose's `extra_hosts` maps `db.commonswarm.internal`
+to `172.31.0.10`; the OFF runtime's DNS and actual UID/GID must match first.
+The URL preserves the existing login/password/database, replacing only its
+host with that name. Query overrides/non-5432 ports fail closed. Both the
+producer and the bundled management client receive `ssl.ca`,
+`ssl.servername=db.commonswarm.internal`, and `ssl.rejectUnauthorized=true`.
+Runtime ownership is measured from Dockerfile `USER 10001:10001` and live
+`Config.User`/`process.getuid()`/`process.getgid()`; any drift stops.
+Install `0440 root:10001`: root owns it, only root and the runtime group can
+read it, and no user can write it via mode bits. The ON-only bind is read-only;
+OFF has neither the env input nor mount. No management 1Password item exists.
+
 Requires HezLead's named `TOM_ENABLE_APPROVAL=2026-09-29` prompt input and
 all OFF readiness gates. The edge code at `deploy/edge-runtime/main/router.ts`
 gates the MCP worker via `SWARM_MCP_PUBLIC_ENABLED`. Caddy's shipped site
@@ -461,26 +514,131 @@ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { 
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
 test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
 switch_on() {
+  OAUTH_USER=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
+  test "$OAUTH_USER" = 10001:10001 || { echo 'FAIL: OAuth runtime must be UID:GID 10001:10001; stop on drift' >&2; return 1; }
+  IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$IMAGE" || return 1
+  docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
+import dns from "node:dns/promises";
+if(process.getuid()!==10001 || process.getgid()!==10001 ||
+   process.env.MCP_OAUTH_DATABASE_HOST!=="db.commonswarm.internal" ||
+   (await dns.lookup("db.commonswarm.internal")).address!=="172.31.0.10") process.exit(1);
+' || return 1
+  # The reviewed base Compose extra_hosts resolves this name to 172.31.0.10.
+  # Root reads SWARM_DATABASE_URL only in memory; this transient producer uses
+  # the same exact image/network/name mapping and emits no database values.
+  docker run --rm -i --pull never --network commonswarm-net --user 0:0 \
+    --read-only --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges:true --log-driver none \
+    --add-host db.commonswarm.internal:172.31.0.10 \
+    --mount type=bind,src=/home/commonswarm/.env,dst=/home/commonswarm/.env,readonly \
+    --mount "type=bind,src=$SECRET_STAGE,dst=/secret-stage" \
+    --mount type=bind,src=/etc/ssl/yulan-internal-ca.pem,dst=/etc/ssl/yulan-internal-ca.pem,readonly \
+    --entrypoint node "$IMAGE" --input-type=module <<'NODE' || return 1
+import fs from "node:fs";
+import postgres from "postgres";
+let db;
+let check = "root credential producer configuration";
+function requireCheck(ok) { if (!ok) throw new Error("gate"); }
+function env(path) {
+  const result = {};
+  for (const line of fs.readFileSync(path, "utf8").split(/\r?\n/u)) {
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const match = /^([A-Z][A-Z0-9_]*)=(.*)$/u.exec(line);
+    requireCheck(match && !(match[1] in result));
+    let value = match[2];
+    if (value.length >= 2 && ["'", '\"'].includes(value[0]) && value.at(-1) === value[0]) value = value.slice(1,-1);
+    result[match[1]] = value;
+  }
+  return result;
+}
+try {
+  requireCheck(process.getuid() === 0);
+  requireCheck(fs.readFileSync("/home/commonswarm/.env", "utf8") === fs.readFileSync("/secret-stage/edge.env", "utf8"));
+  const edge = env("/home/commonswarm/.env");
+  const compose = env("/secret-stage/compose.off.env");
+  requireCheck(compose.MCP_OAUTH_UID === "10001" && compose.MCP_OAUTH_GID === "10001");
+  requireCheck(compose.MCP_OAUTH_DATABASE_HOST === "db.commonswarm.internal" && compose.MCP_OAUTH_DATABASE_ADDRESS === "172.31.0.10");
+  const url = new URL(edge.SWARM_DATABASE_URL);
+  requireCheck(["postgres:", "postgresql:"].includes(url.protocol) && url.username && url.password && !url.search && !url.hash);
+  requireCheck(!url.port || url.port === "5432");
+  // Preserve edge username/password/database; dial the OAuth network hostname.
+  url.hostname = "db.commonswarm.internal";
+  const ssl = { ca: fs.readFileSync("/etc/ssl/yulan-internal-ca.pem", "utf8").trim(), servername: "db.commonswarm.internal", rejectUnauthorized: true };
+  requireCheck(ssl.ca.includes("-----BEGIN CERTIFICATE-----"));
+  check = "edge login connection with verified CA/servername";
+  db = postgres(url.href, { max: 1, prepare: false, connect_timeout: 10, idle_timeout: 3, ssl, onnotice() {} });
+  await db.begin("read only", async tx => {
+    await tx`SELECT set_config('statement_timeout', '10s', true), set_config('lock_timeout', '5s', true)`;
+    for (const role of ["swarm_command", "swarm_read"]) {
+      for (const privilege of ["MEMBER", "SET"]) {
+        check = `${privilege} ON ROLE ${role} TO edge login`;
+        const rows = await tx`SELECT pg_has_role(current_user, ${role}, ${privilege}) AS allowed`;
+        requireCheck(rows[0]?.allowed === true);
+      }
+    }
+  });
+  // Check effective grants AFTER SET ROLE, as the real management path does.
+  for (const role of ["swarm_command", "swarm_read"]) {
+    await db.begin("read only", async tx => {
+      await tx`SELECT set_config('statement_timeout', '10s', true), set_config('lock_timeout', '5s', true)`;
+      check = `SET ROLE ${role} TO edge login`;
+      await tx`SELECT set_config('role', ${role}, true)`;
+      for (const schema of role === "swarm_command" ? ["swarm"] : ["swarm_read", "swarm"]) {
+        check = `USAGE ON SCHEMA ${schema} TO ${role}`;
+        const rows = await tx`SELECT has_schema_privilege(current_user, ${schema}, 'USAGE') AS allowed`;
+        requireCheck(rows[0]?.allowed === true);
+      }
+      const tables = role === "swarm_command" ? [
+        ["swarm.users", "SELECT,INSERT,UPDATE"],
+        ["swarm.hosted_mcp_grants", "SELECT,INSERT,UPDATE"],
+        ["swarm.hosted_mcp_grant_workspaces", "SELECT,INSERT"],
+        ["swarm.hosted_mcp_seats", "SELECT,UPDATE"],
+        ["swarm.hosted_mcp_seat_handles", "SELECT,UPDATE"],
+        ["swarm.agent_principals", "SELECT,UPDATE"],
+        ["swarm.workspaces", "SELECT"], ["swarm.memberships", "SELECT"],
+        ["swarm.invitations", "SELECT"], ["swarm.agent_tokens", "SELECT"],
+        ["swarm.streams", "SELECT,UPDATE"], ["swarm.idempotency_keys", "SELECT,INSERT"],
+        ["swarm.events", "INSERT"], ["swarm.audit_log", "INSERT"],
+      ] : [["swarm_read.workspaces", "SELECT"]];
+      for (const [table, privileges] of tables) {
+        for (const privilege of privileges.split(",")) {
+          check = `${privilege} ON TABLE ${table} TO ${role}`;
+          const rows = await tx`SELECT has_table_privilege(current_user, ${table}, ${privilege}) AS allowed`;
+          requireCheck(rows[0]?.allowed === true);
+        }
+      }
+      if (role === "swarm_read") {
+        for (const signature of ["auth.uid()", "swarm.is_member(uuid,uuid)"]) {
+          check = `EXECUTE ON FUNCTION ${signature} TO swarm_read`;
+          const rows = await tx`SELECT has_function_privilege(current_user, ${signature}, 'EXECUTE') AS allowed`;
+          requireCheck(rows[0]?.allowed === true);
+        }
+        check = "SELECT ON swarm_read.workspaces with verified-user claims (including view dependencies)";
+        await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({sub: "00000000-0000-4000-8000-000000000000", role: "authenticated"})}, true)`;
+        const rows = await tx`SELECT workspace_id, name FROM swarm_read.workspaces LIMIT 1`;
+        requireCheck(rows.length === 0);
+      }
+    });
+  }
+  // Close the checked login BEFORE creating the first credential file.
+  check = "close read-only grant preflight";
+  await db.end({timeout: 5}); db = undefined;
+  check = "exclusive root-only credential staging";
+  fs.writeFileSync("/secret-stage/management-database-credentials", JSON.stringify({databaseUrl: url.href})+"\n", {flag: "wx", mode: 0o600});
+  console.log("edge login grants checked read-only; root-only management file staged: PASS");
+} catch (error) {
+  // Do not print error.message, query results, URLs, login names or objects.
+  const code = /^[0-9A-Z]{5}$/u.test(error?.code ?? "") ? ` SQLSTATE=${error.code}` : "";
+  console.error(`FAIL: missing grant or failed check: ${check}${code}; STOP; never widen grants`);
+  process.exitCode = 1;
+} finally {
+  if (db) { try { await db.end({timeout: 5}); } catch { process.exitCode = 1; } }
+}
+NODE
   python3 - "$SECRET_STAGE" <<'PY' || return 1
-import json, os, pathlib, re, sys, urllib.parse
+import os, pathlib, re, sys
 stage=pathlib.Path(sys.argv[1])
-def env(path):
-    result={}
-    for line in path.read_text().splitlines():
-        if not line.strip() or line.lstrip().startswith('#'): continue
-        name,sep,value=line.partition('=')
-        assert sep and re.fullmatch(r'[A-Z][A-Z0-9_]*',name) and name not in result, 'env syntax or duplicate'
-        if len(value)>=2 and value[0]==value[-1] and value[0] in "'\"": value=value[1:-1]
-        result[name]=value
-    return result
-edge=env(stage/'edge.env'); compose=env(stage/'compose.env')
-url=edge.get('SWARM_DATABASE_URL') or edge.get('SUPABASE_DB_URL')
-assert url, 'existing management DB configuration missing'
-parsed=urllib.parse.urlsplit(url)
-assert parsed.scheme in ('postgres','postgresql') and parsed.username and parsed.password
-assert parsed.hostname==compose['MCP_OAUTH_DATABASE_HOST'] and not parsed.query and not parsed.fragment
-(stage/'management-database-credentials').write_text(json.dumps({'databaseUrl':url})+'\n')
-os.chmod(stage/'management-database-credentials',0o600)
 for source,target,flag in [('service.off.env','service.on.env','MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED'),
     ('edge.off.env','edge.on.env','SWARM_MCP_PUBLIC_ENABLED')]:
     text=(stage/source).read_text()
@@ -494,12 +652,11 @@ text,count=re.subn(pattern,'\t\timport mcp_resource_active',text)
 assert count==1 and '@mcp_unavailable' not in text, 'live Caddy differs; stop'
 (stage/'mcp.on.caddy').write_text(text); os.chmod(stage/'mcp.on.caddy',0o600)
 PY
-  GROUP=$(stat -c '%g' /etc/commonswarm-oauth/database-credentials) || return 1
-  OAUTH_GID=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
-  OAUTH_GID=${OAUTH_GID#*:}
-  test "$GROUP" = "$OAUTH_GID" || { echo 'FAIL: artifact credential group differs from OAuth gid' >&2; return 1; }
   test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || return 1
-  install -o root -g "$GROUP" -m 0640 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
+  # Dockerfile and measured Config.User are 10001:10001. Read only for root
+  # and that runtime group; root retains ownership and nobody has write bits.
+  install -o root -g 10001 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
+  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:10001:440 || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
   cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
   oauth_management_compose config --quiet || return 1
@@ -515,6 +672,11 @@ if(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED!=="1") process.exit(1);
 const config=await loadConfig();
 const bindings=await createProductionManagementBindings(config);
 try {
+  const fs=await import("node:fs");
+  const file=process.env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE;
+  const stat=fs.statSync(file);
+  if(process.getuid()!==10001 || process.getgid()!==10001 || stat.uid!==0 || stat.gid!==10001 || (stat.mode & 0o777)!==0o440) throw new Error("management file permissions");
+  fs.accessSync(file, fs.constants.R_OK);
   const {db}=await import("./src/management-command.generated.js");
   const rows=await db`SELECT pg_has_role(current_user, '\''swarm_command'\'', '\''MEMBER'\'') AS command,
     pg_has_role(current_user, '\''swarm_read'\'', '\''MEMBER'\'') AS read`;
@@ -526,39 +688,24 @@ try {
 } catch { console.error("FAIL: management binding readiness"); process.exitCode=1; }
 finally { await bindings.closeManagement(); }
 ' || return 1
-  docker inspect --format '{{.HostConfig.Memory}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-memory-limit.bytes" || return 1
-  docker stats --no-stream --format '{{json .}}' commonswarm-oauth-oauth-1 >"$PROOF_DIR/oauth-stats.json" || return 1
-  python3 - "$PROOF_DIR" <<'PY' || return 1
-import decimal, json, pathlib, re, sys
-proof=pathlib.Path(sys.argv[1]); limit=int((proof/'oauth-memory-limit.bytes').read_text())
-assert limit>0, 'OAuth container has no memory limit'
-stats=json.loads((proof/'oauth-stats.json').read_text())
-assert stats['Name']=='commonswarm-oauth-oauth-1', 'stats container identity mismatch'
-match=re.fullmatch(r'\s*([0-9.]+)\s*(B|KiB|MiB|GiB|TiB|kB|MB|GB|TB)\s*',stats['MemUsage'].split('/')[0])
-assert match, 'unrecognized Docker memory units'
-units={'B':1,'KiB':1024,'MiB':1024**2,'GiB':1024**3,'TiB':1024**4,'kB':1000,'MB':1000**2,'GB':1000**3,'TB':1000**4}
-used=decimal.Decimal(match[1])*units[match[2]]
-print('OAuth docker stats memory bytes='+str(used)+' inspected limit bytes='+str(limit))
-assert used*5<=limit*4, 'OAuth memory exceeds 80% of inspected limit; rollback required'
-print('OAuth memory <=80%: PASS')
-PY
   install -o root -g root -m 0644 "$SECRET_STAGE/mcp.on.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
   systemctl reload caddy || return 1
 }
 if ! switch_on; then
-  echo 'FAIL: switch-on/readiness/memory; rolling back to OFF' >&2
+  echo 'FAIL: switch-on/readiness; rolling back to OFF' >&2
   rollback_to_off || { echo 'FAIL: rollback-to-OFF; stop and report' >&2; exit 1; }
   exit 1
 fi
 ```
 
 The command bundle allocates its postgres.js pool only on first database use,
-with maximum two connections. The switch-on block measures OAuth memory via
-`docker stats --no-stream` after enable and management readiness, compares it
-to `.HostConfig.Memory` from inspect, and automatically rolls back to OFF on
-usage above 80% (or any failed enable/readiness check). This is one release
-sample, not a sustained-load measurement.
+with maximum two connections. The ON route-probe block measures OAuth memory via
+`docker stats --no-stream` after enable, management readiness and ON probes,
+compares it to `.HostConfig.Memory` from inspect, and automatically rolls back
+to OFF on usage at or above 80% (or any failed ON probe/memory check).
+The enable block independently rolls back on failed enable/readiness checks.
+This is one release sample, not a sustained-load measurement.
 
 ```sh
 # step: hm37-mcp-disable

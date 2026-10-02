@@ -100,3 +100,78 @@ credential/key fixtures used mode-0700 `anvil-secret.*` dirs and mode-0600
 files; every fixture cleanup used the installed rm guard and succeeded.
 The initial report's live-measurement and production-readiness limits still
 apply; HezLead arranges the independent cross-family check.
+
+
+## TASK-3 HezLead management-credential ruling (supersedes TASK-2 memory boundary)
+
+The switch-on producer reads only `SWARM_DATABASE_URL` from the current
+`/home/commonswarm/.env`, inside a root Node program on the box. It runs in
+a transient container from the exact reviewed OAuth image, on
+`commonswarm-net`; no new 1Password item or fallback URL is used. It verifies
+snapshot equality and Compose's name/IP/UID/GID inputs, preserves the edge
+login/password/database, and replaces only the host with
+`db.commonswarm.internal`. The base Compose `extra_hosts` maps that name to
+`172.31.0.10`; the procedure checks the actual OFF runtime DNS mapping.
+
+Before creating even the staged file, it connects with that login and checks
+`pg_has_role` MEMBER/SET for both roles, then actually sets each role in
+read-only transactions and checks effective schema/table privileges, plus
+EXECUTE on the workspace view's two function dependencies. It reads the
+scoped workspace view under synthetic verified-user claims without printing
+rows. A failed grant/check prints only the named privilege/object/role and a
+safe SQLSTATE; no grants are added. The preflight closes its pool before
+writing the exclusive mode-0600 staged file under the root mode-0700 secret
+directory. Only ON installs and mounts it; rollback remains base-only with
+exact guarded file removal.
+
+Dockerfile `USER 10001:10001` and Compose's user contract are the repository
+measurements. The procedure requires actual `Config.User`, runtime UID/GID,
+and staged Compose values to agree. It installs `0440 root:10001`, checks
+host stat metadata, and checks metadata/read access as the unprivileged ON
+runtime. Root owns the file, root and the runtime group can read it, nobody
+has write bits, and the ON-only bind is read-only. A root-owned 0600 installed
+file would fail this runtime read and is not used.
+
+The build adapter passes the management runtime's explicit TLS options to
+the real bundled postgres.js constructor: mounted CA, servername
+`db.commonswarm.internal`, rejectUnauthorized true. The existing bundled
+handler regression now observes those options at its database boundary;
+no new test-only production seam or duplicate test was added. The installed
+postgres.js source (`node_modules/postgres/src/connection.js:275` through
+`:289`) merges object SSL options into `tls.connect`, including servername.
+This source inspection plus constructor-boundary proof does not claim a live
+TLS handshake.
+
+Verification with Node 24.20.0:
+
+- Management bundle built. Focused `node --test
+  services/mcp-auth/test/entrypoint.test.js`: 8 tests, 6 passed, 2 skipped
+  for socket EPERM, 0 failed. The same service `test/*.test.js` glob owns it.
+- Mutation control: removing only the management TLS adaptation makes that
+  test fail for absent servername. Restored the adapter byte-for-byte,
+  rebuilt the bundle, and reran the focused file successfully.
+- All 13 fenced sh blocks (12 RELEASE, 1 RUNBOOK) pass both `bash -n` and
+  `/bin/bash -n`; the nested window-state/helpers also pass both parsers.
+  All 7 Python heredocs compile. The new root-producer Node heredoc and
+  all 3 shell-quoted Node readiness programs pass Node syntax; changed JS
+  and the generated bundle also pass syntax.
+- Executed the extracted root-producer program with filesystem/database
+  stubs and only the child process's root UID check mocked: 11 synthetic
+  positive/negative cases pass. These cover URL host adaptation, verified
+  TLS options, read-only transactions/role changes/effective grants, exact
+  missing-grant labels, zero file writes on preflight failure, and mode-0600
+  staging. Real root/Docker/TLS/SQL and final bind ownership are unmeasured.
+- Actual extracted memory program accepts 7.99 MiB of a 10 MiB limit and
+  rejects exactly 8 MiB and 8.01 MiB; decimal units also behave correctly.
+  The ON route-probe step now calls the memory gate only after ON probes
+  pass, and rolls back to OFF on either failure. Executing that extracted
+  control flow with stand-ins passes success, probe-failure, memory-failure,
+  rollback-failure, and OFF scenarios under both Bash parsers.
+- `git diff --check` passes. Identity and agent-trailer checks apply to the
+  final three-commit `origin/main..HEAD` range; results are in RESULT-3.md.
+
+No new live observations, Docker, PostgreSQL, release, probe, CI, push,
+Alloy, browser, GUI, keychain, 1Password, or HOME changes. Synthetic secret
+files stayed in fresh mode-0700 `/private/tmp/anvil-secret.*` directories,
+mode-0600 files, with successful installed-guard cleanup after every case.
+HezLead owns the independent cross-family check and live release gates.

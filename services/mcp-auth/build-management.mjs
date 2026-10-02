@@ -13,7 +13,7 @@ await build({
   format: "esm",
   external: ["postgres"],
   define: { "Deno.env.get": "managementEnvGet", "import.meta.main": "false" },
-  banner: { js: 'import { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\nimport { managementEnvGet, lazyManagementDatabase } from "./management-runtime.js";' },
+  banner: { js: 'import { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\nimport { managementEnvGet, managementDatabaseOptions, lazyManagementDatabase } from "./management-runtime.js";' },
   plugins: [{
     name: "deno-npm-specifiers",
     setup(builder) {
@@ -31,6 +31,7 @@ await build({
         }
         return { loader: "ts", contents: source.replace(pool, (value) =>
           value.replace("db = postgres(", "db = lazyManagementDatabase(() => postgres(")
+            .replace("withDatabaseTls(", "managementDatabaseOptions(")
             .replace(/\);$/u, "));")) };
       });
     },
