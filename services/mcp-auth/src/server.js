@@ -9,7 +9,7 @@ import { createConsentOrchestrator, createPostgresConsentProgress } from "./cons
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
-import { createLogger } from "./logger.js";
+import { createLogger, logProviderError, subscribeProviderErrors } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
 import { createPostgresAdapter } from "./postgres-adapter.js";
 import { createMcpProvider } from "./provider.js";
@@ -49,6 +49,7 @@ function clientErrorResponse(error) {
 
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
   interactionHandler }) {
+  subscribeProviderErrors(provider, logger);
   const oidc = provider.callback();
   return async function handle(request, response) {
     const requestId = randomUUID();
@@ -88,6 +89,9 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         new URL(request.url, "https://mcp.commonswarm.com"))) return;
       await oidc(request, response);
     } catch (error) {
+      if (path.startsWith("/interaction/") || path === "/oauth/callback/gotrue") {
+        logProviderError(logger, "interaction.error", requestId, error);
+      }
       const clientResponse = clientErrorResponse(error);
       const status = clientResponse?.status ?? 500;
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
