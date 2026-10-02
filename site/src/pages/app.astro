@@ -86,4 +86,16 @@ const description =
 
   <LiveDashboard />
   <AdminDelegations />
+  {/* Runs during parsing, after all app asset tags and before deferred module scripts.
+      Vite can add preload and stylesheet links when those modules execute. */}
+  <script is:inline data-app-build-snapshot>
+    (() => {
+      const urls = new Set();
+      for (const node of document.querySelectorAll("script[src], link[href]")) {
+        const raw = node.getAttribute("src") ?? node.getAttribute("href") ?? "";
+        if (/\/_astro\/[^"']+\.(?:js|css)$/.test(raw)) urls.add(raw);
+      }
+      document.documentElement.setAttribute("data-app-build-assets", [...urls].sort().join("\n"));
+    })();
+  </script>
 </Base>

@@ -9527,9 +9527,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * /_astro/<name>.<contenthash>.<js|css> names, so an asset-only check would have missed every
      * copy change we ship.
      *
-     *  1. The served asset URLs against the ones this page is RUNNING, read out of its own DOM
-     *     once, below, before any poll. This is the certain one: the code being served is not the
-     *     code in this tab. It holds even for a build deployed before this page loaded.
+     *  1. The served asset URLs against the initial HTML's asset snapshot. /app captures it
+     *     during parsing, before module scripts can inject preload or stylesheet links.
+     *     A live DOM scan here would count those runtime links as a different build forever.
      *  2. The served HTML against the first served HTML this tab saw. This is the one that catches
      *     a markup-only build, and it can only see changes made after the first poll.
      *
@@ -9549,7 +9549,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       return [...urls].sort().join("\n");
     };
-    const runningBuild = buildAssetsFrom(document);
+    const runningBuild = document.documentElement.getAttribute("data-app-build-assets") ?? "";
     /* OUR markup, not the whole document. Comparing the entire served HTML would flap on bytes
        that are not ours: an injected analytics or preview toolbar, a per-request id from a proxy.
        Everything this build renders lives inside <live-dashboard>, and anything injected around
@@ -9566,6 +9566,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /* NOT the empty string. "nothing dismissed yet" has to be a value no served build can equal,
        or a probe that returns nothing compares equal to it and reads as already dismissed. */
     let dismissedBuild: string | null = null;
+    const dismissedBuildKey = (build: string): string => `commonswarm:app-dismissed-build:${build}`;
     let servedBuild = "";
     /* THE READER'S LAST ACTION, counted. A poll answers about the server as it was when its
        request went out, so an answer that arrives after the reader has acted is older than the
@@ -9612,13 +9613,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           void checkForNewBuild();
         }
       }
-      /* THE READER MOVED WHILE THIS WAS OPEN, so this answer is older than what they acted on and
-         none of it is applied: not the baseline, not the dismissal, not the reset below. MEASURED
-         (see `a poll that was already open when Not now was clicked does not undo it`): a poll
-         held open across a Not now click came back with "the same build you are running", cleared
-         the dismissal through the reset, and the build the reader had just dismissed raised the
-         bar again. Nothing is lost by dropping it — the next poll asks about the server as it is
-         after the click, and the `finally` above has already started one if a poll was queued. */
+      /* A response to a request made before the reader's action cannot change the baseline
+         or notice. The queued poll, if any, asks again after that action. */
       if (version !== noticeActionVersion) return;
       const page = new DOMParser().parseFromString(body, "text/html");
       const served = buildAssetsFrom(page);
@@ -9634,21 +9630,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        * dismissing an asset change stored the asset set, and the next build that changed only
        * markup carried that same asset set and compared equal to it. */
       servedBuild = `${served}\n${markup}`;
+      try {
+        if (window.sessionStorage.getItem(dismissedBuildKey(servedBuild)) === "1") {
+          dismissedBuild = servedBuild;
+        }
+      } catch {
+        // Keep dismissal working in this tab when storage is unavailable.
+      }
       const isNewBuild = served !== runningBuild || markup !== baselineMarkup;
       if (!isNewBuild) {
-        /* WHAT THIS RESET IS ALLOWED TO DO, AND WHEN. It clears the reader's dismissal, and it
-           may do that only from a poll that started after the reader's last action — which is
-           what the version check above enforces. Within that limit it is needed: without it a
-           rollback stranded the dismissal, because after dismissing B and rolling back to A, B
-           shipping again still equalled the remembered value and was swallowed for the life of
-           the tab. Outside it, it is the branch that silently undid the reader's click. */
-        dismissedBuild = null;
         showUpdateNotice(false);
         return;
       }
-      /* Dismissal is remembered against what caused it, in memory only: a reload takes the new
-       * build anyway, so there is nothing to persist, and a THIRD build differs from the
-       * dismissed one and asks again. */
+      /* Match the whole served build, including markup. A reload or an unchanged poll must
+         not undo Dismiss; a different served build still asks again. */
       showUpdateNotice(servedBuild !== dismissedBuild);
     };
 
@@ -9660,6 +9655,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          before this, so it is retired here rather than allowed to answer over the click. */
       noticeActionVersion += 1;
       dismissedBuild = servedBuild;
+      try {
+        window.sessionStorage.setItem(dismissedBuildKey(servedBuild), "1");
+      } catch {
+        // The in-memory dismissal still applies if storage is blocked or full.
+      }
       showUpdateNotice(false);
     });
 
