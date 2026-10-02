@@ -4,9 +4,11 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { migrationNames, repoSql, versions } from '../support/admin-schema-db.js';
 
-for (const [i, version] of versions.entries()) {
+const reserveVersions = [...versions, '20261003000004'];
+const reserveMigrations = [...migrationNames, '20261003000004_migration_checksums.sql'];
+for (const [i, version] of reserveVersions.entries()) {
   test(`admin-schema reserve ${version} is verbatim and artifact-preserving`, () => {
-    const source = repoSql(`supabase/migrations/${migrationNames[i]}`);
+    const source = repoSql(`supabase/migrations/${reserveMigrations[i]}`);
     const marker = '-- Reserve rollback (verbatim sibling reserve; data-free only):\n';
     assert.equal(source.split(marker).length, 2);
     const inverse = source.split(marker)[1]!.split('\n').filter(Boolean)
@@ -17,7 +19,7 @@ for (const [i, version] of versions.entries()) {
     assert.doesNotMatch(inverse, /\bCASCADE\b|\bTRUNCATE\b|\bDELETE FROM\b/);
   });
   test(`admin-schema catalog ${version} pins every function body`, () => {
-    const source = repoSql(`supabase/migrations/${migrationNames[i]}`).split('-- Reserve rollback')[0]!;
+    const source = repoSql(`supabase/migrations/${reserveMigrations[i]}`).split('-- Reserve rollback')[0]!;
     const proof = repoSql(`deploy/release-proofs/item-ai/${version}-catalog.sql`);
     const functions = [...source.matchAll(/CREATE FUNCTION ([\w.]+)\([\s\S]*?AS \$fn\$([\s\S]*?)\$fn\$;/g)];
     assert.ok(functions.length > 0, 'positive control: migration function bodies found');

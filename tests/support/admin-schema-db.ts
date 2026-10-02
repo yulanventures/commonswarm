@@ -25,7 +25,7 @@ export function databaseContainer(): string {
  * Older inverse drills must not run against durable artifacts from earlier tests.
  */
 export function emptyApplicationSchema(): string {
-  const schemas = ['swarm', 'swarm_read', 'commonswarm_oauth'];
+  const schemas = ['swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops'];
   const suffix = randomUUID().replaceAll('-', '');
   const ddl = execFileSync('docker', ['exec', databaseContainer(), 'pg_dump',
     '-U', 'supabase_admin', '-d', 'postgres', '--schema-only',
