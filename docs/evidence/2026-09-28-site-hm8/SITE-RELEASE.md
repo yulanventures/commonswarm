@@ -215,7 +215,10 @@ PY
   chmod 0600 "$SITE_WINDOW_FILE"
   printf '%s\n' "$box_open" >"$SITE_EVIDENCE/site-01-open.txt"
   chmod 0600 "$SITE_EVIDENCE/site-01-open.txt"
-  scp "$SITE_WINDOW_FILE" commonswarm@yulan-vps-1:/tmp/commonswarm-site-window.env >/dev/null
+  # -p keeps the local 0600 mode; plain scp creates the box copy with the remote umask (0644), which the
+  # close step refuses (live, lane 8 try 9). Fixed remote command, no variable arguments.
+  scp -p "$SITE_WINDOW_FILE" commonswarm@yulan-vps-1:/tmp/commonswarm-site-window.env >/dev/null
+  ssh commonswarm@yulan-vps-1 'chmod 0600 /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env && test "$(stat -c %a /tmp/commonswarm-site-window.env)" = 600'
 )
 ```
 
