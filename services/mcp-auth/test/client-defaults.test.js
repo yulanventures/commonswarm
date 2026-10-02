@@ -6,6 +6,7 @@ import { errors } from "oidc-provider";
 import instance from "oidc-provider/lib/helpers/weak_cache.js";
 
 import { createMcpProvider, ISSUER, RESOURCE, TEST_ACCOUNT_ID } from "../src/provider.js";
+import { registrableDomain } from "../src/registration.js";
 
 const CLAUDE_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata";
 
@@ -75,13 +76,22 @@ test("DCR metadata validates with omitted algorithms and supported grant/respons
   const minimal = {
     client_id: "dcr-client",
     redirect_uris: claudeMetadata().redirect_uris,
-    token_endpoint_auth_method: "none",
   };
   await provider.Client.validate(minimal);
   const client = new provider.Client(minimal);
   assert.equal(client.responseTypeAllowed("code"), true);
   assert.equal(client.grantTypeAllowed("authorization_code"), true);
   assert.equal(client.idTokenSignedResponseAlg, "ES256");
+  assert.equal(client.tokenEndpointAuthMethod, "none");
+});
+
+test("registrableDomain groups sibling subdomains and splits generic ccTLD labels", () => {
+  assert.equal(registrableDomain("a.evil.com"), "evil.com");
+  assert.equal(registrableDomain("b.evil.com"), "evil.com");
+  assert.equal(registrableDomain("foo.co.uk"), "foo.co.uk");
+  assert.equal(registrableDomain("bar.co.uk"), "bar.co.uk");
+  assert.equal(registrableDomain("127.0.0.1"), "127.0.0.1");
+  assert.equal(registrableDomain("localhost"), "localhost");
 });
 
 test("explicit unsupported ID-token algorithms remain invalid for CIMD and DCR metadata", async () => {

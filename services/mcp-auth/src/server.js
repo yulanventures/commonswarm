@@ -14,6 +14,7 @@ import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-f
 import { createPostgresAdapter } from "./postgres-adapter.js";
 import { createMcpProvider } from "./provider.js";
 import { createProductionManagementBindings } from "./management-bindings.js";
+import { createPostgresRegistrationStore } from "./registration.js";
 
 const ALWAYS_AVAILABLE = new Set([
   "/health",
@@ -164,9 +165,16 @@ export async function startServer({
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
   }
   const pool = createPool(config);
+  let registrationStore;
+  if (config.publicAuthorizationEnabled) {
+    registrationStore = createPostgresRegistrationStore(pool);
+    await registrationStore.cleanup();
+  }
   const metadataFetch = createPostgresCimdFetch(pool, createPinnedMetadataFetch());
   const provider = await createMcpProvider({
     adapter: createPostgresAdapter(pool),
+    ...(registrationStore ? { registrationStore } : {}),
+    registrationEnabled: config.publicAuthorizationEnabled,
     cookieKeys: config.cookieKeys,
     jwks: config.jwks,
     authorizationCodeTtlSeconds: config.authorizationCodeTtlSeconds,
@@ -231,7 +239,16 @@ export async function startServer({
     server.once("error", reject);
     server.listen(config.port, "0.0.0.0", resolve);
   });
-  return { server, provider, pool };
+  if (registrationStore) {
+    // Expiry is enforced in every lookup; deletion also runs while the service
+    // is idle. Restart performs cleanup before accepting requests.
+    const registrationCleanup = setInterval(() => {
+      void registrationStore.cleanup().catch(() => logger.info({ event: "registration_cleanup_failed" }));
+    }, 60 * 60 * 1000);
+    registrationCleanup.unref();
+    server.once("close", () => clearInterval(registrationCleanup));
+  }
+  return { server, provider, pool, registrationStore };
 }
 
 // Both npm start and the Docker CMD reach this production composition root.

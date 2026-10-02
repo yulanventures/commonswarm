@@ -9,6 +9,8 @@ import {
   METADATA_BODY_LIMIT_BYTES,
 } from "./metadata-fetch.js";
 import { createAtomicMemoryAdapter } from "./memory-adapter.js";
+import { CLIENT_SCOPES, createMemoryRegistrationStore, createRegistrationLimiter,
+  validateClientPolicy } from "./registration.js";
 
 export const ISSUER = "https://mcp.commonswarm.com";
 export const RESOURCE = "https://mcp.commonswarm.com/mcp";
@@ -43,6 +45,9 @@ export async function createMcpProvider({
   nativeLoopbackEnabled = false,
   providerGrantActive = async () => true,
   clientMetadataAccepted = async () => true,
+  registrationEnabled = true,
+  registrationStore = createMemoryRegistrationStore(),
+  registrationLimiter = createRegistrationLimiter(),
 } = {}) {
   const metadataFetch = injectedMetadataFetch ?? (injectedFetch === undefined
     ? createPinnedMetadataFetch()
@@ -60,13 +65,15 @@ export async function createMcpProvider({
     (ctx) => Boolean(ctx.oidc.session.accountId && !ctx.oidc.account),
   ));
   const provider = new Provider(ISSUER, {
-    adapter,
+    adapter: (model) => model === "Client" ? registrationStore : adapter(model),
     clientAuthMethods: ["none"],
     // Match omitted client algorithms to the provider's ES256 signing key.
     clientDefaults: {
       id_token_signed_response_alg: "ES256",
       authorization_signed_response_alg: "ES256",
       introspection_signed_response_alg: "ES256",
+      token_endpoint_auth_method: "none",
+      scope: CLIENT_SCOPES.join(" "),
     },
     cookies: {
       keys: cookieKeys,
@@ -74,6 +81,9 @@ export async function createMcpProvider({
       short: { httpOnly: true, sameSite: "lax", secure: true, signed: true },
     },
     features: {
+      registration: { enabled: registrationEnabled, initialAccessToken: false,
+        issueRegistrationAccessToken: false, idFactory: registrationLimiter },
+      pushedAuthorizationRequests: { enabled: false },
       clientIdMetadataDocument: {
         ack: "draft-02",
         enabled: true,
@@ -135,7 +145,11 @@ export async function createMcpProvider({
       jwks: "/jwks",
     },
     rotateRefreshToken: true,
-    scopes: ["openid", "offline_access", "mcp"],
+    scopes: CLIENT_SCOPES,
+    extraClientMetadata: {
+      properties: ["scope"],
+      validator: (_ctx, _key, _value, metadata) => validateClientPolicy(metadata, nativeLoopbackEnabled),
+    },
     ttl: {
       AccessToken: accessTokenTtlSeconds,
       AuthorizationCode: authorizationCodeTtlSeconds,
@@ -158,5 +172,21 @@ export async function createMcpProvider({
   // Production terminates TLS before this app. Tests exercise the same trusted
   // proxy shape over an ephemeral loopback HTTP server.
   provider.proxy = true;
+  provider.use(async (ctx, next) => {
+    // oidc-provider filters unknown authorization scopes. Refuse escalation
+    // explicitly rather than silently turning it into a narrower request.
+    if (ctx.path === "/authorize" && typeof ctx.query.scope === "string" &&
+        ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope))) {
+      ctx.status = 400;
+      ctx.body = { error: "invalid_scope" };
+      return;
+    }
+    await next();
+    const entities = ctx.oidc?.entities;
+    if ((entities?.AuthorizationCode || entities?.AccessToken) && ctx.status < 400 &&
+        (ctx.path.startsWith("/authorize") || ctx.path === "/token")) {
+      await registrationStore.markUsed(entities.Client.clientId);
+    }
+  });
   return provider;
 }

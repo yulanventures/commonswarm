@@ -11,6 +11,7 @@ import {
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
 import { renderConsentPage } from "./interaction-page.js";
+import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE_SCOPES } from "./provider.js";
 
 function respond(response, status, body, headers = {}) {
@@ -85,6 +86,28 @@ function identity(session) {
     interactiveAuthAtSeconds: session.authenticated_at === null
       ? null
       : Math.floor(new Date(session.authenticated_at).getTime() / 1000),
+  };
+}
+
+async function findClient(provider, clientId) {
+  if (!provider?.Client?.find) return undefined;
+  try {
+    return await provider.Client.find(clientId);
+  } catch {
+    return undefined;
+  }
+}
+
+async function clientConsentDisplay(provider, clientId, redirectUri) {
+  if (metadataUrlAllowed(clientId)) {
+    return { verified: true, primary: new URL(clientId).host };
+  }
+  const client = await findClient(provider, clientId);
+  const redirect = new URL(redirectUri);
+  return {
+    verified: false,
+    primary: redirect.hostname.toLowerCase(),
+    declaredName: client?.clientName ?? null,
   };
 }
 
@@ -222,7 +245,7 @@ export function createInteractionHandler({
       // HTTP is only a native-client loopback exception. Client metadata has
       // already passed the provider's policy before this interaction exists.
       const client = new URL(redirectUri).protocol === "http:"
-        ? await provider.Client.find(details.params.client_id)
+        ? await findClient(provider, details.params.client_id)
         : null;
       return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
     }
@@ -250,7 +273,7 @@ export function createInteractionHandler({
       const csrf = await store.issueConsentToken(interactionUid, browser.id, session.user_id);
       respondHtml(response, 200, renderConsentPage({
         interactionUid,
-        clientHost: new URL(details.params.client_id).host,
+        clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: currentIdentity,
         workspaces,
         selectedWorkspaceIds: bound.selected_workspace_ids ?? [],
@@ -295,7 +318,7 @@ export function createInteractionHandler({
         : { selectionVersion: body.selection_version, token: csrfToken };
       respondHtml(response, 400, renderConsentPage({
         interactionUid,
-        clientHost: new URL(details.params.client_id).host,
+        clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces: workspaces ?? await workspaceReader(identity(session)),
         selectedWorkspaceIds,
@@ -435,7 +458,7 @@ export function createInteractionHandler({
       const workspaces = await workspaceReader(identity(session));
       respondHtml(response, 502, renderConsentPage({
         interactionUid,
-        clientHost: new URL(consent.client_id).host,
+        clientDisplay: await clientConsentDisplay(provider, consent.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces,
         selectedWorkspaceIds: consent.selected_workspace_ids,
