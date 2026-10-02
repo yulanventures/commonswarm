@@ -417,7 +417,12 @@ and exactly one visible panel before reading sign-in state.
       fi
     fi
     if [ "$keep_browser" -eq 1 ] && [ "$status" -eq 0 ]; then exit 0; fi
-    if [ -n "$chrome_pid" ]; then kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; fi
+    if [ -n "$chrome_pid" ] && kill -0 "$chrome_pid" 2>/dev/null; then
+      case "$(ps -p "$chrome_pid" -o command= 2>/dev/null)" in
+        *"$chrome"*"--user-data-dir=$profile"*) kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true ;;
+        *) printf 'WARN site-03-browser-session-preflight: pid %s is not the task-owned browser; not signalled\n' "$chrome_pid" >&2 ;;
+      esac
+    fi
     if ! rm -r -- "$browser_root"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
       exit 1
