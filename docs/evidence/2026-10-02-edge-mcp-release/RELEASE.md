@@ -39,7 +39,16 @@ and the service env_file from the baseline render with both label-listed
 files. It captures safe fingerprints, then renders the archive with that
 baseline override before open, using the existing live working_dir for the
 in-memory preview. Stage verifies the actual relocated mount paths in the
-new directory. Stage/apply/rollback use those same inputs.
+new directory. Stage/apply/rollback use those same inputs. Every Compose
+config/up receives `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`, derived
+from live inspect; preflight stops if the live network differs. The `bridge`
+default stays because `tests/p1-cli/edge-runtime-box.test.ts` pins it.
+The repository now carries the recorded box override with `mem_limit: 2g`.
+Older release trees (including `65a6caf0`) lack it: stage copies the live
+bytes into them. If a release tree contains the override, preflight and stage
+require a regular file byte-equal to live before accepting it; a mismatch
+reports the path and differing SHA-256 digests and stops. Rollback retains
+the baseline override without rewriting it.
 Every rendered service field must match the captured baseline; live image
 id, complete env key/value digests, networks, memory, restart policy, ports
 and mounts must also match. Only release-prefixed bind sources and the
@@ -240,6 +249,8 @@ edge_compose() {
 edge_config_check() {
 local mode=${1:-config}
 if test "$#" -gt 0; then shift; fi
+test "$EDGE_NETWORK" = commonswarm-net
+export COMMONSWARM_EDGE_NETWORK_MODE="$EDGE_NETWORK"
 python3 - "$mode" "$EDGE_DIR" "$PREVIOUS_EDGE" "$NEW_EDGE" "$EDGE_PROJECT" "$EDGE_NETWORK" "$EDGE_ENV_FILE" "$EDGE_PROJECT_ENV_FILE" "${EDGE_BASELINE_FACTS:-}" "$BOX_ARCHIVE_PATH" "$@" <<'PY'
 import copy,hashlib,json,os,pathlib,subprocess,sys,tarfile
 mode,selected,previous,new,project,network,env_file,project_env,saved,archive=sys.argv[1:11]
@@ -280,6 +291,14 @@ def render(root,preview=False):
             members=[m for m in tar.getmembers() if m.name=='deploy/edge-runtime/compose.yaml']
             assert len(members)==1 and members[0].isfile()
             content=tar.extractfile(members[0]).read()
+            override_path='deploy/edge-runtime/compose.override.yaml'
+            overrides=[m for m in tar.getmembers() if m.name==override_path]
+            if overrides:
+                if len(overrides)!=1 or not overrides[0].isfile(): fail([override_path+' type/duplicate'])
+                candidate=tar.extractfile(overrides[0]).read()
+                live_override=pathlib.Path(previous+'/'+override_path).read_bytes()
+                if candidate!=live_override:
+                    fail([override_path+' bytes live.sha256='+hashlib.sha256(live_override).hexdigest()+' archive.sha256='+hashlib.sha256(candidate).hexdigest()])
         args+=['-f','-','-f',previous+'/deploy/edge-runtime/compose.override.yaml']
         options={'input':content,'cwd':work,'env':process_env}
         config=run(args+['config','--format','json'],**options)
@@ -546,7 +565,8 @@ printf 'PASS edge-mcp-open: protected env snapshot; no production mutation\n'
 ```
 
 Stage copies the captured baseline override byte-for-byte and verifies its
-SHA-256. Both renders and recreation use the measured project, service env
+SHA-256, after requiring any archive override to be byte-equal. Both renders
+and recreation use the measured project, service env
 file, interpolation env label (if present), network mode and both Compose
 files, with working_dir set to the selected release. Stage verifies a fresh
 archive tree and any reused destination, including the
@@ -566,6 +586,8 @@ test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$EDGE_ARCHIVE_SHA2
 python3 - "$BOX_ARCHIVE_PATH" "$PROOF_DIR/source" "$NEW_EDGE" "$RELEASE_SHA" "$PROOF_DIR/compose.override.yaml" <<'PY'
 import hashlib,os,pathlib,pwd,shutil,stat,sys,tarfile
 archive,source,new,sha,override=sys.argv[1:]; source=pathlib.Path(source); new=pathlib.Path(new)
+override_path='deploy/edge-runtime/compose.override.yaml'
+live_override=pathlib.Path(override).read_bytes()
 try:
     if not source.exists():
         source.mkdir(mode=0o700)
@@ -578,7 +600,12 @@ try:
                 if m.issym():
                     target=pathlib.PurePosixPath(m.linkname)
                     assert not target.is_absolute() and '..' not in target.parts
-                assert m.name not in ('RELEASE_SHA','deploy/edge-runtime/compose.override.yaml')
+                assert m.name!='RELEASE_SHA'
+                if m.name==override_path:
+                    if not m.isfile(): raise SystemExit('FAIL edge-mcp-stage: '+override_path+' type differs from live regular file; STOP')
+                    candidate=tar.extractfile(m).read()
+                    if candidate!=live_override:
+                        raise SystemExit('FAIL edge-mcp-stage: '+override_path+' bytes differ: live.sha256='+hashlib.sha256(live_override).hexdigest()+' archive.sha256='+hashlib.sha256(candidate).hexdigest()+'; STOP')
             tar.extractall(source,filter='data')
         (source/'RELEASE_SHA').write_text(sha+'\n')
         shutil.copyfile(override,source/'deploy/edge-runtime/compose.override.yaml')
