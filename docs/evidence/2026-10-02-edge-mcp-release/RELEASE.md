@@ -1,11 +1,11 @@
 # Edge-only release from the MCP ON baseline
 
 **Option (b): prepared, not executed.** HezLead supplies the reviewed, landed
-MCP-fix SHA and separately authorizes execution. This worker has made no live
-measurements. The task handoff says edge `eb2a87ac`, OAuth `00e89738`,
-app/stack `ad964ed1`, site `603a206e`, with MCP ON. Only the full edge identity
-below is an executable pin; preflight captures the other running identities
-and refuses drift throughout the window.
+edge SHA and separately authorizes execution. This worker has made no live
+measurements. HezLead supplies `BASELINE_EDGE_SHA` as the full running edge
+identity. OAuth `00e89738`, app/stack `ad964ed1`, site `603a206e` and MCP ON
+remain the required handoff baseline; preflight captures the other running
+identities and refuses drift throughout the window.
 
 The generic procedure is insufficient as an ON-state plan: its env gate checks
 `SWARM_SELF_SERVE` and reports optional names, but does not require effective
@@ -72,7 +72,7 @@ window; this preparation checks syntax only and is not a live rehearsal.
 | Input | Format | Source / use |
 | --- | --- | --- |
 | `RELEASE_SHA` | Full 40 lowercase hex; differs from baseline | HezLead's independently reviewed fix already landed on origin/main, with exact-SHA edge gates from §1 (`deploy/RELEASE-TO-BOX.md:149`). |
-| `BASELINE_EDGE_SHA` | Exactly `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` | Task handoff; preflight checks current, RELEASE_SHA and container mounts. |
+| `BASELINE_EDGE_SHA` | Full 40 lowercase hex | HezLead's running edge identity; preflight checks current, RELEASE_SHA and container mounts. |
 | `WINDOW_END_UTC` | `YYYY-MM-DDTHH:MM:SSZ`, future and at most 30 minutes away at preflight | HezLead's approved window end, checked on box clock. |
 | `MAX_MCP_OUTAGE_SECONDS` | Positive decimal, 1..600 | HezLead's approved maximum; checked in the final 503 receipt, including rollback. Exceeding it is FAIL even if ON was restored. |
 | `PLAN_FILE` | Absolute file containing this independently reviewed plan | Mac operator; transport extracts exactly one marked sh block. |
@@ -113,7 +113,8 @@ trap 'echo "FAIL edge-mcp-archive: line $LINENO; STOP" >&2' ERR
 : "${RELEASE_SHA:?}" "${BASELINE_EDGE_SHA:?}" "${PLAN_FILE:?}"
 case "$RELEASE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#RELEASE_SHA}" = 40
-test "$BASELINE_EDGE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+case "$BASELINE_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
+test "${#BASELINE_EDGE_SHA}" = 40
 test "$RELEASE_SHA" != "$BASELINE_EDGE_SHA"
 test -z "$(git status --porcelain)"
 git fetch origin main
@@ -188,7 +189,7 @@ python3 - "$RELEASE_SHA" "$WINDOW_ID" "$BASELINE_EDGE_SHA" "$BOX_ARCHIVE_PATH" "
 import datetime,pathlib,re,sys
 s,w,b,a,h,end,budget=sys.argv[1:]
 assert re.fullmatch('[0-9a-f]{40}',s) and s!=b
-assert b=='eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922'
+assert re.fullmatch('[0-9a-f]{40}',b)
 assert re.fullmatch('[A-Za-z0-9]{6}',w) and a==f'/tmp/hm37-edge-{s}-{w}.tar'
 assert re.fullmatch('[0-9a-f]{64}',h)
 assert re.fullmatch('[1-9][0-9]*',budget) and int(budget)<=600
@@ -743,7 +744,9 @@ set -euo pipefail
 trap 'echo "FAIL edge-mcp-rollback: line $LINENO; ON unverified, retain stage, run timer-recover, report ongoing outage; STOP" >&2' ERR
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 test ! -e "$PROOF_DIR/closed.txt"
-test "$PREVIOUS_EDGE" = /home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+case "$BASELINE_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
+test "${#BASELINE_EDGE_SHA}" = 40
+test "$PREVIOUS_EDGE" = "/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA"
 test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$BASELINE_EDGE_SHA"
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"

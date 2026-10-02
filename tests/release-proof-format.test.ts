@@ -78,7 +78,7 @@ function runbookShellBlock(runbook: string, step: string): string {
 function releaseDirectoryFunction(runbook: string): string {
   const applyBlock = runbookShellBlock(runbook, "1-apply-release-directories");
   const startMarker = "  prepare_release_directory() {";
-  const endMarker = "\n\n  for KIND in $KIND_LIST; do";
+  const endMarker = '\n\n  for KIND in "${KIND_ARRAY[@]}"; do';
   const start = applyBlock.indexOf(startMarker);
   const end = applyBlock.indexOf(endMarker, start);
   assert.notEqual(start, -1, "missing release-directory function in runbook");
@@ -214,7 +214,7 @@ test("every release runbook shell block is labelled and parses with macOS Bash 3
     const parsed = spawnSync("/bin/bash", ["-n"], { input: block, encoding: "utf8" });
     assert.equal(parsed.status, 0, `${firstLine}: ${parsed.stderr}`);
   }
-  assert.match(releaseRunbook(), /printf "%s='%s'\\n" RELEASE_DIR_STATE "\$RELEASE_DIR_STATE"/);
+  assert.match(releaseRunbook(), /printf '%s=%q\\n' RELEASE_DIR_STATE "\$RELEASE_DIR_STATE"/);
   assert.match(releaseRunbook(), /RELEASE_DIR_STATE=%s\\n.*RELEASE_DIR_RESULT/s);
 });
 
