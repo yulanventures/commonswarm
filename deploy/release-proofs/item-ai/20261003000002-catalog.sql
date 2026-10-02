@@ -1,5 +1,16 @@
 -- Forward catalog (review input) for 20261003000002. Safe OID lookups fail closed.
 SELECT COALESCE((
+  EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_admin_issuer' AND rolcanlogin AND NOT rolinherit
+    AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)
+  AND (SELECT array_agg(parent.rolname::text ORDER BY parent.rolname) FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
+    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
+    =ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
+  AND (SELECT count(*) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)=2
+  AND NOT EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass
+    AND refobjid='commonswarm_admin_issuer'::regrole AND deptype IN ('a','o'))
+  AND NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE roleid='commonswarm_admin_issuer'::regrole
+    AND (NOT admin_option OR inherit_option OR set_option))
+  AND
   EXISTS(SELECT 1 FROM pg_type t WHERE t.oid=to_regtype('commonswarm_oauth.dpop_admission_status')
     AND t.typtype='e' AND pg_get_userbyid(t.typowner)='swarm_admin'
     AND (SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid=t.oid)

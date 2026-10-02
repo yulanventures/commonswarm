@@ -1,5 +1,9 @@
 -- M2: client policy, shared DPoP admission and bounded lifecycle boundaries.
 -- No client is seeded, no runtime gets swarm membership, no issuance is enabled.
+-- D1: only the dedicated issuer can SET LOCAL ROLE inside the issuance
+-- transaction. Never SET ROLE at connection level. Production sets its password.
+-- Its entire direct privilege allowlist is empty; membership permits only SET
+-- to commonswarm_oauth_runtime and swarm_command (NO ADMIN, NO INHERIT).
 DO $roles$
 DECLARE n text; creator_is_cluster_administrator boolean;
 BEGIN
@@ -34,6 +38,41 @@ BEGIN
     END IF;
   END LOOP;
 END $roles$;
+
+DO $issuer$
+DECLARE creator_is_cluster_administrator boolean;
+BEGIN
+  SELECT rolsuper INTO creator_is_cluster_administrator FROM pg_catalog.pg_roles WHERE rolname=current_user;
+  IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='commonswarm_admin_issuer') THEN
+    SET LOCAL createrole_self_grant='';
+    CREATE ROLE commonswarm_admin_issuer LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
+  END IF;
+  IF EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='commonswarm_admin_issuer'
+    AND (NOT rolcanlogin OR rolinherit OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
+    OR EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.member
+      JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid WHERE r.rolname='commonswarm_admin_issuer'
+      AND (parent.rolname NOT IN ('commonswarm_oauth_runtime','swarm_command') OR m.admin_option OR m.inherit_option OR NOT m.set_option))
+    OR EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.roleid
+      WHERE r.rolname='commonswarm_admin_issuer' AND (NOT m.admin_option OR m.inherit_option OR m.set_option)) THEN
+    RAISE EXCEPTION 'unsafe admin issuer role';
+  END IF;
+  IF EXISTS(SELECT 1 FROM pg_catalog.pg_shdepend WHERE refclassid='pg_authid'::regclass
+    AND refobjid='commonswarm_admin_issuer'::regrole AND deptype IN ('a','o')) THEN
+    RAISE EXCEPTION 'admin issuer must have no direct privileges or ownership';
+  END IF;
+  IF creator_is_cluster_administrator AND EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members
+    WHERE roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole) THEN
+    RAISE EXCEPTION 'issuer administrator membership is unnecessary';
+  ELSIF NOT creator_is_cluster_administrator AND (SELECT count(*)<>1 OR NOT coalesce(bool_and(
+    admin_option AND NOT inherit_option AND NOT set_option),false) FROM pg_catalog.pg_auth_members
+    WHERE roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole) THEN
+    RAISE EXCEPTION 'issuer creator membership is unsafe';
+  END IF;
+END $issuer$;
+-- The migration principal must hold ADMIN on both parent roles. No password or
+-- direct schema/table/function/database grant is added to the issuer.
+GRANT commonswarm_oauth_runtime,swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+
 GRANT USAGE ON SCHEMA commonswarm_oauth TO commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 REVOKE ALL ON SCHEMA swarm FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 
@@ -470,3 +509,5 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
 -- -- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.
+-- REVOKE commonswarm_oauth_runtime,swarm_command FROM commonswarm_admin_issuer;
+-- -- Retain the constrained issuer login; it has no direct privileges or SET memberships.

@@ -21,6 +21,8 @@ ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_class WHERE relowner IN (SELECT o
   ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))
   AND NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspowner IN (SELECT oid FROM pg_roles WHERE rolname IN
   ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))`, 'policy roles own no objects')}
+DROP OWNED BY commonswarm_admin_issuer;
+DROP ROLE commonswarm_admin_issuer;
 DROP OWNED BY commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 DROP ROLE commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
@@ -32,6 +34,7 @@ VALUES('${hosted}','${provider}','${owner}','${workspace}','ordinary-client','ht
   decode(repeat('ab',32),'hex'),'reviewed-hosted-interaction','active',statement_timestamp(),statement_timestamp());
 CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE;
 GRANT swarm_admin TO ${role};
+GRANT commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
 SET LOCAL ROLE ${role};
 ${dbAssert(`SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user`, 'migration role must be constrained')}
 ${migrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
