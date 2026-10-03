@@ -10,15 +10,16 @@ Use [LISTING](LISTING.md), [REVIEWER-ACCESS](../../2026-10-03-reviewer-packet/RE
 | --- | --- |
 | Account login | Existing Tom SSO in already signed-in Chrome under the assigned task. No password/new account. |
 | Owning organization / project | Existing approved Yulan Ventures owner/project; exact IDs, names and Apps Management Write/owner role are **worker reads from portal**. Never create an organization/project to bypass a missing role. |
-| Developer identity / individual or business verification | Existing status **worker reads from portal**. Directory developer name derives from verified identity. If missing, Tom completes personally; worker stops. |
+| Developer identity / individual or business verification | Existing status **worker reads from portal**. Directory developer name derives from verified identity. If OpenAI requires identity/organization verification and it is incomplete, park ChatGPT for Tom; proceed with Claude alone once its C3 items are met. |
 | New plugin / package upload | Upload the reviewed OA-01 portable ZIP with exactly one hosted MCP server. Actual archive path, package version, draft ID and upload result are **worker reads from portal** / supplied by package maker; none exists here. |
 | Metadata & Skills / package metadata | Use the tables below; required findings must be resolved in source and corrected ZIP. No bundled skills proposed, so no invented skill-scan PASS. |
 | MCPs / endpoint | `https://mcp.commonswarm.com/mcp`. |
 | MCPs / authentication | OAuth authorization code + PKCE/S256, public client `none`, DCR/CIMD; resource exact endpoint, permission scope `mcp`; identity/refresh scopes from discovery as host requires. No API key, password or manual secret entry. |
-| MCPs / domain verification | Exact challenge URL/token and status are **worker reads from portal**. Tom/authorized separate operator completes; submission worker must not publish challenge files, change DNS, or perform verification. |
+| MCPs / domain verification | For `commonswarm.com`, read the organization-generated DNS TXT record name and value under existing SSO and copy exactly into [DNS-TXT](../DNS-TXT.md) in its stated format. HezLead adds it via Cloudflare API; confirm with `dig TXT` as documented there. Worker may read/copy the challenge and status, but never changes DNS. No invented record or token. |
 | MCPs / tools and scans | Exactly eight source tools/titles/hints from LISTING. Per-tool auth metadata/scope changes require OA-07 implementation and separate release. Read actual connection/scan findings; do not infer success from DCR alone. |
 | Review information → Review details / login URL | `https://commonswarm.com/app`. |
-| Review details / dedicated reviewer credentials | **BLOCKED: OA-10 is Tom-only.** Required for authenticated review, with sample data and immediate access without MFA approval/codes/magic links/private network. Self-serve own-account instructions are prepared but are not a documented vendor exemption. No credentials in package, Git/chat/screenshots. |
+| Review details / dedicated reviewer credentials | HezLead ruling B: submit with self-serve access and reviewer notes below; Tom morning step pending, nonblocking. Tom alone types the later dedicated credential here and checks immediate access without MFA approval/codes/magic links/private network. No vendor exemption or acceptance claimed; no credentials in package, Git/chat/screenshots. |
+| Review details / reviewer notes | A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. |
 | Review details / tenant/workspace | Directory Review for own-account instructions; actual Tom-approved populated fixture name/ID if vendor requires dedicated credentials. Unknown actual fixture ID is **worker reads from portal** / approved private handoff; never fabricate. |
 | Review details / sign-in instructions | Paste complete REVIEWER-ACCESS, including account prerequisites, one form submit for workspace creation, the single configured OAuth provider, consented Home workspace, both seats and all examples. Enter here, not in ZIP metadata. |
 | Review details / positive and negative cases | Exactly P1–P5/N1–N3 below, with actual execution evidence. Cases imported from ZIP are read-only; changes require corrected package upload. |
@@ -42,10 +43,10 @@ The public guide describes these package fields as importing into the dashboard.
 | `version` | Package maker sets actual release semantic version; **worker reads from portal** and maker receipt. Do not use backend version as package version. |
 | `description` | LISTING long description (688; ≤4,000). |
 | `author.name` | Yulan Ventures, LLC (≤120). |
-| `author.email` | `legal@commonswarm.com` only after HezLead confirms routing (≤320). |
+| `author.email` | `support@commonswarm.com` (HezLead ruling 3; ≤320). |
 | `author.url` | `https://yulanventures.com` (HTTPS; ≤2,048). |
 | `homepage` | `https://commonswarm.com` (≤2,048); separately set websiteURL. |
-| `repository` | `https://github.com/yulanventures/commonswarm`. |
+| `repository` | `https://github.com/yulanventures/commonswarm/tree/b8a97e10eee5c322b7d57d70280ba4ad51527338`. |
 | `license` | Omit optional declaration until package maker checks applicable LICENSE; do not invent a license. |
 | `keywords` | Optional; coordination, workspace, agents. |
 | `extensions` | `com.openai` namespace for interface/review/publication below. |
@@ -99,4 +100,4 @@ These are prepared cases, **not executed results**. The full argument sequence, 
 | N2 | Enforce workspace consent with own fixtures | Create a second workspace you own without consenting it to this connection; try claiming there, then claim in Directory Review. | claim_seat | Unconsented-workspace claim refused; control claim allowed. Never probe another person's workspace. |
 | N3 | Refuse a revoked connection | After valid identity/check and refresh, revoke this exact connection in Connected apps; retry old-token identity/check and refresh once. | whoami, check; OAuth refresh / browser revoke outside tool catalog | Prior grant/seat and refresh refused; no silent reconsent or successful access. |
 
-Current C3 prerequisites remain package/support/auth code, actual connection/scans/test execution/video, and Tom-only dedicated credentials/verification. Legal waiver and live DCR/CIMD/annotations remove those old gates; they do not fabricate a completed submission.
+Current C3 prerequisites remain package/support/auth code, actual connection/scans/test execution/video, and existing OpenAI organization/project eligibility plus required verification. Dedicated credentials are a nonblocking Tom morning step under ruling B; see C3-ACTIONS for the exact remaining rows. Legal waiver and live DCR/CIMD/annotations remove those old gates; they do not fabricate a completed submission.
