@@ -8,6 +8,12 @@ import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
 import { createAdminHttpHandler } from "../src/admin-http.js";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { createLogger } from "../src/logger.js";
+import { calculateJwkThumbprint, decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { AdminTokenLifecycle } from "../src/admin-lifecycle.js";
+import { adminDigest, createAdminManifest } from "../src/admin-consent.js";
+import { emptyAdminAccount } from "../src/admin-authority.generated.js";
+import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
+import { admitAdminProof, verifyAdminProof } from "../src/admin-dpop.js";
 
 async function fixture(t, { issuerPool = null } = {}) {
   const clientId = "https://client.example/metadata", redirect = "https://client.example/callback";
@@ -188,4 +194,136 @@ test("ordinary /token delegates the original unread HTTP stream without an admin
   assert.equal(received, body);
   assert.equal(delegated, true);
   assert.equal(lookups, 0, "ordinary token ingress must not query admin state");
+});
+
+// SQL fixtures supply committed read rows; the real bridge/reducer, lifecycle,
+// provider exchange, signing and ledger validation execute without a service.
+async function adminExchange(t, seconds, { badExpiry = false } = {}) {
+  const now = Math.floor(Date.now() / 1000) * 1000, owner = randomUUID(), grantId = randomUUID();
+  const clientId = "https://client.example/metadata", redirectUri = "https://client.example/callback";
+  const key = await generateKeyPair("ES256", { extractable: true });
+  const jwk = await exportJWK(key.publicKey), jkt = await calculateJwkThumbprint(jwk);
+  const signing = await generateKeyPair("ES256", { extractable: true });
+  const signingJwk = { ...await exportJWK(signing.privateKey), alg: "ES256", use: "sig", kid: "boundary-test" };
+  const metadata = { client_id: clientId, application_type: "web", redirect_uris: [redirectUri],
+    grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
+    token_endpoint_auth_method: "none", id_token_signed_response_alg: "ES256",
+    dpop_bound_access_tokens: true, dpop_signing_alg: "ES256" };
+  const manifest = createAdminManifest({ mode: "granular", scope_names: ["admin:read"], workspace_ids: [],
+    expires_at: new Date(now + seconds * 1000).toISOString() },
+  { verification: { client_id: clientId }, resourceScopes: ["admin:read"] }, now);
+  const grant = { ...manifest, grant_id: grantId, owner_user_id: owner, consent_receipt_id: randomUUID(),
+    manifest_digest: adminDigest(manifest), created_at: now, state: "active", suspended_at: null,
+    revoked_at: null, reason_code: null, withdrawn_workspace_ids: [], replaces_grant_id: null };
+  const account = { owner_user_id: owner, stream_id: randomUUID(), seq: 0,
+    projection: { ...emptyAdminAccount(), grants: { [grantId]: grant } } };
+  const verification = { active: true, owner_approved: true, application_type: "web", dpop_tested: true,
+    pkce_s256_tested: true, origin_control_verified: true, redirect_tested: true,
+    registration_source: "static", metadata_digest: adminDigest(metadata) };
+  const sha = "a".repeat(40), target = `/home/commonswarm/edge/releases/${sha}`;
+  const measurement = { admin_issuance_enabled: true, legacy_closed: true, auth_contract_version: 2,
+    lane8_evidence_digest: "b".repeat(64), measurement_evidence_ref: "service-free test", measured_at: new Date(),
+    approved_edge_release_sha: sha, measured_edge_release_sha: sha, measured_edge_target: target,
+    measured_mount: target, measured_generation: "1", release_generation: "1",
+    measured_artifact_digest: "c".repeat(64), measured_image_digest: `sha256:${"d".repeat(64)}` };
+  let binding, artifact;
+  const queries = [], events = [], ledger = [], failures = [], serverErrors = [];
+  const pool = { connect: async () => ({ async query(sql, values) {
+    queries.push(sql);
+    if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+    if (sql.includes("admit_dpop_proof")) return { rows: [{ status: "accepted" }] };
+    if (sql.includes("admin_cutover_state")) return { rows: [measurement] };
+    if (sql.includes("migration_checksum_failures")) return { rows: [], rowCount: 0 };
+    if (sql.includes("issuer_key_allowed")) return { rows: [{ allowed: true }] };
+    if (sql.includes("lock_admin_consent_policy") || sql.includes("FROM commonswarm_oauth.admin_verified_clients")) return { rows: [verification] };
+    if (sql.includes("FROM commonswarm_oauth.registered_clients")) return { rows: [], rowCount: 0 };
+    if (sql.includes("SELECT * FROM swarm.admin_accounts")) return { rows: [structuredClone(account)] };
+    if (sql.includes("FROM swarm.admin_grants")) return { rows: [{ ...grant,
+      expires_at: new Date(grant.expires_at), refresh_deadline: new Date(grant.refresh_deadline) }] };
+    if (sql.includes("FROM commonswarm_oauth.admin_grant_bindings")) return { rows: [binding] };
+    if (sql.includes("FROM commonswarm_oauth.provider_artifacts")) return { rows: [artifact] };
+    if (sql.includes("resolve_admin_grant_status")) return { rows: [{ active: true }] };
+    if (sql.includes(" AS now")) return { rows: [{ now: sql.includes("*1000") ? now : now / 1000 }] };
+    if (sql.includes("admin_rate_buckets")) return { rows: [{ attempts: 1 }] };
+    if (sql.includes("INSERT INTO swarm.admin_events")) events.push(JSON.parse(values[4]));
+    if (sql.includes("UPDATE commonswarm_oauth.admin_grant_bindings")) {
+      binding = { ...binding, generation: values[1], scope_names: values[2] }; return { rows: [binding] };
+    }
+    if (sql.includes("INSERT INTO commonswarm_oauth.admin_access_issuances")) ledger.push(values);
+    return { rows: [], rowCount: 0, command: sql.split(" ")[0] };
+  }, release() {} }) };
+  const provider = await createMcpProvider({ jwks: { keys: [signingJwk] }, activeSigningKid: signingJwk.kid,
+    registrationEnabled: false, registrationStore: { find: async () => metadata, markUsed: async () => {} } });
+  provider.on("grant.error", (_ctx, error) => failures.push(error));
+  provider.on("server_error", (_ctx, error) => serverErrors.push(error));
+  if (badExpiry) {
+    // Corrupt the signed result at the pinned provider's actual signing hook.
+    const { createRequire } = await import("node:module");
+    const { dirname, resolve } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+    const require = createRequire(import.meta.url);
+    const { default: instance } = await import(pathToFileURL(resolve(dirname(require.resolve("oidc-provider")), "helpers/weak_cache.js")).href);
+    instance(provider).configuration.formats.customizers.jwt = async (_ctx, _token, jwt) => { jwt.payload.exp += 600; };
+  }
+  const client = await provider.Client.find(clientId), family = new provider.Grant({ accountId: owner, clientId });
+  verification.metadata_digest = adminDigest(client.metadata());
+  family.addOIDCScope("openid offline_access"); family.addResourceScope(ADMIN_RESOURCE, "admin:read");
+  const familyId = await family.save();
+  binding = { ...grant, admin_grant_id: grantId, provider_grant_id: familyId, verification_version: 1, jkt,
+    expires_at: new Date(grant.expires_at), refresh_deadline: new Date(grant.refresh_deadline) };
+  const verifier = "boundary-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
+  const code = await new provider.AuthorizationCode({ accountId: owner, client, grantId: familyId,
+    scope: "openid offline_access admin:read", resource: [ADMIN_RESOURCE], redirectUri,
+    codeChallenge: createHash("sha256").update(verifier).digest("base64url"), codeChallengeMethod: "S256", dpopJkt: jkt }).save();
+  artifact = { payload: { clientId, dpopJkt: jkt }, grant_id: familyId, consumed_at: null };
+  const dpop = await new SignJWT({ htm: "POST", htu: `${ISSUER}/token`, iat: now / 1000,
+    jti: randomUUID(), nonce: "boundary-nonce" }).setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk }).sign(key.privateKey);
+  const proof = await admitAdminProof(pool, await verifyAdminProof({ method: "POST", headers: { dpop } }, jkt));
+  const params = { client_id: clientId, grant_type: "authorization_code", code, code_verifier: verifier,
+    redirect_uri: redirectUri, resource: ADMIN_RESOURCE };
+  const coordinator = new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: true });
+  const lifecycle = new AdminTokenLifecycle({ activeKid: signingJwk.kid }), callback = provider.callback();
+  let outcome;
+  const server = createServer(async (request, response) => { outcome = await coordinator.run(response, async () => {
+    await lifecycle.prepareToken({ binding, model: "AuthorizationCode", hash: "fixture-code-digest", consumed_at: null }, params);
+    await callback(request, response);
+  }, { kind: "token", owner, proof }); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/token`, { method: "POST",
+    headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host, "x-forwarded-proto": "https", dpop,
+      "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params) });
+  return { status: response.status, body: await response.json(), grant, events, ledger, failures, serverErrors, queries,
+    diagnostic: JSON.stringify({ refusal: outcome?.cause?.code,
+      grantErrors: failures.map(error => error.error), serverErrors: serverErrors.map(error => error.code) }) };
+}
+
+test("admin first exchange uses the committed grant and clips the actual signed JWT to short consent", async t => {
+  for (const seconds of [120, 600]) {
+    const result = await adminExchange(t, seconds);
+    assert.equal(result.status, 200, result.diagnostic);
+    assert.equal(result.body.token_type, "DPoP");
+    const jwt = decodeJwt(result.body.access_token);
+    assert.ok(jwt.exp * 1000 <= result.grant.expires_at);
+    assert.ok(jwt.exp - jwt.iat <= Math.min(300, seconds));
+    assert.equal(result.events.filter(e => e.type === "AdminCredentialIssued").length, 1);
+    assert.equal(result.ledger.length, 1);
+    assert.equal(result.failures.length + result.serverErrors.length, 0);
+    assert.ok(result.queries.includes("COMMIT"));
+  }
+});
+
+test("admin token validation refusal maps to OAuth invalid_grant 400 and rolls back without a ledger row", async t => {
+  const result = await adminExchange(t, 600, { badExpiry: true });
+  assert.equal(result.status, 400, result.diagnostic);
+  assert.equal(result.body.error, "invalid_grant");
+  assert.ok(!("access_token" in result.body) && !("refresh_token" in result.body));
+  assert.equal(result.serverErrors.length, 0);
+  assert.equal(result.failures.length, 1);
+  assert.ok(result.failures[0] instanceof errors.InvalidGrant);
+  assert.equal(result.ledger.length, 0);
+  assert.ok(result.queries.includes("ROLLBACK"));
+  const control = await adminExchange(t, 600);
+  assert.equal(control.status, 200);
+  assert.equal(control.ledger.length, 1);
 });

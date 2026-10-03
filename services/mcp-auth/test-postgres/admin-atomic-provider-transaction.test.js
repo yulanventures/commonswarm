@@ -552,11 +552,23 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           assert.equal(loser.trace.committed,false,"overlapping loser cannot commit a replay fence");
           const denied=await loser.response.json();
           assert.ok(!("access_token" in denied) && !("refresh_token" in denied));
+          assert.equal(loser.response.headers.get("location"), null, "loser cannot reveal a code or continuation");
+          if (name === "consent finish") {
+            assert.equal(denied.error, "consent_receipt_invalid");
+            assert.deepEqual(Object.keys(denied).sort(), ["error", "request_id"], "no grant or receipt data leaks");
+          }
           assert.equal((await f.pool.query(`SELECT state FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[f.family()])).rows[0].state,"active");
         }
         return good;
       }
       const finished = await proveUnit("consent finish", consentUrl, { method: "POST", body: {} }, 303,true);
+      const singleUse = (await f.pool.query(`SELECT
+        (SELECT count(*)::int FROM swarm.admin_grants WHERE owner_user_id=$1) AS grants,
+        (SELECT count(*)::int FROM swarm.admin_consents WHERE owner_user_id=$1 AND consumed_at IS NOT NULL) AS consumed,
+        (SELECT count(*)::int FROM swarm.admin_events WHERE owner_user_id=$1 AND event->>'type'='AdminDelegationGranted') AS events,
+        (SELECT count(*)::int FROM commonswarm_oauth.admin_grant_bindings WHERE owner_user_id=$1) AS families`, [f.owner])).rows[0];
+      assert.deepEqual(singleUse, { grants: 1, consumed: 1, events: 1, families: 1 },
+        "overlapping consent confirmations consume one receipt and create exactly one grant/family");
       const continued = await proveUnit("authorization continuation", finished.response.headers.get("location"), {}, 303);
       const code = new URL(continued.response.headers.get("location")).searchParams.get("code");
       assert.equal(typeof code, "string");

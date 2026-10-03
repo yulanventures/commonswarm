@@ -35,14 +35,14 @@ function requirePendingReceipt(input, current, parent, r) {
       r.manifest_digest !== adminDigest(r.manifest) || !adminManifestValid(r.manifest, Date.now()) ||
       r.registry_version !== r.manifest.registry_version || r.availability_digest !== r.manifest.availability_digest ||
       r.full_account !== (r.manifest.mode === "full_account") ||
-      (r.full_account && !current.fullAccountEligible)) refuse("consent_receipt_invalid", 409);
+      (r.full_account && !current.fullAccountEligible)) refuse("consent_receipt_invalid", 400);
   const summary = adminSummary({ ...input, policy: current, manifest: r.manifest,
     version: parent.selection_version, replacementGrantId: r.replacement_grant_id });
   // This compares the current verification/metadata/request snapshot with the
   // selection's immutable digest binding, also on a pending GET/reload.
   if (!opaqueMatches(summary.token, r.csrf_binding) ||
       (r.full_account && !opaqueMatches(summary.secondToken, r.second_confirmation_binding))) {
-    refuse("consent_receipt_invalid", 409);
+    refuse("consent_receipt_invalid", 400);
   }
   return summary;
 }
@@ -209,7 +209,7 @@ export class PostgresAdminConsentStore {
       AND consent_token_hash=$5 AND consent_token_consumed_at IS NULL AND completed_at IS NULL
       AND expires_at>statement_timestamp() RETURNING *`,
     [uid, hashOpaque(sessionId), ownerUserId, version, hashOpaque(csrfToken)])).rows[0];
-    if (!parent) refuse("consent_receipt_invalid", 409);
+    if (!parent) refuse("consent_receipt_invalid", 400);
     const receipt = (await tx.query(`INSERT INTO commonswarm_oauth.admin_interactions
       (interaction_uid,owner_user_id,client_id,resource,redirect_uri,registry_version,verification_version,
        manifest,manifest_digest,availability_digest,requested_scopes,session_binding,csrf_binding,
@@ -222,7 +222,7 @@ export class PostgresAdminConsentStore {
       manifest.availability_digest, policy.requestedScopes, hashOpaque(sessionId), hashOpaque(summary.token),
       manifest.mode === "full_account" ? hashOpaque(summary.secondToken) : null,
       manifest.mode === "full_account", params.code_challenge, params.dpop_jkt, parent.expires_at])).rows[0];
-    if (!receipt) refuse("consent_receipt_invalid", 409);
+    if (!receipt) refuse("consent_receipt_invalid", 400);
     return { parent: interactionRow(parent), receipt };
   }
 }
@@ -277,7 +277,7 @@ export function createAdminConsentService({ store, provider, fetchMetadata = cre
             (r.full_account && (completion.confirm_full_account !== "yes" ||
               typeof completion.second_token !== "string" ||
               !opaqueMatches(completion.second_token, r.second_confirmation_binding)))) {
-          refuse("consent_receipt_invalid", 409);
+          refuse("consent_receipt_invalid", 400);
         }
         await store.cutover(tx); // Retain the consent store's fresh cutover read; the shared gate decides.
         if (await effectiveAdminGate() !== "open") {

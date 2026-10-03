@@ -250,7 +250,7 @@ test("admin-consent-client-policy: stale authentication, CSRF, summary and dupli
   ];
   for (const [name, mutate, code] of changes) await t.test(name, async () => {
     const f = fixture(); const selected = await f.select(); mutate(f);
-    await assert.rejects(f.confirm(selected), { code });
+    await assert.rejects(f.confirm(selected), { code, ...(code === "consent_receipt_invalid" ? { status: 400 } : {}) });
     assert.equal(f.state.cutoverReads + f.state.grants + f.state.completions, 0);
     const control = fixture();
     await assert.rejects(control.confirm(await control.select()), { code: "admin_issuance_disabled" });

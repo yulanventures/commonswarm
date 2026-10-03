@@ -209,7 +209,10 @@ export async function createMcpProvider({
       validator: (_ctx, _key, _value, metadata) => validateClientPolicy(metadata, nativeLoopbackEnabled),
     },
     ttl: {
-      AccessToken: accessTokenTtlSeconds,
+      // A numeric override bypasses the provider's resource TTL. Admin JWTs
+      // must use the consent-clipped TTL calculated under the issuer locks.
+      AccessToken: (_ctx, token) => token.aud === ADMIN_RESOURCE
+        ? token.resourceServer.accessTokenTTL : accessTokenTtlSeconds,
       AuthorizationCode: authorizationCodeTtlSeconds,
       Grant: refreshTokenTtlSeconds,
       Interaction: 10 * 60,

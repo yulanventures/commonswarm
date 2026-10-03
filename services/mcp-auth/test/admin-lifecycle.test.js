@@ -62,6 +62,24 @@ test("AS consent confirmation checks the pending receipt's current rights before
         else assert.equal(rightsReads.length, condition === "missing receipt" ? 1 : 2,
           "confirmation re-reads membership for the receipt's exact workspace selection");
         for (const values of rightsReads) assert.deepEqual(values, [owner, [workspace]]);
+        if (allowed) {
+          // The production bridge consumed this receipt while persisting the
+          // first grant. A new grant ID cannot reuse it, even with fresh rights.
+          let duplicate;
+          const retryServer = createServer((_request, response) => coordinator.run(response, async () => {
+            duplicate = await bridge.decide(account, { kind: "grant_admin_delegation", grant_id: randomUUID(),
+              consent_receipt_id: receiptId, replaces_grant_id: null }, actor);
+            response.statusCode = 204; response.end();
+          }, { kind: "human", owner, sessionHash }));
+          await new Promise(resolve => retryServer.listen(0, "127.0.0.1", resolve));
+          try {
+            assert.equal((await fetch(`http://127.0.0.1:${retryServer.address().port}`)).status, 204);
+            assert.equal(duplicate.ok, false);
+            assert.equal(duplicate.reason, "consent_invalid");
+            assert.equal(events.filter(event => event.type === "AdminDelegationGranted").length, 1);
+            assert.deepEqual(Object.keys(account.projection.grants), [grantId]);
+          } finally { await new Promise(resolve => retryServer.close(resolve)); }
+        }
       } finally { await new Promise(resolve => server.close(resolve)); }
     });
   }

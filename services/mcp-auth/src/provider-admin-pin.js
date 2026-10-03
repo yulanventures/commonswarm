@@ -4,6 +4,8 @@ import { pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { adminTransactionContext } from "./admin-transaction.js";
 import { adminProofAdmitted } from "./admin-dpop.js";
+import { AdminConsentError } from "./admin-consent.js";
+import { errors } from "oidc-provider";
 
 export const ADMIN_TOKEN_INGRESS = Symbol("admin-token-ingress");
 
@@ -22,7 +24,22 @@ export async function bindProviderAdminNonceStore(provider, finishToken) {
   // Ordinary requests retain their IncomingMessage and provider parser.
   for (const [grantType, handler] of finishToken ? internal.grantTypeHandlers : []) {
     internal.grantTypeHandlers.set(grantType, async ctx => {
-      const operation = async () => { await handler(ctx); await finishToken(ctx); };
+      const operation = async () => {
+        try { await handler(ctx); await finishToken(ctx); }
+        catch (error) {
+          const ErrorType = error instanceof AdminConsentError ? {
+            invalid_grant: errors.InvalidGrant,
+            invalid_scope: errors.InvalidScope,
+            unauthorized_client: errors.UnauthorizedClient,
+          }[error.code] : undefined;
+          if (!ErrorType) throw error;
+          // The provider catches OAuth errors. Retain the refusal for the
+          // coordinator so it rolls back and preserves the public 400 mapping.
+          const scope = adminTransactionContext(false);
+          if (scope) scope.failure ??= error;
+          throw new ErrorType({ cause: error });
+        }
+      };
       const ingress = ctx.req[ADMIN_TOKEN_INGRESS];
       if (ingress) await ingress(ctx, operation);
       else await operation();

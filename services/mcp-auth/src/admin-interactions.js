@@ -70,7 +70,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       if (result.receipt) {
         if (result.receipt.consumed_at != null ||
             result.receipt.verification_version !== result.policy.verification.verification_version) {
-          throw new AdminConsentError("consent_receipt_invalid", 409);
+          throw new AdminConsentError("consent_receipt_invalid", 400);
         }
         await html({ ...result, version: result.parent.selection_version });
       } else {
@@ -97,7 +97,7 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     input.csrfToken = parsed.format === "form" ? body.csrf_token : request.headers["x-cswarm-csrf"];
     input.version = body.selection_version;
     if (!Number.isSafeInteger(input.version) || typeof input.csrfToken !== "string" || input.csrfToken.length < 20) {
-      throw new AdminConsentError("consent_receipt_invalid", 409);
+      throw new AdminConsentError("consent_receipt_invalid", 400);
     }
     if (operation === "selection") {
       if (!Array.isArray(body.workspace_ids) || !Array.isArray(body.scope_names)) throw new ClientError(400);
