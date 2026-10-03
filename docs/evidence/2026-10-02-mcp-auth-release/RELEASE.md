@@ -91,8 +91,9 @@ Execute only the marked blocks, extracted by step ID. Mac blocks use Bash
 preparation worker has not used sudo**. Each box block receives the same
 nonsecret `OAUTH_RELEASE_SHA`; preflight and open also receive the two
 baseline inputs, `EXPECTED_EDGE_SHA` and the checked MODE; later blocks reload a root-owned state file holding
-only paths, SHA/image identity, and helper code. On any FAIL stop forward
-work and follow the failure-state table before cleanup/closing. Do not invent
+only paths, SHA/image identity, and helper code. On deploy/verification FAIL stop forward
+work and follow the failure-state table before cleanup/closing. CLOSE_FAILED
+after verified ON follows the closure decision table and never requests rollback. Do not invent
 commands during the window. No Actions, HOME changes, Mac Docker or browser.
 
 ## HezLead rerun order and input sources
@@ -138,6 +139,51 @@ Never supply guessed rollback paths or reuse the baseline proof directory.
 
 Supply the three nonsecret identities from HezLead's latest measured report
 in the retained box shell. This block validates and exports them without defaults.
+
+
+## Shared preflight and closure decision
+
+Run `oauth-release-shared-preflight` **first**, before every existing run-order entry.
+Start in the reviewed repository with `OAUTH_PLAN_FILE` set to this absolute plan
+and `RELEASE_INPUTS_JSON` set to a regular nonsecret INPUTS JSON file. The
+shared checker validates the full input set together and exports the validated
+values to the retained Bash shell. Generated archive hashes, window IDs and
+secret-stage paths remain outputs; never guess them as inputs. Existing box
+preflight/open blocks still remeasure declared reads and enforce freshness.
+The inventory below is part of the reviewed plan: changing a marked block
+requires reviewing its producer/consumer/cleanup/read inventory and digest.
+A consumer may use only an input or an earlier producer on its selected route.
+Optional absence/existence checks are observations, not file consumption.
+Referenced OAuth steps in DCR are resolved from RELEASE_SHA in the Git object
+database, and participate in the same run order, not an earlier release.
+
+| Failure phase | Result and live state | Action |
+| --- | --- | --- |
+| Inputs/preflight, before mutation | STOP; baseline unchanged | Close only task staging already created. |
+| Deploy or required verification fails | DEPLOY_FAILED; candidate unverified | Run the existing marked rollback/recovery and verify baseline. |
+| Required deploy verification passes | DEPLOY_VERIFIED; selected source/image and mode verified | Proceed to evidence/closure. |
+| Receipt write, copy-back, manifest, timer restoration or cleanup fails after verification | CLOSE_FAILED; report last verified source/image/mode, timer/lock and exact leftover paths/PIDs | Keep verified bytes live; no rollback. HezLead reconciles closure. |
+| Outage budget exceeded after verified recovery/deploy | Run remains FAIL; verified live state retained | Record the measured interval; closure may proceed. No rollback solely for receipt/budget failure. |
+
+CLOSE_FAILED is a terminal closure result, never a deploy-failure trigger.
+The closure EXIT handler catches explicit exits and guarded cleanup refusals.
+If a later read discovers actual source/health drift, it is a new verification
+failure and follows the existing recovery path. Report uncertainty explicitly;
+last verified state is not a new box measurement. Never reopen a closed window.
+Only nonsecret evidence may be copied back; backups and freshness gates remain.
+
+```sh
+# step: oauth-release-shared-preflight
+# readonly: yes
+# host: Mac /bin/bash 3.2; FIRST, before archive, box contact or window
+set -euo pipefail
+: "${RELEASE_INPUTS_JSON:?absolute nonsecret INPUTS JSON required}"
+RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
+export RELEASE_PREFLIGHT_TOOL
+python3 "$RELEASE_PREFLIGHT_TOOL" "${OAUTH_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
+# Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
+eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$OAUTH_PLAN_FILE")"
+```
 
 ```sh
 # step: hm37-oauth-plan-inputs
@@ -277,9 +323,7 @@ for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
                 facts=f'method={method} base={base} path={path} UA={ua} status={code} content-type={content_type!r}'
                 assert len(body)<=131072, f'oversized response: {facts}'
                 if path=='/jwks':
-                    assert re.fullmatch(
-                        r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
-                        content_type.strip(), re.I), f'invalid JWKS content type: {facts}'
+                    assert response.headers.get_content_type().lower() in {'application/jwk-set+json','application/json'}, f'invalid JWKS content type: {facts}'
                 else:
                     media_type='text/html' if enabled and path=='/authorize' else 'application/json'
                     assert re.fullmatch(re.escape(media_type)+
@@ -755,7 +799,7 @@ recover_baseline() {
       echo 'FAIL hm37-mcp-restore-on REQ 92: baseline ON restore failed; end state baseline OFF, dark Caddy and 503 verified; STOP' >&2
       return 1
     fi
-    outage_receipt || { echo 'FAIL hm37-oauth-rollback REQ 93: baseline ON verified but receipt failed; retain stage; STOP' >&2; return 1; }
+    outage_receipt || { echo "CLOSE_FAILED hm37-oauth-rollback: LIVE_STATE=ON SOURCE=$EXPECTED_OAUTH_SHA IMAGE=$EXPECTED_OAUTH_IMAGE_DIGEST; receipt failed; retain stage; do not roll back" >&2; return 1; }
     echo 'Baseline image and exact ON snapshots restored; ON probes PASS; stop forward release work'
   else
     echo 'Baseline image restored; end state OFF; OFF probes PASS; stop forward release work'
@@ -964,7 +1008,7 @@ if test "$MCP_EXPECTED_MODE" = on; then
     rollback_to_off || { echo 'FAIL: rollback-to-OFF; stop and report' >&2; exit 1; }
     exit 1
   fi
-  outage_receipt || { echo 'FAIL hm37-mcp-route-probes REQ 93: ON verified but receipt failed; retain stage; STOP' >&2; exit 1; }
+  outage_receipt || { echo "CLOSE_FAILED hm37-mcp-route-probes: LIVE_STATE=ON SOURCE=$OAUTH_RELEASE_SHA IMAGE=$(cat "$PROOF_DIR/oauth-image.id"); receipt failed; retain stage; do not roll back" >&2; exit 1; }
 else
   mcp_route_probes || exit 1
 fi
@@ -1309,8 +1353,29 @@ No copyback of secret backups or raw docker inspect/env output.
 ```sh
 # step: hm37-oauth-close
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      hm37-oauth-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_FAILURE_PHASE=DEPLOY_FAILED
+
 trap 'echo "FAIL: hm37-oauth-close line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
+RELEASE_LIVE_STATE="$(hm37_baseline_mode) source=$(readlink -f /home/commonswarm/oauth/current); preceding-route-check-verified"
+RELEASE_FAILURE_PHASE=CLOSE_FAILED
 box_rm_preflight || exit 1
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib, re, sys
@@ -1330,8 +1395,60 @@ Mac public archive cleanup (only the directory created by the archive block):
 ```sh
 # step: hm37-oauth-mac-close
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      hm37-oauth-mac-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
+
 : "${ARCHIVE_DIR:?FAIL: original public archive directory missing}"
 case "$ARCHIVE_DIR" in /private/tmp/hm37-oauth-archive.*) ;; *) echo 'FAIL: archive cleanup boundary' >&2; exit 1;; esac
 test "$(cd "$ARCHIVE_DIR" && pwd -P)" = "$ARCHIVE_DIR" || exit 1
 rm -rf "$ARCHIVE_DIR" || { echo "FAIL: guarded cleanup refused $ARCHIVE_DIR" >&2; exit 1; }
+```
+
+```release-contract
+{
+  "version": 1,
+  "release_input": "OAUTH_RELEASE_SHA",
+  "inputs": {"EXPECTED_EDGE_SHA": {"format": "sha40"}, "EXPECTED_OAUTH_IMAGE_DIGEST": {"format": "digest"}, "EXPECTED_OAUTH_SHA": {"format": "sha40"}, "OAUTH_PLAN_FILE": {"format": "abs-file"}, "OAUTH_RELEASE_SHA": {"format": "sha40"}, "TOM_ENABLE_APPROVAL": {"format": "literal:2026-09-29"}},
+  "repo_paths": ["deploy/edge-runtime", "deploy/edge-runtime/compose.override.yaml", "deploy/edge-runtime/compose.yaml", "deploy/mcp-auth/compose.management.yaml", "deploy/mcp-auth/compose.yaml", "deploy/supabase-stack/commonswarm-mcp.caddy", "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "scripts/release-preflight.py", "services/mcp-auth/Dockerfile"],
+  "runtime_paths": ["src/management-command.generated.js"],
+  "input_files": ["$OAUTH_PLAN_FILE"],
+  "routes": {"normal": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-transition-off", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-close", "hm37-oauth-mac-close"], "off-baseline": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-close", "hm37-oauth-mac-close"], "recovery": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-transition-off", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-rollback", "hm37-oauth-close", "hm37-oauth-mac-close"]},
+  "steps": {
+    "oauth-release-shared-preflight": {"reads": [], "sha256": "07764b1010a047acbf1736114007c4558d2c5fcc115e34fff4874f5bd5df6391"},
+    "hm37-oauth-plan-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker inspect"], "sha256": "70d027ebb5ef8f0a72bd520c05fb677000f8cbbb5da1b7efde945ca6321a43c3"},
+    "hm37-mcp-baseline-state": {"reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "command:docker inspect", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "dfba97333489f58ca9a5ba284add0b521528e3e64bafb22fb880761d0a5ff183"},
+    "hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "386c92f13c8cb795343d0731cf0e670f651e8ecda02a191f12e09425962486e9"},
+    "hm37-oauth-preflight": {"reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/cookie-keys", "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/commonswarm-oauth/signing-keys.pem", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "command:docker inspect"], "sha256": "6108a06477ef441541ce80d4a27830cfd13598f6c2cb9099164fe2da0e3b5fd1"},
+    "hm37-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "hm37-mcp-enable"}, "creates": ["$PROOF_DIR/baseline-mcp-mode", "$PROOF_DIR/hm37-window.sh", "$PROOF_DIR/release.tar", "$SECRET_STAGE", "$SECRET_STAGE/compose.baseline.off.env", "$SECRET_STAGE/compose.env", "$SECRET_STAGE/edge.env", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/management.baseline", "$SECRET_STAGE/mcp.caddy", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.env", "SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "de31ef3fac17b3bf09bef13b0ccf023feb937c7ed839f7084a4fe7f9a10ee32c"},
+    "hm37-mcp-transition-off": {"creates": ["$PROOF_DIR/mcp-503-start.epoch", "$PROOF_DIR/mcp-503-start.utc"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "01e4454c92e62f408991396aee4342bb8a93a7698c96665654bb6bdd258a320b"},
+    "hm37-oauth-build": {"consumes": ["$PROOF_DIR/oauth-image.id"], "creates": ["$PROOF_DIR/oauth-base-references.txt", "$PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "96819761d3286f5f355afb527abf9f3b55d1d89569f47c61a4038b356a9f80f1"},
+    "hm37-oauth-inputs": {"consumes": ["$PROOF_DIR/oauth-image.id"], "creates": ["$SECRET_STAGE/compose.off.env", "$SECRET_STAGE/service.off.env"], "reads": ["/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/oauth/release-proofs/"], "sha256": "bd6c1a75477f20170dbeba6191a8d63a8897bc6ef1242c9868ed18d73cf70f70"},
+    "hm37-oauth-release-off": {"consumes": ["$PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "a6b9e18ce3481d3c667cb6dc0d293d75a8c1e103421dc6222ec54ea3c7150e08"},
+    "hm37-mcp-route-probes": {"creates": ["$PROOF_DIR/mcp-503-end.epoch", "$PROOF_DIR/mcp-503-end.utc", "$PROOF_DIR/mcp-503-receipt.txt", "$PROOF_DIR/oauth-image.id", "$PROOF_DIR/oauth-memory-limit.bytes", "$PROOF_DIR/oauth-stats.json"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "75d3a60a70bb245804e2524cd118dbf6e643cd4f4526fc0ea76f55cbe768f24f"},
+    "hm37-oauth-rollback": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "2fb7a9c5332b1813f910321ee81b214cd0d87a8a707b21ac42a6e2213718e188"},
+    "hm37-mcp-restore-on": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "891eef231fca606faf6d8a0c7f9e55882c5a426707c77096ffd2870728b12b83"},
+    "hm37-mcp-enable": {"consumes": ["$PROOF_DIR/oauth-image.id", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.off.env"], "creates": ["$SECRET_STAGE/edge.on.env", "$SECRET_STAGE/management-database-credentials", "$SECRET_STAGE/mcp.on.caddy", "$SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials", "management-database-credentials"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "d1ae90abb86f7b75c3c5ab9ac9b7ec49060dc03f60fe6f76326147af664eea45"},
+    "hm37-mcp-disable": {"cleanup": ["management-database-credentials"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "7f638c50258483cf37a18f16d848780a1f505dd725ab6bab690fb85950025e1c"},
+    "hm37-oauth-close": {"cleanup": ["SECRET_STAGE"], "cleanup_owners": {"$SECRET_STAGE": "hm37-oauth-open"}, "consumes": [], "reads": ["/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:readlink -f"], "sha256": "d543abcac8c13a683b545e4a4c5e8617e6f4517be104929297052da3b3cad474"},
+    "hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "hm37-oauth-archive"}, "reads": [], "sha256": "ae9464ad1b84cb9430c3a2d1ce7f101804874a5a6428e1afc7a948404103187e"}
+  },
+  "different": [["OAUTH_RELEASE_SHA", "EXPECTED_OAUTH_SHA"]],
+  "plan_input": "OAUTH_PLAN_FILE"
+}
 ```

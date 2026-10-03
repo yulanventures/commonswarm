@@ -42,7 +42,7 @@ by an absolute path and is read without printing it.
 
 | Name | Supplier and meaning | Exact format |
 |---|---|---|
-| `GATE_EVIDENCE_FILE` | HezLead, exact-SHA site gates | absolute regular non-symlink nonsecret receipt with `SHA=<SITE_RELEASE_SHA>`, `site build: PASS`, `site tests: PASS`, `site CI: PASS` |
+| `GATE_EVIDENCE_FILE` | HezLead, exact-SHA site gates | absolute regular non-symlink nonsecret JSON receipt with `sha` equal to `SITE_RELEASE_SHA` and `gates` statuses for site build, site tests and site CI |
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | 40 lowercase hex; a commit on `origin/main`, descendant of base with a nonempty `site/` delta |
@@ -67,7 +67,7 @@ by an absolute path and is read without printing it.
 {"name":"SITE_BUILD_ENV_OP_REFERENCE","format":"literal:op://Yulan Ventures Infra/CommonSwarm Site/public-build-env","supplier":"HezLead and Anvil","meaning":"Approved 1Password document reference; never a credential value."}
 {"name":"OP_SERVICE_ACCOUNT_TOKEN_FILE","format":"abs-file:op-service-account-token","supplier":"Anvil","meaning":"Protected token file used by the noninteractive 1Password service-account workflow."}
 ```
-The gate receipt is parsed as complete lines, following `dcr-archive` in
+The gate receipt is parsed as JSON, following `dcr-archive` in
 `docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md`. It is checked before any box
 contact and copied into the protected evidence set at open. It supplies proof
 of gates already run; this plan never dispatches Actions.
@@ -127,6 +127,51 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 | `site2-06` public verification or blocking browser recheck fails | STOP and retain pin/window/evidence for HezLead; no successful close. |
 | Either close fails | Retain state; guarded-rm refusal reports exact path/message and leaves it. `site2-07-manifest-close` may resume only the documented no-box-close-receipt state; partial box close needs HezLead reconciliation. |
 
+
+## Shared preflight and closure decision
+
+Run `site-release-shared-preflight` **first**, before every existing run-order entry.
+Start in the reviewed repository with `SITE_PLAN_FILE` set to this absolute plan
+and `RELEASE_INPUTS_JSON` set to a regular nonsecret INPUTS JSON file. The
+shared checker validates the full input set together and exports the validated
+values to the retained Bash shell. Generated archive hashes, window IDs and
+secret-stage paths remain outputs; never guess them as inputs. Existing box
+preflight/open blocks still remeasure declared reads and enforce freshness.
+The inventory below is part of the reviewed plan: changing a marked block
+requires reviewing its producer/consumer/cleanup/read inventory and digest.
+A consumer may use only an input or an earlier producer on its selected route.
+Optional absence/existence checks are observations, not file consumption.
+Referenced OAuth steps in DCR are resolved from RELEASE_SHA in the Git object
+database, and participate in the same run order, not an earlier release.
+
+| Failure phase | Result and live state | Action |
+| --- | --- | --- |
+| Inputs/preflight, before mutation | STOP; baseline unchanged | Close only task staging already created. |
+| Deploy or required verification fails | DEPLOY_FAILED; candidate unverified | Run the existing marked rollback/recovery and verify baseline. |
+| Required deploy verification passes | DEPLOY_VERIFIED; selected source/image and mode verified | Proceed to evidence/closure. |
+| Receipt write, copy-back, manifest, timer restoration or cleanup fails after verification | CLOSE_FAILED; report last verified source/image/mode, timer/lock and exact leftover paths/PIDs | Keep verified bytes live; no rollback. HezLead reconciles closure. |
+| Outage budget exceeded after verified recovery/deploy | Run remains FAIL; verified live state retained | Record the measured interval; closure may proceed. No rollback solely for receipt/budget failure. |
+
+CLOSE_FAILED is a terminal closure result, never a deploy-failure trigger.
+The closure EXIT handler catches explicit exits and guarded cleanup refusals.
+If a later read discovers actual source/health drift, it is a new verification
+failure and follows the existing recovery path. Report uncertainty explicitly;
+last verified state is not a new box measurement. Never reopen a closed window.
+Only nonsecret evidence may be copied back; backups and freshness gates remain.
+
+```sh
+# step: site-release-shared-preflight
+# readonly: yes
+# host: Mac /bin/bash 3.2; FIRST, before archive, box contact or window
+set -euo pipefail
+: "${RELEASE_INPUTS_JSON:?absolute nonsecret INPUTS JSON required}"
+RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
+export RELEASE_PREFLIGHT_TOOL
+python3 "$RELEASE_PREFLIGHT_TOOL" "${SITE_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
+# Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
+eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$SITE_PLAN_FILE")"
+```
+
 ```sh
 # step: site2-plan-inputs
 # readonly: yes
@@ -173,12 +218,9 @@ PYINPUT
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
   test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-lines=p.read_text().splitlines()
-assert [line for line in lines if line.startswith("SHA=")]==["SHA="+sys.argv[2]]
-for gate in ("site build", "site tests", "site CI"):
-    assert gate+": PASS" in lines, "STOP: exact-SHA site gate missing"
+import os,runpy,sys
+check=runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt']
+check(sys.argv[1],sys.argv[2],['site build','site tests','site CI'])
 PY
 )
 ```
@@ -218,12 +260,9 @@ PYINPUT
   test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
   test ! -e "$HOME/.commonswarm-site-window.env"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-lines=p.read_text().splitlines()
-assert [line for line in lines if line.startswith("SHA=")]==["SHA="+sys.argv[2]]
-for gate in ("site build", "site tests", "site CI"):
-    assert gate+": PASS" in lines, "STOP: exact-SHA site gate missing"
+import os,runpy,sys
+check=runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt']
+check(sys.argv[1],sys.argv[2],['site build','site tests','site CI'])
 PY
   case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
   case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
@@ -500,12 +539,8 @@ positive controls.
   git merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
   test -n "$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
-  git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
-  git show "$SITE_RELEASE_SHA:deploy/site/finalize-release.sh" | grep -q guarded_delete
-  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
-    grep -q 'deletes valid temporary paths'
-  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
-    grep -q 'with a valid-delete control'
+  # Execute refusal and positive controls with HOME unchanged and guarded rm.
+  python3 "$RELEASE_PREFLIGHT_TOOL" deletion-controls "$SITE_RELEASE_REPO"
   umask 077
   git log --format='%H %s' "$EXPECTED_SITE_SHA..$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-commits.txt"
@@ -1104,14 +1139,11 @@ These are fixed assertions, not window decisions:
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   test "${#EXPECTED_SITE_SHA}" -eq 40
   case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  grep -qFx 'MCP_LIVE=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-00-mcp-live.txt"
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-00-mcp-live.txt" MCP_LIVE=PASS
   python3 - "$SITE_EVIDENCE/site2-00-gate-evidence.txt" "$SITE_RELEASE_SHA" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-lines=p.read_text().splitlines()
-assert [line for line in lines if line.startswith("SHA=")]==["SHA="+sys.argv[2]]
-for gate in ("site build", "site tests", "site CI"):
-    assert gate+": PASS" in lines, "STOP: exact-SHA site gate missing"
+import os,runpy,sys
+check=runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt']
+check(sys.argv[1],sys.argv[2],['site build','site tests','site CI'])
 PY
   grep -qFx 'PIN=PASS' "$SITE_EVIDENCE/site2-03-pin.txt"
   grep -qFx 'DELETE_GUARDS=PASS' "$SITE_EVIDENCE/site2-02-summary.txt"
@@ -1151,7 +1183,7 @@ PY
     printf '%s\n' 'HOSTED_MCP_ON=yes' 'EXACT_SHA_SITE_GATES=PASS'
     printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-or-populated-view-only' 'LIVE_REVOKE_CONTROL=NOT_PROVED_BY_SITE_RELEASE'
     jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json"
-    printf '%s\n' 'ROLLBACK_PIN=verified' 'All release holds resolved'
+    printf '%s\n' 'ROLLBACK_PIN=verified' 'HOLDS_RESOLVED=yes'
   } >"$SITE_EVIDENCE/GO.txt"
   chmod 0600 "$SITE_EVIDENCE/GO.txt"
 )
@@ -1171,9 +1203,8 @@ PY
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site
-  grep -qFx "SHA=$SITE_RELEASE_SHA" "$SITE_EVIDENCE/GO.txt"
-  grep -qFx "BASE_SHA=$EXPECTED_SITE_SHA" "$SITE_EVIDENCE/GO.txt"
-  grep -qFx 'All release holds resolved' "$SITE_EVIDENCE/GO.txt"
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/GO.txt" \
+    "SHA=$SITE_RELEASE_SHA" "BASE_SHA=$EXPECTED_SITE_SHA" HOLDS_RESOLVED=yes
   box_now=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 date -u '+%Y-%m-%dT%H:%M:%SZ')
   python3 - "$box_now" "$SITE_WINDOW_END_UTC" <<'PY'
 import datetime
@@ -1273,7 +1304,8 @@ the pin. Browser state cannot prevent these page/asset checks from running.
 HezLead's acceptance decision table uses the mode selected by `site2-03`.
 "Before assertions" means no `ASSERTIONS_STARTED` marker was written; attachment,
 navigation and app readiness are browser infrastructure checks. Once any product
-assertion starts, FULL-CONTROL failures remain blocking, including later cleanup.
+assertion starts, FULL-CONTROL assertion failures remain blocking. Receipt and
+daemon cleanup failures after all assertions passed are CLOSE_FAILED.
 A non-blocking result requires the separate `site2-05-public.txt` PASS receipt;
 it never converts a public-byte or deployment failure into a success.
 
@@ -1282,7 +1314,8 @@ it never converts a public-byte or deployment failure into a success.
 | Either | Deployment failure or public page/asset byte failure | Yes | Yes (site2-04 reconciliation restores the pin if switched) |
 | REDUCED-CONTROL | Any browser step: setup, harness, attachment, readiness, Chromium gone, assertion or daemon cleanup | No; `browser_acceptance=NOT_PROVED reason=<named STEP or STOP line>` | No |
 | FULL-CONTROL | Browser infrastructure failure before any product assertion ran | No; same `NOT_PROVED` receipt | No |
-| FULL-CONTROL | Browser failure after product assertions started | Yes | Yes |
+| FULL-CONTROL | Product assertion fails | Yes | Yes |
+| Either | Receipt/daemon cleanup fails after product assertions passed | CLOSE_FAILED; site stays verified | No |
 | Either | Browser acceptance passed | No | No |
 
 `site2-06` verifies rollback public bytes before attempting its browser re-check.
@@ -1417,11 +1450,12 @@ a non-blocking browser failure exits zero so the release continues to close.
   }
   trap 'finish_browser_acceptance "$?"' EXIT
   # Public acceptance is a prerequisite, regardless of browser outcome.
-  grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-05-public.txt"
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS
   test ! -f "$SITE_EVIDENCE/rollback-auto.txt"
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
   test ! -e "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt"
+  test ! -e "$SITE_EVIDENCE/site2-05-browser.json"
   check_task_browser() {
     browser_reason=
     case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
@@ -1752,11 +1786,19 @@ for line in lines:
                 "stderr: STOP: STEP 3 document load timeout",
                 "stderr: STOP: STEP 4 app readiness timeout"}:
         reason=line.removeprefix("stderr: ")
-nonblocking=branch=="REDUCED-CONTROL" or not started
-acceptance="PASS" if code==0 else "NOT_PROVED" if nonblocking else "FAIL"
+# STEP 14 runs only after every product assertion passes. The JSON result is
+# likewise produced after those assertions, and this invocation forbids stale bytes.
+product_verified=(root/"site2-05-browser.json").is_file() or reason=="STEP 14 (receipt write)"
+close_failed=bool(code and product_verified)
+nonblocking=branch=="REDUCED-CONTROL" or not started or close_failed
+acceptance="PASS" if code==0 or close_failed else "NOT_PROVED" if nonblocking else "FAIL"
 rows=["BROWSER_BRANCH="+branch,"browser_acceptance="+acceptance+" reason="+reason,
       "browser_control_exit="+str(code),"assertions_started="+("yes" if started else "no"),
+      "product_verified="+("yes" if product_verified else "no"),
+      "closure_failed="+("yes" if close_failed else "no"),
       "blocking="+("yes" if code and not nonblocking else "no")]
+if close_failed:
+    print("CLOSE_FAILED site2-05-browser-acceptance: LIVE_STATE=verified-site; product assertions passed; receipt/daemon cleanup failed; no rollback",file=sys.stderr)
 text="\n".join(rows)+"\n"
 receipt=root/(label+"-receipt.txt"); receipt.write_text(text,encoding="utf-8"); receipt.chmod(0o600)
 with summary.open("a",encoding="utf-8") as stream: stream.write(text)
@@ -1778,6 +1820,10 @@ ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root
 printf 'rollback_reason=browser-control-failure\nrestored_release=%s\n' "$pin"
 BOX
     chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$browser_status"
+  fi
+  if python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt" closure_failed=yes >/dev/null; then
+    printf 'CLOSE_FAILED LIVE_STATE=site SOURCE=%s BROWSER_PID=%s LEFTOVER=%s; no rollback\n' "$SITE_RELEASE_SHA" "$SITE_CHROME_PID" "$SITE_BROWSER_ROOT" >&2
+    exit "$browser_status"
   fi
 )
 ```
@@ -1897,7 +1943,7 @@ assert remote==local; print("ROLLBACK_PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
   chmod 0600 "$SITE_EVIDENCE/site2-06-rollback-verify.txt"
-  grep -qFx 'ROLLBACK_PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-06-rollback-verify.txt"
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
   test ! -e "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt"
@@ -2134,6 +2180,25 @@ only fixed commands. The close additionally allowlists its values on the box.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      site2-07-pre-pin-manifest-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_LIVE_STATE="last-verified-site; see retained verification receipt"
+
   set -E
   trap 'printf "FAIL site2-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   test "$(command -v rm)" = "$HOME/.local/bin/rm"
@@ -2266,6 +2331,24 @@ PY
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      site2-07-manifest-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+
   set -E
   trap 'printf "FAIL site2-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   test "$(command -v rm)" = "$HOME/.local/bin/rm"
@@ -2292,12 +2375,12 @@ PY
   fi
   pin=$(cat "$SITE_EVIDENCE/previous.release"); previous=$(cat "$SITE_EVIDENCE/previous.original")
   if test -f "$SITE_EVIDENCE/rollback-auto.txt"; then
-    grep -qFx 'ROLLBACK_PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-06-rollback-verify.txt"
+    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS
     outcome=rolled-back
   elif test -f "$SITE_EVIDENCE/site2-04-reconciliation.txt"; then
     grep -qFx 'DEPLOYMENT=failed-before-switch' "$SITE_EVIDENCE/site2-04-reconciliation.txt"; outcome=failed-before-switch
   else
-    grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-05-public.txt"
+    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS
     python3 - "$SITE_EVIDENCE" <<'PY'
 import json,pathlib,re,sys
 root=pathlib.Path(sys.argv[1]); label="site2-05-browser-acceptance"
@@ -2307,7 +2390,7 @@ rows=(root/(label+"-receipt.txt")).read_text(encoding="utf-8").splitlines()
 assert "BROWSER_BRANCH="+branch in rows and "blocking=no" in rows
 acceptance=[line for line in rows if line.startswith("browser_acceptance=")]; assert len(acceptance)==1
 if acceptance[0].startswith("browser_acceptance=PASS reason="):
-    assert "browser_control_exit=0" in rows
+    assert "browser_control_exit=0" in rows or ("product_verified=yes" in rows and "closure_failed=yes" in rows)
     assert json.loads((root/"site2-05-browser.json").read_text(encoding="utf-8"))["branch"]==branch
 else:
     assert re.fullmatch(r"browser_acceptance=NOT_PROVED reason=(?:STEP [0-9]{1,2} \([A-Za-z /-]+\)|STOP[^\n]+)",acceptance[0])
@@ -2315,6 +2398,7 @@ else:
 PY
     outcome=released
   fi
+  RELEASE_LIVE_STATE="site outcome=$outcome source=$SITE_RELEASE_SHA baseline=$EXPECTED_SITE_SHA; preceding-controls-verified"
   test "$pin" = "/srv/commonswarm/site/releases/.site-window-pin-$SITE_WINDOW_ID"
   test "$previous" = "$BASELINE_DIR"
   after=''
@@ -2665,3 +2749,37 @@ new release actions or claiming an unproved close.
 | 75 | `@@ -2127,13 +2257,13 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic. |
 | 76 | `@@ -2154,44 +2284,44 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Update the historical gap mapping for the generic live-state handoff without dropping a mapped control. |
 | 77 | Append §10 after §9 | Add this complete per-hunk generalization ledger; no executable block or gate added here. |
+
+```release-contract
+{
+  "version": 1,
+  "release_input": "SITE_RELEASE_SHA",
+  "inputs": {"EXPECTED_SITE_SHA": {"format": "sha40"}, "GATE_EVIDENCE_FILE": {"format": "abs-file"}, "OP_SERVICE_ACCOUNT_TOKEN_FILE": {"format": "abs-file", "mode": 384}, "SITE_APPROVER": {"format": "literal:HezLead"}, "SITE_BUILD_ENV_OP_REFERENCE": {"format": "op-reference"}, "SITE_EVIDENCE": {"format": "empty-dir", "mode": 448}, "SITE_PLAN_COMMIT": {"format": "sha40"}, "SITE_PLAN_FILE": {"format": "abs-file"}, "SITE_PROMPT_NUMBER": {"format": "decimal-positive"}, "SITE_RELEASE_REPO": {"format": "empty-dir"}, "SITE_RELEASE_SHA": {"format": "sha40"}},
+  "repo_paths": ["deploy/site", "deploy/site/deploy.sh", "deploy/site/validate-site-env.mjs", "docs/evidence/2026-10-02-site-release/SITE-RELEASE.md", "package.json", "scripts/release-preflight.py", "tests/p1-cli/site-deletion-safety.test.ts"],
+  "runtime_paths": ["site/.env", "site/.env.local", "site/.env.production", "site/.env.production.local"],
+  "input_files": ["$SITE_PLAN_FILE", "$GATE_EVIDENCE_FILE", "$OP_SERVICE_ACCOUNT_TOKEN_FILE"],
+  "routes": {"before-pin": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-06", "site2-07-pre-pin-manifest-close"], "normal": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-03-pin-previous", "site2-03-go-record", "site2-04", "site2-05", "site2-05-browser-acceptance", "site2-06", "site2-07-manifest-close"]},
+  "steps": {
+    "site-release-shared-preflight": {"reads": [], "sha256": "ff77105c5c4e94bfc2b540f0f9da5ce009188d5280f7b2e6b22eab94df5e7eb9"},
+    "site2-plan-inputs": {"reads": [], "sha256": "00aaf8909b470ef510117082a7dbf032bf5179a5b2ac229df67efeca596d0778"},
+    "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "28c0b132ea1afab8eb01180d9fb6a68ad886d06e7c82efb919f23373966cd995"},
+    "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "bbf8fc164a43ca1c351da1871bb1417bf87ecbe8b4c00462a6da798aeff313f4"},
+    "site2-00-a-close-ingest": {"creates": ["$SITE_EVIDENCE/site2-00-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "9842d30b8bf7d0f6091311d4a0ae19ca142c2992bee552b91fffb8eb396171c6"},
+    "site2-00-build-env": {"cleanup": ["SITE_BUILD_ENV_TEMP"], "cleanup_owners": {"$SITE_BUILD_ENV_TEMP": "site2-00-build-env"}, "creates": ["$SITE_BUILD_ENV_TEMP", "$SITE_EVIDENCE/site2-00-build-env.txt", "$SITE_RELEASE_REPO/site/.env", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env"], "reads": ["endpoint:https://api.commonswarm.com"], "sha256": "53096515681ef1c83b493dfc1f8e847ab8d31f5e8f5b24d4423e2de98b0d89d4"},
+    "site2-02": {"creates": ["$SITE_EVIDENCE/site2-02-commits.txt", "$SITE_EVIDENCE/site2-02-name-status.txt", "$SITE_EVIDENCE/site2-02-numstat.txt", "$SITE_EVIDENCE/site2-02-summary.txt"], "reads": [], "sha256": "3344c32f1c0e123d8411d33782b769858ef6b4656ed688ade486e5a082093564"},
+    "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "b74396352cc06f6c5d0b60abcf6faba48771fbff455f8fca86a4c2f465a6478d"},
+    "site2-03": {"consumes": ["$SITE_EVIDENCE/site2-03-browser-preflight.json"], "reads": [], "sha256": "342f8f7a95591e60540d6026659c37817ca1db98fec8e9134898f6c796b1f3f8"},
+    "site2-03-pin-previous": {"creates": ["$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/site2-03-pin.txt", "$pin", "pin"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "2c5f47b4b740c138a9c66c3ec5bc38c4f0919acc13f1a652fd91aeaccb5d13a5"},
+    "site2-03-go-record": {"consumes": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-00-mcp-live.txt", "$SITE_EVIDENCE/site2-02-summary.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-03-pin.txt"], "creates": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/site2-03-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "af7a3dc126c34b4d8bd05436cd8396898c40008632b7e6f551a6d3154fa821b4"},
+    "site2-04": {"consumes": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/deploy-status.txt", "$SITE_EVIDENCE/deploy.log", "$SITE_EVIDENCE/pin-after-deploy.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "edde0faa1760e38fd538e224d3def15e51c07d227dc4add5c036e2019ef17467"},
+    "site2-04-reconcile-failure": {"creates": ["$SITE_EVIDENCE/retry-approved"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "command:readlink -f"], "sha256": "990c7a8846185a8bed831785b1d343cdc30b52c160dbf4ac197945f4aba0a142"},
+    "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "ec0781c2ae4e2d7c7f26769eb1a5bb691968bf7f7652d551ff9bf28ebf702538"},
+    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "09564a40c097ab78a6060bfe411bed84fb47193ead5956aa7da76a58508764c3"},
+    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "56f0b934f957d905f23dc3f0371b1dd217346831c9449d559aa2888534f18a0b"},
+    "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "2e8a0f37a74721d73afbd66046ed7ee211e031c7b09cd7db75a4d90287f1378f"},
+    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "685c3c0f1bce3744d5ff1726b437ea07da8a3cfc0d815371933def63b094fb41"}
+  },
+  "gate_receipts": [{"gates": ["site build", "site tests", "site CI"], "input": "GATE_EVIDENCE_FILE"}],
+  "plan_input": "SITE_PLAN_FILE"
+}
+```
