@@ -19,7 +19,7 @@ Use [LISTING](LISTING.md), [REVIEWER-ACCESS](../../2026-10-03-reviewer-packet/RE
 | MCPs / tools and scans | Exactly eight source tools/titles/hints from LISTING. Per-tool auth metadata/scope changes require OA-07 implementation and separate release. Read actual connection/scan findings; do not infer success from DCR alone. |
 | Review information → Review details / login URL | `https://commonswarm.com/app`. |
 | Review details / dedicated reviewer credentials | HezLead ruling B: submit with self-serve access and reviewer notes below; Tom morning step pending, nonblocking. Tom alone types the later dedicated credential here and checks immediate access without MFA approval/codes/magic links/private network. No vendor exemption or acceptance claimed; no credentials in package, Git/chat/screenshots. |
-| Review details / reviewer notes | A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. |
+| Review details / reviewer notes | A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. Retrieval happens during a chat turn; inbox checks return durable batches and acknowledging a batch advances delivery; messages cannot be edited or recalled; seat names do not isolate chats; the connector does not claim or close tasks. |
 | Review details / tenant/workspace | Directory Review for own-account instructions; actual Tom-approved populated fixture name/ID if vendor requires dedicated credentials. Unknown actual fixture ID is **worker reads from portal** / approved private handoff; never fabricate. |
 | Review details / sign-in instructions | Paste complete REVIEWER-ACCESS, including account prerequisites, one form submit for workspace creation, the single configured OAuth provider, consented Home workspace, both seats and all examples. Enter here, not in ZIP metadata. |
 | Review details / positive and negative cases | Exactly P1–P5/N1–N3 below, with actual execution evidence. Cases imported from ZIP are read-only; changes require corrected package upload. |
@@ -41,7 +41,7 @@ The public guide describes these package fields as importing into the dashboard.
 | `$schema` | `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json` (portable format). |
 | `name` | `commonswarm` (stable lowercase identifier, ≤64). |
 | `version` | Package maker sets actual release semantic version; **worker reads from portal** and maker receipt. Do not use backend version as package version. |
-| `description` | LISTING long description (688; ≤4,000). |
+| `description` | LISTING long description (598; ≤4,000). |
 | `author.name` | Yulan Ventures, LLC (≤120). |
 | `author.email` | `support@commonswarm.com` (HezLead ruling 3; ≤320). |
 | `author.url` | `https://yulanventures.com` (HTTPS; ≤2,048). |
@@ -56,7 +56,7 @@ The public guide describes these package fields as importing into the dashboard.
 | `extensions.com.openai.id` | Omit unless an assigned ID exists; assigned value is **worker reads from portal**, preserve it. |
 | `extensions.com.openai.interface.displayName` | CommonSwarm (11; ≤30). |
 | `.interface.shortDescription` | Coordinate people and agents (28; ≤30). |
-| `.interface.longDescription` | LISTING long description (688; ≤4,000). |
+| `.interface.longDescription` | LISTING long description (598; ≤4,000). |
 | `.interface.developerName` | Yulan Ventures, LLC (19; ≤80); actual directory identity derives from verified account. |
 | `.interface.category` | Productivity; exact current allowed title **worker reads from portal** (guide gives this example). |
 | `.interface.capabilities` | Omit optional portable field; if maker chooses Codex format, required array, maximum 20 items of ≤120 each. No unsupported capabilities. |

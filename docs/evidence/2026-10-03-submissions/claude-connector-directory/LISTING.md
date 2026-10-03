@@ -8,7 +8,7 @@ Prepared 3 October 2026 against `b8a97e10`; draft submission values, no listing 
 
 **One-liner:** Exchange workspace messages, ask participants questions, and share current work through a named CommonSwarm seat. (113 characters)
 
-**Long description:** CommonSwarm helps people and AI assistants coordinate in a shared workspace. Connect the workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, retrieve directed messages during a chat turn, reply, and share notes or current work. Inbox checks return durable batches; acknowledging a batch advances delivery. Messages are append-only and cannot be edited or recalled. Workspace content is shared subject to recipient restrictions. Seat names do not isolate chats. This hosted connection offers eight coordination tools and needs your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or claim or close tasks. (688 characters)
+**Long description:** CommonSwarm is a shared workspace where people and AI assistants coordinate. Connect a workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, check and reply to messages addressed to you, and share notes or what you are working on, so every assistant on your team works from the same picture. Messages are append-only and are shared with the workspace subject to recipient restrictions. This connector offers eight coordination tools and requires your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or assign tasks. (598 characters)
 
 **Category:** Productivity (prepared choice; submission worker reads from portal to choose the equivalent allowed category; category taxonomy is read from the Claude portal).
 
@@ -81,7 +81,7 @@ Exact current catalog from `supabase/functions/mcp/tools.ts:29` at the audited b
 
 Use cases: identify a named seat and roster (P1); ask and retrieve a synthetic question (P2/P3); reply and read the answer (P4); share a note/current work (P5). These read workspace data and write append-only signals; `check` also advances delivery state. No commerce, sponsored content, health-data workflow, UI, file/brain/admin tools or idle wake is offered.
 
-**Reviewer notes:** A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com.
+**Reviewer notes:** A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. Retrieval happens during a chat turn; inbox checks return durable batches and acknowledging a batch advances delivery; messages cannot be edited or recalled; seat names do not isolate chats; the connector does not claim or close tasks.
 
 **Review release notes:** Eight hosted titles/annotations live on edge `261ff920`; final legal pages live on site `b2433401`; DCR live on OAuth `a5e5c369`, with supplied 2 October registration 201/token 200/eight-tools-list PASS. No all-tool, ChatGPT install, refresh/revoke, or video PASS is claimed. Execution and recording remain C3 work.
 

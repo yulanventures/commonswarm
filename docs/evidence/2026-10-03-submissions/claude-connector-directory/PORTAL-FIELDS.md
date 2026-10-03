@@ -15,7 +15,7 @@ Entry: existing paid-plan SSO account → developer portal at `claude.ai/directo
 | Tools / missing titles or safety hints | Supplied live; do not mark an absent hint resolved if the portal disagrees. Stop dependent submission and report exact tool/finding. |
 | Listing / server name | CommonSwarm (11; ≤100). |
 | Listing / one-liner | Copy LISTING's 113-character one-liner (≤200). |
-| Listing / description | Copy LISTING's 688-character long description (≤2,000). |
+| Listing / description | Copy LISTING's 598-character long description (≤2,000). |
 | Listing / categories | Productivity candidate; choose the actual equivalent from portal taxonomy, 1–5 categories. Taxonomy/accepted values are **worker reads from portal**. |
 | Listing / documentation URL | `https://github.com/yulanventures/commonswarm/blob/b8a97e10eee5c322b7d57d70280ba4ad51527338/README.md`; public documentation candidate, worker confirms access/portal acceptance. |
 | Listing / privacy URL | `https://commonswarm.com/privacy` (final/live). |
@@ -42,7 +42,7 @@ Entry: existing paid-plan SSO account → developer portal at `claude.ai/directo
 | Test & launch / reviewer instructions | Paste complete REVIEWER-ACCESS path and all eight argument/result examples; attach/link durable instructions as accepted by portal. Never paste a filesystem-only path as the reviewer's public URL. |
 | Test & launch / reviewer login URL | `https://commonswarm.com/app`; CC-12 uses ruling B; Tom's morning credential entry is pending and nonblocking. |
 | Test & launch / populated test-account credentials | HezLead ruling B: submit with self-serve access and reviewer notes below; Tom morning step pending, nonblocking. Tom alone types the later dedicated credential here. No agent-created account/password entry; no credential in Git/chat. |
-| Test & launch / reviewer notes | A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. |
+| Test & launch / reviewer notes | A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com. Retrieval happens during a chat turn; inbox checks return durable batches and acknowledging a batch advances delivery; messages cannot be edited or recalled; seat names do not isolate chats; the connector does not claim or close tasks. |
 | Test & launch / workspace or tenant | Directory Review, created by the reviewer for self-serve cases; actual Tom-approved fixture ID/name if dedicated credentials required. Never invent an existing workspace ID. |
 | Test & launch / every tool exercised confirmation | Pending actual CC-13 execution receipts. Do not check until independently supplied receipts cover all eight tools. |
 | Test & launch / launch details, dates or rollout choices | **worker reads from portal**; use HezLead's C6 GO after C3, not an invented launch date. |
