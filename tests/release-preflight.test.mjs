@@ -17,10 +17,10 @@ function replaceContract(text, value) { return text.replace(/^```release-contrac
 function run(cmd, args, options = {}) {
   return spawnSync(cmd, args, { encoding: 'utf8', ...options });
 }
-function git(args, cwd) {
+function git(args, cwd, trim = true) {
   const result = run('git', args, { cwd });
   assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
+  return trim ? result.stdout.trim() : result.stdout;
 }
 function cleanup(root) {
   assert.equal(resolve(root, '..'), tempRoot);
@@ -28,29 +28,32 @@ function cleanup(root) {
   const result = run('rm', ['-rf', '--', root]);
   assert.equal(result.status, 0, `guard refused ${root}: ${result.stderr}`);
 }
-function fixture(file) {
+function fixture(file, atHead = false) {
   const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
-  const text = readFileSync(file, 'utf8');
+  const text = atHead ? git(['show', `HEAD:${file}`], repo, false) : readFileSync(file, 'utf8');
   const c = contract(text);
-  const gitRepo = join(root, 'repo'); mkdirSync(gitRepo);
-  // Only repository inputs are staged. The object database, not current files,
-  // determines existence; dependency plan bodies are the reviewed real bytes.
-  for (const p of [...c.repo_paths].sort((a, b) => a.length - b.length)) {
-    const target = join(gitRepo, p);
-    if (existsSync(target)) continue;
-    if (existsSync(p) && !readableFile(p)) {
-      mkdirSync(target, { recursive: true }); writeFileSync(join(target, '.fixture'), 'tree');
-    } else {
-      mkdirSync(resolve(target, '..'), { recursive: true });
-      writeFileSync(target, existsSync(p) ? readFileSync(p) : 'fixture');
+  const gitRepo = atHead ? repo : join(root, 'repo');
+  if (!atHead) {
+    mkdirSync(gitRepo);
+    // Only repository inputs are staged. The object database, not current files,
+    // determines existence; dependency plan bodies are the reviewed real bytes.
+    for (const p of [...c.repo_paths].sort((a, b) => a.length - b.length)) {
+      const target = join(gitRepo, p);
+      if (existsSync(target)) continue;
+      if (existsSync(p) && !readableFile(p)) {
+        mkdirSync(target, { recursive: true }); writeFileSync(join(target, '.fixture'), 'tree');
+      } else {
+        mkdirSync(resolve(target, '..'), { recursive: true });
+        writeFileSync(target, existsSync(p) ? readFileSync(p) : 'fixture');
+      }
     }
+    for (const r of Object.values(c.references ?? {})) {
+      const target = join(gitRepo, r.plan); mkdirSync(resolve(target, '..'), { recursive: true });
+      writeFileSync(target, readFileSync(r.plan));
+    }
+    git(['init', '-q'], gitRepo); git(['add', '.'], gitRepo);
+    git(['-c', 'user.name=Release Fixture', '-c', 'user.email=fixture.local', 'commit', '-qm', 'fixture'], gitRepo);
   }
-  for (const r of Object.values(c.references ?? {})) {
-    const target = join(gitRepo, r.plan); mkdirSync(resolve(target, '..'), { recursive: true });
-    writeFileSync(target, readFileSync(r.plan));
-  }
-  git(['init', '-q'], gitRepo); git(['add', '.'], gitRepo);
-  git(['-c', 'user.name=Release Fixture', '-c', 'user.email=fixture.local', 'commit', '-qm', 'fixture'], gitRepo);
   const sha = git(['rev-parse', 'HEAD'], gitRepo);
   const inputs = {};
   for (const [key, rule] of Object.entries(c.inputs)) {
@@ -84,6 +87,24 @@ function readableFile(p) {
 }
 
 for (const file of plans) {
+  test(`${file}: real preflight accepts HEAD pins and refuses a one-byte block change`, () => {
+    const f = fixture(file, true);
+    try {
+      const positive = f.check();
+      assert.equal(positive.status, 0, positive.stdout + positive.stderr);
+      assert.equal(positive.stdout.trim(), 'PASS');
+      // Change exactly one byte in the owned block's failure message, keeping
+      // its declaration and every other input valid so only the pin check refuses it.
+      const source = shellBlocks(f.text).find(body => /\bgit\b[^\n]*\bstatus --/.test(body));
+      assert.ok(source, 'missing checkout status block');
+      const step = source.match(/^# step: ([a-z0-9-]+)/)[1];
+      const mutated = f.text.replace(source, source.replace('FAIL', 'FaIL'));
+      assert.notEqual(mutated, f.text);
+      const negative = f.check(f.inputs, mutated);
+      assert.equal(negative.status, 1, negative.stdout + negative.stderr);
+      assert.equal(negative.stdout.trim(), `FAIL: ${step}: block changed; review/update its I/O inventory`);
+    } finally { cleanup(f.root); }
+  });
   test(`${file}: Bash 3.2 syntax and first marked preflight`, () => {
     const text = readFileSync(file, 'utf8'); const blocks = shellBlocks(text);
     assert.match(blocks[0], /^# step: [\w-]+-release-shared-preflight\n# readonly: yes/);
