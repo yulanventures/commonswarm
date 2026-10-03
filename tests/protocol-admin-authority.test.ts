@@ -4,11 +4,82 @@ import { test } from 'node:test';
 import {
   ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, ADMIN_SCOPE_NAMES,
   adminManifestValid, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
-  type AdminActor, type AdminCommand,
+  adminConsentOptions, adminAvailableCapabilities,
+  type AdminActor, type AdminCommand, type AdminManifest,
 } from '../src/protocol/index.js';
-import { adminCoreFixture, adminManifest } from './support/admin-fixture.js';
+import { adminCoreFixture, adminManifest, adminManifestDigest } from './support/admin-fixture.js';
 
 const activate = (f: ReturnType<typeof adminCoreFixture>) => f.run({ kind: 'grant_admin_delegation', grant_id: f.grantId, consent_receipt_id: f.receipt, replaces_grant_id: null });
+test('v1 consent is refused while historical v1 grants retain human recovery, revoke and audit without conversion', () => {
+  for (const mode of ['granular', 'full_account'] as const) {
+    const f = adminCoreFixture();
+    const { capability_names, availability_digest, ...fields } = f.manifest;
+    const historical = { ...fields, registry_version: 1, mode,
+      scope_names: mode === 'full_account' ? [...ADMIN_SCOPE_NAMES] : fields.scope_names,
+      workspace_selector: mode === 'full_account' ? 'owned_and_selected' as const : 'selected' as const };
+    const digest = adminManifestDigest(historical);
+    const refused = f.run({ kind: 'prepare_admin_consent', consent: {
+      consent_receipt_id: randomUUID(), owner_user_id: f.owner, session_binding: f.session,
+      manifest: historical as unknown as AdminManifest, manifest_digest: digest,
+      full_account_selected: mode === 'full_account', expires_at: f.now + 300000, consumed_at: null,
+    } });
+    assert.equal(refused.reason, 'consent_invalid');
+    assert.deepEqual(refused.events.map(event => event.type), ['AdminActionRecorded']);
+    assert.equal(adminManifestValid(historical, f.now, false), false);
+    const accepted = activate(f);
+    assert.equal(accepted.ok, true); // Fresh v2 consent is the positive control.
+    // Replay persisted pre-v2 consent/grant envelopes, never re-consent or infer capabilities.
+    const oldEvents = [...f.prepare.events, ...accepted.events].map(event => {
+      const payload = event.type === 'AdminConsentPrepared' ? { ...event.payload, manifest: historical,
+        manifest_digest: digest, full_account_selected: mode === 'full_account' }
+        : event.type === 'AdminDelegationGranted' ? { ...event.payload, ...historical, manifest_digest: digest }
+        : event.payload;
+      if (event.type === 'AdminDelegationGranted') {
+        delete payload.capability_names;
+        delete payload.availability_digest;
+      }
+      return { ...event, payload, grant_manifest_digest: event.grant_id ? digest : null };
+    });
+    const oldState = oldEvents.reduce(reduceAdminAuthority, emptyAdminAccount());
+    const actor: AdminActor = { kind: 'delegated_admin', grant_id: f.grantId,
+      admin_identity_id: f.manifest.admin_identity_id, connection_id: f.manifest.connection_id,
+      resource: ADMIN_RESOURCE, scope_names: ['admin:read'], access_expires_at: f.now + 300000 };
+    const read: AdminCommand = { kind: 'admin_read_metadata', grant_id: f.grantId, resource_kind: 'grant', workspace_id: null };
+    assert.equal(decideAdminAuthority(read, oldState, { ...f.ctx, actor }).reason, 'scope_expansion_forbidden');
+    assert.equal(decideAdminAuthority(read, f.state(), { ...f.ctx, actor }).ok, true);
+    for (const status of ['active', 'suspended', 'revoked', 'expired'] as const) {
+      let state = structuredClone(oldState);
+      const ctx = { ...f.ctx, now: status === 'expired' ? f.manifest.expires_at : f.now, current_workspace_rights: false };
+      if (status !== 'active') {
+        const terminal: AdminCommand = status === 'expired' ? { kind: 'expire_admin_delegation', grant_id: f.grantId }
+          : { kind: status === 'suspended' ? 'suspend_admin_delegation' : 'revoke_admin_delegation', grant_id: f.grantId, reason_code: 'human_fenced' };
+        const decision = decideAdminAuthority(terminal, state, status === 'expired'
+          ? { ...ctx, now: f.manifest.expires_at, actor: { kind: 'system' } } : ctx);
+        assert.equal(decision.ok, true);
+        state = decision.events.reduce(reduceAdminAuthority, state);
+      }
+      assert.equal(state.grants[f.grantId]?.state, status);
+      assert.equal(decideAdminAuthority(read, state, { ...ctx, actor: { kind: 'human', user_id: randomUUID(), session_binding: f.session } }).ok, false);
+      assert.equal(decideAdminAuthority({ kind: 'revoke_admin_delegation', grant_id: f.grantId, reason_code: 'human_revoked' }, state,
+        { ...ctx, actor: { kind: 'human', user_id: randomUUID(), session_binding: f.session } }).reason, 'human_confirmation_required');
+      const recovered = decideAdminAuthority(read, state, ctx);
+      assert.equal(recovered.ok, true);
+      assert.deepEqual(recovered.events.map(event => event.type), ['AdminMetadataRead', 'AdminActionRecorded']);
+      assert.equal(recovered.events[1]?.grant_manifest_digest, digest);
+      const revoked = decideAdminAuthority({ kind: 'revoke_admin_delegation', grant_id: f.grantId, reason_code: 'human_revoked' }, state, ctx);
+      assert.equal(revoked.ok, true);
+      assert.deepEqual(revoked.events.map(event => event.type), status === 'revoked' || status === 'expired'
+        ? ['AdminActionRecorded'] : ['AdminDelegationRevoked', 'AdminActionRecorded']);
+      state = revoked.events.reduce(reduceAdminAuthority, state);
+      assert.equal(state.grants[f.grantId]?.manifest_digest, digest);
+      assert.equal(state.grants[f.grantId]?.registry_version, 1);
+      assert.equal(Object.hasOwn(state.grants[f.grantId]!, 'capability_names'), false);
+      assert.equal(Object.hasOwn(state.grants[f.grantId]!, 'availability_digest'), false);
+      assert.equal(state.consents[f.receipt]?.manifest_digest, digest);
+    }
+  }
+});
+
 test('human consent is session-bound, single-use, finite, and cannot be supplied by workers or admins', () => {
   const f = adminCoreFixture();
   assert.equal(f.prepare.ok, true);
@@ -38,11 +109,16 @@ test('human consent is session-bound, single-use, finite, and cannot be supplied
   ]) assert.equal(adminManifestValid({ ...m, ...mutation }, f.now), false);
 });
 
-test('full-account consent pins every scope and requires explicit human selection', () => {
+test('full-account consent refuses unavailable scopes, pins all available capabilities and requires explicit human selection', () => {
   const f = adminCoreFixture();
-  const manifest = { ...f.manifest, mode: 'full_account' as const, workspace_selector: 'owned_and_selected' as const, scope_names: [...ADMIN_SCOPE_NAMES] };
+  const scope_names = adminConsentOptions().filter(option => option.available).map(option => option.scope);
+  const manifest = { ...f.manifest, mode: 'full_account' as const, workspace_selector: 'owned_and_selected' as const,
+    scope_names, capability_names: adminAvailableCapabilities(scope_names) };
   const consent = { consent_receipt_id: randomUUID(), owner_user_id: f.owner, session_binding: f.session,
-    manifest, manifest_digest: 'd'.repeat(64), full_account_selected: false, expires_at: f.now + 300000, consumed_at: null };
+    manifest, manifest_digest: adminManifestDigest(manifest), full_account_selected: false, expires_at: f.now + 300000, consumed_at: null };
+  const unavailable = { ...manifest, scope_names: [...ADMIN_SCOPE_NAMES] };
+  assert.equal(f.run({ kind: 'prepare_admin_consent', consent: { ...consent, manifest: unavailable,
+    manifest_digest: adminManifestDigest(unavailable), full_account_selected: true } }).reason, 'consent_invalid');
   assert.equal(f.run({ kind: 'prepare_admin_consent', consent }).reason, 'consent_invalid');
   assert.equal(f.run({ kind: 'prepare_admin_consent', consent: { ...consent, full_account_selected: true } }).ok, true);
   assert.equal(f.run({ kind: 'grant_admin_delegation', grant_id: f.grantId, consent_receipt_id: consent.consent_receipt_id, replaces_grant_id: null }).ok, true);
@@ -123,8 +199,8 @@ test('human narrowing removes permission and cannot expand a grant or reset its 
   const manifest = { ...f.manifest, expires_at: f.now + 60000, issuance_limits: { ...f.manifest.issuance_limits, worker_credentials: 0 } };
   const receipt = randomUUID();
   assert.equal(f.run({ kind: 'prepare_admin_consent', consent: { consent_receipt_id: receipt, owner_user_id: f.owner,
-    session_binding: f.session, manifest, manifest_digest: 'd'.repeat(64), full_account_selected: false, expires_at: f.now + 300000, consumed_at: null } }).ok, true);
-  const narrow: AdminCommand = { kind: 'narrow_admin_delegation', grant_id: f.grantId, manifest, manifest_digest: 'd'.repeat(64), consent_receipt_id: receipt };
+    session_binding: f.session, manifest, manifest_digest: adminManifestDigest(manifest), full_account_selected: false, expires_at: f.now + 300000, consumed_at: null } }).ok, true);
+  const narrow: AdminCommand = { kind: 'narrow_admin_delegation', grant_id: f.grantId, manifest, manifest_digest: adminManifestDigest(manifest), consent_receipt_id: receipt };
   assert.equal(f.run({ ...narrow, manifest: { ...manifest, scope_names: ['admin:read', 'seats:create'] } }).reason, 'scope_expansion_forbidden');
   assert.equal(f.run(narrow).ok, true);
   assert.equal(f.state().grants[f.grantId]?.expires_at, f.now + 60000);
@@ -137,7 +213,7 @@ test('replacement revokes the prior grant atomically and expiry applies before i
   assert.equal(activate(f).ok, true);
   const receipt = randomUUID();
   assert.equal(f.run({ kind: 'prepare_admin_consent', consent: { consent_receipt_id: receipt,
-    owner_user_id: f.owner, session_binding: f.session, manifest: f.manifest, manifest_digest: 'e'.repeat(64),
+    owner_user_id: f.owner, session_binding: f.session, manifest: f.manifest, manifest_digest: adminManifestDigest(f.manifest),
     full_account_selected: false, expires_at: f.now + 300000, consumed_at: null } }).ok, true);
   const replacement = randomUUID();
   assert.equal(f.run({ kind: 'grant_admin_delegation', grant_id: replacement, consent_receipt_id: receipt, replaces_grant_id: null }).reason, 'replacement_required');

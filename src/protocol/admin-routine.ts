@@ -13,7 +13,10 @@ import {
   ADMIN_INVITATION_ISSUE_PER_DAY,
   ADMIN_ISSUANCE_CEILINGS,
   ADMIN_RESOURCE,
-  ADMIN_SCOPE_REGISTRY,
+  ADMIN_AVAILABILITY,
+  ADMIN_REGISTRY_VERSION,
+  adminCapabilityAvailable,
+  adminEffectiveCapabilities,
   ADMIN_UUID_RE,
   ADMIN_WORKSPACE_CREATE_PER_DAY,
   adminExactKeys,
@@ -215,7 +218,7 @@ export function parseAdminRoutineCommand(
   value: unknown,
 ): AdminRoutineCommand | null {
   const c = adminRecord(value);
-  if (!c || !uuid(c.grant_id) || !uuid(c.workspace_id)) return null;
+  if (!c || typeof c.kind !== "string" || !adminCapabilityAvailable(c.kind) || !uuid(c.grant_id) || !uuid(c.workspace_id)) return null;
   const exact = (keys: string[]) =>
     adminExactKeys(c, ["kind", "grant_id", "workspace_id", ...keys]);
   let valid = false;
@@ -466,13 +469,12 @@ export function decideAdminRoutine(
   if (!actor.scope_names.every((s) => grant.scope_names.includes(s))) {
     return finish("scope_expansion_forbidden");
   }
-  const scope = Object.entries(ADMIN_SCOPE_REGISTRY).find(([, commands]) =>
-    (commands as readonly string[]).includes(command.kind)
-  )?.[0] as AdminScope | undefined;
+  const scope = ADMIN_AVAILABILITY[ADMIN_REGISTRY_VERSION]?.[command.kind]?.scope;
   if (
     !scope || !grant.scope_names.includes(scope) ||
     !actor.scope_names.includes(scope)
   ) return finish("scope_forbidden");
+  if (!adminEffectiveCapabilities(grant, actor.scope_names).includes(command.kind)) return finish("capability_forbidden");
   const created = routine.created_workspaces[command.workspace_id];
   if (command.kind !== "admin_create_workspace") {
     const selected = grant.workspace_ids.includes(command.workspace_id);

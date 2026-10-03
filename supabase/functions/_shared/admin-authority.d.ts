@@ -56,6 +56,7 @@ export interface AdminCredentialLineage {
     delivery_state: 'awaiting_delivery';
 }
 export interface AdminAccountState {
+    client_approvals?: Record<string, AdminClientApproval>;
     connections?: Record<string, AdminConnectionAttempt>;
     routine?: AdminRoutineState;
     grants: Record<string, AdminGrant>;
@@ -65,6 +66,17 @@ export interface AdminAccountState {
         hour_start: number;
         attempts: number;
     }>;
+}
+export interface AdminClientApproval {
+    owner_user_id: string;
+    client_id: string;
+    verification_version: number;
+    approved_at: number;
+    approval_event_id: string;
+    approval_command_id: string;
+    withdrawn_at: number | null;
+    withdrawal_event_id: string | null;
+    withdrawal_reason: string | null;
 }
 export interface AdminConnectionAttempt {
     attempt_id: string;
@@ -83,7 +95,7 @@ export interface AdminConnectionAttempt {
     cancelled_at: number | null;
     reason_code: string | null;
 }
-export declare const ADMIN_EVENT_TYPES: readonly ["AdminConsentPrepared", "AdminDelegationGranted", "AdminDelegationNarrowed", "AdminDelegationRevoked", "AdminDelegationSuspended", "AdminDelegationExpired", "AdminWorkspaceAccessWithdrawn", "AdminCredentialIssued", "AdminCredentialRotated", "AdminCredentialReplayDetected", "AdminMetadataRead", "AdminActionRecorded", "AdminConnectionPrepared", "AdminConnectionCancelled"];
+export declare const ADMIN_EVENT_TYPES: readonly ["AdminConsentPrepared", "AdminDelegationGranted", "AdminDelegationNarrowed", "AdminDelegationRevoked", "AdminDelegationSuspended", "AdminDelegationExpired", "AdminWorkspaceAccessWithdrawn", "AdminCredentialIssued", "AdminCredentialRotated", "AdminCredentialReplayDetected", "AdminMetadataRead", "AdminActionRecorded", "AdminConnectionPrepared", "AdminConnectionCancelled", "AdminClientApproved", "AdminClientApprovalWithdrawn"];
 export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEventType;
 export interface AdminAccountEvent {
     stream_kind: 'account';
@@ -104,6 +116,15 @@ export interface AdminAccountEvent {
     payload: Record<string, unknown>;
 }
 export type AdminCommand = {
+    kind: 'approve_admin_client';
+    client_id: string;
+    verification_version: number;
+} | {
+    kind: 'withdraw_admin_client_approval';
+    client_id: string;
+    verification_version: number;
+    reason_code: string;
+} | {
     kind: 'prepare_admin_consent';
     consent: AdminConsent;
 } | {
@@ -159,6 +180,13 @@ export interface AdminDecisionContext {
     target_workspace_owned_by_grantor: boolean;
     presenting_refresh_generation: number | null;
     presenting_refresh_lineage_id: string | null;
+    client_policy?: {
+        client_id: string;
+        verification_version: number;
+        verification_active: boolean;
+        approval: AdminClientApproval | null;
+        linked_grant_ids: readonly string[];
+    };
 }
 export interface AdminDecision {
     ok: boolean;
@@ -166,6 +194,10 @@ export interface AdminDecision {
     events: AdminAccountEvent[];
 }
 export declare function emptyAdminAccount(): AdminAccountState;
+/** Shared strict wire validation; these commands never accept an owner or verification facts. */
+export declare function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCommand, {
+    client_id: string;
+}> | null;
 /** Shared counter keys and ceilings, including identifiable refused attempts. */
 export declare function adminRatePolicy(actor: AdminActor, grant: AdminGrant, action: string, workspaceId: string | null, lineageId: string | null, requestedGrantId: string | null): {
     key: string;

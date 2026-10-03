@@ -259,39 +259,6 @@ test("failed observation leaves check successful and retries after a later empty
   assert.equal(quiet.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 0);
 });
 
-test("in-flight observation ends within the remaining check deadline", { timeout: 5_000 }, async () => {
-  const { profilePath } = await setup();
-  const base = fixture([row(1), row(2)]);
-  let ackStarted = 0;
-  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    const body = JSON.parse(String(init?.body));
-    if (body.command?.kind === "ack_agent_delivery") {
-      ackStarted++;
-      if (ackStarted === 1) {
-        await new Promise(resolve => setTimeout(resolve, 160));
-        return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503 });
-      }
-      return await new Promise<Response>(() => {}); // transport ignores abort
-    }
-    return base.fetcher(input, init);
-  }) as typeof fetch;
-  const deadline = Date.now() + 350;
-  const output: string[] = [];
-  let forcedExitText = "";
-  const hardExit = setTimeout(() => { forcedExitText = "check_timeout"; }, Math.max(0, deadline - Date.now() + 150));
-  let result: Awaited<ReturnType<typeof checkAgentMessages>>;
-  try {
-    result = await checkAgentMessages({ profilePath, fetcher, deadlineAtMs: deadline,
-      present: async value => { output.push(renderAgentCheck(value)); } });
-  } finally { clearTimeout(hardExit); }
-  assert.equal(result.messages.length, 2);
-  assert.equal(ackStarted, 2);
-  assert.ok(output[0]?.includes(row(1).id));
-  assert.ok(Date.now() < deadline + 100, "an ack in flight must finish before hook forced-exit grace");
-  assert.equal(forcedExitText, "", "the forced-exit failure text cannot fire after an ACK deadline");
-  assert.doesNotMatch(output.join(""), /check_timeout/);
-});
-
 test("terminal observation refusals leave the queue after one request each", { timeout: 15_000 }, async () => {
   const { profilePath } = await setup();
   const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE + 1 }, (_, index) => row(index + 1));

@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import * as bundle from "../../supabase/functions/_shared/protocol.js";
-import { adminCoreFixture } from "../support/admin-fixture.js";
+import { adminCoreFixture } from "./admin-issuance-fixture.test.js";
 
 test("the generated edge bundle can issue a consented account grant and refuses a worker grant", () => {
   const f = adminCoreFixture();
+  assert.equal(f.prepare().ok, true);
   const command = {
     kind: "grant_admin_delegation" as const,
     grant_id: f.grantId,
@@ -51,10 +52,12 @@ test("the generated edge bundle can issue a consented account grant and refuses 
 test("the generated bundle enforces separate routine creation permission and folds both streams", () => {
   const f = adminCoreFixture();
   f.manifest.scope_names = ["admin:read", "workspaces:create", "onboarding:connect"];
+  f.manifest.capability_names = bundle.adminAvailableCapabilities(f.manifest.scope_names);
   f.manifest.created_workspace_policy.scope_names = ["onboarding:connect"];
   f.manifest.target_rules.recipient_user_ids = [f.owner];
   f.manifest.target_rules.recipient_connection_ids = [f.manifest.connection_id];
   f.manifest.target_rules.transports = ["local"];
+  assert.equal(f.prepare().ok, true);
   const granted = bundle.decideAdminAuthority(
     {
       kind: "grant_admin_delegation",

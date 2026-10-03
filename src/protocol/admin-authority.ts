@@ -2,7 +2,7 @@ import { ADMIN_ROUTINE_EVENT_TYPES, reduceAdminRoutine, emptyAdminRoutine, type 
 import {
   ADMIN_ACCESS_TTL_SECONDS, ADMIN_RESOURCE, adminManifestValid, adminScopes,
   ADMIN_READ_RATE_PER_HOUR, ADMIN_MUTATION_RATE_PER_HOUR, ADMIN_REFRESH_RATE_PER_HOUR,
-  canonicalAdminJson, type AdminManifest, type AdminScope,
+  canonicalAdminJson, adminEffectiveCapabilities, adminRecord, adminExactKeys, type AdminManifest, type AdminScope,
 } from './admin-policy.js';
 
 export type AdminActor =
@@ -28,12 +28,18 @@ export interface AdminCredentialLineage {
   state: 'active' | 'revoked'; delivery_state: 'awaiting_delivery';
 }
 export interface AdminAccountState {
+  client_approvals?: Record<string, AdminClientApproval>;
   // Absent on pre-enrollment projections; no earlier command could create an attempt.
   connections?: Record<string, AdminConnectionAttempt>;
   routine?: AdminRoutineState;
   grants: Record<string, AdminGrant>; consents: Record<string, AdminConsent>;
   lineages: Record<string, AdminCredentialLineage>;
   rate_buckets: Record<string, { hour_start: number; attempts: number }>;
+}
+export interface AdminClientApproval {
+  owner_user_id: string; client_id: string; verification_version: number;
+  approved_at: number; approval_event_id: string; approval_command_id: string;
+  withdrawn_at: number | null; withdrawal_event_id: string | null; withdrawal_reason: string | null;
 }
 export interface AdminConnectionAttempt {
   attempt_id: string; parent_admin_grant_id: string; workspace_id: string;
@@ -48,6 +54,7 @@ export const ADMIN_EVENT_TYPES = [
   'AdminWorkspaceAccessWithdrawn', 'AdminCredentialIssued', 'AdminCredentialRotated',
   'AdminCredentialReplayDetected', 'AdminMetadataRead', 'AdminActionRecorded',
   'AdminConnectionPrepared', 'AdminConnectionCancelled',
+  'AdminClientApproved', 'AdminClientApprovalWithdrawn',
 ] as const;
 export type AdminEventType = typeof ADMIN_EVENT_TYPES[number] | AdminRoutineEventType;
 export interface AdminAccountEvent {
@@ -58,6 +65,8 @@ export interface AdminAccountEvent {
   occurred_at_server: number; payload: Record<string, unknown>;
 }
 export type AdminCommand =
+  | { kind: 'approve_admin_client'; client_id: string; verification_version: number }
+  | { kind: 'withdraw_admin_client_approval'; client_id: string; verification_version: number; reason_code: string }
   | { kind: 'prepare_admin_consent'; consent: AdminConsent }
   | { kind: 'grant_admin_delegation'; grant_id: string; consent_receipt_id: string; replaces_grant_id: string | null }
   | { kind: 'narrow_admin_delegation'; grant_id: string; manifest: AdminManifest; manifest_digest: string; consent_receipt_id: string }
@@ -74,9 +83,25 @@ export interface AdminDecisionContext {
   current_workspace_rights: boolean; withdrawing_workspace_owner: boolean;
   target_workspace_owned_by_grantor: boolean;
   presenting_refresh_generation: number | null; presenting_refresh_lineage_id: string | null;
+  client_policy?: {
+    client_id: string; verification_version: number; verification_active: boolean;
+    approval: AdminClientApproval | null; linked_grant_ids: readonly string[];
+  };
 }
 export interface AdminDecision { ok: boolean; reason: string | null; events: AdminAccountEvent[] }
 export function emptyAdminAccount(): AdminAccountState { return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} }; }
+
+/** Shared strict wire validation; these commands never accept an owner or verification facts. */
+export function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCommand, { client_id: string }> | null {
+  const c = adminRecord(input);
+  if (!c || typeof c.client_id !== 'string' || new TextEncoder().encode(c.client_id).length < 1 ||
+      new TextEncoder().encode(c.client_id).length > 2048 || typeof c.verification_version !== 'number' ||
+      !Number.isSafeInteger(c.verification_version) || c.verification_version < 1 || c.verification_version > 2147483647) return null;
+  if (c.kind === 'approve_admin_client' && adminExactKeys(c, ['kind', 'client_id', 'verification_version'])) return c as Extract<AdminCommand, { kind: 'approve_admin_client' }>;
+  if (c.kind === 'withdraw_admin_client_approval' && adminExactKeys(c, ['kind', 'client_id', 'verification_version', 'reason_code']) &&
+      typeof c.reason_code === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(c.reason_code)) return c as Extract<AdminCommand, { kind: 'withdraw_admin_client_approval' }>;
+  return null;
+}
 
 /** Shared counter keys and ceilings, including identifiable refused attempts. */
 export function adminRatePolicy(actor: AdminActor, grant: AdminGrant, action: string, workspaceId: string | null, lineageId: string | null, requestedGrantId: string | null): { key: string; limit: number }[] {
@@ -102,6 +127,7 @@ function narrowing(next: AdminManifest, prior: AdminGrant, now: number): boolean
   if (!adminManifestValid(next, now, false) || next.admin_identity_id !== prior.admin_identity_id ||
       next.connection_id !== prior.connection_id || next.client_id !== prior.client_id ||
       next.resource !== prior.resource || next.registry_version !== prior.registry_version ||
+      next.availability_digest !== prior.availability_digest || !subset(next.capability_names, prior.capability_names) ||
       (prior.mode === 'granular' && next.mode !== 'granular') ||
       next.expires_at > prior.expires_at || next.refresh_deadline !== prior.refresh_deadline ||
       !subset(next.scope_names, prior.scope_names) || !subset(next.workspace_ids, prior.workspace_ids) ||
@@ -153,7 +179,8 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
     emit('AdminActionRecorded', {
       audit_record_id: auditId, grant_id: auditGrant?.grant_id ?? ('grant_id' in command ? command.grant_id : null),
       admin_identity_id: auditGrant?.admin_identity_id ?? null, connection_id: auditGrant?.connection_id ?? null,
-      action: command.kind, target_kind: 'admin_grant', target_id: auditGrant?.grant_id ?? null,
+      action: command.kind, target_kind: 'client_id' in command ? 'admin_client' : 'admin_grant', target_id: 'client_id' in command ? command.client_id : auditGrant?.grant_id ?? null,
+      ...('client_id' in command ? { client_id: command.client_id, verification_version: command.verification_version } : {}),
       workspace_id: 'workspace_id' in command ? command.workspace_id : null,
       manifest_digest: auditGrant?.manifest_digest ?? null, request_digest: ctx.request_digest,
       outcome: reason === null ? 'accepted' : 'refused', reason_code: reason,
@@ -165,6 +192,33 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
   };
   const humanOwner = actor.kind === 'human' && actor.user_id === ctx.owner_user_id;
   if (actor.kind === 'worker' || actor.kind === 'hosted_seat') return finish('credential_kind_forbidden');
+  if (command.kind === 'approve_admin_client' || command.kind === 'withdraw_admin_client_approval') {
+    if (!humanOwner) return finish('human_confirmation_required');
+    if (!parseAdminClientApprovalCommand(command)) return finish('invalid_request');
+    const policy = ctx.client_policy;
+    if (!policy || policy.client_id !== command.client_id || policy.verification_version !== command.verification_version ||
+        policy.approval && (policy.approval.owner_user_id !== ctx.owner_user_id || policy.approval.client_id !== command.client_id ||
+          policy.approval.verification_version !== command.verification_version)) return finish('client_approval_unavailable');
+    const approval = policy.approval;
+    if (command.kind === 'approve_admin_client') {
+      if (!policy.verification_active) return finish('client_verification_required');
+      if (approval && approval.withdrawn_at !== null) return finish('client_approval_withdrawn');
+      if (!approval) emit('AdminClientApproved', { owner_user_id: ctx.owner_user_id, client_id: command.client_id,
+        verification_version: command.verification_version, approved_at: ctx.now });
+    } else {
+      if (!approval) return finish('client_approval_unavailable');
+      if (approval.withdrawn_at !== null) return finish(null);
+      if (policy.linked_grant_ids.some(id => !state.grants[id] || state.grants[id]!.owner_user_id !== ctx.owner_user_id ||
+          state.grants[id]!.client_id !== command.client_id)) return finish('grant_unavailable');
+      emit('AdminClientApprovalWithdrawn', { owner_user_id: ctx.owner_user_id, client_id: command.client_id,
+        verification_version: command.verification_version, reason_code: command.reason_code, effective_at: ctx.now });
+      for (const id of policy.linked_grant_ids) {
+        const linked = state.grants[id]!;
+        if (linked.state === 'active' || linked.state === 'suspended') emit('AdminDelegationRevoked', terminalPayload(linked, state, ctx.now, command.reason_code));
+      }
+    }
+    return finish(null);
+  }
   const replayLineage = 'credential_lineage_id' in command ? state.lineages[command.credential_lineage_id] : undefined;
   const verifiedReplay = actor.kind === 'credential_runtime' && grant && replayLineage?.grant_id === grant.grant_id &&
     (command.kind === 'rotate_admin_credential' || command.kind === 'record_admin_credential_replay') &&
@@ -203,7 +257,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
   if (!grant || grant.owner_user_id !== ctx.owner_user_id) return finish('grant_unavailable');
   if (actor.kind === 'delegated_admin' && (actor.grant_id !== grant.grant_id || actor.admin_identity_id !== grant.admin_identity_id ||
       actor.connection_id !== grant.connection_id || actor.resource !== ADMIN_RESOURCE)) return finish('grant_binding_mismatch');
-  if (actor.kind === 'delegated_admin' && (!adminScopes(actor.scope_names) || !subset(actor.scope_names, grant.scope_names))) return finish('scope_expansion_forbidden');
+  if (actor.kind === 'delegated_admin' && (!adminScopes(actor.scope_names, grant.registry_version) || !subset(actor.scope_names, grant.scope_names))) return finish('scope_expansion_forbidden');
   if (command.kind === 'revoke_admin_delegation' || command.kind === 'suspend_admin_delegation' || command.kind === 'surrender_admin_delegation') {
     if (command.kind === 'surrender_admin_delegation' ? actor.kind !== 'delegated_admin' : !humanOwner && actor.kind !== 'system') return finish('human_confirmation_required');
     if (actor.kind === 'delegated_admin' && actor.access_expires_at <= ctx.now) return finish('credential_expired');
@@ -244,6 +298,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
     return finish(null);
   }
   if (command.kind === 'admin_read_metadata') {
+    if (actor.kind === 'delegated_admin' && !adminEffectiveCapabilities(grant, actor.scope_names).includes(command.kind)) return finish('capability_forbidden');
     if (!humanOwner && (actor.kind !== 'delegated_admin' || actor.access_expires_at <= ctx.now ||
         !actor.scope_names.includes('admin:read') || !grant.scope_names.includes('admin:read') ||
         command.resource_kind !== 'grant')) return finish('credential_kind_forbidden');
@@ -275,7 +330,7 @@ export function decideAdminAuthority(command: AdminCommand, state: AdminAccountS
     emit('AdminDelegationRevoked', terminalPayload(grant, state, ctx.now, 'refresh_replay'));
     return finish('refresh_replay');
   }
-  if (!adminScopes(command.scope_names) || !command.scope_names.includes('admin:read') ||
+  if (!adminScopes(command.scope_names, grant.registry_version) || !command.scope_names.includes('admin:read') ||
       !subset(command.scope_names, lineage.scope_names) || !subset(command.scope_names, grant.scope_names)) return finish('scope_expansion_forbidden');
   if (!ctx.current_workspace_rights) return finish('current_rights_required');
   emit('AdminCredentialRotated', { grant_id: grant.grant_id, credential_lineage_id: lineage.credential_lineage_id,
@@ -298,6 +353,17 @@ function terminalPayload(grant: AdminGrant, state: AdminAccountState, now: numbe
 export function reduceAdminAuthority(previous: AdminAccountState | null, event: AdminAccountEvent): AdminAccountState {
   if (event.schema_version !== 1 || event.stream_kind !== 'account' || !(ADMIN_EVENT_TYPES as readonly string[]).includes(event.type) && !(ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) throw new Error('unsupported admin event');
   const state = previous ?? emptyAdminAccount(), p = event.payload;
+  if (event.type === 'AdminClientApproved' || event.type === 'AdminClientApprovalWithdrawn') {
+    const key = canonicalAdminJson([event.owner_user_id, p.client_id, p.verification_version]);
+    const prior = state.client_approvals?.[key];
+    const approval: AdminClientApproval = event.type === 'AdminClientApproved' ? {
+      owner_user_id: event.owner_user_id, client_id: String(p.client_id), verification_version: Number(p.verification_version),
+      approved_at: event.occurred_at_server, approval_event_id: event.event_id, approval_command_id: event.command_id,
+      withdrawn_at: null, withdrawal_event_id: null, withdrawal_reason: null,
+    } : { ...prior!, withdrawn_at: event.occurred_at_server, withdrawal_event_id: event.event_id, withdrawal_reason: String(p.reason_code) };
+    if (event.type === 'AdminClientApprovalWithdrawn' && !prior) throw new Error('unknown admin client approval');
+    return { ...state, client_approvals: { ...state.client_approvals, [key]: approval } };
+  }
   if (event.type === 'AdminConnectionPrepared') {
     const attempt = p as unknown as AdminConnectionAttempt;
     if (!event.grant_id || attempt.parent_admin_grant_id !== event.grant_id ||

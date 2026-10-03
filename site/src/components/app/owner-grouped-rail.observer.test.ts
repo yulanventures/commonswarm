@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { browserTest as test } from "../../../tests/chrome.js";
 import { renderParticipantRailFixture } from "./participant-rail.fixture.js";
 
 const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");

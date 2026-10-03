@@ -52,10 +52,12 @@ async function transact(input, auth) {
 }
 function manifest(full = false) {
   const now = Date.now();
+  const scope_names = full ? policy.adminConsentOptions().filter(option => option.available).map(option => option.scope) : ['admin:read'];
   return {
     connection_id: id(), client_id: 'lane-b-runtime', resource: policy.ADMIN_RESOURCE,
     mode: full ? 'full_account' : 'granular', registry_version: policy.ADMIN_REGISTRY_VERSION,
-    scope_names: full ? [...policy.ADMIN_SCOPE_NAMES] : ['admin:read'],
+    scope_names, capability_names: policy.adminAvailableCapabilities(scope_names),
+    availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
     workspace_selector: full ? 'owned_and_selected' : 'selected', workspace_ids: [config.workspace],
     created_workspace_policy: { scope_names: [] },
     target_rules: { seat_ids: [], own_seats: false, grant_created_seats: false, recipient_user_ids: [], recipient_connection_ids: [], transports: [] },
@@ -122,10 +124,20 @@ try {
     const defaulted = await http(wire({ kind: 'prepare_admin_consent', manifest: defaults, full_account_selected: false }));
     check(defaulted.status === 200 && defaulted.body.manifest.mode === 'granular' && defaulted.body.manifest.scope_names.join(',') === 'admin:read', 'granular read-only default');
     const m = manifest(true);
+    const legacy = { ...m, registry_version: 1, scope_names: [...policy.ADMIN_SCOPE_NAMES] };
+    delete legacy.capability_names; delete legacy.availability_digest;
+    const legacyResult = await http(wire({ kind: 'prepare_admin_consent', manifest: legacy, full_account_selected: true }));
+    check(legacyResult.status === 400 && legacyResult.body.error === 'invalid_request', 'v1 consent refused without conversion');
+    const unavailable = { ...m, scope_names: [...policy.ADMIN_SCOPE_NAMES] };
+    const unavailableResult = await http(wire({ kind: 'prepare_admin_consent', manifest: unavailable, full_account_selected: true }));
+    check(unavailableResult.status === 400 && unavailableResult.body.error === 'invalid_request', 'full-account unavailable scopes refused');
     check((await http(wire({ kind: 'prepare_admin_consent', manifest: m, full_account_selected: false }))).status === 403, 'full-account selection required');
     check((await http(wire({ kind: 'prepare_admin_consent', manifest: m, full_account_selected: true }), config.jwt, '')).status === 403, 'CSRF origin required');
     const full = await activate(true);
-    check(full.manifest.scope_names.length === policy.ADMIN_SCOPE_NAMES.length, 'pinned full registry');
+    const availableScopes = policy.adminConsentOptions().filter(option => option.available).map(option => option.scope);
+    check(full.manifest.scope_names.length === availableScopes.length && availableScopes.every(scope => full.manifest.scope_names.includes(scope)) &&
+      JSON.stringify(full.manifest.capability_names) === JSON.stringify(policy.adminAvailableCapabilities(availableScopes)) &&
+      full.manifest.availability_digest === policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION), 'pinned full available registry and exact capabilities');
     check((await http(wire({ ...grant.input.command, grant_id: id() }))).status === 403, 'consent single use');
     const binding = await adminDigest({ wrong: 'session' });
     const prepared = await http(wire({ kind: 'prepare_admin_consent', manifest: manifest(), full_account_selected: false }));

@@ -120,13 +120,16 @@ async function http(input, token) {
 }
 try {
   const scenario = Deno.args[1], now = Date.now(), connection = id();
+  const scope_names = policy.adminConsentOptions().filter(option => option.available).map(option => option.scope);
   const manifest = {
     connection_id: connection,
     client_id: "lane-c-runtime",
     resource: policy.ADMIN_RESOURCE,
     mode: "granular",
     registry_version: policy.ADMIN_REGISTRY_VERSION,
-    scope_names: [...policy.ADMIN_SCOPE_NAMES],
+    scope_names,
+    capability_names: policy.adminAvailableCapabilities(scope_names),
+    availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
     workspace_selector: "selected",
     workspace_ids: [config.workspace],
     created_workspace_policy: { scope_names: ["seats:create", "seats:revoke"] },

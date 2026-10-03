@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 
 test('real worker HTTP handlers refuse admin credentials before parsing, authentication, or database work', () => {
@@ -23,9 +24,11 @@ test('release admin smoke retains only redacted responses on PASS and FAIL', (t)
   assert.ok(block);
   const scripts = [...block.matchAll(/<<'PYCODE'\n(.*?)\nPYCODE/gms)].map(match => match[1]!);
   assert.equal(scripts.length, 2);
-  const directory = mkdtempSync('/private/tmp/cdrel-smoke-test.');
+  const temporaryRoot = realpathSync(tmpdir());
+  const directory = mkdtempSync(join(temporaryRoot, 'cdrel-smoke-test.'));
   t.after(() => {
-    assert.match(directory, /^\/private\/tmp\/cdrel-smoke-test\.[A-Za-z0-9]+$/u);
+    assert.equal(dirname(directory), temporaryRoot);
+    assert.match(basename(directory), /^cdrel-smoke-test\.[A-Za-z0-9]+$/u);
     assert.equal(realpathSync(directory), directory);
     const cleanup = spawnSync('rm', ['-rf', '--', directory], { encoding: 'utf8' });
     assert.equal(cleanup.status, 0, `guarded cleanup refused ${directory}: ${cleanup.stderr}`);

@@ -4,9 +4,10 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import type ts from "typescript";
 import {
   AGENT_JOIN_CREDENTIAL_ID_RE,
   AGENT_JOIN_LIVE_LIMIT_ERROR,
@@ -26,6 +27,17 @@ import { H0_AGENT_DOCUMENT_PATH_PREFIX } from "../../src/protocol/h0-agent-docum
 import { handleH0Request } from "../../supabase/functions/h0/core.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
+
+// This shared assertion also runs in the standalone site package, whose CI gate installs
+// only site dependencies. Resolve the compiler from either declared package, never npx.
+const ts: typeof import("typescript") = (() => {
+  try {
+    return createRequire(import.meta.url)("typescript");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "MODULE_NOT_FOUND") throw error;
+    return createRequire(new URL("../../site/package.json", import.meta.url))("typescript");
+  }
+})();
 
 function read(path: string): string {
   return readFileSync(join(root, path), "utf8");
