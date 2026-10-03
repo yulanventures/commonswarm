@@ -25,6 +25,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
+import * as ts from "typescript";
 import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, capturedMacProducts, localCopyProducts, blockPathReferences, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
 import { consumedEvidenceProducts, type EvidenceProduct } from "./box-dry-run/evidence-products.js";
 import { SUCCESS_RECEIPT_LABEL, successReceiptBytes, type SuccessReceipt } from "./box-dry-run/success-receipts.js";
@@ -2016,6 +2017,22 @@ function makeStubBin(bin: string, rootOwned = false): void {
   }
 }
 
+// Bake these inputs into the fixture-owned executable, rather than its caller's
+// environment. A plan's exports cannot replace them, including across sudo.
+function configureStubRuntime(bin: string, inputs: Record<string, string | undefined>): void {
+  const declarations = Object.entries(inputs).map(([name, value]) => {
+    assert.match(name, /^fixture_[a-z_]+$/);
+    return `unset ${name}\nreadonly ${name}=${shellWord(value ?? "")}`;
+  }).join("\n");
+  for (const command of readdirSync(bin)) {
+    const path = join(bin, command);
+    if (!lstatSync(path).isFile()) continue;
+    const source = readFileSync(path, "utf8");
+    if (!source.includes("# fixture-runtime-inputs")) continue;
+    writeFileSync(path, source.replace("# fixture-runtime-inputs", declarations));
+  }
+}
+
 function writeMode(filename: string, body: string, mode = 0o600): void {
   mkdirSync(dirname(filename), { recursive: true });
   writeFileSync(filename, body, { mode });
@@ -2201,8 +2218,10 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
     BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
     BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
   });
-  env.BOX_DRY_RUN_OP_BUILD_REFERENCE = env.SITE_BUILD_ENV_OP_REFERENCE;
-  env.BOX_DRY_RUN_OP_BUILD_TMP = macTmp;
+  configureStubRuntime(bin, {
+    fixture_build_reference: env.SITE_BUILD_ENV_OP_REFERENCE,
+    fixture_build_tmp: macTmp,
+  });
   // The PREP receipt's seats are not marked valid here. Whether a seat's credential is valid is a live observation of
   // the hosted workspace, and the one executed program that asks (hm37a-directed-check-old/new) is declared NOT
   // EXECUTED, so no principal table is written for it and no profile is materialized at the receipt's paths.
@@ -2312,8 +2331,9 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   const supportRoot = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-box-support-"));
   const bin = join(supportRoot, "bin");
   const log = join(temporary, "stub.log");
-  const commonswarmLog = join(supportRoot, "commonswarm-stub.log");
-  const dockerState = join(supportRoot, "docker-state");
+  const servicePrivate = join(supportRoot, "service-private");
+  const commonswarmLog = join(servicePrivate, "commonswarm-stub.log");
+  const dockerState = join(servicePrivate, "docker-state");
   const macLocalRoot = join(temporary, "mac-local");
   for (const path of [macLocalRoot, join(macLocalRoot, "home"), join(macLocalRoot, "tmp")]) {
     makeRootDirectory(path, 0o700);
@@ -2336,6 +2356,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   const pythonFixture = join(supportRoot, "python");
   const sourceRoot = join(supportRoot, "source");
   makeRootDirectory(supportRoot, 0o755);
+  makeRootDirectory(servicePrivate, 0o700);
   writeRootMode(commonswarmLog, "", 0o600);
   makeRootDirectory(dockerState, 0o700);
   copyRootFixture(PRELUDE, prelude, 0o644);
@@ -2442,7 +2463,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
     chmodSync(targetStack, 0o755);
   }
   chownTree("root:root", supportRoot);
-  chownPaths("commonswarm:commonswarm", commonswarmLog, dockerState);
+  chownPaths("commonswarm:commonswarm", servicePrivate, commonswarmLog, dockerState);
   for (const path of [
     log,
     "/home/commonswarm/.env",
@@ -2493,6 +2514,15 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   ].filter(pathExists).map(normalizeSeededPath).filter((path, index, paths) => paths.indexOf(path) === index).sort();
 
   const boxPromptEnvironment = syntheticPromptEnvironment(temporary, declaredPromptInputs, fromWindowA);
+  configureStubRuntime(bin, {
+    fixture_service_private: servicePrivate,
+    fixture_service_log: commonswarmLog,
+    fixture_root_private: temporary,
+    fixture_root_log: log,
+    fixture_docker_state: dockerState,
+    fixture_build_reference: macSiteSource ? boxPromptEnvironment.SITE_BUILD_ENV_OP_REFERENCE : undefined,
+    fixture_build_tmp: macSiteSource ? join(macLocalRoot, "tmp") : undefined,
+  });
   const fixture: Fixture = {
     temporary, cwd: process.cwd(), home: join(macLocalRoot, "home"), bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, sudoPolicy, rootDirectories,
@@ -2510,7 +2540,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       BOX_DRY_RUN_USERLAND: userland,
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
-      BOX_DRY_RUN_DOCKER_STATE_DIR: dockerState,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
@@ -2528,8 +2557,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
         BOX_DRY_RUN_SOURCE_CLONE: macSiteSource,
         BOX_DRY_RUN_DIST_FIXTURE: macSiteDist,
         BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: boxPromptEnvironment.OP_SERVICE_ACCOUNT_TOKEN_FILE,
-        BOX_DRY_RUN_OP_BUILD_REFERENCE: boxPromptEnvironment.SITE_BUILD_ENV_OP_REFERENCE,
-        BOX_DRY_RUN_OP_BUILD_TMP: join(macLocalRoot, "tmp"),
       } : {}),
       BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
       BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
@@ -4294,12 +4321,12 @@ test("controls: the site Python wrapper admits only the protected build-env op h
   const writer = /python3 - "\$OP_SERVICE_ACCOUNT_TOKEN_FILE" "\$SITE_BUILD_ENV_OP_REFERENCE" "\$SITE_BUILD_ENV_SOURCE" <<'PY'\n([\s\S]*?)\nPY/.exec(block.source)?.[1];
   assert.ok(writer, "site plan must supply its actual service-account Python writer");
   makeStubBin(bin);
+  configureStubRuntime(bin, { fixture_build_reference: reference, fixture_build_tmp: temporary });
   writeMode(tokenFile, syntheticToken, 0o600);
   mkdirSync(scratch, { mode: 0o700 });
   const env = explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`, BOX_DRY_RUN_STUB_LOG: log,
     BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
-    BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: tokenFile,
-    BOX_DRY_RUN_OP_BUILD_REFERENCE: reference, BOX_DRY_RUN_OP_BUILD_TMP: temporary });
+    BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: tokenFile });
   const run = (source = writer, ref = reference, target = output, overrides: NodeJS.ProcessEnv = {}) =>
     spawnSync("/bin/bash", ["-c", 'source "$1"; python3 - "$2" "$3" "$4"', "site-op-control", PRELUDE, tokenFile, ref, target],
       { encoding: "utf8", env: { ...env, ...overrides }, input: `${source}\n` });
@@ -4313,6 +4340,11 @@ test("controls: the site Python wrapper admits only the protected build-env op h
   try {
     refused(writer.replace("pathlib.Path(token_file).read_text().strip()", "'wrong-synthetic-token'"));
     refused(writer, "op://Yulan Ventures Infra/Other/public-build-env");
+    const redirectedReference = "op://Yulan Ventures Infra/Other/public-build-env";
+    refused(writer, redirectedReference, output, {
+      BOX_DRY_RUN_OP_BUILD_REFERENCE: redirectedReference,
+      fixture_build_reference: redirectedReference,
+    });
     refused(writer, reference, join(scratch, "other.env"));
     const desktopSession = run(writer, reference, output, { OP_SESSION_DRY_RUN: "forbidden-session" });
     assert.equal(desktopSession.status, 1);
@@ -4352,10 +4384,11 @@ test("controls: the site Python wrapper admits only the protected build-env op h
 test("controls: box sudo keeps logs private and Docker state visible across the service uid", {
   skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
 }, () => {
-  const fixture = prepareBoxFixture("s1");
+  // Include the site's conditional fixture inputs in the actual shell audit.
+  const fixture = prepareBoxFixture("s1", blocks(SITE));
   const block: Block = {
     file: RUNBOOK, step: "service-uid-control", marker: "yes", host: "box /bin/bash 5.2 as root", line: 1,
-    source: 'set -euo pipefail\ntest -z "${BOX_DRY_RUN_COMMONSWARM_STUB_LOG+x}"',
+    source: "set -euo pipefail\ncompgen -e",
   };
   const run = (args: string[]) => executeWholeBlock({ ...block,
     source: `${block.source}\n${["sudo", "-u", "commonswarm", "env",
@@ -4363,9 +4396,35 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
       "docker", "compose", "-p", "commonswarm-edge", ...args].map(shellWord).join(" ")}`,
   }, fixture);
   try {
-    assert.throws(() => executeWholeBlock(block, fixture, {
-      env: { BOX_DRY_RUN_COMMONSWARM_STUB_LOG: join(fixture.supportRoot!, "commonswarm-stub.log") },
-    }), /block shell received non-allowlisted env BOX_DRY_RUN_COMMONSWARM_STUB_LOG/);
+    const environment = executeWholeBlock(block, fixture);
+    assert.equal(environment.status, 0, environment.stderr);
+    const shellNames = environment.stdout.trim().split("\n");
+    assert.ok(shellNames.includes("PATH"), "environment enumeration must actually run");
+    // Bash itself creates these three exports. Every supplied name is reconciled
+    // against the unchanged allowlist, rather than testing one absent variable.
+    assertChildEnvironmentAllowed(Object.fromEntries(shellNames
+      .filter((name) => !["PWD", "SHLVL", "_"].includes(name)).map((name) => [name, ""])), fixture.promptInputs);
+    assert.equal(shellNames.some((name) => name.startsWith("fixture_")), false, "baked dispatcher inputs leaked to the block shell");
+    for (const name of ["BOX_DRY_RUN_COMMONSWARM_STUB_LOG", "BOX_DRY_RUN_DOCKER_STATE_DIR",
+      "BOX_DRY_RUN_OP_BUILD_REFERENCE", "BOX_DRY_RUN_OP_BUILD_TMP"]) {
+      assert.equal(shellNames.includes(name), false, `${name} leaked to the plan shell`);
+      assert.throws(() => executeWholeBlock(block, fixture, { env: { [name]: "forbidden" } }),
+        new RegExp(`block shell received non-allowlisted env ${name}`));
+    }
+    const outside = join(fixture.temporary!, "redirected-service-log");
+    writeMode(outside, "must survive\n");
+    const redirected = executeWholeBlock({ ...block, source: [
+      "set -euo pipefail",
+      `export BOX_DRY_RUN_PYTHON_FIXTURE=${shellWord(join(fixture.temporary!, "python"))}`,
+      `export BOX_DRY_RUN_STUB_LOG=${shellWord(outside)}`,
+      `export BOX_DRY_RUN_COMMONSWARM_STUB_LOG=${shellWord(outside)}`,
+      `export BOX_DRY_RUN_DOCKER_STATE_DIR=${shellWord(join(fixture.temporary!, "redirected-state"))}`,
+      `export fixture_service_log=${shellWord(outside)}`,
+      'sudo -u commonswarm env COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env docker compose -p commonswarm-edge config -q',
+    ].join("\n") }, fixture);
+    assert.equal(redirected.status, 0, redirected.stderr);
+    assert.equal(readFileSync(outside, "utf8"), "must survive\n", "a block redirected or truncated the stub log");
+    assert.equal(pathExists(join(fixture.temporary!, "redirected-state")), false);
     for (const args of [["config", "--unreviewed"], ["up", "-d", "--unreviewed", "edge-runtime"]]) {
       const rejected = run(args);
       assert.equal(rejected.status, 69, rejected.stderr);
@@ -4383,11 +4442,14 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
     assert.equal(lstatSync(fixture.log).uid, 0);
     assert.equal(lstatSync(fixture.log).mode & 0o777, 0o600);
     assert.equal(lstatSync(fixture.temporary!).mode & 0o777, 0o700);
-    const serviceLog = lstatSync(join(fixture.supportRoot!, "commonswarm-stub.log"));
+    const servicePrivate = join(fixture.supportRoot!, "service-private");
+    const serviceLogPath = join(servicePrivate, "commonswarm-stub.log");
+    const serviceLog = lstatSync(serviceLogPath);
     const serviceUid = spawnSync("/usr/bin/id", ["-u", "commonswarm"], { encoding: "utf8" });
     assert.equal(serviceUid.status, 0, serviceUid.stderr);
     assert.equal(serviceLog.uid, Number(serviceUid.stdout.trim()));
     assert.equal(serviceLog.mode & 0o777, 0o600);
+    assert.equal(lstatSync(servicePrivate).mode & 0o777, 0o700);
     const denied = spawnSync("/usr/bin/sudo", ["-n", "-u", "commonswarm", "/usr/bin/cat", fixture.log], { encoding: "utf8" });
     assert.equal(denied.status, 1);
     assert.equal(denied.stdout, "");
@@ -4396,7 +4458,21 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
     assert.match(log, /^docker compose -p commonswarm-edge config -q$/m);
     assert.match(log, /^docker compose -p commonswarm-edge up -d edge-runtime$/m);
     assert.doesNotMatch(log, /__FIRST_FAIL__/);
-    assert.equal(readdirSync(fixture.env.BOX_DRY_RUN_DOCKER_STATE_DIR!).includes("edge-runtime-up"), true);
+    assert.equal(readdirSync(join(servicePrivate, "docker-state")).includes("edge-runtime-up"), true);
+    const savedLog = join(servicePrivate, "saved.log");
+    renameSync(serviceLogPath, savedLog);
+    symlinkSync(outside, serviceLogPath);
+    try {
+      const escaped = run(["config", "-q"]);
+      assert.equal(escaped.status, 69, escaped.stderr);
+      assert.match(escaped.stderr, /UNPRODUCED private stub log path/);
+      assert.equal(readFileSync(outside, "utf8"), "must survive\n");
+    } finally {
+      unlinkSync(serviceLogPath);
+      renameSync(savedLog, serviceLogPath);
+    }
+    const restored = run(["config", "-q"]);
+    assert.equal(restored.status, 0, restored.stderr);
   } finally {
     cleanupBoxFixture(fixture);
   }
@@ -4683,6 +4759,53 @@ test("block shells use an explicit empty-base environment and plan code cannot r
     } finally {
       cleanupMacFixture(fixture);
     }
+  }
+});
+
+test("fixture environment inventory admits only allowlisted adapters and declared prompt inputs", (t) => {
+  // Audit both complete builders without starting a Mac fixture or changing HOME.
+  // The executable Linux control above separately enumerates what Bash receives.
+  const source = ts.createSourceFile("box-dry-run.test.ts",
+    readFileSync("tests/box-dry-run.test.ts", "utf8"), ts.ScriptTarget.Latest, true);
+  const builders = ["prepareMacFixtureSetup", "prepareBoxFixtureSetup"];
+  const promptInputs = SCOPED.flatMap((file) => promptInputsForBlocks(blocks(file)));
+  for (const name of builders) {
+    const builder = source.statements.find((node): node is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.ok(builder?.body, `missing fixture builder ${name}`);
+    const supplied = new Set<string>();
+    let environments = 0;
+    const collect = (node: ts.Node): void => {
+      if (ts.isPropertyAssignment(node)) {
+        assert.ok(ts.isIdentifier(node.name) || ts.isStringLiteral(node.name), "computed fixture env key needs an explicit audit");
+        supplied.add(node.name.text);
+      } else if (ts.isSpreadAssignment(node)) {
+        if ((ts.isIdentifier(node.expression) && node.expression.text === "boxPromptEnvironment") ||
+            ts.isCallExpression(node.expression) && ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "syntheticPromptEnvironment") return;
+        const expression = ts.isParenthesizedExpression(node.expression) ? node.expression.expression : node.expression;
+        assert.ok(ts.isConditionalExpression(expression), "unrecognized fixture env spread needs an explicit audit");
+        // Conditional spreads contain their literal env keys; inspect all arms.
+      }
+      ts.forEachChild(node, collect);
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "explicitEnvironment") {
+        environments++;
+        for (const argument of node.arguments) collect(argument);
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(node.left) && ts.isIdentifier(node.left.expression) && node.left.expression.text === "env") {
+        supplied.add(node.left.name.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(builder.body);
+    assert.equal(environments, 1, `${name}: inventory must reach its environment constructor`);
+    // explicitEnvironment itself supplies these names to every fixture.
+    for (const key of Object.keys(explicitEnvironment())) supplied.add(key);
+    assertChildEnvironmentAllowed(Object.fromEntries([...supplied].map((key) => [key, ""])), promptInputs);
+    t.diagnostic(`${name}: ${supplied.size} explicit env names, 0 outside allowlist/prompt inputs; ${[...supplied].sort().join(", ")}`);
   }
 });
 

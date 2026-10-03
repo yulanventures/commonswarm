@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+# Replaced only in fixture-owned copies, before any plan shell runs. Values are
+# local readonly shell variables; they are never exported to a plan or uid child.
+# fixture-runtime-inputs
+
 name=${0##*/}
 original_argv=("$@")
-: "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
-printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
-printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
-printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
 
 fail_unproduced() {
   printf 'UNPRODUCED %s\n' "$1" >&2
@@ -21,9 +21,35 @@ unhandled_stub() {
   exit 69
 }
 
+require_private_log() {
+  /usr/bin/python3 - "$1" "$2" <<'PY' || fail_unproduced 'private stub log path'
+import os, pathlib, stat, sys
+root, path = map(pathlib.Path, sys.argv[1:])
+assert root.is_absolute() and path.is_absolute()
+assert str(root.resolve()) == str(root) and str(path.resolve()) == str(path)
+assert path.parent == root
+assert stat.S_ISDIR(root.lstat().st_mode) and stat.S_IMODE(root.lstat().st_mode) == 0o700
+assert stat.S_ISREG(path.lstat().st_mode) and stat.S_IMODE(path.lstat().st_mode) == 0o600
+PY
+}
+
+if [ -n "${fixture_root_log:-}" ]; then
+  if [ "$EUID" -eq 0 ]; then
+    BOX_DRY_RUN_STUB_LOG=$fixture_root_log
+    require_private_log "$fixture_root_private" "$BOX_DRY_RUN_STUB_LOG"
+  elif [ "$EUID" -eq "$(/usr/bin/id -u commonswarm)" ]; then
+    BOX_DRY_RUN_STUB_LOG=$fixture_service_log
+    require_private_log "$fixture_service_private" "$BOX_DRY_RUN_STUB_LOG"
+  fi
+fi
+: "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
+printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
+printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
+printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
+
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
 stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
-docker_state_dir="${BOX_DRY_RUN_DOCKER_STATE_DIR:-$stub_state_dir/docker}"
+docker_state_dir="${fixture_docker_state:-$stub_state_dir/docker}"
 
 # The fixture box root is a directory under the dry run's own temporary directory. Every ssh, scp and rsync
 # operation lands there, and nothing else. The harness creates it; a stub never invents one.
@@ -72,11 +98,19 @@ run_in_box() {
     /usr/bin/id -u "$login_user" >/dev/null || fail_unproduced 'box ssh login user'
     remote_home=$(/usr/bin/getent passwd "$login_user" | /usr/bin/cut -d: -f6)
     case "$remote_home" in /*) ;; *) fail_unproduced 'box ssh login home' ;; esac
+    # An ops login may sudo into commonswarm too. The root SSH dispatcher owns
+    # collection, since ops cannot read the service user's private directory.
+    require_private_log "$fixture_service_private" "$fixture_service_log"
+    : >"$fixture_service_log"
     remote_support="${BOX_DRY_RUN_PYTHON_FIXTURE%/*}"
     remote_trap=$(mktemp "$remote_support/remote-trap.XXXXXX")
-    remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
-    /usr/bin/chown "$login_user:$login_user" "$remote_log"
-    chmod 0600 "$remote_log"
+    if [ "$login_user" = commonswarm ]; then
+      remote_log=${fixture_service_log:?fixed service log required}
+    else
+      remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
+      /usr/bin/chown "$login_user:$login_user" "$remote_log"
+      chmod 0600 "$remote_log"
+    fi
     printf 'source %q\n' "$remote_prelude" >"$remote_trap"
     printf '%s\n' 'set -E' \
       'trap '\''block_status=$?; case $- in *e*) printf "__FIRST_FAIL__:%s\n" "$BASH_COMMAND" >&2; exit "$block_status" ;; esac'\'' ERR' >>"$remote_trap"
@@ -95,7 +129,9 @@ run_in_box() {
       BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
       ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
     cat "$remote_log" >>"$BOX_DRY_RUN_STUB_LOG"
-    rm -f -- "$remote_trap" "$remote_log"
+    if [ "$login_user" != commonswarm ]; then cat "$fixture_service_log" >>"$BOX_DRY_RUN_STUB_LOG"; fi
+    rm -f -- "$remote_trap"
+    if [ "$login_user" != commonswarm ]; then rm -f -- "$remote_log"; fi
     exit "$status"
   fi
   [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
@@ -329,12 +365,17 @@ case "$name" in
       done
       case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
       root_log=$BOX_DRY_RUN_STUB_LOG
-      if [ "$sudo_user" = root ]; then root_log=${BOX_DRY_RUN_ROOT_STUB_LOG:-$BOX_DRY_RUN_STUB_LOG}; fi
+      if [ "$EUID" -eq 0 ] || [ "$sudo_user" = root ]; then
+        root_log=${fixture_root_log:?fixed root log required}
+        if [ "$EUID" -eq 0 ]; then require_private_log "$fixture_root_private" "$root_log"; fi
+      fi
       if [ "$EUID" -eq 0 ] && [ "$sudo_user" = commonswarm ]; then
         # A root-private log must stay private across the real uid transition.
         # Append the service user's own log only after its command returns.
-        # The fixture owns this fixed support path; it is not a plan-shell input.
-        service_log="${BOX_DRY_RUN_PYTHON_FIXTURE:?box fixture required}/../commonswarm-stub.log"
+        # Both paths were baked into the root-owned dispatcher at fixture build
+        # time. Refuse symlinks or any log outside its own private 0700 tree.
+        service_log=${fixture_service_log:?fixed service log required}
+        require_private_log "${fixture_service_private:?fixed service private tree required}" "$service_log"
         : >"$service_log"
         status=0
         /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
@@ -373,13 +414,13 @@ case "$name" in
       # The site plan's Python loads the protected file into only the op child.
       # Admit that handoff only for its pinned reference and fresh scratch file;
       # arbitrary inherited tokens and every other output form stay refused.
-      [ -n "${BOX_DRY_RUN_OP_BUILD_REFERENCE:-}" ] && \
-        [ "$reference" = "$BOX_DRY_RUN_OP_BUILD_REFERENCE" ] || exit 69
+      [ -n "${fixture_build_reference:-}" ] && \
+        [ "$reference" = "$fixture_build_reference" ] || exit 69
       case "$output" in
-        "${BOX_DRY_RUN_OP_BUILD_TMP:?build scratch root required}"/anvil-secret.??????/site-build.env) ;;
+        "${fixture_build_tmp:?build scratch root required}"/anvil-secret.??????/site-build.env) ;;
         *) exit 69 ;;
       esac
-      scratch_leaf=${output_parent#"$BOX_DRY_RUN_OP_BUILD_TMP"/}
+      scratch_leaf=${output_parent#"$fixture_build_tmp"/}
       case "$scratch_leaf" in */*) exit 69 ;; esac
       [ ! -e "$output" ] && [ "$OP_SERVICE_ACCOUNT_TOKEN" = "$(cat "$token_file")" ] || exit 69
       case "$(uname -s)" in
