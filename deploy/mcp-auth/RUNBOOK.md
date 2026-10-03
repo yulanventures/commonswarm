@@ -167,8 +167,10 @@ Box-side provisioning is **preparation only, not executed by this lane**:
    enumerated migration grants. Stop on extra membership/privileges. Never add
    `swarm_command` membership to the ordinary OAuth runtime. Role switching
    remains `SET LOCAL ROLE` per step inside the single issuance transaction.
-2. Generate/set its SCRAM password in a separately assigned provisioning window.
-   Keep the password in a protected item in 1Password vault **Yulan Ventures
+2. HezLead runs the separately reviewed box-side provisioning block in an
+   assigned window. That block generates the password **on the box**, sets the
+   role's SCRAM password and writes the credential file without printing the
+   password. Keep it in a protected item in 1Password vault **Yulan Ventures
    Infra**, retrieved only through the service-account token file. HezLead must
    supply the actual item reference; no item name or live password is invented
    here. Rotate the issuer alongside the management credential, and restore its
@@ -176,30 +178,33 @@ Box-side provisioning is **preparation only, not executed by this lane**:
 3. Stage credential material only in a fresh mode-0700
    `/private/tmp/anvil-secret.XXXXXX` directory, with secret files mode 0600.
    Install the protected JSON `{ "user": "commonswarm_admin_issuer",
-   "password": "<from the protected item>" }` at
-   `/etc/commonswarm-oauth/admin-issuer-database-credentials`, owned by root,
-   mode 0400 as specified by the lane task. Never put the password in arguments,
+   "password": "<generated on the box>" }` at
+   `/etc/commonswarm-oauth/admin-issuer-database-credentials`, owned by
+   `root:986`, mode `0440`, after verifying the measured service UID:GID
+   `996:986`. Stop on identity drift. UID 996 reads through group 986, exactly
+   as for the management credential. Never put the password in arguments,
    environment values, logs or release evidence. Close the staging window using
    the guarded `rm`; stop and report any guard refusal.
-4. **STOP before mounting/activation:** the strict 0400 root-owned file cannot
-   be read by the existing unprivileged OAuth UID. Compose bind files also have
-   no optional/`required: false` setting: `bind.create_host_path: false` refuses
-   a missing file, while `true` creates a directory. Neither meets the required
-   absent-file startup contract. Lane 9 therefore leaves both Compose files
-   unchanged pending HezLead's decision. An opt-in issuer override plus a
-   root:<service gid> 0440 runtime copy (as for management), with a root:root
-   0400 source, is a proposed alternative requiring an explicit task revision.
-   Do not run the service as root or widen permissions silently to bypass this.
-5. Only after that decision and independent review may the release plan set
-   `MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE` to a reviewed read-only
-   container mount, reconcile all same-build gates, open the release-owned SQL
-   cutover row and request the environment switch. Recheck `/admin/gate` and
+4. Only approved admin activation releases (lane 8 W2+) add
+   `compose.admin-issuer.yaml` to `compose.yaml` and any separately required
+   management overlay. It bind-mounts the host credential read-only at
+   `/run/commonswarm-oauth/admin-issuer-database-credentials` and sets
+   `MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE` to that exact path.
+   `bind.create_host_path: false` refuses a missing file in an activation
+   release. Ordinary OFF and rollback releases omit the issuer overlay and
+   issuer-file setting from the service env file; base Compose has no issuer
+   reference or mount. Without it, the service starts with no issuer
+   coordinator and issuance stays OFF, even if the activation flag is requested.
+   The overlay does not set `MCP_OAUTH_ADMIN_ISSUANCE_ENABLED` or open cutover.
+5. After independent review, the release plan must reconcile all same-build
+   gates, open the release-owned SQL cutover row and request the environment
+   switch. Recheck `/admin/gate` and
    ordinary MCP/DCR/CIMD controls. Closing the environment switch prevents new
    issuance; existing grants/families require the approved revocation procedure.
 
 This section supplies no executable release blocks or production authorization.
-The lane-8 W5 implementation STOP still applies until the mount/permissions
-contract and the other lane-8 limits are resolved in a reviewed plan revision.
+The mount/permissions contract follows HezLead's lane-9 part-2 ruling; lane-8
+W5 and the other activation limits still require their reviewed plan revision.
 
 ## Releasing OAuth while MCP is ON
 
