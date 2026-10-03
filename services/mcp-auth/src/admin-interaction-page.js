@@ -63,16 +63,16 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
       <p>Worker grant kinds: ${words(manifest.renewal_limits.grant_kinds)}. Existing worker principals: ${words(manifest.renewal_limits.principal_ids)}.</p>
       <p>Access ends on <time id="local-expiry" datetime="${expiry.toISOString()}">${e(expiry.toISOString())}</time><span id="expiry-zone"> (UTC)</span>; UTC: ${e(expiry.toISOString())}. Renewal requires your approval again. You can revoke it in /app.</p>
       <p>Refresh cannot extend this deadline: ${e(new Date(manifest.refresh_deadline).toISOString())}.</p>
-      <p>${e(FULL_ACCOUNT_WARNING)}</p></section>
+      <p id="full-account-warning">${e(FULL_ACCOUNT_WARNING)}</p></section>
       <form method="post" action="/interaction/${encodeURIComponent(uid)}/consent">
         <input type="hidden" name="csrf_token" value="${e(summary.token)}">
         <input type="hidden" name="summary_digest" value="${e(summary.digest)}">
         <input type="hidden" name="selection_version" value="${e(version)}">
-        ${manifest.mode === "full_account" ? `<input type="hidden" name="second_token" value="${e(summary.secondToken)}"><label><input type="checkbox" name="confirm_full_account" value="yes" required> I confirm this exact full account summary</label>` : ""}
+        ${manifest.mode === "full_account" ? `<input type="hidden" name="second_token" value="${e(summary.secondToken)}"><label><input type="checkbox" name="confirm_full_account" value="yes" aria-describedby="full-account-warning" required> I confirm this exact full account summary</label>` : ""}
         <button type="submit">${manifest.mode === "full_account" ? "Confirm full account access" : "Confirm chosen permissions"}</button></form>`;
   }
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review CommonSwarm admin access</title>
     <style>body{font-family:system-ui;max-width:48rem;margin:3rem auto;padding:1rem}label{display:block;margin:.7rem 0}fieldset{margin:1rem 0}dt{font-weight:bold}dd{margin-bottom:.5rem}button{padding:.7rem 1rem}</style></head>
-    <body><main><h1>Review admin access</h1>${identity}<p>Admin connections are not available yet. Reviewing a selection does not connect the client.</p>${form}<a href="https://commonswarm.com/app">Cancel and return to /app</a></main>
+    <body><main><h1>Review admin access</h1>${identity}<p>Admin connections are not available yet. Reviewing a selection does not connect the client.</p>${form}<form method="get" action="https://commonswarm.com/app"><button type="submit">Cancel and return to /app</button></form></main>
     ${manifest && scriptNonce ? `<script nonce="${e(scriptNonce)}">const expiry=document.getElementById("local-expiry");expiry.textContent=new Date(expiry.dateTime).toLocaleString();document.getElementById("expiry-zone").textContent=" (your local time)";</script>` : ""}</body></html>`;
 }

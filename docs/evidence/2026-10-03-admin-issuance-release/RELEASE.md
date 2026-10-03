@@ -94,6 +94,12 @@ only the exact validated task secret directory with the guarded `rm`; refusal
 leaves it in place and reports the exact path/message. Immutable releases and
 nonsecret proofs are retained. Closed windows cannot be reused.
 
+`EDGE_MEASUREMENT_FILE` is an absolute regular nonsecret copy of W4
+`edge-measurement.json`, including `generation` and `invalidated_at`. W5 open
+and W6 open/checks/apply query the box again; a recycle makes an older receipt
+unusable. After a recycle, retain fresh measurement evidence before reopening.
+The recycle hook already binds its reopen to the current locked generation.
+
 ## Marked common blocks
 
 ```sh
@@ -280,6 +286,64 @@ PY
 ```
 
 ```sh
+# step: ai-edge-receipt
+# readonly: yes
+# host: box root; EDGE_RECEIPT_REMOTE=1 queries the box from the W5 Mac wrapper
+set -euo pipefail
+: "${EDGE_MEASUREMENT_FILE:?current edge-measurement.json required}"
+python3 - "$INPUTS_FILE" "$EDGE_MEASUREMENT_FILE" <<'PY'
+import json,os,pathlib,re,shlex,subprocess,sys
+d=json.load(open(sys.argv[1])); p=pathlib.Path(sys.argv[2])
+def need(ok,field):
+    if not ok: raise SystemExit('FAIL edge-measurement.json: '+field+'; STOP')
+need(p.is_absolute() and p.is_file() and not p.is_symlink(),'EDGE_MEASUREMENT_FILE')
+m=json.loads(p.read_text()); sha=d['release_sha']; image=d['baseline_postgres_image']
+need(re.fullmatch('[0-9a-f]{40}',sha) is not None,'release_sha')
+need(re.fullmatch('sha256:[0-9a-f]{64}',image) is not None,'baseline_postgres_image')
+query=r'''
+set -euo pipefail
+umask 077
+EDGE_QUERY_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
+edge_query_cleanup() {
+ python3 - "$EDGE_QUERY_STAGE" <<'EDGE_QUERY_CLEANUP' || return 1
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p))
+assert p.is_dir() and not p.is_symlink() and p.resolve()==p and p.stat().st_mode & 0o777==0o700
+EDGE_QUERY_CLEANUP
+ rm -r -- "$EDGE_QUERY_STAGE"
+}
+trap edge_query_cleanup EXIT
+unset SOURCE_DATABASE_URL TARGET_DATABASE_URL
+PG_SERVICE_OUTPUT="$EDGE_QUERY_STAGE/service.conf" PG_PASS_OUTPUT="$EDGE_QUERY_STAGE/pass" \
+ COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
+ node "/home/commonswarm/admin-issuance/releases/$1/deploy/supabase-stack/migrate/make-pg-service.mjs" >"$EDGE_QUERY_STAGE/session.log" 2>&1
+chmod 0600 "$EDGE_QUERY_STAGE/service.conf" "$EDGE_QUERY_STAGE/pass"
+docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
+ --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
+ --volume "$EDGE_QUERY_STAGE/service.conf:/run/service.conf:ro" --volume "$EDGE_QUERY_STAGE/pass:/run/pass:ro" \
+ --volume /etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro \
+ --entrypoint psql "$2" -X --set=ON_ERROR_STOP=1 -Atq \
+ --command 'SET default_transaction_read_only=on;' \
+ --command 'SELECT row_to_json(r) FROM (SELECT release_generation,measured_generation,invalidated_at,approved_edge_release_sha,measured_edge_release_sha,measured_edge_target,measured_mount,measured_image_digest,measured_artifact_digest FROM commonswarm_oauth.admin_cutover_state WHERE singleton) r;' 2>"$EDGE_QUERY_STAGE/query.log"
+'''
+args=['/bin/bash','-s','--',sha,image]
+if os.environ.get('EDGE_RECEIPT_REMOTE')=='1':
+    args=['ssh','-o','BatchMode=yes','-o','ConnectTimeout=10','ops@100.115.66.74','sudo -n '+shlex.join(args)]
+try:
+    row=json.loads(subprocess.check_output(args,input=query,text=True,stderr=subprocess.DEVNULL))
+except Exception:
+    raise SystemExit('FAIL edge-measurement.json: current release_generation/invalidated_at unavailable; STOP') from None
+need(m.get('invalidated_at','missing') is None and row.get('invalidated_at','missing') is None,'invalidated_at')
+need(type(m.get('generation')) is int and m['generation']>0 and m['generation']==row.get('release_generation')==row.get('measured_generation'),'generation/release_generation/measured_generation')
+for field,observed in [('release_sha','measured_edge_release_sha'),('target','measured_edge_target'),('mount','measured_mount'),('image_digest','measured_image_digest'),('artifact_digest','measured_artifact_digest')]:
+    need(m.get(field)==row.get(observed) and isinstance(m.get(field),str) and bool(m[field]),field+'/'+observed)
+need(m['release_sha']==sha==row.get('approved_edge_release_sha'),'release_sha/approved_edge_release_sha')
+need(m['target']==m['mount']=='/home/commonswarm/edge/releases/'+sha,'target/mount')
+print('PASS current edge-measurement.json generation/invalidated_at/release_sha/target/mount/image_digest/artifact_digest')
+PY
+```
+
+```sh
 # step: ai-open
 # readonly: no
 # host: box root; after repeated inputs/baseline preflight
@@ -303,6 +367,14 @@ WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window
 BOX_ARCHIVE_PATH=/tmp/admin-issuance-${RELEASE_SHA}-${WINDOW_ID}.tar
 PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-${WINDOW}-${WINDOW_ID}
 RELEASE_ROOT=/home/commonswarm/admin-issuance/releases/$RELEASE_SHA
+case "$WINDOW" in W5|W6|W7)
+python3 - "$PLAN_FILE" <<'PY'
+import pathlib,re,subprocess,sys
+blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
+subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
+PY
+;; esac
 test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
 : "${LIVE_CONTROLS_FILE:?reviewed live authenticated before controls required}"
 python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" <<'PY'
@@ -1350,6 +1422,13 @@ sql+="UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=fa
 (p/'measure.sql').write_text(sql)
 PY
 ai_db -q --file /proof/measure.sql >/dev/null
+EDGE_MEASUREMENT_GENERATION=$(ai_ro -Atq --command 'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;')
+python3 - "$PROOF_DIR/edge-measurement.json" "$EDGE_MEASUREMENT_GENERATION" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); m=json.loads(p.read_text())
+assert sys.argv[2].isdigit() and int(sys.argv[2])>0, 'FAIL release_generation/measured_generation/invalidated_at; STOP'
+m.update(generation=int(sys.argv[2]),invalidated_at=None); p.write_text(json.dumps(m,sort_keys=True)+'\n')
+PY
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy"
 cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.caddy"
 test "$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_caddyfile_sha256"])' "$INPUTS_FILE")"
@@ -1648,6 +1727,16 @@ PY
 # host: Mac /bin/bash 3.2; invokes one complete reviewed generalized site block
 set -euo pipefail
 : "${SITE_STEP:?}" "${SITE_RELEASE_REPO:?}" "${PREP_DIR:?}"
+if test "$SITE_STEP" = site2-01; then
+ export EDGE_RECEIPT_REMOTE=1
+python3 - "$PLAN_FILE" <<'PY'
+import pathlib,re,subprocess,sys
+blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
+subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
+PY
+ unset EDGE_RECEIPT_REMOTE
+fi
 case "$SITE_STEP" in
  site2-plan-inputs|site2-00-source-checkout|site2-01|site2-00-a-close-ingest|site2-00-build-env|site2-02|site2-03-browser-session-preflight|site2-03|site2-03-pin-previous|site2-03-go-record|site2-04|site2-04-reconcile-failure|site2-05|site2-05-browser-acceptance|site2-06|site2-07-pre-pin-manifest-close|site2-07-manifest-close) ;;
  *) echo 'FAIL W5 unknown site step; STOP' >&2; exit 1;;
@@ -1789,6 +1878,12 @@ PY
 set -euo pipefail
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
+python3 - "$PLAN_FILE" <<'PY'
+import pathlib,re,subprocess,sys
+blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
+subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
+PY
 ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
@@ -1844,6 +1939,12 @@ assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.
 PY
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
+python3 - "$PLAN_FILE" <<'PY'
+import pathlib,re,subprocess,sys
+blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
+subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
+PY
 ai_run ai-inputs
 ai_run ai-w6-activation-approval
 ai_run ai-gates
@@ -1860,6 +1961,13 @@ systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 /usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
 /usr/local/libexec/commonswarm-admin-edge-recycle after >"$SECRET_STAGE/measure-after.log" 2>&1
+# The just-completed hook owns this fresh measurement; retain a new W6 receipt.
+ACTIVATION_GENERATION=$(ai_ro -Atq --command 'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;')
+python3 - "$EDGE_MEASUREMENT_FILE" "$PROOF_DIR/edge-measurement.json" "$ACTIVATION_GENERATION" <<'PY'
+import json,pathlib,sys
+m=json.load(open(sys.argv[1])); assert sys.argv[3].isdigit() and int(sys.argv[3])>0, 'FAIL release_generation/measured_generation/invalidated_at; STOP'
+m.update(generation=int(sys.argv[3]),invalidated_at=None); pathlib.Path(sys.argv[2]).write_text(json.dumps(m,sort_keys=True)+'\n')
+PY
 python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
 import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
@@ -1887,11 +1995,13 @@ m=[m for m in c['Mounts'] if m['Destination']=='/run/commonswarm-oauth/admin-iss
 assert len(m)==1 and m[0]['Source']=='/etc/commonswarm-oauth/admin-issuer-database-credentials' and m[0]['RW'] is False
 assert subprocess.check_output(['docker','image','inspect','--format','{{index .Config.Labels "org.opencontainers.image.revision"}}',c['Image']],text=True).strip()==sys.argv[1]
 PY
-python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql" <<'PY'
+python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql" "$PROOF_DIR/edge-measurement.json" <<'PY'
 import json,pathlib,re,sys
-d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']
+d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']; m=json.load(open(sys.argv[3]))
+assert type(m.get('generation')) is int and m['generation']>0 and m.get('invalidated_at','missing') is None, 'FAIL generation/invalidated_at; STOP'
+gen=str(m['generation'])
 assert re.fullmatch('[0-9a-f]{40}',sha) and re.fullmatch('[0-9a-f]{64}',h)
-sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation checks refused'; END IF; END $$; "
+sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; "
 sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+h+"',admin_issuance_enabled=true WHERE singleton; COMMIT;\n"
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY

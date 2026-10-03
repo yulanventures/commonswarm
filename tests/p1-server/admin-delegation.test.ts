@@ -2,15 +2,17 @@ import { adminEdgeDatabase } from '../support/admin-edge-database.js';
 /** Lane B: real command/read adapters and database migration; server suite only. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { createClient } from '@supabase/supabase-js';
-import { emptyApplicationSchema } from '../support/admin-schema-db.js';
+import { fixture, emptyApplicationSchema } from '../support/admin-schema-db.js';
+import { ADMIN_RESOURCE, canonicalAdminJson } from '../../src/protocol/index.js';
 
 const scenarios = {
+  cached_v1: 'legacy-admin-unreachable: cached v1 admin command replay denied with current OAuth positive',
   runtime: 'legacy-admin-unreachable: opaque access, refresh, private mint and callbacks refuse with actual OAuth positive',
   boundary: 'admin-boundary-isolation: both schemes stay separate from human and worker surfaces',
   lifecycle: 'admin-revoke-every-request: init list read action idempotent and queued calls refuse with independent active control',
@@ -37,7 +39,23 @@ for (const [scenario, label] of Object.entries(scenarios)) {
     chmodSync(secretDir, 0o700);
     let isolated: Awaited<ReturnType<typeof adminEdgeDatabase>> | undefined;
     try {
-      isolated = await adminEdgeDatabase(local.DB_URL);
+      const legacy = scenario === 'cached_v1' ? fixture(1) : undefined;
+      let historicalSql = legacy?.sql ?? '';
+      if (legacy) {
+        const cached = { command_id: 'cached-v1-admin-read', stream: { kind: 'account' }, resource: ADMIN_RESOURCE,
+          command: { kind: 'admin_read_metadata', grant_id: legacy.grant, resource_kind: 'grant', workspace_id: null } };
+        const response = { status: 200, body: { cached_v1_success: true, grant: { grant_id: legacy.grant, registry_version: 1 } } };
+        const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+        historicalSql += `
+INSERT INTO swarm.admin_credentials(credential_id,grant_id,credential_lineage_id,generation,access_hash,refresh_hash,
+  access_expires_at,refresh_deadline,scope_names)
+VALUES('${randomUUID()}','${legacy.grant}','${randomUUID()}',0,decode('${hash('swm_adm_' + 'a'.repeat(43))}','hex'),
+  decode('${hash('swm_adr_' + 'b'.repeat(43))}','hex'),statement_timestamp()+interval '5 minutes',statement_timestamp()+interval '1 day',ARRAY['admin:read']);
+INSERT INTO swarm.admin_command_results(owner_user_id,actor_key,command_id,request_digest,response)
+VALUES('${legacy.owner}','delegated_admin:${legacy.identity}','${cached.command_id}','${hash(canonicalAdminJson(cached))}','${JSON.stringify(response)}'::jsonb);
+`;
+      }
+      isolated = await adminEdgeDatabase(local.DB_URL, historicalSql);
       local.DB_URL = isolated.url;
       const sql = isolated.db;
       const auth = createClient(local.API_URL, local.SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -53,7 +71,8 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
       const configPath = join(secretDir, 'local.json');
       writeFileSync(configPath, JSON.stringify({ local, owner, workspace, jwt: signed.data.session.access_token,
-        ...(scenario === 'storage' ? { rollbackSchema: emptyApplicationSchema() } : {}) }), { mode: 0o600 });
+        ...(scenario === 'storage' ? { rollbackSchema: emptyApplicationSchema() } : {}),
+        ...(legacy ? { legacy: { owner: legacy.owner, grant: legacy.grant, identity: legacy.identity, connection: legacy.connection, client: legacy.client } } : {}) }), { mode: 0o600 });
       const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
         '--allow-read', '--allow-env', '--allow-net', ...(scenario === 'replay' ? ['--allow-run=deno'] : []), 'tests/support/admin-server-harness.mjs', configPath, scenario], {
         encoding: 'utf8', timeout: 150000, env: process.env,

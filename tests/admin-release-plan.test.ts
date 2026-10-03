@@ -119,8 +119,8 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
-  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 8, 'every secret-window check keeps /private/tmp/anvil-secret');
-  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 3, 'every stage is a fresh /private/tmp/anvil-secret.XXXXXX');
+  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 9, 'every secret-window check keeps /private/tmp/anvil-secret');
+  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 4, 'every stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/c1-smoke\.pointer'/);
   assert.match(block('ai-close'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(p\)\)/);
   assert.match(block('ai-w2-between-probes'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(stage\)\)/);
@@ -332,7 +332,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 8, pointer: 5 }));
+  writeFileSync(planCopy, portable(plan, { stage: 9, pointer: 5 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -733,4 +733,232 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
   } finally {
     if(existsSync(stage)) removeStage(stage);
   }
+});
+
+
+test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {
+  const apply = block('ai-w6-activation-apply');
+  assert.match(apply, /rows\+\['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1'\]/, 'activation must explicitly opt in');
+  assert.match(apply, /install .*"\$SECRET_STAGE\/service\.active\.env" \/etc\/commonswarm-oauth\/service\.env/);
+  assert.match(apply, /docker compose[^;]*-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose\.admin-issuer\.yaml"[^;]*up -d/, 'activation must mount the dedicated issuer credential');
+  assert.match(apply, /UPDATE commonswarm_oauth\.admin_cutover_state SET lane8_evidence_digest=.*admin_issuance_enabled=true WHERE singleton/);
+  assert.match(apply, /ai_db -q --file \/proof\/activate\.sql/, 'the generated DB cutover must actually be applied');
+});
+
+test('admin release plan: failed recycle restart remains closed; healthy restart remeasures before reopening', () => {
+  const root = join(realpathSync(scratch), 'recycle-execution'); mkdirSync(root);
+  const configDir = join(root, 'config'); mkdirSync(configDir);
+  const edgeRoot = join(root, 'edge'), target = join(edgeRoot, 'releases', sha);
+  mkdirSync(target, { recursive: true });
+  const releaseRoot = join(root, 'release', sha); mkdirSync(releaseRoot, { recursive: true });
+  const archive = join(root, `admin-issuance-${sha}-Abc123.tar`);
+  writeFileSync(join(target, 'tracked.txt'), 'reviewed edge bytes\n');
+  // Actual archive/byte verification still runs; only OS/daemon/DB boundaries are substituted.
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile; t=tarfile.open(sys.argv[1],"w"); t.add(sys.argv[2],arcname="tracked.txt"); t.close()', archive, join(target, 'tracked.txt')], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const current = join(edgeRoot, 'current');
+  const link = spawnSync('ln', ['-s', target, current], { encoding: 'utf8' }); assert.equal(link.status, 0, link.stderr);
+  const config = join(configDir, 'recycle.json'), stateFile = join(root, 'database.json');
+  writeFileSync(config, JSON.stringify({ release_sha: sha, target, image_digest: `sha256:${hex}`,
+    artifact_digest: digest(readFileSync(archive)), archive, postgres_image: `sha256:${hex}`, release_root: releaseRoot }), { mode: 0o600 });
+  const shim = join(root, 'bin'); mkdirSync(shim);
+  const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+  const boundary = `
+from types import SimpleNamespace
+fixture_state = pathlib.Path(os.environ['RECYCLE_FIXTURE_STATE'])
+original_stat = pathlib.Path.stat
+def fixture_stat(p, *args, **kwargs):
+    value = original_stat(p, *args, **kwargs)
+    if str(p) == os.environ['RECYCLE_FIXTURE_CONFIG']:
+        return SimpleNamespace(st_uid=0, st_mode=value.st_mode)
+    return value
+pathlib.Path.stat = fixture_stat
+def fixture_run(args, **kwargs):
+    assert args[0] == 'node'
+    env = kwargs['env']
+    pathlib.Path(env['PG_SERVICE_OUTPUT']).write_text('synthetic service fixture')
+    pathlib.Path(env['PG_PASS_OUTPUT']).write_text('synthetic pass fixture')
+    return SimpleNamespace(returncode=0)
+def fixture_output(args, **kwargs):
+    if args[:2] == ['docker', 'inspect']:
+        if os.environ.get('RECYCLE_FIXTURE_FAILURE') == '1':
+            raise subprocess.CalledProcessError(1, ['docker', 'inspect'])
+        r = json.loads(pathlib.Path(os.environ['RECYCLE_FIXTURE_CONFIG']).read_text())
+        target = r['target']
+        return json.dumps([{'Image': r['image_digest'], 'State': {'Health': {'Status': 'healthy'}},
+          'Config': {'Labels': {'com.docker.compose.project.working_dir': target+'/deploy/edge-runtime'}},
+          'HostConfig': {'NetworkMode': 'commonswarm-net', 'Memory': 2147483648},
+          'Mounts': [{'Destination': dst, 'Source': target+'/'+rel, 'RW': False} for dst,rel in
+            [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]).encode()
+    assert args[:2] == ['docker', 'run'] and args[-1] == '-'
+    sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
+    if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
+    enable = re.search(r'admin_issuance_enabled=(true|false)', sql)
+    if enable: state['enabled'] = enable[1] == 'true'
+    if 'release_generation=release_generation+1' in sql:
+        state['generation'] += 1; state['invalidated'] = True
+    if 'measured_generation=release_generation' in sql:
+        state['measured_generation'] = state['generation']; state['invalidated'] = False
+    fixture_state.write_text(json.dumps(state))
+    return ('t' if prior else 'f')+'\\n'+str(state['generation']) if 'RETURNING release_generation' in sql else ''
+subprocess.run = fixture_run
+subprocess.check_output = fixture_output
+`;
+  writeFileSync(join(shim, 'python3'), `#!/bin/bash\nexec '${python}' "$@"\n`, { mode: 0o700 });
+  let source = portable(block('ai-recycle-hook'), { stage: 1, pointer: 0 });
+  // Remap the complete hook's paths to the owned fixture; no live path is used.
+  for (const [from, to] of [
+    ['/etc/commonswarm-admin-release', configDir], ['/home/commonswarm/edge', edgeRoot],
+    ['/home/commonswarm/admin-issuance/releases', join(root, 'release')],
+    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')],
+    ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
+  ]) source = source.split(from).join(to);
+  const imports = 'import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time\n';
+  assert.equal(source.split(imports).length - 1, 1);
+  source = source.replace(imports, imports + boundary);
+  const hook = (mode: string, failed = false) => run(`set -- ${mode}\n${source}`, {
+    PATH: `${shim}:${process.env.PATH}`, RECYCLE_FIXTURE_STATE: stateFile, RECYCLE_FIXTURE_CONFIG: config,
+    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0',
+  });
+  const state = () => JSON.parse(readFileSync(stateFile, 'utf8'));
+  const initial = { enabled: true, generation: 7, measured_generation: 7, invalidated: false };
+  for (const failed of [true, false]) {
+    writeFileSync(stateFile, JSON.stringify(initial));
+    const before = hook('before'); assert.equal(before.status, 0, before.stderr);
+    assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+    assert.deepEqual(JSON.parse(readFileSync(join(configDir, 'recycle-intent.json'), 'utf8')), { reopen: true, generation: 8 });
+    const after = hook('after', failed);
+    if (failed) {
+      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance stays closed/);
+      assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+    } else {
+      assert.equal(after.status, 0, after.stderr);
+      assert.deepEqual(state(), { enabled: true, generation: 8, measured_generation: 8, invalidated: false });
+    }
+    assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');
+  }
+});
+
+
+// Receipt admission owns stale-proof refusal. Only the remote DB/SSH boundary
+// supplies observations; the complete plan validator and its callers execute.
+test('edge-release-measurement-paths: stale-receipt-cannot-open; current receipt admits W5/W6 and later reopen', () => {
+  const root = mkdtempSync(join(scratch, 'edge-admission-'));
+  const shim = join(root, 'bin'); mkdirSync(shim);
+  const observed = join(root, 'observed.json'), receipt = join(root, 'edge-measurement.json');
+  const queries = join(root, 'queries.txt');
+  const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+  const imports = 'import json,os,pathlib,re,shlex,subprocess,sys\n';
+  const boundary = `
+def observe(args, **kwargs):
+    query = kwargs['input']
+    assert 'SET default_transaction_read_only=on;' in query
+    assert 'release_generation,measured_generation,invalidated_at' in query
+    remote = os.environ.get('EDGE_RECEIPT_REMOTE') == '1'
+    assert args[:2] == (['ssh','-o'] if remote else ['/bin/bash','-s'])
+    with open(os.environ['EDGE_QUERY_LOG'],'a') as log: log.write(('remote' if remote else 'box')+'\\n')
+    return pathlib.Path(os.environ['EDGE_OBSERVED']).read_text()
+subprocess.check_output = observe
+`;
+  // Wrapper substitutes observations only in the receipt block, including when
+  // a caller extracts it from the actual plan. No fixture implements refusal.
+  const wrapper = join(root, 'observe.py');
+  writeFileSync(wrapper, `import sys\nsys.argv=sys.argv[1:]\nsource=sys.stdin.read()\nanchor=${JSON.stringify(imports)}\nboundary=${JSON.stringify(boundary)}\nexec(compile(source.replace(anchor,anchor+boundary),"<receipt-fixture>","exec"))\n`);
+  writeFileSync(join(shim, 'python3'), `#!/bin/bash\nif test "$1" = -; then\nexec '${python}' '${wrapper}' "$@"\nelse\nexec '${python}' "$@"\nfi\n`, { mode: 0o700 });
+  const target = '/home/commonswarm/edge/releases/'+sha;
+  const current = { release_sha: sha, target, mount: target, image_digest: `sha256:${hex}`, artifact_digest: hex,
+    generation: 8, invalidated_at: null };
+  const row = { release_generation: 8, measured_generation: 8, invalidated_at: null,
+    approved_edge_release_sha: sha, measured_edge_release_sha: sha, measured_edge_target: target,
+    measured_mount: target, measured_image_digest: current.image_digest, measured_artifact_digest: hex };
+  writeFileSync(observed, JSON.stringify(row));
+  // Positive runs stop at the first operation after admission, through external
+  // shell boundaries. They never create box paths or execute live operations.
+  const stop = `printf 'ADMITTED\\n'; exit 0`;
+  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\n`;
+  writeFileSync(readyFile, 'nonsecret readiness\n'); utimesSync(readyFile, new Date(), new Date());
+  const admissions: Array<[string, string, string]> = [
+    ['W5 common open', 'ai-open', 'W5'], ['W6 open', 'ai-open', 'W6'], ['later reopen', 'ai-open', 'W7'],
+    ['W5 site open', 'ai-w5-reference', 'W5'],
+    ['W6 activation checks', 'ai-w6-activation-checks', 'W6'], ['W6 activation apply', 'ai-w6-activation-apply', 'W6'],
+  ];
+  for (const [name, step, window] of admissions) {
+    const input: Input = { ...base(), window };
+    if (window === 'W6') input.approval = approval(input, 'activate-admin-issuance-and-smoke');
+    const env = { INPUTS_FILE: inputFile(input), PLAN_FILE: planPath, EDGE_MEASUREMENT_FILE: receipt,
+      EDGE_OBSERVED: observed, EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH,
+      WINDOW: window, W5_CLOSED_FILE: closeFile, BROWSER_READY_FILE: readyFile,
+      SITE_STEP: 'site2-01', SITE_RELEASE_REPO: root, PREP_DIR: root, SITE_RELEASE_SHA: sha };
+    writeFileSync(receipt, JSON.stringify(current)); writeFileSync(queries, '');
+    const positive = run(harness+block(step), env);
+    assert.equal(positive.status, 0, `${name}: ${positive.stderr}`);
+    assert.match(positive.stdout+positive.stderr, /ADMITTED/, name);
+    assert.equal(readFileSync(queries,'utf8').trim(), step === 'ai-w5-reference' ? 'remote' : 'box', `${name} must re-read the box`);
+    for (const [change, field] of [
+      [{ generation: 7 }, 'generation'], [{ invalidated_at: '2026-10-03T12:00:00Z' }, 'invalidated_at'],
+    ] as const) {
+      writeFileSync(receipt, JSON.stringify({ ...current, ...change })); writeFileSync(queries, '');
+      const negative = run(harness+block(step), env);
+      assert.notEqual(negative.status, 0, `${name} accepted stale ${field}`);
+      assert.ok(negative.stderr.includes(field), `${name} must name ${field}: ${negative.stderr}`);
+      assert.doesNotMatch(negative.stdout, /ADMITTED/, `${name} operated after refusal`);
+      assert.ok(readFileSync(queries,'utf8').trim(), `${name} refusal must use a fresh observation`);
+    }
+  }
+  // A current-looking receipt is refused when the hook invalidated the box row.
+  writeFileSync(receipt, JSON.stringify(current));
+  const env = { INPUTS_FILE: inputFile(base()), EDGE_MEASUREMENT_FILE: receipt, EDGE_OBSERVED: observed,
+    EDGE_QUERY_LOG: queries, PATH: shim+':'+process.env.PATH };
+  for (const [change, field] of [
+    [{ invalidated_at: '2026-10-03T12:00:00Z' }, 'invalidated_at'],
+    [{ release_generation: 9, measured_generation: 9 }, 'generation'],
+    [{ measured_generation: 7 }, 'generation'], [{ measured_edge_target: '/wrong' }, 'target'],
+    [{ measured_edge_release_sha: 'c'.repeat(40) }, 'release_sha'],
+  ] as const) {
+    writeFileSync(observed, JSON.stringify({ ...row, ...change }));
+    const refused = run(block('ai-edge-receipt'), env);
+    assert.notEqual(refused.status, 0, `box drift ${field} admitted`);
+    assert.ok(refused.stderr.includes(field), refused.stderr);
+  }
+  writeFileSync(observed, JSON.stringify(row));
+  assert.equal(run(block('ai-edge-receipt'), env).status, 0);
+});
+
+// Execute the receipt-writing portions against independent DB observations;
+// verify the emitted activation transaction binds that specific generation.
+test('edge-release-measurement-paths: W4 records generation and W6 binds the freshly remeasured activation receipt', () => {
+  const root = mkdtempSync(join(scratch, 'generation-write-'));
+  const receipt = join(root, 'edge-measurement.json');
+  const target = '/home/commonswarm/edge/releases/'+sha;
+  const measured = { release_sha: sha, target, mount: target, image_digest: `sha256:${hex}`, artifact_digest: hex };
+  const w4 = block('ai-w4-apply');
+  const start = w4.indexOf('EDGE_MEASUREMENT_GENERATION=');
+  const end = w4.indexOf('cmp -s /etc/caddy/sites/', start);
+  assert.ok(start > 0 && end > start);
+  const source = w4.slice(start, end);
+  writeFileSync(receipt, JSON.stringify(measured));
+  const env = { PROOF_DIR: root, OBSERVED_GENERATION: '14' };
+  const read = `ai_ro() { printf '%s\\n' "$OBSERVED_GENERATION"; }\n`;
+  const recorded = run('set -euo pipefail\n'+read+source, env);
+  assert.equal(recorded.status, 0, recorded.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { ...measured, generation: 14, invalidated_at: null });
+  assert.notEqual(run('set -euo pipefail\n'+read+source, { ...env, OBSERVED_GENERATION: '' }).status, 0);
+  const apply = block('ai-w6-activation-apply');
+  const refreshStart = apply.indexOf('ACTIVATION_GENERATION=');
+  const refreshEnd = apply.indexOf('python3 - "$SECRET_STAGE/service.env"', refreshStart);
+  const sqlStart = apply.indexOf('python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql"');
+  const sqlEnd = apply.indexOf('ai_db -q --file /proof/activate.sql', sqlStart);
+  assert.ok(refreshStart > 0 && refreshEnd > refreshStart && sqlStart > refreshEnd && sqlEnd > sqlStart);
+  const supplied = join(root, 'supplied.json'); writeFileSync(supplied, readFileSync(receipt));
+  const result = run('set -euo pipefail\n'+read+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
+    ...env, OBSERVED_GENERATION: '15', EDGE_MEASUREMENT_FILE: supplied, INPUTS_FILE: inputFile(base()),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { ...measured, generation: 15, invalidated_at: null });
+  assert.equal(JSON.parse(readFileSync(supplied, 'utf8')).generation, 14, 'prior receipt is retained');
+  const sql = readFileSync(join(root, 'activate.sql'), 'utf8');
+  assert.match(sql, /PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF/,
+    'hold the generation row lock from receipt comparison through activation UPDATE');
+  assert.match(sql, /AND release_generation=15 AND measured_generation=release_generation AND invalidated_at IS NULL/,
+    'a completed recycle after the receipt was read must refuse the final activation transaction');
 });
