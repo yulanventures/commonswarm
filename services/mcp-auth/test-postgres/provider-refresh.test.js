@@ -8,6 +8,7 @@ import { Pool } from "pg";
 
 import { createAdminHttpHandler } from "../src/admin-http.js";
 import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
+import { createLogger } from "../src/logger.js";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
 
@@ -86,11 +87,14 @@ async function startProvider(clientId, beforeConsume, database = pool) {
       response.end(error.stack ?? String(error));
     });
   };
-  const server = createServer(createAdminHttpHandler({ handler, runtimePool: database, issuerPool: null }));
+  const logs = [];
+  const logger = createLogger(line => logs.push(JSON.parse(line)));
+  const server = createServer(createAdminHttpHandler({ handler, runtimePool: database, issuerPool: null, logger }));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const cookies = new Map();
   return {
+    logs,
     async request(target, options = {}) {
       const external = new URL(target, ISSUER);
       const headers = new Headers(options.headers);
@@ -305,7 +309,9 @@ test("ordinary MCP + admin-http: code exchange, refresh and replay before and af
           await refreshAdapter.upsert(initial.body.refresh_token, { ...payload, resource: [RESOURCE] }, 3600);
           const escalation = await tokenRequest(server, { ...parameters, resource: ADMIN_RESOURCE });
           assert.equal(escalation.status, 503);
-          assert.equal(escalation.body.error, "admin_issuance_disabled");
+          assert.equal(escalation.body.error, "temporarily_unavailable");
+          assert.equal(server.logs.at(-1).event, "admin.ingress_error");
+          assert.equal(server.logs.at(-1).error_code, "admin_issuance_disabled");
           const rotated = await tokenRequest(server, parameters);
           assert.equal(rotated.status, 200);
           assert.equal(decodeJwt(rotated.body.access_token).aud, RESOURCE);

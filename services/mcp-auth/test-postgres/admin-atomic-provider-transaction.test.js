@@ -151,7 +151,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   // production owns transaction control and never obtains setup privileges.
   const coordinatorPool = { connect: async () => {
     const owned = testRequests.getStore();
-    const trace = { calls: [], writes: [], committed: false, phase: owned.phase, events: [],
+    const trace = { calls: [], writes: [], providerWrites: [], committed: false, phase: owned.phase, events: [],
       gate: { state: "not_reached", cause: null }, gateInputs: {
         envValuePresent: activationEnv.MCP_OAUTH_ADMIN_ISSUANCE_ENABLED != null ? "yes" : "no",
         coordinatorPresent: coordinator != null ? "yes" : "no", cutoverOpen: "no", measuredReleasePass: "no" } };
@@ -226,7 +226,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         trace.commitStage = "fixture_commit_fault";
         if (owned.fault === "commit") await raw("SELECT 1/0").catch(() => {});
         trace.commitStage = "fixture_before_commit";
-        if (owned.beforeCommit) await owned.beforeCommit();
+        if (owned.beforeCommit) await owned.beforeCommit(trace);
         trace.commitStage = "physical_commit";
         const result = await raw(sql); trace.committed=result.command === "COMMIT";
         if (owned.fault === "commit-response-lost") throw Object.assign(new Error("test lost COMMIT acknowledgement"),{ code:"ECONNRESET" });
@@ -252,6 +252,24 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         trace.calls.push({ ...stamp,sql:sql.trim().split(/\s+/u).slice(0,3).join(" ") });
         if (/^\s*(?:INSERT|UPDATE|DELETE)\b/iu.test(sql) || sql.includes("record_admin_request_audit(")) {
           trace.writes.push({ ...stamp });
+          if (/^\s*(?:INSERT INTO|UPDATE) commonswarm_oauth\.provider_artifacts\b/iu.test(sql) && result.rowCount === 1 &&
+              ["Grant", "AuthorizationCode", "RefreshToken"].includes(values[0])) {
+            // Read the actual tuple version before the adapter's savepoint is
+            // released. txid_current() returns the TOP-LEVEL XID even here.
+            // Both XID locks must belong to this backend's same virtual unit.
+            const written = await raw(`SELECT a.model,a.artifact_id_hash,a.xmin::text AS tuple_xid,
+              EXISTS (SELECT 1 FROM pg_locks child JOIN pg_locks parent
+                ON parent.pid=child.pid AND parent.virtualtransaction=child.virtualtransaction
+                WHERE child.locktype='transactionid' AND child.transactionid=a.xmin
+                  AND child.mode='ExclusiveLock' AND child.granted AND child.pid=pg_backend_pid()
+                  AND parent.locktype='transactionid'
+                  AND parent.transactionid=(txid_current() % 4294967296)::text::xid
+                  AND parent.mode='ExclusiveLock' AND parent.granted) AS owned
+              FROM commonswarm_oauth.provider_artifacts a WHERE a.model=$1 AND a.artifact_id_hash=$2`,
+            values.slice(0,2));
+            assert.equal(written.rowCount, 1, "the actual adapter write must have a tuple version");
+            trace.providerWrites.push({ ...stamp, ...written.rows[0] });
+          }
           if (trace.writes.length === owned.after) throw new Error("test injected write failure");
         }
       }
@@ -527,8 +545,9 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         let entered, unblock;
         const atCommit = new Promise(resolve => { entered = resolve; });
         const blocked = new Promise(resolve => { unblock = resolve; });
-        let delivered = false;
-        const operation = f.request(url, { ...options, beforeCommit: async () => {
+        let delivered = false, stagedTrace;
+        const operation = f.request(url, { ...options, beforeCommit: async trace => {
+          stagedTrace = trace;
           entered(); await blocked;
         } }).then(result => { delivered = true; return result; });
         // Do not hang if the positive path fails before reaching COMMIT.
@@ -545,10 +564,23 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           }
           assert.equal(delivered, false, "HTTP client receives no headers/body before COMMIT");
           assert.equal(await f.snapshot(), baseline, "independent backend sees no staged changes before COMMIT");
+          for (const write of stagedTrace.providerWrites) {
+            assert.equal(write.owned, true, "artifact XID and top-level XID must share the backend's virtual transaction");
+            assert.deepEqual([write.pid, write.xid], [stagedTrace.calls[0].pid, stagedTrace.calls[0].xid]);
+            assert.equal((await f.pool.query(`SELECT 1 FROM commonswarm_oauth.provider_artifacts
+              WHERE model=$1 AND artifact_id_hash=$2 AND xmin::text=$3`,
+            [write.model, write.artifact_id_hash, write.tuple_xid])).rowCount, 0,
+            "an independent backend must not see the written artifact version before top-level COMMIT");
+          }
         } finally { unblock(); }
         const good = await operation;
         assert.equal(good.response.status, expected, atomicDiagnostic(good.trace)); atomic(good.trace);
         assert.equal(good.trace.writes.length, count);
+        const latestWrites = new Map(good.trace.providerWrites.map(write => [`${write.model}:${write.artifact_id_hash}`, write]));
+        for (const write of latestWrites.values()) assert.equal((await f.pool.query(`SELECT 1
+          FROM commonswarm_oauth.provider_artifacts WHERE model=$1 AND artifact_id_hash=$2 AND xmin::text=$3`,
+        [write.model, write.artifact_id_hash, write.tuple_xid])).rowCount, 1,
+        "top-level COMMIT must expose exactly one row of the captured artifact version");
         if (duplicate) {
           const loser=await duplicate;
           assert.ok([400,503].includes(loser.response.status),atomicDiagnostic(loser.trace));
@@ -590,7 +622,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
       assert.ok(recorded.rows[0].access_token_digest.equals(digest(initial.access_token)));
       assert.ok(recorded.rows[1].access_token_digest.equals(digest(successor.access_token)));
       // Independent durable row versions, not just ALS traces: authority/event/
-      // audit/ledger and adapter mutations must bear the coordinator's real XID.
+      // audit/ledger bear the top-level XID; adapter upserts can bear a sub-XID.
       const xid32 = trace => String(BigInt(trace.calls[0].xid) % (2n ** 32n));
       const versions = await f.pool.query(`SELECT i.generation,i.xmin::text AS ledger,e.xmin::text AS event,a.xmin::text AS audit
         FROM commonswarm_oauth.admin_access_issuances i JOIN swarm.admin_events e USING(event_id)
@@ -599,12 +631,18 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         const expected = xid32(row.generation === 0 ? exchanged.trace : rotated.trace);
         assert.deepEqual([row.ledger, row.event, row.audit], [expected, expected, expected]);
       }
-      const providerVersions = await f.pool.query(`SELECT model,xmin::text AS xid FROM commonswarm_oauth.provider_artifacts
+      const providerVersions = await f.pool.query(`SELECT model,artifact_id_hash,xmin::text AS xid FROM commonswarm_oauth.provider_artifacts
         WHERE grant_id=$1 OR (model='Grant' AND payload->>'jti'=$1)`, [f.family()]);
       assert.ok(providerVersions.rows.some(row => row.model === "AuthorizationCode"));
       assert.equal(providerVersions.rows.filter(row => row.model === "RefreshToken").length, 2);
-      for (const row of providerVersions.rows) assert.equal(row.xid,
-        xid32(row.model === "Grant" ? finished.trace : row.model === "AuthorizationCode" ? exchanged.trace : rotated.trace));
+      for (const row of providerVersions.rows) {
+        const trace = row.model === "Grant" ? finished.trace : row.model === "AuthorizationCode" ? exchanged.trace : rotated.trace;
+        const write = trace.providerWrites.findLast(write => write.model === row.model && write.artifact_id_hash === row.artifact_id_hash);
+        assert.ok(write, "each durable artifact must match an actual write in its intended issuance unit");
+        assert.equal(write.owned, true, "the captured tuple XID must belong to that top-level transaction");
+        assert.deepEqual([write.pid, write.xid], [trace.calls[0].pid, trace.calls[0].xid]);
+        assert.equal(row.xid, write.tuple_xid, "the committed artifact must retain the captured write's exact tuple XID");
+      }
       const authorityVersions = await f.pool.query(`SELECT xmin::text AS xid FROM commonswarm_oauth.admin_grant_bindings
         WHERE provider_grant_id=$1 UNION ALL SELECT xmin::text FROM swarm.admin_accounts WHERE owner_user_id=$2`, [f.family(), f.owner]);
       assert.ok(authorityVersions.rows.every(row => row.xid === xid32(rotated.trace)));
