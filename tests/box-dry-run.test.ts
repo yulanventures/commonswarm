@@ -2035,13 +2035,54 @@ function configureStubRuntime(bin: string, inputs: Record<string, string | undef
   }
 }
 
-function preparePythonFixture(directory: string, siteMcp: boolean): void {
+const SITE_CADDY_FILE = "deploy/site/commonswarm-site.caddy";
+const SITE_PARITY_REFERENCE = "deploy/site/vercel-reference.json";
+
+// Public commonswarm.com Content-Type, from committed files only. Caddy's
+// `@name path <pattern>` + `header @name Content-Type "<type>"` pairs apply to the
+// request path. Files without such a header get Caddy file_server's type, taken
+// from the parity reference the box's Caddy matched in strict live parity
+// (docs/evidence/2026-09-16-n-site/LANDING.md:35-36): `/` for .html and each
+// fingerprinted asset policy. Any other extension stays unmodeled (fail closed).
+function siteContentTypes(): { caddy: Array<{ path: string; type: string }>; file_server: Record<string, string> } {
+  const caddy = readFileSync(SITE_CADDY_FILE, "utf8");
+  const matchers = new Map<string, string>();
+  for (const match of caddy.matchAll(/^\s*@([A-Za-z]+) path (\S+)\s*$/gm)) {
+    assert.equal(matchers.has(match[1]!), false, `duplicate Caddy matcher @${match[1]}`);
+    assert.match(match[2]!, /^(?:\/[A-Za-z0-9._/-]+|\*\.[a-z0-9]+)$/, `unmodeled Caddy path pattern ${match[2]}`);
+    matchers.set(match[1]!, match[2]!);
+  }
+  const rules = [...caddy.matchAll(/^\s*header @([A-Za-z]+) Content-Type "([^"]+)"\s*$/gm)].flatMap((match) => {
+    const path = matchers.get(match[1]!);
+    // handle_errors' @notFound is an expression matcher for error responses, not a served file.
+    if (path === undefined) { assert.equal(match[1], "notFound", `Content-Type header without a path matcher: @${match[1]}`); return []; }
+    return [{ path, type: match[2]! }];
+  });
+  assert.ok(rules.some((rule) => rule.path === "*.js"), "the committed Caddy config sets the .js Content-Type");
+  const reference = JSON.parse(readFileSync(SITE_PARITY_REFERENCE, "utf8")) as {
+    routes: Array<{ path: string; status: number; contentType: string | null }>;
+    fingerprintedAssetPolicies: Array<{ extension: string; contentType: string }>;
+  };
+  const home = reference.routes.find((route) => route.path === "/" && route.status === 200);
+  assert.ok(home?.contentType, "the parity reference records the / page Content-Type");
+  const fileServer: Record<string, string> = { ".html": home.contentType };
+  for (const policy of reference.fingerprintedAssetPolicies) {
+    assert.match(policy.extension, /^\.[a-z0-9]+$/);
+    fileServer[policy.extension] = policy.contentType;
+  }
+  return { caddy: rules, file_server: fileServer };
+}
+
+function preparePythonFixture(directory: string, siteMcp: boolean, contentTypes = siteContentTypes()): void {
   mkdirSync(directory, { recursive: true, mode: 0o755 });
   const source = readFileSync(join(PYTHON_FIXTURE, "sitecustomize.py"), "utf8");
   const marker = "_SITE_MCP = False  # fixture-site-mcp";
   assert.equal(source.split(marker).length, 2, "Python fixture must have exactly one private site-mode marker");
+  const typesMarker = "_SITE_CONTENT_TYPES = None  # fixture-site-content-types";
+  assert.equal(source.split(typesMarker).length, 2, "Python fixture must have exactly one public content-type marker");
   writeMode(join(directory, "sitecustomize.py"), source.replace(marker,
-    `_SITE_MCP = ${siteMcp ? "True" : "False"}  # fixture-site-mcp`), 0o644);
+    `_SITE_MCP = ${siteMcp ? "True" : "False"}  # fixture-site-mcp`).replace(typesMarker,
+    `_SITE_CONTENT_TYPES = json.loads(${JSON.stringify(JSON.stringify(contentTypes))})  # fixture-site-content-types`), 0o644);
 }
 
 function writeMode(filename: string, body: string, mode = 0o600): void {
@@ -9402,6 +9443,64 @@ test("controls: box-mode ssh runs the remote command in the login home, not the 
   } finally {
     cleanupBoxFixture(fixture);
   }
+});
+
+test("controls: site-05 public responses take Content-Type from the committed Caddy config and fail closed", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-public-"));
+  try {
+    const log = join(temporary, "stub.log");
+    const root = join(temporary, "box");
+    const site = join(root, "srv/commonswarm/site");
+    const release = join(site, "releases", "20260928T010203Z-603a206e52f3-0123456789abcdef");
+    mkdirSync(release, { recursive: true });
+    prepareDistFixture(release);
+    symlinkSync(release, join(site, "current"));
+    const types = siteContentTypes();
+    assert.deepEqual(types.caddy.find((rule) => rule.path === "*.js"), { path: "*.js", type: "application/javascript; charset=utf-8" });
+    const program = /python3 - "\$expected" <<'PY'\n([\s\S]*?)\nPY/.exec(planBlock(SITE, "site-05").source)?.[1];
+    assert.ok(program, "site-05 must supply its actual public-byte Python");
+    // Path projection only, as the ssh boundary maps /srv into a fixture box root.
+    const projected = program.replace('root=pathlib.Path("/srv/commonswarm/site")', `root=pathlib.Path(${JSON.stringify(site)})`);
+    assert.notEqual(projected, program);
+    const run = (python: string, source = projected) => {
+      // A fresh stub bin per model: configureStubRuntime bakes its marker once.
+      const bin = join(temporary, `bin-${basename(python)}`);
+      makeStubBin(bin);
+      configureStubRuntime(bin, { fixture_python: python });
+      return spawnSync("/bin/bash", ["-c", 'source "$1"; python3 - "$2"', "site-05-control", PRELUDE, release],
+        { encoding: "utf8", input: `${source}\n`, env: explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`,
+          BOX_DRY_RUN_STUB_LOG: log, BOX_DRY_RUN_BOX_ROOT: root, BOX_DRY_RUN_PYTHON_FIXTURE: python }) });
+    };
+    const fixturePython = (name: string, model?: ReturnType<typeof siteContentTypes>): string => {
+      const directory = join(temporary, name);
+      preparePythonFixture(directory, true, model);
+      return directory;
+    };
+    const positive = run(fixturePython("python-committed"));
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.match(positive.stdout, /"media_type":"application\/javascript"/);
+    assert.match(positive.stdout, /^PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe\/1\.0$/m);
+    // A .js served as text/javascript fails the plan's own media check.
+    const textJs = run(fixturePython("python-text-js", { ...types, caddy: types.caddy.map((rule) => rule.path === "*.js"
+      ? { ...rule, type: "text/javascript; charset=utf-8" } : rule) }));
+    assert.equal(textJs.status, 1, textJs.stderr);
+    assert.match(textJs.stderr, /AssertionError/);
+    assert.doesNotMatch(textJs.stdout, /PUBLIC_BYTES=PASS/);
+    // An extension neither the Caddy config nor the parity reference names fails closed.
+    const noCss = run(fixturePython("python-no-css", { ...types, file_server: Object.fromEntries(
+      Object.entries(types.file_server).filter(([extension]) => extension !== ".css")) }));
+    assert.equal(noCss.status, 69, noCss.stderr);
+    assert.match(noCss.stderr, /UNPRODUCED public content type for \.css/);
+    // The unbaked source has no model at all.
+    const unbaked = run(PYTHON_FIXTURE);
+    assert.equal(unbaked.status, 69, unbaked.stderr);
+    assert.match(unbaked.stderr, /UNPRODUCED public content type model/);
+    // Byte equality is still checked: the model supplies only the header, never matching bytes.
+    const changed = run(fixturePython("python-committed-2"), projected.replace(
+      'download=(release/"download/index.html").read_bytes()', 'download=(release/"download/index.html").read_bytes()+b"x"'));
+    assert.equal(changed.status, 1, changed.stderr);
+    assert.match(changed.stderr, /AssertionError/);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-public-"); }
 });
 
 test("controls: a failed site-04 reports its deploy evidence tail and changes nothing else", () => {

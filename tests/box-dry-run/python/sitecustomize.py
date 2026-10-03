@@ -24,6 +24,28 @@ _real_build_opener = urllib.request.build_opener
 # Fixture construction replaces this in a private copy for the site sequence.
 # This is harness state, never a value supplied by the plan's environment.
 _SITE_MCP = False  # fixture-site-mcp
+# Public commonswarm.com Content-Type model, baked into each fixture copy from
+# deploy/site/commonswarm-site.caddy header matchers (request path) and, for
+# file_server defaults, deploy/site/vercel-reference.json, which the box's
+# Caddy matched in strict live parity (docs/evidence/2026-09-16-n-site/LANDING.md:35-36).
+# The unbaked source has no model: a public byte response then fails closed.
+_SITE_CONTENT_TYPES = None  # fixture-site-content-types
+
+
+def _public_content_type(request_path, served):
+    if not _SITE_CONTENT_TYPES:
+        sys.stderr.write("UNPRODUCED public content type model\n")
+        raise SystemExit(69)
+    lowered = request_path.lower()
+    for rule in _SITE_CONTENT_TYPES["caddy"]:
+        pattern = rule["path"].lower()
+        if (pattern.startswith("*") and lowered.endswith(pattern[1:])) or lowered == pattern:
+            return rule["type"]
+    media = _SITE_CONTENT_TYPES["file_server"].get(served.suffix.lower())
+    if media is None:
+        sys.stderr.write("UNPRODUCED public content type for " + (served.suffix or "a file without extension") + "\n")
+        raise SystemExit(69)
+    return media
 
 
 class Response:
@@ -153,8 +175,7 @@ def _fixture(request):
         if path.is_dir():
             path = path / "index.html"
         if path.is_file():
-            content_type = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}.get(
-                path.suffix, "application/octet-stream")
+            content_type = _public_content_type(suffix, path)
             status, body = 200, path.read_bytes()
         else:
             status, body, content_type = 404, b"", "text/plain"
