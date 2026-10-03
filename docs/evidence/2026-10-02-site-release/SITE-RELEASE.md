@@ -169,7 +169,9 @@ RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
 export RELEASE_PREFLIGHT_TOOL
 python3 "$RELEASE_PREFLIGHT_TOOL" "${SITE_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
 # Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
-eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$SITE_PLAN_FILE")"
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$SITE_PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
 ```
 
 ```sh
@@ -2759,7 +2761,7 @@ new release actions or claiming an unproved close.
   "input_files": ["$SITE_PLAN_FILE", "$GATE_EVIDENCE_FILE", "$OP_SERVICE_ACCOUNT_TOKEN_FILE"],
   "routes": {"before-pin": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-06", "site2-07-pre-pin-manifest-close"], "normal": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-03-pin-previous", "site2-03-go-record", "site2-04", "site2-05", "site2-05-browser-acceptance", "site2-06", "site2-07-manifest-close"]},
   "steps": {
-    "site-release-shared-preflight": {"reads": [], "sha256": "ff77105c5c4e94bfc2b540f0f9da5ce009188d5280f7b2e6b22eab94df5e7eb9"},
+    "site-release-shared-preflight": {"reads": [], "sha256": "96d517dcab1a6d6a66da47dde411713ee22fa98071ca0ee72b01190326925dad"},
     "site2-plan-inputs": {"reads": [], "sha256": "00aaf8909b470ef510117082a7dbf032bf5179a5b2ac229df67efeca596d0778"},
     "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "28c0b132ea1afab8eb01180d9fb6a68ad886d06e7c82efb919f23373966cd995"},
     "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "bbf8fc164a43ca1c351da1871bb1417bf87ecbe8b4c00462a6da798aeff313f4"},

@@ -182,7 +182,9 @@ RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
 export RELEASE_PREFLIGHT_TOOL
 python3 "$RELEASE_PREFLIGHT_TOOL" "${OAUTH_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
 # Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
-eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$OAUTH_PLAN_FILE")"
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$OAUTH_PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
 ```
 
 ```sh
@@ -1432,7 +1434,7 @@ rm -rf "$ARCHIVE_DIR" || { echo "FAIL: guarded cleanup refused $ARCHIVE_DIR" >&2
   "input_files": ["$OAUTH_PLAN_FILE"],
   "routes": {"normal": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-transition-off", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-close", "hm37-oauth-mac-close"], "off-baseline": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-close", "hm37-oauth-mac-close"], "recovery": ["oauth-release-shared-preflight", "hm37-oauth-plan-inputs", "hm37-mcp-baseline-state", "hm37-oauth-archive", "hm37-oauth-preflight", "hm37-oauth-open", "hm37-mcp-transition-off", "hm37-mcp-route-probes", "hm37-oauth-build", "hm37-oauth-inputs", "hm37-oauth-release-off", "hm37-mcp-route-probes", "hm37-mcp-enable", "hm37-mcp-route-probes", "hm37-oauth-rollback", "hm37-oauth-close", "hm37-oauth-mac-close"]},
   "steps": {
-    "oauth-release-shared-preflight": {"reads": [], "sha256": "07764b1010a047acbf1736114007c4558d2c5fcc115e34fff4874f5bd5df6391"},
+    "oauth-release-shared-preflight": {"reads": [], "sha256": "8f9926a2445c3e4027aa4d3c1a3088bb362b1d62b3e65858b2d90b70320ae133"},
     "hm37-oauth-plan-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker inspect"], "sha256": "70d027ebb5ef8f0a72bd520c05fb677000f8cbbb5da1b7efde945ca6321a43c3"},
     "hm37-mcp-baseline-state": {"reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "command:docker inspect", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "2259f7a6f9c5be7e550e57406322b3c8be56d6bf80f8a33805d7e029d7678b6d"},
     "hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "386c92f13c8cb795343d0731cf0e670f651e8ecda02a191f12e09425962486e9"},

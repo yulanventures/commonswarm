@@ -164,7 +164,9 @@ RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
 export RELEASE_PREFLIGHT_TOOL
 python3 "$RELEASE_PREFLIGHT_TOOL" "${PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
 # Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
-eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$PLAN_FILE")"
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
 ```
 
 ```sh
@@ -1129,7 +1131,7 @@ they do not prove an authenticated MCP tool call or the separate HM done-test.
   "input_files": ["$PLAN_FILE"],
   "routes": {"normal": ["edge-release-shared-preflight", "edge-mcp-plan-inputs", "edge-mcp-archive", "edge-mcp-preflight", "edge-mcp-open", "edge-mcp-stage", "edge-mcp-transition-503", "edge-mcp-apply", "edge-mcp-restore-on", "edge-mcp-probes", "edge-mcp-close", "edge-mcp-mac-close"], "recovery": ["edge-release-shared-preflight", "edge-mcp-plan-inputs", "edge-mcp-archive", "edge-mcp-preflight", "edge-mcp-open", "edge-mcp-stage", "edge-mcp-transition-503", "edge-mcp-apply", "edge-mcp-restore-on", "edge-mcp-probes", "edge-mcp-rollback", "edge-mcp-probes", "edge-mcp-close", "edge-mcp-mac-close"]},
   "steps": {
-    "edge-release-shared-preflight": {"reads": [], "sha256": "3267bc607e1317b87b870fd4e9966a369e5c374d729da6eeb6e5c01fb36d3eb2"},
+    "edge-release-shared-preflight": {"reads": [], "sha256": "e1b3e816d530adcd9da81e30339f5b0fafeba00fa6e8b667a1baab99cdaf91fc"},
     "edge-mcp-plan-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases", "command:docker inspect"], "sha256": "d941ebeefbe4fb14f1bc8b722f3b9b765cefff3a4488ce1adad448622c5a1783"},
     "edge-mcp-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "dc412f3676b5d1f78d0b2008abcd58b392621c45773470e533c17c680fe56ece"},
     "edge-mcp-transport": {"creates": ["$ARCHIVE_DIR/box-step.sh", "$ARCHIVE_DIR/site-prefix.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases", "command:readlink -f"], "sha256": "35599d0a142c811d2ff7e92d343800e90dfee3ad0c72e946fbf15755b5f9e849"},

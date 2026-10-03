@@ -176,7 +176,9 @@ RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
 export RELEASE_PREFLIGHT_TOOL
 python3 "$RELEASE_PREFLIGHT_TOOL" "${DCR_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
 # Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
-eval "$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$DCR_PLAN_FILE")"
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$DCR_PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
 ```
 
 ```sh
@@ -2023,7 +2025,7 @@ not replace the required GATE_EVIDENCE_FILE for the final landed RELEASE_SHA.
   "input_files": ["$DCR_PLAN_FILE", "$OAUTH_PLAN_FILE", "$GATE_EVIDENCE_FILE"],
   "routes": {"normal": ["dcr-release-shared-preflight", "dcr-plan-inputs", "dcr-archive", "dcr-stage", "dcr-session", "dcr-preflight", "dcr-oauth-inputs", "dcr-oauth-baseline-state", "oauth:hm37-oauth-archive", "dcr-oauth-preflight", "dcr-oauth-open", "dcr-public-helper", "oauth:hm37-mcp-transition-off", "oauth:hm37-mcp-route-probes", "oauth:hm37-oauth-build", "oauth:hm37-oauth-inputs", "oauth:hm37-oauth-release-off", "oauth:hm37-mcp-route-probes", "dcr-caddy-apply", "dcr-caddy-probes", "dcr-oauth-enable", "oauth:hm37-mcp-route-probes", "dcr-oauth-verify", "dcr-public-probes", "dcr-final-readback", "dcr-oauth-close", "dcr-check-cleanup", "oauth:hm37-oauth-mac-close", "dcr-mac-close"], "recovery": ["dcr-release-shared-preflight", "dcr-plan-inputs", "dcr-archive", "dcr-stage", "dcr-session", "dcr-preflight", "dcr-oauth-inputs", "dcr-oauth-baseline-state", "oauth:hm37-oauth-archive", "dcr-oauth-preflight", "dcr-oauth-open", "dcr-public-helper", "oauth:hm37-mcp-transition-off", "oauth:hm37-mcp-route-probes", "oauth:hm37-oauth-build", "oauth:hm37-oauth-inputs", "oauth:hm37-oauth-release-off", "oauth:hm37-mcp-route-probes", "dcr-caddy-apply", "dcr-caddy-probes", "dcr-oauth-enable", "oauth:hm37-mcp-route-probes", "dcr-oauth-verify", "dcr-public-probes", "dcr-final-readback", "dcr-caddy-rollback", "dcr-recover-baseline", "dcr-baseline-verify", "dcr-oauth-close", "dcr-check-cleanup", "oauth:hm37-oauth-mac-close", "dcr-mac-close"]},
   "steps": {
-    "dcr-release-shared-preflight": {"reads": [], "sha256": "eb1353a3ec2fdf8b99d4e80d65b9955ce313bf066174d11bff3b43bb611eb833"},
+    "dcr-release-shared-preflight": {"reads": [], "sha256": "f1e88d8c9c27b0a6c6a1c98681df79ae9f5b0de01c3952fa47767eacfd7ed634"},
     "dcr-plan-inputs": {"reads": [], "sha256": "e138b9e56587149131f3f159c00eb3643ff41f4d9fa80c42926a816aa3392c0f"},
     "dcr-archive": {"creates": ["$DCR_ARCHIVE_DIR", "$DCR_ARCHIVE_DIR/release.tar", "$DCR_BOX_ARCHIVE_PATH", "DCR_ARCHIVE_DIR", "DCR_BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "9a1f9d32cfc3fef5ccae2919b727f80b4891d04e3554cb42e528531d0accfb90"},
     "dcr-transport": {"creates": ["$DCR_ARCHIVE_DIR/box-step.sh"], "reads": [], "sha256": "a38faa3b29ba4f9605bca48ba8cfa08d68cd34a9e01601373dd99740eff06d9a"},

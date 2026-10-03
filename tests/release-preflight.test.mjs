@@ -3,7 +3,9 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { test } from 'node:test';
+import { tmpdir } from 'node:os';
 
+const tempRoot = realpathSync(tmpdir());
 const repo = process.cwd();
 const tool = join(repo, 'scripts/release-preflight.py');
 const plans = ['edge-mcp-release/RELEASE.md', 'mcp-auth-release/RELEASE.md', 'site-release/SITE-RELEASE.md', 'dcr-release/RELEASE-V2.md'].map(s => 'docs/evidence/2026-10-02-' + s);
@@ -21,13 +23,13 @@ function git(args, cwd) {
   return result.stdout.trim();
 }
 function cleanup(root) {
-  assert.equal(resolve(root, '..'), '/private/tmp');
-  assert.match(root, /^\/private\/tmp\/release-preflight-test\.[\w]+$/);
+  assert.equal(resolve(root, '..'), tempRoot);
+  assert.match(root.slice(tempRoot.length + 1), /^release-preflight-test\.[\w]+$/);
   const result = run('rm', ['-rf', '--', root]);
   assert.equal(result.status, 0, `guard refused ${root}: ${result.stderr}`);
 }
 function fixture(file) {
-  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
   const text = readFileSync(file, 'utf8');
   const c = contract(text);
   const gitRepo = join(root, 'repo'); mkdirSync(gitRepo);
@@ -157,7 +159,7 @@ for (const file of plans) {
 }
 
 test('JSON gate identity tolerates prose and field order, rejects wrong/missing/failed fields', () => {
-  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
   try {
     const file = join(root, 'receipt.json'), sha = 'a'.repeat(40);
     const runGate = value => { writeFileSync(file, JSON.stringify(value)); return run('python3', [tool, 'gate', file, sha, 'build', 'CI']); };
@@ -171,7 +173,7 @@ test('JSON gate identity tolerates prose and field order, rejects wrong/missing/
 });
 
 test('site deletion evidence runs genuine guard refusal and positive controls without HOME changes', () => {
-  const result = run('python3', [tool, 'deletion-controls', repo]);
+  const result = run('python3', [tool, 'deletion-controls', repo, tempRoot]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
@@ -188,7 +190,7 @@ test('JWKS route checks accept JSON base types with only an optional charset', (
 });
 
 test('site public-byte, rollback and MCP receipt gates require the release probe UA', () => {
-  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
   try {
     const source = readFileSync(plans[2], 'utf8');
     for (const step of ['site2-00-a-close-ingest', 'site2-03-go-record', 'site2-05', 'site2-06']) {
@@ -211,7 +213,7 @@ test('site public-byte, rollback and MCP receipt gates require the release probe
 });
 
 test('edge close classifies an already-closed budget failure as closure, and failed verification as deployment', () => {
-  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
   try {
     const source = shellBlocks(readFileSync(plans[0], 'utf8')).find(b => b.startsWith('# step: edge-mcp-close\n'));
     // Only remap the box state file; run the real phase assignments and branches.
@@ -243,7 +245,7 @@ test('edge close classifies an already-closed budget failure as closure, and fai
 });
 
 test('site assertions passing before a daemon/copy-back failure cannot request rollback', () => {
-  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  const root = realpathSync(mkdtempSync(join(tempRoot, 'release-preflight-test.')));
   try {
     const source = shellBlocks(readFileSync(plans[2], 'utf8')).find(b => b.startsWith('# step: site2-05-browser-acceptance '));
     const classifier = source.match(/python3 - "\$SITE_EVIDENCE" site2-05-browser-acceptance "\$branch" "\$browser_status" <<'PY'\n([\s\S]*?)\nPY/)[1];

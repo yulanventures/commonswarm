@@ -16,10 +16,11 @@ import sys
 import tempfile
 
 
-def deletion_controls(repo):
+def deletion_controls(repo, temp_root='/private/tmp'):
     # Execute the real deletion functions on task-owned paths. No HOME changes,
     # production paths, bypass binary, or test-name matching.
-    root = pathlib.Path(tempfile.mkdtemp(prefix='release-delete-control.', dir='/private/tmp'))
+    temp_root = pathlib.Path(temp_root).resolve(strict=True)
+    root = pathlib.Path(tempfile.mkdtemp(prefix='release-delete-control.', dir=temp_root)).resolve(strict=True)
     try:
         allowed = root / 'allowed'
         outside = root / 'outside'
@@ -48,7 +49,7 @@ def deletion_controls(repo):
             if result.returncode or positive.exists() or not (outside / 'keep').is_file():
                 raise ValueError(name + ': positive deletion control failed')
     finally:
-        if root.parent != pathlib.Path('/private/tmp') or not root.name.startswith('release-delete-control.'):
+        if root.parent != temp_root or not re.fullmatch(r'release-delete-control\.[A-Za-z0-9_]+', root.name):
             raise ValueError('control cleanup boundary failed: ' + str(root))
         result = subprocess.run(['rm', '-rf', '--', str(root)], capture_output=True, text=True)
         if result.returncode:
@@ -227,7 +228,7 @@ def check(plan, inputs, repo):
 def main():
     try:
         if len(sys.argv) >= 2 and sys.argv[1] == 'deletion-controls':
-            deletion_controls(sys.argv[2])
+            deletion_controls(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else '/private/tmp')
         elif len(sys.argv) >= 2 and sys.argv[1] == 'gate':
             receipt(sys.argv[2], sys.argv[3], sys.argv[4:])
         elif len(sys.argv) >= 2 and sys.argv[1] == 'fields':
