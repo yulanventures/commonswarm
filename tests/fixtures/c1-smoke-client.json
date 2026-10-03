@@ -1,5 +1,5 @@
 {
-  "client_id": "https://commonswarm.com/.well-known/c1-smoke-client.json",
+  "client_id": "https://commonswarm.com/oauth/c1-smoke/client.json",
   "client_name": "CommonSwarm C1 smoke",
   "client_uri": "https://commonswarm.com",
   "application_type": "web",

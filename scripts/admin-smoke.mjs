@@ -8,7 +8,7 @@ import { createHash, generateKeyPairSync, createPublicKey, randomBytes, randomUU
 
 const ISSUER = 'https://mcp.commonswarm.com';
 const RESOURCE = 'https://api.commonswarm.com/admin';
-const CLIENT = 'https://commonswarm.com/.well-known/c1-smoke-client.json';
+const CLIENT = 'https://commonswarm.com/oauth/c1-smoke/client.json';
 const REDIRECT = 'https://commonswarm.com/oauth/c1-smoke/callback';
 const VERSION = '2025-11-25';
 const SCOPES = ['admin:read', 'workspaces:create', 'seats:create', 'seats:revoke'];

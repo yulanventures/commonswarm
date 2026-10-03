@@ -10,7 +10,7 @@ const script = fileURLToPath(new URL('../scripts/admin-smoke.mjs', import.meta.u
 const preload = fileURLToPath(new URL('./support/admin-smoke-transport.mjs', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/c1-smoke-client.json', import.meta.url));
 const ISSUER = 'https://mcp.commonswarm.com', RESOURCE = 'https://api.commonswarm.com/admin';
-const CLIENT = 'https://commonswarm.com/.well-known/c1-smoke-client.json';
+const CLIENT = 'https://commonswarm.com/oauth/c1-smoke/client.json';
 const REDIRECT = 'https://commonswarm.com/oauth/c1-smoke/callback';
 const SCOPE = 'admin:read workspaces:create seats:create seats:revoke';
 const SCOPES = SCOPE.split(' ');
