@@ -138,10 +138,16 @@ test("the edge catch uses one post-rollback insert and keeps retry policy unchan
     join(process.cwd(), "supabase/functions/command/index.ts"),
     "utf8",
   );
-  const insertFunction = source.slice(
-    source.indexOf("async function insertCommandFailure"),
-    source.indexOf("async function handlePostRequest"),
-  );
+  const insertStart = source.indexOf("async function insertCommandFailure(");
+  assert.ok(insertStart >= 0, "insertCommandFailure must exist");
+  // Bound the function body at the next top-level declaration. Slicing up to
+  // handlePostRequest would sweep in unrelated admin code that uses db.begin.
+  const insertEnd = source.indexOf("\n}\n", insertStart);
+  assert.ok(insertEnd > insertStart, "insertCommandFailure body must be bounded");
+  const insertFunction = source
+    .slice(insertStart, insertEnd + 3)
+    .replace(/\/\*[\s\S]*?\*\//gu, "")
+    .replace(/^\s*\/\/.*$/gmu, "");
   const handlerStart = source.indexOf("async function handlePostRequest(");
   const handlerEnd = source.indexOf("export async function handleRequest(", handlerStart);
   assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, "worker POST handler must be bounded");
@@ -152,7 +158,22 @@ test("the edge catch uses one post-rollback insert and keeps retry policy unchan
     (insertFunction.match(/INSERT INTO swarm\.command_failures/gu) ?? []).length,
     1,
   );
-  assert.doesNotMatch(insertFunction, /await db\.begin/u);
+  // Exactly one autocommit statement: no BEGIN, no transaction, no second query.
+  assert.equal((insertFunction.match(/\bawait db`/gu) ?? []).length, 1);
+  assert.equal((insertFunction.match(/\bdb`/gu) ?? []).length, 1);
+  assert.doesNotMatch(insertFunction, /db\.begin|\.begin\(|\.savepoint\(|set_config|SET LOCAL|SET ROLE/u);
+  assert.equal((insertFunction.match(/\bINSERT\b/gu) ?? []).length, 1);
+  assert.equal((source.match(/INSERT INTO swarm\.command_failures/gu) ?? []).length, 1);
+  // Post-rollback: the catch block persists only after the transaction call has
+  // rejected, and the pool insert is wired in as the single persistence callback.
+  assert.ok(
+    handler.indexOf("handleTransaction(") >= 0 &&
+      handler.indexOf("handleTransaction(") < handler.lastIndexOf("  } catch (error) {"),
+    "transaction must run in the try block, before the catch",
+  );
+  assert.equal((catchBlock.match(/insertCommandFailure/gu) ?? []).length, 1);
+  assert.equal((catchBlock.match(/finishCommandFailure\(/gu) ?? []).length, 1);
+  assert.doesNotMatch(catchBlock, /db\.begin|db`/u);
   assert.match(catchBlock, /await finishCommandFailure/u);
   assert.match(catchBlock, /40001 \(serialization failure\)/u);
   assert.match(catchBlock, /40P01 \(deadlock\)/u);
