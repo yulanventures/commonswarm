@@ -1,5 +1,5 @@
 import { adminConsentOptions, ADMIN_GRANT_TTL_SECONDS } from "./admin-policy.generated.js";
-import { escapeHtml as e } from "./interaction-page.js";
+import { escapeHtml as e, renderConsentDestination } from "./interaction-page.js";
 
 export const FULL_ACCOUNT_WARNING = "This client can create workspaces and change seats and invitations within these limits. That includes future workspaces you own. Workers it creates may read workspace messages and files. If the client or agent host is compromised, someone else can use this access until it expires or you revoke it.";
 
@@ -34,6 +34,8 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
     <p>Client ID: ${e(params.client_id)}</p><p>HTTPS client host: ${e(new URL(params.client_id).host)}</p>
     <p>Authorization returns to: ${e(new URL(params.redirect_uri).host)}</p>
     <p>${verified ? `Independently verified publisher: ${e(policy.verification.publisher_identity)}; active verification ${e(policy.verification.verification_version)}. Approved by account owner ${e(policy.approval.owner_user_id)}.` : "This client is unverified. Admin access is unavailable."}</p>`;
+  const destination = renderConsentDestination({ clientName: policy?.metadata?.client_name,
+    redirectUri: params.redirect_uri, metadataHost: new URL(params.client_id).hostname });
   let form = "";
   if (verified && !manifest) {
     form = `<form method="post" action="/interaction/${encodeURIComponent(uid)}/selection">
@@ -46,6 +48,7 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
       <label><input type="checkbox" disabled> Billing changes are not available</label></fieldset>
       <fieldset><legend>Selected workspaces (optional for account setup)</legend>${workspaces.map(w => `<label><input type="checkbox" name="workspace_ids" value="${e(w.id)}"> ${e(w.name)}</label>`).join("")}</fieldset>
       <label>Access ends (UTC, at most thirty days)<input type="datetime-local" name="expires_at" value="${defaultExpiry}" required></label>
+      ${destination}
       <button type="submit">Review exact permissions and limits</button></form>`;
   } else if (manifest && summary) {
     const expiry = new Date(manifest.expires_at);
@@ -69,10 +72,11 @@ export function renderAdminConsentPage({ uid, user, params, policy, csrfToken, v
         <input type="hidden" name="summary_digest" value="${e(summary.digest)}">
         <input type="hidden" name="selection_version" value="${e(version)}">
         ${manifest.mode === "full_account" ? `<input type="hidden" name="second_token" value="${e(summary.secondToken)}"><label><input type="checkbox" name="confirm_full_account" value="yes" aria-describedby="full-account-warning" required> I confirm this exact full account summary</label>` : ""}
+        ${destination}
         <button type="submit">${manifest.mode === "full_account" ? "Confirm full account access" : "Confirm chosen permissions"}</button></form>`;
   }
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review CommonSwarm admin access</title>
-    <style>body{font-family:system-ui;max-width:48rem;margin:3rem auto;padding:1rem}label{display:block;margin:.7rem 0}fieldset{margin:1rem 0}dt{font-weight:bold}dd{margin-bottom:.5rem}button{padding:.7rem 1rem}</style></head>
+    <style>body{font-family:system-ui;max-width:48rem;margin:3rem auto;padding:1rem}label{display:block;margin:.7rem 0}fieldset{margin:1rem 0}dt{font-weight:bold}dd{margin-bottom:.5rem}button{padding:.7rem 1rem}.notice{border:1px solid;padding:1rem}</style></head>
     <body><main><h1>Review admin access</h1>${identity}<p>Admin connections are not available yet. Reviewing a selection does not connect the client.</p>${form}<form method="get" action="https://commonswarm.com/app"><button type="submit">Cancel and return to /app</button></form></main>
     ${manifest && scriptNonce ? `<script nonce="${e(scriptNonce)}">const expiry=document.getElementById("local-expiry");expiry.textContent=new Date(expiry.dateTime).toLocaleString();document.getElementById("expiry-zone").textContent=" (your local time)";</script>` : ""}</body></html>`;
 }
