@@ -3,7 +3,7 @@
 WITH expected(name,columns,can_update,fks,checks,uniques) AS (VALUES
 ('household_workspace_boundaries',ARRAY['workspace_id','purpose','owner_user_id']::text[],true,2,2,0),
 ('household_member_content_roles',ARRAY['workspace_id','user_id','content_role','content_consent_id','confirmed_at','revoked_at']::text[],true,1,1,0),
-('household_content_connections',ARRAY['connection_id','grant_id','workspace_id','principal_id','owner_user_id','purpose','operations','consent_receipt_id','expires_at','revoked_at','hosted_grant_id']::text[],true,4,3,0)
+('household_content_connections',ARRAY['connection_id','grant_id','workspace_id','principal_id','owner_user_id','purpose','operations','consent_receipt_id','expires_at','revoked_at','hosted_grant_id']::text[],true,3,3,0)
 ), actual AS (
  SELECT e.*,c.oid,c.relowner,c.relkind,c.relrowsecurity,c.relforcerowsecurity
  FROM expected e LEFT JOIN pg_class c ON c.oid=to_regclass('swarm.'||e.name)
