@@ -333,7 +333,8 @@ case "$name" in
       if [ "$EUID" -eq 0 ] && [ "$sudo_user" = commonswarm ]; then
         # A root-private log must stay private across the real uid transition.
         # Append the service user's own log only after its command returns.
-        service_log=${BOX_DRY_RUN_COMMONSWARM_STUB_LOG:?service stub log required}
+        # The fixture owns this fixed support path; it is not a plan-shell input.
+        service_log="${BOX_DRY_RUN_PYTHON_FIXTURE:?box fixture required}/../commonswarm-stub.log"
         : >"$service_log"
         status=0
         /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \

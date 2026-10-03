@@ -2510,7 +2510,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       BOX_DRY_RUN_USERLAND: userland,
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
-      BOX_DRY_RUN_COMMONSWARM_STUB_LOG: commonswarmLog,
       BOX_DRY_RUN_DOCKER_STATE_DIR: dockerState,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
@@ -4354,10 +4353,19 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
   skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
 }, () => {
   const fixture = prepareBoxFixture("s1");
-  const run = (args: string[]) => spawnSync("sudo", ["-u", "commonswarm", "env",
-    "COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net", "COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env",
-    "docker", "compose", "-p", "commonswarm-edge", ...args], { encoding: "utf8", env: fixture.env });
+  const block: Block = {
+    file: RUNBOOK, step: "service-uid-control", marker: "yes", host: "box /bin/bash 5.2 as root", line: 1,
+    source: 'set -euo pipefail\ntest -z "${BOX_DRY_RUN_COMMONSWARM_STUB_LOG+x}"',
+  };
+  const run = (args: string[]) => executeWholeBlock({ ...block,
+    source: `${block.source}\n${["sudo", "-u", "commonswarm", "env",
+      "COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net", "COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env",
+      "docker", "compose", "-p", "commonswarm-edge", ...args].map(shellWord).join(" ")}`,
+  }, fixture);
   try {
+    assert.throws(() => executeWholeBlock(block, fixture, {
+      env: { BOX_DRY_RUN_COMMONSWARM_STUB_LOG: join(fixture.supportRoot!, "commonswarm-stub.log") },
+    }), /block shell received non-allowlisted env BOX_DRY_RUN_COMMONSWARM_STUB_LOG/);
     for (const args of [["config", "--unreviewed"], ["up", "-d", "--unreviewed", "edge-runtime"]]) {
       const rejected = run(args);
       assert.equal(rejected.status, 69, rejected.stderr);
@@ -4375,6 +4383,11 @@ test("controls: box sudo keeps logs private and Docker state visible across the 
     assert.equal(lstatSync(fixture.log).uid, 0);
     assert.equal(lstatSync(fixture.log).mode & 0o777, 0o600);
     assert.equal(lstatSync(fixture.temporary!).mode & 0o777, 0o700);
+    const serviceLog = lstatSync(join(fixture.supportRoot!, "commonswarm-stub.log"));
+    const serviceUid = spawnSync("/usr/bin/id", ["-u", "commonswarm"], { encoding: "utf8" });
+    assert.equal(serviceUid.status, 0, serviceUid.stderr);
+    assert.equal(serviceLog.uid, Number(serviceUid.stdout.trim()));
+    assert.equal(serviceLog.mode & 0o777, 0o600);
     const denied = spawnSync("/usr/bin/sudo", ["-n", "-u", "commonswarm", "/usr/bin/cat", fixture.log], { encoding: "utf8" });
     assert.equal(denied.status, 1);
     assert.equal(denied.stdout, "");
