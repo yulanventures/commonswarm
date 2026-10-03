@@ -10,7 +10,7 @@ static files on the Mac and contains no box image-build step.
 
 **Release:** validated `SITE_RELEASE_SHA`, reviewed and landed on `origin/main`.
 
-**Baseline source:** validated `SITE_BASE_SHA`, reconciled with the box measurement.
+**Baseline source:** validated `EXPECTED_SITE_SHA`, reconciled with the box measurement.
 
 **Baseline release:** `BASELINE_DIR`, measured from `/srv/commonswarm/site/current`.
 **Status:** executable plan; no operation recorded here has run.
@@ -46,7 +46,7 @@ by an absolute path and is read without printing it.
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | 40 lowercase hex; a commit on `origin/main`, descendant of base with a nonempty `site/` delta |
-| `SITE_BASE_SHA` | Anvil, expected full baseline source SHA | 40 lowercase hex; a commit and ancestor of release; must equal the uniquely resolved box-recorded source prefix |
+| `EXPECTED_SITE_SHA` | Anvil, expected full baseline source SHA | 40 lowercase hex; a commit and ancestor of release; must equal the uniquely resolved box-recorded source prefix |
 | `BASELINE_DIR` | Produced by window open, never supplied or trusted | canonical current release directory measured on the box and retained in the protected window file |
 | `SITE_RELEASE_VERSION` | Produced from the exact checkout | root `package.json` version, used for the `/download` version control |
 | `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
@@ -60,7 +60,7 @@ by an absolute path and is read without printing it.
 {"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for this site release."}
 {"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing this generalized plan."}
 {"name":"SITE_RELEASE_SHA","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
-{"name":"SITE_BASE_SHA","format":"sha40","supplier":"Anvil","meaning":"Expected full baseline source commit, checked against the measured source."}
+{"name":"EXPECTED_SITE_SHA","format":"sha40","supplier":"Anvil","meaning":"Expected full baseline source commit, checked against the measured source."}
 {"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
 {"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
 {"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
@@ -68,7 +68,7 @@ by an absolute path and is read without printing it.
 {"name":"OP_SERVICE_ACCOUNT_TOKEN_FILE","format":"abs-file:op-service-account-token","supplier":"Anvil","meaning":"Protected token file used by the noninteractive 1Password service-account workflow."}
 ```
 The gate receipt is parsed as complete lines, following `dcr-archive` in
-`docs/evidence/2026-10-02-dcr-release/RELEASE.md`. It is checked before any box
+`docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md`. It is checked before any box
 contact and copied into the protected evidence set at open. It supplies proof
 of gates already run; this plan never dispatches Actions.
 
@@ -77,7 +77,7 @@ box's resolved `current` link. `deploy/site/deploy.sh` records the source as
 `git rev-parse --short=12 HEAD` inside that release directory name, rather than
 writing a full-SHA file into the static tree. Open measures that recorded prefix
 on the box, resolves it uniquely with Git in the exact checkout, and requires
-the full result to equal `SITE_BASE_SHA`. An absent, malformed, ambiguous or
+the full result to equal `EXPECTED_SITE_SHA`. An absent, malformed, ambiguous or
 mismatching source is STOP. `BASELINE_DIR` is derived from the measurement,
 never accepted from an old receipt or prompt; later pin/deploy/close paths
 compare against that retained measurement. The full source and directory are
@@ -96,6 +96,7 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 
 | Order | Step | Required result / next action |
 |---|---|---|
+| 0 | `site2-plan-inputs` | Required full expected site source validated and exported. |
 | 1 | `site2-00-source-checkout` | Exact landed commit, base ancestry, nonempty site delta and exact-SHA gates; no window yet. |
 | 2 | `site2-01` | Box clock, measured baseline directory/source, protected local and box window files, copied gate receipt. |
 | 3 | `site2-00-a-close-ingest` | Current hosted MCP ON receipt; preserves the historical step name. |
@@ -127,6 +128,17 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 | Either close fails | Retain state; guarded-rm refusal reports exact path/message and leaves it. `site2-07-manifest-close` may resume only the documented no-box-close-receipt state; partial box close needs HezLead reconciliation. |
 
 ```sh
+# step: site2-plan-inputs
+# host: Mac /bin/bash 3.2 before source checkout/open
+set -euo pipefail
+python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+export EXPECTED_SITE_SHA
+```
+
+```sh
 # step: site2-00-source-checkout — Mac mini /bin/bash 3.2; Anvil; create isolated exact-SHA checkout
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
@@ -136,13 +148,16 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
   trap 'printf "FAIL site2-00-source-checkout: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${SITE_RELEASE_REPO:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
-  : "${SITE_BASE_SHA:?named input missing}"
+  : "${EXPECTED_SITE_SHA:?named input missing}"
   : "${GATE_EVIDENCE_FILE:?named input missing}"
   case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+  export EXPECTED_SITE_SHA
   test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
   test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
   git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
@@ -153,9 +168,9 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
   test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   test "$(git -C "$SITE_RELEASE_REPO" remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
   test -z "$(git -C "$SITE_RELEASE_REPO" status --short --untracked-files=all)"
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${SITE_BASE_SHA}^{commit}")" = "$SITE_BASE_SHA"
-  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${EXPECTED_SITE_SHA}^{commit}")" = "$EXPECTED_SITE_SHA"
+  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
@@ -182,15 +197,18 @@ and derives the ID. Nobody types a time or ID.
   trap 'printf "FAIL site2-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${GATE_EVIDENCE_FILE:?named input missing}"
   : "${SITE_RELEASE_REPO:?named input missing}"
-  : "${SITE_BASE_SHA:?named input missing}"
+  : "${EXPECTED_SITE_SHA:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
   : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+  export EXPECTED_SITE_SHA
   for input_path in "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
@@ -213,8 +231,8 @@ PY
   test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
   test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
-  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   SITE_RELEASE_VERSION=$(node -p 'require(process.argv[1]).version' "$SITE_RELEASE_REPO/package.json")
   case "$SITE_RELEASE_VERSION" in ''|*[!0-9A-Za-z.+-]*) exit 1 ;; esac
   if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
@@ -222,7 +240,8 @@ PY
     exit 1
   fi
 
-  box_open=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
+  box_open_file="$SITE_EVIDENCE/site2-01-box-open.txt"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s >"$box_open_file" <<'BOX'
 set -euo pipefail
 set -E
 trap 'printf "FAIL site2-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
@@ -269,7 +288,7 @@ for url, media in (
 print("BOX_EGRESS=PASS user_agent=" + UA)
 PY
 BOX
-  )
+  box_open=$(cat "$box_open_file")
   start=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_START_UTC=//p')
   end=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_END_UTC=//p')
   previous=$(printf '%s\n' "$box_open" | sed -n 's/^PREVIOUS_RELEASE=//p')
@@ -290,7 +309,10 @@ PY
   test "${#source_prefix}" -eq 12
   case "$source_prefix" in *[!0-9a-f]*) exit 1 ;; esac
   measured_source=$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${source_prefix}^{commit}")
-  test "$measured_source" = "$SITE_BASE_SHA"
+  if test "$measured_source" != "$EXPECTED_SITE_SHA"; then
+    printf 'FAIL: EXPECTED_SITE_SHA expected=%s observed=%s; STOP\n' "$EXPECTED_SITE_SHA" "$measured_source" >&2
+    exit 1
+  fi
   BASELINE_DIR="$previous"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$measured_source" "$SITE_RELEASE_SHA"
   SITE_WINDOW_ID=$(printf '%s' "$start" | tr -d ':-')
@@ -307,7 +329,7 @@ PY
     printf 'SITE_EVIDENCE=%q\n' "$SITE_EVIDENCE"
     printf 'SITE_RELEASE_REPO=%q\n' "$SITE_RELEASE_REPO"
     printf 'SITE_RELEASE_SHA=%q\n' "$SITE_RELEASE_SHA"
-    printf 'SITE_BASE_SHA=%q\n' "$SITE_BASE_SHA"
+    printf 'EXPECTED_SITE_SHA=%q\n' "$EXPECTED_SITE_SHA"
     printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
     printf 'OP_SERVICE_ACCOUNT_TOKEN_FILE=%q\n' "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
     printf 'BASELINE_DIR=%q\n' "$BASELINE_DIR"
@@ -456,11 +478,11 @@ positive controls.
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  test "${#EXPECTED_SITE_SHA}" -eq 40
+  case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   git merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
-  git merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  git merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
   git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
   git show "$SITE_RELEASE_SHA:deploy/site/finalize-release.sh" | grep -q guarded_delete
@@ -469,20 +491,20 @@ positive controls.
   git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
     grep -q 'with a valid-delete control'
   umask 077
-  git log --format='%H %s' "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/ \
+  git log --format='%H %s' "$EXPECTED_SITE_SHA..$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-commits.txt"
-  git diff --name-status "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+  git diff --name-status "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-name-status.txt"
-  git diff --numstat "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+  git diff --numstat "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-numstat.txt"
-  commit_count=$(git rev-list --count "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/)
+  commit_count=$(git rev-list --count "$EXPECTED_SITE_SHA..$SITE_RELEASE_SHA" -- site/)
   listed_commit_count=$(wc -l <"$SITE_EVIDENCE/site2-02-commits.txt" | tr -d ' ')
-  changed_count=$(git diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ | wc -l | tr -d ' ')
+  changed_count=$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ | wc -l | tr -d ' ')
   listed_count=$(wc -l <"$SITE_EVIDENCE/site2-02-name-status.txt" | tr -d ' ')
   test "$commit_count" -eq "$listed_commit_count"
   test "$changed_count" -eq "$listed_count"
   {
-    printf 'base=%s\ntarget=%s\n' "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
+    printf 'base=%s\ntarget=%s\n' "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
     printf 'site_commit_count=%s\nsite_changed_file_count=%s\n' "$commit_count" "$changed_count"
     printf '%s\n' 'DELETE_GUARDS=PASS' 'SOURCE_RECONCILIATION=PASS'
   } >"$SITE_EVIDENCE/site2-02-summary.txt"
@@ -1019,8 +1041,8 @@ These are fixed assertions, not window decisions:
   case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  test "${#EXPECTED_SITE_SHA}" -eq 40
+  case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   grep -qFx 'MCP_LIVE=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-00-mcp-live.txt"
   python3 - "$SITE_EVIDENCE/site2-00-gate-evidence.txt" "$SITE_RELEASE_SHA" <<'PY'
 import pathlib,sys
@@ -1064,7 +1086,7 @@ PY
   chmod 0600 "$SITE_EVIDENCE/site2-03-mcp-live.txt"
   {
     printf 'APPROVER=%s\nPLAN_COMMIT=%s\nSHA=%s\nBASE_SHA=%s\nPROMPT_NUMBER=%s\n' \
-      "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$SITE_BASE_SHA" "$SITE_PROMPT_NUMBER"
+      "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$EXPECTED_SITE_SHA" "$SITE_PROMPT_NUMBER"
     printf '%s\n' 'HOSTED_MCP_ON=yes' 'EXACT_SHA_SITE_GATES=PASS'
     printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-or-populated-view-only' 'LIVE_REVOKE_CONTROL=NOT_PROVED_BY_SITE_RELEASE'
     jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json"
@@ -1089,7 +1111,7 @@ PY
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site
   grep -qFx "SHA=$SITE_RELEASE_SHA" "$SITE_EVIDENCE/GO.txt"
-  grep -qFx "BASE_SHA=$SITE_BASE_SHA" "$SITE_EVIDENCE/GO.txt"
+  grep -qFx "BASE_SHA=$EXPECTED_SITE_SHA" "$SITE_EVIDENCE/GO.txt"
   grep -qFx 'All release holds resolved' "$SITE_EVIDENCE/GO.txt"
   box_now=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 date -u '+%Y-%m-%dT%H:%M:%SZ')
   python3 - "$box_now" "$SITE_WINDOW_END_UTC" <<'PY'
@@ -2494,7 +2516,7 @@ pre-pin closure, failure reconciliation, rollback (§6), and manifest close (§7
 remain. No account/workspace control fixture or acceptance assertion was dropped.
 
 The boxed source record is a 12-character prefix in the measured release name;
-this copy uniquely expands it to the full Git commit before matching SITE_BASE_SHA.
+this copy uniquely expands it to the full Git commit before matching EXPECTED_SITE_SHA.
 It does not invent a RELEASE_SHA file absent from the deployment helper. The fixed
 /download version becomes the selected source version so that control stays useful.
 The FULL-CONTROL / REDUCED-CONTROL acceptance table, independent public-byte gate,
@@ -2509,7 +2531,7 @@ new release actions or claiming an unproved close.
 | 2 | `@@ -27,110 +26,181 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Define generic SHA/gate inputs and measured baseline/version outputs; remove historical edge/DARK/prep-seat handoff requirements; document the actual recorded source prefix and add Run order / Failure paths; Validate full SHA commit identities, origin/main ancestry, site delta and exact-SHA receipt in source checkout and window open; Replace fixed target/base SHA tests with validated full lowercase SHA inputs. |
 | 3 | `@@ -139,7 +209,7 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic. |
 | 4 | `@@ -151,7 +221,15 @@` | Measure canonical current directory and its recorded source prefix on the box rather than trust a literal baseline. |
-| 5 | `@@ -192,7 +270,13 @@` | Uniquely resolve the measured prefix to a full commit, require equality to SITE_BASE_SHA and base ancestry, and derive BASELINE_DIR. |
+| 5 | `@@ -192,7 +270,13 @@` | Uniquely resolve the measured prefix to a full commit, require equality to EXPECTED_SITE_SHA and base ancestry, and derive BASELINE_DIR. |
 | 6 | `@@ -210,11 +294,15 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Retain measured baseline/version and generic gate path in window state; archive full-source baseline and protected gate receipt; preserve scp -p/0600. |
 | 7 | `@@ -225,30 +313,52 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Replace the historical handoff-copy step with the same current MCP metadata/unauthenticated POST ON probe used at GO; keep its stable step ID. |
 | 8 | `@@ -288,7 +398,7 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic. |
