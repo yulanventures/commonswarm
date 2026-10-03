@@ -249,8 +249,8 @@ describe("Grok ACP host core (pure fake child)", () => {
   test("env allowlist: keeps PATH/HOME/locale, strips SWARM and credential-like keys", () => {
     const env = sanitizeChildEnv({
       PATH: "/usr/bin",
-      HOME: "/Users/test",
-      GROK_HOME: "/Users/test/.grok-custom",
+      HOME: process.env.HOME,
+      GROK_HOME: join(process.env.HOME!, ".grok-custom"),
       LANG: "en_US.UTF-8",
       SWARM_CLOUD_URL: "https://evil.example",
       SWARM_TOKEN: "nope",
@@ -262,8 +262,8 @@ describe("Grok ACP host core (pure fake child)", () => {
       USER: "test",
     });
     assert.equal(env.PATH, "/usr/bin");
-    assert.equal(env.HOME, "/Users/test");
-    assert.equal(env.GROK_HOME, "/Users/test/.grok-custom");
+    assert.equal(env.HOME, process.env.HOME);
+    assert.equal(env.GROK_HOME, join(process.env.HOME!, ".grok-custom"));
     assert.equal(env.LANG, "en_US.UTF-8");
     assert.equal(env.USER, "test");
     assert.equal(env.SWARM_CLOUD_URL, undefined);
@@ -279,15 +279,15 @@ describe("Grok ACP host core (pure fake child)", () => {
   test("listener env keeps operator home and only pins the updater", () => {
     const env = buildGrokChildEnv({
       PATH: "/usr/bin",
-      HOME: "/Users/test",
-      GROK_HOME: "/Users/test/.grok-custom",
+      HOME: process.env.HOME,
+      GROK_HOME: join(process.env.HOME!, ".grok-custom"),
       SWARM_AGENT_TOKEN: "secret",
       XAI_API_KEY: "secret",
     });
     assert.deepEqual(env, {
       PATH: "/usr/bin",
-      HOME: "/Users/test",
-      GROK_HOME: "/Users/test/.grok-custom",
+      HOME: process.env.HOME,
+      GROK_HOME: join(process.env.HOME!, ".grok-custom"),
       GROK_DISABLE_AUTOUPDATER: "1",
     });
   });
@@ -295,13 +295,13 @@ describe("Grok ACP host core (pure fake child)", () => {
   test("listener env does not install sandbox, hook, or tool kill-switches", () => {
     const env = buildGrokChildEnv({
       PATH: "/usr/bin",
-      HOME: "/Users/test",
-      GROK_HOME: "/Users/test/.grok-custom",
+      HOME: process.env.HOME,
+      GROK_HOME: join(process.env.HOME!, ".grok-custom"),
       SWARM_AGENT_TOKEN: "secret",
       XAI_API_KEY: "secret",
     });
-    assert.equal(env.HOME, "/Users/test");
-    assert.equal(env.GROK_HOME, "/Users/test/.grok-custom");
+    assert.equal(env.HOME, process.env.HOME);
+    assert.equal(env.GROK_HOME, join(process.env.HOME!, ".grok-custom"));
     for (const key of [
       "GROK_SANDBOX",
       "CMUX_GROK_HOOKS_DISABLED",

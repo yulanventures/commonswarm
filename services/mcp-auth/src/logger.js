@@ -21,7 +21,7 @@ export function logProviderError(logger, event, requestId, error) {
     if (frames.length === 5) break;
   }
   logger.info({ event, request_id: requestId, error_name: identifier(error?.name) ?? "Error",
-    error_code: identifier(error?.code) ?? null, stack_frames: frames });
+    error_code: identifier(error?.code) ?? identifier(error?.error) ?? null, stack_frames: frames });
 }
 
 export function subscribeProviderErrors(provider, logger) {

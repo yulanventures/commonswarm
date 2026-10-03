@@ -191,7 +191,7 @@ describe("OpenCode ACP host core (pure)", () => {
     const env = buildOpenCodeChildEnv(
       {
         PATH: "/usr/bin",
-        HOME: "/Users/real",
+        HOME: process.env.HOME,
         SWARM_CLOUD_ANON_KEY: "secret-anon",
         OPENAI_API_KEY: "sk-test",
         TOKEN: "nope",

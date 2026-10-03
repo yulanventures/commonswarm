@@ -1,15 +1,22 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   ADMIN_RESOURCE, ADMIN_REGISTRY_VERSION, ADMIN_ISSUANCE_CEILINGS, ADMIN_RENEWAL_CEILINGS,
   type AdminManifest, type AdminDecisionContext, type AdminAccountState, type AdminCommand,
   decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
+  adminAvailableCapabilities, adminAvailabilityDigest, canonicalAdminJson,
 } from '../../src/protocol/index.js';
+
+export function adminManifestDigest(manifest: unknown): string {
+  return createHash('sha256').update(canonicalAdminJson(manifest)).digest('hex');
+}
 
 export function adminManifest(now: number, workspaceIds: string[] = []): AdminManifest {
   return {
     admin_identity_id: randomUUID(), connection_id: randomUUID(), client_id: 'lane-b-runtime',
     resource: ADMIN_RESOURCE, mode: 'granular', registry_version: ADMIN_REGISTRY_VERSION,
     scope_names: ['admin:read'], workspace_selector: 'selected', workspace_ids: workspaceIds,
+    capability_names: adminAvailableCapabilities(['admin:read']),
+    availability_digest: adminAvailabilityDigest(ADMIN_REGISTRY_VERSION)!,
     created_workspace_policy: { scope_names: [] },
     target_rules: { seat_ids: [], own_seats: false, grant_created_seats: false, recipient_user_ids: [], recipient_connection_ids: [], transports: [] },
     worker_scope_ceiling: [], role_ceiling: 'member',
@@ -39,7 +46,7 @@ export function adminCoreFixture(workspaceIds: string[] = []) {
   };
   const prepare = run({ kind: 'prepare_admin_consent', consent: {
     consent_receipt_id: receipt, owner_user_id: owner, session_binding: session,
-    manifest, manifest_digest: 'c'.repeat(64), full_account_selected: false,
+    manifest: structuredClone(manifest), manifest_digest: adminManifestDigest(manifest), full_account_selected: false,
     expires_at: now + 300000, consumed_at: null,
   } });
   return { now, owner, grantId, receipt, manifest, session, ctx, run, prepare, state: () => state };

@@ -346,7 +346,9 @@ test("2. CIMD uses injected fetch and rejects unsafe or invalid metadata", async
   }
 });
 
-test("2b. CIMD cache has bounded duration, expires, and revalidates through the injected fetch", async () => {
+test("2b. CIMD cache has bounded duration, expires, and revalidates through the injected fetch", async (t) => {
+  // oidc-provider's CIMD cache reads Date.now(); keep it fixed between requests.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   assert.deepEqual(CIMD_CACHE_DURATION_SECONDS, { min: 30, max: 300 });
   const clientId = "https://cache-expiry.example/oauth-client.json";
   let fetches = 0;
@@ -360,7 +362,7 @@ test("2b. CIMD cache has bounded duration, expires, and revalidates through the 
     const cached = await server.request(authorizationUrl({ clientId, state: "cache-two" }));
     assert.equal(cached.status, 303);
     assert.equal(fetches, 1);
-    await new Promise((resolve) => setTimeout(resolve, 35));
+    t.mock.timers.tick(21);
     const revalidated = await server.request(authorizationUrl({ clientId, state: "cache-three" }));
     assert.equal(revalidated.status, 303);
     assert.equal(fetches, 2);
@@ -439,6 +441,39 @@ test("4. RFC 8707 binds authorization and token requests to the one MCP resource
     assert.equal(duplicateAtToken.response.status, 400);
     assert.equal(duplicateAtToken.body.error, "invalid_target");
   }
+});
+
+test("m1-admin-interaction-reserve: live AS still refuses admin authorization/code/refresh with ordinary MCP controls", async () => {
+  const clientId = "https://admin-reserve.example/oauth-client.json";
+  sharedDocuments.set(clientId, clientMetadata(clientId));
+  const adminResource = "https://api.commonswarm.com/admin";
+  const callback = await followAuthorization(sharedServer, authorizationUrl({ clientId, resource: adminResource }));
+  assert.equal(callback.searchParams.get("error"), "invalid_target");
+
+  const mcpCallback = await followAuthorization(sharedServer, authorizationUrl({ clientId }));
+  const deniedCode = await tokenRequest(sharedServer, {
+    client_id: clientId, code: mcpCallback.searchParams.get("code"), code_verifier: CODE_VERIFIER,
+    grant_type: "authorization_code", redirect_uri: DEFAULT_REDIRECT_URI, resource: adminResource,
+  });
+  assert.equal(deniedCode.response.status, 400);
+  assert.equal(deniedCode.body.error, "invalid_target");
+
+  const issued = await authorizeAndExchange(sharedServer, { clientId });
+  const deniedRefresh = await tokenRequest(sharedServer, {
+    client_id: clientId, refresh_token: issued.tokens.refresh_token,
+    grant_type: "refresh_token", resource: adminResource,
+  });
+  assert.equal(deniedRefresh.response.status, 400);
+  assert.equal(deniedRefresh.body.error, "invalid_target");
+  // A refused exchange may revoke its family; use an independent live MCP
+  // family for the ordinary refresh control, preserving provider behavior.
+  const control = await authorizeAndExchange(sharedServer, { clientId });
+  const refreshed = await tokenRequest(sharedServer, {
+    client_id: clientId, refresh_token: control.tokens.refresh_token,
+    grant_type: "refresh_token", resource: RESOURCE,
+  });
+  assert.equal(refreshed.response.status, 200);
+  assert.ok(refreshed.body.scope.split(" ").includes("mcp"));
 });
 
 test("5. RFC 9207 adds the configured issuer to the authorization response", async () => {

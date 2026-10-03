@@ -2,6 +2,7 @@
 // implementation of grant/consent writes and no public management HTTP route.
 import { build } from "esbuild";
 import { readFile } from "node:fs/promises";
+import "./build-admin-policy.mjs";
 
 await build({
   absWorkingDir: new URL("../../", import.meta.url).pathname,

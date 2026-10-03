@@ -141,7 +141,7 @@ test("Claude Code version parser cannot be confused with the bridge version", ()
 test("Claude child env preserves HOME but strips inherited Claude and credential state", () => {
   const env = buildClaudeChildEnv({
     PATH: "/usr/bin",
-    HOME: "/Users/test",
+    HOME: process.env.HOME,
     USER: "test",
     LANG: "en_US.UTF-8",
     CLAUDE_CODE_ENTRYPOINT: "claude",
@@ -153,7 +153,7 @@ test("Claude child env preserves HOME but strips inherited Claude and credential
   });
   assert.deepEqual(env, {
     PATH: "/usr/bin",
-    HOME: "/Users/test",
+    HOME: process.env.HOME,
     USER: "test",
     LANG: "en_US.UTF-8",
   });

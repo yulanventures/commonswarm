@@ -33,6 +33,11 @@ import { createTemporary as mkdtempSync, removeTemporary, withTemporarySetup } f
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
 const PREP = "docs/evidence/2026-09-29-hm37-prep/BOX-WINDOW.md";
+const PLANNED_PREP_ROOT = (() => {
+  const root = /^  PREP_ROOT="([^"]+)"$/m.exec(readFileSync(PREP, "utf8"))?.[1];
+  assert.ok(root && isAbsolute(root), "prep plan must declare an absolute PREP_ROOT");
+  return root;
+})();
 const HM37 = "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md";
 const HM37B = "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md";
 const SITE = "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md";
@@ -1302,7 +1307,7 @@ function sbplPath(path: string): string {
 }
 
 function operatorHomes(): string[] {
-  return [...new Set([userInfo().homedir, "/Users/yulanbot"])];
+  return [...new Set([userInfo().homedir, dirname(dirname(PLANNED_PREP_ROOT))])];
 }
 
 function canonicalPath(path: string): string {
@@ -3651,7 +3656,7 @@ function executeWholeBlock(
     };
   }
   let body = materialize(block);
-  if (fixture.temporary) body = body.replaceAll("/Users/yulanbot/anvil-work/hm37-prep", join(fixture.temporary, "hm37-prep"));
+  if (fixture.temporary) body = body.replaceAll(PLANNED_PREP_ROOT, join(fixture.temporary, "hm37-prep"));
   if (fixture.macTmp) body = mapMacTmp(body, fixture.macTmp);
   const script = [
     "set -E", `source ${JSON.stringify(fixture.prelude)}`,
@@ -6104,11 +6109,18 @@ test("controls: a Mac block that starts an absolute-path application is denied a
     // regresses, this harmless stand-in cannot start an installed browser or read a real profile.
     const fakeApplication = join(fixture.home, "Applications", "ChromeGuardFake.app", "chrome");
     writeMode(fakeApplication, "#!/bin/sh\nprintf 'CHROME_GUARD_FAKE_RAN\\n'\n", 0o755);
-    const head = preflight.source.slice(0, launch)
-      .replace(chromeLine, `  chrome='${fakeApplication}'`)
-      // Keep the tool-source check separate from this kernel denial control;
-      // this fixture-owned executable deliberately lives under Applications.
-      .replace('  case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac\n', '');
+    // Each replacement must change the merged plan text; none may silently miss.
+    const replaceOnce = (text: string, from: string | RegExp, to: string): string => {
+      const changed = text.replace(from, () => to);
+      assert.notEqual(changed, text, `control replacement target is absent: ${String(from)}`);
+      return changed;
+    };
+    let head = preflight.source.slice(0, launch);
+    head = replaceOnce(head, /^  profile=.*$/m, '  profile="$SITE_EVIDENCE/control-profile"; mkdir -p "$profile"');
+    head = replaceOnce(head, chromeLine, `  chrome='${fakeApplication}'`);
+    // Keep the tool-source check separate from this kernel denial control;
+    // this fixture-owned executable deliberately lives under Applications.
+    head = replaceOnce(head, '  case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac\n', '');
     const versionCall = '  "$chrome" --version\n)\n';
     const executableCheck = '  test -x "$chrome"\n';
     assert.ok(head.includes(executableCheck), "the plan checks that the Chrome binary is executable");
@@ -6978,6 +6990,10 @@ test("recorded command fixtures cite builders or measured browser controls", () 
     assert.ok(typeof fixture.output === "object" && fixture.output !== null);
     assert.equal(Object.hasOwn(fixture.output as object, "step_result"), false);
   }
+  const profile = fixtures.browser_profile!.output as { user_data_dir: { evidence: string; path: string } };
+  const profilePath = evidenceValue(profile.user_data_dir);
+  assert.equal(typeof profilePath, "string");
+  assert.ok(isAbsolute(profilePath as string), "recorded browser profile must resolve to an absolute path");
 });
 
 // A failing ssh child reports its own last failing command and the line of the box script it was on. The report

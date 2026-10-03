@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { withClientBuild } from "./client-build.js";
 import { commandEndpoint, readEndpoint, CLIENT_PROTOCOL_VERSION, type CloudTarget } from "./config.js";
 import { ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage, type AdminReadRequest, type AdminRecoveryPage } from "./admin-delegations-contract.js";
+export { readAdminIssuanceGate } from "./admin-delegations-gate.js";
 
 export class AdminRecoveryError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "AdminRecoveryError"; }

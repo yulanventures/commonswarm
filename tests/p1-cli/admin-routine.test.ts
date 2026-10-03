@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { adminCoreFixture } from "../support/admin-fixture.js";
+import { adminCoreFixture } from "./admin-issuance-fixture.test.js";
 // @ts-expect-error TS5097: exercise the Deno response boundary without a service.
 import { adminConnectionResult } from "../../supabase/functions/command/admin-connection-result.ts";
 import {
   ADMIN_RESOURCE,
-  ADMIN_SCOPE_NAMES,
+  adminConsentOptions,
+  adminAvailableCapabilities,
   type AdminAccountState,
   type AdminRoutineCommand,
   type AdminRoutineContext,
@@ -19,7 +20,8 @@ import {
 
 function fixture() {
   const workspaceId = randomUUID(), f = adminCoreFixture([workspaceId]);
-  f.manifest.scope_names = [...ADMIN_SCOPE_NAMES];
+  f.manifest.scope_names = adminConsentOptions().filter(o => o.available).map(o => o.scope);
+  f.manifest.capability_names = adminAvailableCapabilities(f.manifest.scope_names);
   f.manifest.created_workspace_policy.scope_names = ["seats:create"];
   f.manifest.target_rules = {
     seat_ids: [],
@@ -31,6 +33,7 @@ function fixture() {
   };
   f.manifest.worker_scope_ceiling = ["post_signal", "create"];
   f.manifest.renewal_limits.grant_kinds = ["timeboxed", "standing"];
+  assert.equal(f.prepare().ok, true);
   assert.equal(
     f.run({
       kind: "grant_admin_delegation",

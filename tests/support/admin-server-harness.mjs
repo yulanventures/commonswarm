@@ -1,3 +1,4 @@
+import { oauthFixture } from './admin-edge-oauth-fixture.mjs';
 // Real Deno edge adapters. Local credentials stay in memory or the protected
 // task file; no credentials, SQL errors, or response bodies go to stdout.
 const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
@@ -16,21 +17,16 @@ const publicJwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), 
 const upstreamFetch = globalThis.fetch;
 globalThis.fetch = async (...args) => {
   const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-  if (url === 'https://mcp.commonswarm.com/jwks') return new Response(JSON.stringify({ keys: [publicJwk] }));
+  if (url === 'https://mcp.commonswarm.com/jwks') {
+    const response = new Response(JSON.stringify({ keys: [publicJwk, {...publicJwk,kid:"independent-key"}] }));
+    Object.defineProperty(response, 'url', { value: url });
+    return response;
+  }
   return await upstreamFetch(...args);
 };
 const base64url = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 const encoded = value => base64url(new TextEncoder().encode(JSON.stringify(value)));
-async function runtimeProof(grant, overrides = {}, key = signing.privateKey) {
-  const now = Math.floor(Date.now() / 1000);
-  const head = encoded({ alg: 'ES256', typ: 'at+jwt', kid: publicJwk.kid });
-  const body = encoded({ iss: 'https://mcp.commonswarm.com', aud: 'https://api.commonswarm.com/admin',
-    sub: config.owner, grant_id: grant.grantId, connection_id: grant.manifest.connection_id,
-    client_id: grant.manifest.client_id, iat: now, exp: now + 300, ...overrides });
-  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(`${head}.${body}`));
-  return `${head}.${body}.${base64url(new Uint8Array(signature))}`;
-}
-const { db, handleRequest, handleAdminRuntimeCommand } = await import('../../supabase/functions/command/index.ts');
+const { db, handleRequest, handleAdminMcpRequest } = await import('../../supabase/functions/command/index.ts');
 const { adminTransaction, adminDigest, recordAdminFailure } = await import('../../supabase/functions/command/admin-delegation.ts');
 const policy = await import('../../supabase/functions/_shared/protocol.js');
 const { handleRequest: readRequest } = await import('../../supabase/functions/read/index.ts');
@@ -38,8 +34,9 @@ const id = () => crypto.randomUUID();
 let stage = 'initialization';
 function check(condition, label) { stage = label; if (!condition) throw new Error('assertion'); }
 const wire = (command, command_id = id()) => ({ command_id, stream: { kind: 'account' }, resource: policy.ADMIN_RESOURCE, command });
+const oauthTokens = new Map();
 async function http(input, token = config.jwt, origin = 'https://commonswarm.com') {
-  const response = await handleRequest(new Request('http://127.0.0.1/functions/v1/command', {
+  const response = await handleRequest(oauthTokens.has(token) ? await oauthTokens.get(token).request(input) : new Request('http://127.0.0.1/functions/v1/command', {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(input),
   }));
   return { status: response.status, body: await response.json() };
@@ -52,10 +49,12 @@ async function transact(input, auth) {
 }
 function manifest(full = false) {
   const now = Date.now();
+  const scope_names = full ? policy.adminConsentOptions().filter(option => option.available).map(option => option.scope) : ['admin:read'];
   return {
-    connection_id: id(), client_id: 'lane-b-runtime', resource: policy.ADMIN_RESOURCE,
+    connection_id: id(), client_id: `https://client.example/${id()}`, resource: policy.ADMIN_RESOURCE,
     mode: full ? 'full_account' : 'granular', registry_version: policy.ADMIN_REGISTRY_VERSION,
-    scope_names: full ? [...policy.ADMIN_SCOPE_NAMES] : ['admin:read'],
+    scope_names, capability_names: policy.adminAvailableCapabilities(scope_names),
+    availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
     workspace_selector: full ? 'owned_and_selected' : 'selected', workspace_ids: [config.workspace],
     created_workspace_policy: { scope_names: [] },
     target_rules: { seat_ids: [], own_seats: false, grant_created_seats: false, recipient_user_ids: [], recipient_connection_ids: [], transports: [] },
@@ -73,13 +72,14 @@ async function activate(full = false) {
   check(granted.status === 200, 'human activation');
   return { grantId, input, manifest: prepared.body.manifest, receipt: prepared.body.consent_receipt_id };
 }
-async function issue(grant) {
-  let delivery;
-  const credential = await runtimeProof(grant);
-  const result = await handleAdminRuntimeCommand(wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() }), credential, async value => { delivery = value; });
-  check(result.status === 200 && delivery, 'private credential delivery');
-  check(!JSON.stringify(result).includes(delivery.access_credential) && !JSON.stringify(result).includes(delivery.refresh_credential), 'no replayable credentials');
-  return { credential, delivery };
+async function issue(grant, kid = publicJwk.kid) {
+  const oauth = await oauthFixture(db, grant.grantId, signing, kid);
+  oauthTokens.set(oauth.access, oauth);
+  return oauth;
+}
+async function mcp(oauth, method, params) {
+  const response = await handleAdminMcpRequest(await oauth.request({jsonrpc:'2.0',id:1,method,params},'admin_mcp'));
+  return {status:response.status, body:await response.json()};
 }
 const readWire = grant => wire({ kind: 'admin_read_metadata', grant_id: grant.grantId, resource_kind: 'grant', workspace_id: null });
 async function count(owner = config.owner) {
@@ -90,42 +90,42 @@ try {
   const scenario = Deno.args[1];
   const grant = await activate();
   if (scenario === 'runtime') {
-    const issueInput = wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() });
-    let deliveries = 0;
-    const deliver = async () => { deliveries++; };
-    const forged = { connection_id: grant.manifest.connection_id, client_id: grant.manifest.client_id, resource: policy.ADMIN_RESOURCE };
+    const issueInput = wire({ kind:'issue_admin_credential',grant_id:grant.grantId,credential_lineage_id:id() });
     const before = await count();
-    check((await handleAdminRuntimeCommand(issueInput, forged, deliver)).status === 401, 'caller identity is not runtime proof');
-    const direct = await transact(issueInput, { kind: 'runtime', identity: forged });
-    check(direct.result.status === 401, 'direct transaction cannot bypass runtime proof');
-    const attacker = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-    const badProofs = [
-      await runtimeProof(grant, {}, attacker.privateKey),
-      await runtimeProof(grant, { aud: 'https://mcp.commonswarm.com/mcp' }),
-      await runtimeProof(grant, { exp: Math.floor(Date.now() / 1000) - 1 }),
-      await runtimeProof(grant, { sub: id() }),
-      await runtimeProof(grant, { connection_id: id() }),
-      await runtimeProof(grant, { client_id: 'different-client' }),
-      await runtimeProof(grant, { grant_id: id() }),
-    ];
-    for (const proof of badProofs) check((await handleAdminRuntimeCommand(issueInput, proof, deliver)).status >= 400, 'unverified or foreign runtime refused');
-    check(deliveries === 0 && await count() === before, 'runtime proof denials deliver nothing and cannot charge victim');
-    // Positive control exercises the same command, adapter, database, and delivery.
-    const runtime = await issue(grant);
-    const rotate = wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] });
-    check((await handleAdminRuntimeCommand(rotate, forged, deliver, runtime.delivery.refresh_credential)).status === 401, 'refresh possession cannot replace runtime proof');
-    check((await handleAdminRuntimeCommand(rotate, await runtimeProof(grant, { connection_id: id() }), deliver, runtime.delivery.refresh_credential)).status === 403, 'refresh bound to signed connection');
-    check((await handleAdminRuntimeCommand(rotate, runtime.credential, deliver, runtime.delivery.refresh_credential)).status === 200 && deliveries === 1, 'authenticated rotation control');
+    for (const kind of ['runtime','access','system']) {
+      check((await transact(issueInput, {kind,credential:'retired',identity:{owner_user_id:config.owner},owner_user_id:config.owner})).result.status === 401,'retired direct authentication refused');
+    }
+    const fake = await transact(readWire(grant), {kind:'oauth',admission:{token:{owner_user_id:config.owner,admin_grant_id:grant.grantId},digest:new Uint8Array(32)}});
+    check(fake.result.status === 401 && await count() === before,'forged identity cannot bind victim audit');
+    for (const old of ['swm_adm_'+ 'a'.repeat(43),'swm_adr_'+ 'b'.repeat(43)]) check((await http(readWire(grant),old)).status === 401,'legacy public credentials refused');
+    const commandModule = await import('../../supabase/functions/command/index.ts');
+    check(!('handleAdminRuntimeCommand' in commandModule) && !('handleAdminWorkerRuntimeCommand' in commandModule),'retired callbacks absent');
+    const oauth = await issue(grant);
+    const untrusted=(await import('../../supabase/functions/_shared/admin-oauth-db.ts')).createAdminRequestVerifier(db);
+    const forgedFromImport=await untrusted.verify(await oauth.request(readWire(grant)),'admin_command');
+    check((await transact(readWire(grant),{kind:'oauth',admission:forgedFromImport})).result.status===401,'caller-instantiated verifier cannot confer authority through imports');
+    check((await http(issueInput,oauth.access)).status === 403,'OAuth token cannot mint opaque admin access');
+    check((await http(readWire(grant),oauth.access)).status === 200,'actual OAuth admin positive control');
   } else if (scenario === 'consent') {
     const defaults = manifest();
     delete defaults.mode; delete defaults.workspace_selector; delete defaults.scope_names;
     const defaulted = await http(wire({ kind: 'prepare_admin_consent', manifest: defaults, full_account_selected: false }));
     check(defaulted.status === 200 && defaulted.body.manifest.mode === 'granular' && defaulted.body.manifest.scope_names.join(',') === 'admin:read', 'granular read-only default');
     const m = manifest(true);
+    const legacy = { ...m, registry_version: 1, scope_names: [...policy.ADMIN_SCOPE_NAMES] };
+    delete legacy.capability_names; delete legacy.availability_digest;
+    const legacyResult = await http(wire({ kind: 'prepare_admin_consent', manifest: legacy, full_account_selected: true }));
+    check(legacyResult.status === 400 && legacyResult.body.error === 'invalid_request', 'v1 consent refused without conversion');
+    const unavailable = { ...m, scope_names: [...policy.ADMIN_SCOPE_NAMES] };
+    const unavailableResult = await http(wire({ kind: 'prepare_admin_consent', manifest: unavailable, full_account_selected: true }));
+    check(unavailableResult.status === 400 && unavailableResult.body.error === 'invalid_request', 'full-account unavailable scopes refused');
     check((await http(wire({ kind: 'prepare_admin_consent', manifest: m, full_account_selected: false }))).status === 403, 'full-account selection required');
     check((await http(wire({ kind: 'prepare_admin_consent', manifest: m, full_account_selected: true }), config.jwt, '')).status === 403, 'CSRF origin required');
     const full = await activate(true);
-    check(full.manifest.scope_names.length === policy.ADMIN_SCOPE_NAMES.length, 'pinned full registry');
+    const availableScopes = policy.adminConsentOptions().filter(option => option.available).map(option => option.scope);
+    check(full.manifest.scope_names.length === availableScopes.length && availableScopes.every(scope => full.manifest.scope_names.includes(scope)) &&
+      JSON.stringify(full.manifest.capability_names) === JSON.stringify(policy.adminAvailableCapabilities(availableScopes)) &&
+      full.manifest.availability_digest === policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION), 'pinned full available registry and exact capabilities');
     check((await http(wire({ ...grant.input.command, grant_id: id() }))).status === 403, 'consent single use');
     const binding = await adminDigest({ wrong: 'session' });
     const prepared = await http(wire({ kind: 'prepare_admin_consent', manifest: manifest(), full_account_selected: false }));
@@ -229,7 +229,17 @@ try {
     const rollback = await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000001-rollback.sql');
     const migration = await Deno.readTextFile('supabase/migrations/20261001000001_admin_delegation.sql');
     let control = false;
+    const rollbackDrill = new Error('rollback drill');
+    stage = 'rollback round trip';
     await db.begin(async tx => {
+      // Exercise the inverse against empty copies of the real DDL. The original
+      // versioned grants/history remain intact and the transaction restores names.
+      await tx.unsafe(config.rollbackSchema);
+      // Additive OAuth schema depends on these predecessor tables. Its reserves
+      // refuse if artifacts exist; this isolated legacy drill has none.
+      for (const version of ['20261003000004','20261003000003','20261003000002','20261003000001']) {
+        await tx.unsafe(await Deno.readTextFile(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
+      }
       await tx.unsafe(await Deno.readTextFile('supabase/admin-delegation-reserve/20261001000005-rollback.sql'));
       const [historyAbsent] = await tx`SELECT to_regprocedure('swarm.admin_routine_workspace_history(uuid,uuid,uuid)') AS fn`;
       check(historyAbsent.fn === null, 'rollback removes routine history function');
@@ -250,136 +260,176 @@ try {
       check(readRestored.fn !== null, 'migration restores human recovery function');
       const [restored] = await tx`SELECT to_regclass('swarm.admin_grants') AS relation`;
       check(restored.relation !== null, 'migration restores grants');
+      for (const name of ['20261003000001_admin_oauth_bindings.sql','20261003000002_admin_oauth_policy.sql','20261003000003_admin_oauth_cutover.sql','20261003000004_migration_checksums.sql']) {
+        await tx.unsafe(await Deno.readTextFile(`supabase/migrations/${name}`));
+      }
       control = true;
-      throw new Error('rollback drill');
-    }).catch(() => {});
+      throw rollbackDrill;
+    }).catch(error => { if (error !== rollbackDrill) throw error; });
     check(control, 'rollback round trip');
     await db`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid AND user_id = ${config.owner}::uuid`;
     check((await http(wire({ kind: 'revoke_admin_delegation', grant_id: grant.grantId, reason_code: 'human_revoked' }))).status === 200, 'human recovery without workspace membership');
   } else {
-    const runtime = await issue(grant), token = runtime.delivery.access_credential;
-    const read = readWire(grant);
-    check((await http(read, token)).status === 200, 'admin read positive control');
-    if (scenario === 'expiry') {
-      const short = { ...grant.manifest, expires_at: Date.now() + 2000 };
-      const consent = await http(wire({ kind: 'prepare_admin_consent', manifest: short, full_account_selected: false }));
-      check(consent.status === 200, 'narrowing preparation');
-      check((await http(wire({ kind: 'narrow_admin_delegation', grant_id: grant.grantId, manifest: consent.body.manifest, manifest_digest: consent.body.manifest_digest, consent_receipt_id: consent.body.consent_receipt_id }))).status === 200, 'human deadline narrowing');
-      check((await http(readWire(grant), token)).status === 200, 'narrowed positive read');
-      await new Promise(resolve => setTimeout(resolve, 2200));
-      check((await http(readWire(grant), token)).status === 403, 'expiry enforced before lazy event');
-      const refresh = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] }), runtime.credential, async () => {}, runtime.delivery.refresh_credential);
-      check(refresh.status === 403, 'expired refresh refused');
-      check((await http(wire({ kind: 'revoke_admin_delegation', grant_id: grant.grantId, reason_code: 'human_revoked' }))).status === 200, 'human recovery after expiry');
-    } else if (scenario === 'failure') {
-      const input = readWire(grant), authentication = { kind: 'access', credential: token };
-      const before = await count();
-      let reached = false;
-      await db.begin(async tx => {
-        await tx`SELECT set_config('role', 'swarm_command', true), set_config('search_path', 'swarm, pg_catalog', true)`;
-        const outcome = await adminTransaction(tx, input, authentication);
-        check(outcome.result.status === 200, 'rollback positive command');
-        reached = true;
-        throw new Error('rollback');
-      }).catch(() => {});
-      check(reached && await count() === before, 'rollback retains no success event');
-      await db.begin(async tx => {
-        await tx`SELECT set_config('role', 'swarm_command', true), set_config('search_path', 'swarm, pg_catalog', true)`;
-        await recordAdminFailure(tx, input, authentication);
-      });
-      check(await count() === before + 1, 'failure card committed separately');
-      const [failure] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid ORDER BY seq DESC LIMIT 1`;
-      check(failure.event.type === 'AdminActionRecorded' && failure.event.payload.outcome === 'failed' && failure.event.payload.related_event_ids.length === 0, 'failure contains no success reference');
-      check((await http(input, token)).status === 500 && await count() === before + 1, 'failure retry is recorded outcome');
-    } else if (scenario === 'boundary') {
-      let gotrue = 0;
-      const upstream = globalThis.fetch;
-      globalThis.fetch = async (...args) => {
-        const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-        if (url.includes('/auth/v1/')) { gotrue++; throw new Error('admin reached human auth'); }
-        return await upstream(...args);
-      };
-      check((await http(readWire(grant), token)).status === 200 && gotrue === 0, 'admin never uses GoTrue');
-      globalThis.fetch = upstream;
-      const beforeWrongResource = await count();
-      const wrongResource = await http({ ...readWire(grant), resource: 'https://mcp.commonswarm.com/mcp' }, token);
-      check(wrongResource.status === 400 && wrongResource.body.error === 'invalid_request' && !Object.hasOwn(wrongResource.body, 'grant'), 'wrong resource refused without metadata');
-      const [resourceAudit] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid ORDER BY seq DESC LIMIT 1`;
-      check(await count() === beforeWrongResource + 1 && resourceAudit.event.type === 'AdminActionRecorded' && resourceAudit.event.payload.outcome === 'refused' && resourceAudit.event.payload.reason_code === 'invalid_request' && resourceAudit.event.payload.related_event_ids.length === 0, 'wrong resource produces only refusal audit');
-      check((await http(wire({ ...read.command, workspace_id: id() }), token)).status === 403, 'foreign workspace refused');
-      check((await http(wire({ ...read.command, grant_id: id() }), token)).status === 403, 'foreign grant refused');
-      check((await http({ ...readWire(grant), command_id: '' }, token)).status === 400, 'invalid command ID audited');
-      check((await http(wire({ kind: 'issue_admin_credential', grant_id: grant.grantId, credential_lineage_id: id() }), token)).status === 403, 'admin cannot issue its own credentials');
-      const beforeUnknown = await count();
-      check((await http(readWire(grant), 'swm_adm_' + 'a'.repeat(43))).status === 401, 'unknown credential refused');
-      check(await count() === beforeUnknown, 'unknown credential never charges victim audit');
-      check((await http(wire({ kind: 'admin_create_workspace', name: 'forbidden' }), token)).status === 403, 'operations deferred to lane C');
-      check((await http(wire({ ...grant.input.command, grant_id: id() }), token)).status === 403, 'admin cannot grant');
-      const ordinary = await readRequest(new Request('http://127.0.0.1/functions/v1/read?view=members&workspace_id=' + config.workspace, { headers: { Authorization: `Bearer ${token}` } }));
-      check(ordinary.status === 403, 'worker read endpoint rejects admin');
-      check((await http(readWire(grant), runtime.delivery.refresh_credential)).status === 403, 'refresh cannot be public bearer');
-      check((await http(readWire(grant), 'swm_agt_' + 'a'.repeat(43))).status === 403, 'worker cannot use account endpoint');
-      const widened = await handleAdminRuntimeCommand(wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read', 'seats:create'] }), runtime.credential, async () => {}, runtime.delivery.refresh_credential);
-      check(widened.status === 403, 'refresh cannot widen');
-      await db`UPDATE swarm.memberships SET revoked_at = statement_timestamp() WHERE workspace_id = ${config.workspace}::uuid AND user_id = ${config.owner}::uuid`;
-      check((await http(wire({ ...read.command, workspace_id: config.workspace }), token)).status === 403, 'current membership checked');
-      check((await http(readWire(grant), token)).status === 200, 'own grant status survives membership loss');
+    const oauth = await issue(grant), token = oauth.access, read = readWire(grant);
+    check((await http(read,token)).status === 200,'admin read positive control');
+    if (scenario === 'boundary') {
+      let gotrue = 0; const original = globalThis.fetch;
+      globalThis.fetch = async (...args) => { if (String(args[0]).includes('/auth/v1/')) { gotrue++; throw new Error(); } return original(...args); };
+      check((await http(readWire(grant),token)).status === 200 && gotrue === 0,'delegated actor never becomes a human');
+      globalThis.fetch = original;
+      check((await http({...readWire(grant),resource:'https://mcp.commonswarm.com/mcp'},token)).status === 400,'foreign resource refuses');
+      check((await http(wire({...read.command,grant_id:id()}),token)).status === 403,'foreign grant refuses');
+      check((await http(wire({...read.command,workspace_id:id()}),token)).status === 403,'foreign workspace refuses');
+      for (const scheme of ['Bearer','DPoP']) {
+        const req = await oauth.request(readWire(grant)); req.headers.set('authorization',`${scheme} ${token}`);
+        if (scheme==='Bearer') check((await handleRequest(req)).status===401,'Bearer admin refused');
+        const ordinary = await readRequest(new Request('http://127.0.0.1/functions/v1/read?view=members&workspace_id='+config.workspace,{headers:{Authorization:`${scheme} ${token}`}}));
+        check(ordinary.status===403,'ordinary read refuses admin under both schemes');
+      }
+      check((await http(readWire(grant),'swm_agt_'+ 'a'.repeat(43))).status===403,'worker cannot use human account branch');
     } else if (scenario === 'lifecycle') {
-      const rotate = wire({ kind: 'rotate_admin_credential', grant_id: grant.grantId, credential_lineage_id: runtime.delivery.credential_lineage_id, generation: 0, scope_names: ['admin:read'] });
-      let successor;
-      const rotated = await handleAdminRuntimeCommand(rotate, runtime.credential, async value => { successor = value; }, runtime.delivery.refresh_credential);
-      check(rotated.status === 200 && successor.generation === 1 && successor.refresh_deadline === runtime.delivery.refresh_deadline, 'atomic rotation retains deadline');
-      const beforeRetry = await count();
-      let deliveredAgain = false;
-      check((await handleAdminRuntimeCommand(rotate, runtime.credential, async () => { deliveredAgain = true; }, runtime.delivery.refresh_credential)).status === 200 && !deliveredAgain, 'rotation retry has no secret delivery');
-      check(await count() === beforeRetry, 'rotation retry has no extra events');
-      const responses = await Promise.all([
-        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.credential, async () => {}, successor.refresh_credential),
-        handleAdminRuntimeCommand(wire({ ...rotate.command, generation: 1 }), runtime.credential, async () => {}, successor.refresh_credential),
-      ]);
-      check(responses.filter(r => r.status === 200).length === 1 && responses.filter(r => r.status === 403).length === 1, 'concurrent refresh replay fences lineage');
-      check((await http(read, token)).status === 403, 'revoked read retry refused');
-      const [row] = await db`SELECT state FROM swarm.admin_grants WHERE grant_id = ${grant.grantId}::uuid`;
-      check(row.state === 'revoked', 'replay tombstone persisted');
-      const another = await activate();
-      const uncertain = await handleAdminRuntimeCommand(wire({ kind: 'issue_admin_credential', grant_id: another.grantId, credential_lineage_id: id() }),
-        await runtimeProof(another), async () => { throw new Error('delivery failed'); });
-      check(uncertain.status === 503, 'delivery failure reported');
-      const [ended] = await db`SELECT state FROM swarm.admin_grants WHERE grant_id = ${another.grantId}::uuid`;
-      check(ended.state === 'revoked', 'uncertain delivery terminally revoked');
+      const independentGrant = await activate(), independent = await issue(independentGrant);
+      check((await mcp(oauth,'initialize')).status===200 && (await mcp(oauth,'tools/list')).status===200,'init and listing active control');
+      const queued = await oauth.admission();
+      check((await http(wire({kind:'revoke_admin_delegation',grant_id:grant.grantId,reason_code:'human_revoked'}))).status===200,'human revoke commits');
+      const [family] = await db`SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=${oauth.provider}) AS fenced`;
+      check(family.fenced,'human revoke atomically tombstones OAuth family');
+      for (const method of ['initialize','tools/list']) check((await mcp(oauth,method)).status===403,'revoked metadata surfaces refuse');
+      check((await http(read,token)).status===403,'cached same command result rechecks revoke');
+      check((await http(wire({kind:'surrender_admin_delegation',grant_id:grant.grantId,reason_code:'test_revoke'}),token)).status===403,'revoked action refuses');
+      check((await transact(readWire(grant),{kind:'oauth',admission:queued})).result.status===403,'queued work rechecks after revoke');
+      check((await http(readWire(independentGrant),independent.access)).status===200,'independent active grant remains usable');
+      const [status] = await db`SELECT active FROM commonswarm_oauth.resolve_admin_grant_status(${oauth.provider},${config.owner}::uuid,${publicJwk.kid})`;
+      check(!status.active,'refresh policy shares terminal family state');
+      const keyControlGrant=await activate(), keyControl=await issue(keyControlGrant,'independent-key');
+      const parallel=await Promise.all([http(readWire(independentGrant),independent.access),http(readWire(keyControlGrant),keyControl.access)]);
+      check(parallel.every(r=>r.status===200),'distinct issuer keys share account without lock upgrade deadlock');
+      const cachedKeyRead=readWire(independentGrant);
+      check((await http(cachedKeyRead,independent.access)).status===200,'key-denial cached read positive');
+      await db`INSERT INTO commonswarm_oauth.issuer_key_denials(issuer,kid,reason,evidence_ref) VALUES('https://mcp.commonswarm.com',${publicJwk.kid},'test_compromise','edge-test')`;
+      for (const method of ['initialize','tools/list']) check((await mcp(independent,method)).status===403,'key denial rechecks metadata');
+      check((await http(cachedKeyRead,independent.access)).status===403,'key denial invalidates cached result');
+      check((await http(wire({kind:'surrender_admin_delegation',grant_id:independentGrant.grantId,reason_code:'test'}),independent.access)).status===403,'key denial refuses action');
+      check((await http(readWire(keyControlGrant),keyControl.access)).status===200,'independent issuer key positive after denial');
+      const [reconciled] = await db`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${config.owner}::uuid`;
+      check(reconciled.projection.grants[independentGrant.grantId].state==='revoked' &&
+        reconciled.projection.grants[keyControlGrant.grantId].state==='active','independent request persists terminal fence without resurrecting the denied grant');
+      check((await http(readWire(independentGrant))).status===200,'human recovery remains usable after issuer key denial');
+    } else if (scenario === 'expiry') {
+      const independentGrant=await activate(), independent=await issue(independentGrant);
+      await db`UPDATE swarm.memberships SET revoked_at=statement_timestamp() WHERE workspace_id=${config.workspace}::uuid AND user_id=${config.owner}::uuid`;
+      check((await http(read,token)).status===403,'cached metadata rechecks current rights');
+      check((await mcp(oauth,'tools/list')).status===403,'listing rechecks current rights');
+      await db`UPDATE swarm.memberships SET revoked_at=NULL WHERE workspace_id=${config.workspace}::uuid AND user_id=${config.owner}::uuid`;
+      check((await http(readWire(independentGrant),independent.access)).status===200,'restored current-rights independent control');
+      const short={...grant.manifest,expires_at:Date.now()+2000};
+      const consent=await http(wire({kind:'prepare_admin_consent',manifest:short,full_account_selected:false}));
+      check(consent.status===200,'human narrowing preparation');
+      check((await http(wire({kind:'narrow_admin_delegation',grant_id:grant.grantId,manifest:consent.body.manifest,manifest_digest:consent.body.manifest_digest,consent_receipt_id:consent.body.consent_receipt_id}))).status===200,'human narrowing');
+      check((await http(read,token)).status===403,'old manifest JWT refuses immediately after narrowing');
+      await new Promise(resolve=>setTimeout(resolve,2200));
+      check((await http(readWire(grant),token)).status===403,'expiry enforced without lazy event');
+      check((await http(wire({kind:'revoke_admin_delegation',grant_id:grant.grantId,reason_code:'human_revoked'}))).status===200,'human recovery after expiry');
+    } else if (scenario === 'failure') {
+      const input=readWire(grant), admission=await oauth.admission(), authentication={kind:'oauth',admission}, before=await count();
+      const proofRequest=await oauth.request(input), admitted=await (await import('../../supabase/functions/command/admin-admission.ts')).admitAdminRequest(proofRequest,'admin_command');
+      let reached=false; const rollback=new Error('intentional rollback');
+      await db.begin(async tx=>{ await tx`SELECT set_config('role','swarm_command',true)`; const result=await adminTransaction(tx,input,{kind:'oauth',admission:admitted}); check(result.result.status===200,'rollback reaches positive authority'); reached=true; throw rollback; }).catch(error=>{if(error!==rollback)throw error;});
+      check(reached && await count()===before,'rollback retains no domain success');
+      const replayed=await handleRequest(proofRequest.clone()); check(replayed.status===401,'authority rollback cannot release committed proof');
+      await db.begin(async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;await recordAdminFailure(tx,input,authentication);});
+      check(await count()===before+1,'separate failure card');
+      const [failure]=await db`SELECT event FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid ORDER BY seq DESC LIMIT 1`;
+      check(failure.event.type==='AdminActionRecorded' && failure.event.payload.outcome==='failed' && failure.event.actor_user===null && failure.event.grant_id===grant.grantId,'failure is an audited delegated actor');
+      check((await http(input,token)).status===503 && await count()===before+1,'failure receipt retains stable retry outcome');
+    } else if (scenario === 'replay') {
+      const postgres = (await import('npm:postgres@3.4.9')).default;
+      const firstDb=postgres(config.local.DB_URL,{prepare:false,max:1});
+      const otherDb=postgres(config.local.DB_URL,{prepare:false,max:1});
+      const {createAdminRequestVerifier}=await import('../../supabase/functions/_shared/admin-oauth-db.ts');
+      try {
+        const [firstPid]=await firstDb`SELECT pg_backend_pid() AS pid`;
+        const [secondPid]=await otherDb`SELECT pg_backend_pid() AS pid`;
+        check(firstPid.pid!==secondPid.pid,'two verifier pools have distinct PostgreSQL backends');
+        const first=createAdminRequestVerifier(firstDb), second=createAdminRequestVerifier(otherDb), jti=id();
+        const request=await oauth.request(readWire(grant),'admin_command',{jti});
+        const outcomes=await Promise.allSettled([first.verify(request,'admin_command'),second.verify(request.clone(),'admin_command')]);
+        check(outcomes.filter(r=>r.status==='fulfilled').length===1 && outcomes.filter(r=>r.status==='rejected' && r.reason.code==='replay').length===1,'two edge verifier instances admit one signed proof');
+        const {admitAdminRequest}=await import('../../supabase/functions/command/admin-admission.ts');
+        const rollbackRequest=await oauth.request(readWire(grant));
+        const accepted=await admitAdminRequest(rollbackRequest,'admin_command');
+        const rollback=new Error('domain rollback'); let reached=false;
+        await db.begin(async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;check((await adminTransaction(tx,readWire(grant),{kind:'oauth',admission:accepted})).result.status===200,'replay test enters real authority');reached=true;throw rollback;}).catch(error=>{if(error!==rollback)throw error;});
+        check(reached,'authority rollback executes');
+        // Retire both participating pools before a completely new Deno process
+        // verifies the original proof and a re-signed, correct second-entry proof.
+        await firstDb.end(); await otherDb.end();
+        const wireRequest=(req,surface)=>({url:req.url,headers:Object.fromEntries(req.headers),surface});
+        const replays=[wireRequest(request,'admin_command'),wireRequest(rollbackRequest,'admin_command'),
+          wireRequest(await oauth.request({},'admin_mcp',{jti}),'admin_mcp')];
+        const child=new Deno.Command('deno',{args:['run','--no-lock','--config','supabase/functions/command/deno.json',
+          '--allow-net','--allow-env','tests/support/admin-replay-restart.mjs'],stdin:'piped',stdout:'piped',stderr:'null'}).spawn();
+        const output=child.output();
+        const writer=child.stdin.getWriter();
+        await writer.write(new TextEncoder().encode(JSON.stringify({databaseUrl:config.local.DB_URL,issuerJwk:publicJwk,
+          replays,fresh:wireRequest(await oauth.request({},'admin_mcp'),'admin_mcp')})));
+        await writer.close();
+        const result=await output;
+        check(result.success && new TextDecoder().decode(result.stdout).trim()==='ADMIN_REPLAY_RESTART_OK',
+          'fresh verifier process refuses committed and rolled-back cross-entry replays; fresh proof succeeds');
+      } finally {await firstDb.end();await otherDb.end();}
+    } else if (scenario === 'issuance') {
+      const sign=async changes=>oauth.sign({typ:'at+jwt',alg:'ES256',kid:publicJwk.kid},{...oauth.claims,...changes},signing.privateKey);
+      for (const changes of [{jti:id()},{connection_id:id()},{admin_identity_id:id()},{client_id:'foreign'},{manifest_digest:'f'.repeat(64)}]) {
+        const foreign=await sign(changes), req=await oauth.request(readWire(grant));
+        req.headers.set('authorization',`DPoP ${foreign}`);
+        const header={typ:'dpop+jwt',alg:'ES256',jwk:oauth.jwk};
+        req.headers.set('dpop',await oauth.sign(header,{htm:'POST',htu:'https://api.commonswarm.com/functions/v1/command',iat:Math.floor(Date.now()/1000),jti:id(),nonce:oauth.nonce,ath:base64url(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(foreign))))},oauth.keys.privateKey));
+        check((await handleRequest(req)).status===401,'signed but unrecorded or mismatched ledger cannot enter');
+      }
+      for (const method of ['initialize','tools/list']) check((await mcp(oauth,method)).status===200,'committed issuance metadata positive');
+      check((await http(readWire(grant),token)).status===200,'committed issuance command positive');
+      const rolledBack=await oauth.issue(1,{},oauth.g.scope_names,true);
+      for (const surface of ['admin_command','admin_mcp']) {
+        const body=surface==='admin_command'?readWire(grant):{jsonrpc:'2.0',id:1,method:'tools/list'};
+        const handler=surface==='admin_command'?handleRequest:handleAdminMcpRequest;
+        check((await handler(await oauth.request(body,surface,{},rolledBack))).status===401,'rolled-back issuance row refuses both entries');
+      }
+      const rotated=await oauth.issue(1);
+      check((await handleRequest(await oauth.request(readWire(grant),'admin_command',{},rotated))).status===200,'new committed generation succeeds');
+      check((await http(readWire(grant),token)).status===200,'prior live generation remains valid after rotation');
+      const state=await db`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${config.owner}::uuid`;
+      check(state[0].projection.grants[grant.grantId].registry_version===2,'real v2 ledger binding');
     } else if (scenario === 'limits') {
-      const mutationKeys = [`mutation:grant:${grant.grantId}`, `mutation:connection:${grant.manifest.connection_id}`, `mutation:account:${config.owner}`];
-      async function mutationAttempts() {
-        return await db`SELECT bucket_key, attempts FROM swarm.admin_rate_buckets
-          WHERE bucket_key = ANY(${mutationKeys}) AND hour_start = floor(extract(epoch FROM clock_timestamp()) / 3600)::bigint`;
+      for (const method of ['initialize','tools/list']) check((await mcp(oauth,method)).status===200,'D3 metadata transaction');
+      const [before]=await db`SELECT read_requests,action_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
+      check(Number(before.read_requests)===3,'D3 init list read count');
+      check((await http(read,token)).status===200,'fresh proof recovers fixed-command result');
+      const bad=wire({kind:'unsupported_command'});check((await http(bad,token)).status===403,'authenticated refusal');
+      check((await http(bad,token)).status===403,'refusal cached outcome');
+      const [after]=await db`SELECT read_requests,action_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
+      check(Number(after.read_requests)===4 && Number(after.action_rows)===2,'D3 counts every authenticated replay');
+      // Put the real daily counter at its boundary, then use the HTTP entry.
+      await db`UPDATE commonswarm_oauth.admin_oauth_audit_daily SET read_requests=1000,read_rows=1000 WHERE admin_grant_id=${grant.grantId}::uuid`;
+      check((await mcp(oauth,'tools/list')).status===200,'read succeeds beyond retained audit row cap');
+      const [capped]=await db`SELECT read_requests,read_rows,suppressed_read_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
+      check(Number(capped.read_requests)===1001 && Number(capped.read_rows)===1000 && Number(capped.suppressed_read_rows)===1,'D3 suppresses row while counting beyond cap');
+      const keys=[`mutation:grant:${grant.grantId}`,`mutation:connection:${grant.manifest.connection_id}`,`mutation:account:${config.owner}`];
+      for (let n=1;n<policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage;n++) {
+        const attempt=wire({kind:'unsupported_command'}), prior=await count();
+        check((await http(attempt,token)).status===403,'refused mutation consumes finite allowance');
+        const rows=await db`SELECT attempts FROM swarm.admin_rate_buckets WHERE bucket_key=ANY(${keys}) AND hour_start=floor(extract(epoch FROM clock_timestamp())/3600)::bigint`;
+        check(rows.length===keys.length && rows.every(r=>r.attempts===n+1),'durable connection/account/grant allowance counts');
+        check((await http(attempt,token)).status===403 && await count()===prior+1,'idempotent domain refusal does not spend twice');
       }
-      const initial = await mutationAttempts();
-      // Issuance is an authenticated mutation, so it already used one attempt.
-      check(initial.length === mutationKeys.length && initial.every(row => row.attempts === 1), 'credential issuance consumes mutation allowance');
-      const beforeRetry = await count();
-      check((await http(read, token)).status === 200 && await count() === beforeRetry, 'read retry uncharged');
-      check((await mutationAttempts()).every(row => row.attempts === 1), 'read retry preserves mutation allowance');
-      const remaining = policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage - initial[0].attempts;
-      for (let i = 0; i < remaining; i++) {
-        const refused = wire({ kind: 'unsupported_command' });
-        const beforeRefusal = await count();
-        const result = await http(refused, token);
-        check(result.status === 403 && result.body.error === 'human_confirmation_required', 'unsupported mutation refused');
-        const charged = await mutationAttempts();
-        check(charged.length === mutationKeys.length && charged.every(row => row.attempts === i + 2) && await count() === beforeRefusal + 1, 'refused mutation durably charged once');
-        check((await http(refused, token)).status === 403 && await count() === beforeRefusal + 1 && (await mutationAttempts()).every(row => row.attempts === i + 2), 'refused mutation retry uncharged');
-      }
-      const exhausted = await http(wire({ kind: 'unsupported_command' }), token);
-      check(exhausted.status === 429 && exhausted.body.error === 'rate_limited', 'malformed mutation allowance exhausted');
-      check((await mutationAttempts()).every(row => row.attempts === policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage + 1), 'exhausted refusal still charged');
-      check((await http(wire({ kind: 'surrender_admin_delegation', grant_id: grant.grantId, reason_code: 'surrendered' }), token)).status === 200, 'surrender survives exhausted allowance');
-      check((await mutationAttempts()).every(row => row.attempts === policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage + 1), 'surrender preserves exhausted allowance');
-      const [audit] = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND event->>'type' = 'AdminActionRecorded' AND event->'payload'->>'outcome' = 'refused'`;
-      check(audit.n === remaining + 1, 'every refusal has one durable human audit');
+      check((await http(wire({kind:'unsupported_command'}),token)).status===429,'finite mutation ceiling blocks next attempt');
+      const [actions]=await db`SELECT count(*)::integer AS n FROM commonswarm_oauth.admin_oauth_audit WHERE admin_grant_id=${grant.grantId}::uuid AND event_kind='action'`;
+      const [daily]=await db`SELECT action_rows FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id=${grant.grantId}::uuid`;
+      check(actions.n===Number(daily.action_rows) && actions.n>2,'every action retained beyond metadata cap');
+      check((await http(wire({kind:'surrender_admin_delegation',grant_id:grant.grantId,reason_code:'surrendered'}),token)).status===200,'surrender audit commits with terminal family');
     } else throw new Error('unknown scenario');
-    const events = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid`;
-    const material = JSON.stringify(events);
-    check(!material.includes(token) && !material.includes(runtime.delivery.refresh_credential), 'events exclude credential material');
+    const material=JSON.stringify(await db`SELECT event FROM swarm.admin_events WHERE owner_user_id=${config.owner}::uuid`);
+    check(!material.includes(token),'domain events exclude raw credential');
   }
   console.log('ADMIN_SERVER_OK');
 } catch {
