@@ -2,12 +2,11 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { renderAdminConsentPage } from '../../services/mcp-auth/src/admin-interaction-page.js';
+import { renderAdminConsentPage } from '../src/admin-interaction-page.js';
 
 // Parse actual hosted HTML with the standard-library HTML parser, without a
 // browser, service, or synthetic DOM that supplies its own accessibility state.
-type Element = { tag: string; attrs: Record<string, string | null>; children: Array<Element | string> };
-function htmlTree(html: string): Element {
+function htmlTree(html) {
   const parsed = spawnSync('python3', ['-c', `
 import json,sys
 from html.parser import HTMLParser
@@ -29,12 +28,12 @@ p=Tree(); p.feed(sys.stdin.read()); print(json.dumps(p.root))
   assert.equal(parsed.status, 0, parsed.stderr);
   return JSON.parse(parsed.stdout);
 }
-const elements = (node: Element): Element[] => [node, ...node.children.flatMap(child => typeof child === 'string' ? [] : elements(child))];
-const text = (node: Element): string => node.children.map(child => typeof child === 'string' ? child : text(child)).join('').replace(/\s+/g, ' ').trim();
-function one(tree: Element, predicate: (node: Element) => boolean): Element {
+const elements = (node) => [node, ...node.children.flatMap(child => typeof child === 'string' ? [] : elements(child))];
+const text = (node) => node.children.map(child => typeof child === 'string' ? child : text(child)).join('').replace(/\s+/g, ' ').trim();
+function one(tree, predicate) {
   const matches = elements(tree).filter(predicate);
   assert.equal(matches.length, 1, 'expected exactly one rendered element');
-  return matches[0]!;
+  return matches[0];
 }
 
 test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent; warning and exact summary', () => {
@@ -65,7 +64,7 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   const warningIds = confirmation.attrs['aria-describedby']?.trim().split(/\s+/) ?? [];
   assert.ok(warningIds.length, 'second confirmation must describe its full-account warning');
   const described = warningIds.map(id => text(one(tree, node => node.attrs.id === id))).join(' ');
-  const spec = readFileSync(new URL('../../docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md', import.meta.url), 'utf8');
+  const spec = readFileSync(new URL('../../../docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md', import.meta.url), 'utf8');
   const warning = /Full account requires[^\n]+Warning: “([^”]+)”/.exec(spec)?.[1];
   assert.ok(warning, 'spec defines the full-account warning');
   assert.equal(described, warning, 'all workspace/seat/invitation, future workspace, worker content and compromised-host powers are associated');
@@ -99,9 +98,9 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   for (const [labelText, value] of [['Workspaces created','3'], ['Live seats','4'], ['Seats created in total','12'], ['Invitations','6'],
     ['Worker access lifetime (seconds)','600'], ['Worker renewal period (seconds)','3600'], ['Renewals per worker','7'], ['Renewals in total','21']]) {
     const list = one(summary, node => node.tag === 'dl' && elements(node).some(child => child.tag === 'dt' && text(child) === labelText));
-    const children = list.children.filter((child): child is Element => typeof child !== 'string');
+    const children = list.children.filter((child) => typeof child !== 'string');
     const index = children.findIndex(child => child.tag === 'dt' && text(child) === labelText);
-    assert.equal(children[index+1]?.tag, 'dd'); assert.equal(text(children[index+1]!), value);
+    assert.equal(children[index+1]?.tag, 'dd'); assert.equal(text(children[index+1]), value);
   }
   const all = text(tree);
   assert.ok(all.includes('HTTPS client host: client.example'));
