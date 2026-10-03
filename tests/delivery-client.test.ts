@@ -1271,9 +1271,11 @@ test("delivery-client.test.ts is literally named by the root npm test script", a
     await readFile(new URL("../package.json", import.meta.url), "utf8"),
   ) as { scripts?: Record<string, string> };
   const testScript = packageJson.scripts?.["test"] ?? "";
+  assert.match(testScript, /run-test-list\.mjs tests\/lists\/test\.txt/);
+  const list = (await readFile(new URL("../tests/lists/test.txt", import.meta.url), "utf8")).split(/\r?\n/);
   assert.ok(
-    testScript.includes("tests/delivery-client.test.ts"),
-    `npm test must name tests/delivery-client.test.ts; script is: ${testScript}`,
+    list.includes("tests/delivery-client.test.ts"),
+    "npm test list tests/lists/test.txt must name tests/delivery-client.test.ts",
   );
 });
 
