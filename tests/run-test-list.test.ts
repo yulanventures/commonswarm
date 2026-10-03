@@ -44,6 +44,17 @@ test("run-test-list refuses a duplicate entry", () => {
   });
 });
 
+test("run-test-list keeps list order, expands a glob in place and drops repeats", () => {
+  withDir((dir) => {
+    mkdirSync(join(dir, "sub"));
+    for (const f of ["z.test.mjs", "a.test.mjs", "sub/b.test.mjs", "sub/c.test.mjs"]) writeFileSync(join(dir, f), "");
+    writeFileSync(join(dir, "list.txt"), "z.test.mjs\nsub/c.test.mjs\nsub/*.test.mjs\na.test.mjs\n");
+    const result = run(dir, "list.txt", "--list-only");
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "z.test.mjs\nsub/c.test.mjs\nsub/b.test.mjs\na.test.mjs\n");
+  });
+});
+
 test("run-test-list skips comments and expands globs in --list-only", () => {
   withDir((dir) => {
     mkdirSync(join(dir, "sub"));

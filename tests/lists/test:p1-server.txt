@@ -1,10 +1,10 @@
-tests/p1-server/**/*.test.ts
-tests/p1-server/admin-client-verification-lock.test.ts
-tests/p1-server/admin-dpop-admission.test.ts
-tests/p1-server/admin-issuance-cutover.test.ts
-tests/p1-server/admin-issuer-privileges.test.ts
-tests/p1-server/admin-request-audit.test.ts
 tests/p1-server/admin-schema-isolation.test.ts
+tests/p1-server/admin-issuer-privileges.test.ts
+tests/p1-server/migration-checksums.test.ts
+tests/p1-server/admin-request-audit.test.ts
+tests/p1-server/admin-dpop-admission.test.ts
+tests/p1-server/admin-client-verification-lock.test.ts
 tests/p1-server/legacy-db-fence.test.ts
 tests/p1-server/mcp-artifacts-unchanged-after-m1.test.ts
-tests/p1-server/migration-checksums.test.ts
+tests/p1-server/admin-issuance-cutover.test.ts
+tests/p1-server/**/*.test.ts

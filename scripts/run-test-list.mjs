@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /* Runs the test files named in a list file: node scripts/run-test-list.mjs <list> [--list-only] [node --test flags...]
  * The list holds one path per line; blank lines and lines starting with # are ignored.
- * A path with a glob character is passed to node --test as written (node expands it).
+ * Files run in list order. A path with a glob character is expanded in place (matches sorted) and
+ * a file already named earlier is not repeated.
  * Any other path must exist, and no path may appear twice; otherwise exit 1.
- * --list-only prints the expanded file set (sorted, one per line) and runs nothing. */
+ * --list-only prints the expanded file set in run order, one per line and runs nothing. */
 import { spawnSync } from "node:child_process";
 import { existsSync, globSync, readFileSync } from "node:fs";
 
@@ -34,10 +35,10 @@ export function checkList(entries, exists = existsSync) {
 export function expand(entries) {
   const files = new Set();
   for (const entry of entries) {
-    if (GLOB.test(entry)) for (const match of globSync(entry)) files.add(match);
+    if (GLOB.test(entry)) for (const match of globSync(entry).sort()) files.add(match);
     else files.add(entry);
   }
-  return [...files].sort();
+  return [...files];
 }
 
 function main(argv) {
@@ -66,7 +67,12 @@ function main(argv) {
     console.log(expand(entries).join("\n"));
     return 0;
   }
-  const result = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--test", ...flags, ...entries], {
+  const files = expand(entries);
+  if (files.length === 0) {
+    console.error(`${listPath}: no test files matched`);
+    return 1;
+  }
+  const result = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--test", ...flags, ...files], {
     stdio: "inherit",
   });
   if (result.error) {
