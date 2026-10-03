@@ -1,5 +1,5 @@
 # Release PR means a pull_request whose base branch is release.
-# Full suite runs nightly at 03:00 UTC and on release PRs; manual suite selection remains.
+# Full suite runs nightly at 03:23 UTC (duplicate trigger; the primary nightly runs from a launchd job) and on release PRs; manual suite selection remains.
 # Full suite: server (including MCP auth), p1-cli, site, box-dry-run, and npm test (unit).
 # server-repeat remains a manual diagnostic; it is not part of the full-suite matrix.
 # Keep ubuntu-latest: these suites need Linux containers, headless browsers, or root fixtures.
@@ -11,7 +11,7 @@ on:
   pull_request:
     branches: [release]
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '23 3 * * *'
   workflow_dispatch:
     inputs:
       ref:
@@ -81,6 +81,15 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
+      - name: Build the MCP auth management bundle
+        # The generated bundle is gitignored; any suite that can reach services/mcp-auth needs it first.
+        if: matrix.suite == 'server' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.suite }}" = server ]; then
+            npm ci --prefix services/mcp-auth --ignore-scripts --no-audit --no-fund
+          fi
+          node services/mcp-auth/build-management.mjs
       - name: Guard and run the box whole-block dry run
         if: matrix.suite == 'box-dry-run'
         env:
