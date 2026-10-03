@@ -10,8 +10,8 @@ bash scripts/build-chatgpt-package.sh --validate-only --submission-ready
 
 Requires Python 3 with `jsonschema` (validated with 4.25.1), and Node 22+ for
 the service-free test. Builds run offline, without credentials or services.
-The final command currently fails deliberately: no verified customer-support
-URL or real demo recording is available. The default build validates the draft
+The final command currently fails deliberately: no real demo recording is
+available. The default build validates the draft
 package, rather than claiming submission readiness. Neither mode proves live
 URLs, account eligibility, tool execution, scan acceptance or vendor approval.
 
@@ -53,11 +53,11 @@ Fetched schema SHA-256 values:
 The eight cases are prepared expectations, not execution receipts. Optional
 country overrides, translations, author email, app references, hooks, skills,
 private credentials and reviewer instructions are omitted. The support URL is
-omitted because OA-03 is blocked; the video URL is omitted because OA-09 has no
-recording. Both are optional in an uploaded draft and required for MCP review.
-HezLead must choose a product-support address before the support page can be
-implemented and separately released. `legal@` and `security@` are reserved for
-their existing purposes; the email-template README describes `hello@` as an
-email sender without a formal support role. Do not infer a support channel.
+`https://commonswarm.com/support`, using the product-support address
+`support@commonswarm.com` chosen by HezLead in `../TASK-2.md`. The page is
+implemented in this lane and must be separately released and checked live before
+submission. `legal@` and `security@` keep their existing purposes. The video URL
+is omitted because OA-09 has no recording. Support and video URLs are optional
+in an uploaded draft and required for MCP review.
 
 No submission, deployment, account creation or production change occurs here.

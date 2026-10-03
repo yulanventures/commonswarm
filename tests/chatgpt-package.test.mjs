@@ -53,6 +53,7 @@ test("OA-01/OA-12: reject extra servers, app references, hooks, and private revi
     ["plugin", (plugin) => { plugin.extensions["com.openai"].hooks = "./hooks/hooks.json"; }, /no apps or hooks/],
     ["plugin", (plugin) => { plugin.extensions["com.openai"].review.test_credentials = "synthetic forbidden field"; }, /credentials and reviewer instructions/],
     ["plugin", (plugin) => { plugin.extensions["com.openai"].interface.shortDescription = "x".repeat(31); }, /shortDescription/],
+    ["plugin", (plugin) => { plugin.extensions["com.openai"].interface.supportURL = "http://commonswarm.com/support"; }, /supportURL: expected HTTPS URL/],
     ["plugin", (plugin) => { plugin.extensions["com.openai"].review.test_cases.positive.pop(); }, /exactly 5 positive/],
   ];
   for (const [name, mutation, reason] of mutations) {
@@ -74,7 +75,17 @@ test("OA-01/OA-12: reject extra servers, app references, hooks, and private revi
 });
 
 test("OA-03/OA-09: draft builds disclose missing prerequisites and submission mode refuses them", () => {
-  fixture(({ invoke }) => {
+  fixture(({ source, invoke, mutate }) => {
+    const plugin = JSON.parse(readFileSync(join(source, "plugin.json"), "utf8"));
+    assert.equal(plugin.extensions["com.openai"].interface.supportURL, "https://commonswarm.com/support");
+    const prepared = invoke("--validate-only");
+    assert.equal(prepared.status, 0);
+    assert.match(prepared.stdout, /DRAFT ONLY: missing demo_recording_url/);
+    const noRecording = invoke("--validate-only", "--submission-ready");
+    assert.equal(noRecording.status, 1);
+    assert.match(noRecording.stderr, /submission prerequisites missing: demo_recording_url/);
+
+    mutate("plugin", (plugin) => { delete plugin.extensions["com.openai"].interface.supportURL; });
     const draft = invoke("--validate-only");
     assert.equal(draft.status, 0);
     assert.match(draft.stdout, /DRAFT ONLY: missing supportURL, demo_recording_url/);
