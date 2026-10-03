@@ -1,3 +1,8 @@
+import { ADMIN_RESOURCE, adminConsentOptions } from "./admin-policy.generated.js";
+import { ADMIN_AS_ISSUANCE_ENABLED, adminDigest } from "./admin-consent.js";
+import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
+import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
+import { bindProviderAdminNonceStore } from "./provider-admin-pin.js";
 import { randomBytes } from "node:crypto";
 import { generateKeyPair, exportJWK } from "jose";
 import Provider, { errors, interactionPolicy } from "oidc-provider";
@@ -44,7 +49,9 @@ export async function createMcpProvider({
   refreshTokenTtlSeconds = REFRESH_TOKEN_TTL_SECONDS,
   nativeLoopbackEnabled = false,
   providerGrantActive = async () => true,
+  providerGrantResource = async () => undefined,
   clientMetadataAccepted = async () => true,
+  activeSigningKid,
   registrationEnabled = true,
   registrationStore = createMemoryRegistrationStore(),
   registrationLimiter = createRegistrationLimiter(),
@@ -56,6 +63,7 @@ export async function createMcpProvider({
       cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
     throw new TypeError("CIMD cache duration must have bounded min and max seconds");
   }
+  const adminLifecycle = new AdminTokenLifecycle({ activeKid: activeSigningKid ?? jwks?.keys?.[0]?.kid });
   const policy = interactionPolicy.base();
   // A provider session can outlive the authenticated browser session. The
   // default no_session check only tests accountId; without an Account,
@@ -107,7 +115,25 @@ export async function createMcpProvider({
           }
           return resource;
         },
-        getResourceServerInfo: (_ctx, resource) => {
+        getResourceServerInfo: async (ctx, resource, client) => {
+          if (resource === ADMIN_RESOURCE) {
+            if (!ADMIN_AS_ISSUANCE_ENABLED) throw new errors.InvalidTarget("admin issuance closed");
+            await requireMeasuredAdminRelease();
+            const policy = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_verified_clients
+              WHERE client_id=$1 AND active AND withdrawn_at IS NULL`, [client.clientId])).rows[0];
+            const registered = (await adminQuery(`SELECT 1 FROM commonswarm_oauth.registered_clients WHERE client_id=$1`, [client.clientId])).rowCount;
+            if (!policy || registered || policy.application_type !== "web" || !policy.dpop_tested ||
+                !policy.pkce_s256_tested || !policy.origin_control_verified || !policy.redirect_tested ||
+                !metadataUrlAllowed(client.clientId) || policy.metadata_digest !== adminDigest(client.metadata())) {
+              throw new errors.InvalidTarget("verified hosted admin client required");
+            }
+            const unit = adminTransactionContext().token;
+            if (ctx.path === "/token" && !unit) throw new errors.InvalidGrant("admin transaction required");
+            const now = Number((await adminQuery("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint AS now")).rows[0].now);
+            return { audience: ADMIN_RESOURCE, accessTokenFormat: "jwt", jwt: { sign: { alg: "ES256" } },
+              accessTokenTTL: unit ? adminTokenLifetime(unit.binding, now) : 300,
+              scope: (unit?.binding.scope_names ?? adminConsentOptions().filter(o => o.available).map(o => o.scope)).join(" ") };
+          }
           if (resource !== RESOURCE) {
             throw new errors.InvalidTarget("unsupported resource");
           }
@@ -136,6 +162,23 @@ export async function createMcpProvider({
       claims: async () => ({ sub: accountId }),
     })),
     grantTypes: ["authorization_code", "refresh_token"],
+    loadExistingGrant: async ctx => {
+      const explicit = ctx.oidc.result?.consent?.grantId;
+      const id = explicit ?? ctx.oidc.session.grantIdFor(ctx.oidc.client.clientId);
+      if (!id) return undefined;
+      const resource = ctx.oidc.params.resource;
+      const bound = await providerGrantResource(id);
+      if (bound && bound !== resource) {
+        if (explicit) throw new errors.InvalidTarget("grant resource mismatch");
+        return undefined;
+      }
+      const grant = await ctx.oidc.provider.Grant.find(id);
+      if (grant?.resources && (Object.keys(grant.resources).length !== 1 || !Object.hasOwn(grant.resources,resource))) {
+        if (explicit) throw new errors.InvalidTarget("grant resource mismatch");
+        return undefined;
+      }
+      return grant;
+    },
     interactions: { policy },
     jwks: jwks ?? { keys: [await signingJwk()] },
     pkce: { required: () => true },
@@ -147,7 +190,7 @@ export async function createMcpProvider({
     rotateRefreshToken: true,
     scopes: CLIENT_SCOPES,
     extraClientMetadata: {
-      properties: ["scope"],
+      properties: ["scope", "dpop_signing_alg"],
       validator: (_ctx, _key, _value, metadata) => validateClientPolicy(metadata, nativeLoopbackEnabled),
     },
     ttl: {
@@ -156,12 +199,15 @@ export async function createMcpProvider({
       Grant: refreshTokenTtlSeconds,
       Interaction: 10 * 60,
       RefreshToken: (ctx) => Math.min(
+        adminTransactionContext(false)?.token ? Math.max(0, Math.floor(
+          (new Date(adminTransactionContext().token.binding.refresh_deadline).getTime() - Date.now()) / 1000)) : refreshTokenTtlSeconds,
         refreshTokenTtlSeconds,
         ctx?.oidc?.entities.RotatedRefreshToken?.remainingTTL ?? refreshTokenTtlSeconds,
       ),
       Session: refreshTokenTtlSeconds,
     },
     extraTokenClaims: async (_ctx, token) => {
+      if (adminTransactionContext(false)?.token) return adminLifecycle.claims(token);
       if (!await providerGrantActive(token.grantId)) {
         throw new errors.InvalidGrant("provider grant is inactive");
       }
@@ -172,16 +218,22 @@ export async function createMcpProvider({
   // Production terminates TLS before this app. Tests exercise the same trusted
   // proxy shape over an ephemeral loopback HTTP server.
   provider.proxy = true;
+  await bindProviderAdminNonceStore(provider);
   provider.use(async (ctx, next) => {
     // oidc-provider filters unknown authorization scopes. Refuse escalation
     // explicitly rather than silently turning it into a narrower request.
     if (ctx.path === "/authorize" && typeof ctx.query.scope === "string" &&
-        ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope))) {
+        ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope) &&
+          !(ctx.query.resource === ADMIN_RESOURCE && ADMIN_AS_ISSUANCE_ENABLED &&
+            adminConsentOptions().some(o => o.available && o.scope === scope)))) {
       ctx.status = 400;
       ctx.body = { error: "invalid_scope" };
       return;
     }
     await next();
+    if (ctx.path === "/token" && ctx.status < 400 && adminTransactionContext(false)?.token) {
+      await adminLifecycle.recordToken(ctx.body);
+    }
     const entities = ctx.oidc?.entities;
     if ((entities?.AuthorizationCode || entities?.AccessToken) && ctx.status < 400 &&
         (ctx.path.startsWith("/authorize") || ctx.path === "/token")) {

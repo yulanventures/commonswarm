@@ -1,1 +1,3 @@
 src/admin-policy.generated.js
+# Built from the shared TypeScript source by build-admin-policy.mjs.
+src/admin-authority.generated.js

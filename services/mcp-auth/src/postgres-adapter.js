@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { errors } from "oidc-provider";
+import { adminTransactionContext, adminQuery, joinAdminTransaction, AdminTransactionError } from "./admin-transaction.js";
 
 const GRANTABLE_MODELS = new Set([
   "AccessToken",
@@ -33,6 +34,7 @@ function storedPayload(row, recoveredJti) {
 }
 
 async function transaction(pool, callback) {
+  if (adminTransactionContext(false)) return joinAdminTransaction(callback);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -62,9 +64,31 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
   const qualifiedSchema = assertIdentifier(schema);
   const artifacts = `${qualifiedSchema}.provider_artifacts`;
   const tombstones = `${qualifiedSchema}.refresh_family_tombstones`;
+  const database = pool;
+  pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : database.query(...args),
+    connect: () => adminTransactionContext(false)
+      ? Promise.resolve({ query: adminQuery, release() {} }) : database.connect() };
+  function adminPayload(payload) {
+    const admin="https://api.commonswarm.com/admin";
+    return payload?.resource === admin || (Array.isArray(payload?.resource) && payload.resource.includes(admin)) ||
+      payload?.params?.resource === admin || payload?.aud === admin || payload?.grant_class === "delegated_admin" ||
+      Object.hasOwn(payload?.resources ?? {},admin);
+  }
+  async function requireBoundContext(modelName, id, payload) {
+    if (adminTransactionContext(false)) return;
+    if (adminPayload(payload)) throw new AdminTransactionError("admin_transaction_required");
+    if (qualifiedSchema !== "commonswarm_oauth") return;
+    const row = (await database.query(`SELECT 1 FROM ${qualifiedSchema}.provider_grant_resources r
+      WHERE r.grant_class='delegated_admin' AND (r.provider_grant_id=$3 OR EXISTS(
+        SELECT 1 FROM ${artifacts} a WHERE a.model=$1 AND a.artifact_id_hash=$2
+          AND r.provider_grant_id=coalesce(a.grant_id,a.payload->>'jti'))) LIMIT 1`,
+      [modelName, lookupHash(id), payload?.grantId ?? (modelName === "Grant" ? id : null)])).rows[0];
+    if (row) throw new AdminTransactionError("admin_transaction_required");
+  }
 
   return (model) => ({
     async consume(id) {
+      await requireBoundContext(model, id);
       const client = beforeConsume && model === "RefreshToken" ? await pool.connect() : null;
       try {
         await beforeConsume?.({ model, id, processId: client?.processID ?? null });
@@ -94,6 +118,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async destroy(id) {
+      await requireBoundContext(model, id);
       await pool.query(
         `DELETE FROM ${artifacts} WHERE model = $1 AND artifact_id_hash = $2`,
         [model, lookupHash(id)],
@@ -101,6 +126,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async find(id) {
+      await requireBoundContext(model, id);
       const result = await pool.query(
         `SELECT payload, consumed_at
            FROM ${artifacts} AS artifact
@@ -114,6 +140,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, lookupHash(id)],
       );
+      if (result.rows[0] && adminPayload(result.rows[0].payload)) await requireBoundContext(model,id,result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0], id) : undefined;
     },
 
@@ -132,6 +159,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, uid],
       );
+      if (result.rows[0]) await requireBoundContext(model, result.rows[0].payload.jti ?? "", result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0]) : undefined;
     },
 
@@ -150,10 +178,16 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, lookupHash(userCode)],
       );
+      if (result.rows[0]) await requireBoundContext(model, result.rows[0].payload.jti ?? "", result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0]) : undefined;
     },
 
     async revokeByGrantId(grantId) {
+      if (!adminTransactionContext(false) && qualifiedSchema === "commonswarm_oauth") {
+        const binding = (await database.query(`SELECT grant_class FROM ${qualifiedSchema}.provider_grant_resources
+          WHERE provider_grant_id=$1`, [grantId])).rows[0];
+        if (binding?.grant_class === "delegated_admin") throw new AdminTransactionError("admin_transaction_required");
+      }
       await transaction(pool, async (client) => {
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))",
@@ -170,6 +204,10 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async upsert(id, payload, expiresIn) {
+      if (Array.isArray(payload.resource) || (payload.resources && Object.keys(payload.resources).length !== 1)) {
+        throw new errors.InvalidTarget("exactly one bound resource is required");
+      }
+      await requireBoundContext(model, id, payload);
       const grantId = GRANTABLE_MODELS.has(model) && typeof payload.grantId === "string"
         ? payload.grantId
         : null;
@@ -195,6 +233,15 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           );
           if (revoked.rowCount !== 0) {
             throw new errors.InvalidGrant("grant family revoked");
+          }
+          if (qualifiedSchema === "commonswarm_oauth" && payload.resource === "https://mcp.commonswarm.com/mcp") {
+            const hosted = (await client.query("SELECT * FROM commonswarm_oauth.resolve_hosted_grant_status($1)", [grantId])).rows[0];
+            if (!hosted?.active || hosted.client_id !== payload.clientId || hosted.owner_user_id !== payload.accountId ||
+                hosted.resource !== payload.resource) throw new errors.InvalidGrant("hosted grant binding unavailable");
+            await client.query(`INSERT INTO commonswarm_oauth.provider_grant_resources
+              (provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
+              VALUES($1,$2,'hosted_mcp',$3,$4,$5,$5) ON CONFLICT(provider_grant_id) DO NOTHING`,
+              [grantId,hosted.resource,hosted.owner_user_id,hosted.client_id,hosted.grant_id]);
           }
         }
 
