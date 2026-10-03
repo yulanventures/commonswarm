@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { chmod, lstat, writeFile } from "node:fs/promises";
-import { randomInt } from "node:crypto";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
@@ -10,9 +10,21 @@ import { exportJWK, generateKeyPair } from "jose";
 
 import { loadConfig } from "../src/config.js";
 import { createProductionManagementBindings } from "../src/management-bindings.js";
+import { ISSUER } from "../src/provider.js";
 import { startServer } from "../src/server.js";
 
 const exec = promisify(execFile);
+
+async function allocateLoopbackPort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = server.address();
+  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  return port;
+}
 
 async function fixture(t) {
   const { stdout } = await exec("mktemp", ["-d", "/private/tmp/anvil-secret.XXXXXX"]);
@@ -46,7 +58,7 @@ async function fixture(t) {
   return {
     // HOME is inherited unchanged. No GoTrue or PostgreSQL requests are made.
     ...process.env,
-    PORT: String(randomInt(49152, 65536)),
+    PORT: String(await allocateLoopbackPort()),
     MCP_OAUTH_SIGNING_KEYS_FILE: `${directory}/signing`,
     MCP_OAUTH_COOKIE_KEYS_FILE: `${directory}/cookies`,
     MCP_OAUTH_DATABASE_CREDENTIALS_FILE: `${directory}/database`,
@@ -82,7 +94,9 @@ async function entrypoint(t, env) {
     try {
       const response = await fetch(`${root}/.well-known/oauth-authorization-server`);
       assert.equal(response.status, 200);
-      await response.body.cancel();
+      const metadata = await response.json();
+      assert.equal(metadata.issuer, ISSUER,
+        `discovery on ${root} is not this entrypoint (issuer ${metadata.issuer ?? "missing"})`);
       return root;
     } catch (error) {
       if (error instanceof assert.AssertionError) throw error;
