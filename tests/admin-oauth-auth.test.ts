@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { cryptoFixture } from './support/admin-oauth-crypto.js';
+
+const ADMIN_ACCESS_TTL_SECONDS = 300;
+const ADMIN_CLOCK_SKEW_SECONDS = 0;
+const PROOF_ADMIT_PAST_SECONDS = 60;
+const PROOF_ADMIT_FUTURE_SECONDS = 5;
+const TIME_CASE_MARGIN_SECONDS = 60;
+
+type Case = Record<string, unknown> | (() => Record<string, unknown>);
+async function rejectCases(cases: Case[], verify: (changes: Record<string, unknown>) => Promise<unknown>, error: typeof AdminTokenError | typeof AdminProofError) {
+  for (const changes of cases) {
+    const resolved = typeof changes === 'function' ? changes() : changes;
+    await assert.rejects(verify(resolved), error);
+  }
+}
 // @ts-expect-error TS5097 real edge cryptographic boundary
 import { AdminProofError, AdminTokenError, AdminJwtVerifier, AdminRequestVerifier, adminTokenDigest, base64url, isAdminAdmission, ADMIN_COMMAND_URI, ADMIN_MCP_URI } from '../supabase/functions/_shared/admin-oauth-auth.ts';
 // @ts-expect-error TS5097 denial boundary
@@ -49,13 +63,21 @@ test('admin-dpop-verifier-unit: real signatures, nonce challenges, cross-entry p
 
 test('admin-dpop-verifier-unit: reject Bearer, class/cnf, key, hash, method, configured URI, time, nonce and ambiguous headers before authority', async () => {
   const shared = store(), f = await cryptoFixture(shared), access = await f.token(), n = await nonce(f, access);
-  for (const changes of [{ grant_class: undefined }, { cnf: undefined }, { aud: [ADMIN_MCP_URI] }, { grant_id: undefined }, { admin_grant_id: undefined }, { admin_identity_id: undefined }, { scope: 'mcp' }, { registry_version: 1 }, { exp: f.claims.iat + 301 }, { iat: f.claims.iat + 1 }, { nbf: f.claims.iat + 1 }]) {
-    await assert.rejects(f.verifier.verify(await f.request(await f.token(changes), 'admin_command', {}, { nonce: n }), 'admin_command'), AdminTokenError);
-  }
+  await rejectCases([
+    { grant_class: undefined }, { cnf: undefined }, { aud: [ADMIN_MCP_URI] }, { grant_id: undefined },
+    { admin_grant_id: undefined }, { admin_identity_id: undefined }, { scope: 'mcp' }, { registry_version: 1 },
+    () => ({ exp: Math.floor(Date.now() / 1000) + ADMIN_ACCESS_TTL_SECONDS + ADMIN_CLOCK_SKEW_SECONDS + TIME_CASE_MARGIN_SECONDS }),
+    () => ({ iat: Math.floor(Date.now() / 1000) + ADMIN_CLOCK_SKEW_SECONDS + TIME_CASE_MARGIN_SECONDS }),
+    () => ({ nbf: Math.floor(Date.now() / 1000) + ADMIN_CLOCK_SKEW_SECONDS + TIME_CASE_MARGIN_SECONDS }),
+  ], async changes => f.verifier.verify(await f.request(await f.token(changes), 'admin_command', {}, { nonce: n }), 'admin_command'), AdminTokenError);
   await assert.rejects(f.verifier.verify(await f.request(access, 'admin_command', {}, { nonce: n }, 'Bearer'), 'admin_command'), AdminTokenError);
-  for (const changes of [{ ath: 'wrong' }, { htm: 'GET' }, { htu: ADMIN_MCP_URI }, { htu: `${ADMIN_COMMAND_URI}?x=1` }, { htu: 'https://evil.example/functions/v1/command' }, { iat: f.claims.iat - 61 }, { iat: f.claims.iat + 6 }, { jti: '' }, { nonce: 'K'.repeat(43) }]) {
-    await assert.rejects(f.verifier.verify(await f.request(access, 'admin_command', {}, { nonce: n, ...changes }), 'admin_command'), AdminProofError);
-  }
+  await rejectCases([
+    { ath: 'wrong' }, { htm: 'GET' }, { htu: ADMIN_MCP_URI }, { htu: `${ADMIN_COMMAND_URI}?x=1` },
+    { htu: 'https://evil.example/functions/v1/command' },
+    () => ({ iat: Math.floor(Date.now() / 1000) - PROOF_ADMIT_PAST_SECONDS - ADMIN_CLOCK_SKEW_SECONDS - TIME_CASE_MARGIN_SECONDS }),
+    () => ({ iat: Math.floor(Date.now() / 1000) + PROOF_ADMIT_FUTURE_SECONDS + ADMIN_CLOCK_SKEW_SECONDS + TIME_CASE_MARGIN_SECONDS }),
+    { jti: '' }, { nonce: 'K'.repeat(43) },
+  ], async changes => f.verifier.verify(await f.request(access, 'admin_command', {}, { nonce: n, ...changes }), 'admin_command'), AdminProofError);
   for (const header of [{ typ: 'JWT' }, { alg: 'none' }, { crit: ['x'] }, { jku: 'https://evil.example' }, { jwk: { ...f.publicKey, d: 'private' } }]) {
     const req = await f.request(access, 'admin_command', {}, { nonce: n });
     req.headers.set('dpop', await f.proof(access, 'admin_command', { nonce: n }, header));
