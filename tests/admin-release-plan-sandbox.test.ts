@@ -40,7 +40,7 @@ const stepOf = (source: string) => /^# step: (ai-[a-z0-9-]+)$/.exec(source.split
 const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)?.[1];
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-human-revoke',
@@ -49,7 +49,7 @@ const EXPECTED_MAC_STEPS = [
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
 ];
@@ -180,6 +180,7 @@ const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha
   measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
   controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-post-w5'],
   cleanup: { grants_revoked: true, dcr_clients_expiring: [{ client_id: 'dry-run-pre-w1', expires_after: new Date(Date.now() + 30 * 86400_000).toISOString() }] } });
+const liveControlsProof = join(scratch, 'live-controls-proof'); mkdirSync(liveControlsProof, { mode: 0o700 });
 const consentFile = join(scratch, 'consent-post-W5.json'); writeFileSync(consentFile, consentText);
 const liveControlsFile = join(scratch, 'live-W5-after.json');
 writeFileSync(liveControlsFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'after',
@@ -412,6 +413,9 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
       CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
+      // ai-live-controls also runs in the W5 Mac shell: validate the W5 after pair, producer
+      // read from the verified release tar, retained copies in a task-owned proof directory.
+      ...(step === 'ai-live-controls' ? { INPUTS_FILE: inputsFor('W5'), BOX_ARCHIVE_PATH: archiveFile, PROOF_DIR: liveControlsProof } : {}),
       // withdraw: the approve mode first requires the pointer that ai-w6-pointer publishes later.
       C1_INPUTS_FILE: c1InputsFile, C1_PROOF_DIR: c1ProofDir, C1_CLIENT_ACTION: 'withdraw',
       C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-client-check.txt',
