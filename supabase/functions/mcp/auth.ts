@@ -277,6 +277,16 @@ export class McpJwtVerifier {
             claims.nbf > claims.exp))) {
       throw new McpTokenError("invalid_token");
     }
+    // Measure only after signature and claim validation; retain legacy access.
+    // Follow-up: enforce after 7 days of zero missing-scope events.
+    if (typeof claims.scope !== "string" || !claims.scope.split(" ").includes("mcp")) {
+      // Bound and sanitize the prefix, and never emit even a short full ID.
+      const clientIdPrefix = typeof claims.client_id === "string"
+        ? claims.client_id.slice(0, Math.min(8, Math.max(0, claims.client_id.length - 1)))
+          .replace(/[^A-Za-z0-9_-]/gu, "_")
+        : null;
+      console.warn(JSON.stringify({ event: "mcp_missing_scope", client_id_prefix: clientIdPrefix }));
+    }
     return {
       providerGrantId: claims.grant_id,
       subject: claims.sub.toLowerCase(),

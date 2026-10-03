@@ -29,18 +29,21 @@ const recipients = { type: "array", items: recipient, minItems: 1, maxItems: 20 
 export const HOSTED_TOOL_TABLE = [
   {
     name: "claim_seat", title: "Claim a named seat",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Create or reuse a named seat. Omit workspace_id for the consented home workspace, or select another consented workspace. Retry with the same request_id.",
     annotations: { title: "Claim a named seat", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ workspace_id: claimWorkspace, name: text(1, 80), request_id: requestId }, ["name", "request_id"]),
   },
   {
     name: "whoami", title: "Show seat identity",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Show the selected hosted seat identity.",
     annotations: { title: "Show seat identity", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
   },
   {
     name: "check", title: "Check and acknowledge inbox",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Open a durable inbox batch, optionally acknowledging the prior batch and permanently advancing delivery.",
     // ACK replaces durable cursor state; later calls can create new batches.
     // See command/index.ts handleHostedCheck and mcp/index.ts executeTool.
@@ -49,30 +52,35 @@ export const HOSTED_TOOL_TABLE = [
   },
   {
     name: "ask", title: "Ask workspace participants",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Ask one or more workspace participants. Retry with the same request_id.",
     annotations: { title: "Ask workspace participants", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "recipients", "body", "request_id"]),
   },
   {
     name: "note", title: "Share a workspace note",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Share a note, optionally with recipients. Retry with the same request_id.",
     annotations: { title: "Share a workspace note", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, recipients, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "reply", title: "Reply to a signal",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Reply privately to a signal. Retry with the same request_id.",
     annotations: { title: "Reply to a signal", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, signal_id: uuid, body: text(1, 8000), request_id: requestId }, ["seat", "signal_id", "body", "request_id"]),
   },
   {
     name: "working_on", title: "Share current work",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "Share current work. Retry with the same request_id.",
     annotations: { title: "Share current work", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle, body: text(1, 8000), request_id: requestId }, ["seat", "body", "request_id"]),
   },
   {
     name: "members", title: "List workspace participants",
+    securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
     description: "List members and agents in the selected seat's workspace.",
     annotations: { title: "List workspace participants", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
