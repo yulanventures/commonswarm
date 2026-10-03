@@ -3,8 +3,12 @@
 -- in the SAME transaction as its supabase_migrations.schema_migrations insert.
 -- Existing versions are backfilled from files at the actually released SHA,
 -- with source='backfill'; expected activation hashes are never observed evidence.
-CREATE SCHEMA IF NOT EXISTS commonswarm_ops AUTHORIZATION swarm_admin;
 DO $schema$ BEGIN
+  -- PG17 checks database CREATE before IF NOT EXISTS. The data-free reserve
+  -- retains this schema; reusing it needs schema ownership, not database CREATE.
+  IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname='commonswarm_ops') THEN
+    CREATE SCHEMA commonswarm_ops AUTHORIZATION swarm_admin;
+  END IF;
   IF (SELECT nspowner FROM pg_catalog.pg_namespace WHERE nspname='commonswarm_ops')<>'swarm_admin'::regrole THEN
     RAISE EXCEPTION 'commonswarm_ops has unexpected owner';
   END IF;

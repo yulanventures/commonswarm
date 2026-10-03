@@ -1,8 +1,9 @@
 /** Isolated local PostgreSQL boundary. No service credentials or browser use. */
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { runSqlProcess, sqlPhase } from './admin-schema-process.js';
 
 export const versions = ['20261003000001', '20261003000002', '20261003000003'] as const;
 export const migrationNames = [
@@ -50,12 +51,10 @@ export function emptyApplicationSchema(): string {
 }
 export function runSql(sql: string): void {
   const emptySchema = emptyApplicationSchema();
-  const result = spawnSync('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
-    '-U', clusterAdministrator, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
-    input: `BEGIN;\n${emptySchema}\n${sql}\nROLLBACK;\n`, encoding: 'utf8', timeout: 60_000,
-  });
-  assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr);
+  runSqlProcess('docker', ['exec', '-i', databaseContainer(), 'psql', '-X', '-Atq',
+    '-U', clusterAdministrator, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
+    '-v', 'VERBOSITY=verbose', '-v', 'SHOW_CONTEXT=never', '-f', '/dev/stdin'],
+  `BEGIN;\n${sqlPhase('empty-application-schema', emptySchema)}\n${sqlPhase('test-body', sql)}\nROLLBACK;\n`);
 }
 export function dbAssert(expression: string, label: string): string {
   return `DO $assert$ BEGIN IF NOT coalesce((${expression}),false) THEN RAISE EXCEPTION '${label}'; END IF; END $assert$;`;
