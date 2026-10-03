@@ -49,6 +49,28 @@ function requirePendingReceipt(input, current, parent, r) {
 export function adminDigest(value) {
   return createHash("sha256").update(canonicalAdminJson(value)).digest("hex");
 }
+
+// CIMD verification pins adminDigest of the complete fetched JSON document,
+// before provider defaults/field filtering. Use this snapshot at every admin
+// checkpoint; the ordinary provider cache cannot establish current eligibility.
+export async function resolveAdminClientMetadata({ client, source, fetchMetadata }) {
+  try {
+    const runtime = client.metadata();
+    if (source === "static") return runtime;
+    if (source !== "cimd") refuse();
+    const result = await fetchMetadata(client.clientId ?? runtime.client_id);
+    if (!result.ok) refuse();
+    const metadata = await result.json();
+    // Fresh metadata cannot authorize a cached client with different wire behavior.
+    for (const key of ["client_id", "application_type", "redirect_uris", "dpop_signing_alg"]) {
+      if (canonicalAdminJson(runtime[key]) !== canonicalAdminJson(metadata[key])) refuse();
+    }
+    return metadata;
+  } catch (error) {
+    if (error instanceof AdminConsentError) throw error;
+    refuse();
+  }
+}
 function hostedHttps(uri) {
   // This also rejects literal/private/loopback hosts, userinfo and fragments.
   return typeof uri === "string" && metadataUrlAllowed(uri);
@@ -217,20 +239,8 @@ export function createAdminConsentService({ store, provider, fetchMetadata = cre
     try {
       const client = await provider.Client.find(input.params.client_id);
       if (!client) refuse();
-      const runtime = client.metadata();
-      if (staticClientIds.has(input.params.client_id)) {
-        metadata = runtime;
-        source = "static";
-      } else {
-        const result = await fetchMetadata(input.params.client_id);
-        if (!result.ok) refuse();
-        metadata = await result.json();
-        source = "cimd";
-        // Fresh metadata cannot authorize a cached client with different wire behavior.
-        for (const key of ["client_id", "application_type", "redirect_uris", "dpop_signing_alg"]) {
-          if (canonicalAdminJson(runtime[key]) !== canonicalAdminJson(metadata[key])) refuse();
-        }
-      }
+      source = staticClientIds.has(input.params.client_id) ? "static" : "cimd";
+      metadata = await resolveAdminClientMetadata({ client, source, fetchMetadata });
     } catch (error) {
       if (error instanceof AdminConsentError) throw error;
       refuse();
