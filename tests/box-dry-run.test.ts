@@ -2033,6 +2033,15 @@ function configureStubRuntime(bin: string, inputs: Record<string, string | undef
   }
 }
 
+function preparePythonFixture(directory: string, siteMcp: boolean): void {
+  mkdirSync(directory, { recursive: true, mode: 0o755 });
+  const source = readFileSync(join(PYTHON_FIXTURE, "sitecustomize.py"), "utf8");
+  const marker = "_SITE_MCP = False  # fixture-site-mcp";
+  assert.equal(source.split(marker).length, 2, "Python fixture must have exactly one private site-mode marker");
+  writeMode(join(directory, "sitecustomize.py"), source.replace(marker,
+    `_SITE_MCP = ${siteMcp ? "True" : "False"}  # fixture-site-mcp`), 0o644);
+}
+
 function writeMode(filename: string, body: string, mode = 0o600): void {
   mkdirSync(dirname(filename), { recursive: true });
   writeFileSync(filename, body, { mode });
@@ -2153,6 +2162,7 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
   const macTmp = join(temporary, "tmp");
   const boxRoot = join(temporary, "box");
   const distFixture = join(temporary, "dist-fixture");
+  const pythonFixture = join(temporary, "python");
   const log = join(temporary, "stub.log");
   const promptRoot = join(temporary, "prompt-inputs");
   const opServiceAccountTokenFile = join(promptRoot, "op-service-account-token");
@@ -2160,6 +2170,7 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
   writeFileSync(opServiceAccountTokenFile, promptSchemaContent("op-service-account-token"), { mode: 0o600 });
   chmodSync(opServiceAccountTokenFile, 0o600);
   makeStubBin(bin);
+  preparePythonFixture(pythonFixture, planBlocks.some((block) => block.file === SITE));
   const inventoryDeno = planBlocks.some((block) => shortStep(block) === "runbook-04") ? pinInventoryDeno(bin) : undefined;
   for (const command of MAC_HOST_STATE_STUBS) {
     copyFileSync(STUB, join(bin, command));
@@ -2190,7 +2201,7 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
     PATH: macBlockPath(bin),
     BOX_DRY_RUN_PART: "mac",
     BOX_DRY_RUN_STUB_LOG: log,
-    BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
+    BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
     BOX_DRY_RUN_USERLAND: USERLAND,
     BOX_DRY_RUN_BOX_ROOT: boxRoot,
     BOX_DRY_RUN_BOX_BIN: boxBin,
@@ -2219,6 +2230,7 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
     BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
   });
   configureStubRuntime(bin, {
+    fixture_python: pythonFixture,
     fixture_build_reference: env.SITE_BUILD_ENV_OP_REFERENCE,
     fixture_build_tmp: macTmp,
   });
@@ -2228,7 +2240,7 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
   const fixture: Fixture = {
     temporary, cwd: checkout, home, bin, log, inventoryDeno,
     prelude: PRELUDE,
-    pythonFixture: PYTHON_FIXTURE,
+    pythonFixture,
     sourceRoot: checkout,
     part: "mac", macTmp, boxRoot, boxBin, distFixture, containment: blockProfile,
     browserBranch: options.browserBranch ?? "FULL-CONTROL",
@@ -2362,7 +2374,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   copyRootFixture(PRELUDE, prelude, 0o644);
   copyRootFixture(USERLAND, userland, 0o644);
   makeRootDirectory(pythonFixture, 0o755);
-  copyRootFixture(join(PYTHON_FIXTURE, "sitecustomize.py"), join(pythonFixture, "sitecustomize.py"), 0o644);
+  preparePythonFixture(pythonFixture, macSiteSequence);
   makeRootDirectory(sourceRoot, 0o755);
   makeRootDirectory(join(sourceRoot, "supabase"), 0o755);
   makeRootDirectory(join(sourceRoot, "supabase/migrations"), 0o755);
@@ -2515,6 +2527,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
 
   const boxPromptEnvironment = syntheticPromptEnvironment(temporary, declaredPromptInputs, fromWindowA);
   configureStubRuntime(bin, {
+    fixture_python: pythonFixture,
     fixture_service_private: servicePrivate,
     fixture_service_log: commonswarmLog,
     fixture_root_private: temporary,
@@ -8833,9 +8846,9 @@ test("controls: the box clock supplies producer and consumer date arithmetic", (
         BOX_DRY_RUN_USERLAND: USERLAND, BOX_DRY_RUN_STUB_LOG: join(temporary, "clock.log") });
       const epoch = Date.parse(start) / 1000;
       const clock = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
-        `. ${shellWord(PRELUDE)}\ndate -u +%Y-%m-%dT%H:%M:%SZ\ndate -u +%s\n` });
+        `. ${shellWord(PRELUDE)}\ndate -u +%Y-%m-%dT%H:%M:%SZ\ndate -u +%s\ndate +%s\n` });
       assert.equal(clock.status, 0, clock.stderr);
-      assert.deepEqual(clock.stdout.trim().split("\n"), [start, String(epoch)]);
+      assert.deepEqual(clock.stdout.trim().split("\n"), [start, String(epoch), String(epoch)]);
       const run = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
         `. ${shellWord(PRELUDE)}\nstart=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n` +
         'date -u -d "$start" +%s\ndate -u +%s\ndate -u -d "$start + 4 hours" +%s\n' +
@@ -8848,8 +8861,90 @@ test("controls: the box clock supplies producer and consumer date arithmetic", (
       assert.equal(refused.status, 69);
       assert.match(refused.stderr, /unhandled dry-run stub: date/);
       assert.equal(refused.stdout, "");
+      for (const args of ["+%Y-%m-%d", "-d now +%s", "+%s extra", "+%s +%s"]) {
+        const unsupported = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
+          `. ${shellWord(PRELUDE)}\ndate ${args}\nprintf reached\n` });
+        assert.equal(unsupported.status, 69, unsupported.stderr);
+        assert.match(unsupported.stderr, /unhandled dry-run stub: date/);
+        assert.equal(unsupported.stdout, "");
+      }
     }
   } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-clock-"); }
+});
+
+test("controls: the site GO Python probe models only the exact live MCP request forms", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  try {
+    const bin = join(temporary, "bin");
+    const python = join(temporary, "python");
+    const log = join(temporary, "stub.log");
+    makeStubBin(bin);
+    preparePythonFixture(python, true);
+    configureStubRuntime(bin, { fixture_python: python });
+    const block = planBlock(SITE, "site-03-go-record");
+    const program = /python3 - >"\$SITE_EVIDENCE\/site-03-mcp-live\.txt" <<'PY'\n([\s\S]*?)\nPY/.exec(block.source)?.[1];
+    assert.ok(program, "site GO must supply its actual MCP Python probe");
+    const env = explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`, BOX_DRY_RUN_STUB_LOG: log,
+      BOX_DRY_RUN_PYTHON_FIXTURE: python });
+    const run = (source = program, overrides: NodeJS.ProcessEnv = {}) => spawnSync("/bin/bash",
+      ["-c", 'source "$1"; python3 -', "site-go-control", PRELUDE],
+      { encoding: "utf8", env: { ...env, ...overrides }, input: `${source}\n` });
+    const positive = run();
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.equal(positive.stdout, "MCP_METADATA=PASS status=200 media_type=application/json resource=https://mcp.commonswarm.com/mcp\n" +
+      "MCP_POST=PASS status=401 authenticated=no\nMCP_LIVE=PASS user_agent=commonswarm-release-probe/1.0\n");
+    for (const [before, after] of [
+      ['"User-Agent": UA', '"User-Agent": "other-probe"'],
+      ['"User-Agent": UA,', ''],
+      ['"Accept": "application/json"', '"Accept": "text/html"'],
+      ['"Content-Type": "application/json"', '"Content-Type": "text/plain"'],
+      ['"Accept-Encoding": "identity"', '"Accept-Encoding": "gzip"'],
+      ['"User-Agent": UA,', '"Authorization": "Bearer synthetic", "User-Agent": UA,'],
+      ['method="POST", data=b"{}"', 'method="GET", data=b"{}"'],
+      ['method="POST", data=b"{}"', 'method="HEAD", data=b"{}"'],
+      ['method="POST", data=b"{}"', 'method="POST", data=b"[]"'],
+      ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-protected-resource/other'],
+      ['/.well-known/oauth-protected-resource/mcp', '/unexpected'],
+      ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-protected-resource/mcp?extra=1'],
+      ['https://mcp.commonswarm.com', 'https://foreign.example'],
+    ]) {
+      assert.ok(program.includes(before!), `mutation target absent: ${before}`);
+      const refused = run(program.replaceAll(before!, after!));
+      assert.equal(refused.status, 69, `${after}: ${refused.stderr}`);
+      assert.match(refused.stderr, /UNPRODUCED site MCP request form/);
+      assert.doesNotMatch(refused.stdout, /MCP_LIVE=PASS/);
+    }
+    const redirected = run(program, { BOX_DRY_RUN_PYTHON_FIXTURE: join(temporary, "missing-python"),
+      fixture_python: join(temporary, "missing-python"), SITE_MCP: "0" });
+    assert.equal(redirected.status, 0, redirected.stderr);
+    assert.equal(redirected.stdout, positive.stdout, "plan exports replaced private Python fixture state");
+    const fixturePath = join(python, "sitecustomize.py");
+    const acceptedFixture = readFileSync(fixturePath, "utf8");
+    for (const [before, after, failure] of [
+      ['200, json.dumps({"resource": resource}).encode(), "application/json"',
+        '201, json.dumps({"resource": resource}).encode(), "application/json"', "metadata must be 200 JSON"],
+      ['json.dumps({"resource": resource}).encode(), "application/json"',
+        'json.dumps({"resource": resource}).encode(), "text/plain"', "metadata must be 200 JSON"],
+      ['json.dumps({"resource": resource})', 'json.dumps({"resource": "wrong"})', "metadata resource mismatch"],
+      ['401, b"", "application/json"', '403, b"", "application/json"', "MCP POST must be 401"],
+    ]) {
+      assert.ok(acceptedFixture.includes(before!), `response mutation absent: ${before}`);
+      writeFileSync(fixturePath, acceptedFixture.replace(before!, after!));
+      const invalid = run();
+      assert.equal(invalid.status, 1, invalid.stderr);
+      assert.ok(invalid.stderr.includes(failure!), invalid.stderr);
+      assert.doesNotMatch(invalid.stdout, /MCP_LIVE=PASS/);
+    }
+    writeFileSync(fixturePath, acceptedFixture);
+    const restored = run();
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(restored.stdout, positive.stdout);
+    preparePythonFixture(python, false);
+    const dark = run();
+    assert.equal(dark.status, 1, dark.stderr);
+    assert.match(dark.stderr, /STOP: MCP protected-resource metadata must be 200 JSON before GO/);
+    assert.match(readFileSync(log, "utf8"), /python-urllib status=503 .*oauth-protected-resource\/mcp/);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-"); }
 });
 
 test("controls: a quoted heredoc does not see Mac-local variables", () => {

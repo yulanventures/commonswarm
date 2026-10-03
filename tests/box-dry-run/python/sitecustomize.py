@@ -15,10 +15,15 @@ import pathlib
 import pwd
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 _real_urlopen = urllib.request.urlopen
 _real_build_opener = urllib.request.build_opener
+
+# Fixture construction replaces this in a private copy for the site sequence.
+# This is harness state, never a value supplied by the plan's environment.
+_SITE_MCP = False  # fixture-site-mcp
 
 
 class Response:
@@ -69,7 +74,27 @@ def _fixture(request):
 
     method = getattr(request, "method", None) or (request.get_method() if not isinstance(request, str) else "GET")
     data = getattr(request, "data", None)
-    if not explicit and any(host in url for host in (
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    if _SITE_MCP and (parsed.hostname == "mcp.commonswarm.com" or
+                      path.startswith("/.well-known/oauth-protected-resource/") or
+                      path == "/mcp" or path.startswith("/mcp/")):
+        # Source-derived site GO request/response shapes, not a live observation:
+        # docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:768-793
+        # requires these two public probes after MCP is
+        # enabled. Window A's historical dark-route responses stay below.
+        # The real plan Python still validates status, media type and resource.
+        expected_headers = {"user-agent": "commonswarm-release-probe/1.0", "accept": "application/json",
+                            "content-type": "application/json", "accept-encoding": "identity"}
+        resource = "https://mcp.commonswarm.com/mcp"
+        if headers == expected_headers and url == "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp" and method == "GET" and data is None:
+            status, body, content_type = 200, json.dumps({"resource": resource}).encode(), "application/json"
+        elif headers == expected_headers and url == resource and method == "POST" and data == b"{}":
+            status, body, content_type = 401, b"", "application/json"
+        else:
+            sys.stderr.write("UNPRODUCED site MCP request form\n")
+            raise SystemExit(69)
+    elif not explicit and any(host in url for host in (
         "api.commonswarm.com", "edge-staging.commonswarm.com", "commonswarm.com"
     )) and "mcp.commonswarm.com" not in url:
         status, body, content_type = 403, b"error code: 1010\n", "text/plain"

@@ -801,7 +801,7 @@ case "$name" in
     exit 69
     ;;
   python3)
-    exec /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 "$@"
+    exec /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${fixture_python:-${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}}" /usr/bin/python3 "$@"
     ;;
   tar)
     tar_arguments=()
