@@ -346,7 +346,9 @@ test("2. CIMD uses injected fetch and rejects unsafe or invalid metadata", async
   }
 });
 
-test("2b. CIMD cache has bounded duration, expires, and revalidates through the injected fetch", async () => {
+test("2b. CIMD cache has bounded duration, expires, and revalidates through the injected fetch", async (t) => {
+  // oidc-provider's CIMD cache reads Date.now(); keep it fixed between requests.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   assert.deepEqual(CIMD_CACHE_DURATION_SECONDS, { min: 30, max: 300 });
   const clientId = "https://cache-expiry.example/oauth-client.json";
   let fetches = 0;
@@ -360,7 +362,7 @@ test("2b. CIMD cache has bounded duration, expires, and revalidates through the 
     const cached = await server.request(authorizationUrl({ clientId, state: "cache-two" }));
     assert.equal(cached.status, 303);
     assert.equal(fetches, 1);
-    await new Promise((resolve) => setTimeout(resolve, 35));
+    t.mock.timers.tick(21);
     const revalidated = await server.request(authorizationUrl({ clientId, state: "cache-three" }));
     assert.equal(revalidated.status, 303);
     assert.equal(fetches, 2);
