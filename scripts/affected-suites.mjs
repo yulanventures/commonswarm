@@ -31,7 +31,12 @@ export const RULES = [
 
 export function affectedSuites(paths) {
   const hit = new Set();
-  for (const path of paths) for (const [re, suites] of RULES) if (re.test(path)) suites.forEach((s) => hit.add(s));
+  for (const path of paths) {
+    const rules = RULES.filter(([re]) => re.test(path));
+    // Fail safe: a changed path that no rule names could affect anything, so run everything.
+    if (rules.length === 0) return [...SUITES];
+    for (const [, suites] of rules) suites.forEach((s) => hit.add(s));
+  }
   return SUITES.filter((s) => hit.has(s));
 }
 
