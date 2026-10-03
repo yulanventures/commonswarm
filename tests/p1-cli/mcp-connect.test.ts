@@ -44,6 +44,24 @@ after(() => {
   removeLaneTempHome(fileHome);
 });
 
+function spawnPausedWriter(script: string, args: string[]) {
+  // A pending promise and open FileHandles do not keep the child alive. Keep
+  // stdin referenced until the parent kills the writer at its publication point.
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+    `process.stdin.resume();\n${script}`, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+  // Subscribe before readiness or filesystem awaits so an early exit cannot be missed.
+  const closed = once(child, "close");
+  const ready = Promise.race([once(child.stdout, "data"), closed.then(([code, signal]) => {
+    throw new Error(`paused writer exited before readiness (${code ?? signal})`);
+  })]);
+  return { child, closed, ready };
+}
+
+async function stopPausedWriter(writer: ReturnType<typeof spawnPausedWriter>) {
+  if (writer.child.exitCode === null && writer.child.signalCode === null) writer.child.kill("SIGKILL");
+  return writer.closed;
+}
+
 test("connect accepts its symlink lock when hard-link publication is unavailable", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
@@ -384,7 +402,7 @@ test("Fold 9 unsupported hard links use exclusive final creation and recover a w
 
 test("Fold 10 killed wx claims and fallback temps recover the same pending connect", { timeout: 20000 }, async () => {
   const f = await fixture();
-  let child: ReturnType<typeof spawn> | null = null;
+  let writer: ReturnType<typeof spawnPausedWriter> | null = null;
   let posts = 0;
   const fetcher: typeof fetch = async () => {
     posts++;
@@ -409,13 +427,11 @@ test("Fold 10 killed wx claims and fallback temps recover the same pending conne
           }
           await handle.writeFile(data);
         }, async () => { throw Object.assign(new Error('no links'), { code: 'EPERM' }); });`;
-      child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential, killPoint],
-        { stdio: ["ignore", "pipe", "pipe"] });
-      await once(child.stdout!, "data");
+      writer = spawnPausedWriter(script, [credential, killPoint]);
+      await writer.ready;
       assert.equal((await readFile(credential)).length, 0, "the claimed path stays empty until rename");
-      child.kill("SIGKILL");
-      await once(child, "exit");
-      child = null;
+      assert.deepEqual(await stopPausedWriter(writer), [null, "SIGKILL"], "the parent killed the paused writer");
+      writer = null;
       assert.equal((await readFile(credential)).length, 0);
       await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher });
       assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
@@ -424,7 +440,7 @@ test("Fold 10 killed wx claims and fallback temps recover the same pending conne
     }
     assert.equal(posts, 4);
   } finally {
-    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    if (writer) await stopPausedWriter(writer).catch(() => undefined);
     await f.close();
   }
 });
@@ -1885,7 +1901,7 @@ test("Fold 7 damaged completion warns; unreadable completion refuses before regi
 
 test("Fold 7 kill before first credential write leaves no final file and one-request recovery", { timeout: 15000 }, async () => {
   const f = await fixture();
-  let child: ReturnType<typeof spawn> | null = null;
+  let writer: ReturnType<typeof spawnPausedWriter> | null = null;
   try {
     const path = join(f.root, "first-kill", "profile.json");
     let posts = 0;
@@ -1899,25 +1915,24 @@ test("Fold 7 kill before first credential write leaves no final file and one-req
     const credential = join(dirname(path), "credential.json");
     const storageUrl = new URL("../../src/cloud/storage.ts", import.meta.url).href;
     const script = `import { writeSecureJsonFileExclusive } from ${JSON.stringify(storageUrl)}; await writeSecureJsonFileExclusive(process.argv[1], '{}', async () => { process.stdout.write('ready\\n'); await new Promise(() => {}); });`;
-    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential], { stdio: ["ignore", "pipe", "pipe"] });
-    await once(child.stdout!, "data");
-    child.kill("SIGKILL");
-    await once(child, "exit");
-    child = null;
+    writer = spawnPausedWriter(script, [credential]);
+    await writer.ready;
+    assert.deepEqual(await stopPausedWriter(writer), [null, "SIGKILL"], "the parent killed the paused writer");
+    writer = null;
     await assert.rejects(stat(credential), { code: "ENOENT" });
     assert.equal((await readdir(dirname(path))).filter(name => /^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(name)).length, 1);
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher });
     assert.equal(posts, 2);
     assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
   } finally {
-    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    if (writer) await stopPausedWriter(writer).catch(() => undefined);
     await f.close();
   }
 });
 
 test("Fold 7 replace failure unlinks its temp and a killed replacement temp is removed next run", { timeout: 15000 }, async () => {
   const f = await fixture();
-  let child: ReturnType<typeof spawn> | null = null;
+  let writer: ReturnType<typeof spawnPausedWriter> | null = null;
   try {
     const path = join(f.root, "replace-kill", "profile.json");
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
@@ -1931,11 +1946,10 @@ test("Fold 7 replace failure unlinks its temp and a killed replacement temp is r
     assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
     const storageUrl = new URL("../../src/cloud/storage.ts", import.meta.url).href;
     const script = `import { writeSecureJsonFile } from ${JSON.stringify(storageUrl)}; await writeSecureJsonFile(process.argv[1], '{}', async handle => { await handle.writeFile('{}'); process.stdout.write('ready\\n'); await new Promise(() => {}); });`;
-    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential], { stdio: ["ignore", "pipe", "pipe"] });
-    await once(child.stdout!, "data");
-    child.kill("SIGKILL");
-    await once(child, "exit");
-    child = null;
+    writer = spawnPausedWriter(script, [credential]);
+    await writer.ready;
+    assert.deepEqual(await stopPausedWriter(writer), [null, "SIGKILL"], "the parent killed the paused writer");
+    writer = null;
     assert.equal((await readdir(dirname(path))).filter(name => /^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(name)).length, 1);
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
       assert.equal((error as { code: string }).code, "profile_exists");
@@ -1948,7 +1962,7 @@ test("Fold 7 replace failure unlinks its temp and a killed replacement temp is r
     assert.deepEqual(await readFile(credential), before);
     assert.equal(f.calls(), 1);
   } finally {
-    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    if (writer) await stopPausedWriter(writer).catch(() => undefined);
     await f.close();
   }
 });
