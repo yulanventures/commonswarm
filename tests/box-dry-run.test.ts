@@ -2890,9 +2890,17 @@ function suppliedPromptFile(source: string, fixture: ProductContext): string | u
 // A Mac file that a declared NOT EXECUTED Mac block lists as unproduced has no source in a dry run: that block never
 // ran, so bytes the box lane modeled for it would be the result of an observation nobody made. The Mac lane has no such
 // file either, and its own transfer fails on it.
-function unproducedMacProduct(file: string): NonSubstitutableEntry | undefined {
-  return nonSubstitutableEntries().find((entry) => entry.scope === "whole-block" && entry.step !== undefined &&
-    blockIndex().get(entry.step)?.host.startsWith("Mac ") && (entry.unproduced ?? []).some((missing) => missing.output === file));
+// A declaring block later in the consumer's own plan cannot have written the
+// consumer's input: e.g. hm37b-copyback re-extracts hm37-worker-boundary.txt
+// after hm37b-stage-transfer has shipped hm37b-control-review's original.
+function unproducedMacProduct(file: string, consumer: Block): NonSubstitutableEntry | undefined {
+  return nonSubstitutableEntries().find((entry) => {
+    if (entry.scope !== "whole-block" || entry.step === undefined) return false;
+    const origin = blockIndex().get(entry.step);
+    if (!origin?.host.startsWith("Mac ")) return false;
+    if (origin.file === consumer.file && origin.line > consumer.line) return false;
+    return (entry.unproduced ?? []).some((missing) => missing.output === file);
+  });
 }
 
 // The bytes a Mac-to-box transfer's own producer writer and the supplied inputs give, or undefined when no writer of
@@ -3133,6 +3141,25 @@ function macBoundaryInputs(block: Block, fixture: Fixture, operations: ReturnTyp
   return { inputs };
 }
 
+// site-04 sends deploy.sh output only to its evidence log. When the block
+// fails, report the tail of that fixture file (synthetic inputs only) so the
+// failing deploy step is visible. Diagnostic text only: it changes no result.
+function siteDeployDiagnostic(block: Block, fixture: Fixture): string {
+  if (shortStep(block) !== "site-04" || !fixture.env.SITE_EVIDENCE) return "";
+  const lines: string[] = [];
+  for (const name of ["deploy-status.txt", "deploy.log"]) {
+    const path = join(fixture.env.SITE_EVIDENCE, name);
+    if (!pathExists(path) || !lstatSync(path).isFile()) {
+      lines.push(`dry-run diagnostic: ${name} absent`);
+      continue;
+    }
+    const bytes = readFileSync(path);
+    const tail = bytes.subarray(Math.max(0, bytes.length - 4096)).toString("utf8");
+    lines.push(`dry-run diagnostic: ${name} (${bytes.length} bytes, last ${Math.min(bytes.length, 4096)}):`, tail.trimEnd());
+  }
+  return lines.join("\n") + "\n";
+}
+
 function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined {
   assert.ok(guardedBoxFixtures.has(fixture), "cross-host products require a guarded box fixture");
   // Direct boundary controls obey the same declaration as the whole-plan
@@ -3148,7 +3175,7 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
         .replaceAll("/private/tmp/anvil-secret.", join(fixture.macLocalRoot!, "tmp/anvil-secret.")) }, fixture, {
       env: { HOME: fixture.home, TMPDIR: join(fixture.macLocalRoot!, "tmp") },
     });
-    if (execution.result !== "passed") return execution;
+    if (execution.result !== "passed") return { ...execution, stderr: execution.stderr + siteDeployDiagnostic(block, fixture) };
     return { ...execution, result: "not-executed", seeded: [], declared: {
       surface: "Mac site producer contract on Linux",
       reason: "Complete local writer sequence modeled on the guarded Linux runner; SSH scripts execute as their declared login users. Build and browser surfaces retain their existing declarations.",
@@ -3193,7 +3220,7 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
       }
       // A name a declared NOT EXECUTED Mac producer enumerates as unavailable has no source in a dry run, so an executed
       // transfer refuses it. Static handoff coverage reports the same name as unavailable and models no bytes for it.
-      const absent = !stateSource && !suppliedPromptFile(symbolic.source, fixture) ? unproducedMacProduct(basename(product.path)) : undefined;
+      const absent = !stateSource && !suppliedPromptFile(symbolic.source, fixture) ? unproducedMacProduct(basename(product.path), block) : undefined;
       if (absent) {
         return { step: shortStep(block), result: "failed", status: 69, stdout, seeded,
           stderr: `UNPRODUCED Mac product ${basename(product.path)}: its producer ${absent.step} is NOT EXECUTED and documents no success bytes for it\n` };
@@ -3308,6 +3335,26 @@ function unavailableConsumerInputs(block: Block, records: BlockRecord[], missing
             !missingManifestMembers.has(output.output) ||
             !entry.unproduced?.some((missing) => missing.output === output.output)) continue;
         reasons.push(`${output.path}: ${entry.step} is NOT EXECUTED; ${output.reason}`);
+      }
+    }
+    // An early-failure path stops before a whole-block declared box writer of
+    // a manifest member (e.g. the Window A evidence transfer). Its declared,
+    // unproduced proof destination is not reached on this path. Only a step of
+    // the selected Window A sequence counts, and only once the window opened.
+    if (records.some((record) => record.block.file === HM37 && shortStep(record.block) === "hm37a-open-inputs")) {
+      const selected = selectedHmSequence();
+      const index = blockIndex();
+      for (const entry of nonSubstitutableEntries()) {
+        if (entry.scope !== "whole-block" || entry.step === undefined || !selected.includes(entry.step)) continue;
+        const producer = index.get(entry.step);
+        if (!producer || ![HM37, RUNBOOK].includes(producer.file) ||
+            records.some((record) => record.block.file === producer.file && record.block.step === producer.step)) continue;
+        for (const output of entry.written_outputs ?? []) {
+          if (output.path !== `/home/commonswarm/stack/release-proofs/{sha}/${output.output}` ||
+              !missingManifestMembers.has(output.output) ||
+              !entry.unproduced?.some((missing) => missing.output === output.output)) continue;
+          reasons.push(`${output.path}: ${entry.step} is not reached on this path`);
+        }
       }
     }
   }
@@ -9299,6 +9346,44 @@ test("controls: all Python calls share the exact prelude wrapper and preserve ar
   } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-"); }
 });
 
+test("controls: a later declared block of the same plan never claims an earlier transfer's input", () => {
+  const stage = planBlock(HM37B, "hm37b-stage-transfer");
+  const cleanup = planBlock(HM37B, "hm37b-mac-cleanup");
+  for (const name of ["hm37-worker-boundary.txt", "hm37-hosted-control-inputs.txt"]) {
+    // hm37b-control-review (earlier) writes these; hm37b-copyback (later) only re-extracts them.
+    assert.equal(unproducedMacProduct(name, stage), undefined);
+    assert.equal(unproducedMacProduct(name, cleanup)?.step, "hm37b-copyback", "a consumer after copy-back still refuses its unproduced copy");
+    const product = transferProducts(stage).find((item) => basename(item.path) === name && item.source === `$EVIDENCE_DIR/${name}`);
+    assert.ok(product, `stage transfer ships ${name} from the Mac evidence directory`);
+    const bytes = String(macProductModel(product, stage, { env: {} } as ProductContext));
+    assert.match(bytes, /^# SYNTHETIC Mac producer product; not a review observation\n/);
+    assert.match(bytes, /^worker_boundary_review=PASS$/m);
+  }
+  // Earlier declared producers still refuse their unproduced names.
+  assert.equal(unproducedMacProduct("hm37a-local-control-old.json", planBlock(HM37, "hm37a-failure-evidence-transfer"))?.step,
+    "hm37a-directed-check-old");
+  assert.equal(unproducedMacProduct("hm37a-prep-seat-inventory.json", planBlock(HM37, "hm37a-local-evidence-transfer"))?.step,
+    "hm37a-directed-check-old");
+  assert.equal(unproducedMacProduct("human-session.json", stage)?.step, "hm37b-hosted-auth-dependency-preflight");
+});
+
+test("controls: a failed site-04 reports its deploy evidence tail and changes nothing else", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-site-diagnostic-"));
+  try {
+    const fixture = { env: { SITE_EVIDENCE: temporary } } as unknown as Fixture;
+    const site04 = planBlock(SITE, "site-04");
+    assert.equal(siteDeployDiagnostic(planBlock(SITE, "site-05"), fixture), "");
+    assert.equal(siteDeployDiagnostic(site04, { env: {} } as unknown as Fixture), "");
+    assert.match(siteDeployDiagnostic(site04, fixture), /deploy-status\.txt absent\n.*deploy\.log absent\n$/s);
+    writeMode(join(temporary, "deploy-status.txt"), "deploy_exit=1\n");
+    writeMode(join(temporary, "deploy.log"), "x".repeat(5000) + "\nRefusing deploy: example\n");
+    const report = siteDeployDiagnostic(site04, fixture);
+    assert.match(report, /deploy_exit=1/);
+    assert.match(report, /deploy\.log \(5026 bytes, last 4096\):\n[x]+\nRefusing deploy: example\n$/);
+    assert.equal(readFileSync(join(temporary, "deploy.log"), "utf8").length, 5026);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-site-diagnostic-"); }
+});
+
 test("controls: executable date and Python window checks use one clock across Bash and sh", () => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-clock-"));
   try {
@@ -9354,6 +9439,26 @@ test("controls: unavailable consumers never supply bytes and unknown missing cop
   const executed = [...records, record(RUNBOOK, "runbook-33", "passed")];
   assert.deepEqual(unavailableConsumerInputs(block, executed, new Set(["edge-probe-start.txt"])), [],
     "an executed producer's missing product must fail the real consumer");
+  // Pre-commit failure path: the Window A evidence transfer is cut off before it
+  // runs. Its nine declared box destinations are explained as not reached; once
+  // the transfer is reached they are NOT EXECUTED instead, never both.
+  const transferNames = ["hm37a-prep-seat-inventory.json", "hm37a-local-control-old.json", "hm37a-local-control-new.json",
+    "hm37-loopback-reads.json", "hm37-public-reads.json", "hm37-mcp-hostname-reads.json",
+    "hm37-loopback-boundaries.json", "hm37-public-boundaries.json", "hm37-mcp-hostname-boundaries.json"];
+  const early = [record(HM37, "hm37a-open-inputs", "not-executed"), record(HM37, "hm37a-directed-check-old", "not-executed")];
+  assert.deepEqual(unavailableConsumerInputs(block, early, new Set(transferNames)),
+    transferNames.map((name) => `/home/commonswarm/stack/release-proofs/{sha}/${name}: hm37a-local-evidence-transfer is not reached on this path`).sort());
+  const reached = unavailableConsumerInputs(block, [...early, record(HM37, "hm37a-local-evidence-transfer", "not-executed")], new Set(transferNames));
+  assert.equal(reached.length, transferNames.length);
+  assert.ok(reached.every((reason) => reason.includes(": hm37a-local-evidence-transfer is NOT EXECUTED; ")));
+  assert.deepEqual(unavailableConsumerInputs(block, [...early, record(HM37, "hm37a-local-evidence-transfer", "passed")], new Set(transferNames)), [],
+    "a reached transfer that passed and left its destinations missing must fail the real consumer");
+  assert.deepEqual(unavailableConsumerInputs(block, [early[1]!], new Set(transferNames)), [],
+    "without an opened Window A no unreached producer explains a missing member");
+  assert.deepEqual(unavailableConsumerInputs(block, early, new Set([...transferNames, "unlisted-proof.txt"])), [],
+    "an unrelated missing member cannot hide behind unreached transfer members");
+  assert.deepEqual(unavailableConsumerInputs(block, early, new Set(["hm37-hosted-check-control.json"])), [],
+    "a Window B declaration is never a Window A producer");
   // A declaration's absence cannot silently turn an ordinary transfer into a
   // passed run. Its real boundary refusal control remains independently owned.
   const transfer = planBlock(HM37, "hm37a-local-evidence-transfer");
