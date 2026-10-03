@@ -1,0 +1,472 @@
+/** Cross lane: real live-ordinary-controls receipts through extracted RELEASE.md blocks. */
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createServer } from 'node:http';
+import { spawn, spawnSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+const temporaryRoot = realpathSync(tmpdir());
+const secretParent = join(temporaryRoot, 'anvil-secret-root');
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp } from 'node:fs/promises';
+
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const script = join(repo, 'scripts/live-ordinary-controls.mjs');
+const preload = join(repo, 'tests/support/live-ordinary-controls-transport.mjs');
+const planPath = join(repo, 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
+const plan = readFileSync(planPath, 'utf8');
+const blocks = [...plan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]);
+const block = id => {
+  const matches = blocks.filter(s => s.startsWith(`# step: ${id}\n`));
+  assert.equal(matches.length, 1, `one complete ${id} block`);
+  return matches[0];
+};
+const digest = value => createHash('sha256').update(value).digest('hex');
+const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+assert.ok(python.startsWith('/'), 'absolute Python runtime');
+
+const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
+const client = 'https://commonswarm.com/oauth/c1-controls/client.json';
+const redirect = 'https://commonswarm.com/oauth/c1-controls/callback', resource = `${issuer}/mcp`;
+const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
+const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const windowId = 'ABC123';
+const hash = b => createHash('sha256').update(b).digest('hex');
+const b64hash = b => createHash('sha256').update(b).digest('base64url');
+const uid = '11111111-1111-4111-8111-111111111111', wid = '22222222-2222-4222-8222-222222222222';
+const pid = '33333333-3333-4333-8333-333333333333';
+const privateWrite = (p, b) => writeFile(p, typeof b === 'string' ? b : JSON.stringify(b), { mode: 0o600 });
+const scriptBytes = readFileSync(script);
+const producerSha = digest(scriptBytes);
+
+// --- live-ordinary-controls fixture (same wire contract as tests/live-ordinary-controls.test.mjs) ---
+async function liveFixture(t) {
+  mkdirSync(secretParent, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(secretParent, 'anvil-secret.')); await chmod(root, 0o700);
+  const creds = join(root, 'credentials'), human = join(root, 'human'), seat = join(root, 'seat');
+  for (const dir of [creds, human, seat]) await mkdir(dir, { mode: 0o700 });
+  const clientTimes = new Map();
+  const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
+  const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
+  const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
+  const clientMetadata = JSON.parse(await readFile(new URL('../site/public/oauth/c1-controls/client.json', import.meta.url)));
+  const emit = (res, status, body, headers = {}) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(body === null ? undefined : JSON.stringify(body));
+  };
+  const token = (res, f) => {
+    const a = secret(), r = secret(); access.add(a); families.set(r, { family: f, consumed: false });
+    return emit(res, 200, { token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 300, scope: 'mcp', ignored_cookie: secret() });
+  };
+  let signal;
+  const server = createServer(async (req, res) => {
+    try {
+      assert.equal(req.headers['user-agent'], 'curl/8.7.1');
+      const url = new URL(req.url, issuer), chunks = [];
+      for await (const b of req) chunks.push(b);
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const p = req.headers['content-type']?.startsWith('application/x-www-form-urlencoded') ? new URLSearchParams(raw) : null;
+      const body = raw && !p ? JSON.parse(raw) : null;
+      const event = { at: Date.now(), path: url.pathname, method: req.method, grant: p?.get('grant_type'), client: p?.get('client_id'), rpc: body?.method, command: body?.command?.kind }; events.push(event);
+      if (url.pathname === '/.well-known/oauth-authorization-server') return emit(res, 200, {
+        issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/reg`,
+        code_challenge_methods_supported: ['S256'], scopes_supported: ['openid', 'offline_access', 'mcp'],
+      });
+      if (url.pathname === '/.well-known/oauth-protected-resource/mcp') return emit(res, 200, { resource, authorization_servers: [issuer], scopes_supported: ['mcp'] });
+      if (url.pathname === '/oauth/c1-controls/client.json') return emit(res, 200, clientMetadata);
+      if (url.pathname === '/reg') {
+        assert.equal(req.method, 'POST'); assert.equal(body.token_endpoint_auth_method, 'none');
+        const id = randomBytes(24).toString('base64url'); clients.add(id); clientTimes.set(id, event.at);
+        return emit(res, 201, { ...body, client_id: id });
+      }
+      if (url.pathname === '/authorize') {
+        res.writeHead(303, { location: `${issuer}/interaction/${randomBytes(12).toString('hex')}`, 'set-cookie': `session=${secret()}; HttpOnly` }); return res.end();
+      }
+      if (url.pathname === '/token') {
+        assert.equal(req.method, 'POST'); assert.equal(p.get('resource'), resource);
+        const id = p.get('client_id');
+        if (p.get('grant_type') === 'authorization_code') {
+          const c = codes.get(p.get('code')); assert.ok(c);
+          assert.equal(c.clientId, id); assert.equal(p.get('redirect_uri'), redirect);
+          assert.equal(b64hash(p.get('code_verifier')), c.challenge); codes.delete(p.get('code'));
+          const family = { clientId: id, revoked: false }; event.family = family;
+          if (id !== client) clientTimes.set(id, event.at);
+          return token(res, family);
+        }
+        assert.equal(p.get('grant_type'), 'refresh_token'); const stored = families.get(p.get('refresh_token'));
+        if (!stored || stored.family.revoked) { event.rejected = true; event.family = stored?.family; return emit(res, 400, { error: 'invalid_grant' }); }
+        assert.equal(stored.family.clientId, id); event.family = stored.family;
+        if (stored.consumed) { stored.family.revoked = true; event.rejected = true; return emit(res, 400, { error: 'invalid_grant' }); }
+        stored.consumed = true; return token(res, stored.family);
+      }
+      if (url.pathname === '/revoke') {
+        const stored = families.get(p.get('token')); assert.ok(stored); stored.family.revoked = true;
+        return emit(res, 204, null);
+      }
+      if (url.pathname === '/mcp') {
+        assert.ok(access.has(req.headers.authorization?.slice(7))); assert.equal(body.jsonrpc, '2.0');
+        if (body.method === 'notifications/initialized') return emit(res, 202, null);
+        let result;
+        if (body.method === 'initialize') result = { protocolVersion: '2025-06-18', serverInfo: { name: 'commonswarm' } };
+        else {
+          assert.equal(body.method, 'tools/list');
+          result = { tools: tools.map(name => ({ name })) };
+        }
+        return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
+      }
+      if (url.pathname === '/auth/v1/token') {
+        const now = new Date().toISOString(); humanRefresh = secret();
+        return emit(res, 200, { access_token: secret(), refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
+          user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
+      }
+      if (url.pathname === '/rest/v1/workspaces') {
+        return emit(res, 200, [{ workspace_id: wid, name: 'c1-controls (test)' }]);
+      }
+      if (url.pathname === '/functions/v1/read') {
+        if (body.resource === 'members') return emit(res, 200, { members: [], agents: [], identity: {
+          credential_valid: true, workspace_id: wid, principal_id: pid, owner_user_id: uid, workspace_name: 'c1-controls (test)',
+        } });
+        return emit(res, 200, { signals: signal ? [signal] : [] });
+      }
+      if (url.pathname === '/functions/v1/command') {
+        signal = { id: randomUUID(), workspace_id: wid, from: pid, from_kind: 'agent', to: null, to_agent: null, in_reply_to: null, about: null,
+          kind: 'note', body: body.command.body, until: new Date(Date.now() + 60000).toISOString(), created_at: new Date().toISOString() };
+        return emit(res, 200, { status: 'accepted', ok: true, event_ids: [], signal });
+      }
+      throw new Error('unexpected wire request');
+    } catch { violations.push({ path: req.url.split('?')[0], reason: 'wire contract failure' }); emit(res, 500, { error: 'fixture_contract_violation' }); }
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    server.closeAllConnections(); await new Promise(r => server.close(r));
+    assert.deepEqual(violations, []);
+    await promisify(execFile)('/Users/yulanbot/.local/bin/rm', ['-r', root]);
+  });
+  const profileId = hash(api).slice(0, 24);
+  await privateWrite(join(human, 'target.json'), { url: api, anon_key: anon });
+  await privateWrite(join(human, `${profileId}.json`), { version: 1, refreshToken: humanRefresh, generation: 0, deviceId: randomUUID(), userId: uid });
+  await privateWrite(join(human, `${profileId}.profile.json`), { version: 1, userId: uid, workspaceId: wid, pendingCommands: {} });
+  await privateWrite(join(seat, 'profile.json'), { version: 1, url: api, anon_key: anon, workspace_id: wid, principal_id: pid, credential_file: join(seat, 'credential.json') });
+  await privateWrite(join(seat, 'credential.json'), { message: 'Agent credential minted. It is bound to this run, so the agent\'s work is attributable to it.',
+    status: 'accepted', principal_id: pid, token_id: randomUUID(), run_id: randomUUID(), agent_token: seatToken });
+  let sequence = 0;
+  const f = { consent: undefined };
+  async function run(command, extra = [], { handoff = true, outName } = {}) {
+    const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
+    const out = outName ?? join(root, `receipt${sequence}.json`);
+    const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
+      command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
+        ['window', '--phase', 'before', '--window', 'W1', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+    for (let i = 0; i < extra.length; i++) {
+      const arg = extra[i]; const n = args.indexOf(arg);
+      if (n >= 0) args.splice(n, 2);
+      args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]);
+    }
+    const child = spawn(process.execPath, ['--import', preload, script, ...args, '--release-sha', release, '--cred-dir', creds, '--out', out,
+      '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], {
+      cwd: repo, env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '', done = false, handoffError;
+    child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+    const completed = new Promise((r, j) => { child.once('error', j); child.once('exit', code => { done = true; r(code); }); });
+    const handoffs = (async () => {
+      if (command !== 'consent' || !handoff) return;
+      for (const name of ['cimd', 'dcr']) {
+        const path = join(pointer, `${name}-authorize-url.txt`); let a;
+        while (!done) {
+          try {
+            const text = (await readFile(path, 'utf8')).trim();
+            if (!text) { await sleep(10); continue; }
+            a = new URL(text); break;
+          } catch (e) { if (e.code !== 'ENOENT') throw e; await sleep(10); }
+        }
+        if (!a) break;
+        const code = secret(); codes.set(code, { clientId: a.searchParams.get('client_id'), challenge: a.searchParams.get('code_challenge') });
+        const cb = new URL(redirect); cb.search = new URLSearchParams({ code, state: a.searchParams.get('state'), iss: issuer });
+        await writeFile(join(pointer, `${name}-callback-url.txt`), cb.href, { mode: 0o600 });
+      }
+    })().catch(e => { handoffError = e; child.kill(); });
+    const exit = await completed; await handoffs; if (handoffError) throw handoffError;
+    let receipt, bytes;
+    try { bytes = await readFile(out); receipt = JSON.parse(bytes); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    return { exit, output, receipt, bytes, out };
+  }
+  f.run = run;
+  return f;
+}
+
+async function produceReceipts(t) {
+  const f = await liveFixture(t);
+  const pre = await f.run('consent'); assert.equal(pre.exit, 0, pre.output); f.consent = pre.out;
+  const w1 = await f.run('window', ['--window', 'W1', '--phase', 'before']);
+  assert.equal(w1.exit, 0, w1.output);
+  const w2 = await f.run('window', ['--window', 'W2', '--phase', 'before']);
+  assert.equal(w2.exit, 0, w2.output);
+  for (const window of ['W3', 'W4', 'W5']) {
+    const w = await f.run('window', ['--window', window]);
+    assert.equal(w.exit, 0, w.output);
+  }
+  const post = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', pre.out]);
+  assert.equal(post.exit, 0, post.output); f.consent = post.out;
+  const w5after = await f.run('window', ['--window', 'W5', '--phase', 'after']);
+  assert.equal(w5after.exit, 0, w5after.output);
+  assert.equal(pre.receipt.producer_sha256, producerSha);
+  assert.equal(w2.receipt.producer_sha256, producerSha);
+  assert.equal(post.receipt.producer_sha256, producerSha);
+  assert.equal(w5after.receipt.producer_sha256, producerSha);
+  return {
+    preW1: { bytes: pre.bytes, path: pre.out },
+    w1Before: { bytes: w1.bytes, path: w1.out },
+    w2Before: { bytes: w2.bytes, path: w2.out },
+    postW5: { bytes: post.bytes, path: post.out },
+    w5After: { bytes: w5after.bytes, path: w5after.out },
+  };
+}
+
+// --- plan block fixture (stubs as tests/admin-release-live-failclosed-w123.test.ts) ---
+const dispatcher = String.raw`
+import builtins,hashlib,io,json,os,pathlib,random,shutil,string,subprocess,sys,urllib.request
+root=pathlib.Path(os.environ['FIXTURE_ROOT']); cfg=json.loads((root/'commands.json').read_text())
+name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
+with (root/'argv.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
+def refuse(): raise SystemExit('UNMODELLED '+name+' '+repr(args))
+def owned(value):
+    p=pathlib.Path(value)
+    if not p.is_absolute() or not str(p).startswith(str(root)+'/'): refuse()
+    return p
+def output(value): print(value)
+if name=='python3':
+    if args==['-'] or (args and args[0]=='-'):
+        source=sys.stdin.read(); sys.argv=['-']+args[1:]
+    elif len(args)>=2 and args[0]=='-c': source=args[1]; sys.argv=['-c']+args[2:]
+    else: refuse()
+    import socket
+    def no_network(*a,**kw): raise RuntimeError('UNMODELLED network')
+    socket.socket.connect=no_network; socket.create_connection=no_network
+    exec(compile(source,'<complete-plan-block>','exec'))
+elif name in ('ai_deadline','ai_ro','ai_db','openssl','nice','timeout','docker','node'): refuse()
+elif name=='chmod':
+    if len(args)<2 or args[0] not in ('0600','0700'): refuse()
+    for value in args[1:]: owned(value).chmod(int(args[0],8))
+elif name=='install' and len(args)==4 and args[:2]==['-m','0600']:
+    target=owned(args[3]); shutil.copyfile(owned(args[2]),target); target.chmod(0o600)
+elif name=='stat' and len(args)==3 and args[:2]==['-c','%a']:
+    output(format(owned(args[2]).stat().st_mode & 0o777,'o'))
+elif name=='sha256sum':
+    if len(args)!=1: refuse()
+    output(hashlib.sha256(owned(args[0]).read_bytes()).hexdigest()+'  '+args[0])
+elif name=='awk':
+    if args!=['{print $1}']: refuse()
+    for line in sys.stdin: output(line.split()[0])
+elif name=='mktemp':
+    if len(args)!=2 or args[0]!='-d' or not args[1].endswith('.XXXXXX'): refuse()
+    created=owned(args[1][:-6]+''.join(random.choice(string.ascii_letters+string.digits) for _ in range(6)))
+    created.mkdir(mode=0o700); output(created)
+elif name=='mkdir':
+    if len(args)!=2 or args[0]!='-p': refuse()
+    owned(args[1]).mkdir(parents=True,exist_ok=True)
+elif name=='cp' and len(args)==2:
+    shutil.copyfile(owned(args[0]),owned(args[1]))
+elif name=='date':
+    if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
+    output('2026-10-03T12:00:00Z')
+elif name=='cat':
+    if len(args)!=1: refuse()
+    sys.stdout.write(owned(args[0]).read_text())
+else: refuse()
+`;
+
+const scratch = mkdtempSync(join(temporaryRoot, 'c1-cross-plan-'));
+const planScratch = join(scratch, 'receipts');
+mkdirSync(planScratch, { recursive: true, mode: 0o700 });
+
+function planFixture(config = {}) {
+  const root = mkdtempSync(join(scratch, 'case-'));
+  const bin = join(root, 'bin'), proof = join(root, 'proof');
+  for (const dir of [bin, proof, join(root, 'etc/commonswarm-oauth'), join(root, 'admin-issuance/release-proofs'), join(root, 'archive'), join(root, 'release/scripts'), join(root, 'tmp'), join(root, 'caddy'), join(root, 'stage')]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  const put = (path, value) => writeFileSync(join(root, path), Buffer.isBuffer(value) ? value : typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
+  put('commands.json', { sha: release, ...config });
+  put('argv.jsonl', '');
+  put('release/scripts/live-ordinary-controls.mjs', config.producerBytes ?? scriptBytes);
+  for (const name of ['python3', 'chmod', 'install', 'stat', 'sha256sum', 'awk', 'mktemp', 'mkdir', 'cp', 'date', 'cat']) {
+    writeFileSync(join(bin, name), '#!' + python + '\n' + dispatcher, { mode: 0o700 });
+  }
+  const releaseRoot = join(root, 'admin-issuance/releases', release);
+  mkdirSync(join(releaseRoot, 'scripts'), { recursive: true, mode: 0o700 });
+  put(`admin-issuance/releases/${release}/scripts/live-ordinary-controls.mjs`, config.producerBytes ?? scriptBytes);
+  put(`admin-issuance/releases/${release}/RELEASE_SHA`, `${release}\n`);
+  put('home.env', 'EDGE=fixture\n');
+  put('etc/commonswarm-oauth/compose.env', 'MCP_OAUTH_IMAGE=fixture\n');
+  put('etc/commonswarm-oauth/service.env', 'MCP_OAUTH_ENABLED=1\n');
+  for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) put(`caddy/${name}`, `fixture ${name}\n`);
+  const env = {
+    ...process.env, PATH: bin, FIXTURE_ROOT: root, RELEASE_SHA: release, RELEASE_ROOT: releaseRoot,
+    PROOF_DIR: proof, SECRET_STAGE: join(root, 'stage'), PSQL_IMAGE: 'fixture-postgres',
+  };
+  function remap(source) {
+    for (const [from, to] of [
+      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
+      ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
+      ['/home/commonswarm/.env', join(root, 'home.env')],
+      ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
+      ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
+      ['/etc/caddy/sites', join(root, 'caddy')],
+    ]) source = source.split(from).join(to);
+    return source;
+  }
+  function run(steps, window, extra = {}) {
+    const source = remap(steps.map(block).join('\n'));
+    const runEnv = { ...env, WINDOW: window, WINDOW_ID: windowId, ...extra };
+    const result = spawnSync('/bin/bash', [], { input: source, env: runEnv, encoding: 'utf8', timeout: 15_000 });
+    assert.ifError(result.error); assert.equal(result.signal, null);
+    assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
+    return result;
+  }
+  return { root, proof, put, run, releaseRoot };
+}
+
+function stageReceipt(f, name, bytes) {
+  const path = join(f.root, name);
+  writeFileSync(path, bytes, { mode: 0o600 });
+  return path;
+}
+
+function buildArchive(f, planText, producerBytes = scriptBytes) {
+  const releaseRoot = join(f.root, 'admin-issuance/releases', release);
+  const scriptPath = join(releaseRoot, 'scripts/live-ordinary-controls.mjs');
+  const planRel = 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md';
+  const planPathOnDisk = join(releaseRoot, planRel);
+  mkdirSync(dirname(planPathOnDisk), { recursive: true, mode: 0o700 });
+  writeFileSync(scriptPath, producerBytes, { mode: 0o600 });
+  writeFileSync(planPathOnDisk, planText, { mode: 0o600 });
+  const archive = join(f.root, 'archive', `admin-issuance-${release}-${windowId}.tar`);
+  const made = spawnSync(python, ['-c',
+    'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[i+1],arcname=sys.argv[i]) for i in range(2,len(sys.argv),2)]',
+    archive, 'scripts/live-ordinary-controls.mjs', scriptPath, planRel, planPathOnDisk], { encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  chmodSync(archive, 0o600);
+  return { archive, archiveSha: digest(readFileSync(archive)) };
+}
+
+function openRun(f, window, consentBytes, liveBytes, { producerBytes = scriptBytes, planText = 'fixture plan\n' } = {}) {
+  const consentPath = stageReceipt(f, 'open-consent.json', consentBytes);
+  const livePath = stageReceipt(f, 'open-live.json', liveBytes);
+  const live = JSON.parse(liveBytes.toString());
+  const { archive, archiveSha } = buildArchive(f, planText, producerBytes);
+  f.put('open-inputs.json', { release_sha: release, window_id: live.window_id, window, archive_sha256: archiveSha, plan_sha256: digest(planText) });
+  f.put('gates.json', '{}');
+  for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/' + name, 'fixture ' + name);
+  return f.run(['ai-open'], window, {
+    INPUTS_FILE: join(f.root, 'open-inputs.json'),
+    GATE_RECEIPT_FILE: join(f.root, 'gates.json'),
+    PLAN_FILE: join(f.root, 'unused-plan'),
+    LIVE_CONTROLS_FILE: livePath,
+    CONSENT_RECEIPT_FILE: consentPath,
+    BOX_ARCHIVE_PATH: archive,
+    PROOF_DIR: join(f.root, 'admin-issuance/release-proofs', `${release}-${window}-${windowId}`),
+  });
+}
+
+function liveControlsRun(f, window, phase, consentBytes, liveBytes) {
+  const consentPath = stageReceipt(f, 'live-consent.json', consentBytes);
+  const livePath = stageReceipt(f, 'live-controls.json', liveBytes);
+  const live = JSON.parse(liveBytes.toString());
+  assert.equal(digest(readFileSync(join(f.releaseRoot, 'scripts/live-ordinary-controls.mjs'))), live.producer_sha256);
+  f.put('inputs.json', { release_sha: release, window_id: live.window_id, window: live.window });
+  return f.run(['ai-live-controls'], window, {
+    INPUTS_FILE: join(f.root, 'inputs.json'),
+    LIVE_CONTROLS_FILE: livePath,
+    CONSENT_RECEIPT_FILE: consentPath,
+    RELEASE_ROOT: f.releaseRoot,
+    PROOF_DIR: f.proof,
+    WINDOW: window,
+    WINDOW_ID: windowId,
+    PHASE: phase,
+  });
+}
+
+function pass(result, line) {
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout + result.stderr, new RegExp(line));
+}
+
+function stopped(result, text) {
+  assert.notEqual(result.status, 0, 'expected refusal');
+  assert.ok((result.stdout + result.stderr).includes(text), `expected ${text}; got ${JSON.stringify(result.stderr)}`);
+}
+
+/** @type {Awaited<ReturnType<typeof produceReceipts>> | undefined} */
+let produced;
+
+test('cross-live-controls / script-produces-binding-receipts', async t => {
+  produced = await produceReceipts(t);
+  for (const [name, file] of Object.entries(produced)) {
+    const dest = join(planScratch, `${name}.json`);
+    writeFileSync(dest, file.bytes, { mode: 0o600 });
+    file.stored = dest;
+  }
+  assert.equal(produced.preW1.bytes.toString(), readFileSync(produced.preW1.stored, 'utf8'));
+});
+
+test('cross-live-controls / ai-open W1 before passes with real producer and receipts', () => {
+  const f = planFixture();
+  const proofDir = join(f.root, 'admin-issuance/release-proofs', `${release}-W1-${windowId}`);
+  const result = openRun(f, 'W1', produced.preW1.bytes, produced.w1Before.bytes);
+  pass(result, /PASS ai-open/);
+  assert.equal(readFileSync(join(proofDir, 'consent-pre-W1.json'), 'utf8'), produced.preW1.bytes.toString());
+});
+
+test('cross-live-controls / ai-live-controls W2 before passes with real producer and receipts', () => {
+  const f = planFixture();
+  const result = liveControlsRun(f, 'W2', 'before', produced.preW1.bytes, produced.w2Before.bytes);
+  pass(result, /PASS live authenticated ordinary controls bound to consent pre-W1 and released producer/);
+  const ordinary = readFileSync(join(f.proof, 'ordinary-before.json'), 'utf8');
+  assert.deepEqual(JSON.parse(ordinary), JSON.parse(produced.w2Before.bytes.toString()));
+});
+
+test('cross-live-controls / ai-live-controls W5 after passes with real producer and receipts', () => {
+  const f = planFixture();
+  const result = liveControlsRun(f, 'W5', 'after', produced.postW5.bytes, produced.w5After.bytes);
+  pass(result, /PASS live authenticated ordinary controls bound to consent post-W5 and released producer/);
+  assert.ok(existsSync(join(f.proof, 'ordinary-after.json')));
+  assert.equal(readFileSync(join(f.proof, 'consent-post-W5.json'), 'utf8'), produced.postW5.bytes.toString());
+});
+
+test('cross-live-controls / negative false-control refuses ai-live-controls', () => {
+  const f = planFixture();
+  const live = JSON.parse(produced.w2Before.bytes.toString());
+  live.controls.hosted_mcp_consent_refresh = false;
+  const tampered = Buffer.from(JSON.stringify(live, null, 2) + '\n');
+  stopped(liveControlsRun(f, 'W2', 'before', produced.preW1.bytes, tampered),
+    'FAIL ai-live-controls: live control hosted_mcp_consent_refresh expected true got false; STOP');
+});
+
+test('cross-live-controls / negative consent-byte mismatch refuses ai-open', () => {
+  const f = planFixture();
+  const consent = JSON.parse(produced.preW1.bytes.toString());
+  consent.dcr_client_ids[0] = consent.dcr_client_ids[0].slice(0, -1) + (consent.dcr_client_ids[0].at(-1) === 'a' ? 'b' : 'a');
+  stopped(openRun(f, 'W1', Buffer.from(JSON.stringify(consent, null, 2) + '\n'), produced.w1Before.bytes),
+    'FAIL ai-open: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP');
+});
+
+test('cross-live-controls / negative archive producer mismatch refuses ai-open', () => {
+  const f = planFixture();
+  stopped(openRun(f, 'W1', produced.preW1.bytes, produced.w1Before.bytes, { producerBytes: Buffer.concat([scriptBytes, Buffer.from('\n')]) }),
+    'FAIL ai-open: live producer_sha256 expected sha256-of-released-script got mismatch; STOP');
+});
+
+test('cross-live-controls / negative post-W5 consent at W2 refuses ai-live-controls', () => {
+  const f = planFixture();
+  const live = JSON.parse(produced.w2Before.bytes.toString());
+  live.consent_receipt_sha256 = digest(produced.postW5.bytes);
+  stopped(liveControlsRun(f, 'W2', 'before', produced.postW5.bytes, Buffer.from(JSON.stringify(live, null, 2) + '\n')),
+    'FAIL ai-live-controls: consent_phase for W2 before expected pre-W1 got post-W5; STOP');
+});
