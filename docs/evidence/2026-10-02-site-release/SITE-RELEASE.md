@@ -206,19 +206,27 @@ import re,sys
 if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
 PYINPUT
   export EXPECTED_SITE_SHA
-  test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
-  test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
+  test -d "$SITE_RELEASE_REPO"
+  test ! -L "$SITE_RELEASE_REPO"
+  PLAN_GUARD_VALUE_1="$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
+  test -z "${PLAN_GUARD_VALUE_1}"
   git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
   git -C "$SITE_RELEASE_REPO" fetch origin main
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${SITE_RELEASE_SHA}^{commit}")" = "$SITE_RELEASE_SHA"
+  PLAN_GUARD_VALUE_2="$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${SITE_RELEASE_SHA}^{commit}")"
+  test "${PLAN_GUARD_VALUE_2}" = "$SITE_RELEASE_SHA"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
   git -C "$SITE_RELEASE_REPO" checkout --detach "$SITE_RELEASE_SHA"
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
-  test "$(git -C "$SITE_RELEASE_REPO" remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
-  test -z "$(git -C "$SITE_RELEASE_REPO" status --short --untracked-files=all)"
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${EXPECTED_SITE_SHA}^{commit}")" = "$EXPECTED_SITE_SHA"
+  PLAN_GUARD_VALUE_3="$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)"
+  test "${PLAN_GUARD_VALUE_3}" = "$SITE_RELEASE_SHA"
+  PLAN_GUARD_VALUE_4="$(git -C "$SITE_RELEASE_REPO" remote get-url origin)"
+  test "${PLAN_GUARD_VALUE_4}" = https://github.com/yulanventures/commonswarm.git
+  PLAN_GUARD_VALUE_5="$(git -C "$SITE_RELEASE_REPO" status --short --untracked-files=all)"
+  test -z "${PLAN_GUARD_VALUE_5}"
+  PLAN_GUARD_VALUE_6="$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${EXPECTED_SITE_SHA}^{commit}")"
+  test "${PLAN_GUARD_VALUE_6}" = "$EXPECTED_SITE_SHA"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  PLAN_GUARD_VALUE_7="$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  test -n "${PLAN_GUARD_VALUE_7}"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
 import os,runpy,sys
 check=runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt']
@@ -257,9 +265,12 @@ PYINPUT
   for input_path in "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
-  test -d "$SITE_EVIDENCE" && test ! -L "$SITE_EVIDENCE"
-  test -z "$(find "$SITE_EVIDENCE" -mindepth 1 -maxdepth 1 -print -quit)"
-  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
+  test -d "$SITE_EVIDENCE"
+  test ! -L "$SITE_EVIDENCE"
+  PLAN_GUARD_VALUE_8="$(find "$SITE_EVIDENCE" -mindepth 1 -maxdepth 1 -print -quit)"
+  test -z "${PLAN_GUARD_VALUE_8}"
+  PLAN_GUARD_VALUE_9="$(stat -f '%Lp' "$SITE_EVIDENCE")"
+  test "${PLAN_GUARD_VALUE_9}" = 700
   test ! -e "$HOME/.commonswarm-site-window.env"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
 import os,runpy,sys
@@ -269,12 +280,16 @@ PY
   case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
   case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
   case "$OP_SERVICE_ACCOUNT_TOKEN_FILE" in /*) ;; *) exit 1 ;; esac
-  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
-  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  PLAN_GUARD_VALUE_10="$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")"
+  test "${PLAN_GUARD_VALUE_10}" = 600
+  PLAN_GUARD_VALUE_11="$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)"
+  test "${PLAN_GUARD_VALUE_11}" = "$SITE_RELEASE_SHA"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  PLAN_GUARD_VALUE_12="$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  test -n "${PLAN_GUARD_VALUE_12}"
   SITE_RELEASE_VERSION=$(node -p 'require(process.argv[1]).version' "$SITE_RELEASE_REPO/package.json")
   case "$SITE_RELEASE_VERSION" in ''|*[!0-9A-Za-z.+-]*) exit 1 ;; esac
   # Bash holds the executing script open; query open paths without setuid tools.
@@ -294,10 +309,13 @@ set -euo pipefail
 set -E
 trap 'printf "FAIL site2-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 root=/srv/commonswarm/site
-test "$(id -un)" = commonswarm
+PLAN_GUARD_VALUE_13="$(id -un)"
+test "${PLAN_GUARD_VALUE_13}" = commonswarm
 test ! -e /tmp/commonswarm-site-window.env
-test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
-test -z "$(find "$root/releases" -maxdepth 1 \( -type d -o -type l \) -name '.site-window-pin-*' -print)"
+PLAN_GUARD_VALUE_14="$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -z "${PLAN_GUARD_VALUE_14}"
+PLAN_GUARD_VALUE_15="$(find "$root/releases" -maxdepth 1 \( -type d -o -type l \) -name '.site-window-pin-*' -print)"
+test -z "${PLAN_GUARD_VALUE_15}"
 python3 - <<'PYBOXRELEASE'
 import pathlib
 # Linux exposes argv directly; inspect names without executing process tools.
@@ -311,7 +329,8 @@ for path in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
     if any(arg.endswith((b"deploy/site/deploy.sh", b"finalize-release.sh")) for arg in arguments):
         raise SystemExit("STOP: another box site release process exists")
 PYBOXRELEASE
-test -w "$root" && test -w "$root/releases"
+test -w "$root"
+test -w "$root/releases"
 previous=$(readlink -f "$root/current")
 test -L "$root/current"
 python3 - "$previous" <<'PY'
@@ -322,7 +341,8 @@ match=re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-([0-9a-f]{12})-[0-9a-f]{16}",p.name)
 assert match
 print("BASELINE_SOURCE_PREFIX="+match[1])
 PY
-test -f "$previous/app/index.html" && test -f "$previous/download/index.html"
+test -f "$previous/app/index.html"
+test -f "$previous/download/index.html"
 start=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 end=$(date -u -d "$start + 4 hours" '+%Y-%m-%dT%H:%M:%SZ')
 printf 'SITE_WINDOW_START_UTC=%s\nSITE_WINDOW_END_UTC=%s\n' "$start" "$end"
@@ -459,15 +479,18 @@ PY
   test -z "${OP_SERVICE_ACCOUNT_TOKEN+x}"
   test -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}"
   if compgen -A variable OP_SESSION_ >/dev/null; then exit 1; fi
-  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
-  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  PLAN_GUARD_VALUE_16="$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")"
+  test "${PLAN_GUARD_VALUE_16}" = 600
   SITE_BUILD_ENV_TEMP="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
   case "$SITE_BUILD_ENV_TEMP" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   trap 'status=$?; if ! rm -r -- "$SITE_BUILD_ENV_TEMP"; then printf "STOP: guarded cleanup refused %s; leave it for HezLead\n" "$SITE_BUILD_ENV_TEMP" >&2; exit 1; fi; exit "$status"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   SITE_BUILD_ENV_SOURCE="$SITE_BUILD_ENV_TEMP/site-build.env"
-  test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
+  test ! -e "$SITE_BUILD_ENV_SOURCE"
+  test ! -L "$SITE_BUILD_ENV_SOURCE"
   chmod 0700 "$SITE_BUILD_ENV_TEMP"
   python3 - "$OP_SERVICE_ACCOUNT_TOKEN_FILE" "$SITE_BUILD_ENV_OP_REFERENCE" "$SITE_BUILD_ENV_SOURCE" <<'PY'
 import os,pathlib,subprocess,sys
@@ -481,16 +504,20 @@ result=subprocess.run(['op','read',reference,'--out-file',output],env=env,
 if result.returncode: raise SystemExit('STOP: service-account build-env read failed')
 PY
   chmod 0600 "$SITE_BUILD_ENV_SOURCE"
-  test -f "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
-  test "$(stat -f '%Lp' "$SITE_BUILD_ENV_SOURCE")" = 600
+  test -f "$SITE_BUILD_ENV_SOURCE"
+  test ! -L "$SITE_BUILD_ENV_SOURCE"
+  PLAN_GUARD_VALUE_17="$(stat -f '%Lp' "$SITE_BUILD_ENV_SOURCE")"
+  test "${PLAN_GUARD_VALUE_17}" = 600
   test ! -e site/.env
   for override in site/.env.local site/.env.production site/.env.production.local; do
     test ! -e "$override"
   done
   install -m 0600 "$SITE_BUILD_ENV_SOURCE" site/.env
-  test "$(grep -Ec '^[A-Za-z_][A-Za-z0-9_]*=' site/.env)" -eq 3
+  PLAN_GUARD_VALUE_18="$(grep -Ec '^[A-Za-z_][A-Za-z0-9_]*=' site/.env)"
+  test "${PLAN_GUARD_VALUE_18}" -eq 3
   for name in PUBLIC_SUPABASE_URL PUBLIC_SUPABASE_ANON_KEY PUBLIC_H0_LINK_JOIN; do
-    test "$(grep -Ec "^${name}=" site/.env)" -eq 1
+    PLAN_GUARD_VALUE_19="$(grep -Ec "^${name}=" site/.env)"
+    test "${PLAN_GUARD_VALUE_19}" -eq 1
   done
   node deploy/site/validate-site-env.mjs site/.env </dev/null
   node - <<'NODE' >"$SITE_EVIDENCE/site2-00-build-env.txt"
@@ -532,14 +559,16 @@ positive controls.
   trap 'printf "FAIL site2-02: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
-  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  PLAN_GUARD_VALUE_20="$(git rev-parse HEAD)"
+  test "${PLAN_GUARD_VALUE_20}" = "$SITE_RELEASE_SHA"
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   test "${#EXPECTED_SITE_SHA}" -eq 40
   case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   git merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
   git merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  PLAN_GUARD_VALUE_21="$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  test -n "${PLAN_GUARD_VALUE_21}"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
   # Execute refusal and positive controls with HOME unchanged and guarded rm.
   python3 "$RELEASE_PREFLIGHT_TOOL" deletion-controls "$SITE_RELEASE_REPO"
@@ -618,7 +647,8 @@ retaining raw browser output in the public evidence directory.
   trap 'printf "FAIL site2-03-browser-session-preflight: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   umask 077
-  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  PLAN_GUARD_VALUE_22="$(command -v rm)"
+  test "${PLAN_GUARD_VALUE_22}" = "$HOME/.local/bin/rm"
   browser_root="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
   case "$browser_root" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   chrome_pid=
@@ -1025,13 +1055,17 @@ browser branch. No bearer is exported from Chrome and no revoke is exercised.
   trap 'printf "FAIL site2-03: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
-  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
-  test -f site/.env && test ! -L site/.env
-  test "$(stat -f '%Lp' site/.env)" = 600
+  PLAN_GUARD_VALUE_23="$(git rev-parse HEAD)"
+  test "${PLAN_GUARD_VALUE_23}" = "$SITE_RELEASE_SHA"
+  test -f site/.env
+  test ! -L site/.env
+  PLAN_GUARD_VALUE_24="$(stat -f '%Lp' site/.env)"
+  test "${PLAN_GUARD_VALUE_24}" = 600
   node deploy/site/validate-site-env.mjs site/.env </dev/null
   test -f "$SITE_EVIDENCE/site2-03-browser-preflight.json"
   test ! -L "$SITE_EVIDENCE/site2-03-browser-preflight.json"
-  test "$(stat -f '%Lp' "$SITE_EVIDENCE/site2-03-browser-preflight.json")" = 600
+  PLAN_GUARD_VALUE_25="$(stat -f '%Lp' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
+  test "${PLAN_GUARD_VALUE_25}" = 600
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
 )
@@ -1068,17 +1102,22 @@ case "$window_id" in
 esac
 root=/srv/commonswarm/site
 previous=$2
-test -f /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
-test "$(stat -c '%a' /tmp/commonswarm-site-window.env)" = 600
+test -f /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+PLAN_GUARD_VALUE_26="$(stat -c '%a' /tmp/commonswarm-site-window.env)"
+test "${PLAN_GUARD_VALUE_26}" = 600
 (
   . /tmp/commonswarm-site-window.env
   test "$SITE_WINDOW_ID" = "$window_id"
   test "$BASELINE_DIR" = "$previous"
 )
 pin="$root/releases/.site-window-pin-$window_id"
-test "$(readlink -f "$root/current")" = "$previous"
-test -d "$previous" && test ! -L "$previous"
-test ! -e "$pin" && test ! -L "$pin"
+PLAN_GUARD_VALUE_27="$(readlink -f "$root/current")"
+test "${PLAN_GUARD_VALUE_27}" = "$previous"
+test -d "$previous"
+test ! -L "$previous"
+test ! -e "$pin"
+test ! -L "$pin"
 cp -a --reflink=auto "$previous" "$pin"
 python3 - "$previous" "$pin" <<'PY'
 import hashlib,json,os,pathlib,stat,sys
@@ -1203,7 +1242,8 @@ PY
   trap 'printf "FAIL site2-04: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
-  test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  PLAN_GUARD_VALUE_28="$(git rev-parse HEAD)"
+  test "${PLAN_GUARD_VALUE_28}" = "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site
   python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/GO.txt" \
     "SHA=$SITE_RELEASE_SHA" "BASE_SHA=$EXPECTED_SITE_SHA" HOLDS_RESOLVED=yes
@@ -1222,7 +1262,8 @@ PY
   printf -v box_command '%q ' /bin/bash -s -- "$previous" "$pin"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" <<'BOX'
 set -euo pipefail
-test "$(readlink -f /srv/commonswarm/site/current)" = "$1"
+PLAN_GUARD_VALUE_29="$(readlink -f /srv/commonswarm/site/current)"
+test "${PLAN_GUARD_VALUE_29}" = "$1"
 test -f "$2/app/index.html"
 BOX
   test ! -e "$SITE_EVIDENCE/deploy.log"
@@ -1283,10 +1324,13 @@ set -E
 trap 'printf "FAIL site2-04-reconcile-failure: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
-test -f "$pin/app/index.html"; test "$(readlink -f "$root/current")" = "$failed"
-test ! -e "$next" && test ! -L "$next"
+test -f "$pin/app/index.html"; PLAN_GUARD_VALUE_30="$(readlink -f "$root/current")"
+ test "${PLAN_GUARD_VALUE_30}" = "$failed"
+test ! -e "$next"
+test ! -L "$next"
 ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"
-test "$(readlink -f "$root/current")" = "$pin"
+PLAN_GUARD_VALUE_31="$(readlink -f "$root/current")"
+test "${PLAN_GUARD_VALUE_31}" = "$pin"
 printf 'rollback_reason=deployment-failure-after-switch\nrestored_release=%s\n' "$pin"
 BOX
     printf '%s\n' 'DEPLOYMENT=failed-after-switch' 'RETRY=forbidden' \
@@ -1406,8 +1450,11 @@ set -E
 trap 'printf "FAIL site2-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
-test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
-ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$pin"
+PLAN_GUARD_VALUE_32="$(readlink -f "$root/current")"
+test "${PLAN_GUARD_VALUE_32}" = "$failed"; test ! -e "$next"
+ test ! -L "$next"
+ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; PLAN_GUARD_VALUE_33="$(readlink -f "$root/current")"
+ test "${PLAN_GUARD_VALUE_33}" = "$pin"
 printf 'rollback_reason=public-control-failure\nrestored_release=%s\n' "$pin"
 BOX
     chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$control_status"
@@ -1492,8 +1539,10 @@ a non-blocking browser failure exits zero so the release continues to close.
     check_task_browser
     umask 077
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
-    test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
-    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    test -d "$SITE_BROWSER_ROOT"
+    test ! -L "$SITE_BROWSER_ROOT"
+    PLAN_GUARD_VALUE_34="$(stat -f '%Lp' "$SITE_BROWSER_ROOT")"
+    test "${PLAN_GUARD_VALUE_34}" = 700
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     endpoint="$SITE_CHROME_ENDPOINT"
     private_evidence="$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence"
@@ -1816,8 +1865,11 @@ set -E
 trap 'printf "FAIL site2-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
-test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
-ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$pin"
+PLAN_GUARD_VALUE_35="$(readlink -f "$root/current")"
+test "${PLAN_GUARD_VALUE_35}" = "$failed"; test ! -e "$next"
+ test ! -L "$next"
+ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; PLAN_GUARD_VALUE_36="$(readlink -f "$root/current")"
+ test "${PLAN_GUARD_VALUE_36}" = "$pin"
 printf 'rollback_reason=browser-control-failure\nrestored_release=%s\n' "$pin"
 BOX
     chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$browser_status"
@@ -1932,7 +1984,8 @@ PY
 set -euo pipefail
 set -E
 trap 'printf "FAIL site2-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-pin=$1; test "$(readlink -f /srv/commonswarm/site/current)" = "$pin"
+pin=$1; PLAN_GUARD_VALUE_37="$(readlink -f /srv/commonswarm/site/current)"
+ test "${PLAN_GUARD_VALUE_37}" = "$pin"
 python3 - "$pin" <<'PY'
 import pathlib,sys,urllib.request
 UA="curl/8.7.1"; release=pathlib.Path(sys.argv[1]); local=(release/"app/index.html").read_bytes()
@@ -1953,8 +2006,10 @@ BOX
   export SITE_EVIDENCE
   umask 077
   case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
-  test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
-  test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+  test -d "$SITE_BROWSER_ROOT"
+  test ! -L "$SITE_BROWSER_ROOT"
+  PLAN_GUARD_VALUE_38="$(stat -f '%Lp' "$SITE_BROWSER_ROOT")"
+  test "${PLAN_GUARD_VALUE_38}" = 700
   test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
   endpoint="$SITE_CHROME_ENDPOINT"
   private_evidence="$SITE_BROWSER_ROOT/site2-06-evidence"
@@ -2202,10 +2257,12 @@ RELEASE_LIVE_STATE="last-verified-site; see retained verification receipt"
 
   set -E
   trap 'printf "FAIL site2-07-pre-pin-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  PLAN_GUARD_VALUE_39="$(command -v rm)"
+  test "${PLAN_GUARD_VALUE_39}" = "$HOME/.local/bin/rm"
   test -f "$HOME/.commonswarm-site-window.env"
   test ! -L "$HOME/.commonswarm-site-window.env"
-  test "$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")" = 600
+  PLAN_GUARD_VALUE_40="$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")"
+  test "${PLAN_GUARD_VALUE_40}" = 600
   . "$HOME/.commonswarm-site-window.env"
   test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
   case "$SITE_WINDOW_ID" in
@@ -2254,23 +2311,28 @@ case "$window_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
 esac
 previous=$2
-test -f /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
-test "$(stat -c '%a' /tmp/commonswarm-site-window.env)" = 600
+test -f /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+PLAN_GUARD_VALUE_41="$(stat -c '%a' /tmp/commonswarm-site-window.env)"
+test "${PLAN_GUARD_VALUE_41}" = 600
 (
   . /tmp/commonswarm-site-window.env
   test "$SITE_WINDOW_ID" = "$window_id"
   test "$BASELINE_DIR" = "$previous"
 )
 test -L "$root/current"
-test "$(readlink -f "$root/current")" = "$previous"
+PLAN_GUARD_VALUE_42="$(readlink -f "$root/current")"
+test "${PLAN_GUARD_VALUE_42}" = "$previous"
 test -d "$previous"
 test ! -L "$previous"
 test ! -e "$root/releases/.site-window-pin-$window_id"
 test ! -L "$root/releases/.site-window-pin-$window_id"
-test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+PLAN_GUARD_VALUE_43="$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -z "${PLAN_GUARD_VALUE_43}"
 test -f /tmp/commonswarm-site-window.env
 test ! -L /tmp/commonswarm-site-window.env
-test "$(stat -c '%a' /tmp/commonswarm-site-window.env)" = 600
+PLAN_GUARD_VALUE_44="$(stat -c '%a' /tmp/commonswarm-site-window.env)"
+test "${PLAN_GUARD_VALUE_44}" = 600
 rm -f -- /tmp/commonswarm-site-window.env
 test ! -e /tmp/commonswarm-site-window.env
 test ! -L /tmp/commonswarm-site-window.env
@@ -2352,9 +2414,12 @@ trap release_close_exit EXIT
 
   set -E
   trap 'printf "FAIL site2-07-manifest-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-  test "$(command -v rm)" = "$HOME/.local/bin/rm"
-  test -f "$HOME/.commonswarm-site-window.env" && test ! -L "$HOME/.commonswarm-site-window.env"
-  test "$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")" = 600
+  PLAN_GUARD_VALUE_45="$(command -v rm)"
+  test "${PLAN_GUARD_VALUE_45}" = "$HOME/.local/bin/rm"
+  test -f "$HOME/.commonswarm-site-window.env"
+  test ! -L "$HOME/.commonswarm-site-window.env"
+  PLAN_GUARD_VALUE_46="$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")"
+  test "${PLAN_GUARD_VALUE_46}" = 600
   . "$HOME/.commonswarm-site-window.env"
   test "$SITE_WINDOW_FILE" = "$HOME/.commonswarm-site-window.env"
   test "${#SITE_RELEASE_SHA}" -eq 40
@@ -2364,11 +2429,14 @@ trap release_close_exit EXIT
   esac
   for input_path in "$SITE_EVIDENCE" "$SITE_RELEASE_REPO"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
-    test -d "$input_path" && test ! -L "$input_path"
+    test -d "$input_path"
+    test ! -L "$input_path"
   done
-  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
+  PLAN_GUARD_VALUE_47="$(stat -f '%Lp' "$SITE_EVIDENCE")"
+  test "${PLAN_GUARD_VALUE_47}" = 700
   # Retry only an attempt that has no box-close receipt and no completed close.
-  test ! -e "$SITE_EVIDENCE/CLOSE.txt" && test ! -L "$SITE_EVIDENCE/CLOSE.txt"
+  test ! -e "$SITE_EVIDENCE/CLOSE.txt"
+  test ! -L "$SITE_EVIDENCE/CLOSE.txt"
   test ! -L "$SITE_EVIDENCE/site2-07-pin-close.txt"
   if test -e "$SITE_EVIDENCE/site2-07-pin-close.txt"; then
     test -f "$SITE_EVIDENCE/site2-07-pin-close.txt"
@@ -2482,32 +2550,41 @@ if outcome=="released":
     assert re.fullmatch(r"/srv/commonswarm/site/releases/[0-9]{8}T[0-9]{6}Z-"+re.escape(release_sha[:12])+r"-[0-9a-f]{16}",after)
 else: assert acceptance==after==""
 PY
-test "$(id -un)" = commonswarm
-test -f /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
-test "$(stat -c '%a' /tmp/commonswarm-site-window.env)" = 600
+PLAN_GUARD_VALUE_48="$(id -un)"
+test "${PLAN_GUARD_VALUE_48}" = commonswarm
+test -f /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
+PLAN_GUARD_VALUE_49="$(stat -c '%a' /tmp/commonswarm-site-window.env)"
+test "${PLAN_GUARD_VALUE_49}" = 600
 (
   . /tmp/commonswarm-site-window.env
   test "$SITE_WINDOW_ID" = "$3"
   test "$SITE_RELEASE_SHA" = "$release_sha"
   test "$BASELINE_DIR" = "$baseline_dir"
 )
-test -d "$pin" && test ! -L "$pin"
+test -d "$pin"
+test ! -L "$pin"
 test -f "$pin/app/index.html"
 test "$pin" = "$root/releases/.site-window-pin-$window_id"
 test "$previous" = "$baseline_dir"
 test -L "$root/current"
 current=$(readlink -f "$root/current")
 case "$outcome" in
-  released) test "$current" = "$after"; test -d "$after" && test ! -L "$after" ;;
+  released) test "$current" = "$after"; test -d "$after"
+ test ! -L "$after" ;;
   rolled-back) test "$current" = "$pin" ;;
   failed-before-switch) test "$current" = "$previous" ;;
 esac
-test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+PLAN_GUARD_VALUE_50="$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
+test -z "${PLAN_GUARD_VALUE_50}"
 if test "$current" = "$pin"; then
   if test -d "$previous" && test ! -L "$previous"; then target="$previous"
-  else test ! -e "$previous" && test ! -L "$previous"; mv "$pin" "$previous"; target="$previous"; pin=''; fi
-  next="$root/current.next.$window_id.close"; test ! -e "$next" && test ! -L "$next"
-  ln -s "$target" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$target"
+  else test ! -e "$previous"
+test ! -L "$previous"; mv "$pin" "$previous"; target="$previous"; pin=''; fi
+  next="$root/current.next.$window_id.close"; test ! -e "$next"
+ test ! -L "$next"
+  ln -s "$target" "$next"; mv -Tf "$next" "$root/current"; PLAN_GUARD_VALUE_51="$(readlink -f "$root/current")"
+ test "${PLAN_GUARD_VALUE_51}" = "$target"
 fi
 if test -n "$pin" && test -d "$pin" && test ! -L "$pin"; then
   python3 - "$pin" "$root/releases" "$window_id" <<'PY'
@@ -2520,7 +2597,8 @@ PY
   test ! -e "$pin"
 fi
 rm -f -- /tmp/commonswarm-site-window.env
-test ! -e /tmp/commonswarm-site-window.env && test ! -L /tmp/commonswarm-site-window.env
+test ! -e /tmp/commonswarm-site-window.env
+test ! -L /tmp/commonswarm-site-window.env
 printf 'pin_released=yes\noutcome=%s\nOUTCOME=%s\n' "$outcome" "$outcome"
 if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
 BOX
@@ -2541,7 +2619,8 @@ PY
   if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test ! -L "$SITE_BROWSER_ROOT"
-    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    PLAN_GUARD_VALUE_52="$(stat -f '%Lp' "$SITE_BROWSER_ROOT")"
+    test "${PLAN_GUARD_VALUE_52}" = 700
     case "$SITE_CHROME_PID" in ''|*[!0-9]*) exit 1 ;; esac
     test "$SITE_CHROME_PID" -gt 1
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
@@ -2557,7 +2636,8 @@ PY
     test ! -e "$SITE_BROWSER_ROOT"
   fi
   rm -f -- "$SITE_WINDOW_FILE"
-  test ! -e "$SITE_WINDOW_FILE" && test ! -L "$SITE_WINDOW_FILE"
+  test ! -e "$SITE_WINDOW_FILE"
+  test ! -L "$SITE_WINDOW_FILE"
   write_site_manifest
   manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
@@ -2763,22 +2843,22 @@ new release actions or claiming an unproved close.
   "steps": {
     "site-release-shared-preflight": {"reads": [], "sha256": "96d517dcab1a6d6a66da47dde411713ee22fa98071ca0ee72b01190326925dad"},
     "site2-plan-inputs": {"reads": [], "sha256": "00aaf8909b470ef510117082a7dbf032bf5179a5b2ac229df67efeca596d0778"},
-    "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "28c0b132ea1afab8eb01180d9fb6a68ad886d06e7c82efb919f23373966cd995"},
-    "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "bbf8fc164a43ca1c351da1871bb1417bf87ecbe8b4c00462a6da798aeff313f4"},
+    "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "256dc045c7dc6ceaf59633b86cb87cfe49cfcd1a42874366b43758eb6ade6a5c"},
+    "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "86cd48cce0c1a2a280ed92dec05fe25d80e54c0232e9bbda597ddc1c8f9abe92"},
     "site2-00-a-close-ingest": {"creates": ["$SITE_EVIDENCE/site2-00-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "bdcf8bf51a5026bb16962bcfbfd75f606c2f3bb2cdb2ea1c9a514cd523a54ee5"},
-    "site2-00-build-env": {"cleanup": ["SITE_BUILD_ENV_TEMP"], "cleanup_owners": {"$SITE_BUILD_ENV_TEMP": "site2-00-build-env"}, "creates": ["$SITE_BUILD_ENV_TEMP", "$SITE_EVIDENCE/site2-00-build-env.txt", "$SITE_RELEASE_REPO/site/.env", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env"], "reads": ["endpoint:https://api.commonswarm.com"], "sha256": "53096515681ef1c83b493dfc1f8e847ab8d31f5e8f5b24d4423e2de98b0d89d4"},
-    "site2-02": {"creates": ["$SITE_EVIDENCE/site2-02-commits.txt", "$SITE_EVIDENCE/site2-02-name-status.txt", "$SITE_EVIDENCE/site2-02-numstat.txt", "$SITE_EVIDENCE/site2-02-summary.txt"], "reads": [], "sha256": "3344c32f1c0e123d8411d33782b769858ef6b4656ed688ade486e5a082093564"},
-    "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "b74396352cc06f6c5d0b60abcf6faba48771fbff455f8fca86a4c2f465a6478d"},
-    "site2-03": {"consumes": ["$SITE_EVIDENCE/site2-03-browser-preflight.json"], "reads": [], "sha256": "342f8f7a95591e60540d6026659c37817ca1db98fec8e9134898f6c796b1f3f8"},
-    "site2-03-pin-previous": {"creates": ["$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/site2-03-pin.txt", "$pin", "pin"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "2c5f47b4b740c138a9c66c3ec5bc38c4f0919acc13f1a652fd91aeaccb5d13a5"},
+    "site2-00-build-env": {"cleanup": ["SITE_BUILD_ENV_TEMP"], "cleanup_owners": {"$SITE_BUILD_ENV_TEMP": "site2-00-build-env"}, "creates": ["$SITE_BUILD_ENV_TEMP", "$SITE_EVIDENCE/site2-00-build-env.txt", "$SITE_RELEASE_REPO/site/.env", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env"], "reads": ["endpoint:https://api.commonswarm.com"], "sha256": "0d3a9088091db9063b31c9c5c5f847d7a5fde4000505cbc365baf8cb273fec21"},
+    "site2-02": {"creates": ["$SITE_EVIDENCE/site2-02-commits.txt", "$SITE_EVIDENCE/site2-02-name-status.txt", "$SITE_EVIDENCE/site2-02-numstat.txt", "$SITE_EVIDENCE/site2-02-summary.txt"], "reads": [], "sha256": "21c147dd8bfd189a409709867ff655537b9f56991f4a8ba7a5ef98d64ddcc1ae"},
+    "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "947c0adbc0766307b5f6a922bc17e55ff93072d45d126e4180eaa39bce378353"},
+    "site2-03": {"consumes": ["$SITE_EVIDENCE/site2-03-browser-preflight.json"], "reads": [], "sha256": "1a14094bb8d583069ee9539e5c9201f71034058e17698d5fffcc428ccb575711"},
+    "site2-03-pin-previous": {"creates": ["$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/site2-03-pin.txt", "$pin", "pin"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "9b6165bc95417186b9c6834c378b9c5aa11dd3e160dde0ee78d38c227e0c036d"},
     "site2-03-go-record": {"consumes": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-00-mcp-live.txt", "$SITE_EVIDENCE/site2-02-summary.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-03-pin.txt"], "creates": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/site2-03-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "488d4bebc8c20291303511617c3d16e3d0ef7a88ddc3e01465b74579ddfee778"},
-    "site2-04": {"consumes": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/deploy-status.txt", "$SITE_EVIDENCE/deploy.log", "$SITE_EVIDENCE/pin-after-deploy.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "edde0faa1760e38fd538e224d3def15e51c07d227dc4add5c036e2019ef17467"},
-    "site2-04-reconcile-failure": {"creates": ["$SITE_EVIDENCE/retry-approved"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "command:readlink -f"], "sha256": "990c7a8846185a8bed831785b1d343cdc30b52c160dbf4ac197945f4aba0a142"},
-    "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "8bd6020c646053184794ffdc3a8031a36bcb845e6951d292d9c657430db4bed3"},
-    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "3181082829bd4151a922b9784816a0ef192e6cd1e8faabe1390ce2cc9d93847e"},
-    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "188d2e7ef758c1cf1a5d94c00b358b36ec400f96acf937a8a22dcdfb369dec90"},
-    "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "2e8a0f37a74721d73afbd66046ed7ee211e031c7b09cd7db75a4d90287f1378f"},
-    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "a3af8afebe171396efbb9a9a6de7887ccdbd4f20e9c782377b4328ec5a084200"}
+    "site2-04": {"consumes": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/deploy-status.txt", "$SITE_EVIDENCE/deploy.log", "$SITE_EVIDENCE/pin-after-deploy.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "4d39eac63aff11b8c92c06bada849f372f5d84a2302c80dd76cf93d56cc89b20"},
+    "site2-04-reconcile-failure": {"creates": ["$SITE_EVIDENCE/retry-approved"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "command:readlink -f"], "sha256": "26338bc1ed09cb1b941a465fa375cc3ca9c7bb614a4d784067aa4415fd0ab704"},
+    "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "95a7ec41da3f1caf87c13c85cd91df28e6b3643a1b6499618cd1592016be5a50"},
+    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "97ac337a49aae5de6e92d9a7a90e5628886a4ff982c9add2c5f0b97780a26c31"},
+    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "aac9606c3df78b6b97b76eaf88cf8a8e935f542f2feb9f3e33a9bec3cbbcf226"},
+    "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "a871de698176515e1cb32853feb38562d4bfb7970759649a84e1ed79a191d835"},
+    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "9aab649ed92c038b0e9be192d47e20a83a654458735913e8bf19e2d2ddca84b1"}
   },
   "gate_receipts": [{"gates": ["site build", "site tests", "site CI"], "input": "GATE_EVIDENCE_FILE"}],
   "plan_input": "SITE_PLAN_FILE"

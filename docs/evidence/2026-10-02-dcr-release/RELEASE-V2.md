@@ -205,10 +205,12 @@ trap 'echo "FAIL dcr-archive: line $LINENO; STOP before window" >&2' ERR
 : "${RELEASE_SHA:?}" "${DCR_PLAN_FILE:?}" "${OAUTH_PLAN_FILE:?}" "${GATE_EVIDENCE_FILE:?}"
 case "$RELEASE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#RELEASE_SHA}" = 40
-test -z "$(git status --porcelain)"
+PLAN_GUARD_VALUE_1="$(git status --porcelain)"
+test -z "${PLAN_GUARD_VALUE_1}"
 git remote get-url origin | python3 -c 'import sys; assert sys.stdin.read().strip() in ("https://github.com/yulanventures/commonswarm.git","git@github.com:yulanventures/commonswarm.git")'
 git fetch origin main
-test "$(git rev-parse "${RELEASE_SHA}^{commit}")" = "$RELEASE_SHA"
+PLAN_GUARD_VALUE_2="$(git rev-parse "${RELEASE_SHA}^{commit}")"
+test "${PLAN_GUARD_VALUE_2}" = "$RELEASE_SHA"
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
 python3 - "${DCR_REVIEWED_CODE_SHA:-}" <<'PYCODE'
 import re,sys
@@ -229,7 +231,8 @@ DCR_ARCHIVE_DIR=$(mktemp -d /private/tmp/dcr-release-archive.XXXXXX)
 chmod 0700 "$DCR_ARCHIVE_DIR"
 DCR_WINDOW_ID=${DCR_ARCHIVE_DIR##*.}
 git archive --format=tar --output "$DCR_ARCHIVE_DIR/release.tar" "$RELEASE_SHA"
-test "$(git get-tar-commit-id <"$DCR_ARCHIVE_DIR/release.tar")" = "$RELEASE_SHA"
+PLAN_GUARD_VALUE_3="$(git get-tar-commit-id <"$DCR_ARCHIVE_DIR/release.tar")"
+test "${PLAN_GUARD_VALUE_3}" = "$RELEASE_SHA"
 chmod 0600 "$DCR_ARCHIVE_DIR/release.tar"
 DCR_ARCHIVE_SHA256=$(shasum -a 256 "$DCR_ARCHIVE_DIR/release.tar" | awk '{print $1}')
 DCR_BOX_ARCHIVE_PATH=/tmp/dcr-release-${RELEASE_SHA}-${DCR_WINDOW_ID}.tar
@@ -283,7 +286,8 @@ import re,sys
 value=sys.argv[1]
 assert re.fullmatch(r'[0-9]{14}(,[0-9]{14})*',value) and len(value.split(','))==len(set(value.split(','))), 'FAIL: invalid EXPECTED_SCHEMA_MIGRATIONS; STOP'
 PYINPUT
-test "$(id -u)" = 0
+PLAN_GUARD_VALUE_4="$(id -u)"
+test "${PLAN_GUARD_VALUE_4}" = 0
 python3 - "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$WINDOW_END_UTC" <<'PYCODE'
 import datetime,pathlib,re,sys
 s,w,a,h,end=sys.argv[1:]
@@ -293,10 +297,12 @@ until=datetime.datetime.strptime(end,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dateti
 assert 0<(until-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800
 p=pathlib.Path(a); assert not p.is_symlink() and p.resolve(strict=True)==p and p.is_file() and p.stat().st_mode & 0o777==0o600
 PYCODE
-test "$(sha256sum "$DCR_BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$DCR_ARCHIVE_SHA256"
+PLAN_GUARD_VALUE_5="$(sha256sum "$DCR_BOX_ARCHIVE_PATH" | awk '{print $1}')"
+test "${PLAN_GUARD_VALUE_5}" = "$DCR_ARCHIVE_SHA256"
 PROOF_DIR=/home/commonswarm/oauth/dcr-preflights/${RELEASE_SHA}-${DCR_WINDOW_ID}
 DCR_SOURCE_DIR=$PROOF_DIR/source
-test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
+test ! -e "$PROOF_DIR"
+test ! -L "$PROOF_DIR"
 install -d -m 0700 -o root -g root "$PROOF_DIR"
 python3 - "$DCR_BOX_ARCHIVE_PATH" "$PROOF_DIR" "$RELEASE_SHA" <<'PYCODE'
 import hashlib,os,pathlib,shutil,sys,tarfile
@@ -333,9 +339,11 @@ chmod 0600 "$PROOF_DIR/state.sh"
 set -euo pipefail
 trap 'printf "FAIL dcr-session: line %s; services/schema untouched; dcr-secret-abort SECRET_STAGE=%s\n" "$LINENO" "${SECRET_STAGE:-not-created}" >&2' ERR
 . "/home/commonswarm/oauth/dcr-preflights/${1:?}-${2:?}/state.sh"
-test ! -e "$PROOF_DIR/closed.txt" && test ! -e "$PROOF_DIR/session-ready.txt"
+test ! -e "$PROOF_DIR/closed.txt"
+test ! -e "$PROOF_DIR/session-ready.txt"
 umask 077
-test -d /private/tmp && test ! -L /private/tmp
+test -d /private/tmp
+test ! -L /private/tmp
 SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$SECRET_STAGE"
 # Persist the exact cleanup path immediately, including failures before helper creation.
@@ -350,9 +358,13 @@ PSQL_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$PSQL_IMAGE")
 POSTGRES_CIDS=()
 while IFS= read -r value; do test -z "$value" || POSTGRES_CIDS[${#POSTGRES_CIDS[@]}]=$value; done < <(docker ps -q --filter label=com.docker.compose.project=commonswarm-supabase-stack --filter label=com.docker.compose.service=postgres)
 test "${#POSTGRES_CIDS[@]}" = 1
-test "$(docker inspect --format '{{.Image}}' "${POSTGRES_CIDS[0]}")" = "$PSQL_IMAGE_ID"
+PLAN_GUARD_VALUE_6="$(docker inspect --format '{{.Image}}' "${POSTGRES_CIDS[0]}")"
+test "${PLAN_GUARD_VALUE_6}" = "$PSQL_IMAGE_ID"
 for path in /home/commonswarm/.env /etc/commonswarm-release/target.env; do
- test -f "$path" && test ! -L "$path" && test "$(stat -c %a "$path")" = 600
+ test -f "$path"
+ test ! -L "$path"
+ PLAN_GUARD_VALUE_7="$(stat -c %a "$path")"
+test "${PLAN_GUARD_VALUE_7}" = 600
 done
 unset SOURCE_DATABASE_URL TARGET_DATABASE_URL
 # make-pg-service reads the existing files; credentials never enter shell variables/argv.
@@ -431,11 +443,14 @@ printf 'PASS dcr-session: target-only standard release psql/ro helpers; secret v
 set -euo pipefail
 trap 'echo "FAIL DCR read-only preflight line $LINENO; STOP" >&2' ERR
 . "/home/commonswarm/oauth/dcr-preflights/${1:?}-${2:?}/state.sh"
-test ! -e "$PROOF_DIR/closed.txt" && test -f "$PROOF_DIR/session-ready.txt"
+test ! -e "$PROOF_DIR/closed.txt"
+test -f "$PROOF_DIR/session-ready.txt"
 . "$DB_SESSION"
 (cd "$PROOF_DIR" && sha256sum -c proof-inputs.sha256 >/dev/null)
 release_psql_ro -q --file "$PROOF_DIR/identity.sql"
-test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+PLAN_GUARD_VALUE_8="$(date -u +%s)"
+PLAN_GUARD_VALUE_9="$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "${PLAN_GUARD_VALUE_8}" -le "${PLAN_GUARD_VALUE_9}"
 
 release_psql_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/applied-before.txt"
 python3 - "${EXPECTED_SCHEMA_MIGRATIONS:-}" "$PROOF_DIR/applied-before.txt" <<'PYSCHEMA'
@@ -451,11 +466,14 @@ if expected!=observed:
     raise SystemExit('FAIL: EXPECTED_SCHEMA_MIGRATIONS expected='+','.join(sorted(expected))+' observed='+','.join(sorted(observed))+'; STOP')
 print('PASS: EXPECTED_SCHEMA_MIGRATIONS exact applied set matched')
 PYSCHEMA
-test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
+PLAN_GUARD_VALUE_10="$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")"
+test "${PLAN_GUARD_VALUE_10}" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
+PLAN_GUARD_VALUE_11="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_11}" = t
 printf '\\i /proof/20261002000001-rollback-catalog.sql\nSELECT :\x27rollback_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = f
+PLAN_GUARD_VALUE_12="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_12}" = f
 release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' >"$PROOF_DIR/cron-before.txt"
 printf '20261002000001 ledger=1 catalog=t rollback=f; read-only\n' >"$PROOF_DIR/preflight.txt"
 ```
@@ -537,7 +555,8 @@ PYCODE
 # step: dcr-oauth-baseline-state
 set -euo pipefail
 trap 'echo "FAIL hm37-mcp-baseline-state REQ 99: unexpected check failure; STOP" >&2' ERR
-test "$(id -u)" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+PLAN_GUARD_VALUE_13="$(id -u)" || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+test "${PLAN_GUARD_VALUE_13}" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
 hm37_baseline_mode() {
 python3 - <<'PY' || return 1
 import json, pathlib, re, subprocess
@@ -648,11 +667,14 @@ PY
 }
 DCR_PROOF=/home/commonswarm/oauth/dcr-preflights/${RELEASE_SHA:?}-${DCR_WINDOW_ID:?}
 . "$DCR_PROOF/state.sh"
-test ! -e "$DCR_PROOF/closed.txt" && test -f "$DCR_PROOF/preflight.txt"
+test ! -e "$DCR_PROOF/closed.txt"
+test -f "$DCR_PROOF/preflight.txt"
 . "$DB_SESSION"
-test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
+PLAN_GUARD_VALUE_14="$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")"
+test "${PLAN_GUARD_VALUE_14}" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
+PLAN_GUARD_VALUE_15="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_15}" = t
 dcr_expected_baselines check
 export DCR_PROOF EXPECTED_EDGE_SHA
 BASELINE_MCP_MODE=$(hm37_baseline_mode) || exit 1
@@ -679,7 +701,8 @@ assert p.read_bytes()==subprocess.check_output(['git','show',sys.argv[2]+':docs/
 PYCODE
   ;;
  hm37-mcp-transition-off|hm37-oauth-build|hm37-oauth-inputs|hm37-oauth-release-off|hm37-mcp-route-probes|hm37-mcp-disable|hm37-oauth-rollback|hm37-mcp-restore-on|hm37-oauth-close)
-  test "$(id -u)" = 0
+  PLAN_GUARD_VALUE_16="$(id -u)"
+  test "${PLAN_GUARD_VALUE_16}" = 0
   : "${DCR_PROOF:?}"
   REFERENCE_FILE=$DCR_PROOF/source/docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md
   STEP_FILE=$DCR_PROOF/oauth-reference.sh
@@ -702,18 +725,24 @@ case "$HM37_STEP" in
   test "${DCR_CLOSE_VERIFIED:-}" = yes
   test -f "$DCR_PROOF/close-on-verified.txt"
   . "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"
-  test "$(hm37_baseline_mode)" = on
+  PLAN_GUARD_VALUE_17="$(hm37_baseline_mode)"
+  test "${PLAN_GUARD_VALUE_17}" = on
   . "$STEP_FILE"
   touch "$DCR_PROOF/oauth-closed.txt"
   ;;
  hm37-oauth-build|hm37-oauth-inputs|hm37-oauth-release-off|hm37-mcp-route-probes)
   . "$DCR_PROOF/state.sh"; . "$DB_SESSION"
-  test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
+  PLAN_GUARD_VALUE_18="$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")"
+  test "${PLAN_GUARD_VALUE_18}" = 1
   printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
-  test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
+  PLAN_GUARD_VALUE_19="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+  test "${PLAN_GUARD_VALUE_19}" = t
   . "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"
   REMAINING=$((180 - $(date -u +%s) + $(cat "$PROOF_DIR/mcp-503-start.epoch")))
-  test "$REMAINING" -gt 0 && test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+  test "$REMAINING" -gt 0
+  PLAN_GUARD_VALUE_20="$(date -u +%s)"
+PLAN_GUARD_VALUE_21="$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "${PLAN_GUARD_VALUE_20}" -le "${PLAN_GUARD_VALUE_21}"
   export OAUTH_RELEASE_SHA MCP_EXPECTED_MODE DCR_PROOF
   timeout --signal=TERM --kill-after=5 "$REMAINING" /bin/bash -euo pipefail "$STEP_FILE"
   ;;
@@ -1069,7 +1098,8 @@ require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved
 PY
   docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" rollback_to_off compose.baseline.off.env || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_22="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_22}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   test -L /home/commonswarm/oauth/current || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
   MCP_EXPECTED_MODE=off mcp_route_probes || return 1
@@ -1087,12 +1117,14 @@ restore_baseline_on() {
     cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" &&
     cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
     cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_23="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_23}" = 0:986:440 || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose config --quiet || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_24="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_24}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
@@ -1178,15 +1210,21 @@ test "${TOM_ENABLE_APPROVAL:-}" = 2026-09-29 || { echo 'FAIL: named HezLead swit
 caddy_sites_import || exit 1
 DCR_OAUTH_PROOF=$PROOF_DIR
 . "$DCR_PROOF/state.sh"; . "$DB_SESSION"
-test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
+PLAN_GUARD_VALUE_25="$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")"
+test "${PLAN_GUARD_VALUE_25}" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
+PLAN_GUARD_VALUE_26="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_26}" = t
 . "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"
 REMAINING=$((180 - $(date -u +%s) + $(cat "$PROOF_DIR/mcp-503-start.epoch")))
-test "$REMAINING" -gt 0 && test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "$REMAINING" -gt 0
+PLAN_GUARD_VALUE_27="$(date -u +%s)"
+PLAN_GUARD_VALUE_28="$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "${PLAN_GUARD_VALUE_27}" -le "${PLAN_GUARD_VALUE_28}"
 
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.off.env" || { echo 'FAIL: edge env changed since snapshot; stop and report' >&2; exit 1; }
-test -f "$DCR_PROOF/caddy-applied.txt" && test -f "$DCR_PROOF/caddy-off-verified.txt"
+test -f "$DCR_PROOF/caddy-applied.txt"
+test -f "$DCR_PROOF/caddy-off-verified.txt"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-candidate.caddy" || { echo 'FAIL: Caddy candidate changed; stop and report' >&2; exit 1; }
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.off.env" || { echo 'FAIL: OAuth env changed since OFF deploy; stop and report' >&2; exit 1; }
 test ! -e /etc/commonswarm-oauth/management-database-credentials && test ! -L /etc/commonswarm-oauth/management-database-credentials || { echo 'FAIL: unexpected management file; stop and report' >&2; exit 1; }
@@ -1194,7 +1232,8 @@ switch_on() {
   OAUTH_USER=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
   test "$OAUTH_USER" = 996:986 || { echo 'FAIL: OAuth runtime must be UID:GID 996:986; stop on drift' >&2; return 1; }
   IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$IMAGE" || return 1
+  PLAN_GUARD_VALUE_29="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_29}" = "$IMAGE" || return 1
   docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import dns from "node:dns/promises";
 if(process.getuid()!==996 || process.getgid()!==986 ||
@@ -1340,7 +1379,8 @@ PY
   # Compose overrides the image default; measured Config.User is 996:986.
   # Read only for root and that runtime group; root retains ownership and nobody has write bits.
   install -o root -g 986 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_30="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_30}" = 0:986:440 || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
   cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
   oauth_management_compose config --quiet || return 1
@@ -1391,7 +1431,8 @@ fi
 # host: box root /bin/bash
 set -euo pipefail
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(hm37_baseline_mode)" = on
+PLAN_GUARD_VALUE_31="$(hm37_baseline_mode)"
+test "${PLAN_GUARD_VALUE_31}" = on
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-candidate.caddy"
 (cd "$DCR_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
 python3 - "$PROOF_DIR" "$DCR_PROOF" <<'PYCODE'
@@ -1545,9 +1586,13 @@ trap 'echo "FAIL dcr-caddy-apply line $LINENO; run dcr-caddy-failure; STOP" >&2'
 : "${DCR_PROOF:?}"
 test ! -e "$DCR_PROOF/closed.txt"
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(hm37_baseline_mode)" = off
+PLAN_GUARD_VALUE_32="$(hm37_baseline_mode)"
+test "${PLAN_GUARD_VALUE_32}" = off
 REMAINING=$((180 - $(date -u +%s) + $(cat "$PROOF_DIR/mcp-503-start.epoch")))
-test "$REMAINING" -gt 0 && test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "$REMAINING" -gt 0
+PLAN_GUARD_VALUE_33="$(date -u +%s)"
+PLAN_GUARD_VALUE_34="$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "${PLAN_GUARD_VALUE_33}" -le "${PLAN_GUARD_VALUE_34}"
 CADDY_FORWARD_SECONDS=30
 if test "$REMAINING" -lt "$CADDY_FORWARD_SECONDS"; then CADDY_FORWARD_SECONDS=$REMAINING; fi
 dcr_caddy_forward() {
@@ -1603,8 +1648,12 @@ export DCR_PROOF OAUTH_RELEASE_SHA
 # Includes validation/reload/probes, bounded by both the Caddy share and global budget.
 timeout --signal=TERM --kill-after=1 "$CADDY_FORWARD_SECONDS" /bin/bash -euo pipefail -c \
  '. "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/hm37-window.sh"; . "$DCR_PROOF/caddy-forward.sh"; dcr_caddy_forward'
-test $(( $(date -u +%s) - $(cat "$PROOF_DIR/mcp-503-start.epoch") )) -lt 180
-test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+PLAN_GUARD_VALUE_35="$(date -u +%s)"
+PLAN_GUARD_VALUE_36="$(cat "$PROOF_DIR/mcp-503-start.epoch")"
+test $(( ${PLAN_GUARD_VALUE_35} - ${PLAN_GUARD_VALUE_36} )) -lt 180
+PLAN_GUARD_VALUE_37="$(date -u +%s)"
+PLAN_GUARD_VALUE_38="$(date -u -d "$WINDOW_END_UTC" +%s)"
+test "${PLAN_GUARD_VALUE_37}" -le "${PLAN_GUARD_VALUE_38}"
 ```
 
 dcr-public-helper runs before OFF, so marked rollback extraction/probes are ready
@@ -1628,7 +1677,8 @@ set -euo pipefail
 : "${DCR_PROOF:?}"
 . "$DCR_PROOF/public-helper.sh"
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(hm37_baseline_mode)" = off
+PLAN_GUARD_VALUE_39="$(hm37_baseline_mode)"
+test "${PLAN_GUARD_VALUE_39}" = off
 (cd "$DCR_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
 dcr_public_probe caddy-off
 (cd "$DCR_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
@@ -1643,7 +1693,8 @@ set -euo pipefail
 trap 'echo "FAIL dcr-caddy-rollback line $LINENO; retain bytes/evidence; STOP" >&2' ERR
 : "${DCR_PROOF:?}"
 (cd "$DCR_PROOF" && sha256sum -c apex-before.sha256 mcp-before.sha256 >/dev/null)
-test -f /etc/caddy/sites/20-commonswarm-mcp.caddy && test ! -L /etc/caddy/sites/20-commonswarm-mcp.caddy
+test -f /etc/caddy/sites/20-commonswarm-mcp.caddy
+test ! -L /etc/caddy/sites/20-commonswarm-mcp.caddy
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-candidate.caddy" || cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-before.caddy"
 install -o root -g root -m 0644 "$DCR_PROOF/mcp-before.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-before.caddy"
@@ -1673,7 +1724,9 @@ retest; these boundary probes do not claim them.
 # host: box root /bin/bash
 set -euo pipefail
 : "${DCR_PROOF:?}"
-test -f "$DCR_PROOF/caddy-applied.txt" && test -f "$DCR_PROOF/oauth-verified.txt" && test ! -e "$DCR_PROOF/public-dcr.json"
+test -f "$DCR_PROOF/caddy-applied.txt"
+test -f "$DCR_PROOF/oauth-verified.txt"
+test ! -e "$DCR_PROOF/public-dcr.json"
 . "$DCR_PROOF/public-helper.sh"
 dcr_public_probe dcr
 touch "$DCR_PROOF/public-verified.txt"
@@ -1686,15 +1739,19 @@ touch "$DCR_PROOF/public-verified.txt"
 set -euo pipefail
 trap 'echo "FAIL DCR read-only preflight line $LINENO; STOP" >&2' ERR
 . "/home/commonswarm/oauth/dcr-preflights/${1:?}-${2:?}/state.sh"
-test ! -e "$PROOF_DIR/closed.txt" && test -f "$PROOF_DIR/session-ready.txt"
+test ! -e "$PROOF_DIR/closed.txt"
+test -f "$PROOF_DIR/session-ready.txt"
 . "$DB_SESSION"
 (cd "$PROOF_DIR" && sha256sum -c proof-inputs.sha256 >/dev/null)
 release_psql_ro -q --file "$PROOF_DIR/identity.sql"
-test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
+PLAN_GUARD_VALUE_40="$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")"
+test "${PLAN_GUARD_VALUE_40}" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
+PLAN_GUARD_VALUE_41="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_41}" = t
 printf '\\i /proof/20261002000001-rollback-catalog.sql\nSELECT :\x27rollback_ok\x27::boolean;\n' >"$READBACK_SQL"
-test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = f
+PLAN_GUARD_VALUE_42="$(release_psql_ro -Atq --file "$READBACK_SQL")"
+test "${PLAN_GUARD_VALUE_42}" = f
 
 test -f "$PROOF_DIR/public-verified.txt"
 release_psql_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/closed-ledger.txt"
@@ -1777,9 +1834,12 @@ exit 1
 # host: box root /bin/bash
 set -euo pipefail
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(hm37_baseline_mode)" = on
-test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
+PLAN_GUARD_VALUE_43="$(hm37_baseline_mode)"
+test "${PLAN_GUARD_VALUE_43}" = on
+PLAN_GUARD_VALUE_44="$(readlink -f /home/commonswarm/oauth/current)"
+test "${PLAN_GUARD_VALUE_44}" = "$BASELINE_OAUTH_DIR"
+PLAN_GUARD_VALUE_45="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)"
+test "${PLAN_GUARD_VALUE_45}" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
 for pair in 'service.env /etc/commonswarm-oauth/service.env' 'compose.env /etc/commonswarm-oauth/compose.env' 'edge.env /home/commonswarm/.env' 'mcp.caddy /etc/caddy/sites/20-commonswarm-mcp.caddy' 'management.baseline /etc/commonswarm-oauth/management-database-credentials'; do
  read -r saved live <<<"$pair"
  cmp -s "$SECRET_STAGE/$saved" "$live"
@@ -1815,13 +1875,19 @@ trap release_close_exit EXIT
 RELEASE_FAILURE_PHASE=DEPLOY_FAILED
 
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-test "$(hm37_baseline_mode)" = on
-if test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"; then
+PLAN_GUARD_VALUE_46="$(hm37_baseline_mode)"
+test "${PLAN_GUARD_VALUE_46}" = on
+PLAN_GUARD_VALUE_60="$(readlink -f /home/commonswarm/oauth/current)"
+if test "${PLAN_GUARD_VALUE_60}" = "$BASELINE_OAUTH_DIR"; then
  dcr_run_step dcr-baseline-verify
 else
- test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_RELEASE_DIR"
- test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")"
- test -f "$DCR_PROOF/oauth-verified.txt" && test -f "$DCR_PROOF/public-verified.txt"
+ PLAN_GUARD_VALUE_47="$(readlink -f /home/commonswarm/oauth/current)"
+ test "${PLAN_GUARD_VALUE_47}" = "$OAUTH_RELEASE_DIR"
+ PLAN_GUARD_VALUE_48="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)"
+ PLAN_GUARD_VALUE_49="$(cat "$PROOF_DIR/oauth-image.id")"
+ test "${PLAN_GUARD_VALUE_48}" = "${PLAN_GUARD_VALUE_49}"
+ test -f "$DCR_PROOF/oauth-verified.txt"
+ test -f "$DCR_PROOF/public-verified.txt"
  test -f "$DCR_PROOF/final-readback-verified.txt"
  cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$DCR_PROOF/mcp-candidate.caddy"
  (cd "$DCR_PROOF" && sha256sum -c apex-before.sha256 >/dev/null)
@@ -1866,12 +1932,17 @@ RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
 
 trap 'echo "FAIL dcr-check-cleanup: line $LINENO; report exact path/error; STOP" >&2' ERR
 . "/home/commonswarm/oauth/dcr-preflights/${1:?}-${2:?}/state.sh"
-test "$(id -u)" = 0
-test "$(command -v rm)" = /usr/bin/rm && test -x /usr/bin/rm && test ! -L /usr/bin/rm
+PLAN_GUARD_VALUE_50="$(id -u)"
+test "${PLAN_GUARD_VALUE_50}" = 0
+PLAN_GUARD_VALUE_51="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_51}" = /usr/bin/rm
+test -x /usr/bin/rm
+test ! -L /usr/bin/rm
 if test -f "$PROOF_DIR/closed.txt"; then echo 'dcr-check-cleanup: already closed'; exit 0; fi
 # Before OAuth open no service was changed; afterward OAuth close must prove ON first.
 if test -f "/home/commonswarm/oauth/release-proofs/$RELEASE_SHA/open-ready.txt"; then
- test -f "$PROOF_DIR/oauth-closed.txt" && test -f "$PROOF_DIR/close-on-verified.txt"
+ test -f "$PROOF_DIR/oauth-closed.txt"
+ test -f "$PROOF_DIR/close-on-verified.txt"
 fi
 CLOSE_READBACK_FAILED=0
 if test -f "$PROOF_DIR/session-ready.txt"; then
@@ -1891,9 +1962,11 @@ assert re.fullmatch(pattern,str(p)) and p.resolve(strict=True)==p and not p.is_s
 assert p.stat().st_uid==0 and p.stat().st_mode & 0o777==0o700
 PYCODE
  rm -rf -- "$SECRET_STAGE" || { printf 'FAIL dcr-check-cleanup: cleanup refused %s; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
- test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"
+ test ! -e "$SECRET_STAGE"
+ test ! -L "$SECRET_STAGE"
 fi
-if test -n "${SECRET_STAGE:-}"; then test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"; fi
+if test -n "${SECRET_STAGE:-}"; then test ! -e "$SECRET_STAGE"
+test ! -L "$SECRET_STAGE"; fi
 test "$DCR_BOX_ARCHIVE_PATH" = /tmp/dcr-release-${RELEASE_SHA}-${DCR_WINDOW_ID}.tar
 test ! -L "$DCR_BOX_ARCHIVE_PATH"
 rm -f -- "$DCR_BOX_ARCHIVE_PATH" || { printf 'FAIL dcr-check-cleanup: cleanup refused %s; STOP\n' "$DCR_BOX_ARCHIVE_PATH" >&2; exit 1; }
@@ -1945,7 +2018,12 @@ rm -rf -- "$DCR_ARCHIVE_DIR" || { printf 'FAIL dcr-mac-close: guarded cleanup re
 set -euo pipefail
 trap 'echo "FAIL dcr-stage-abort: report exact path/error; STOP" >&2' ERR
 RELEASE_SHA=${1:?}; DCR_WINDOW_ID=${2:?}; DCR_BOX_ARCHIVE_PATH=${3:?}; DCR_ARCHIVE_SHA256=${4:?}
-test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm && test -x /usr/bin/rm && test ! -L /usr/bin/rm
+PLAN_GUARD_VALUE_52="$(id -u)"
+test "${PLAN_GUARD_VALUE_52}" = 0
+PLAN_GUARD_VALUE_53="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_53}" = /usr/bin/rm
+test -x /usr/bin/rm
+test ! -L /usr/bin/rm
 python3 - "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" <<'PYCODE'
 import pathlib,re,sys
 s,w,a,h=sys.argv[1:]
@@ -1954,7 +2032,8 @@ assert a==f'/tmp/dcr-release-{s}-{w}.tar' and re.fullmatch('[0-9a-f]{64}',h)
 p=pathlib.Path(a); assert p.resolve(strict=True)==p and not p.is_symlink() and p.is_file() and p.stat().st_mode & 0o777==0o600
 assert not pathlib.Path(f'/home/commonswarm/oauth/dcr-preflights/{s}-{w}/state.sh').exists()
 PYCODE
-test "$(sha256sum "$DCR_BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$DCR_ARCHIVE_SHA256"
+PLAN_GUARD_VALUE_54="$(sha256sum "$DCR_BOX_ARCHIVE_PATH" | awk '{print $1}')"
+test "${PLAN_GUARD_VALUE_54}" = "$DCR_ARCHIVE_SHA256"
 rm -f -- "$DCR_BOX_ARCHIVE_PATH" || { printf 'FAIL dcr-stage-abort: cleanup refused %s; STOP\n' "$DCR_BOX_ARCHIVE_PATH" >&2; exit 1; }
 ```
 
@@ -1964,16 +2043,25 @@ rm -f -- "$DCR_BOX_ARCHIVE_PATH" || { printf 'FAIL dcr-stage-abort: cleanup refu
 # host: box root /bin/bash
 set -euo pipefail
 : "${SECRET_STAGE:?exact reported path required}"
-test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
-  test -x /usr/bin/rm && test ! -L /usr/bin/rm &&
-  test ! -e /usr/local/bin/rm && test ! -L /usr/local/bin/rm &&
-  test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm
+PLAN_GUARD_VALUE_55="$(id -u)"
+test "${PLAN_GUARD_VALUE_55}" = 0
+PLAN_GUARD_VALUE_56="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_56}" = /usr/bin/rm
+test -x /usr/bin/rm
+test ! -L /usr/bin/rm
+test ! -e /usr/local/bin/rm
+test ! -L /usr/local/bin/rm
+test ! -e /usr/local/sbin/rm
+test ! -L /usr/local/sbin/rm
 # A completed OAuth open must use the gated close; partial open needs baseline ON proof.
 if test -n "${OAUTH_RELEASE_SHA:-}" && test -n "${DCR_PROOF:-}"; then
  test ! -f "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/open-ready.txt"
- test "$(hm37_baseline_mode)" = on
- test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$EXPECTED_OAUTH_SHA"
- test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
+ PLAN_GUARD_VALUE_57="$(hm37_baseline_mode)"
+ test "${PLAN_GUARD_VALUE_57}" = on
+ PLAN_GUARD_VALUE_58="$(readlink -f /home/commonswarm/oauth/current)"
+ test "${PLAN_GUARD_VALUE_58}" = "/home/commonswarm/oauth/releases/$EXPECTED_OAUTH_SHA"
+ PLAN_GUARD_VALUE_59="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)"
+ test "${PLAN_GUARD_VALUE_59}" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
  MCP_EXPECTED_MODE=on mcp_route_probes
 fi
 python3 - "$SECRET_STAGE" <<'PYCODE'
@@ -1985,7 +2073,8 @@ assert re.fullmatch(pattern,str(p)) and p.is_dir() and not p.is_symlink() and p.
 assert p.stat().st_uid==0 and p.stat().st_mode & 0o777==0o700
 PYCODE
 rm -rf -- "$SECRET_STAGE" || { printf 'FAIL: cleanup refused %s; retain/report exact message\n' "$SECRET_STAGE" >&2; exit 1; }
-test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"
+test ! -e "$SECRET_STAGE"
+test ! -L "$SECRET_STAGE"
 ```
 
 ## Static checks and acceptance limits
@@ -2027,40 +2116,40 @@ not replace the required GATE_EVIDENCE_FILE for the final landed RELEASE_SHA.
   "steps": {
     "dcr-release-shared-preflight": {"reads": [], "sha256": "f1e88d8c9c27b0a6c6a1c98681df79ae9f5b0de01c3952fa47767eacfd7ed634"},
     "dcr-plan-inputs": {"reads": [], "sha256": "e138b9e56587149131f3f159c00eb3643ff41f4d9fa80c42926a816aa3392c0f"},
-    "dcr-archive": {"creates": ["$DCR_ARCHIVE_DIR", "$DCR_ARCHIVE_DIR/release.tar", "$DCR_BOX_ARCHIVE_PATH", "DCR_ARCHIVE_DIR", "DCR_BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "9a1f9d32cfc3fef5ccae2919b727f80b4891d04e3554cb42e528531d0accfb90"},
+    "dcr-archive": {"creates": ["$DCR_ARCHIVE_DIR", "$DCR_ARCHIVE_DIR/release.tar", "$DCR_BOX_ARCHIVE_PATH", "DCR_ARCHIVE_DIR", "DCR_BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "a2c9a0a117c17d68a748543aafa0767fc04f27f0d919c3aedd5ba67e89429433"},
     "dcr-transport": {"creates": ["$DCR_ARCHIVE_DIR/box-step.sh"], "reads": [], "sha256": "a38faa3b29ba4f9605bca48ba8cfa08d68cd34a9e01601373dd99740eff06d9a"},
-    "dcr-stage": {"creates": ["$DCR_PROOF/source", "$DCR_PROOF/state.sh"], "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "6df530923a7f10448c41f16fa09555343817326e55fd54c7b544b4151dfc5f69"},
-    "dcr-session": {"consumes": ["$DCR_PROOF/state.sh"], "creates": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/readback.sql", "$DCR_PROOF/session-ready.txt", "$DCR_SECRET_STAGE/pass", "$DCR_SECRET_STAGE/service.conf", "$DCR_SECRET_STAGE/session.sh", "$SECRET_STAGE", "DCR_SECRET_STAGE"], "reads": ["/etc/commonswarm-release/target.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker image inspect", "command:docker inspect", "command:release_psql_ro"], "sha256": "89491df62e7f7aeabb94314026cff56225c0783a937bb3dabdb28511fa619bed"},
-    "dcr-preflight": {"consumes": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/preflight.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "a87b387382ea4f7fdef28b79277373c3607e1f4d18d9a1370c133bd9d6e33af1"},
+    "dcr-stage": {"creates": ["$DCR_PROOF/source", "$DCR_PROOF/state.sh"], "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "0b7b5038132ea3f4ea5ec1513951b8e850814fe2bb9a6c19ba649a1de30ba448"},
+    "dcr-session": {"consumes": ["$DCR_PROOF/state.sh"], "creates": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/readback.sql", "$DCR_PROOF/session-ready.txt", "$DCR_SECRET_STAGE/pass", "$DCR_SECRET_STAGE/service.conf", "$DCR_SECRET_STAGE/session.sh", "$SECRET_STAGE", "DCR_SECRET_STAGE"], "reads": ["/etc/commonswarm-release/target.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker image inspect", "command:docker inspect", "command:release_psql_ro"], "sha256": "e70830ef3dcf1602e3cf6e6f7793e4689129bf7b570a260b0706fab554d9d2d0"},
+    "dcr-preflight": {"consumes": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/preflight.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "da13d6deff8adf9cf056a31545631c4fb84e7f517f597e0176db7a2459411367"},
     "dcr-oauth-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker inspect"], "sha256": "25d9b8fc7adc6911cafa656594e6a64e604aa17b9bf2283dc935b6831b58ff77"},
-    "dcr-oauth-baseline-state": {"consumes": ["$DCR_PROOF/preflight.txt", "$DCR_PROOF/state.sh"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker inspect", "command:release_psql_ro", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "a8b6b119a1f3c5663905254c08a6de0e8369417579a01de439c83513c201c596"},
-    "dcr-oauth-reference": {"creates": ["$DCR_ARCHIVE_DIR/oauth-reference.sh", "$DCR_PROOF/oauth-reference.sh"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "8de08a2ddb944efca4dfc636119aebb78eb0ce50c1ecc29a2ada916c9f6db61f"},
+    "dcr-oauth-baseline-state": {"consumes": ["$DCR_PROOF/preflight.txt", "$DCR_PROOF/state.sh"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker inspect", "command:release_psql_ro", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "f130aae0a681ec94ca6cd8b64d7f3f2a4cfcb22b5bae630856cf460cd3c42616"},
+    "dcr-oauth-reference": {"creates": ["$DCR_ARCHIVE_DIR/oauth-reference.sh", "$DCR_PROOF/oauth-reference.sh"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "ea45f48c2a5d262acfebeadc97842d933232da289d27795b3e5bad6e999b9fa9"},
     "dcr-oauth-preflight": {"reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/cookie-keys", "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/commonswarm-oauth/signing-keys.pem", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "command:docker inspect"], "sha256": "11ff589d818f28b7ed942bb6194a9b7cd9e70abad8b9e403b2caac4423bd42cd"},
-    "dcr-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "oauth:hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "dcr-oauth-enable"}, "creates": ["$DCR_PROOF/apex-before.sha256", "$DCR_PROOF/marked-", "$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-before.sha256", "$DCR_PROOF/mcp-candidate.caddy", "$OAUTH_PROOF_DIR/baseline-mcp-mode", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/hm37-window.sh", "$OAUTH_PROOF_DIR/oauth-base-references.txt", "$OAUTH_PROOF_DIR/oauth-memory-limit.bytes", "$OAUTH_PROOF_DIR/oauth-stats.json", "$OAUTH_PROOF_DIR/open-ready.txt", "$OAUTH_PROOF_DIR/release.tar", "$OAUTH_PROOF_DIR/secret-stage.path", "$OAUTH_SECRET_STAGE/compose.baseline.off.env", "$OAUTH_SECRET_STAGE/compose.env", "$OAUTH_SECRET_STAGE/edge.env", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/management.baseline", "$OAUTH_SECRET_STAGE/mcp.caddy", "$OAUTH_SECRET_STAGE/service.env", "$OAUTH_SECRET_STAGE/service.off.env", "OAUTH_SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "98342a7112833dfc40ac3f4cb5dec8135650d0a79b4df3396bf3a61799447571"},
-    "dcr-oauth-enable": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-off-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/state.sh", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch", "$OAUTH_PROOF_DIR/oauth-image.id", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/service.off.env"], "creates": ["$OAUTH_SECRET_STAGE/edge.on.env", "$OAUTH_SECRET_STAGE/management-database-credentials", "$OAUTH_SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:release_psql_ro"], "sha256": "3cb32074683e81caa9e664e45a2c5f65143fdc3214829cd746725c5ee794b4c1"},
-    "dcr-oauth-verify": {"consumes": ["$DCR_PROOF/mcp-candidate.caddy"], "creates": ["$DCR_PROOF/oauth-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "d1e5fc06065ff009c2b90b215ae1f0e5ee962cf77cc899268a2855c86f3fe70f"},
+    "dcr-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "oauth:hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "dcr-oauth-enable"}, "creates": ["$DCR_PROOF/apex-before.sha256", "$DCR_PROOF/marked-", "$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-before.sha256", "$DCR_PROOF/mcp-candidate.caddy", "$OAUTH_PROOF_DIR/baseline-mcp-mode", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/hm37-window.sh", "$OAUTH_PROOF_DIR/oauth-base-references.txt", "$OAUTH_PROOF_DIR/oauth-memory-limit.bytes", "$OAUTH_PROOF_DIR/oauth-stats.json", "$OAUTH_PROOF_DIR/open-ready.txt", "$OAUTH_PROOF_DIR/release.tar", "$OAUTH_PROOF_DIR/secret-stage.path", "$OAUTH_SECRET_STAGE/compose.baseline.off.env", "$OAUTH_SECRET_STAGE/compose.env", "$OAUTH_SECRET_STAGE/edge.env", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/management.baseline", "$OAUTH_SECRET_STAGE/mcp.caddy", "$OAUTH_SECRET_STAGE/service.env", "$OAUTH_SECRET_STAGE/service.off.env", "OAUTH_SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "5365dea6026611944eacb6a9bf953c56486684e3c629659b343590569b1b70e0"},
+    "dcr-oauth-enable": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-off-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/state.sh", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch", "$OAUTH_PROOF_DIR/oauth-image.id", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/service.off.env"], "creates": ["$OAUTH_SECRET_STAGE/edge.on.env", "$OAUTH_SECRET_STAGE/management-database-credentials", "$OAUTH_SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:release_psql_ro"], "sha256": "8109a93282e9f0a1980b98bd92469a5bf2a4b61cf90813fccfc3f13026e56750"},
+    "dcr-oauth-verify": {"consumes": ["$DCR_PROOF/mcp-candidate.caddy"], "creates": ["$DCR_PROOF/oauth-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "8dade0638f32f0daf8ea508c1093aaaefe6252ca9daed3bb6de0ca8ff45c9a6a"},
     "dcr-public-helper": {"creates": ["$DCR_PROOF/public-helper.sh"], "reads": ["endpoint:http://127.0.0.1:3490", "endpoint:https://dcr-release-probe.invalid/callback", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp"], "sha256": "0a84d980fc315d1748bb9791a519af443f9de7b118f6d4d3e72ad7bb119793a6"},
-    "dcr-caddy-apply": {"consumes": ["$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/public-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch"], "creates": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-forward.sh", "$DCR_PROOF/mcp-after.sha256"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "9ba0e58c5d870dbb2a8698c3f14b17e9bb0675f49d9911ad69392fb530858a3b"},
-    "dcr-caddy-probes": {"consumes": ["$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/caddy-off-verified.txt"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "dfbadd5d36051e82936c9109f177d6e6c29d561bd444095de2a76ffc05dfd80a"},
-    "dcr-caddy-rollback": {"creates": ["$DCR_PROOF/caddy-rollback-reloaded.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "5bb4bb5bb33a4dd846891c7cc94eff509f2f69b3a5649137a9c7cc3d5bc7a04a"},
-    "dcr-public-probes": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/public-dcr.json", "$DCR_PROOF/public-verified.txt"], "reads": [], "sha256": "0cea9e69d01037a7a473f3e86f17469ba8a38163b1ce3edfb317e86fa6424c6f"},
-    "dcr-final-readback": {"consumes": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/identity.sql", "$DCR_PROOF/public-verified.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/cron-final.txt", "$DCR_PROOF/final-readback-verified.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "8e38a3f64a8f22a9d85591af9bb3a419e05475705c9583f1b2439eed22254ce2"},
+    "dcr-caddy-apply": {"consumes": ["$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/public-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch"], "creates": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-forward.sh", "$DCR_PROOF/mcp-after.sha256"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "5380188000675d4f6df63e07e8278553b8ec610fe617bbc03016932a6b8634df"},
+    "dcr-caddy-probes": {"consumes": ["$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/caddy-off-verified.txt"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "0b878a46e2ca505a9ad7b03afc8ebd24f51fec5df45196ef85d2c2bee7c2ca24"},
+    "dcr-caddy-rollback": {"creates": ["$DCR_PROOF/caddy-rollback-reloaded.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "12f78118797b0ccbb7f84db4480483bd074d7732b006c705aefcd8d8ff67fd7c"},
+    "dcr-public-probes": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/public-dcr.json", "$DCR_PROOF/public-verified.txt"], "reads": [], "sha256": "8ea840c8eb7d15b42b2aef180116181f5449f30f37cbcc24cb525ecbaa97e1bf"},
+    "dcr-final-readback": {"consumes": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/identity.sql", "$DCR_PROOF/public-verified.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/cron-final.txt", "$DCR_PROOF/final-readback-verified.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "429df5121e1bb01fedefa05f08e8ee7471da22a4d8c844e5f7aca86c80663007"},
     "dcr-caddy-failure": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "9e56f3a699901138c6da2abf69d889339837b391066a9bf5f03e02e85adfa8b3"},
     "dcr-public-failure": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "57becf0a39c04933224d47d71e76f8e0ef611fae992999361038f3f1e34d7d0f"},
     "dcr-recover-baseline": {"creates": ["$DCR_PROOF/recovery-result.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "cc491ec9e70dd21e345fb3baa69c89454746f480bec3910020993af9d8ae9e9c"},
-    "dcr-baseline-verify": {"creates": ["$DCR_PROOF/baseline-on-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "5e80f21cf14121252f15bf6b4d70d63d8c466943b5fc6354497d3a69fcf2c39e"},
-    "dcr-oauth-close": {"cleanup": ["OAUTH_SECRET_STAGE"], "consumes": ["$DCR_PROOF/final-readback-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-verified.txt", "$OAUTH_PROOF_DIR/oauth-image.id"], "creates": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/oauth-closed.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "adc36057a477f5c5af31bbba68c4bb1a3bf5dda1630542bd77aeef9facabb1ce"},
-    "dcr-check-cleanup": {"cleanup": ["DCR_BOX_ARCHIVE_PATH", "DCR_SECRET_STAGE"], "cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive", "$SECRET_STAGE": "dcr-session"}, "consumes": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "82e245f8e181f3bddec76058889fa70cca0f96e04fc49990a3ee4407cf339d99"},
+    "dcr-baseline-verify": {"creates": ["$DCR_PROOF/baseline-on-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "5337dcc8a0a836a4837d2861235ce2f91166ae16814936a76148089e495b3cd4"},
+    "dcr-oauth-close": {"cleanup": ["OAUTH_SECRET_STAGE"], "consumes": ["$DCR_PROOF/final-readback-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-verified.txt", "$OAUTH_PROOF_DIR/oauth-image.id"], "creates": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/oauth-closed.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "3128944f459501770b5313747b2e8369866b576b7e0340f685e4f0b373dba809"},
+    "dcr-check-cleanup": {"cleanup": ["DCR_BOX_ARCHIVE_PATH", "DCR_SECRET_STAGE"], "cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive", "$SECRET_STAGE": "dcr-session"}, "consumes": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "615795e097af71e36a479d49552ff173bed7cf076602b07acdf4ef9b21dc41d7"},
     "dcr-mac-close": {"cleanup": ["DCR_ARCHIVE_DIR"], "cleanup_owners": {"$DCR_ARCHIVE_DIR": "dcr-archive"}, "reads": [], "sha256": "57ca2675cfafa2b87001da15556d669c7da7a1607cc350c68c390e2485793568"},
-    "dcr-stage-abort": {"cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive"}, "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "a16d411c337c22407180de2b47f69fb3be1d3e06c2b9a2c69ab6750167e815fd"},
-    "dcr-secret-abort": {"cleanup_owners": {"$SECRET_STAGE": "dcr-session"}, "reads": ["/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases/", "command:docker inspect", "command:readlink -f"], "sha256": "5b27a86bb8b23375ab4d9c7809eda684b719df85411517058cd1ff87234e5c8c"},
+    "dcr-stage-abort": {"cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive"}, "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "80307235c02cfca51ca14f4776e305abd559bdafb9a08a409f7bcf0ee2211601"},
+    "dcr-secret-abort": {"cleanup_owners": {"$SECRET_STAGE": "dcr-session"}, "reads": ["/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases/", "command:docker inspect", "command:readlink -f"], "sha256": "1959029fa09cbc198f76e8f0305651b56992d8438b5739fa1abaa9d777d8c4c5"},
     "oauth:hm37-mcp-route-probes": {"creates": ["$OAUTH_PROOF_DIR/mcp-503-receipt.txt"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "75d3a60a70bb245804e2524cd118dbf6e643cd4f4526fc0ea76f55cbe768f24f"},
     "oauth:hm37-mcp-transition-off": {"creates": ["$OAUTH_PROOF_DIR/mcp-503-start.epoch", "$OAUTH_PROOF_DIR/mcp-503-start.utc"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "01e4454c92e62f408991396aee4342bb8a93a7698c96665654bb6bdd258a320b"},
-    "oauth:hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "386c92f13c8cb795343d0731cf0e670f651e8ecda02a191f12e09425962486e9"},
-    "oauth:hm37-oauth-build": {"consumes": ["$OAUTH_PROOF_DIR/oauth-base-references.txt"], "creates": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "96819761d3286f5f355afb527abf9f3b55d1d89569f47c61a4038b356a9f80f1"},
+    "oauth:hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "482089126146233ec124935dddbb9d768b1d799984f1969c9ae55eedecd8cdfe"},
+    "oauth:hm37-oauth-build": {"consumes": ["$OAUTH_PROOF_DIR/oauth-base-references.txt"], "creates": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "606df39886bdb328f5652980c35485f08fd76e225088fe71b4563018d6ef4210"},
     "oauth:hm37-oauth-inputs": {"consumes": ["$OAUTH_PROOF_DIR/oauth-image.id", "$OAUTH_SECRET_STAGE/service.off.env"], "creates": ["$OAUTH_SECRET_STAGE/compose.off.env"], "reads": ["/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/oauth/release-proofs/"], "sha256": "bd6c1a75477f20170dbeba6191a8d63a8897bc6ef1242c9868ed18d73cf70f70"},
-    "oauth:hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "oauth:hm37-oauth-archive"}, "reads": [], "sha256": "ae9464ad1b84cb9430c3a2d1ce7f101804874a5a6428e1afc7a948404103187e"},
-    "oauth:hm37-oauth-release-off": {"consumes": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "a6b9e18ce3481d3c667cb6dc0d293d75a8c1e103421dc6222ec54ea3c7150e08"}
+    "oauth:hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "oauth:hm37-oauth-archive"}, "reads": [], "sha256": "51f73a84aac393bf4d8c26bc9939f31420ac24c01f71dec3ee7109dc4c29aa83"},
+    "oauth:hm37-oauth-release-off": {"consumes": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "fd50f2bf0f67deb34e9ac89eff54b7744832c42e727a765e8220e557f220c88d"}
   },
   "references": {"oauth:hm37-mcp-route-probes": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-mcp-route-probes"}, "oauth:hm37-mcp-transition-off": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-mcp-transition-off"}, "oauth:hm37-oauth-archive": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-archive"}, "oauth:hm37-oauth-build": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-build"}, "oauth:hm37-oauth-inputs": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-inputs"}, "oauth:hm37-oauth-mac-close": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-mac-close"}, "oauth:hm37-oauth-release-off": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-release-off"}},
   "gate_receipts": [{"gates": ["DCR release shell/Python", "release-proof-format", "OAuth DCR tests"], "input": "GATE_EVIDENCE_FILE"}],

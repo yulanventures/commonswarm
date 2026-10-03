@@ -252,7 +252,8 @@ drift, a mismatched Caddy site or failed public probes refuse the window.
 # step: hm37-mcp-baseline-state
 set -euo pipefail
 trap 'echo "FAIL hm37-mcp-baseline-state REQ 99: unexpected check failure; STOP" >&2' ERR
-test "$(id -u)" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+PLAN_GUARD_VALUE_1="$(id -u)" || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+test "${PLAN_GUARD_VALUE_1}" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
 hm37_baseline_mode() {
 python3 - <<'PY' || return 1
 import json, pathlib, re, subprocess
@@ -376,7 +377,8 @@ trap 'echo "FAIL: hm37-oauth-archive line $LINENO" >&2' ERR
 : "${OAUTH_RELEASE_SHA:?FAIL: HezLead must supply the landed SHA}"
 case "$OAUTH_RELEASE_SHA" in ''|*[!0-9a-f]*) echo 'FAIL: SHA format' >&2; exit 1;; esac
 test "${#OAUTH_RELEASE_SHA}" -eq 40 || exit 1
-test -z "$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
+PLAN_GUARD_VALUE_2="$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
+test -z "${PLAN_GUARD_VALUE_2}" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
 git merge-base --is-ancestor "$OAUTH_RELEASE_SHA" origin/main || exit 1
 ARCHIVE_DIR=$(mktemp -d /private/tmp/hm37-oauth-archive.XXXXXX) || exit 1
 git archive --format=tar "$OAUTH_RELEASE_SHA" >"$ARCHIVE_DIR/release.tar" || exit 1
@@ -758,7 +760,8 @@ require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved
 PY
   docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" rollback_to_off compose.baseline.off.env || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_3="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_3}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   test -L /home/commonswarm/oauth/current || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
   MCP_EXPECTED_MODE=off mcp_route_probes || return 1
@@ -776,12 +779,14 @@ restore_baseline_on() {
     cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" &&
     cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
     cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_4="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_4}" = 0:986:440 || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose config --quiet || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_5="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_5}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
@@ -917,7 +922,8 @@ if [ -n "$CACHED_IMAGE" ]; then
   test "$IMAGE" = "$CACHED_IMAGE" || { echo 'FAIL: image lookup changed' >&2; exit 1; }
   printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 else
-  test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
+  PLAN_GUARD_VALUE_6="$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
+  test "${PLAN_GUARD_VALUE_6}" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
   while IFS= read -r BASE_REFERENCE; do
     docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
   done <"$BASE_REFERENCES"
@@ -929,7 +935,8 @@ else
     "$OAUTH_RELEASE_DIR" || { echo 'FAIL: capped OAuth image build' >&2; exit 1; }
 fi
 IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || exit 1
-test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
+PLAN_GUARD_VALUE_7="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
+test "${PLAN_GUARD_VALUE_7}" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
 case "$IMAGE" in sha256:*) ;; *) echo 'FAIL: image must be immutable' >&2; exit 1;; esac
 test "${#IMAGE}" -eq 71 || exit 1
 docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || exit 1
@@ -972,7 +979,9 @@ trap 'echo "FAIL: hm37-oauth-release-off line $LINENO" >&2' ERR
 oauth_compose config --quiet || exit 1
 oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
 healthy commonswarm-oauth-oauth-1 || exit 1
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")" || exit 1
+PLAN_GUARD_VALUE_8="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || exit 1
+PLAN_GUARD_VALUE_9="$(cat "$PROOF_DIR/oauth-image.id")" || exit 1
+test "${PLAN_GUARD_VALUE_8}" = "${PLAN_GUARD_VALUE_9}" || exit 1
 docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import fs from "node:fs";
 import {loadConfig} from "./src/config.js";
@@ -1123,7 +1132,8 @@ switch_on() {
   OAUTH_USER=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
   test "$OAUTH_USER" = 996:986 || { echo 'FAIL: OAuth runtime must be UID:GID 996:986; stop on drift' >&2; return 1; }
   IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$IMAGE" || return 1
+  PLAN_GUARD_VALUE_10="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_10}" = "$IMAGE" || return 1
   docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import dns from "node:dns/promises";
 if(process.getuid()!==996 || process.getgid()!==986 ||
@@ -1274,7 +1284,8 @@ PY
   # Compose overrides the image default; measured Config.User is 996:986.
   # Read only for root and that runtime group; root retains ownership and nobody has write bits.
   install -o root -g 986 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_11="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_11}" = 0:986:440 || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
   cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
   oauth_management_compose config --quiet || return 1
@@ -1420,7 +1431,8 @@ RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
 
 : "${ARCHIVE_DIR:?FAIL: original public archive directory missing}"
 case "$ARCHIVE_DIR" in /private/tmp/hm37-oauth-archive.*) ;; *) echo 'FAIL: archive cleanup boundary' >&2; exit 1;; esac
-test "$(cd "$ARCHIVE_DIR" && pwd -P)" = "$ARCHIVE_DIR" || exit 1
+PLAN_GUARD_VALUE_12="$(cd "$ARCHIVE_DIR" && pwd -P)" || exit 1
+test "${PLAN_GUARD_VALUE_12}" = "$ARCHIVE_DIR" || exit 1
 rm -rf "$ARCHIVE_DIR" || { echo "FAIL: guarded cleanup refused $ARCHIVE_DIR" >&2; exit 1; }
 ```
 
@@ -1436,21 +1448,21 @@ rm -rf "$ARCHIVE_DIR" || { echo "FAIL: guarded cleanup refused $ARCHIVE_DIR" >&2
   "steps": {
     "oauth-release-shared-preflight": {"reads": [], "sha256": "8f9926a2445c3e4027aa4d3c1a3088bb362b1d62b3e65858b2d90b70320ae133"},
     "hm37-oauth-plan-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker inspect"], "sha256": "70d027ebb5ef8f0a72bd520c05fb677000f8cbbb5da1b7efde945ca6321a43c3"},
-    "hm37-mcp-baseline-state": {"reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "command:docker inspect", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "2259f7a6f9c5be7e550e57406322b3c8be56d6bf80f8a33805d7e029d7678b6d"},
-    "hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "386c92f13c8cb795343d0731cf0e670f651e8ecda02a191f12e09425962486e9"},
+    "hm37-mcp-baseline-state": {"reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "command:docker inspect", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "752873a16b4b92f856046463be4aee989b5afc01de72c72f2b317ae73cc19996"},
+    "hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "482089126146233ec124935dddbb9d768b1d799984f1969c9ae55eedecd8cdfe"},
     "hm37-oauth-preflight": {"reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/cookie-keys", "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/commonswarm-oauth/signing-keys.pem", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "command:docker inspect"], "sha256": "6108a06477ef441541ce80d4a27830cfd13598f6c2cb9099164fe2da0e3b5fd1"},
-    "hm37-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "hm37-mcp-enable"}, "creates": ["$PROOF_DIR/baseline-mcp-mode", "$PROOF_DIR/hm37-window.sh", "$PROOF_DIR/release.tar", "$SECRET_STAGE", "$SECRET_STAGE/compose.baseline.off.env", "$SECRET_STAGE/compose.env", "$SECRET_STAGE/edge.env", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/management.baseline", "$SECRET_STAGE/mcp.caddy", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.env", "SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "de31ef3fac17b3bf09bef13b0ccf023feb937c7ed839f7084a4fe7f9a10ee32c"},
+    "hm37-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "hm37-mcp-enable"}, "creates": ["$PROOF_DIR/baseline-mcp-mode", "$PROOF_DIR/hm37-window.sh", "$PROOF_DIR/release.tar", "$SECRET_STAGE", "$SECRET_STAGE/compose.baseline.off.env", "$SECRET_STAGE/compose.env", "$SECRET_STAGE/edge.env", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/management.baseline", "$SECRET_STAGE/mcp.caddy", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.env", "SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "8056af6ffb8dace01879f6b1c8215b0037a138423dc9eef43e7e03643d7a003c"},
     "hm37-mcp-transition-off": {"creates": ["$PROOF_DIR/mcp-503-start.epoch", "$PROOF_DIR/mcp-503-start.utc"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "01e4454c92e62f408991396aee4342bb8a93a7698c96665654bb6bdd258a320b"},
-    "hm37-oauth-build": {"consumes": ["$PROOF_DIR/oauth-image.id"], "creates": ["$PROOF_DIR/oauth-base-references.txt", "$PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "96819761d3286f5f355afb527abf9f3b55d1d89569f47c61a4038b356a9f80f1"},
+    "hm37-oauth-build": {"consumes": ["$PROOF_DIR/oauth-image.id"], "creates": ["$PROOF_DIR/oauth-base-references.txt", "$PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "606df39886bdb328f5652980c35485f08fd76e225088fe71b4563018d6ef4210"},
     "hm37-oauth-inputs": {"consumes": ["$PROOF_DIR/oauth-image.id"], "creates": ["$SECRET_STAGE/compose.off.env", "$SECRET_STAGE/service.off.env"], "reads": ["/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/oauth/release-proofs/"], "sha256": "bd6c1a75477f20170dbeba6191a8d63a8897bc6ef1242c9868ed18d73cf70f70"},
-    "hm37-oauth-release-off": {"consumes": ["$PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "a6b9e18ce3481d3c667cb6dc0d293d75a8c1e103421dc6222ec54ea3c7150e08"},
+    "hm37-oauth-release-off": {"consumes": ["$PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "fd50f2bf0f67deb34e9ac89eff54b7744832c42e727a765e8220e557f220c88d"},
     "hm37-mcp-route-probes": {"creates": ["$PROOF_DIR/mcp-503-end.epoch", "$PROOF_DIR/mcp-503-end.utc", "$PROOF_DIR/mcp-503-receipt.txt", "$PROOF_DIR/oauth-image.id", "$PROOF_DIR/oauth-memory-limit.bytes", "$PROOF_DIR/oauth-stats.json"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "75d3a60a70bb245804e2524cd118dbf6e643cd4f4526fc0ea76f55cbe768f24f"},
     "hm37-oauth-rollback": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "2fb7a9c5332b1813f910321ee81b214cd0d87a8a707b21ac42a6e2213718e188"},
     "hm37-mcp-restore-on": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "891eef231fca606faf6d8a0c7f9e55882c5a426707c77096ffd2870728b12b83"},
-    "hm37-mcp-enable": {"consumes": ["$PROOF_DIR/oauth-image.id", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.off.env"], "creates": ["$SECRET_STAGE/edge.on.env", "$SECRET_STAGE/management-database-credentials", "$SECRET_STAGE/mcp.on.caddy", "$SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials", "management-database-credentials"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "d1ae90abb86f7b75c3c5ab9ac9b7ec49060dc03f60fe6f76326147af664eea45"},
+    "hm37-mcp-enable": {"consumes": ["$PROOF_DIR/oauth-image.id", "$SECRET_STAGE/edge.off.env", "$SECRET_STAGE/mcp.off.caddy", "$SECRET_STAGE/service.off.env"], "creates": ["$SECRET_STAGE/edge.on.env", "$SECRET_STAGE/management-database-credentials", "$SECRET_STAGE/mcp.on.caddy", "$SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials", "management-database-credentials"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "0bef4281d13135716b1675966e0b83f6deb8fe9d90d58f88716fca9d1c0c9773"},
     "hm37-mcp-disable": {"cleanup": ["management-database-credentials"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "7f638c50258483cf37a18f16d848780a1f505dd725ab6bab690fb85950025e1c"},
     "hm37-oauth-close": {"cleanup": ["SECRET_STAGE"], "cleanup_owners": {"$SECRET_STAGE": "hm37-oauth-open"}, "consumes": [], "reads": ["/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:readlink -f"], "sha256": "d543abcac8c13a683b545e4a4c5e8617e6f4517be104929297052da3b3cad474"},
-    "hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "hm37-oauth-archive"}, "reads": [], "sha256": "ae9464ad1b84cb9430c3a2d1ce7f101804874a5a6428e1afc7a948404103187e"}
+    "hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "hm37-oauth-archive"}, "reads": [], "sha256": "51f73a84aac393bf4d8c26bc9939f31420ac24c01f71dec3ee7109dc4c29aa83"}
   },
   "different": [["OAUTH_RELEASE_SHA", "EXPECTED_OAUTH_SHA"]],
   "plan_input": "OAUTH_PLAN_FILE"
