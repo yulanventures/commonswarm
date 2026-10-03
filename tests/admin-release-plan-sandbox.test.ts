@@ -115,7 +115,8 @@ const windowId = 'Dry0R1';
 const producerFile = join(scratch, 'live-ordinary-controls.mjs');
 writeFileSync(producerFile, 'export const dryRunProducer = "live-ordinary-controls";\n');
 const archiveFile = join(scratch, 'release.tar');
-const madeArchive = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archiveFile, producerFile], { encoding: 'utf8' });
+// It also carries the companion SITE-RELEASE.md: ai-w5-reference reads the site plan only from it.
+const madeArchive = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs"); t.add(sys.argv[3],arcname="docs/evidence/2026-10-02-site-release/SITE-RELEASE.md")', archiveFile, producerFile, sitePlanPath], { encoding: 'utf8' });
 assert.equal(madeArchive.status, 0, madeArchive.stderr);
 const archiveBytes = readFileSync(archiveFile);
 const evidenceRoot = join(scratch, 'evidence'); mkdirSync(evidenceRoot, { mode: 0o700 });

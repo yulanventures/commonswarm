@@ -953,7 +953,9 @@ subprocess.check_output = observe
   // Positive runs stop at the first operation after admission, through external
   // shell boundaries. They never create box paths or execute live operations.
   const stop = `printf 'ADMITTED\\n'; exit 0`;
-  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\n`;
+  // The W5 site path's first operation after admission is its verified site-plan extraction;
+  // the stub returns the stop as the extracted block, which the plan then evaluates.
+  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
   writeFileSync(readyFile, 'nonsecret readiness\n'); utimesSync(readyFile, new Date(), new Date());
   const admissions: Array<[string, string, string]> = [
     ['W5 common open', 'ai-open', 'W5'], ['W6 open', 'ai-open', 'W6'], ['later reopen', 'ai-open', 'W7'],
@@ -1070,11 +1072,68 @@ test('admin release plan: ai-extract and ai_run extract only from plan bytes bou
   let r = callGates(); assert.notEqual(r.status, 0);
   assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'digest-mismatch')), r.stderr);
   assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')), 'substituted step never written or sourced');
+  assert.doesNotMatch(r.stderr, /GATE_RECEIPT_FILE/, 'substituted plan text never evaluated');
   rmSync(releasedPlan); symlinkSync(planPath, releasedPlan);
   r = callGates(); assert.notEqual(r.status, 0);
   assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'missing-or-not-regular')), r.stderr);
   assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')));
-  // Positive control: verified bytes are extracted (the real ai-gates then runs and refuses for missing receipts).
+  // Positive control: the verified ai-gates block is evaluated from memory (it then refuses
+  // on its own unset GATE_RECEIPT_FILE); no staged step file is written or reread.
   rmSync(releasedPlan); writeFileSync(releasedPlan, plan);
-  r = callGates(); assert.equal(readFileSync(join(stage, 'step-ai-gates.sh'), 'utf8'), block('ai-gates'));
+  r = callGates(); assert.notEqual(r.status, 0); assert.match(r.stderr, /GATE_RECEIPT_FILE/); assert.doesNotMatch(r.stderr, /FAIL ai_run/);
+  assert.deepEqual(readdirSync(stage), [], 'nothing staged');
+});
+
+test('admin release plan: ai-extract refuses a symlinked step target or a FIFO plan; reads by one non-following fd', () => {
+  const prep = mkdtempSync(join(scratch, 'extract-fd-')), inputs = inputFile(base());
+  const extract = (planFile: string) => run(block('ai-extract'), { PLAN_FILE: planFile, STEP_ID: 'ai-gates', PREP_DIR: prep, INPUTS_FILE: inputs });
+  const good = extract(planPath); assert.equal(good.status, 0, good.stderr);
+  assert.equal(readFileSync(join(prep, 'step.sh'), 'utf8'), block('ai-gates')); rmSync(join(prep, 'step.sh'));
+  // A symlink swapped in at the staged path is never followed or written through.
+  const victim = join(prep, 'victim.txt'); writeFileSync(victim, 'must survive\n'); symlinkSync(victim, join(prep, 'step.sh'));
+  let r = extract(planPath); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes('FAIL ai-extract: step.sh expected writable-regular-file got symlink-or-unwritable; STOP'), r.stderr);
+  assert.equal(readFileSync(victim, 'utf8'), 'must survive\n'); rmSync(join(prep, 'step.sh'));
+  // A FIFO plan is refused without blocking (O_NONBLOCK + fstat S_ISREG).
+  const fifo = join(prep, 'plan.fifo'); assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  r = extract(fifo); assert.notEqual(r.status, 0); assert.equal(r.signal, null);
+  assert.ok(r.stderr.includes(planRefusal('ai-extract', 'PLAN_FILE', 'missing-or-not-regular')), r.stderr);
+  assert.ok(!existsSync(join(prep, 'step.sh')));
+});
+
+test('admin release plan: W5 companion site plan comes only from the verified release archive and is evaluated from memory', () => {
+  const root = mkdtempSync(join(scratch, 'site-ref-')), prep = join(root, 'prep'), repoDir = join(root, 'site-repo');
+  mkdirSync(prep); const sitePath = 'docs/evidence/2026-10-02-site-release/SITE-RELEASE.md';
+  const fence = '```';
+  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
+  const staging = join(root, 'tree'); mkdirSync(dirname(join(staging, sitePath)), { recursive: true }); writeFileSync(join(staging, sitePath), sitePlan);
+  mkdirSync(dirname(join(repoDir, sitePath)), { recursive: true }); writeFileSync(join(repoDir, sitePath), sitePlan);
+  const tar = join(prep, 'release.tar');
+  const made = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname=sys.argv[3])', tar, join(staging, sitePath), sitePath], { encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify({ ...base(), window: 'W5', archive_sha256: digest(readFileSync(tar)) }));
+  const reference = (step: string) => run(block('ai-w5-reference') + '\nprintf "mark=%s\\n" "${W5_SITE_MARK:-unset}"\n',
+    { SITE_STEP: step, SITE_RELEASE_REPO: repoDir, PREP_DIR: prep, INPUTS_FILE: inputs, SITE_RELEASE_SHA: sha });
+  // Positive: the archive block is evaluated in this shell (its variable persists).
+  let r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
+  r = reference('site2-02'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /site2-02 ran/);
+  assert.deepEqual(readdirSync(prep).sort(), ['release.tar'], 'no staged site-plan.md or site-step.sh');
+  const refused = (out: ReturnType<typeof run>, text: string) => {
+    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(text), out.stderr);
+    assert.doesNotMatch(out.stdout, /mark=|site2-02 ran|substituted/);
+  };
+  // Substituted companion bytes in the archive: digest mismatch stops before any block runs.
+  const saved = readFileSync(tar);
+  writeFileSync(tar, saved.toString('latin1').replace('W5_SITE_MARK=from-archive', 'printf substituted;:     '), 'latin1');
+  refused(reference('site2-plan-inputs'), 'FAIL ai-w5-reference: PREP_DIR/release.tar bytes expected input-archive_sha256 got mismatch; STOP');
+  writeFileSync(tar, saved);
+  // A symlinked archive is never followed.
+  const moved = join(root, 'moved.tar'); writeFileSync(moved, saved); rmSync(tar); symlinkSync(moved, tar);
+  refused(reference('site2-plan-inputs'), 'FAIL ai-w5-reference: PREP_DIR/release.tar expected absolute-regular-file got missing-or-not-regular; STOP');
+  rmSync(tar); writeFileSync(tar, saved);
+  // After source checkout the repository copy must equal the archive bytes; a substituted or symlinked copy stops.
+  writeFileSync(join(repoDir, sitePath), sitePlan.replace("site2-02 ran", 'substituted'));
+  refused(reference('site2-02'), 'FAIL ai-w5-reference: SITE_RELEASE_REPO SITE-RELEASE.md expected archive-bytes got different-or-unreadable; STOP');
+  rmSync(join(repoDir, sitePath)); writeFileSync(join(root, 'real-site.md'), sitePlan); symlinkSync(join(root, 'real-site.md'), join(repoDir, sitePath));
+  refused(reference('site2-02'), 'FAIL ai-w5-reference: SITE_RELEASE_REPO SITE-RELEASE.md expected archive-bytes got different-or-unreadable; STOP');
 });

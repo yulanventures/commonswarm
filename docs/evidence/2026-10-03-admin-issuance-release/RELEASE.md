@@ -204,19 +204,38 @@ printf 'PASS ai-prepare: archive retained at %s; upload %s\n' "$PREP_DIR" "$BOX_
 set -euo pipefail
 : "${PLAN_FILE:?}" "${STEP_ID:?}" "${PREP_DIR:?}" "${INPUTS_FILE:?}"
 python3 - "$PLAN_FILE" "$STEP_ID" "$PREP_DIR/step.sh" "$INPUTS_FILE" <<'PY'
-import hashlib,json,pathlib,re,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(sys.argv[1],sys.argv[4],'ai-extract'),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(sys.argv[1],sys.argv[4],'ai-extract').decode(),re.M|re.S)
 found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
 assert len(found)==1 and re.fullmatch('ai-[a-z0-9-]+',sys.argv[2]), 'FAIL extraction; STOP'
-pathlib.Path(sys.argv[3]).write_text(found[0])
+body=found[0].encode()
+# Syntax-check the verified bytes in memory, write them once, then re-read by fd.
+if subprocess.run(['/bin/bash','-n'],input=body).returncode!=0: raise SystemExit('FAIL ai-extract: step syntax expected valid got invalid; STOP')
+try: fd=os.open(sys.argv[3],os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+except OSError: raise SystemExit('FAIL ai-extract: step.sh expected writable-regular-file got symlink-or-unwritable; STOP') from None
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('FAIL ai-extract: step.sh expected regular-file got other; STOP')
+    os.fchmod(fd,0o600); os.write(fd,body)
+finally: os.close(fd)
+written=read_regular(sys.argv[3])
+if written is None or hashlib.sha256(written).digest()!=hashlib.sha256(body).digest(): raise SystemExit('FAIL ai-extract: step.sh expected verified-bytes got changed; STOP')
 PY
-/bin/bash -n "$PREP_DIR/step.sh"
 ```
 
 ```sh
@@ -384,14 +403,24 @@ PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-${WINDO
 RELEASE_ROOT=/home/commonswarm/admin-issuance/releases/$RELEASE_SHA
 case "$WINDOW" in W5|W6|W7)
 python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-open <<'PY'
-import hashlib,json,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -567,21 +596,33 @@ test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
  case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile) ;; *) return 1;; esac
- python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" "$INPUTS_FILE" <<'PY'
-import hashlib,json,pathlib,re,sys
+ local AI_RUN_SOURCE
+ # The verified block reaches the shell only through this substitution: no staged path.
+ AI_RUN_SOURCE=$(python3 -c '
+import hashlib,json,os,re,stat,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b"".join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': released RELEASE.md expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(sys.argv[1],sys.argv[4],'ai_run'),re.M|re.S)
-found=[b for b in blocks if b.startswith('# step: '+sys.argv[2]+'\n')]
-assert len(found)==1
-pathlib.Path(sys.argv[3]).write_text(found[0])
-PY
- /bin/bash -n "$SECRET_STAGE/step-$STEP_NAME.sh"
- . "$SECRET_STAGE/step-$STEP_NAME.sh"
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get("plan_sha256"):
+        raise SystemExit("FAIL "+step+": released RELEASE.md expected absolute-regular-file-with-input-plan_sha256 got "+("missing-or-not-regular" if raw is None else "digest-mismatch")+"; STOP")
+    return raw
+blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],"ai_run").decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
+if len(found)!=1: raise SystemExit("FAIL ai_run: block "+sys.argv[2]+" expected one got "+str(len(found))+"; STOP")
+sys.stdout.write(found[0])
+' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 1
+ printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 1
+ eval "$AI_RUN_SOURCE"
 }
 ai_deadline() {
  test ! -e "$PROOF_DIR/closed.txt"
@@ -901,15 +942,25 @@ PY
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2-preflight <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -1303,15 +1354,25 @@ ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w3-preflight <<'PY' || { printf 'FAIL ai-w3-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -1487,15 +1548,25 @@ ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w4-preflight <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -1925,22 +1996,39 @@ test ! -e "$RECYCLE_DROPIN" || { printf 'FAIL ai-recycle-install: recycle drop-i
 test ! -L "$RECYCLE_DROPIN" || { printf 'FAIL ai-recycle-install: recycle drop-in expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p /etc/commonswarm-admin-release /usr/local/libexec "$(dirname "$RECYCLE_DROPIN")"
 chmod 0700 /etc/commonswarm-admin-release
-python3 - "$PLAN_FILE" "$SECRET_STAGE/recycle.sh" "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
-import hashlib,json,pathlib,re,sys
+python3 - "$PLAN_FILE" /usr/local/libexec/commonswarm-admin-edge-recycle "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-plan=verified_plan(sys.argv[1],sys.argv[3],'ai-recycle-install'); blocks=re.findall(r'^```sh\n(.*?)^```$',plan,re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+plan=verified_plan(sys.argv[1],sys.argv[3],'ai-recycle-install').decode(); blocks=re.findall(r'^```sh\n(.*?)^```$',plan,re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-recycle-hook\n')]; assert len(found)==1
-pathlib.Path(sys.argv[2]).write_text('#!/bin/bash\n'+found[0])
+hook=('#!/bin/bash\n'+found[0]).encode(); target=sys.argv[2]
+if subprocess.run(['/bin/bash','-n'],input=hook).returncode!=0: raise SystemExit('FAIL ai-recycle-install: hook syntax expected valid got invalid; STOP')
+try: fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o700)
+except OSError: raise SystemExit('FAIL ai-recycle-install: installed hook expected writable-regular-file got symlink-or-unwritable; STOP') from None
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit('FAIL ai-recycle-install: installed hook expected regular-file got other; STOP')
+    os.fchown(fd,0,0); os.fchmod(fd,0o700); os.write(fd,hook)
+finally: os.close(fd)
+installed=read_regular(target)
+if installed is None or installed!=hook: raise SystemExit('FAIL ai-recycle-install: installed hook expected verified-bytes got changed; STOP')
 d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
 p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json'); p.write_text(json.dumps(r)+'\n'); p.chmod(0o600)
 PY
-/bin/bash -n "$SECRET_STAGE/recycle.sh"
-install -o root -g root -m 0700 "$SECRET_STAGE/recycle.sh" /usr/local/libexec/commonswarm-admin-edge-recycle
 printf '[Service]\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
 chmod 0644 "$RECYCLE_DROPIN"
 systemctl daemon-reload
@@ -2012,15 +2100,25 @@ test ! -e "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging 
 test ! -L "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_BEFORE"
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" before yes ai-w5-preflight <<'PY' || { printf 'FAIL ai-w5-preflight: W5 opening live controls expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -2037,14 +2135,24 @@ set -euo pipefail
 if test "$SITE_STEP" = site2-01; then
  export EDGE_RECEIPT_REMOTE=1
 python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w5-reference <<'PY'
-import hashlib,json,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -2055,18 +2163,45 @@ case "$SITE_STEP" in
  *) echo 'FAIL W5 unknown site step; STOP' >&2; exit 1;;
 esac
 SITE_PLAN=$SITE_RELEASE_REPO/docs/evidence/2026-10-02-site-release/SITE-RELEASE.md
-git show "${SITE_RELEASE_SHA}:docs/evidence/2026-10-02-site-release/SITE-RELEASE.md" >"$PREP_DIR/site-plan.md"
-case "$SITE_STEP" in site2-plan-inputs|site2-00-source-checkout) ;; *) cmp -s "$SITE_PLAN" "$PREP_DIR/site-plan.md";; esac
-python3 - "$PREP_DIR/site-plan.md" "$SITE_STEP" "$PREP_DIR/site-step.sh" <<'PY'
-import pathlib,re,sys
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
-found=[b for b in blocks if re.match(r'^# step: '+re.escape(sys.argv[2])+r'(?: —[^\n]*)?\n',b)]
-assert len(found)==1, 'FAIL W5 missing/duplicate marked block; STOP'
-pathlib.Path(sys.argv[3]).write_text(found[0])
-PY
-/bin/bash -n "$PREP_DIR/site-step.sh"
-# Source in a subshell? NO: this plan's site blocks retain state in one Mac shell.
-. "$PREP_DIR/site-step.sh"
+# SITE-RELEASE.md comes from the verified release archive (SITE_RELEASE_SHA equals
+# RELEASE_SHA, checked in ai-w5-preflight), read once by fd and re-hashed; after the
+# source checkout the repository copy must equal those bytes. The selected block
+# reaches the shell only through this substitution: no staged path is reread.
+W5_SITE_SOURCE=$(python3 -c '
+import hashlib,io,json,os,re,stat,sys,tarfile
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b"".join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def fail(what,expected,got): raise SystemExit("FAIL ai-w5-reference: "+what+" expected "+expected+" got "+got+"; STOP")
+archive_path,inputs,step,repo_plan=sys.argv[1:5]
+d=json.load(open(inputs))
+archive=read_regular(archive_path) if os.path.isabs(archive_path) else None
+if archive is None: fail("PREP_DIR/release.tar","absolute-regular-file","missing-or-not-regular")
+if hashlib.sha256(archive).hexdigest()!=d.get("archive_sha256"): fail("PREP_DIR/release.tar bytes","input-archive_sha256","mismatch")
+try:
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        m=tar.getmember("docs/evidence/2026-10-02-site-release/SITE-RELEASE.md")
+        site=tar.extractfile(m).read() if m.isfile() else None
+except (KeyError,OSError,tarfile.TarError): site=None
+if site is None: fail("SITE-RELEASE.md in release archive","regular-file","missing")
+if step not in ("site2-plan-inputs","site2-00-source-checkout"):
+    if read_regular(repo_plan)!=site: fail("SITE_RELEASE_REPO SITE-RELEASE.md","archive-bytes","different-or-unreadable")
+blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",site.decode(),re.M|re.S)
+found=[b for b in blocks if re.match(r"^# step: "+re.escape(step)+r"(?: —[^\n]*)?\n",b)]
+if len(found)!=1: fail("site block "+step,"one","missing-or-duplicate")
+sys.stdout.write(found[0])
+' "$PREP_DIR/release.tar" "$INPUTS_FILE" "$SITE_STEP" "$SITE_PLAN")
+printf '%s\n' "$W5_SITE_SOURCE" | /bin/bash -n
+# Evaluate in this shell, NOT a subshell: this plan's site blocks retain state in one Mac shell.
+eval "$W5_SITE_SOURCE"
 ```
 
 Run the referenced plan's exact normal order from its Run order table, including
@@ -2108,15 +2243,25 @@ W5_BEFORE=$PREP_DIR/w5-live-before
 test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected ordinary-before.json got missing; STOP\n' >&2; exit 1; }
 test -f "$W5_BEFORE/consent-pre-W1.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$W5_BEFORE/ordinary-before.json" "$W5_BEFORE/consent-pre-W1.json" before no ai-w5-closed <<'PY' || { printf 'FAIL ai-w5-closed: retained W5 opening receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -2127,15 +2272,25 @@ test ! -e "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expec
 test ! -L "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_LIVE"
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_LIVE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" after yes ai-w5-closed <<'PY' || { printf 'FAIL ai-w5-closed: W5 forward-close live controls expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
@@ -2259,14 +2414,24 @@ set -euo pipefail
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
 python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w6-activation-checks <<'PY'
-import hashlib,json,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -2326,14 +2491,24 @@ PY
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
 python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w6-activation-apply <<'PY'
-import hashlib,json,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -3036,15 +3211,25 @@ case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; e
 case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
 test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no ai-close <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import hashlib,json,os,pathlib,re,subprocess,sys
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
 def verified_plan(name,inputs,step):
-    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
-    raw=p.read_bytes() if ok else b''
-    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
-        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
-    return raw.decode()
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
 if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
