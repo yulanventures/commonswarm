@@ -109,7 +109,7 @@ The transport combines preflight/open and supplies positional inputs to each
 fresh root invocation. There is no release execution in this documentation task.
 
 Failures before transition: stop forward work, run `edge-mcp-rollback` if open
-completed, then close only after baseline ON probes. Failures from transition
+completed, then close only after baseline ON probes. Deploy or required verification failures from transition
 onward: immediately run `edge-mcp-rollback`, then `edge-mcp-probes`,
 `edge-mcp-close`, `edge-mcp-mac-close`. Rollback failure means ongoing outage:
 retain the start receipt and secret stage, restore the recycle timer with
@@ -121,6 +121,53 @@ abort cleanup in a fresh shell with that path as input 8. No forward retry
 after a failure without a new HezLead instruction. A closed
 window is never reopened; archive creates a fresh window for a later attempt.
 Existing release directories are compared, never extracted over or repaired.
+
+
+## Shared preflight and closure decision
+
+Run `edge-release-shared-preflight` **first**, before every existing run-order entry.
+Start in the reviewed repository with `PLAN_FILE` set to this absolute plan
+and `RELEASE_INPUTS_JSON` set to a regular nonsecret INPUTS JSON file. The
+shared checker validates the full input set together and exports the validated
+values to the retained Bash shell. Generated archive hashes, window IDs and
+secret-stage paths remain outputs; never guess them as inputs. Existing box
+preflight/open blocks still remeasure declared reads and enforce freshness.
+The inventory below is part of the reviewed plan: changing a marked block
+requires reviewing its producer/consumer/cleanup/read inventory and digest.
+A consumer may use only an input or an earlier producer on its selected route.
+Optional absence/existence checks are observations, not file consumption.
+Referenced OAuth steps in DCR are resolved from RELEASE_SHA in the Git object
+database, and participate in the same run order, not an earlier release.
+
+| Failure phase | Result and live state | Action |
+| --- | --- | --- |
+| Inputs/preflight, before mutation | STOP; baseline unchanged | Close only task staging already created. |
+| Deploy or required verification fails | DEPLOY_FAILED; candidate unverified | Run the existing marked rollback/recovery and verify baseline. |
+| Required deploy verification passes | DEPLOY_VERIFIED; selected source/image and mode verified | Proceed to evidence/closure. |
+| Receipt write, copy-back, manifest, timer restoration or cleanup fails after verification | CLOSE_FAILED; report last verified source/image/mode, timer/lock and exact leftover paths/PIDs | Keep verified bytes live; no rollback. HezLead reconciles closure. |
+| Outage budget exceeded after verified recovery/deploy | Run remains FAIL; verified live state retained | Record the measured interval; closure may proceed. No rollback solely for receipt/budget failure. |
+
+CLOSE_FAILED is a terminal closure result, never a deploy-failure trigger.
+The closure EXIT handler catches explicit exits and guarded cleanup refusals.
+If a later read discovers actual source/health drift, it is a new verification
+failure and follows the existing recovery path. Report uncertainty explicitly;
+last verified state is not a new box measurement. Never reopen a closed window.
+Only nonsecret evidence may be copied back; backups and freshness gates remain.
+
+```sh
+# step: edge-release-shared-preflight
+# readonly: yes
+# host: Mac /bin/bash 3.2; FIRST, before archive, box contact or window
+set -euo pipefail
+: "${RELEASE_INPUTS_JSON:?absolute nonsecret INPUTS JSON required}"
+RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
+export RELEASE_PREFLIGHT_TOOL
+python3 "$RELEASE_PREFLIGHT_TOOL" "${PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
+# Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
+```
 
 ```sh
 # step: edge-mcp-plan-inputs
@@ -827,7 +874,10 @@ systemctl reload caddy
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 edge_check
 edge_probes public >"$PROOF_DIR/on-probes.txt"
-receipt
+# Runtime and ON probes passed; receipt/timer failures are closure failures.
+trap 'printf "CLOSE_FAILED edge-mcp-restore-on: LIVE_STATE=ON SOURCE=%s; receipt/timer closure failed; retain evidence; no rollback\n" "$RELEASE_SHA" >&2' ERR
+receipt || { printf 'CLOSE_FAILED edge-mcp-restore-on: LIVE_STATE=ON SOURCE=%s; receipt write failed; retain evidence; no rollback\n' "$RELEASE_SHA" >&2; exit 1; }
+
 ```
 
 Rollback recreates only the captured baseline release with its override and
@@ -887,7 +937,10 @@ if test -f "$PROOF_DIR/timer-restore-required.txt"; then
 fi
 systemctl is-active --quiet commonswarm-edge-recycle.timer
 touch "$PROOF_DIR/rollback.txt"
-receipt
+# Runtime and ON probes passed; receipt/timer failures are closure failures.
+trap 'printf "CLOSE_FAILED edge-mcp-rollback: LIVE_STATE=ON SOURCE=%s; receipt/timer closure failed; retain evidence; no rollback\n" "$EXPECTED_EDGE_SHA" >&2' ERR
+receipt || { printf 'CLOSE_FAILED edge-mcp-rollback: LIVE_STATE=ON SOURCE=%s; receipt write failed; retain evidence; no rollback\n' "$EXPECTED_EDGE_SHA" >&2; exit 1; }
+
 ```
 
 ```sh
@@ -904,7 +957,7 @@ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 external_check
 edge_check
 edge_probes >"$PROOF_DIR/final-probes.txt"
-test -s "$PROOF_DIR/mcp-503-receipt.txt"
+test -s "$PROOF_DIR/mcp-503-receipt.txt" || { printf 'CLOSE_FAILED edge-mcp-probes: LIVE_STATE=ON SOURCE=%s; missing outage receipt; retain evidence; no rollback\n' "${EDGE_DIR##*/}" >&2; exit 1; }
 touch "$PROOF_DIR/verified-on.txt"
 printf 'PASS edge-mcp-probes: selected release ON; retain status-only evidence\n'
 ```
@@ -933,9 +986,29 @@ fi
 # step: edge-mcp-close
 # host: box root /bin/bash
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      edge-mcp-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_FAILURE_PHASE=DEPLOY_FAILED
+
 trap 'echo "FAIL edge-mcp-close: line $LINENO; retain remaining stage and report exact error; STOP" >&2' ERR
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 if test -f "$PROOF_DIR/closed.txt"; then
+  RELEASE_FAILURE_PHASE=CLOSE_FAILED
   echo 'edge-mcp-close: already closed'
   if grep -qFx 'budget_met=no' "$PROOF_DIR/mcp-503-receipt.txt"; then exit 1; fi
   exit 0
@@ -946,9 +1019,12 @@ edge_check
 edge_probes >"$PROOF_DIR/close-probes.txt"
 external_check
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
+RELEASE_FAILURE_PHASE=CLOSE_FAILED
+RELEASE_LIVE_STATE="ON source=${EDGE_DIR##*/}; timer=pending-closure-reconciliation; verified-at-close"
 test -s "$PROOF_DIR/mcp-503-receipt.txt"
 if test -f "$PROOF_DIR/timer-restore-required.txt"; then systemctl start commonswarm-edge-recycle.timer; fi
 systemctl is-active --quiet commonswarm-edge-recycle.timer
+RELEASE_LIVE_STATE="ON source=${EDGE_DIR##*/}; timer=active; verified-at-close"
 test "$(command -v rm)" = /usr/bin/rm && test -x /usr/bin/rm && test ! -L /usr/bin/rm
 if test -d "$SECRET_STAGE"; then
   cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
@@ -1004,6 +1080,25 @@ PY
 # step: edge-mcp-mac-close
 # host: Mac /bin/bash 3.2
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      edge-mcp-mac-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
+
 trap 'echo "FAIL edge-mcp-mac-close: report guard error and exact path; STOP" >&2' ERR
 : "${ARCHIVE_DIR:?original archive directory required}"
 python3 - "$ARCHIVE_DIR" <<'PY'
@@ -1025,3 +1120,35 @@ and close timestamp. Copyback is outside this plan; HezLead can read these
 receipts with a separately named read-only task. A 401 and metadata/discovery
 200 prove the public anonymous boundary and advertised issuer/resource;
 they do not prove an authenticated MCP tool call or the separate HM done-test.
+
+```release-contract
+{
+  "version": 1,
+  "release_input": "RELEASE_SHA",
+  "inputs": {"EXPECTED_EDGE_SHA": {"format": "sha40"}, "EXPECTED_OAUTH_IMAGE_DIGEST": {"format": "digest"}, "EXPECTED_OAUTH_SHA": {"format": "sha40"}, "EXPECTED_SITE_SHA": {"format": "sha40"}, "EXPECTED_STACK_SHA": {"format": "sha40"}, "MAX_MCP_OUTAGE_SECONDS": {"format": "decimal-positive", "maximum": 600}, "PLAN_FILE": {"format": "abs-file"}, "RELEASE_SHA": {"format": "sha40"}, "WINDOW_END_UTC": {"format": "utc-window"}},
+  "repo_paths": ["deploy/edge-runtime", "deploy/edge-runtime/compose.override.yaml", "deploy/edge-runtime/compose.yaml", "deploy/site/deploy.sh", "deploy/supabase-stack/commonswarm-mcp.caddy", "docs/evidence/2026-10-02-edge-mcp-release/RELEASE.md", "scripts/release-preflight.py", "supabase/functions"],
+  "runtime_paths": [],
+  "input_files": ["$PLAN_FILE"],
+  "routes": {"normal": ["edge-release-shared-preflight", "edge-mcp-plan-inputs", "edge-mcp-archive", "edge-mcp-preflight", "edge-mcp-open", "edge-mcp-stage", "edge-mcp-transition-503", "edge-mcp-apply", "edge-mcp-restore-on", "edge-mcp-probes", "edge-mcp-close", "edge-mcp-mac-close"], "recovery": ["edge-release-shared-preflight", "edge-mcp-plan-inputs", "edge-mcp-archive", "edge-mcp-preflight", "edge-mcp-open", "edge-mcp-stage", "edge-mcp-transition-503", "edge-mcp-apply", "edge-mcp-restore-on", "edge-mcp-probes", "edge-mcp-rollback", "edge-mcp-probes", "edge-mcp-close", "edge-mcp-mac-close"]},
+  "steps": {
+    "edge-release-shared-preflight": {"reads": [], "sha256": "e1b3e816d530adcd9da81e30339f5b0fafeba00fa6e8b667a1baab99cdaf91fc"},
+    "edge-mcp-plan-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases", "command:docker inspect"], "sha256": "d941ebeefbe4fb14f1bc8b722f3b9b765cefff3a4488ce1adad448622c5a1783"},
+    "edge-mcp-archive": {"creates": ["$ARCHIVE_DIR", "$ARCHIVE_DIR/release.tar", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "dc412f3676b5d1f78d0b2008abcd58b392621c45773470e533c17c680fe56ece"},
+    "edge-mcp-transport": {"creates": ["$ARCHIVE_DIR/box-step.sh", "$ARCHIVE_DIR/site-prefix.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases", "command:readlink -f"], "sha256": "35599d0a142c811d2ff7e92d343800e90dfee3ad0c72e946fbf15755b5f9e849"},
+    "edge-mcp-preflight": {"reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/stack/current", "/srv/commonswarm/site/current", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:readlink -f", "command:systemctl is-active", "endpoint:http://127.0.0.1:3490/health", "endpoint:http://127.0.0.1:9000/functions/v1/mcp", "endpoint:http://127.0.0.1:9000/functions/v1/mcp/.well-known/oauth-protected-resource/mcp", "endpoint:http://127.0.0.1:9000/health", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/.well-known/oauth-authorization-server", "endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/.well-known/openid-configuration", "endpoint:https://mcp.commonswarm.com/health", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "175f277a63cdf6ee45adeb204d1303da4bd572bad532eaef5976c128ea38bee0"},
+    "edge-mcp-open": {"creates": ["$PROOF_DIR/compose.override.yaml", "$PROOF_DIR/edge-baseline.json", "$PROOF_DIR/external.json", "$PROOF_DIR/mcp.off.caddy", "$PROOF_DIR/mcp.on.caddy", "$PROOF_DIR/open.txt", "$PROOF_DIR/state.sh", "$SECRET_STAGE", "$SECRET_STAGE/edge.env", "SECRET_STAGE"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/.env"], "sha256": "2bc8eec2179fac2b5027601a743fe40ba7b123fa43aec39e37867facc8a96754"},
+    "edge-mcp-stage": {"consumes": ["$PROOF_DIR/compose.override.yaml"], "creates": ["$PROOF_DIR/source", "$PROOF_DIR/staged.txt"], "reads": ["/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "command:readlink -f"], "sha256": "9066fda7dd2282f470fb528d2ab02a3870c3194dcaaf37de6a5412a115ef11f2"},
+    "edge-mcp-transition-503": {"consumes": ["$PROOF_DIR/mcp.off.caddy", "$PROOF_DIR/mcp.on.caddy", "$PROOF_DIR/staged.txt"], "creates": ["$PROOF_DIR/503-probes.txt", "$PROOF_DIR/dark-verified.txt", "$PROOF_DIR/mcp-503-start.epoch", "$PROOF_DIR/mcp-503-start.utc", "$PROOF_DIR/timer-restore-required.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/edge/release-proofs/", "command:systemctl is-active", "endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp;", "endpoint:https://mcp.commonswarm.com/mcp", "endpoint:https://mcp.commonswarm.com/mcp;"], "sha256": "039c727f74e3f0a11b9b60399a511cd5c0b78679d877791cf65f32cf19adbcdb"},
+    "edge-mcp-apply": {"consumes": ["$PROOF_DIR/compose.override.yaml", "$PROOF_DIR/dark-verified.txt", "$PROOF_DIR/mcp.off.caddy"], "creates": ["$PROOF_DIR/applied.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "command:docker inspect"], "sha256": "2de00cc9ad31bab645abc6e77d22e994b39d9d29a3bb50f7dd0641f2d83b08f7"},
+    "edge-mcp-restore-on": {"consumes": ["$PROOF_DIR/applied.txt", "$PROOF_DIR/mcp.off.caddy", "$PROOF_DIR/mcp.on.caddy"], "creates": ["$PROOF_DIR/mcp-503-receipt.txt", "$PROOF_DIR/on-probes.txt", "$PROOF_DIR/pre-on-probes.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "command:readlink -f"], "sha256": "acc83da9ea7b3e6d3869429289ace63694e3737512c0eaa9acf2cee808dc55a5"},
+    "edge-mcp-rollback": {"creates": ["$PROOF_DIR/rollback-pre-on-probes.txt", "$PROOF_DIR/rollback-probes.txt", "$PROOF_DIR/rollback.txt", "$PROOF_DIR/timer-restored.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "/home/commonswarm/edge/releases/", "command:docker inspect", "command:readlink -f", "command:systemctl is-active"], "sha256": "92637d94d7508effc744b7a30c31a816312a2e039c92a06a88f9d1f5e78b6b64"},
+    "edge-mcp-probes": {"consumes": ["$PROOF_DIR/mcp-503-receipt.txt", "$PROOF_DIR/mcp.on.caddy", "$SECRET_STAGE/edge.env"], "creates": ["$PROOF_DIR/final-probes.txt", "$PROOF_DIR/verified-on.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "command:readlink -f"], "sha256": "b410aa0333f8ef075cf3e355080c59e0bd0b684ed8d763c756b40eb290427c64"},
+    "edge-mcp-timer-recover": {"reads": ["/home/commonswarm/edge/release-proofs/", "command:systemctl is-active"], "sha256": "16d4f3f85955208003af291cbc7f09aef57af49649ffae94aeaeb87dfab9239c"},
+    "edge-mcp-close": {"cleanup": ["BOX_ARCHIVE_PATH", "SECRET_STAGE"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "edge-mcp-archive", "$SECRET_STAGE": "edge-mcp-open"}, "consumes": ["$PROOF_DIR/mcp-503-receipt.txt", "$PROOF_DIR/mcp.on.caddy", "$PROOF_DIR/state.sh", "$SECRET_STAGE/edge.env"], "creates": ["$PROOF_DIR/close-probes.txt", "$PROOF_DIR/closed.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/release-proofs/", "command:readlink -f", "command:systemctl is-active"], "sha256": "4e2d06f51e3f9799c104f7350f294056d4d1a58bf5ce1ab57dab1c12c55a1b50"},
+    "edge-mcp-open-abort": {"cleanup_owners": {"$SECRET_STAGE": "edge-mcp-open"}, "reads": [], "sha256": "81b539fd41cc4a9f33103652a1ba28351ce261e20478e8a2d4edbb03a505a62c"},
+    "edge-mcp-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "edge-mcp-archive"}, "reads": [], "sha256": "6a060fdf7f170b2e52b624b20ce8a40c1be2ba47f117e67c64807aa00ffdb037"}
+  },
+  "different": [["RELEASE_SHA", "EXPECTED_EDGE_SHA"]],
+  "plan_input": "PLAN_FILE"
+}
+```

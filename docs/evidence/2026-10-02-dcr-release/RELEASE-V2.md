@@ -52,7 +52,7 @@ exact path/message and leave the file.
 | EXPECTED_SCHEMA_MIGRATIONS | HezLead; nonempty comma-separated unique 14-digit applied versions | dcr-preflight reads the box migration catalog and compares the exact set |
 | DCR_PLAN_FILE | Absolute exact-release RELEASE-V2.md path, byte-checked against git | Marked extraction |
 | OAUTH_PLAN_FILE | Absolute exact-release 2026-10-02-mcp-auth-release/RELEASE.md | Unchanged reference extraction |
-| GATE_EVIDENCE_FILE | Regular nonsecret receipt: SHA=RELEASE_SHA, DCR release shell/Python: PASS, release-proof-format: PASS, OAuth DCR tests: PASS | Parsed by dcr-archive before execution |
+| GATE_EVIDENCE_FILE | Regular nonsecret JSON receipt: sha=RELEASE_SHA; gates contains PASS for DCR release shell/Python, release-proof-format and OAuth DCR tests | Parsed by dcr-archive before execution |
 | WINDOW_END_UTC | Fresh HezLead future UTC timestamp, <=30 minutes | Preflight and OAuth forward deadline |
 | EXPECTED_OAUTH_SHA | HezLead's latest measured live ON report; required full 40 lowercase hex | Checked running ON source/recovery |
 | EXPECTED_OAUTH_IMAGE_DIGEST | Same measured report; required sha256 + 64 lowercase hex, no tag | Checked running image/recovery |
@@ -134,6 +134,53 @@ input name or 1Password item**. Schema presence is mandatory before new startup.
 
 ## 1. Read-only applied-schema preflight
 
+
+## Shared preflight and closure decision
+
+Run `dcr-release-shared-preflight` **first**, before every existing run-order entry.
+Start in the reviewed repository with `DCR_PLAN_FILE` set to this absolute plan
+and `RELEASE_INPUTS_JSON` set to a regular nonsecret INPUTS JSON file. The
+shared checker validates the full input set together and exports the validated
+values to the retained Bash shell. Generated archive hashes, window IDs and
+secret-stage paths remain outputs; never guess them as inputs. Existing box
+preflight/open blocks still remeasure declared reads and enforce freshness.
+The inventory below is part of the reviewed plan: changing a marked block
+requires reviewing its producer/consumer/cleanup/read inventory and digest.
+A consumer may use only an input or an earlier producer on its selected route.
+Optional absence/existence checks are observations, not file consumption.
+Referenced OAuth steps in DCR are resolved from RELEASE_SHA in the Git object
+database, and participate in the same run order, not an earlier release.
+
+| Failure phase | Result and live state | Action |
+| --- | --- | --- |
+| Inputs/preflight, before mutation | STOP; baseline unchanged | Close only task staging already created. |
+| Deploy or required verification fails | DEPLOY_FAILED; candidate unverified | Run the existing marked rollback/recovery and verify baseline. |
+| Required deploy verification passes | DEPLOY_VERIFIED; selected source/image and mode verified | Proceed to evidence/closure. |
+| Receipt write, copy-back, manifest, timer restoration or cleanup fails after verification | CLOSE_FAILED; report last verified source/image/mode, timer/lock and exact leftover paths/PIDs | Keep verified bytes live; no rollback. HezLead reconciles closure. |
+| Outage budget exceeded after verified recovery/deploy | Run remains FAIL; verified live state retained | Record the measured interval; closure may proceed. No rollback solely for receipt/budget failure. |
+
+CLOSE_FAILED is a terminal closure result, never a deploy-failure trigger.
+The closure EXIT handler catches explicit exits and guarded cleanup refusals.
+If a later read discovers actual source/health drift, it is a new verification
+failure and follows the existing recovery path. Report uncertainty explicitly;
+last verified state is not a new box measurement. Never reopen a closed window.
+Only nonsecret evidence may be copied back; backups and freshness gates remain.
+
+```sh
+# step: dcr-release-shared-preflight
+# readonly: yes
+# host: Mac /bin/bash 3.2; FIRST, before archive, box contact or window
+set -euo pipefail
+: "${RELEASE_INPUTS_JSON:?absolute nonsecret INPUTS JSON required}"
+RELEASE_PREFLIGHT_TOOL="$(pwd -P)/scripts/release-preflight.py"
+export RELEASE_PREFLIGHT_TOOL
+python3 "$RELEASE_PREFLIGHT_TOOL" "${DCR_PLAN_FILE:?absolute reviewed plan required}" "$RELEASE_INPUTS_JSON" "$(pwd -P)"
+# Export exactly the validated nonsecret fields; shlex.quote prevents shell code.
+RELEASE_PREFLIGHT_EXPORTS=$(python3 -c 'import json,re,shlex,sys; p=json.load(open(sys.argv[1])); c=json.loads(re.search(r"^```release-contract\n(.*?)^```$",open(sys.argv[2]).read(),re.M|re.S)[1]); print("\n".join("export "+k+"="+shlex.quote(p[k]) for k in c["inputs"]))' "$RELEASE_INPUTS_JSON" "$DCR_PLAN_FILE")
+eval "$RELEASE_PREFLIGHT_EXPORTS"
+unset RELEASE_PREFLIGHT_EXPORTS
+```
+
 ```sh
 # step: dcr-plan-inputs
 # readonly: yes
@@ -175,9 +222,8 @@ for value,relative in zip(sys.argv[1:3],['docs/evidence/2026-10-02-dcr-release/R
  p=pathlib.Path(value); assert p.is_absolute() and not p.is_symlink() and p.is_file()
  assert p.read_bytes()==subprocess.check_output(['git','show',sys.argv[4]+':'+relative])
 p=pathlib.Path(sys.argv[3]); assert p.is_file() and not p.is_symlink()
-lines=p.read_text().splitlines(); assert 'SHA='+sys.argv[4] in lines
-for gate in ['DCR release shell/Python','release-proof-format','OAuth DCR tests']:
- assert gate+': PASS' in lines, 'FAIL dcr-archive: exact-SHA gate missing'
+import os,runpy
+runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt'](str(p),sys.argv[4],['DCR release shell/Python','release-proof-format','OAuth DCR tests'])
 PYCODE
 DCR_ARCHIVE_DIR=$(mktemp -d /private/tmp/dcr-release-archive.XXXXXX)
 chmod 0700 "$DCR_ARCHIVE_DIR"
@@ -572,8 +618,8 @@ for base in ['http://127.0.0.1:3490','https://mcp.commonswarm.com']:
                 facts=f'method={method} base={base} path={path} UA={ua} status={code} content-type={content_type!r}'
                 assert len(body)<=131072, f'oversized response: {facts}'
                 if path=='/jwks':
-                    assert re.fullmatch(
-                        r'application/(?:jwk-set\+json|json)(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
+                    assert re.fullmatch(r'application/(?:jwk-set\+json|json)'+
+                        r'(?:\s*;\s*charset=(?:[A-Za-z0-9._-]+|"[A-Za-z0-9._-]+"))?',
                         content_type.strip(), re.I), f'invalid JWKS content type: {facts}'
                 else:
                     media_type='text/html' if enabled and path=='/authorize' else 'application/json'
@@ -1749,6 +1795,25 @@ printf 'Verified baseline source/image/ON snapshots and ON probes\n' >"$DCR_PROO
 # readonly: no
 # host: box root /bin/bash; ONLY final success or verified baseline recovery
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      dcr-oauth-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_FAILURE_PHASE=DEPLOY_FAILED
+
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 test "$(hm37_baseline_mode)" = on
 if test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"; then
@@ -1763,6 +1828,8 @@ else
  MCP_EXPECTED_MODE=on mcp_route_probes
  oauth_memory_gate
 fi
+RELEASE_FAILURE_PHASE=CLOSE_FAILED
+RELEASE_LIVE_STATE="ON source=$(readlink -f /home/commonswarm/oauth/current); verified-at-close"
 printf 'ON source/image/probes verified immediately before snapshot close\n' >"$DCR_PROOF/close-on-verified.txt"
 DCR_CLOSE_VERIFIED=yes
 HM37_STEP=hm37-oauth-close
@@ -1778,6 +1845,25 @@ status-only JSON. Never remove a release directory.
 # readonly: no
 # host: box root /bin/bash 5.2
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      dcr-check-cleanup "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
+
 trap 'echo "FAIL dcr-check-cleanup: line $LINENO; report exact path/error; STOP" >&2' ERR
 . "/home/commonswarm/oauth/dcr-preflights/${1:?}-${2:?}/state.sh"
 test "$(id -u)" = 0
@@ -1821,6 +1907,25 @@ test "$CLOSE_READBACK_FAILED" = 0
 # readonly: no
 # host: Mac /bin/bash 3.2
 set -euo pipefail
+release_close_exit() {
+  release_close_status=$?
+  trap - EXIT
+  if test "$release_close_status" -ne 0; then
+    release_close_action=retain-verified-bytes
+    if test "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" = DEPLOY_FAILED; then release_close_action=run-marked-recovery; fi
+    printf '%s step=%s LIVE_STATE=%s SOURCE=%s BASELINE=%s IMAGE=%s LEFTOVERS=%s,%s,%s PID=%s ACTION=%s; retain evidence\n' \
+      "${RELEASE_FAILURE_PHASE:-CLOSE_FAILED}" \
+      dcr-mac-close "${RELEASE_LIVE_STATE:-unknown-use-last-verification-receipt}" \
+      "${SITE_RELEASE_SHA:-${RELEASE_SHA:-${OAUTH_RELEASE_SHA:-unknown}}}" \
+      "${EXPECTED_SITE_SHA:-${EXPECTED_EDGE_SHA:-${EXPECTED_OAUTH_SHA:-unknown}}}" \
+      "${EXPECTED_OAUTH_IMAGE_DIGEST:-see-verified-image-receipt}" \
+      "${SECRET_STAGE:-${SITE_BROWSER_ROOT:-none}}" "${ARCHIVE_DIR:-${DCR_ARCHIVE_DIR:-none}}" "${PROOF_DIR:-${SITE_EVIDENCE:-none}}" "${SITE_CHROME_PID:-none}" "$release_close_action" >&2
+  fi
+  exit "$release_close_status"
+}
+trap release_close_exit EXIT
+RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
+
 trap 'echo "FAIL dcr-mac-close: report exact guarded path/error; STOP" >&2' ERR
 : "${DCR_ARCHIVE_DIR:?}"
 python3 - "$DCR_ARCHIVE_DIR" <<'PYCODE'
@@ -1909,3 +2014,56 @@ copy with /authorize/* added to POST also STOPPED. No Caddy installation or
 reload was executed. release-proof-format passed 8/8; focused OAuth DCR,
 discovery and routed-userinfo tests passed 14/14. These preparation results do
 not replace the required GATE_EVIDENCE_FILE for the final landed RELEASE_SHA.
+
+```release-contract
+{
+  "version": 1,
+  "release_input": "RELEASE_SHA",
+  "inputs": {"DCR_PLAN_FILE": {"format": "abs-file"}, "DCR_REVIEWED_CODE_SHA": {"format": "sha40"}, "EXPECTED_EDGE_SHA": {"format": "sha40"}, "EXPECTED_OAUTH_IMAGE_DIGEST": {"format": "digest"}, "EXPECTED_OAUTH_SHA": {"format": "sha40"}, "EXPECTED_SCHEMA_MIGRATIONS": {"format": "schema-set"}, "GATE_EVIDENCE_FILE": {"format": "abs-file"}, "OAUTH_PLAN_FILE": {"format": "abs-file"}, "RELEASE_SHA": {"format": "sha40"}, "TOM_ENABLE_APPROVAL": {"format": "literal:2026-09-29"}, "WINDOW_END_UTC": {"format": "utc-window"}},
+  "repo_paths": ["deploy/edge-runtime/compose.override.yaml", "deploy/edge-runtime/compose.yaml", "deploy/mcp-auth", "deploy/mcp-auth/compose.management.yaml", "deploy/mcp-auth/compose.yaml", "deploy/release-proofs/oauth-dcr", "deploy/release-proofs/oauth-dcr/20261002000001-catalog.sql", "deploy/release-proofs/oauth-dcr/20261002000001-rollback-catalog.sql", "deploy/supabase-stack/commonswarm-mcp.caddy", "deploy/supabase-stack/migrate/lib.sh", "deploy/supabase-stack/migrate/make-pg-service.mjs", "docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md", "scripts/release-preflight.py", "services/mcp-auth", "services/mcp-auth/Dockerfile", "supabase/functions", "supabase/migrations"],
+  "runtime_paths": ["services/schema", "src/management-command.generated.js"],
+  "input_files": ["$DCR_PLAN_FILE", "$OAUTH_PLAN_FILE", "$GATE_EVIDENCE_FILE"],
+  "routes": {"normal": ["dcr-release-shared-preflight", "dcr-plan-inputs", "dcr-archive", "dcr-stage", "dcr-session", "dcr-preflight", "dcr-oauth-inputs", "dcr-oauth-baseline-state", "oauth:hm37-oauth-archive", "dcr-oauth-preflight", "dcr-oauth-open", "dcr-public-helper", "oauth:hm37-mcp-transition-off", "oauth:hm37-mcp-route-probes", "oauth:hm37-oauth-build", "oauth:hm37-oauth-inputs", "oauth:hm37-oauth-release-off", "oauth:hm37-mcp-route-probes", "dcr-caddy-apply", "dcr-caddy-probes", "dcr-oauth-enable", "oauth:hm37-mcp-route-probes", "dcr-oauth-verify", "dcr-public-probes", "dcr-final-readback", "dcr-oauth-close", "dcr-check-cleanup", "oauth:hm37-oauth-mac-close", "dcr-mac-close"], "recovery": ["dcr-release-shared-preflight", "dcr-plan-inputs", "dcr-archive", "dcr-stage", "dcr-session", "dcr-preflight", "dcr-oauth-inputs", "dcr-oauth-baseline-state", "oauth:hm37-oauth-archive", "dcr-oauth-preflight", "dcr-oauth-open", "dcr-public-helper", "oauth:hm37-mcp-transition-off", "oauth:hm37-mcp-route-probes", "oauth:hm37-oauth-build", "oauth:hm37-oauth-inputs", "oauth:hm37-oauth-release-off", "oauth:hm37-mcp-route-probes", "dcr-caddy-apply", "dcr-caddy-probes", "dcr-oauth-enable", "oauth:hm37-mcp-route-probes", "dcr-oauth-verify", "dcr-public-probes", "dcr-final-readback", "dcr-caddy-rollback", "dcr-recover-baseline", "dcr-baseline-verify", "dcr-oauth-close", "dcr-check-cleanup", "oauth:hm37-oauth-mac-close", "dcr-mac-close"]},
+  "steps": {
+    "dcr-release-shared-preflight": {"reads": [], "sha256": "f1e88d8c9c27b0a6c6a1c98681df79ae9f5b0de01c3952fa47767eacfd7ed634"},
+    "dcr-plan-inputs": {"reads": [], "sha256": "e138b9e56587149131f3f159c00eb3643ff41f4d9fa80c42926a816aa3392c0f"},
+    "dcr-archive": {"creates": ["$DCR_ARCHIVE_DIR", "$DCR_ARCHIVE_DIR/release.tar", "$DCR_BOX_ARCHIVE_PATH", "DCR_ARCHIVE_DIR", "DCR_BOX_ARCHIVE_PATH"], "reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "9a1f9d32cfc3fef5ccae2919b727f80b4891d04e3554cb42e528531d0accfb90"},
+    "dcr-transport": {"creates": ["$DCR_ARCHIVE_DIR/box-step.sh"], "reads": [], "sha256": "a38faa3b29ba4f9605bca48ba8cfa08d68cd34a9e01601373dd99740eff06d9a"},
+    "dcr-stage": {"creates": ["$DCR_PROOF/source", "$DCR_PROOF/state.sh"], "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "6df530923a7f10448c41f16fa09555343817326e55fd54c7b544b4151dfc5f69"},
+    "dcr-session": {"consumes": ["$DCR_PROOF/state.sh"], "creates": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/readback.sql", "$DCR_PROOF/session-ready.txt", "$DCR_SECRET_STAGE/pass", "$DCR_SECRET_STAGE/service.conf", "$DCR_SECRET_STAGE/session.sh", "$SECRET_STAGE", "DCR_SECRET_STAGE"], "reads": ["/etc/commonswarm-release/target.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker image inspect", "command:docker inspect", "command:release_psql_ro"], "sha256": "89491df62e7f7aeabb94314026cff56225c0783a937bb3dabdb28511fa619bed"},
+    "dcr-preflight": {"consumes": ["$DCR_PROOF/identity.sql", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/preflight.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "a87b387382ea4f7fdef28b79277373c3607e1f4d18d9a1370c133bd9d6e33af1"},
+    "dcr-oauth-inputs": {"reads": ["/home/commonswarm/edge/releases", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker inspect"], "sha256": "25d9b8fc7adc6911cafa656594e6a64e604aa17b9bf2283dc935b6831b58ff77"},
+    "dcr-oauth-baseline-state": {"consumes": ["$DCR_PROOF/preflight.txt", "$DCR_PROOF/state.sh"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/dcr-preflights/", "command:docker inspect", "command:release_psql_ro", "endpoint:http://127.0.0.1:3490", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "a8b6b119a1f3c5663905254c08a6de0e8369417579a01de439c83513c201c596"},
+    "dcr-oauth-reference": {"creates": ["$DCR_ARCHIVE_DIR/oauth-reference.sh", "$DCR_PROOF/oauth-reference.sh"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "8de08a2ddb944efca4dfc636119aebb78eb0ce50c1ecc29a2ada916c9f6db61f"},
+    "dcr-oauth-preflight": {"reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/cookie-keys", "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/commonswarm-oauth/signing-keys.pem", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "command:docker inspect"], "sha256": "11ff589d818f28b7ed942bb6194a9b7cd9e70abad8b9e403b2caac4423bd42cd"},
+    "dcr-oauth-open": {"cleanup": ["BOX_ARCHIVE_PATH"], "cleanup_owners": {"$BOX_ARCHIVE_PATH": "oauth:hm37-oauth-archive", "/etc/commonswarm-oauth/management-database-credentials": "dcr-oauth-enable"}, "creates": ["$DCR_PROOF/apex-before.sha256", "$DCR_PROOF/marked-", "$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-before.sha256", "$DCR_PROOF/mcp-candidate.caddy", "$OAUTH_PROOF_DIR/baseline-mcp-mode", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/hm37-window.sh", "$OAUTH_PROOF_DIR/oauth-base-references.txt", "$OAUTH_PROOF_DIR/oauth-memory-limit.bytes", "$OAUTH_PROOF_DIR/oauth-stats.json", "$OAUTH_PROOF_DIR/open-ready.txt", "$OAUTH_PROOF_DIR/release.tar", "$OAUTH_PROOF_DIR/secret-stage.path", "$OAUTH_SECRET_STAGE/compose.baseline.off.env", "$OAUTH_SECRET_STAGE/compose.env", "$OAUTH_SECRET_STAGE/edge.env", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/management.baseline", "$OAUTH_SECRET_STAGE/mcp.caddy", "$OAUTH_SECRET_STAGE/service.env", "$OAUTH_SECRET_STAGE/service.off.env", "OAUTH_SECRET_STAGE"], "reads": ["/etc/caddy", "/etc/caddy/Caddyfile", "/etc/caddy/sites/*.caddy", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/edge/current", "/home/commonswarm/edge/releases/", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases", "/home/commonswarm/oauth/releases/", "command:docker compose", "command:docker image inspect", "command:docker inspect", "command:docker stats", "command:readlink -f"], "sha256": "98342a7112833dfc40ac3f4cb5dec8135650d0a79b4df3396bf3a61799447571"},
+    "dcr-oauth-enable": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-off-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/state.sh", "$OAUTH_PROOF_DIR/dcr-enable-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch", "$OAUTH_PROOF_DIR/oauth-image.id", "$OAUTH_SECRET_STAGE/edge.off.env", "$OAUTH_SECRET_STAGE/service.off.env"], "creates": ["$OAUTH_SECRET_STAGE/edge.on.env", "$OAUTH_SECRET_STAGE/management-database-credentials", "$OAUTH_SECRET_STAGE/service.on.env", "/etc/commonswarm-oauth/management-database-credentials"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/etc/ssl/yulan-internal-ca.pem", "/home/commonswarm/.env", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:release_psql_ro"], "sha256": "3cb32074683e81caa9e664e45a2c5f65143fdc3214829cd746725c5ee794b4c1"},
+    "dcr-oauth-verify": {"consumes": ["$DCR_PROOF/mcp-candidate.caddy"], "creates": ["$DCR_PROOF/oauth-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "d1e5fc06065ff009c2b90b215ae1f0e5ee962cf77cc899268a2855c86f3fe70f"},
+    "dcr-public-helper": {"creates": ["$DCR_PROOF/public-helper.sh"], "reads": ["endpoint:http://127.0.0.1:3490", "endpoint:https://dcr-release-probe.invalid/callback", "endpoint:https://mcp.commonswarm.com", "endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp"], "sha256": "0a84d980fc315d1748bb9791a519af443f9de7b118f6d4d3e72ad7bb119793a6"},
+    "dcr-caddy-apply": {"consumes": ["$DCR_PROOF/mcp-before.caddy", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/public-helper.sh", "$OAUTH_PROOF_DIR/mcp-503-start.epoch"], "creates": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/caddy-forward.sh", "$DCR_PROOF/mcp-after.sha256"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "9ba0e58c5d870dbb2a8698c3f14b17e9bb0675f49d9911ad69392fb530858a3b"},
+    "dcr-caddy-probes": {"consumes": ["$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/caddy-off-verified.txt"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "dfbadd5d36051e82936c9109f177d6e6c29d561bd444095de2a76ffc05dfd80a"},
+    "dcr-caddy-rollback": {"creates": ["$DCR_PROOF/caddy-rollback-reloaded.txt"], "reads": ["/etc/caddy/Caddyfile", "/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "5bb4bb5bb33a4dd846891c7cc94eff509f2f69b3a5649137a9c7cc3d5bc7a04a"},
+    "dcr-public-probes": {"consumes": ["$DCR_PROOF/caddy-applied.txt", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-helper.sh"], "creates": ["$DCR_PROOF/public-dcr.json", "$DCR_PROOF/public-verified.txt"], "reads": [], "sha256": "0cea9e69d01037a7a473f3e86f17469ba8a38163b1ce3edfb317e86fa6424c6f"},
+    "dcr-final-readback": {"consumes": ["$DCR_PROOF/applied-before.txt", "$DCR_PROOF/cron-before.txt", "$DCR_PROOF/identity.sql", "$DCR_PROOF/public-verified.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/cron-final.txt", "$DCR_PROOF/final-readback-verified.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "command:release_psql_ro"], "sha256": "8e38a3f64a8f22a9d85591af9bb3a419e05475705c9583f1b2439eed22254ce2"},
+    "dcr-caddy-failure": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "9e56f3a699901138c6da2abf69d889339837b391066a9bf5f03e02e85adfa8b3"},
+    "dcr-public-failure": {"reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "57becf0a39c04933224d47d71e76f8e0ef611fae992999361038f3f1e34d7d0f"},
+    "dcr-recover-baseline": {"creates": ["$DCR_PROOF/recovery-result.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/release-proofs/"], "sha256": "cc491ec9e70dd21e345fb3baa69c89454746f480bec3910020993af9d8ae9e9c"},
+    "dcr-baseline-verify": {"creates": ["$DCR_PROOF/baseline-on-verified.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/management-database-credentials", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/.env", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "5e80f21cf14121252f15bf6b4d70d63d8c466943b5fc6354497d3a69fcf2c39e"},
+    "dcr-oauth-close": {"cleanup": ["OAUTH_SECRET_STAGE"], "consumes": ["$DCR_PROOF/final-readback-verified.txt", "$DCR_PROOF/mcp-candidate.caddy", "$DCR_PROOF/oauth-verified.txt", "$DCR_PROOF/public-verified.txt", "$OAUTH_PROOF_DIR/oauth-image.id"], "creates": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/oauth-closed.txt"], "reads": ["/etc/caddy/sites/20-commonswarm-mcp.caddy", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect", "command:readlink -f"], "sha256": "adc36057a477f5c5af31bbba68c4bb1a3bf5dda1630542bd77aeef9facabb1ce"},
+    "dcr-check-cleanup": {"cleanup": ["DCR_BOX_ARCHIVE_PATH", "DCR_SECRET_STAGE"], "cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive", "$SECRET_STAGE": "dcr-session"}, "consumes": ["$DCR_PROOF/close-on-verified.txt", "$DCR_PROOF/closed-ledger.txt", "$DCR_PROOF/session-ready.txt"], "creates": ["$DCR_PROOF/closed.txt"], "reads": ["/home/commonswarm/oauth/dcr-preflights/", "/home/commonswarm/oauth/release-proofs/", "command:release_psql_ro"], "sha256": "82e245f8e181f3bddec76058889fa70cca0f96e04fc49990a3ee4407cf339d99"},
+    "dcr-mac-close": {"cleanup": ["DCR_ARCHIVE_DIR"], "cleanup_owners": {"$DCR_ARCHIVE_DIR": "dcr-archive"}, "reads": [], "sha256": "57ca2675cfafa2b87001da15556d669c7da7a1607cc350c68c390e2485793568"},
+    "dcr-stage-abort": {"cleanup_owners": {"$DCR_BOX_ARCHIVE_PATH": "dcr-archive"}, "reads": ["/home/commonswarm/oauth/dcr-preflights/"], "sha256": "a16d411c337c22407180de2b47f69fb3be1d3e06c2b9a2c69ab6750167e815fd"},
+    "dcr-secret-abort": {"cleanup_owners": {"$SECRET_STAGE": "dcr-session"}, "reads": ["/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "/home/commonswarm/oauth/releases/", "command:docker inspect", "command:readlink -f"], "sha256": "5b27a86bb8b23375ab4d9c7809eda684b719df85411517058cd1ff87234e5c8c"},
+    "oauth:hm37-mcp-route-probes": {"creates": ["$OAUTH_PROOF_DIR/mcp-503-receipt.txt"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "75d3a60a70bb245804e2524cd118dbf6e643cd4f4526fc0ea76f55cbe768f24f"},
+    "oauth:hm37-mcp-transition-off": {"creates": ["$OAUTH_PROOF_DIR/mcp-503-start.epoch", "$OAUTH_PROOF_DIR/mcp-503-start.utc"], "reads": ["/home/commonswarm/oauth/release-proofs/"], "sha256": "01e4454c92e62f408991396aee4342bb8a93a7698c96665654bb6bdd258a320b"},
+    "oauth:hm37-oauth-archive": {"creates": ["$ARCHIVE_DIR", "$BOX_ARCHIVE_PATH", "ARCHIVE_DIR", "BOX_ARCHIVE_PATH"], "reads": [], "sha256": "386c92f13c8cb795343d0731cf0e670f651e8ecda02a191f12e09425962486e9"},
+    "oauth:hm37-oauth-build": {"consumes": ["$OAUTH_PROOF_DIR/oauth-base-references.txt"], "creates": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/home/commonswarm/oauth/release-proofs/", "command:docker image inspect"], "sha256": "96819761d3286f5f355afb527abf9f3b55d1d89569f47c61a4038b356a9f80f1"},
+    "oauth:hm37-oauth-inputs": {"consumes": ["$OAUTH_PROOF_DIR/oauth-image.id", "$OAUTH_SECRET_STAGE/service.off.env"], "creates": ["$OAUTH_SECRET_STAGE/compose.off.env"], "reads": ["/etc/commonswarm-oauth/compose.env", "/etc/commonswarm-oauth/service.env", "/home/commonswarm/oauth/release-proofs/"], "sha256": "bd6c1a75477f20170dbeba6191a8d63a8897bc6ef1242c9868ed18d73cf70f70"},
+    "oauth:hm37-oauth-mac-close": {"cleanup": ["ARCHIVE_DIR"], "cleanup_owners": {"$ARCHIVE_DIR": "oauth:hm37-oauth-archive"}, "reads": [], "sha256": "ae9464ad1b84cb9430c3a2d1ce7f101804874a5a6428e1afc7a948404103187e"},
+    "oauth:hm37-oauth-release-off": {"consumes": ["$OAUTH_PROOF_DIR/oauth-image.id"], "reads": ["/etc/commonswarm-oauth/management-database-credentials", "/home/commonswarm/oauth/current", "/home/commonswarm/oauth/release-proofs/", "command:docker inspect"], "sha256": "a6b9e18ce3481d3c667cb6dc0d293d75a8c1e103421dc6222ec54ea3c7150e08"}
+  },
+  "references": {"oauth:hm37-mcp-route-probes": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-mcp-route-probes"}, "oauth:hm37-mcp-transition-off": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-mcp-transition-off"}, "oauth:hm37-oauth-archive": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-archive"}, "oauth:hm37-oauth-build": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-build"}, "oauth:hm37-oauth-inputs": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-inputs"}, "oauth:hm37-oauth-mac-close": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-mac-close"}, "oauth:hm37-oauth-release-off": {"plan": "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md", "step": "hm37-oauth-release-off"}},
+  "gate_receipts": [{"gates": ["DCR release shell/Python", "release-proof-format", "OAuth DCR tests"], "input": "GATE_EVIDENCE_FILE"}],
+  "plan_input": "DCR_PLAN_FILE"
+}
+```
