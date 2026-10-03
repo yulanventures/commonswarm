@@ -28,6 +28,11 @@ const record = value => value && typeof value === 'object' && !Array.isArray(val
 class Failure extends Error { constructor(code) { super(code); this.code = code; } }
 const demand = (condition, code) => { if (!condition) throw new Failure(code); };
 const sleep = ms => new Promise(done => setTimeout(done, ms));
+// Production secret window: a fresh 0700 /private/tmp/anvil-secret.* directory.
+// Only the test preload can move the parent (no env or CLI seam); the name
+// pattern and every privatePath guard stay identical.
+const SECRET_ROOT = globalThis[Symbol.for('commonswarm.admin-smoke.secret-root')] ?? '/private/tmp';
+const SECRET_WINDOW = new RegExp(`^${SECRET_ROOT.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}/anvil-secret\\.[A-Za-z0-9]+$`);
 
 function options(args) {
   const out = { consentMs: 600_000, fenceMs: 240_000, requestMs: 10_000, totalMs: 900_000 };
@@ -62,7 +67,7 @@ async function privatePath(path, secret) {
   demand(parent === actual, 'symlink_parent');
   const stat = await lstat(parent);
   demand(stat.isDirectory() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700, 'unsafe_directory');
-  if (secret) demand(/^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/.test(actual), 'secret_window_required');
+  if (secret) demand(SECRET_WINDOW.test(actual), 'secret_window_required');
 }
 async function absent(path) {
   try { await lstat(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }

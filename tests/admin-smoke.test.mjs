@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import { createServer } from 'node:http';
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { readFile, writeFile, stat, chmod, symlink } from 'node:fs/promises';
+import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, createPublicKey, randomBytes, randomUUID, sign, verify } from 'node:crypto';
 
@@ -23,10 +26,37 @@ const seatId = '55555555-5555-4555-8555-555555555555';
 const allowedCommands = ['admin_read_metadata', 'admin_create_workspace', 'admin_create_seat', 'admin_revoke_seat'];
 const noFetch = 'data:text/javascript,' + encodeURIComponent("globalThis.fetch = () => { throw new Error('NETWORK_FORBIDDEN'); };");
 
+// Portable secret windows: every OS uses a fresh 0700 anvil-secret.XXXXXX
+// directory under a task-owned parent in the OS temporary root. The executable
+// accepts that parent only through the test preload; production keeps
+// /private/tmp (proved below). Tests never resolve under the real home.
+const temporaryRoot = realpathSync(tmpdir()), realHome = realpathSync(homedir());
+const secretRoot = mkdtempSync(join(temporaryRoot, 'admin-smoke-secret-root.'));
+assert.equal(lstatSync(secretRoot).mode & 0o777, 0o700);
+assert.ok(secretRoot !== realHome && !secretRoot.startsWith(realHome + sep), 'test secret root resolves under the real home');
+const SECRET_STAGE = /^anvil-secret\.[A-Za-z0-9]{6}$/;
+function guardStage(dir, parent) {
+  const stat = lstatSync(dir);
+  assert.ok(dirname(dir) === parent && SECRET_STAGE.test(basename(dir)) && realpathSync(dir) === dir, `unexpected stage ${dir}`);
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700, `unsafe stage ${dir}`);
+  assert.ok(dir !== realHome && !dir.startsWith(realHome + sep), 'stage resolves under the real home');
+}
+function makeStage(parent = secretRoot) {
+  const dir = mkdtempSync(join(parent, 'anvil-secret.'));
+  guardStage(dir, parent);
+  return dir;
+}
+// Remove only the exact stage this file created, after re-checking it.
+function removeStage(dir, parent = secretRoot) { guardStage(dir, parent); rmSync(dir, { recursive: true }); }
+after(() => {
+  assert.ok(dirname(secretRoot) === temporaryRoot && /^admin-smoke-secret-root\.[A-Za-z0-9]{6}$/.test(basename(secretRoot)));
+  rmSync(secretRoot, { recursive: true });
+});
+
 async function exercise(config = {}) {
-  // Even synthetic codes/authorize URLs use the mandated secret window. Guarded
-  // rm is the only deletion mechanism; a refusal fails cleanup and leaves it.
-  const dir = execFileSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' }).trim();
+  // Even synthetic codes/authorize URLs use a secret window with the mandated
+  // name, mode and guards; cleanup removes only this exact created path.
+  const dir = makeStage();
   await chmod(dir, 0o700);
   const paths = Object.fromEntries(['authorize', 'callback', 'receipt', 'fence'].map(k => [k, `${dir}/${k}.txt`]));
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -38,6 +68,7 @@ async function exercise(config = {}) {
   const secrets = [randomBytes(24).toString('base64url'), 'fixture-owner@private.example'];
   const code = secrets[0], attempts = [], seenProofs = new Set(), failures = [], commandRetries = new Map();
   let authorize, initialKey, currentToken, refreshToken, generation = 0, workspaceId, fenced = false, callbackMode, actionChallenged = false;
+  let wireRunId = null, fencedRunId = null;
   let out = '', err = '', child;
   const check = (value, reason) => { if (!value) throw new Error(reason); };
   const emit = (res, status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(data === null ? undefined : JSON.stringify(data)); };
@@ -74,6 +105,8 @@ async function exercise(config = {}) {
           const args = row.rpc.params.arguments;
           check(Object.keys(args).sort().join(',') === 'command,command_id' && args.command.kind === row.rpc.params.name && args.command.grant_id === grantId, 'mcp_call_shape');
           const prior = commandRetries.get(args.command_id); if (prior) check(prior === body, 'retry_changed_command'); else commandRetries.set(args.command_id, body);
+          const commandRun = /^c1_([a-f0-9]{16})_/.exec(args.command_id)?.[1];
+          check(commandRun && (!wireRunId || wireRunId === commandRun), 'command_run_id'); wireRunId = commandRun;
         }
       } else check(!proof.ath && !req.headers.authorization, 'token_ath_present');
       const expectedNonce = req.url === '/token' ? 'fixture_as_nonce' : actionChallenged ? 'fixture_action_nonce' : 'fixture_resource_nonce';
@@ -142,7 +175,7 @@ async function exercise(config = {}) {
       '--consent-timeout-ms', '2000', '--fence-timeout-ms', '2000', '--request-timeout-ms', '1000', '--total-timeout-ms', '6000',
       ...(config.fence ? ['--verify-fenced', '--fence-file', paths.fence] : [])];
     let handoff = Promise.resolve(), handledConsent = false, handledFence = false;
-    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}` }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', chunk => {
       out += chunk;
       if (!handledConsent && out.includes('consent_handoff_ready')) {
@@ -164,9 +197,12 @@ async function exercise(config = {}) {
       }
       if (!handledFence && out.includes('agent_steps_complete_awaiting_human_fence')) {
         handledFence = true;
+        // The human writes the run id that this run sent on the wire. Do not
+        // re-read the receipt here: a failing run may be rewriting it now.
+        // After exit the final receipt must name the same run id.
         handoff = handoff.then(async () => {
-          const receipt = JSON.parse(await readFile(paths.receipt, 'utf8'));
-          fenced = true; await writeFile(paths.fence, receipt.run_id, { mode: 0o600 });
+          check(wireRunId, 'fence_run_id_unobserved'); fencedRunId = wireRunId;
+          fenced = true; await writeFile(paths.fence, fencedRunId, { mode: 0o600 });
         }).catch(e => failures.push(e.message));
       }
     });
@@ -178,6 +214,7 @@ async function exercise(config = {}) {
     });
     await handoff;
     const text = await readFile(paths.receipt, 'utf8'), receipt = JSON.parse(text);
+    if (fencedRunId) assert.equal(receipt.run_id, fencedRunId, 'fence carried a different run id than the receipt');
     const modes = { directory: (await stat(dir)).mode & 0o777, authorize: (await stat(paths.authorize)).mode & 0o777, callback: callbackMode,
       receipt: (await stat(paths.receipt)).mode & 0o777, ...(config.fence && handledFence ? { fence: (await stat(paths.fence)).mode & 0o777 } : {}) };
     // Check raw artifacts/output, including arbitrary upstream strings, JWTs,
@@ -192,7 +229,7 @@ async function exercise(config = {}) {
   } finally {
     if (child?.exitCode === null) child.kill();
     server.closeAllConnections(); await new Promise(done => server.close(done));
-    execFileSync('rm', ['-rf', '--', dir], { stdio: 'pipe' });
+    removeStage(dir);
   }
 }
 
@@ -293,3 +330,47 @@ test('printed CIMD metadata matches the independently pinned lane-11 fixture byt
   assert.equal(metadata.dpop_bound_access_tokens, true);
   assert.equal(metadata.dpop_signing_alg, 'ES256', 'AS admin verification reads this algorithm field');
 });
+
+test('secret window: without the test preload the executable refuses an anvil-secret stage outside /private/tmp', () => {
+  const dir = makeStage();
+  try {
+    const paths = ['authorize', 'callback', 'receipt'].map(k => join(dir, `${k}.txt`));
+    const r = spawnSync(process.execPath, ['--import', noFetch, script, '--authorize-url-file', paths[0], '--callback-file', paths[1], '--receipt-file', paths[2]],
+      { encoding: 'utf8', timeout: 5000 });
+    assert.equal(r.status, 1); assert.equal(r.stdout, '');
+    assert.equal(r.stderr, 'admin_smoke_fail step=files code=secret_window_required\n');
+  } finally { removeStage(dir); }
+});
+
+test('secret window: the preload refuses a fixture parent that is not a private task directory', () => {
+  const loose = mkdtempSync(join(temporaryRoot, 'admin-smoke-loose-root.'));
+  try {
+    for (const [root, mode] of [[loose, 0o755], [temporaryRoot, null], [realHome, null]]) {
+      if (mode !== null) execFileSync('chmod', [mode.toString(8), root]);
+      const r = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
+        env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: root } });
+      assert.notEqual(r.status, 0, `preload accepted ${root}`); assert.match(r.stderr, /invalid_fixture_secret_root/);
+    }
+    const control = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: secretRoot } });
+    assert.equal(control.status, 0, control.stderr);
+  } finally {
+    assert.ok(dirname(loose) === temporaryRoot && /^admin-smoke-loose-root\.[A-Za-z0-9]{6}$/.test(basename(loose)));
+    rmSync(loose, { recursive: true });
+  }
+});
+
+// The production default is macOS-specific: /private/tmp exists only there.
+test('secret window: the production default accepts a fresh /private/tmp/anvil-secret.* stage on darwin',
+  { skip: process.platform !== 'darwin' && 'production secret window /private/tmp exists only on macOS' }, () => {
+    const dir = makeStage('/private/tmp');
+    try {
+      const paths = ['authorize', 'callback', 'receipt'].map(k => join(dir, `${k}.txt`));
+      const r = spawnSync(process.execPath, ['--import', noFetch, script, '--authorize-url-file', paths[0], '--callback-file', paths[1], '--receipt-file', paths[2],
+        '--total-timeout-ms', '2000'], { encoding: 'utf8', timeout: 5000 });
+      assert.equal(r.status, 1);
+      assert.doesNotMatch(r.stderr, /secret_window_required|step=files/);
+      const receipt = JSON.parse(readFileSync(paths[2], 'utf8'));
+      assert.equal(receipt.failed_step, 'discovery', 'window accepted; the next step is the first network call');
+    } finally { removeStage(dir, '/private/tmp'); }
+  });

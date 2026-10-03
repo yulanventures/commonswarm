@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { test } from 'node:test';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { after, test } from 'node:test';
 
 const directory = resolve('docs/evidence/2026-10-03-admin-issuance-release');
 const planPath = join(directory, 'RELEASE.md');
@@ -26,6 +26,45 @@ const scratch = mkdtempSync(join(tmpdir(), 'admin-plan-contract-'));
 const receiptFile = join(scratch, 'receipt.json');
 writeFileSync(receiptFile, '{}\n');
 const sha = 'a'.repeat(40), hex = 'b'.repeat(64);
+
+// Portable fixtures. Production plan blocks pin the macOS secret window
+// /private/tmp/anvil-secret.XXXXXX and the Mac pointer path; neither exists on
+// Linux, and a test must never write under the real home. Tests create the same
+// fresh 0700 anvil-secret.XXXXXX stage under a task-owned parent in the OS
+// temporary root and execute blocks whose two path literals are rewritten to
+// that parent, exactly and countably. RELEASE.md itself is unchanged (pinned by
+// the static test below), so its digest and production rule do not move.
+const temporaryRoot = realpathSync(tmpdir()), realHome = realpathSync(homedir());
+const outsideHome = (path: string) => path !== realHome && !path.startsWith(realHome + sep);
+const secretRoot = mkdtempSync(join(temporaryRoot, 'admin-plan-secret-root.'));
+const pointerDir = join(realpathSync(scratch), 'dcr-rt'); mkdirSync(pointerDir, { mode: 0o700 });
+const fixturePointer = join(pointerDir, 'c1-smoke.pointer');
+assert.ok(outsideHome(secretRoot) && outsideHome(realpathSync(scratch)) && outsideHome(pointerDir), 'test fixtures resolve under the real home');
+assert.match(secretRoot, /^[A-Za-z0-9/_.-]+$/, 'fixture root must be a plain path inside a Python raw string');
+const PRODUCTION_STAGE_RE = "r'/private/tmp/anvil-secret\\.";
+const FIXTURE_STAGE_RE = `r'${secretRoot.replace(/[.-]/g, '\\$&')}/anvil-secret\\.`;
+const PRODUCTION_POINTER = '/Users/yulanbot/work/dcr-rt/c1-smoke.pointer';
+const PRODUCTION_PLAN_PATH = '"$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md"';
+function portable(source: string, expected: { stage: number; pointer: number }) {
+  assert.equal(source.split(PRODUCTION_STAGE_RE).length - 1, expected.stage, 'production secret-window regex count');
+  assert.equal(source.split(PRODUCTION_POINTER).length - 1, expected.pointer, 'production pointer literal count');
+  const result = source.split(PRODUCTION_STAGE_RE).join(FIXTURE_STAGE_RE).split(PRODUCTION_POINTER).join(fixturePointer);
+  assert.ok(!result.includes('/private/tmp/anvil-secret\\.') && !result.includes(PRODUCTION_POINTER));
+  return result;
+}
+const STAGE_NAME = /^anvil-secret\.[A-Za-z0-9]{6}$/;
+function guardStage(stage: string) {
+  const stat = lstatSync(stage);
+  assert.ok(dirname(stage) === secretRoot && STAGE_NAME.test(basename(stage)) && realpathSync(stage) === stage, `unexpected stage ${stage}`);
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o700 && outsideHome(stage), `unsafe stage ${stage}`);
+}
+function makeStage() { const stage = mkdtempSync(join(secretRoot, 'anvil-secret.')); guardStage(stage); return stage; }
+// Remove only the exact stage this file created, after re-checking it.
+function removeStage(stage: string) { guardStage(stage); rmSync(stage, { recursive: true }); }
+after(() => {
+  assert.ok(dirname(secretRoot) === temporaryRoot && /^admin-plan-secret-root\.[A-Za-z0-9]{6}$/.test(basename(secretRoot)));
+  rmSync(secretRoot, { recursive: true });
+});
 const base = () => ({
   release_sha: sha, plan_sha256: digest(plan), archive_sha256: hex,
   window: 'W1', window_id: 'Abc123', window_end_utc: new Date(Date.now() + 600_000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
@@ -76,6 +115,17 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
   // A known multi-heredoc block must remain intact through its final receipt.
   assert.match(block('ai-w4-apply'), /W4 switched and measured/);
   assert.match(block('ai-db-session'), /PASS ai-db-session/);
+});
+
+test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
+  // The executed fixtures rewrite these literals; the plan must still carry them.
+  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 8, 'every secret-window check keeps /private/tmp/anvil-secret');
+  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 3, 'every stage is a fresh /private/tmp/anvil-secret.XXXXXX');
+  assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/c1-smoke\.pointer'/);
+  assert.match(block('ai-close'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(p\)\)/);
+  assert.match(block('ai-w2-between-probes'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(stage\)\)/);
+  assert.equal(block('ai-db-session').split(PRODUCTION_PLAN_PATH).length - 1, 1, 'dispatcher reads the released plan');
+  assert.ok(outsideHome(secretRoot) && outsideHome(fixturePointer));
 });
 
 test('admin release plan: full baseline inputs pass; omissions, prefixes, malformed values and digest drift refuse', () => {
@@ -217,8 +267,7 @@ const w2Tables = ['commonswarm_oauth.interactions', 'swarm.admin_grants', 'swarm
 function w2Fixture() {
   const root = mkdtempSync(join(scratch, 'w2-'));
   const proof = join(root, 'proof'), shims = join(root, 'shims'); mkdirSync(proof); mkdirSync(shims);
-  const made = spawnSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' });
-  assert.equal(made.status, 0); const stage = made.stdout.trim();
+  const stage = makeStage();
   // Synthetic credential-shaped values still obey the secret-window rules.
   writeFileSync(join(stage, 'ordinary-probes.json'), JSON.stringify({
     mcp_access_token: 'synthetic-mcp', human_access_token: 'synthetic-human', workspace_id: '11111111-1111-1111-1111-111111111111',
@@ -280,15 +329,18 @@ class Opener:
         return Response({'ok':True})
 urllib.request.build_opener=lambda *args: Opener()
 `);
-  const dispatcher = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
+  // The dispatcher extracts nested blocks from the plan on disk; give it the
+  // portable rewrite of the whole plan (only the secret-window regex changes).
+  const planCopy = join(root, 'RELEASE.md');
+  writeFileSync(planCopy, portable(plan, { stage: 8, pointer: 5 }));
+  const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
+  assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
+  const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
   const harness = `export VERSION\nai_deadline() { :; }\nai_ro() { python3 '${root}/db.py' read "$@"; }\nai_db() { python3 '${root}/db.py' apply "$@"; }\nai_run() {\n${dispatcher}\n`;
   const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha,
     PYTHONPATH: shims, PATH: '/Users/yulanbot/.local/bin:' + process.env.PATH };
   return { proof, stage, env, harness, migrations, old,
-    clean: () => {
-      const result = spawnSync('/Users/yulanbot/.local/bin/rm', ['-r', '--', stage], { encoding: 'utf8' });
-      assert.equal(result.status, 0, `guard refused ${stage}: ${result.stderr}`);
-    } };
+    clean: () => removeStage(stage) };
 }
 
 test('admin release plan: W2 measures every live lock target; row/size limits refuse and measurements size capped timeouts', () => {
@@ -497,9 +549,8 @@ test('admin release plan: credential material is file/stdin only and generating 
   assert.doesNotMatch(source, /echo\b|set -x|cat "\$SECRET_STAGE\/issuer-password"|--password|PGPASSWORD=/);
   assert.match(block('ai-w2-issuer-rollback'), /NOLOGIN PASSWORD NULL/);
   // Execute the actual secret-producing Python body with synthetic on-box inputs.
-  const made = spawnSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' });
-  assert.equal(made.status, 0); const stage = made.stdout.trim();
-  assert.match(stage, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/);
+  const stage = makeStage();
+  assert.match(basename(stage), /^anvil-secret\.[A-Za-z0-9]{6}$/);
   try {
     writeFileSync(join(stage, 'issuer-password'), 'a'.repeat(64)+'\n', { mode: 0o600 });
     writeFileSync(join(stage, 'service.conf'), '[target]\nhost=db.commonswarm.internal\nport=5432\ndbname=postgres\nuser=supabase_admin\n', { mode: 0o600 });
@@ -512,8 +563,7 @@ test('admin release plan: credential material is file/stdin only and generating 
     assert.ok(credential.user==='commonswarm_admin_issuer' && credential.password==='a'.repeat(64), 'AS credential contract');
     assert.ok(readFileSync(join(stage, 'issuer.sql'),'utf8').includes("ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"), 'password SQL not staged');
   } finally {
-    const cleanup = spawnSync('/Users/yulanbot/.local/bin/rm', ['-r', '--', stage], { encoding: 'utf8' });
-    assert.equal(cleanup.status, 0, `guarded fixture cleanup refused ${stage}: ${cleanup.stderr}`);
+    removeStage(stage);
   }
 });
 
@@ -586,15 +636,24 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
 });
 
 test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
-  const pointer='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer';
-  assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer');
-  mkdirSync('/Users/yulanbot/work/dcr-rt',{recursive:true});
-  const made=spawnSync('mktemp',['-d','/private/tmp/anvil-secret.XXXXXX'],{encoding:'utf8'});
-  assert.equal(made.status,0); const stage=made.stdout.trim();
+  // Never the real Mac pointer: the fixture pointer is under this file's scratch.
+  const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:1});
+  assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer'); assert.ok(outsideHome(pointer));
+  const stage=makeStage();
   const c1=join(scratch,'pointer-input.json');
+  const removePointer=()=>{ assert.equal(lstatSync(pointer).isFile(),true); assert.equal(dirname(pointer),pointerDir); rmSync(pointer); };
   try {
     writeFileSync(c1,JSON.stringify({smoke_workspace_name:'C1 exact workspace'}));
-    const result=run(block('ai-w6-pointer'),{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    // Controls: the rewritten window and pointer checks still execute.
+    const other=mkdtempSync(join(secretRoot,'other-secret.'));
+    try {
+      const wrongStage=run(source,{C1_SECRET_STAGE:other,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+      assert.notEqual(wrongStage.status,0,'stage outside the anvil-secret window accepted'); assert.ok(!existsSync(pointer));
+    } finally { assert.equal(dirname(other),secretRoot); rmSync(other,{recursive:true}); }
+    const wrongPointer=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:join(pointerDir,'other.pointer'),C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(wrongPointer.status,0,'non-pinned pointer path accepted'); assert.ok(!existsSync(join(pointerDir,'other.pointer')));
+    rmSync(join(stage,'request-plan.json'),{force:true});
+    const result=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.equal(result.status,0,result.stderr);
     assert.equal(statSync(pointer).mode & 0o777,0o600);
     const r=JSON.parse(readFileSync(pointer,'utf8'));
@@ -604,13 +663,13 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
     const canonical=JSON.parse(spawnSync('node',['scripts/admin-smoke.mjs','--dry-run'],{encoding:'utf8'}).stdout);
     assert.deepEqual(r.consent_choices.scopes,canonical.scope.split(' ').filter((s:string)=>!['openid','offline_access'].includes(s)));
     assert.doesNotMatch(JSON.stringify(r),/https?:|eyJ|access_token|refresh_token|code_verifier|Bearer/);
-    const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['--',pointer],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr);
+    removePointer();
     writeFileSync(c1,JSON.stringify({smoke_workspace_name:'Bearer synthetic-secret-shaped-fixture'}));
-    const refused=run(block('ai-w6-pointer'),{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    const refused=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.notEqual(refused.status,0); assert.match(refused.stderr,/secret-shaped pointer/); assert.ok(!existsSync(pointer));
   } finally {
-    if(existsSync(pointer)) { const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['--',pointer],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr); }
-    const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['-r','--',stage],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr);
+    if(existsSync(pointer)) removePointer();
+    removeStage(stage);
   }
 });
 
@@ -653,8 +712,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
 });
 
 test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
-  const made=spawnSync('mktemp',['-d','/private/tmp/anvil-secret.XXXXXX'],{encoding:'utf8'});
-  assert.equal(made.status,0); const stage=made.stdout.trim(), proof=join(scratch,'close'); mkdirSync(proof);
+  const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
   for(const file of ['ordinary-after.json','ordinary-recovery.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
@@ -665,14 +723,14 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 1\n',{mode:0o700});
     for(const outcome of ['success','recovered']) {
-      const refused=run(harness+block('ai-close'),{...env,CLOSE_RESULT:outcome});
+      const refused=run(harness+close,{...env,CLOSE_RESULT:outcome});
       assert.notEqual(refused.status,0,`inactive timer allowed ${outcome} W6 close`);
       assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     }
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
-    const result=run(harness+block('ai-close'),{...env,CLOSE_RESULT:'success'});
+    const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
   } finally {
-    if(existsSync(stage)) { const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['-r','--',stage],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr); }
+    if(existsSync(stage)) removeStage(stage);
   }
 });
