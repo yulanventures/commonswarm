@@ -7252,9 +7252,20 @@ test("every cross-host handoff is covered in both modes", { skip: WHOLE_BLOCK_ON
     }
     const unavailable = assertHandoffCoverage(inventory, fixtures);
     t.diagnostic(`Mac products with no bytes in a dry run, enumerated unavailable by their NOT EXECUTED producer: ${unavailable.join(", ") || "none"}`);
-    // The set is closed: only the two directed receipts, whose success writer prints the id a live note returned, have no
-    // bytes. A product that joins it must be a deliberate change to this list, not a quiet fallback of the coverage.
-    assert.deepEqual(unavailable, ["hm37a-local-control-new.json (hm37a-directed-check-new)", "hm37a-local-control-old.json (hm37a-directed-check-old)"]);
+    // The set is closed. The local transfer now includes six HTTP receipts
+    // whose live response fields are unavailable, alongside the two directed
+    // receipts whose signal ids require live notes. None gets synthetic bytes.
+    // An additional product must still fail until deliberately enumerated here.
+    assert.deepEqual(unavailable, [
+      "hm37-loopback-boundaries.json (hm37-public-boundaries)",
+      "hm37-loopback-reads.json (hm37-public-boundary-reads)",
+      "hm37-mcp-hostname-boundaries.json (hm37-public-boundaries)",
+      "hm37-mcp-hostname-reads.json (hm37-public-boundary-reads)",
+      "hm37-public-boundaries.json (hm37-public-boundaries)",
+      "hm37-public-reads.json (hm37-public-boundary-reads)",
+      "hm37a-local-control-new.json (hm37a-directed-check-new)",
+      "hm37a-local-control-old.json (hm37a-directed-check-old)",
+    ]);
     const products = new Map(inventory.map((handoff) => [
       `${handoff.producer.file}:${handoff.producer.step}:${handoff.path}`, handoff,
     ]));
