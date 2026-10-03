@@ -8,7 +8,7 @@ import { databaseContainer, localClusterAdminUrl, openIssuanceForTest } from './
 import { edgeSetupCause } from './admin-edge-setup-diagnostic.js';
 
 const schemas = ['auth', 'swarm', 'swarm_read', 'commonswarm_oauth', 'commonswarm_ops', 'supabase_migrations'];
-export async function adminEdgeDatabase(localUrl: string) {
+export async function adminEdgeDatabase(localUrl: string, beforeCutoverSql = '') {
   const adminUrl = localClusterAdminUrl(localUrl);
   const master = postgres(adminUrl, { prepare: false, max: 1 });
   const name = `admin_edge_${randomUUID().replaceAll('-', '')}`;
@@ -70,6 +70,8 @@ export async function adminEdgeDatabase(localUrl: string) {
     await db.begin(async tx => {
       // --schema-only copies no singleton or migration-ledger rows.
       await tx`INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true)`;
+      // Historical replay fixtures must exist before the real terminal fence.
+      if (beforeCutoverSql) await tx.unsafe(beforeCutoverSql);
       await tx.unsafe(openIssuanceForTest);
     });
     return { url: url.toString(), db, close };
