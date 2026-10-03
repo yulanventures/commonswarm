@@ -21,7 +21,7 @@
     "check:tests": "tsc -p tsconfig.tests.json",
     "check:edge": "deno check --config supabase/functions/command/deno.json supabase/functions/command/index.ts supabase/functions/read/index.ts supabase/functions/capability/index.ts supabase/functions/activity/index.ts supabase/functions/h0/index.ts supabase/functions/mcp/index.ts supabase/functions/admin/index.ts deploy/edge-runtime/main/index.ts",
     "test": "node scripts/run-test-list.mjs tests/lists/test.txt",
-    "test:box-dry-run": "node --import tsx --test --test-concurrency=1 tests/box-dry-run.test.ts",
+    "test:box-dry-run": "node --import tsx --test --test-concurrency=1 tests/box-dry-run.test.ts tests/release-preflight.test.mjs",
     "test:site": "npm --prefix site test",
     "test:p1-cli": "node scripts/require-cli-build.mjs && node --import tsx --test --test-timeout=300000 tests/p1-cli/**/*.test.ts",
     "test:p1-local": "node scripts/run-test-list.mjs tests/lists/test:p1-local.txt --test-concurrency=1",
