@@ -5,7 +5,15 @@ import { randomUUID } from 'node:crypto';
 import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
-const literal = JSON.stringify(allowlist).replaceAll("'", "''");
+// Household permissions: SELECT plus one key column's UPDATE for FOR SHARE;
+// lane 2 never writes these tables. The optional sixth allowlist field records
+// the PostgreSQL 17 lock requirement; only the first five fields describe an ACL.
+// Household stream SELECT/INSERT/UPDATE: load, initialize and persist the reducer projection and sequence.
+// Household events INSERT: append committed reducer events; authorized history reads the stream projection.
+// Household audit INSERT: append command outcomes and digests; the command path never reads this ledger.
+// Household bindings SELECT/INSERT: resolve or establish stable object-to-file identity.
+// Household artifacts SELECT/INSERT/UPDATE: verify retained bytes, register versions and settle reservations.
+const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
 // Default PUBLIC EXECUTE on system functions is the platform baseline. Explicit
@@ -140,6 +148,38 @@ ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
+${[
+  ['household_workspace_boundaries','workspace_id','purpose'],
+  ['household_member_content_roles','workspace_id','content_role'],
+  ['household_content_connections','connection_id','purpose'],
+].map(([table,key,nonkey]) => `
+SET LOCAL ROLE swarm_command;
+SELECT * FROM swarm.${table} WHERE false FOR SHARE;
+${refuses(`INSERT INTO swarm.${table} SELECT * FROM swarm.${table} WHERE false`,'42501')}
+${refuses(`UPDATE swarm.${table} SET ${nonkey}=${nonkey} WHERE false`,'42501')}
+RESET ROLE;
+SAVEPOINT household_lock_control;
+REVOKE UPDATE (${key}) ON swarm.${table} FROM swarm_command;
+SET LOCAL ROLE swarm_command;
+SELECT * FROM swarm.${table} WHERE false;
+${refuses(`SELECT * FROM swarm.${table} WHERE false FOR SHARE`,'42501')}
+RESET ROLE;
+ROLLBACK TO SAVEPOINT household_lock_control;
+SET LOCAL ROLE swarm_command;
+SELECT * FROM swarm.${table} WHERE false FOR SHARE;
+RESET ROLE;
+SELECT pg_temp.assert_issuer();
+${[`INSERT`,`INSERT (${key})`,`UPDATE`,`UPDATE (${nonkey})`,`UPDATE (${key}) WITH GRANT OPTION`].map(privilege => {
+  const grant = privilege.endsWith(' WITH GRANT OPTION')
+    ? `GRANT UPDATE (${key}) ON swarm.${table} TO swarm_command WITH GRANT OPTION;`
+    : `GRANT ${privilege} ON swarm.${table} TO swarm_command;`;
+  return `SAVEPOINT household_acl_mutation;
+${grant}
+${dbAssert("SELECT count(*)=1 FROM issuer_widening", 'household mutation adds exactly one offending ACL')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT household_acl_mutation;
+SELECT pg_temp.assert_issuer();`;
+}).join('\n')}`).join('\n')}
 ${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}
 -- SET ROLE checks the session user, not a previously selected current_user.
 -- Use the cluster admin only to establish the real issuer session identity.

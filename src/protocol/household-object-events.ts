@@ -1,0 +1,149 @@
+import type { EventEnvelope } from './events.js';
+
+export const HOUSEHOLD_OBJECT_TYPES = ['list', 'doc', 'file'] as const;
+export type HouseholdObjectType = typeof HOUSEHOLD_OBJECT_TYPES[number];
+
+export interface HouseholdListItem {
+  item_id: string;
+  text: string;
+  order: number;
+  checked: boolean;
+}
+
+/** Markdown and file metadata are untrusted content, never agent instructions. */
+export type HouseholdContent =
+  | { kind: 'list'; items: readonly HouseholdListItem[] }
+  | { kind: 'doc'; markdown: string }
+  | { kind: 'file'; name: string; media_type: string };
+export type HouseholdFileMetadata = Extract<HouseholdContent, { kind: 'file' }>;
+
+/** Immutable bytes for EVERY revision, including retired versions and drafts.
+ * List/doc values live in the artifact plane too: a 25 MiB doc must never become
+ * a canonical event body (the canonical envelope limit is 64 KiB).
+ */
+export interface HouseholdBlob {
+  storage_key: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface HouseholdRevisionRef {
+  workspace_id: string;
+  object_id: string;
+  /** Opaque server-generated token; a version integer is not a precondition. */
+  token: string;
+}
+
+export interface HouseholdAttribution {
+  user_id: string;
+  principal_id: string | null;
+  run_id: string | null;
+  connection_id: string | null;
+  grant_id: string | null;
+}
+
+export interface HouseholdRevision {
+  revision: HouseholdRevisionRef;
+  parent: HouseholdRevisionRef | null;
+  title: string;
+  kind: HouseholdObjectType;
+  file_metadata: HouseholdFileMetadata | null;
+  blob: HouseholdBlob;
+  author: HouseholdAttribution;
+  occurred_at_server: number;
+  command_id: string;
+}
+
+export type HouseholdPatch =
+  | { kind: 'list'; operations: readonly HouseholdListPatch[] }
+  | { kind: 'doc'; splices: readonly { start: number; before: string; after: string }[] }
+  | { kind: 'file'; before_sha256: string; replacement: Extract<HouseholdContent, { kind: 'file' }> };
+
+export type HouseholdListPatch =
+  | { kind: 'add'; item_id: string; text: string; checked: boolean; after_item_id: string | null }
+  | { kind: 'set'; item_id: string; before_text: string; before_checked: boolean; text: string; checked: boolean }
+  | { kind: 'remove'; item_id: string; before_text: string; before_checked: boolean }
+  | { kind: 'move'; item_id: string; before_order: number; after_item_id: string | null };
+
+/** Only the originating person may recover this, never all household members.
+ * The protected blob holds the complete proposed bytes. Exact base/current
+ * references support a three-way preview without discarding the losing draft.
+ * Adapters must withhold these events from other members' raw event reads too.
+ */
+export interface HouseholdDraft {
+  draft_id: string;
+  workspace_id: string;
+  object_id: string;
+  base: HouseholdRevisionRef;
+  current: HouseholdRevisionRef;
+  proposed: HouseholdBlob;
+  title: string;
+  kind: HouseholdObjectType;
+  file_metadata: HouseholdFileMetadata | null;
+  owner: HouseholdAttribution;
+  occurred_at_server: number;
+  command_id: string;
+}
+
+export interface HouseholdReservation {
+  reservation_id: string;
+  workspace_id: string;
+  object_id: string;
+  kind: HouseholdObjectType;
+  file_metadata: HouseholdFileMetadata | null;
+  title: string;
+  base: HouseholdRevisionRef | null;
+  proposed: HouseholdBlob;
+  owner: HouseholdAttribution;
+  created_at_server: number;
+  expires_at: number;
+}
+
+export type HouseholdOutcome =
+  | { status: 'committed'; object_id: string; revision: HouseholdRevisionRef }
+  | { status: 'pending'; object_id: string; reservation_id: string }
+  | { status: 'released'; reservation_id: string }
+  | { status: 'conflict'; object_id: string; current: HouseholdRevisionRef; draft_id: string }
+  | { status: 'refused'; reason: string };
+
+export interface HouseholdReceipt {
+  principal: string;
+  command_id: string;
+  request_digest: string;
+  outcome: HouseholdOutcome;
+}
+
+export const HOUSEHOLD_OBJECT_EVENT_TYPES = [
+  'HouseholdObjectCreated', 'HouseholdObjectUpdated', 'HouseholdUploadReserved',
+  'HouseholdUploadReleased', 'HouseholdDraftPreserved', 'HouseholdObjectCommandRefused',
+] as const;
+export type HouseholdObjectEventType = typeof HOUSEHOLD_OBJECT_EVENT_TYPES[number];
+
+type Payloads = {
+  HouseholdObjectCreated: { revision: HouseholdRevision; reservation_id: string | null; receipt: HouseholdReceipt };
+  HouseholdObjectUpdated: { revision: HouseholdRevision; reservation_id: string | null; receipt: HouseholdReceipt };
+  HouseholdUploadReserved: { reservation: HouseholdReservation; receipt: HouseholdReceipt };
+  HouseholdUploadReleased: { reservation_id: string; receipt: HouseholdReceipt };
+  HouseholdDraftPreserved: { draft: HouseholdDraft; reservation_id: string | null; receipt: HouseholdReceipt };
+  HouseholdObjectCommandRefused: { receipt: HouseholdReceipt };
+};
+export type HouseholdObjectEvent = {
+  [K in HouseholdObjectEventType]: EventEnvelope<Payloads[K], K>
+}[HouseholdObjectEventType];
+
+export interface HouseholdObject {
+  object_id: string;
+  kind: HouseholdObjectType;
+  /** Full committed history. Retirement never deletes a revision or its bytes. */
+  history: readonly HouseholdRevision[];
+}
+
+export interface HouseholdObjectState {
+  workspace_id: string;
+  stream_id: string;
+  last_seq: number;
+  objects: Readonly<Record<string, HouseholdObject>>;
+  reservations: Readonly<Record<string, HouseholdReservation>>;
+  drafts: Readonly<Record<string, HouseholdDraft>>;
+  receipts: Readonly<Record<string, HouseholdReceipt>>;
+}
