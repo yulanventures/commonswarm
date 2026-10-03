@@ -1,0 +1,297 @@
+{
+  "gates": {
+    "admin-capability-snapshot": [
+      "old-full-account-new-scope-denied",
+      "old-full-account-new-command-denied",
+      "same-version-availability-change-denied",
+      "fresh-consent-supported-positive"
+    ],
+    "admin-unavailable-dispatch": [
+      "one-availability-map",
+      "unknown-unavailable-denied",
+      "granular-full-supported-positive"
+    ],
+    "admin-delegation-v1-denied": [
+      "granular-full-child-denied",
+      "routine-positive"
+    ],
+    "admin-schema-isolation": [
+      "non-superuser-createrole-upgrade-01-through-05",
+      "fk-owner-resource-unique",
+      "rls-acl-search-path",
+      "append-only",
+      "status-positive-foreign-denied",
+      "replay-ttl-cleanup",
+      "tombstone-upsert",
+      "d2-release-only-atomic-ledger-checksum-backfill",
+      "d3-grant-family-cap-count-action-retained-security-bucket"
+    ],
+    "admin-issuer-grants-no-widening": [
+      "required-grants-positive",
+      "any-widening-denied",
+      "noinherit",
+      "transaction-local-per-step-role"
+    ],
+    "admin-schema-reserve": [
+      "verbatim-01-through-05",
+      "empty-reverse-reapply-catalogs",
+      "occupied-oauth-history-denied",
+      "checksum-evidence-denied"
+    ],
+    "legacy-db-fence": [
+      "old-binary-table-function-denied",
+      "human-history-revoke-positive",
+      "terminal-closure-retained-on-rollback"
+    ],
+    "admin-consent-client-policy": [
+      "verified-hosted-https-positive",
+      "ordinary-dcr-positive",
+      "unverified-forged-dcr-admin-denied",
+      "native-loopback-custom-scheme-denied-with-approval-row",
+      "metadata-withdrawal-denied",
+      "dpop-incompatible-denied",
+      "stale-session-csrf-digest-duplicate-receipt-denied"
+    ],
+    "admin-owner-approval-scoped": [
+      "account-owner-positive",
+      "foreign-owner-denied",
+      "worker-hosted-delegated-agent-denied",
+      "verification-prep-cannot-approve",
+      "withdrawal-linked-family-atomic"
+    ],
+    "mcp-interaction-refuses-admin": [
+      "interim-admin-denied-before-grant-lookup-even-flags-on",
+      "ordinary-mcp-positive"
+    ],
+    "full-account-second-confirmation": [
+      "verified-two-step-positive",
+      "first-selection-no-grant",
+      "unverified-full-account-denied"
+    ],
+    "admin-atomic-provider-transaction": [
+      "real-pinned-provider-http-pg",
+      "one-client-pid-per-unit",
+      "no-nested-commit-no-context-denied",
+      "consent-continuation-token-refresh",
+      "receipt-grant-code-token-reducer-audit-signing-faults",
+      "commit-before-response",
+      "concurrent-receipt-code-refresh-consume",
+      "replay-fence-commits-on-error",
+      "uncertain-commit-response-loss",
+      "browser-session-tombstone-rollback"
+    ],
+    "mcp-refresh-never-admin": [
+      "mcp-refresh-positive",
+      "resource-class-relabel-admin-denied"
+    ],
+    "admin-scopes-resource-only": [
+      "separate-admin-positive",
+      "global-oidc-admin-scopes-absent",
+      "ordinary-resource-admin-scopes-denied"
+    ],
+    "as-dpop-required": [
+      "canonical-issuer-code-refresh-same-key-positive",
+      "missing-wrong-proof-key-nonce-denied",
+      "forwarded-host-uri-forgery-denied",
+      "shared-admission-commits-before-issuance",
+      "restart-concurrent-cross-domain-replay-denied"
+    ],
+    "admin-refresh-consent-deadline": [
+      "same-client-resource-key-deadline",
+      "rotation-positive",
+      "scope-widening-renewal-budget-reset-denied",
+      "live-family-required"
+    ],
+    "admin-revoke-family-atomic": [
+      "grant-tombstone-audit-same-commit",
+      "audit-fault-all-or-none",
+      "replay-error-fence-retained"
+    ],
+    "admin-issuance-closed-before-cutover": [
+      "flag-on-old-edge-absent-marker-auth-code-refresh-denied",
+      "ordinary-mcp-positive"
+    ],
+    "admin-activation-measured-release": [
+      "operator-measured-complete-positive",
+      "lying-readiness-sha-denied",
+      "wrong-target-image-generation-denied",
+      "invalidated-rollback-record-denied"
+    ],
+    "admin-activation-migration-ledger": [
+      "version-sha256-complete-positive",
+      "five-prerequisites-oauth-dcr-01-through-05",
+      "missing-ledger-checksum-mismatch-denied"
+    ],
+    "legacy-admin-unreachable": [
+      "public-opaque-access-refresh-denied",
+      "private-signed-proof-module-mint-callback-denied",
+      "cached-command-v1-replay-denied",
+      "actual-oauth-admin-positive"
+    ],
+    "edge-dpop-shared-replay": [
+      "fresh-proof-positive",
+      "two-instances-concurrent-restart-rollback",
+      "cross-entry-domain-same-jti-key-denied",
+      "bearer-missing-class-cnf-denied",
+      "jwt-proof-key-ath-htm-htu-iat-nonce-denied",
+      "dispatch-rollback-does-not-unconsume-proof"
+    ],
+    "admin-boundary-isolation": [
+      "both-schemes-admin-nonadmin-denied",
+      "worker-mcp-human-forged-admin-denied",
+      "ordinary-credential-positive"
+    ],
+    "admin-current-rights": [
+      "oauth-owner-workspace-client-key-target-role-positive",
+      "foreign-workspace-current-rights-ancestor-denied",
+      "complete-owner-admin-grant-family-audit",
+      "audit-insert-failure-denied"
+    ],
+    "admin-revoke-every-request": [
+      "independent-live-grant-positive",
+      "init-list-read-action-idempotent-queued-refresh-denied-after-revoke",
+      "revoke-races-cached-denied-kid",
+      "no-positive-cache"
+    ],
+    "admin-access-issuance-required": [
+      "recorded-token-positive",
+      "missing-rolledback-mismatched-issuance-denied-every-request"
+    ],
+    "admin-site-lifecycle": [
+      "list-approval-metadata-reapproval",
+      "renewal-version-capability-diff",
+      "atomic-revoke",
+      "unknown-outcome-saved-retry-id",
+      "foreign-no-secret-projection",
+      "human-zero-workspace-recovery",
+      "second-confirmation-accessibility"
+    ],
+    "admin-activation-chain": [
+      "combined-exact-build",
+      "old-edge-flag-on-lying-readiness-ledger-mismatch-denied",
+      "measured-closure-complete-checksums-positive",
+      "atomic-consent-issuance-revoke",
+      "shared-replay-restart",
+      "full-account-dormant-fences",
+      "human-recovery",
+      "ordinary-paths-positive"
+    ],
+    "ordinary-paths-unchanged": [
+      "hosted-mcp-consent-refresh",
+      "dcr-registration-consent",
+      "cimd-consent",
+      "human-recovery",
+      "worker-command-read"
+    ],
+    "admin-gate-cancellation": [
+      "two-second-timeout-aborts-coordinator",
+      "no-leaked-client-or-running-query"
+    ],
+    "admin-client-registry-visibility": [
+      "explicit-global-registry-or-owner-scoped-decision",
+      "no-secret-projection"
+    ],
+    "edge-release-measurement-paths": [
+      "switch-recreate-rollback-recycle-invalidate-before-change",
+      "same-step-box-remeasurement",
+      "stale-receipt-cannot-open"
+    ],
+    "release-plan-contract": [
+      "whole-block-extraction-bash32-python-syntax",
+      "input-negative-controls",
+      "gui-denied-sandbox-dry-run",
+      "redaction-secret-cleanup-refusal"
+    ],
+    "oauth-build-route": [
+      "cpu-capped-build-once-source-label",
+      "ordinary-on-config",
+      "local-gate-closed"
+    ],
+    "edge-caddy-route": [
+      "canonical-api-admin-route",
+      "mcp-get-head-gate-cors",
+      "caddy-validate-reload",
+      "outside-origin-probe"
+    ],
+    "site-build-qa": [
+      "exact-source-build-ci",
+      "public-byte-rollback-controls",
+      "authorized-headless-view-only-qa"
+    ]
+  },
+  "windows": {
+    "W1": [
+      "admin-schema-isolation",
+      "admin-issuer-grants-no-widening",
+      "admin-schema-reserve",
+      "ordinary-paths-unchanged",
+      "release-plan-contract"
+    ],
+    "W2": [
+      "oauth-build-route",
+      "ordinary-paths-unchanged",
+      "release-plan-contract"
+    ],
+    "W3": [
+      "legacy-admin-unreachable",
+      "legacy-db-fence",
+      "edge-caddy-route",
+      "ordinary-paths-unchanged",
+      "release-plan-contract"
+    ],
+    "W4": [
+      "admin-site-lifecycle",
+      "site-build-qa",
+      "ordinary-paths-unchanged",
+      "release-plan-contract"
+    ],
+    "W5": [
+      "admin-capability-snapshot",
+      "admin-unavailable-dispatch",
+      "admin-delegation-v1-denied",
+      "admin-schema-isolation",
+      "admin-issuer-grants-no-widening",
+      "admin-schema-reserve",
+      "legacy-db-fence",
+      "admin-consent-client-policy",
+      "admin-owner-approval-scoped",
+      "mcp-interaction-refuses-admin",
+      "full-account-second-confirmation",
+      "admin-atomic-provider-transaction",
+      "mcp-refresh-never-admin",
+      "admin-scopes-resource-only",
+      "as-dpop-required",
+      "admin-refresh-consent-deadline",
+      "admin-revoke-family-atomic",
+      "admin-issuance-closed-before-cutover",
+      "admin-activation-measured-release",
+      "admin-activation-migration-ledger",
+      "legacy-admin-unreachable",
+      "edge-dpop-shared-replay",
+      "admin-boundary-isolation",
+      "admin-current-rights",
+      "admin-revoke-every-request",
+      "admin-access-issuance-required",
+      "admin-site-lifecycle",
+      "admin-activation-chain",
+      "ordinary-paths-unchanged",
+      "admin-gate-cancellation",
+      "admin-client-registry-visibility",
+      "edge-release-measurement-paths",
+      "release-plan-contract",
+      "oauth-build-route",
+      "edge-caddy-route",
+      "site-build-qa"
+    ],
+    "W6": [
+      "admin-activation-chain",
+      "admin-site-lifecycle",
+      "legacy-admin-unreachable"
+    ],
+    "W7": [
+      "legacy-admin-unreachable",
+      "legacy-db-fence",
+      "admin-delegation-v1-denied"
+    ]
+  }
+}
