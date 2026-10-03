@@ -122,12 +122,20 @@ run_in_box() {
         BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;;
       esac
     done
+    # sshd starts the remote command in the login user's home directory, never
+    # in the caller's working directory. The runner creates ops without a home
+    # (useradd --no-create-home); sshd then uses /. The real box has both homes.
+    remote_cwd=/
+    if [ -d "$remote_home" ] && [ ! -L "$remote_home" ]; then remote_cwd=$remote_home; fi
     status=0
-    /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
-      PATH="$PATH" HOME="$remote_home" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
-      BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
-      BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
-      ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
+    (
+      cd "$remote_cwd"
+      exec /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
+        PATH="$PATH" HOME="$remote_home" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+        BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
+        BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
+        ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command"
+    ) || status=$?
     cat "$remote_log" >>"$BOX_DRY_RUN_STUB_LOG"
     if [ "$login_user" != commonswarm ]; then cat "$fixture_service_log" >>"$BOX_DRY_RUN_STUB_LOG"; fi
     rm -f -- "$remote_trap"

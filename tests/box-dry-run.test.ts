@@ -9367,6 +9367,34 @@ test("controls: a later declared block of the same plan never claims an earlier 
   assert.equal(unproducedMacProduct("human-session.json", stage)?.step, "hm37b-hosted-auth-dependency-preflight");
 });
 
+test("controls: box-mode ssh runs the remote command in the login home, not the caller's private directory", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const fixture = prepareBoxFixture("s5", []);
+  try {
+    // The caller sits in the root-only 0700 fixture directory, as site-04 does in its release checkout.
+    const probe = (user: string, command: string): Execution => executeWholeBlock({ ...planBlock(SITE, "site-04"),
+      source: `cd ${shellWord(fixture.temporary!)}\nssh -o BatchMode=yes ${user}@yulan-vps-1 ${shellWord(command)}\n` }, fixture);
+    const home = probe("commonswarm", "pwd; find /srv/commonswarm/site -maxdepth 0 -type d -exec true {} +");
+    assert.equal(home.result, "passed", home.stderr);
+    assert.equal(home.stdout, "/home/commonswarm\n");
+    assert.doesNotMatch(home.stderr, /Failed to (?:change|restore)/);
+    // The runner creates ops without a home; sshd then starts in /.
+    const ops = probe("ops", "pwd");
+    assert.equal(ops.result, "passed", ops.stderr);
+    assert.equal(ops.stdout, existsSync("/home/ops") ? "/home/ops\n" : "/\n");
+    // The private caller directory stays unreadable to the login user.
+    const denied = probe("commonswarm", `cd ${shellWord(fixture.temporary!)}`);
+    assert.equal(denied.result, "failed");
+    // An unknown login user is still refused.
+    const unknown = probe("nobody", "pwd");
+    assert.equal(unknown.result, "failed");
+    assert.match(unknown.stderr, /UNPRODUCED ssh host/);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
 test("controls: a failed site-04 reports its deploy evidence tail and changes nothing else", () => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-site-diagnostic-"));
   try {
