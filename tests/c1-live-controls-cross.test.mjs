@@ -380,12 +380,14 @@ function liveControlsRun(f, window, phase, consentBytes, liveBytes) {
   const livePath = stageReceipt(f, 'live-controls.json', liveBytes);
   const live = JSON.parse(liveBytes.toString());
   assert.equal(digest(readFileSync(join(f.releaseRoot, 'scripts/live-ordinary-controls.mjs'))), live.producer_sha256);
-  f.put('inputs.json', { release_sha: release, window_id: live.window_id, window: live.window });
+  const { archive, archiveSha } = buildArchive(f, 'fixture plan\n');
+  f.put('inputs.json', { release_sha: release, window_id: live.window_id, window: live.window, archive_sha256: archiveSha });
   return f.run(['ai-live-controls'], window, {
     INPUTS_FILE: join(f.root, 'inputs.json'),
     LIVE_CONTROLS_FILE: livePath,
     CONSENT_RECEIPT_FILE: consentPath,
     RELEASE_ROOT: f.releaseRoot,
+    BOX_ARCHIVE_PATH: archive,
     PROOF_DIR: f.proof,
     WINDOW: window,
     WINDOW_ID: windowId,
