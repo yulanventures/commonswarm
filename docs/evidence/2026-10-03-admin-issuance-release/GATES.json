@@ -212,7 +212,11 @@
       "issuer-producer-no-output",
       "recycle-dropin-rollback-present",
       "activation-env-overlay-db-all-required",
-      "w2-unset-env-overlay-absent"
+      "w3-unset-env-overlay-absent",
+      "w1-w5-closed-preparation-no-consent-approval",
+      "w6-missing-stale-browser-readiness-refuses-before-open",
+      "d8-pointer-no-secret-shaped-values",
+      "w6-default-finish-and-forward-close-CLOSED"
     ],
     "oauth-build-route": [
       "cpu-capped-build-once-source-label",
@@ -228,7 +232,10 @@
     "site-build-qa": [
       "exact-source-build-ci",
       "public-byte-rollback-controls",
-      "authorized-headless-view-only-qa"
+      "authorized-headless-view-only-qa",
+      "reviewed-browser-ownership-close-before-W5-close",
+      "cimd-client-callback-public-bytes",
+      "GET-HEAD-admin-gate-closed-after-W5"
     ],
     "admin-issuer-credential-provisioning": [
       "on-box-password-never-stdout-argv-env",
@@ -238,18 +245,30 @@
     ],
     "admin-c1-smoke": [
       "canonical-published-client-exact-version-owner-approval",
-      "explicit-handoff-path-account-scope-rulings",
-      "browser-ready-assigned-human-second-confirmation",
+      "nonsecret-0600-pointer-exact-private-paths-consent-choices-expiry",
+      "missing-or-pre-W5-browser-readiness-refuses-before-open",
+      "account-wide-approval-immediately-before-consent-timestamps",
+      "default-deactivation-closed-explicit-bound-keep-open-only",
       "real-pkce-dpop-nonce-init-list-read-action-refresh",
       "read-only-d3-counts-smoke-grant-family-only",
       "human-owner-file-store-revoke-live-access-refusal-family-tombstone",
       "client-approval-withdrawal",
       "accepted-workspace-residue-next-site-client-removal",
       "secret-handoffs-guarded-cleanup-redacted-report"
+    ],
+    "backup-restore-gate": [
+      "fresh-verified-database-and-object-backup",
+      "complete-isolated-restore-receipt",
+      "stale-or-failed-status-refused"
     ]
   },
   "windows": {
     "W1": [
+      "backup-restore-gate",
+      "ordinary-paths-unchanged",
+      "release-plan-contract"
+    ],
+    "W2": [
       "admin-schema-isolation",
       "admin-issuer-grants-no-widening",
       "admin-schema-reserve",
@@ -257,12 +276,12 @@
       "release-plan-contract",
       "admin-issuer-credential-provisioning"
     ],
-    "W2": [
+    "W3": [
       "oauth-build-route",
       "ordinary-paths-unchanged",
       "release-plan-contract"
     ],
-    "W3": [
+    "W4": [
       "legacy-admin-unreachable",
       "legacy-db-fence",
       "edge-caddy-route",
@@ -270,13 +289,13 @@
       "release-plan-contract",
       "edge-release-measurement-paths"
     ],
-    "W4": [
+    "W5": [
       "admin-site-lifecycle",
       "site-build-qa",
       "ordinary-paths-unchanged",
       "release-plan-contract"
     ],
-    "W5": [
+    "W6": [
       "admin-capability-snapshot",
       "admin-unavailable-dispatch",
       "admin-delegation-v1-denied",
@@ -313,15 +332,8 @@
       "oauth-build-route",
       "edge-caddy-route",
       "site-build-qa",
-      "admin-issuer-credential-provisioning"
-    ],
-    "W6": [
-      "admin-activation-chain",
-      "admin-site-lifecycle",
-      "legacy-admin-unreachable",
-      "admin-c1-smoke",
-      "admin-consent-client-policy",
-      "release-plan-contract"
+      "admin-issuer-credential-provisioning",
+      "admin-c1-smoke"
     ],
     "W7": [
       "legacy-admin-unreachable",

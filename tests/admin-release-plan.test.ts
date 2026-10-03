@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -74,7 +74,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
     }
   }
   // A known multi-heredoc block must remain intact through its final receipt.
-  assert.match(block('ai-w3-apply'), /PASS W3 switched and measured/);
+  assert.match(block('ai-w4-apply'), /PASS W4 switched and measured/);
   assert.match(block('ai-db-session'), /PASS ai-db-session/);
 });
 
@@ -106,9 +106,9 @@ test('admin release plan: full baseline inputs pass; omissions, prefixes, malfor
   }
 });
 
-test('admin release plan: W5 and W7 approval is action/release/window/plan bound; activation refuses absent approval before any operation', () => {
+test('admin release plan: W6 and W7 approval is action/release/window/plan bound; activation refuses absent approval before any operation', () => {
   for (const [window, action, id] of [
-    ['W5', 'activate-admin-issuance', 'ai-w5-approval'],
+    ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
     const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile' };
@@ -125,8 +125,8 @@ test('admin release plan: W5 and W7 approval is action/release/window/plan bound
       assert.notEqual(validate(changed).status, 0, `unbound ${window} ${key}`);
       assert.notEqual(run(block(id!), { INPUTS_FILE: inputFile(changed) }).status, 0);
     }
-    if (window === 'W5') {
-      const apply = run(block('ai-w5-apply'), { INPUTS_FILE: inputFile({ ...input, approval: null }) });
+    if (window === 'W6') {
+      const apply = run(block('ai-w6-activation-apply'), { INPUTS_FILE: inputFile({ ...input, approval: null }) });
       assert.notEqual(apply.status, 0);
       assert.match(apply.stderr, /activation approval required; STOP/);
     }
@@ -135,13 +135,13 @@ test('admin release plan: W5 and W7 approval is action/release/window/plan bound
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-preflight/);
 });
 
-test('admin release plan: W3 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
-  const edge: Input = { ...base(), window: 'W3', rollback_decision: 'restore-service' };
+test('admin release plan: W4 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
+  const edge: Input = { ...base(), window: 'W4', rollback_decision: 'restore-service' };
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
   assert.equal(validate(edge).status, 0);
   const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile' };
-  smoke.approval = approval(smoke, 'admin-smoke-human-consent');
+  smoke.approval = approval(smoke, 'activate-admin-issuance-and-smoke');
   assert.equal(validate(smoke).status, 0);
   const result = run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(smoke) });
   assert.notEqual(result.status, 0);
@@ -166,12 +166,12 @@ test('admin release plan: reserves are verbatim and all lane gates own retained 
   const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as {
     gates: Record<string, string[]>; windows: Record<string, string[]>;
   };
-  const names = new Set(contract.windows.W5);
+  const names = new Set(contract.windows.W6);
   // The specification, rather than a copied implementation list, owns these requirements.
   const spec = readFileSync('docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md', 'utf8');
   const lanes = spec.split('## Build lanes: ordered reviewable commits')[1]!.split('## Release sequence')[0]!;
   for (const m of lanes.matchAll(/`((?:admin-|legacy-|as-dpop-|edge-dpop-|mcp-refresh-|mcp-interaction-|full-account-)[a-z-]+)`/g)) {
-    assert.ok(names.has(m[1]!), `spec gate ${m[1]} not required by W5`);
+    assert.ok(names.has(m[1]!), `spec gate ${m[1]} not required by W6`);
   }
   for (const required of Object.values(contract.windows)) {
     for (const name of required) assert.ok(contract.gates[name]?.length, `unowned gate ${name}`);
@@ -205,36 +205,34 @@ test('admin release plan: checker receipt validates exact build, controls and re
 });
 
 
-test('admin release plan: C1 owner approval inputs and explicit conflict rulings refuse when absent', () => {
+test('admin release plan: C1 owner inputs and exact workspace name refuse when absent', () => {
   const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile' };
-  input.approval = approval(input, 'admin-smoke-human-consent');
+  input.approval = approval(input, 'activate-admin-issuance-and-smoke');
   const c1 = { release_sha: input.release_sha, window_id: input.window_id, plan_sha256: input.plan_sha256,
     owner_user_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', smoke_workspace_id: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
     verification_version: 1, metadata_digest: hex, target_file: receiptFile, state_directory: scratch,
-    path_revision_approval: 'task/path-correction', account_approval_revision: 'task/account-scope-ruling' };
+    smoke_workspace_name: 'C1 exact existing workspace' };
   const c1File = join(scratch, 'c1-inputs.json');
   const check = (c: Input) => {
     writeFileSync(c1File, JSON.stringify(c));
-    return run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(input), C1_INPUTS_FILE: c1File });
+    const body = block('ai-w6-preflight').match(/^python3 - "\$INPUTS_FILE" "\$C1_INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+    return spawnSync('python3', ['-', inputFile(input), c1File], {input: body, encoding:'utf8'});
   };
   assert.equal(check(c1).status, 0, 'positive C1 input control');
   for (const key of Object.keys(c1)) {
     const missing: Input = { ...c1 }; delete missing[key];
     assert.notEqual(check(missing).status, 0, `missing C1 ${key} accepted`);
   }
-  for (const key of ['path_revision_approval', 'account_approval_revision']) {
-    const refused = check({ ...c1, [key]: '' });
-    assert.match(refused.stderr, new RegExp(`${key} required; STOP`));
-  }
+  assert.match(check({ ...c1, smoke_workspace_name: '' }).stderr, /exact smoke workspace name/);
 });
 
 test('admin release plan: credential material is file/stdin only and generating it emits nothing', () => {
-  const source = block('ai-w1-issuer-credential');
+  const source = block('ai-w2-issuer-credential');
   assert.match(source, /openssl rand -hex 32 >"\$SECRET_STAGE\/issuer-password"/);
   assert.match(source, /ai_db -q --file - <"\$SECRET_STAGE\/issuer.sql"/);
   assert.match(source, /install -o root -g 986 -m 0440/);
   assert.doesNotMatch(source, /echo\b|set -x|cat "\$SECRET_STAGE\/issuer-password"|--password|PGPASSWORD=/);
-  assert.match(block('ai-w1-issuer-rollback'), /NOLOGIN PASSWORD NULL/);
+  assert.match(block('ai-w2-issuer-rollback'), /NOLOGIN PASSWORD NULL/);
   // Execute the actual secret-producing Python body with synthetic on-box inputs.
   const made = spawnSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' });
   assert.equal(made.status, 0); const stage = made.stdout.trim();
@@ -267,6 +265,143 @@ test('admin release plan: recycle invalidates before restart, remeasures after a
   assert.match(rollback, /rm -- "\$RECYCLE_DROPIN"/);
   assert.ok(rollback.indexOf('admin_issuance_enabled=false') < rollback.indexOf('rm -- "$RECYCLE_DROPIN"'), 'close before removing hook');
   assert.match(rollback, /systemctl daemon-reload/);
-  assert.match(block('ai-w5-rollback'), /MCP_OAUTH_ADMIN_ISSUANCE_ENABLED/);
-  assert.doesNotMatch(block('ai-w5-rollback'), /-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose.admin-issuer.yaml"/);
+  assert.match(block('ai-w6-activation-rollback'), /MCP_OAUTH_ADMIN_ISSUANCE_ENABLED/);
+  assert.doesNotMatch(block('ai-w6-activation-rollback'), /-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose.admin-issuer.yaml"/);
+});
+
+// Observable release admission: missing/stale readiness refuses before ai-open can create files.
+const readinessRoot = join(scratch, 'w5'); mkdirSync(readinessRoot);
+const closeFile = join(readinessRoot, 'closed.txt'), readyFile = join(readinessRoot, 'BROWSER-READY');
+const closedAt = new Date(Date.now()-60_000);
+writeFileSync(closeFile, closedAt.toISOString().replace(/\.\d{3}Z$/, 'Z')+'\n');
+writeFileSync(join(readinessRoot, 'inputs.json'), JSON.stringify({...base(), window:'W5'}));
+writeFileSync(join(readinessRoot, 'W5-closed.json'), '{"state":"closed"}');
+const readinessEnv = () => ({INPUTS_FILE:inputFile({...base(),window:'W6'}),W5_CLOSED_FILE:closeFile,BROWSER_READY_FILE:readyFile});
+
+test('admin release plan: W6 absent or stale BROWSER-READY refuses before opening; fresh W5-bound marker passes', () => {
+  let result=run(block('ai-open'), readinessEnv());
+  assert.notEqual(result.status,0); assert.match(result.stderr,/fresh BROWSER-READY required/);
+  writeFileSync(readyFile,'nonsecret readiness\n'); utimesSync(readyFile,new Date(0),new Date(0));
+  result=run(block('ai-open'),readinessEnv());
+  assert.notEqual(result.status,0); assert.match(result.stderr,/newer than W5 close/);
+  utimesSync(readyFile,new Date(),new Date());
+  result=run(block('ai-w6-readiness'),readinessEnv()); assert.equal(result.status,0,result.stderr);
+  writeFileSync(join(readinessRoot,'W5-closed.json'),'{"state":"open"}');
+  assert.notEqual(run(block('ai-w6-readiness'),readinessEnv()).status,0);
+  writeFileSync(join(readinessRoot,'W5-closed.json'),'{"state":"closed"}');
+  const activation=run(`ai_run() { if test "$1" = ai-w6-readiness; then\n${block('ai-w6-readiness')}\nfi; }\n${block('ai-w6-activation-apply')}`, {
+    ...readinessEnv(), WINDOW:'W6', INPUTS_FILE: inputFile({...base(),window:'W6',approval:approval({...base(),window:'W6'},'activate-admin-issuance-and-smoke')}), BROWSER_READY_FILE:join(scratch,'absent'),
+  });
+  assert.notEqual(activation.status,0); assert.match(activation.stderr,/fresh BROWSER-READY required/);
+});
+
+test('admin release plan: keep-open defaults false and requires its own exact activation/window approval', () => {
+  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile'};
+  input.approval=approval(input,'activate-admin-issuance-and-smoke');
+  assert.equal(validate(input).status,0);
+  assert.notEqual(validate({...input,keep_open:true}).status,0);
+  assert.notEqual(validate({...input,keep_open:'true'}).status,0);
+  assert.equal(validate({...input,keep_open:true,keep_open_approval:approval(input,'keep-admin-issuance-open')}).status,0);
+  assert.notEqual(validate({...input,keep_open:true,keep_open_approval:approval(input,'activate-admin-issuance-and-smoke')}).status,0);
+});
+
+test('admin release plan: W6 default runs deactivation and proves CLOSED; explicit keep-open proves OPEN', () => {
+  const proof=join(scratch,'finish'); mkdirSync(proof); writeFileSync(join(proof,'C1-fence.txt'),'PASS'); writeFileSync(join(proof,'client-withdraw.json'),JSON.stringify({status:'PASS',withdrawn_at:'2026-10-03T12:02:00Z'})); writeFileSync(join(proof,'agent-final.json'),JSON.stringify({ok:true,refused_after_fence:{http_status:403,refusal_code:'grant_revoked'}}));
+  // Fake ingress is the external boundary; its body follows the deactivation operation.
+  const shim=join(scratch,'shims'); mkdirSync(shim);
+  const pythonPath=spawnSync('which',['python3'],{encoding:'utf8'}).stdout.trim();
+  writeFileSync(join(shim,'python3'),`#!/bin/bash\nif test "$#" = 1 && test "$1" = -; then\n exec '${pythonPath}' -c 'import sys,types; m=types.ModuleType("urllib.request"); R=type("R",(),{"__enter__":lambda s:s,"__exit__":lambda *a:None,"read":lambda s,n:b"{\\"state\\":\\"closed\\"}" if s.method=="GET" else b"","status":200,"headers":{"Access-Control-Allow-Origin":"*","Cache-Control":"no-store"}}); m.Request=lambda url,method,headers:method; m.urlopen=lambda method,timeout:type("Response",(R,),{"method":method})(); import urllib; urllib.request=m; sys.modules["urllib.request"]=m; exec(sys.stdin.read())'\nelse\n exec '${pythonPath}' "$@"\nfi\n`,{mode:0o700});
+  const calls=join(proof,'calls');
+  const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback|ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; *) return 1;; esac; }\n`;
+  const finish=(keep:boolean|undefined)=>run(harness+block('ai-w6-finish'),{WINDOW:'W6',PROOF_DIR:proof,INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH});
+  let result=finish(undefined); assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'closed',explicit_keep_open:false});
+  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-rollback');
+  writeFileSync(calls,''); result=finish(true); assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
+  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-probes');
+});
+
+test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
+  const pointer='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer';
+  assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer');
+  mkdirSync('/Users/yulanbot/work/dcr-rt',{recursive:true});
+  const made=spawnSync('mktemp',['-d','/private/tmp/anvil-secret.XXXXXX'],{encoding:'utf8'});
+  assert.equal(made.status,0); const stage=made.stdout.trim();
+  const c1=join(scratch,'pointer-input.json');
+  try {
+    writeFileSync(c1,JSON.stringify({smoke_workspace_name:'C1 exact workspace'}));
+    const result=run(block('ai-w6-pointer'),{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.equal(result.status,0,result.stderr);
+    assert.equal(statSync(pointer).mode & 0o777,0o600);
+    const r=JSON.parse(readFileSync(pointer,'utf8'));
+    assert.deepEqual(Object.keys(r).sort(),['authorize_url_file','callback_file','consent_choices','expires_at']);
+    assert.equal(r.authorize_url_file,join(stage,'authorize.url')); assert.equal(r.callback_file,join(stage,'callback.url'));
+    assert.equal(r.consent_choices.workspace_name,'C1 exact workspace'); assert.equal(r.consent_choices.home,false); assert.equal(r.consent_choices.full_account,true);
+    const canonical=JSON.parse(spawnSync('node',['scripts/admin-smoke.mjs','--dry-run'],{encoding:'utf8'}).stdout);
+    assert.deepEqual(r.consent_choices.scopes,canonical.scope.split(' ').filter((s:string)=>!['openid','offline_access'].includes(s)));
+    assert.doesNotMatch(JSON.stringify(r),/https?:|eyJ|access_token|refresh_token|code_verifier|Bearer/);
+    const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['--',pointer],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr);
+    writeFileSync(c1,JSON.stringify({smoke_workspace_name:'Bearer synthetic-secret-shaped-fixture'}));
+    const refused=run(block('ai-w6-pointer'),{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(refused.status,0); assert.match(refused.stderr,/secret-shaped pointer/); assert.ok(!existsSync(pointer));
+  } finally {
+    if(existsSync(pointer)) { const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['--',pointer],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr); }
+    const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['-r','--',stage],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr);
+  }
+});
+
+test('admin release plan: C1 report requires ordered approval/withdrawal/revoke timestamps and actual refused call', () => {
+  const report=(changes: Record<string,unknown>={})=> {
+    const root=mkdtempSync(join(scratch,'report-'));
+    const files:Record<string,unknown>={
+      'agent.json':{ok:true,refused_after_fence:{http_status:403,refusal_code:'grant_revoked'},workspace:{accepted_residue:true,name:'c1-smoke-fixture (test, archive me)'}},
+      'C1-audit.json':{audit_counts:{init:1,list:1,read:1,action:1}},
+      'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:03:00Z'},
+      'client-approve.json':{approval_at:'2026-10-03T12:01:00Z'},
+      'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:02:00Z'},
+      'C1-finish.json':{state:'closed',explicit_keep_open:false}, ...changes,
+    };
+    for(const [name,value] of Object.entries(files)) writeFileSync(join(root,name),JSON.stringify(value));
+    writeFileSync(join(root,'C1-cleanup.txt'),'PASS'); writeFileSync(join(root,'C1-fence.txt'),'PASS');
+    const result=run(block('ai-w6-report'),{C1_PROOF_DIR:root,INPUTS_FILE:inputFile(base())});
+    return {result,root};
+  };
+  const good=report(); assert.equal(good.result.status,0,good.result.stderr);
+  const receipt=JSON.parse(readFileSync(join(good.root,'C1.json'),'utf8'));
+  assert.equal(receipt.approval_scope,'account-wide owner/client/version');
+  assert.equal(receipt.approval_at,'2026-10-03T12:01:00Z'); assert.equal(receipt.withdrawn_at,'2026-10-03T12:02:00Z'); assert.equal(receipt.revoked_at,'2026-10-03T12:03:00Z');
+  assert.deepEqual(receipt.refused_follow_up,{http_status:403,refusal_code:'grant_revoked'}); assert.equal(receipt.final_gate,'closed');
+  for(const changes of [
+    {'client-approve.json':{}}, {'client-withdraw.json':{status:'PASS'}}, {'human-revoke.json':{state:'revoked'}},
+    {'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:00:00Z'}},
+    {'agent.json':{ok:true,refused_after_fence:{http_status:200,refusal_code:'grant_revoked'},workspace:{accepted_residue:true}}},
+    {'C1-finish.json':{state:'open',explicit_keep_open:true}},
+  ]) { const bad=report(changes); assert.notEqual(bad.result.status,0); assert.ok(!existsSync(join(bad.root,'C1.json'))); }
+});
+
+test('admin release plan: W1-W5 need no activation or consent approval; W4 binds the terminal fence', () => {
+  for(const window of ['W1','W2','W3','W4','W5']) {
+    const input:Input={...base(),window,rollback_decision:['W1','W2'].includes(window)?'retain-additive':'restore-service'};
+    if(window==='W4') input.legacy_fence_approval=approval(input,'terminal-legacy-db-fence');
+    assert.equal(validate(input).status,0,`${window} closed preparation inputs`);
+    assert.notEqual(validate({...input,approval:approval(input,'activate-admin-issuance-and-smoke')}).status,0);
+  }
+});
+
+test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
+  const made=spawnSync('mktemp',['-d','/private/tmp/anvil-secret.XXXXXX'],{encoding:'utf8'});
+  assert.equal(made.status,0); const stage=made.stdout.trim(), proof=join(scratch,'close'); mkdirSync(proof);
+  for(const file of ['ordinary-after.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
+  const shim=join(scratch,'close-shims'); mkdirSync(shim);
+  writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  try {
+    // Read-only database boundary starts CLOSED: opening-state checks must fail.
+    const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
+    const result=run(harness+block('ai-close'),{WINDOW:'W6',CLOSE_RESULT:'success',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH});
+    assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
+  } finally {
+    if(existsSync(stage)) { const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['-r','--',stage],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr); }
+  }
 });

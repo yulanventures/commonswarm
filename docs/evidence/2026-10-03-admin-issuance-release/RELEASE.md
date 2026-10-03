@@ -1,16 +1,16 @@
-# Admin issuance release: W1–W7
+# Admin issuance release: W2–W7
 
 Prepared, not executed. This plan releases one reviewed `RELEASE_SHA`, landed on
 main, in seven separately authorized windows. The preparation worker has made
 no box measurements. Neither this document nor a PASS receipt grants approval.
-Admin issuance remains OFF until HezLead executes W5: the reviewed issuer
+Admin issuance remains OFF until HezLead executes W6 after a fresh browser-readiness marker: the reviewed issuer
 coordinator, activation-only overlay, exact `MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1`,
 open DB cutover and independently measured release are all required.
 
 Authority: the admin issuance specification's boundaries, lane 8, findings and
-D1–D3 decisions; `deploy/RELEASE-TO-BOX.md`; the generalized October 2 OAuth,
-edge, site and DCR plans. The implementation timestamps are M1–M3 =
-20261003000001–03, D2 = 04, recovery = 05. D2 is sometimes called M4 in code;
+D1–D9 decisions and HezLead’s W1–W7 sequencing; `deploy/RELEASE-TO-BOX.md`; the generalized October 2 OAuth,
+edge, site and DCR plans. The implementation timestamps are M1–M5 =
+20261003000001–05; the fifth also supplies recovery. D2 is sometimes called M4 in code;
 it is **not** the deferred delegation migration.
 
 Execute ONLY whole marked blocks by ID. Each block has a readonly marker; probe
@@ -39,7 +39,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | Input | Source and validation |
 | --- | --- |
 | release_sha, plan_sha256, archive_sha256 | Reviewed landed main commit; SHA-256 of this exact RELEASE.md and exact `git archive` tar; no abbreviated identities |
-| window, window_id, window_end_utc | W1…W7, six alphanumeric characters, UTC end within 30 minutes on box clock |
+| window, window_id, window_end_utc | W2…W7, six alphanumeric characters, UTC end within 30 minutes on box clock |
 | baseline_oauth_sha, baseline_oauth_image | Live OAuth `current`/RELEASE_SHA + container source/image measurement; full SHA/digest |
 | baseline_edge_sha, baseline_edge_image | Live edge `current`/RELEASE_SHA, image and immutable bind mounts |
 | baseline_stack_sha, baseline_postgres_image | Live stack `current`/RELEASE_SHA and PostgreSQL container image |
@@ -48,9 +48,9 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | edge_recycle_service, edge_recycle_timer, edge_recycle_sha256 | Exact recycle units discovered from box timer/service inventory and systemctl cat byte digest, remeasured per window |
 | baseline_ledger_sha256 | SHA-256 of sorted version lines from live migration ledger, including final newline |
 | gate_receipt_sha256 | Independent checker's receipt digest; see GATES.json; exact combined build, no stale lane receipts |
-| rollback_decision | `retain-additive` W1; `restore-service` W2–W4; `close-and-reconcile` W5–W7 |
-| approval | `null` W1–W4; W5/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 separate consent assignment object |
-| legacy_fence_approval | `null` except W3, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
+| rollback_decision | `retain-additive` W1–W2; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
+| approval | `null` W1–W5; W6/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 authorizes activation and assigned human consent |
+| legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files;
 `BOX_ARCHIVE_PATH=/tmp/admin-issuance-<release_sha>-<window_id>.tar` is an
@@ -61,10 +61,10 @@ evidence file, its SHA-256, PASS and the exact control set in GATES.json.
 The checker supplies the receipt and retained evidence files. This plan checks
 their identities and controls; it does not substitute static checks for live
 database/provider/client proofs. The checker must refute the combined build.
-W1 needs schema, reserve and ordinary-path controls; W5 needs **every** named
-gate. W2/W3/W4 also require their build/route/site receipts.
+W1 needs backup/restore controls; W2 needs schema, reserve and ordinary-path controls; W6 needs **every** named
+gate. W3/W4/W5 also require their build/route/site receipts.
 
-`BACKFILL_FILE` W1 is an absolute regular nonsecret JSON list, one row per
+`BACKFILL_FILE` W2 is an absolute regular nonsecret JSON list, one row per
 already-applied version: version, released_sha, sha256, file. `file` is exactly
 `supabase/migrations/<version>_<name>.sql`. Each row's released_sha is the SHA
 actually released when that migration was applied, supported by HezLead's
@@ -75,13 +75,13 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
-| W1 SCHEMA | ai-inputs, ai-gates, ai-prepare, ai-box-preflight; ai-open, ai-db-session, ai-w1-preflight, ai-w1-apply, ai-w1-reconcile, ai-w1-probes, ai-w1-issuer-credential (HezLead), ai-close. One transaction applies 01→05, then inserts all five ledger/checksum pairs and historical backfills. Failure before COMMIT rolls back the whole transaction. After COMMIT retain additive schema; never drop evidence/history. |
-| W2 OAUTH | common ai-inputs/ai-gates/preflight/open/session; ai-w2-preflight, ai-w2-build, ai-w2-apply, ai-w2-local-gate, ai-ordinary-probes, ai-close. On failure ai-w2-rollback, common ordinary controls, then close. Existing ordinary MCP stays ON; admin env is unset and overlay absent. |
-| W3 EDGE/CADDY | common ai-inputs/ai-gates/preflight/open/session; ai-w3-preflight, ai-w3-caddy-candidate, ai-w3-apply (close/invalidate, edge switch, terminal legacy fence, measured record, both Caddy routes, validate/reload), ai-w3-probes, ai-w3-readback, ai-close. Failure ai-w3-rollback, ordinary controls, close; legacy fence is permanent. |
-| W4 SITE | common preflight; ai-w4-preflight, ai-w4-reference for the generalized site plan's complete preflight/open/build/probe/rollback/close sequence. No browser step without separately assigned QA authorization. Site baseline is remeasured by that plan; admin gate remains closed. |
-| W5 ACTIVATION | ai-w5-approval, common preflight/open/session, ai-w5-checks, ai-w5-apply, ai-w5-probes, ai-w5-readback, ordinary controls, ai-close. Activation adds issuer overlay + env 1 + SQL open. Rollback ai-w5-rollback/ai-emergency-close; preserve history, human grant/family reconciliation under separate approved plan. |
-| W6 C1 ADMIN SMOKE | ai-w6-preflight (requires explicit path/scope rulings), common preflight/open/session, ai-w6-prepare/transfer, ai-w6-client-check, owner approve, ai-w6-start, audit, human revoke/verify-fenced, fence readback, owner withdrawal, secret close, report, ordinary controls, ai-close. Separate assigned browser consent; accepted workspace residue and W7/W4b site removal. |
-| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (refuse without C1), ai-w7-proof, ai-close. This build already removes the runtime mint; retirement is proof/attestation, not reintroducing it until W7. Failure ai-emergency-close; never restore opaque authentication. |
+| W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
+| W2 SCHEMA | common preflight/open/session; ai-w2-preflight, ai-w2-apply, ai-w2-reconcile, ai-w2-probes, ai-w2-issuer-credential (HezLead), ordinary controls, ai-close. M1–M5 (including 20261003000005) and checksum backfill share one transaction. Retain additive schema after COMMIT. |
+| W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
+| W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. |
+| W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
+| W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
+| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
 
 After any failure STOP forward work and record the step and fixed failure code in
 LOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,
@@ -113,7 +113,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(d)==set(keys), 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -131,17 +131,22 @@ need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800,
 need(re.fullmatch(r'/srv/commonswarm/site/releases/[A-Za-z0-9._-]+',d['baseline_site_target']) is not None, 'site target')
 need(hashlib.sha256(plan.read_bytes()).hexdigest()==d['plan_sha256'], 'plan bytes')
 need(hashlib.sha256(receipt.read_bytes()).hexdigest()==d['gate_receipt_sha256'], 'checker receipt bytes')
-decision={'W1':'retain-additive','W2':'restore-service','W3':'restore-service','W4':'restore-service','W5':'close-and-reconcile','W6':'close-and-reconcile','W7':'close-and-reconcile'}
+decision={'W1':'retain-additive','W2':'retain-additive','W3':'restore-service','W4':'restore-service','W5':'restore-service','W6':'close-and-reconcile','W7':'close-and-reconcile'}
 need(d['rollback_decision']==decision[d['window']], 'rollback decision')
 def approval(v,action):
     need(isinstance(v,dict) and set(v)=={'approver','action','release_sha','window_id','plan_sha256','prompt_ref'}, action+' approval required')
     need(v['approver'] in ('Tom','HezLead') and v['action']==action and
          all(v[k]==d[k] for k in ('release_sha','window_id','plan_sha256')) and
          isinstance(v['prompt_ref'],str) and re.fullmatch('[A-Za-z0-9/_.:-]{1,200}',v['prompt_ref']), action+' approval binding')
-action={'W5':'activate-admin-issuance','W6':'admin-smoke-human-consent','W7':'retire-legacy-admin-mint'}.get(d['window'])
+action={'W6':'activate-admin-issuance-and-smoke','W7':'retire-legacy-admin-mint'}.get(d['window'])
 if action: approval(d['approval'],action)
 else: need(d['approval'] is None, 'no implicit activation approval')
-if d['window']=='W3': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
+need(type(d.get('keep_open',False)) is bool, 'keep_open boolean')
+if d.get('keep_open',False):
+    need(d['window']=='W6','keep-open window')
+    approval(d.get('keep_open_approval'),'keep-admin-issuance-open')
+else: need(d.get('keep_open_approval') is None,'no unused keep-open approval')
+if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
 PY
@@ -280,6 +285,18 @@ PY
 # host: box root; after repeated inputs/baseline preflight
 set -euo pipefail
 umask 077
+if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W6; then
+ : "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
+ python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
+import datetime,json,pathlib,sys
+d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
+assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
+w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
+assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
+t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
+PY
+fi
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
 WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")
@@ -386,7 +403,7 @@ ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations 
 test "$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-inputs|ai-gates|ai-w5-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-w5-rollback|ai-emergency-close) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-w6-activation-rollback|ai-emergency-close) ;; *) return 1;; esac
  python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
@@ -496,7 +513,35 @@ HezLead supplies the independently generated live-controls receipt before
 open and after each window. This plan only validates that external input; no
 operator-authored probe is permitted during the release window.
 
-## W1: one schema window before any code release
+## W1: fresh backup gate
+
+HezLead takes a fresh verified database/object backup before W1. The existing
+isolated restore drill must have a complete successful receipt; no live restore
+or service dispatch is authorized here. W2 consumes this exact W1 close.
+
+```sh
+# step: ai-w1-backup-gate
+# readonly: no
+# host: HezLead box root; status reads and nonsecret proof only
+set -euo pipefail
+test "$WINDOW" = W1
+ai_deadline
+python3 - "$PROOF_DIR/backup-gate.json" <<'PY'
+import datetime,json,pathlib,sys
+now=datetime.datetime.now(datetime.timezone.utc)
+b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
+r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
+assert all(b.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified')), 'FAIL verified backup; STOP'
+age=(now-datetime.datetime.fromisoformat(b['verified_at'].replace('Z','+00:00'))).total_seconds()
+assert 0<=age<=1800 and b['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL fresh backup; STOP'
+assert r.get('ok') is True and r.get('state')=='complete', 'FAIL complete restore drill; STOP'
+age=(now-datetime.datetime.fromisoformat(r['at'].replace('Z','+00:00'))).total_seconds()
+assert 0<=age<=8*86400, 'FAIL restore freshness; STOP'
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','backup_verified_at':b['verified_at'],'restore_at':r['at']})+'\n')
+PY
+```
+
+## W2: one schema window before any code release
 
 All five migrations share **one outer transaction**. This solves the ordering
 constraint: the checksum table first exists after 04, so record the 01–05
@@ -507,30 +552,37 @@ with CREATEROLE and narrow ledger access. Checksum inserts explicitly use
 `SET LOCAL ROLE commonswarm_admin_release`, then RESET ROLE. No runtime writes.
 
 Reserve files are the five exact `supabase/admin-delegation-reserve/*` siblings,
-copied verbatim into this plan's `reserve/` directory. `ai-w1-preflight` checks
+copied verbatim into this plan's `reserve/` directory. `ai-w2-preflight` checks
 them against the source archive and requires independently executed empty
 reverse/reapply catalog controls. They are data-free inverses, **not a production
 post-COMMIT rollback**. 04 refuses any checksum evidence; 01 refuses existing
 ordinary provider artifacts/bindings. This live box already hosts ordinary
 OAuth, so deleting its rows to make a reserve pass is forbidden. On apply
 failure PostgreSQL rolls back all DDL/ledger/checksums. On uncertain COMMIT use
-ai-w1-reconcile. After a successful COMMIT retain additive schema, leave gates
+ai-w2-reconcile. After a successful COMMIT retain additive schema, leave gates
 closed, and stop code rollout if probes fail. No historical data is dropped.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
-`<released_sha>.tar` archives from the historical release inputs. The W1
+`<released_sha>.tar` archives from the historical release inputs. The W2
 backfill verifier checks every archive's migration bytes against BACKFILL_FILE.
 It also checks the current files: if historical and reviewed hashes disagree,
 STOP rather than changing observed evidence to fit a new build.
 
 ```sh
-# step: ai-w1-preflight
+# step: ai-w2-preflight
 # readonly: no
 # host: box root; database read-only, writes proof files
 set -euo pipefail
-test "$WINDOW" = W1
+test "$WINDOW" = W2
 ai_deadline
-: "${BACKFILL_FILE:?}" "${HISTORICAL_ARCHIVES_DIR:?}"
+: "${BACKFILL_FILE:?}" "${HISTORICAL_ARCHIVES_DIR:?}" "${W1_CLOSED_FILE:?}"
+python3 - "$W1_CLOSED_FILE" "$RELEASE_SHA" <<'PY'
+import datetime,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
+d=json.load(open(p.parent/"inputs.json")); assert d["window"]=="W1" and d["release_sha"]==sys.argv[2]
+assert json.load(open(p.parent/"backup-gate.json"))["status"]=="PASS"
+assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(p.read_text().strip().replace("Z","+00:00"))).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
+PY
 test -f "$PROOF_DIR/ordinary-before.json"
 python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA" <<'PY'
 import hashlib,json,pathlib,re,sys,tarfile
@@ -539,7 +591,7 @@ assert backfill.is_absolute() and backfill.is_file() and not backfill.is_symlink
 assert archives.is_absolute() and archives.is_dir() and not archives.is_symlink()
 rows=json.loads(backfill.read_text()); ledger=(proof/'ledger-before.txt').read_text().splitlines()
 versions=['2026100300000'+str(i) for i in range(1,6)]
-assert not any(v in ledger for v in versions), 'FAIL W1 unexpected applied prefix; STOP'
+assert not any(v in ledger for v in versions), 'FAIL W2 unexpected applied prefix; STOP'
 assert all(v in ledger for v in ['2026100100000'+str(i) for i in range(1,6)]+['20260928000003','20261002000001']), 'FAIL prerequisites; STOP'
 assert isinstance(rows,list) and len(rows)==len(ledger) and sorted(r['version'] for r in rows)==ledger
 for r in rows:
@@ -586,15 +638,15 @@ done
 ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,pg_get_userbyid(p.proowner),p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2,p.oid;" >"$PROOF_DIR/functions-before.txt"
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-before.txt"
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-before.txt"
-printf 'PASS W1 preflight: exact ledger/backfill/reserves/catalogs; backup fresh\n'
+printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs; backup fresh\n'
 ```
 
 ```sh
-# step: ai-w1-apply
+# step: ai-w2-apply
 # readonly: no
 # host: box root; one transaction; no code or gate change
 set -euo pipefail
-test "$WINDOW" = W1
+test "$WINDOW" = W2
 ai_deadline
 test -f "$PROOF_DIR/new-migrations.json" && test ! -e "$PROOF_DIR/schema-attempted.txt"
 ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/ledger-now.txt"
@@ -626,11 +678,11 @@ PY
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/schema-attempted.txt"
 # No ERR trap retries this. Disconnect at COMMIT means unknown outcome.
 ai_db -q --file /proof/apply.sql >"$SECRET_STAGE/apply.out"
-printf 'PASS W1 transaction returned COMMIT; require independent readback\n'
+printf 'PASS W2 transaction returned COMMIT; require independent readback\n'
 ```
 
 ```sh
-# step: ai-w1-reconcile
+# step: ai-w2-reconcile
 # readonly: no
 # host: box root; database read-only, available after timeout/unknown COMMIT
 set -euo pipefail
@@ -653,11 +705,11 @@ catalogs with the before receipt in a separate read-only diagnosis. No command
 in this plan erases partially observed state.
 
 ```sh
-# step: ai-w1-probes
+# step: ai-w2-probes
 # readonly: no
 # host: box root; database read-only, proof files only
 set -euo pipefail
-test "$WINDOW" = W1
+test "$WINDOW" = W2
 test -f "$PROOF_DIR/schema-committed.txt"
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
  printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
@@ -668,8 +720,8 @@ test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND NOT legacy_c
 ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,pg_get_userbyid(p.proowner),p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2,p.oid;" >"$PROOF_DIR/functions-after.txt"
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-after.txt"
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-after.txt"
-printf 'PASS W1 catalogs, ACL/RLS/search-path/owner inventory; issuance OFF\n'
-printf 'PASS\n' >"$PROOF_DIR/W1-probes.txt"
+printf 'PASS W2 catalogs, ACL/RLS/search-path/owner inventory; issuance OFF\n'
+printf 'PASS\n' >"$PROOF_DIR/W2-probes.txt"
 ```
 
 The schema receipt must independently prove positive status resolver/foreign
@@ -678,9 +730,9 @@ grants/NOINHERIT/local-role isolation, tombstone/upsert, D2 ledger atomicity and
 D3 cap/count/action/security-bucket controls. Catalogs alone are insufficient.
 ai-gates enforces these named controls before any schema apply.
 
-## HezLead box block: W1 issuer credential
+## HezLead box block: W2 issuer credential
 
-Run after ai-w1-reconcile/ai-w1-probes, before W1 close. The password is
+Run after ai-w2-reconcile/ai-w2-probes, before W2 close. The password is
 created on the box, never printed and never copied to the Mac or 1Password
 this window (HezLead's ruling). The AS format is JSON `{user,password}`.
 The fresh role has no existing credential; an existing file stops this initial
@@ -688,11 +740,11 @@ provisioning. Rotation is a separate credential window alongside management.
 Rollback disables login and clears the new password; it retains additive schema.
 
 ```sh
-# step: ai-w1-issuer-credential
+# step: ai-w2-issuer-credential
 # readonly: no
-# host: HezLead ONLY, box root, W1 schema window
+# host: HezLead ONLY, box root, W2 schema window
 set -euo pipefail
-test "$WINDOW" = W1
+test "$WINDOW" = W2
 ai_deadline
 test -f "$PROOF_DIR/schema-committed.txt"
 test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials
@@ -733,11 +785,11 @@ printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"
 ```
 
 ```sh
-# step: ai-w1-issuer-rollback
+# step: ai-w2-issuer-rollback
 # readonly: no
 # host: HezLead ONLY, box root; failed initial provisioning, not a rotation
 set -euo pipefail
-test "$WINDOW" = W1
+test "$WINDOW" = W2
 ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null
 if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials; then
  test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
@@ -747,20 +799,20 @@ test "$(ai_ro -Atq --command "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname
 printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt"
 ```
 
-## W2: OAuth code release, ordinary MCP ON, issuance admin activation OFF
+## W3: OAuth code release, ordinary MCP ON, issuance admin activation OFF
 
-W2 keeps ordinary MCP ON with the management overlay. It omits the
+W3 keeps ordinary MCP ON with the management overlay. It omits the
 admin-issuer overlay and leaves the activation environment variable unset. All baseline Compose files must be exactly the two reviewed base and
 management files. No unreviewed override is silently dropped. Store resolved
 config and diagnostics only inside SECRET_STAGE. Source and image identity
 are independently checked; local image ID is an immutable sha256 reference.
 
 ```sh
-# step: ai-w2-preflight
+# step: ai-w3-preflight
 # readonly: no
 # host: box root; config snapshots only
 set -euo pipefail
-test "$WINDOW" = W2
+test "$WINDOW" = W3
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 BASELINE_OAUTH_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_sha"])' "$INPUTS_FILE")
@@ -773,20 +825,20 @@ test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm
 python3 - /etc/commonswarm-oauth/service.env <<'PY'
 import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
-assert not any(r.split('=',1)[0] in ('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE') for r in rows), 'FAIL W2 admin env must be unset; STOP'
+assert not any(r.split('=',1)[0] in ('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE') for r in rows), 'FAIL W3 admin env must be unset; STOP'
 PY
 test ! -e "$NEW_OAUTH" && test ! -L "$NEW_OAUTH"
 mkdir -p "$NEW_OAUTH"
 cp -a "$RELEASE_ROOT/." "$NEW_OAUTH/"
-printf 'PASS W2 baseline Compose exact; schema present; admin activation OFF\n'
+printf 'PASS W3 baseline Compose exact; schema present; admin activation OFF\n'
 ```
 
 ```sh
-# step: ai-w2-build
+# step: ai-w3-build
 # readonly: no
 # host: box root; build once, CPU-capped
 set -euo pipefail
-test "$WINDOW" = W2
+test "$WINDOW" = W3
 ai_deadline
 IMAGE_TAG=commonswarm-oauth:release-$RELEASE_SHA
 CACHED=$(docker image ls --no-trunc --quiet --filter "reference=$IMAGE_TAG")
@@ -805,15 +857,15 @@ test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainer
 printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e \
  'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.existsSync("src/admin-authority.generated.js")) process.exit(1)' >/dev/null 2>&1
-printf 'PASS W2 CPU-capped image; immutable source label; admin activation OFF\n'
+printf 'PASS W3 CPU-capped image; immutable source label; admin activation OFF\n'
 ```
 
 ```sh
-# step: ai-w2-apply
+# step: ai-w3-apply
 # readonly: no
 # host: box root; existing ON configuration, one service recreation
 set -euo pipefail
-test "$WINDOW" = W2
+test "$WINDOW" = W3
 ai_deadline
 test ! -e "$PROOF_DIR/oauth-attempted.txt"
 cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env"
@@ -837,11 +889,11 @@ mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/cu
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
 test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")"
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
-printf 'PASS W2 applied; require all probes before close\n'
+printf 'PASS W3 applied; require all probes before close\n'
 ```
 
 ```sh
-# step: ai-w2-probes
+# step: ai-w3-probes
 # readonly: probe
 # host: Mac outside ingress; protected values never printed
 set -euo pipefail
@@ -854,18 +906,18 @@ for base in ['https://mcp.commonswarm.com']:
             body=r.read(4097)
             assert r.status==200 and len(body)<=4096
             assert json.loads(body)=={'state':'closed'} if method=='GET' else body==b''
-print('PASS W2 GET/HEAD gate closed')
+print('PASS W3 GET/HEAD gate closed')
 PY
 ```
 
-Before W3, the live Caddy may not route `/admin/gate`. W2 must still probe the
-new AS directly at loopback (ai-w2-local-gate); a public 404 is retained as
+Before W4, the live Caddy may not route `/admin/gate`. W3 must still probe the
+new AS directly at loopback (ai-w3-local-gate); a public 404 is retained as
 expected **unavailable ingress**, never treated as gate closed. Run public
-ai-w2-probes only if baseline Caddy already serves that route; W3 makes it
+ai-w3-probes only if baseline Caddy already serves that route; W4 makes it
 mandatory with CORS. Baseline route availability is measured, never guessed.
 
 ```sh
-# step: ai-w2-local-gate
+# step: ai-w3-local-gate
 # readonly: probe
 # host: box root
 set -euo pipefail
@@ -875,15 +927,15 @@ with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r:
     assert r.status==200 and json.loads(r.read(4096))=={'state':'closed'}
 print('PASS local AS /admin/gate closed')
 PY
-printf 'PASS\n' >"$PROOF_DIR/W2-probes.txt"
+printf 'PASS\n' >"$PROOF_DIR/W3-probes.txt"
 ```
 
 ```sh
-# step: ai-w2-rollback
+# step: ai-w3-rollback
 # readonly: no
 # host: box root; deadline does not prevent recovery
 set -euo pipefail
-test "$WINDOW" = W2
+test "$WINDOW" = W3
 install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
 docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
@@ -893,10 +945,10 @@ ln -s "$OLD_OAUTH" /home/commonswarm/oauth/current.admin-issuance
 mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
 test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")"
-printf 'PASS W2 baseline image restored; verify ordinary controls before close\n'
+printf 'PASS W3 baseline image restored; verify ordinary controls before close\n'
 ```
 
-## W3: edge, permanent legacy closure, operator measurement and Caddy
+## W4: edge, permanent legacy closure, operator measurement and Caddy
 
 The canonical admin resource is **api.commonswarm.com/admin**, not an alias on
 the MCP hostname. Define its snippet in the MCP Caddy fragment, import it in
@@ -914,11 +966,11 @@ invalidate before restart and remeasure afterward; failed measurement keeps
 issuance closed. Other edge release paths must use the same marked hooks. Readiness JSON is diagnostic only.
 
 ```sh
-# step: ai-w3-preflight
+# step: ai-w4-preflight
 # readonly: no
 # host: box root; files only, database read-only
 set -euo pipefail
-test "$WINDOW" = W3
+test "$WINDOW" = W4
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 BASELINE_EDGE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_sha"])' "$INPUTS_FILE")
@@ -945,15 +997,15 @@ image=json.loads(subprocess.check_output(['docker','image','inspect',d['baseline
 expected=dict(x.split('=',1) for x in image['Config'].get('Env',[])); expected.update(c['environment'])
 assert expected==dict(x.split('=',1) for x in live['Config']['Env']), 'FAIL effective edge environment drift; STOP'
 PY
-printf 'PASS W3 source, reviewed override, network/memory and ON flags\n'
+printf 'PASS W4 source, reviewed override, network/memory and ON flags\n'
 ```
 
 ```sh
-# step: ai-w3-caddy-candidate
+# step: ai-w4-caddy-candidate
 # readonly: no
 # host: box root; candidate files only; before edge mutation
 set -euo pipefail
-test "$WINDOW" = W3
+test "$WINDOW" = W4
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib
 p=pathlib.Path(__import__('sys').argv[1]); mcp=(p/'mcp.caddy').read_text(); api=(p/'api.caddy').read_text()
@@ -1031,15 +1083,15 @@ assert c.count('import /etc/caddy/sites/*.caddy')==1, 'FAIL Caddy import form; S
 PY
 chmod -R go-rwx "$SECRET_STAGE"
 caddy validate --config "$SECRET_STAGE/Caddyfile" --adapter caddyfile >"$SECRET_STAGE/caddy-validate.log" 2>&1
-printf 'PASS W3 both Caddy candidate routes validated; CORS preserved\n'
+printf 'PASS W4 both Caddy candidate routes validated; CORS preserved\n'
 ```
 
 ```sh
-# step: ai-w3-apply
+# step: ai-w4-apply
 # readonly: no
 # host: box root; issuance close/invalidate precedes every source change
 set -euo pipefail
-test "$WINDOW" = W3
+test "$WINDOW" = W4
 ai_deadline
 test ! -e "$PROOF_DIR/edge-attempted.txt"
 ai_run ai-inputs
@@ -1086,8 +1138,8 @@ expected={}
 for v in ['2026100100000'+str(i) for i in range(1,6)]+['20260928000003','20261002000001']+['2026100300000'+str(i) for i in range(1,6)]:
     files=list((root/'supabase/migrations').glob(v+'_*.sql')); assert len(files)==1
     expected[v]=hashlib.sha256(files[0].read_bytes()).hexdigest()
-sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT commonswarm_oauth.apply_legacy_admin_fence('W3/"+wid+"/ai-w3-apply');\n"
-sql+="UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,approved_edge_release_sha='"+sha+"',auth_contract_version=2,required_migrations='"+json.dumps(expected)+"'::jsonb,measured_edge_release_sha='"+sha+"',measured_edge_target='"+m['target']+"',measured_mount='"+m['mount']+"',measured_image_digest='"+m['image_digest']+"',measured_artifact_digest='"+m['artifact_digest']+"',release_generation=release_generation+1,measured_generation=release_generation+1,measured_at=statement_timestamp(),measurement_evidence_ref='W3/"+wid+"/ai-w3-apply',invalidated_at=NULL WHERE singleton; COMMIT;\n"
+sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT commonswarm_oauth.apply_legacy_admin_fence('W4/"+wid+"/ai-w4-apply');\n"
+sql+="UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,approved_edge_release_sha='"+sha+"',auth_contract_version=2,required_migrations='"+json.dumps(expected)+"'::jsonb,measured_edge_release_sha='"+sha+"',measured_edge_target='"+m['target']+"',measured_mount='"+m['mount']+"',measured_image_digest='"+m['image_digest']+"',measured_artifact_digest='"+m['artifact_digest']+"',release_generation=release_generation+1,measured_generation=release_generation+1,measured_at=statement_timestamp(),measurement_evidence_ref='W4/"+wid+"/ai-w4-apply',invalidated_at=NULL WHERE singleton; COMMIT;\n"
 (p/'measure.sql').write_text(sql)
 PY
 ai_db -q --file /proof/measure.sql >/dev/null
@@ -1101,13 +1153,13 @@ systemctl reload caddy
 ai_run ai-recycle-install
 systemctl start "$EDGE_RECYCLE_TIMER"
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W3 switched and measured; legacy permanently fenced; issuance OFF\n'
+printf 'PASS W4 switched and measured; legacy permanently fenced; issuance OFF\n'
 ```
 
 ```sh
-# step: ai-w3-probes
+# step: ai-w4-probes
 # readonly: probe
-# host: Mac outside ingress, Origin set; then box readback via ai-w3-readback
+# host: Mac outside ingress, Origin set; then box readback via ai-w4-readback
 set -euo pipefail
 python3 - <<'PY'
 import json,urllib.error,urllib.request
@@ -1129,20 +1181,20 @@ PY
 ```
 
 ```sh
-# step: ai-w3-readback
+# step: ai-w4-readback
 # readonly: no
 # host: box root; database read-only, redacted receipt
 set -euo pipefail
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND legacy_closed AND invalidated_at IS NULL AND measured_generation=release_generation AND measured_edge_release_sha=approved_edge_release_sha FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 test "$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')" = 0
 test "$(ai_ro -Atq --command "SELECT NOT EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active') AND NOT has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE') AND (SELECT relforcerowsecurity FROM pg_class WHERE oid='swarm.admin_credentials'::regclass);" )" = t
-printf 'PASS closure/measurement/ledger+checksum gate; issuance OFF\n' >"$PROOF_DIR/W3-readback.txt"
+printf 'PASS closure/measurement/ledger+checksum gate; issuance OFF\n' >"$PROOF_DIR/W4-readback.txt"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.new.caddy"
 cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.new.caddy"
 ```
 
 ```sh
-# step: ai-w3-rollback
+# step: ai-w4-rollback
 # readonly: no
 # host: box root; leave legacy closure permanent and issuance closed
 set -euo pipefail
@@ -1164,11 +1216,11 @@ test "$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)" =
 test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE"
 systemctl start "$EDGE_RECYCLE_TIMER"
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W3 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
+printf 'PASS W4 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
 ```
 
 ```sh
-# step: ai-w3-timer-recovery
+# step: ai-w4-timer-recovery
 # readonly: no
 # host: box root; also available after a failed rollback; not a close receipt
 set -euo pipefail
@@ -1185,7 +1237,7 @@ unit names plus SHA-256 of `systemctl cat <service>` including its final newline
 as `edge_recycle_timer`, `edge_recycle_service`, `edge_recycle_sha256`.
 These are measured inputs, never presumed unit names. ai-box-preflight binds
 and validates them. Each later window must remeasure the unit including the
-drop-in. Install in W3 while the timer is stopped, before restoring it.
+drop-in. Install in W4 while the timer is stopped, before restoring it.
 The hook closes issuance/increments generation in ExecStartPre, before the
 existing restart, then remeasures target, image, health, immutable mounts and
 all archive bytes in ExecStartPost. Only a previously open, still-approved
@@ -1273,9 +1325,9 @@ PY
 ```sh
 # step: ai-recycle-install
 # readonly: no
-# host: HezLead ONLY, box root, W3 with timer stopped
+# host: HezLead ONLY, box root, W4 with timer stopped
 set -euo pipefail
-test "$WINDOW" = W3
+test "$WINDOW" = W4
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" && exit 1
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 RECYCLE_DROPIN=/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
@@ -1316,27 +1368,29 @@ test ! -e "$RECYCLE_DROPIN"
 printf 'PASS recycle drop-in removed; issuance closed; reenable timer only after recovery\n'
 ```
 
-## W4: /app site release
+## W5: /app site release
 
 Use the generalized site plan from the **same RELEASE_SHA**, without weakening
 its source, main-ancestry, baseline, deletion, retention pin, GO, public byte,
 human recovery, secret, rollback and manifest gates. Its exact named inputs are
-additional W4 inputs, not fabricated values. SITE_BASE_SHA must equal this
+additional W5 inputs, not fabricated values. EXPECTED_SITE_SHA must equal this
 window's measured baseline_site_sha. No borrowing a historical ON receipt.
 The approved site plan includes headless view-only QA; before execution HezLead
 must explicitly assign that QA to a worker. Our task authorizes no browser
-launch. W6 consent authorization is not W4 browser authorization.
+launch. W6 consent authorization is not W5 browser authorization.
 
 ```sh
-# step: ai-w4-preflight
+# step: ai-w5-preflight
 # readonly: yes
 # host: Mac /bin/bash 3.2
 set -euo pipefail
-: "${SITE_RELEASE_SHA:?}" "${SITE_BASE_SHA:?}" "${SITE_QA_AUTHORIZATION_FILE:?}"
+: "${SITE_RELEASE_SHA:?}" "${EXPECTED_SITE_SHA:?}" "${SITE_QA_AUTHORIZATION_FILE:?}"
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 test "$SITE_RELEASE_SHA" = "$RELEASE_SHA"
-test "$SITE_BASE_SHA" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_site_sha"])' "$INPUTS_FILE")"
+test "$EXPECTED_SITE_SHA" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_site_sha"])' "$INPUTS_FILE")"
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+# Same-build site-build-qa receipt includes the strengthened ownership helper/close.
+# The companion site plan uses EXPECTED_SITE_SHA and its existing manifest close.
 python3 - "$SITE_QA_AUTHORIZATION_FILE" "$RELEASE_SHA" <<'PY'
 import json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
@@ -1347,23 +1401,23 @@ PY
 ```
 
 ```sh
-# step: ai-w4-reference
+# step: ai-w5-reference
 # readonly: no
 # host: Mac /bin/bash 3.2; invokes one complete reviewed generalized site block
 set -euo pipefail
 : "${SITE_STEP:?}" "${SITE_RELEASE_REPO:?}" "${PREP_DIR:?}"
 case "$SITE_STEP" in
- site2-00-source-checkout|site2-01|site2-00-a-close-ingest|site2-00-build-env|site2-02|site2-03-browser-session-preflight|site2-03|site2-03-pin-previous|site2-03-go-record|site2-04|site2-04-reconcile-failure|site2-05|site2-05-browser-acceptance|site2-06|site2-07-pre-pin-manifest-close|site2-07-manifest-close) ;;
- *) echo 'FAIL W4 unknown site step; STOP' >&2; exit 1;;
+ site2-plan-inputs|site2-00-source-checkout|site2-01|site2-00-a-close-ingest|site2-00-build-env|site2-02|site2-03-browser-session-preflight|site2-03|site2-03-pin-previous|site2-03-go-record|site2-04|site2-04-reconcile-failure|site2-05|site2-05-browser-acceptance|site2-06|site2-07-pre-pin-manifest-close|site2-07-manifest-close) ;;
+ *) echo 'FAIL W5 unknown site step; STOP' >&2; exit 1;;
 esac
 SITE_PLAN=$SITE_RELEASE_REPO/docs/evidence/2026-10-02-site-release/SITE-RELEASE.md
 git show "${SITE_RELEASE_SHA}:docs/evidence/2026-10-02-site-release/SITE-RELEASE.md" >"$PREP_DIR/site-plan.md"
-if test "$SITE_STEP" != site2-00-source-checkout; then cmp -s "$SITE_PLAN" "$PREP_DIR/site-plan.md"; fi
+case "$SITE_STEP" in site2-plan-inputs|site2-00-source-checkout) ;; *) cmp -s "$SITE_PLAN" "$PREP_DIR/site-plan.md";; esac
 python3 - "$PREP_DIR/site-plan.md" "$SITE_STEP" "$PREP_DIR/site-step.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
 found=[b for b in blocks if re.match(r'^# step: '+re.escape(sys.argv[2])+r'(?: —[^\n]*)?\n',b)]
-assert len(found)==1, 'FAIL W4 missing/duplicate marked block; STOP'
+assert len(found)==1, 'FAIL W5 missing/duplicate marked block; STOP'
 pathlib.Path(sys.argv[3]).write_text(found[0])
 PY
 /bin/bash -n "$PREP_DIR/site-step.sh"
@@ -1372,7 +1426,7 @@ PY
 ```
 
 Run the referenced plan's exact normal order from its Run order table, including
-its error reconciliation and close blocks. Do not shortcut to deploy.sh. W4
+its error reconciliation and close blocks. Do not shortcut to deploy.sh. W5
 requires `admin-site-lifecycle`/projection receipts plus the actual browser QA
 receipt and outside GET/HEAD gate closed/CORS probes. Site's automatic rollback
 is its explicit preselected failure path; it never retries deployment. Its
@@ -1380,37 +1434,120 @@ protected build env recovery uses the service-account token file. Any rm refusal
 STOPs cleanup, with the exact path/message retained. The caller does not execute
 the next W window until that referenced site's window is verified closed.
 
-## W5: separate activation approval and executable preconditions
+```sh
+# step: ai-w5-closed
+# readonly: probe
+# host: HezLead Mac; after referenced site manifest and browser ownership close
+set -euo pipefail
+: "${SITE_EVIDENCE:?}" "${INPUTS_FILE:?}"
+python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" <<'PY'
+import datetime,hashlib,json,pathlib,subprocess,urllib.request,sys
+d=json.load(open(sys.argv[1])); site=pathlib.Path(sys.argv[2])
+assert d['window']=='W5' and site.is_absolute() and site.is_dir() and not site.is_symlink()
+close=site/'CLOSE.txt'; assert close.is_file() and not close.is_symlink()
+lines=close.read_text().splitlines()
+assert 'CLOSED=yes' in lines and 'OUTCOME=released' in lines and 'PIN_RELEASED=yes' in lines, 'FAIL site ownership/manifest close not released; STOP'
+manifest=site/'manifest.json'; digest=hashlib.sha256(manifest.read_bytes()).hexdigest()
+assert lines.count('MANIFEST_SHA256='+digest)==1, 'FAIL site close manifest digest; STOP'
+for row in json.loads(manifest.read_text()):
+    rel=pathlib.PurePosixPath(row['path']); assert not rel.is_absolute() and '..' not in rel.parts
+    path=site/rel; assert path.is_file() and not path.is_symlink()
+    assert hashlib.sha256(path.read_bytes()).hexdigest()==row['sha256']
+# Ownership stop/guarded secret cleanup precede CLOSE.txt in the reviewed site plan.
+# Exact site source/main ancestry and strengthened close are checker-gated before release.
+for method in ('GET','HEAD'):
+    req=urllib.request.Request('https://mcp.commonswarm.com/admin/gate',method=method,headers={'Origin':'https://commonswarm.com','User-Agent':'curl/8.7.1'})
+    with urllib.request.urlopen(req,timeout=15) as response:
+        body=response.read(4097)
+        assert response.status==200 and response.headers.get('Access-Control-Allow-Origin')=='*' and 'no-store' in response.headers.get('Cache-Control','')
+        assert (json.loads(body)=={'state':'closed'}) if method=='GET' else body==b''
+client='https://commonswarm.com/oauth/c1-smoke/client.json'
+req=urllib.request.Request(client,headers={'User-Agent':'curl/8.7.1'})
+with urllib.request.urlopen(req,timeout=15) as response:
+    assert response.status==200 and response.headers.get('Content-Type','').split(';')[0]=='application/json'
+    document=json.loads(response.read(4097))
+canonical=json.loads(subprocess.check_output(['node','scripts/admin-smoke.mjs','--print-client-metadata'],text=True))
+assert document==canonical, 'FAIL public canonical CIMD client; STOP'
+with urllib.request.urlopen(urllib.request.Request(canonical['redirect_uris'][0],headers={'User-Agent':'curl/8.7.1'}),timeout=15) as response:
+    assert response.status==200 and response.headers.get('Content-Type','').split(';')[0]=='text/html', 'FAIL public callback page; STOP'
+root=pathlib.Path('/Users/yulanbot/work/hm37-live-release')/(d['release_sha']+'-W5-'+d['window_id'])
+root.mkdir(mode=0o700,parents=True,exist_ok=False)
+(root/'inputs.json').write_text(json.dumps(d)+'\n')
+(root/'W5-closed.json').write_text(json.dumps({'state':'closed','site_ownership_close':'PASS'})+'\n')
+(root/'closed.txt').write_text(datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')+'\n')
+print('PASS W5 site ownership close and outside GET/HEAD gate CLOSED; retain W5 closed.txt for W6')
+PY
+```
 
-Every gate in GATES.json's W5 set is required against the exact combined build.
+## W6 readiness: before any open or activation
+
+Use the canonical BROWSER-READY path on the Mac; the box consumes only the
+nonsecret mode-0600 copy made by ai-w6-readiness-transfer. W5 inputs, closed
+receipt and close timestamp travel together. Never fabricate a close marker.
+
+```sh
+# step: ai-w6-readiness
+# readonly: yes
+# host: Mac or box; required again immediately before activation
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
+python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
+import datetime,json,pathlib,sys
+d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
+assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
+w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
+assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
+t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
+PY
+```
+
+```sh
+# step: ai-w6-readiness-transfer
+# readonly: no
+# host: HezLead Mac; nonsecret transport before W6 box open
+set -euo pipefail
+test "$BROWSER_READY_FILE" = /Users/yulanbot/work/BROWSER-READY
+: "${W5_CLOSED_FILE:?}"
+C1_READY_DEST=/tmp/admin-c1-ready-${WINDOW_ID}
+printf -v C1_REMOTE 'test ! -e %q && mkdir -m 0700 %q' "$C1_READY_DEST" "$C1_READY_DEST"
+ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
+scp -p "$BROWSER_READY_FILE" "$W5_CLOSED_FILE" "${W5_CLOSED_FILE%/*}/inputs.json" "${W5_CLOSED_FILE%/*}/W5-closed.json" "ops@100.115.66.74:$C1_READY_DEST/"
+# Box uses W5_CLOSED_FILE=$C1_READY_DEST/closed.txt and BROWSER_READY_FILE=$C1_READY_DEST/BROWSER-READY.
+```
+
+## W6: separate activation approval and executable preconditions
+
+Every gate in GATES.json's W6 set is required against the exact combined build.
 This includes every lane-8 gate in Composer/Grok findings, the lane-6a timeout
 AbortSignal follow-up and the verified-client registry visibility decision.
 The same-build integration `admin-activation-chain` is a preproduction receipt;
 W6's production C1 receipt follows activation and is not substituted for it.
 
 ```sh
-# step: ai-w5-approval
+# step: ai-w6-activation-approval
 # readonly: yes
-# host: Mac or box; execute before any W5 staging, network or mutation
+# host: Mac or box; execute before any W6 staging, network or mutation
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); a=d.get('approval')
-assert d.get('window')=='W5' and isinstance(a,dict), 'FAIL W5 explicit activation approval required; STOP'
-assert a.get('action')=='activate-admin-issuance' and a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref'), 'FAIL W5 approval identity; STOP'
-assert all(a.get(k)==d.get(k) and isinstance(d.get(k),str) and d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL W5 approval binding; STOP'
-print('W5 approval present; every named proof and measured production prerequisites remain required')
+assert d.get('window')=='W6' and isinstance(a,dict), 'FAIL W6 explicit activation approval required; STOP'
+assert a.get('action')=='activate-admin-issuance-and-smoke' and a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref'), 'FAIL W6 approval identity; STOP'
+assert all(a.get(k)==d.get(k) and isinstance(d.get(k),str) and d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL W6 approval binding; STOP'
+print('W6 activation and consent approval present; every named proof and measured production prerequisites remain required')
 PY
 ```
 
 ```sh
-# step: ai-w5-checks
+# step: ai-w6-activation-checks
 # readonly: no
-# host: box root; DB read-only; ai-gates must have passed for W5
+# host: box root; DB read-only; ai-gates must have passed for W6
 set -euo pipefail
-test "$WINDOW" = W5
-ai_run ai-w5-approval
+test "$WINDOW" = W6
+ai_run ai-w6-readiness
+ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
@@ -1447,11 +1584,11 @@ with tarfile.open(archive) as t:
     for member in t.getmembers():
         if member.isfile(): assert (pathlib.Path(target)/member.name).read_bytes()==t.extractfile(member).read()
 PY
-printf 'PASS W5 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W5-checks.txt"
+printf 'PASS W6 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W6-checks.txt"
 ```
 
 ```sh
-# step: ai-w5-apply
+# step: ai-w6-activation-apply
 # readonly: no
 # host: HezLead, box root; approved activation only
 set -euo pipefail
@@ -1459,21 +1596,22 @@ set -euo pipefail
 python3 - "$INPUTS_FILE" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); a=d.get('approval')
-assert d.get('window')=='W5' and isinstance(a,dict) and a.get('action')=='activate-admin-issuance', 'FAIL W5 activation approval required; STOP'
-assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')), 'FAIL W5 approval binding; STOP'
+assert d.get('window')=='W6' and isinstance(a,dict) and a.get('action')=='activate-admin-issuance-and-smoke', 'FAIL W6 activation approval required; STOP'
+assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')), 'FAIL W6 approval binding; STOP'
 PY
-test "$WINDOW" = W5
+test "$WINDOW" = W6
+ai_run ai-w6-readiness
 ai_run ai-inputs
-ai_run ai-w5-approval
+ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
-test -f "$PROOF_DIR/W5-checks.txt"
+test -f "$PROOF_DIR/W6-checks.txt"
 test ! -e "$PROOF_DIR/activation-attempted.txt"
 OAUTH_TARGET=/home/commonswarm/oauth/releases/$RELEASE_SHA
 test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_TARGET"
 test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
 test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
-# Both hooks are marked complete blocks installed in W3; no generated operator script.
+# Both hooks are marked complete blocks installed in W4; no generated operator script.
 systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 /usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
@@ -1516,11 +1654,11 @@ PY
 ai_db -q --file /proof/activate.sql >/dev/null
 systemctl start "$EDGE_RECYCLE_TIMER"
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W5 overlay/env/cutover active; require outside gate probe before close\n'
+printf 'PASS W6 overlay/env/cutover active; require outside gate probe before close\n'
 ```
 
 ```sh
-# step: ai-w5-probes
+# step: ai-w6-activation-probes
 # readonly: probe
 # host: Mac outside ingress, then HezLead box receipt
 set -euo pipefail
@@ -1537,18 +1675,18 @@ PY
 ```
 
 ```sh
-# step: ai-w5-readback
+# step: ai-w6-activation-readback
 # readonly: no
-# host: HezLead box root; after outside ai-w5-probes PASS
+# host: HezLead box root; after outside ai-w6-activation-probes PASS
 set -euo pipefail
-test "$WINDOW" = W5
+test "$WINDOW" = W6
 test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AND lane8_evidence_digest IS NOT NULL AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 test "$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')" = 0
-printf 'PASS W5 measured release, overlay/env and public gate open\n' >"$PROOF_DIR/W5-probes.txt"
+printf 'PASS W6 measured release, overlay/env and public gate open\n' >"$PROOF_DIR/W6-probes.txt"
 ```
 
 ```sh
-# step: ai-w5-rollback
+# step: ai-w6-activation-rollback
 # readonly: no
 # host: HezLead box root; remove activation env/overlay and close cutover
 set -euo pipefail
@@ -1576,15 +1714,15 @@ with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r:
 PY
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 systemctl start "$EDGE_RECYCLE_TIMER"
-printf 'PASS W5 env/overlay removed; DB closed; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+printf 'PASS W6 env/overlay removed; DB closed; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
 ```
 
 ```sh
 # step: ai-emergency-close
 # readonly: no
-# host: HezLead box root; W5–W7 recovery, never reopens opaque authentication
+# host: HezLead box root; W6–W7 recovery, never reopens opaque authentication
 set -euo pipefail
-ai_run ai-w5-rollback
+ai_run ai-w6-activation-rollback
 printf 'Issuance closed; existing grants require the W6 human revoke/approval withdrawal or separately approved incident reconciliation\n'
 ```
 
@@ -1597,26 +1735,35 @@ through the human fence: its key/token state is in memory. No browser starts
 from these blocks. HezLead's assigned browser worker performs fresh full-account
 second confirmation only after `/Users/yulanbot/work/BROWSER-READY` exists.
 
-Two observed contracts conflict with TASK-2 and require HezLead to settle
-before W6 opens. The requested `/Users/yulanbot/work/dcr-rt/authorize.url` and
-`/private/tmp/dcr-rt-callback.url` are refused by the runner's privatePath guard:
-all private handoffs must be directly in a fresh secret directory, with no
-symlink parent. The plan below uses `$C1_SECRET_STAGE/authorize.url` and
-`$C1_SECRET_STAGE/callback.url`; the requested dcr-rt directory is only a
-nonsecret pointer rendezvous. This correction needs an explicit path ruling.
-Also `approve_admin_client` accepts only client_id/verification_version and
-stores account-owner approval, with no workspace scope. Its account envelope
-rejects workspace_id. The runner creates a workspace after full-account consent;
-its grant can cover future owned workspaces. A smoke-only client ceiling and
-prompt withdrawal reduce residue but do not make approval workspace-scoped.
-Do not claim otherwise: a separate scope ruling is required. ai-w6-preflight
-refuses absent rulings. No window runs the incompatible original paths/command.
+D8 keeps every runner file inside its own fresh secret directory. W6 publishes
+only the 0600 nonsecret `/Users/yulanbot/work/dcr-rt/c1-smoke.pointer`: absolute
+authorize_url_file and callback_file paths, consent_choices (exact existing
+smoke workspace name, scopes from the canonical runner request validated
+against the spec, home=false, full_account=true because workspaces:create
+requires it), and expires_at UTC. The new workspace created by the runner is
+accepted residue; it is not the existing workspace selected for consent.
 
-`C1_INPUTS_FILE` is a regular absolute nonsecret JSON input supplied by HezLead:
-release_sha/window_id/plan_sha256; owner_user_id and existing smoke_workspace_id;
-verification_version, metadata_digest; a target_file (protected JSON url/anonKey),
-owner file-store state_directory; and path_revision_approval plus
-account_approval_revision, each a nonempty explicit HezLead prompt reference.
+D9 approval is account-wide for this owner/client/version. Approve immediately
+before the assigned worker consents; in this same W6 withdraw that approval
+and revoke the grant/family. Full-account consent covers future owned spaces;
+the smoke scope ceiling does not make approval workspace-scoped. Record
+approval_at, withdrawn_at, revoked_at and the actual refused follow-up call.
+
+`C1_INPUTS_FILE` is a regular absolute nonsecret JSON supplied by HezLead:
+release_sha/window_id/plan_sha256; owner_user_id, existing smoke_workspace_id
+and its exact smoke_workspace_name; verification_version, metadata_digest;
+target_file and owner file-store state_directory. No extra revision approvals.
+W5 invokes the companion site's existing site2-07-manifest-close with its
+strengthened browser ownership helper; ai-w5-closed verifies that plan's actual
+CLOSE.txt (CLOSED=yes, OUTCOME=released, PIN_RELEASED=yes and manifest digest).
+The same-build site-build-qa gate requires the new ownership implementation.
+
+`W5_CLOSED_FILE` names the verified W5 close; `BROWSER_READY_FILE` must name
+`/Users/yulanbot/work/BROWSER-READY` and be newer than that close. Copy the
+nonsecret readiness file to the box for ai-open and revalidation, retaining
+its modification time. The box input names that copy; the Mac preflight checks
+the canonical path. `keep_open` is optional in INPUTS_FILE, defaults false;
+true requires a separate bound `keep_open_approval` action keep-admin-issuance-open.
 The verification row is an external reviewed input prepared by the release
 role, not created by owner approval. PASS10 pins lowercase SHA-256 of
 `canonicalAdminJson(fetched_document)` via the production `adminDigest`.
@@ -1633,7 +1780,7 @@ set -euo pipefail
 python3 - "$INPUTS_FILE" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); a=d.get('approval')
-assert d.get('window')=='W6' and isinstance(a,dict) and a.get('action')=='admin-smoke-human-consent', 'FAIL W6 human consent assignment required; STOP'
+assert d.get('window')=='W6' and isinstance(a,dict) and a.get('action')=='activate-admin-issuance-and-smoke', 'FAIL W6 human consent assignment required; STOP'
 assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) and isinstance(d.get(k),str) and d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL W6 approval binding; STOP'
 PY
 : "${C1_INPUTS_FILE:?C1 approval inputs absent; STOP}"
@@ -1642,16 +1789,28 @@ import json,pathlib,re,sys
 d=json.load(open(sys.argv[1])); p=pathlib.Path(sys.argv[2])
 assert p.is_absolute() and p.is_file() and not p.is_symlink(), 'FAIL C1 regular input required; STOP'
 c=json.loads(p.read_text())
+assert set(c)==set('release_sha window_id plan_sha256 owner_user_id smoke_workspace_id smoke_workspace_name verification_version metadata_digest target_file state_directory'.split()), 'FAIL exact C1 keys; STOP'
 assert all(c.get(k)==d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL C1 window binding; STOP'
 for k in ['owner_user_id','smoke_workspace_id']: assert re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}',c.get(k,'')), 'FAIL C1 owner/workspace input; STOP'
 assert type(c.get('verification_version')) is int and c['verification_version']>0
 assert re.fullmatch('[0-9a-f]{64}',c.get('metadata_digest',''))
-for k in ['path_revision_approval','account_approval_revision']:
-    assert isinstance(c.get(k),str) and re.fullmatch('[A-Za-z0-9/_.:-]{1,200}',c[k]), 'FAIL C1 '+k+' required; STOP'
+assert isinstance(c.get('smoke_workspace_name'),str) and 0<len(c['smoke_workspace_name'])<=200 and not any(ord(x)<32 for x in c['smoke_workspace_name']), 'FAIL exact smoke workspace name; STOP'
 for k in ['target_file','state_directory']:
     path=pathlib.Path(c.get(k,'')); assert path.is_absolute() and path.exists() and not path.is_symlink(), 'FAIL C1 owner session input; STOP'
-print('PASS C1 assignment, corrected-path/scope rulings and reviewed approval inputs')
+print('PASS C1 assignment, D8 private paths and D9 account-wide approval inputs')
 PY
+: "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
+test "$BROWSER_READY_FILE" = /Users/yulanbot/work/BROWSER-READY
+python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
+import datetime,json,pathlib,sys
+d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
+assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
+w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
+assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
+t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
+PY
+
 ```
 
 ```sh
@@ -1677,7 +1836,7 @@ set -euo pipefail
 : "${C1_TRANSFER_DIRECTION:?upload or download}" "${C1_TRANSFER_FILE:?}" "${C1_PROOF_DIR:?}"
 C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
 case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
- upload:C1-inputs.json|upload:agent.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
+ upload:C1-inputs.json|upload:agent.json|upload:agent-final.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
   C1_UPLOAD=/tmp/admin-c1-${WINDOW_ID}-${C1_TRANSFER_FILE}
   test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
   printf -v C1_REMOTE 'test ! -e %q' "$C1_UPLOAD"
@@ -1686,7 +1845,7 @@ case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
   printf -v C1_REMOTE 'sudo -n install -o root -g root -m 0600 %q %q' "$C1_UPLOAD" "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
   ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
   ;;
- download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt)
+ download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt|download:C1-finish.json)
   test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
   printf -v C1_REMOTE 'sudo -n cat %q' "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
   ( set -C; umask 077; ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
@@ -1698,8 +1857,8 @@ esac
 Use this exact transfer block to upload C1-inputs.json (set the box's
 C1_INPUTS_FILE to that derived proof path), download C1-client-check.txt before
 owner approval, upload agent.json before SQL audit (C1_AGENT_RECEIPT on box),
-download C1-audit.json before human revoke, and download C1-fence.txt before
-reporting. After report/cleanup, upload C1.json and C1-cleanup.txt for W6 close.
+download C1-audit.json before human revoke, and download C1-fence.txt and C1-finish.json before
+reporting. Upload client-withdraw.json before revoke and agent-final.json after the same runner completes, before finish; after report/cleanup, upload C1.json and C1-cleanup.txt for W6 close.
 The immutable C1.json and its measured digest become W7's C1_REPORT_FILE input.
 This allowlist excludes private authorize/callback/key/token/session files.
 
@@ -1716,10 +1875,10 @@ test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AN
 test "$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')" = 0
 python3 - "$C1_INPUTS_FILE" "$PROOF_DIR/client-check.sql" <<'PY'
 import json,pathlib,re,sys
-c=json.load(open(sys.argv[1])); v=c['verification_version']; h=c['metadata_digest']; owner=c['owner_user_id']; ws=c['smoke_workspace_id']
+c=json.load(open(sys.argv[1])); v=c['verification_version']; h=c['metadata_digest']; owner=c['owner_user_id']; ws=c['smoke_workspace_id']; name=c['smoke_workspace_name'].replace("'","''")
 assert type(v) is int and v>0 and re.fullmatch('[0-9a-f]{64}',h)
 for value in [owner,ws]: assert re.fullmatch(r'[0-9a-fA-F-]{36}',value)
-sql="SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='https://commonswarm.com/oauth/c1-smoke/client.json' AND verification_version="+str(v)+" AND metadata_digest='"+h+"' AND active AND withdrawn_at IS NULL AND registration_source='cimd' AND application_type='web' AND redirect_uris=ARRAY['https://commonswarm.com/oauth/c1-smoke/callback']::text[] AND scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND full_account_eligible AND NOT delegation_eligible AND pkce_s256_tested AND dpop_tested AND redirect_tested AND origin_control_verified) AND EXISTS(SELECT 1 FROM swarm.memberships WHERE user_id='"+owner+"'::uuid AND workspace_id='"+ws+"'::uuid AND role='owner' AND revoked_at IS NULL);\n"
+sql="SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='https://commonswarm.com/oauth/c1-smoke/client.json' AND verification_version="+str(v)+" AND metadata_digest='"+h+"' AND active AND withdrawn_at IS NULL AND registration_source='cimd' AND application_type='web' AND redirect_uris=ARRAY['https://commonswarm.com/oauth/c1-smoke/callback']::text[] AND scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND full_account_eligible AND NOT delegation_eligible AND pkce_s256_tested AND dpop_tested AND redirect_tested AND origin_control_verified) AND EXISTS(SELECT 1 FROM swarm.memberships WHERE user_id='"+owner+"'::uuid AND workspace_id='"+ws+"'::uuid AND role='owner' AND revoked_at IS NULL) AND EXISTS(SELECT 1 FROM swarm.workspaces WHERE workspace_id='"+ws+"'::uuid AND name='"+name+"');\n"
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY
 test "$(ai_ro -Atq --file /proof/client-check.sql)" = t
@@ -1734,6 +1893,9 @@ set -euo pipefail
 : "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_CLIENT_ACTION:?approve or withdraw}"
 case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
 # Execute ai-w6-preflight and retain box C1-client-check.txt first.
+# approve: only after ai-w6-start/ai-w6-pointer, immediately before consent.
+# withdraw: after audit, immediately before human revoke in this same W6.
+if test "$C1_CLIENT_ACTION" = approve; then test -f /Users/yulanbot/work/dcr-rt/c1-smoke.pointer; fi
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
 node --import tsx --input-type=module - "$C1_INPUTS_FILE" "$C1_PROOF_DIR" "$C1_CLIENT_ACTION" <<'JS'
 import { readFile, writeFile } from 'node:fs/promises';
@@ -1761,7 +1923,7 @@ try {
  const command={kind:action==='approve'?'approve_admin_client':'withdraw_admin_client_approval',client_id:doc.client_id,verification_version:c.verification_version,...(action==='withdraw'?{reason_code:'smoke_cleanup'}:{})};
  const r=await fetch(commandEndpoint(target),{method:'POST',headers:{authorization:`Bearer ${human.accessToken}`,apikey:target.anonKey,'content-type':'application/json'},body:JSON.stringify(withClientBuild({command_id:commandId,client_version:CLIENT_PROTOCOL_VERSION,stream:{kind:'account'},resource:'https://api.commonswarm.com/admin',command})),signal:AbortSignal.timeout(15000)});
  const result=await r.json(); if(!r.ok || result.status!=='accepted') throw Error();
- await writeFile(`${proof}/client-${action}.json`,JSON.stringify({status:'PASS',command_id:commandId,client_id:doc.client_id,verification_version:c.verification_version,metadata_digest:digest})+'\n',{flag:'wx',mode:0o600});
+ await writeFile(`${proof}/client-${action}.json`,JSON.stringify({status:'PASS',command_id:commandId,client_id:doc.client_id,verification_version:c.verification_version,metadata_digest:digest,...(action==='approve'?{approval_at:new Date().toISOString()}:{withdrawn_at:new Date().toISOString()})})+'\n',{flag:'wx',mode:0o600});
  console.log('PASS owner client command; canonical document/version bound; no credentials emitted');
 } catch { console.error('FAIL owner client command; outcome may be unknown; reconcile saved request ID; STOP'); process.exitCode=1; }
 JS
@@ -1770,29 +1932,80 @@ JS
 ```sh
 # step: ai-w6-start
 # readonly: no
-# host: HezLead Mac, after preflight/client approve; no browser launch
+# host: HezLead Mac, after preflight/client-check; owner approval follows pointer publication; no browser launch
 set -euo pipefail
 : "${C1_PROOF_DIR:?}"
-test -f "$C1_PROOF_DIR/client-approve.json"
+test -f "$C1_PROOF_DIR/C1-client-check.txt"
+# Start runner and publish handoff before approving; approval is immediately before consent.
 test -f /Users/yulanbot/work/BROWSER-READY
 C1_SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$C1_SECRET_STAGE"
 printf '%s\n' "$C1_SECRET_STAGE" >"$C1_PROOF_DIR/secret-stage.path"
-# Nonsecret pointer only; never write the URL/code/key/tokens here.
-C1_POINTER=/Users/yulanbot/work/dcr-rt/admin-c1-${WINDOW_ID}.pointer
-( set -C; umask 077; printf '%s\n' "$C1_SECRET_STAGE" >"$C1_POINTER" )
 node scripts/admin-smoke.mjs \
  --authorize-url-file "$C1_SECRET_STAGE/authorize.url" \
  --callback-file "$C1_SECRET_STAGE/callback.url" \
- --receipt-file "$C1_PROOF_DIR/agent.json" \
+ --receipt-file "$C1_SECRET_STAGE/agent.json" \
  --verify-fenced --fence-file "$C1_SECRET_STAGE/fenced" \
- >"$C1_PROOF_DIR/agent-status.log" 2>&1 &
+ >"$C1_SECRET_STAGE/agent-status.log" 2>&1 &
 C1_RUNNER_PID=$!
+C1_POINTER=/Users/yulanbot/work/dcr-rt/c1-smoke.pointer
 printf '%s\n' "$C1_RUNNER_PID" >"$C1_PROOF_DIR/runner.pid"
 ```
 
+```sh
+# step: ai-w6-pointer
+# readonly: no
+# host: HezLead Mac; runner underway, before owner approval/consent
+set -euo pipefail
+: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_INPUTS_FILE:?}"
+node scripts/admin-smoke.mjs --dry-run >"$C1_SECRET_STAGE/request-plan.json"
+python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_INPUTS_FILE" "$INPUTS_FILE" docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md <<'PY'
+import datetime,json,os,pathlib,re,sys
+stage,pointer,cfile,inputs,spec=map(pathlib.Path,sys.argv[1:])
+assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and stage.is_dir() and not stage.is_symlink() and stage.resolve()==stage and stage.stat().st_mode & 0o777==0o700
+assert str(pointer)=='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer' and not pointer.exists() and not pointer.is_symlink() and pointer.parent.resolve()==pointer.parent
+c=json.loads(cfile.read_text()); d=json.loads(inputs.read_text()); request=json.loads((stage/'request-plan.json').read_text())
+assert request['client_id']=='https://commonswarm.com/oauth/c1-smoke/client.json' and request['resource']=='https://api.commonswarm.com/admin'
+scopes=[v for v in request['scope'].split() if v not in ('openid','offline_access')]
+assert scopes and len(scopes)==len(set(scopes)) and all(re.fullmatch('[a-z]+:[a-z]+',v) and v in spec.read_text() for v in scopes)
+name=c['smoke_workspace_name']
+assert isinstance(name,str) and 0<len(name)<=200 and not any(ord(x)<32 for x in name)
+assert not re.search(r'(?i)bearer|https?://|eyJ[A-Za-z0-9_-]+\.|(?:token|secret|password)=',name), 'FAIL secret-shaped pointer value; STOP'
+expiry=datetime.datetime.fromisoformat(d['window_end_utc'].replace('Z','+00:00'))
+assert expiry>datetime.datetime.now(datetime.timezone.utc)
+r={'authorize_url_file':str(stage/'authorize.url'),'callback_file':str(stage/'callback.url'),
+   'consent_choices':{'workspace_name':name,'scopes':scopes,'home':False,'full_account':'workspaces:create' in scopes},
+   'expires_at':d['window_end_utc']}
+fd=os.open(pointer,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as output: output.write(json.dumps(r,sort_keys=True)+'\n')
+print('PASS nonsecret D8 pointer: private absolute paths, exact consent choices, UTC expiry')
+PY
+```
+
+```sh
+# step: ai-w6-agent-receipt
+# readonly: no
+# host: HezLead Mac; export only redacted receipt from runner secret directory
+set -euo pipefail
+python3 - "$C1_SECRET_STAGE/agent.json" "$C1_PROOF_DIR/agent.json" <<'PY'
+import json,pathlib,re,sys
+source,out=map(pathlib.Path,sys.argv[1:]); r=json.loads(source.read_text())
+assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}/agent.json',str(source)) and not source.is_symlink()
+assert re.fullmatch('[0-9a-f]{16}',r['run_id'])
+# These are the runner's nonsecret evidence fields; no claims, headers, URLs or tokens.
+keys=['ok','run_id','workspace','steps','refused_after_fence','failed_step','failure_code']
+public={k:r[k] for k in keys}
+assert not re.search(r'(?i)access_token|refresh_token|code_verifier|authorization|eyJ[A-Za-z0-9_-]+\.',json.dumps(public)), 'FAIL private receipt data; STOP'
+assert not out.is_symlink()
+out.write_text(json.dumps(public)+'\n'); out.chmod(0o600)
+if r['ok'] is True:
+    final=out.parent/'agent-final.json'; assert not final.exists() and not final.is_symlink()
+    final.write_text(json.dumps(public)+'\n'); final.chmod(0o600)
+PY
+```
+
 HezLead's browser worker reads the pointer, waits for the 0600 authorize file,
-performs fresh consent with the exact smoke capabilities and full-account
+refuses an expired pointer, follows consent_choices exactly (including workspace, scopes and home), performs fresh full-account
 second confirmation, then atomically writes the full callback URL as 0600 to
 the secret callback path without logging it. This is a separate browser-worker
 assignment; this plan never launches the installed Chrome app. HezLead starts
@@ -1833,6 +2046,8 @@ PY
 # host: HezLead Mac, OWNER's file-store CLI session; human revoke verb D6
 set -euo pipefail
 : "${C1_PROOF_DIR:?}" "${C1_SECRET_STAGE:?}"
+# Withdraw owner client approval first, then revoke this grant/family.
+test -f "$C1_PROOF_DIR/client-withdraw.json"
 # Copy the nonsecret C1-audit.json from the box into C1_PROOF_DIR first.
 C1_GRANT_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["grant_id"])' "$C1_PROOF_DIR/C1-audit.json")
 C1_REVOKE_REQUEST_ID=$(node -e 'console.log(require("node:crypto").randomUUID())')
@@ -1855,14 +2070,17 @@ node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
  --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
  >"$C1_PROOF_DIR/human-revoke.json" 2>"$C1_PROOF_DIR/human-revoke-status.log"
 python3 - "$C1_PROOF_DIR/human-revoke.json" "$C1_PROOF_DIR/agent.json" "$C1_SECRET_STAGE/fenced" <<'PY'
-import json,os,pathlib,sys
+import datetime,json,os,pathlib,sys
 r=json.load(open(sys.argv[1])); assert r['state']=='revoked'
+r['revoked_at']=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+pathlib.Path(sys.argv[1]).write_text(json.dumps(r)+'\n')
 a=json.load(open(sys.argv[2])); p=pathlib.Path(sys.argv[3]); assert not p.exists() and not p.is_symlink()
 fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as f: f.write(a['run_id']+'\n')
 PY
 # Same runner performs --verify-fenced with a still-live token. Never restart it.
 wait "$C1_RUNNER_PID"
+# Execute ai-w6-agent-receipt again after wait, before final report.
 ```
 
 ```sh
@@ -1888,7 +2106,7 @@ Mac proof directory. Do not edit the runner receipt to invent human results.
 The receipt below combines independently observed audit, human and agent proof.
 The workspace remains **`c1-smoke-<runid> (test, archive me)`**, accepted residue
 (D4), with a 10-second `/app` archive step on Tom's morning list. No archive is
-claimed. W7/W4b follow-up: a separately reviewed site release removes
+claimed. W7/W5b follow-up: a separately reviewed site release removes
 `site/public/oauth/c1-smoke/client.json` (or returns 404); verify public absence
 and keep the callback free of secrets. Never leave a long-lived approved client.
 
@@ -1906,13 +2124,17 @@ try {
  const a=JSON.parse(await readFile(`${root}/agent.json`,'utf8'));
  const audit=JSON.parse(await readFile(`${root}/C1-audit.json`,'utf8'));
  const revoke=JSON.parse(await readFile(`${root}/human-revoke.json`,'utf8'));
+ const approval=JSON.parse(await readFile(`${root}/client-approve.json`,'utf8'));
+ const finish=JSON.parse(await readFile(`${root}/C1-finish.json`,'utf8'));
  const withdrawal=JSON.parse(await readFile(`${root}/client-withdraw.json`,'utf8'));
  const fence=await readFile(`${root}/C1-fence.txt`,'utf8');
  if(!a.ok || a.refused_after_fence?.refusal_code==null || ![401,403].includes(a.refused_after_fence.http_status) || revoke.state!=='revoked' || withdrawal.status!=='PASS' || !fence.startsWith('PASS') || !a.workspace.accepted_residue || !Object.values(audit.audit_counts).every(n=>Number.isSafeInteger(n)&&n>0)) throw Error();
- const r={release_sha:d.release_sha,status:'PASS',cleanup:true,audit_kinds:['init','list','read','action'],audit_counts:audit.audit_counts,grant_revoked:true,refresh_family_tombstoned:true,live_access_refused:true,client_approval_withdrawn:true,accepted_residue:a.workspace.name,site_document_removal:'W7/W4b next reviewed site release'};
+ if(!approval.approval_at || !withdrawal.withdrawn_at || !revoke.revoked_at || !(Date.parse(approval.approval_at)<=Date.parse(withdrawal.withdrawn_at) && Date.parse(withdrawal.withdrawn_at)<=Date.parse(revoke.revoked_at))) throw Error();
+ if(finish.state!==(d.keep_open===true?'open':'closed') || finish.explicit_keep_open!==(d.keep_open===true)) throw Error();
+ const r={approval_at:approval.approval_at,withdrawn_at:withdrawal.withdrawn_at,revoked_at:revoke.revoked_at,refused_follow_up:a.refused_after_fence,final_gate:finish.state,release_sha:d.release_sha,status:'PASS',cleanup:true,audit_kinds:['init','list','read','action'],audit_counts:audit.audit_counts,grant_revoked:true,refresh_family_tombstoned:true,live_access_refused:true,client_approval_withdrawn:true,accepted_residue:a.workspace.name,approval_scope:'account-wide owner/client/version',site_document_removal:'W7/W5b next reviewed site release'};
  await writeFile(`${root}/C1.json`,JSON.stringify(r,null,2)+'\n',{flag:'wx',mode:0o600});
- const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W4b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
- await writeFile('/Users/yulanbot/work/hm37-live-release/C1-SMOKE-REPORT.md',text,{flag:'wx',mode:0o600});
+ const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nApproval scope: account-wide owner/client/version. Approval at ${approval.approval_at}; withdrawn at ${withdrawal.withdrawn_at}; revoked at ${revoke.revoked_at}.\n\nRefused follow-up: HTTP ${a.refused_after_fence.http_status}, ${a.refused_after_fence.refusal_code}. Final gate: ${finish.state}.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W5b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
+ await writeFile(`${root}/C1-SMOKE-REPORT.md`,text,{flag:'wx',mode:0o600});
 } catch { console.error('FAIL C1 report evidence incomplete; STOP'); process.exitCode=1; }
 JS
 ```
@@ -1929,17 +2151,56 @@ import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); pointer=pathlib.Path(sys.argv[2]); saved=pathlib.Path(sys.argv[3])
 assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p)) and p.is_dir() and not p.is_symlink() and p.resolve()==p and p.stat().st_mode & 0o777==0o700
 assert saved.read_text().strip()==str(p)
-assert re.fullmatch(r'/Users/yulanbot/work/dcr-rt/admin-c1-[A-Za-z0-9]{6}\.pointer',str(pointer)) and not pointer.is_symlink() and pointer.read_text().strip()==str(p)
+assert str(pointer)=='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer' and not pointer.is_symlink()
+if pointer.exists():
+    assert pointer.is_file() and pointer.stat().st_mode & 0o777==0o600
+    r=__import__('json').loads(pointer.read_text()); assert r['authorize_url_file']==str(p/'authorize.url') and r['callback_file']==str(p/'callback.url')
 PY
 rm -r -- "$C1_SECRET_STAGE" || { printf 'FAIL cleanup refused %s; STOP\n' "$C1_SECRET_STAGE" >&2; exit 1; }
-rm -- "$C1_POINTER" || { printf 'FAIL cleanup refused %s; STOP\n' "$C1_POINTER" >&2; exit 1; }
+if test -e "$C1_POINTER"; then
+ rm -- "$C1_POINTER" || { printf 'FAIL cleanup refused %s; STOP\n' "$C1_POINTER" >&2; exit 1; }
+fi
 printf 'PASS private handoffs removed; redacted receipts and accepted residue retained\n' >"$C1_PROOF_DIR/C1-cleanup.txt"
 ```
+
+```sh
+# step: ai-w6-finish
+# readonly: no
+# host: HezLead box root; after approval withdrawal, grant/family revoke and refused follow-up
+set -euo pipefail
+test "$WINDOW" = W6
+ai_run ai-inputs
+test -f "$PROOF_DIR/C1-fence.txt" && test -f "$PROOF_DIR/client-withdraw.json"
+python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
+assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403) and r['refused_after_fence']['refusal_code'], 'FAIL actual refused follow-up; STOP'
+assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STOP'
+PY
+if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
+ ai_run ai-w6-activation-probes
+ printf '{"state":"open","explicit_keep_open":true}\n' >"$PROOF_DIR/C1-finish.json"
+else
+ ai_run ai-w6-activation-rollback
+ python3 - <<'PY'
+import json,urllib.request
+for method in ('GET','HEAD'):
+    req=urllib.request.Request('https://mcp.commonswarm.com/admin/gate',method=method,headers={'Origin':'https://commonswarm.com','User-Agent':'curl/8.7.1'})
+    with urllib.request.urlopen(req,timeout=15) as response:
+        body=response.read(4097)
+        assert response.status==200 and response.headers.get('Access-Control-Allow-Origin')=='*' and 'no-store' in response.headers.get('Cache-Control','')
+        assert (json.loads(body)=={'state':'closed'}) if method=='GET' else body==b''
+print('PASS W6 default deactivation: public GET/HEAD gate CLOSED')
+PY
+ printf '{"state":"closed","explicit_keep_open":false}\n' >"$PROOF_DIR/C1-finish.json"
+fi
+```
+
 
 ## W7: separately approved retirement proof
 
 Lane 5 already removes runtime mint/admission/callback in the release build,
-and W3 performs the separately approved terminal DB fence before W5. W7 must
+and W4 performs the separately approved terminal DB fence before W6. W7 preserves the measured OPEN/CLOSED state left by W6 and must
 never be interpreted as allowing legacy authentication until smoke is done.
 Its job is final retirement attestation after C1; no DROP of history or reserve
 rollback. Historical rows remain for human recovery. No optional v1 delegation.
@@ -1995,12 +2256,13 @@ import pathlib,re,sys
 s=pathlib.Path(sys.argv[1]).read_text()
 assert not re.search(r'export\s+(?:async\s+)?function\s+handleAdminRuntimeCommand\b',s), 'FAIL runtime export survives; STOP'
 PY
+ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;' >"$PROOF_DIR/retirement-gate-state.txt"
 printf 'PASS W7 legacy runtime and DB auth permanently unreachable; history retained\n' >"$PROOF_DIR/retirement.txt"
 ```
 
-W7/W4b site cleanup follow-up: make a separately reviewed commit removing
+W7/W5b site cleanup follow-up: make a separately reviewed commit removing
 `site/public/oauth/c1-smoke/client.json`, release the resulting landed SHA with
-the W4 site procedure, then retain a public 404 probe receipt. This plan never
+the W5 site procedure, then retain a public 404 probe receipt. This plan never
 removes a tracked file inside an immutable release or rebuilds an old SHA.
 
 ## Close and abort cleanup
@@ -2008,7 +2270,7 @@ removes a tracked file inside an immutable release or rebuilds an old SHA.
 Before forward close run ai-ordinary-probes, the window's specific probes and
 ai-live-controls phase after. Before recovered close use phase recovery. Supply
 `CLOSE_RESULT=success|recovered` only after those proofs; it is an outcome input,
-not permission to skip probes. Failed recovery cannot close. W6 creates nothing while its explicit rulings or approval inputs are absent.
+not permission to skip probes. Failed recovery cannot close. W6 refuses opening while browser readiness or activation/consent approval is absent.
 Recovered close requires emergency env/overlay/DB close and ordinary controls.
 
 ```sh
@@ -2020,19 +2282,22 @@ set -euo pipefail
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
-  W1) test -f "$PROOF_DIR/schema-committed.txt" && test -f "$PROOF_DIR/W1-probes.txt" && test -f "$PROOF_DIR/issuer-credential.txt";;
-  W2) test -f "$PROOF_DIR/W2-probes.txt";;
-  W3) test -f "$PROOF_DIR/W3-readback.txt";;
-  W5) test -f "$PROOF_DIR/W5-probes.txt";;
-  W6) test -f "$PROOF_DIR/C1.json" && test -f "$PROOF_DIR/C1-cleanup.txt";;
+  W1) test -f "$PROOF_DIR/backup-gate.json";;
+  W2) test -f "$PROOF_DIR/schema-committed.txt" && test -f "$PROOF_DIR/W2-probes.txt" && test -f "$PROOF_DIR/issuer-credential.txt";;
+  W3) test -f "$PROOF_DIR/W3-probes.txt";;
+  W4) test -f "$PROOF_DIR/W4-readback.txt";;
+  W6) test -f "$PROOF_DIR/C1.json" && test -f "$PROOF_DIR/C1-cleanup.txt" && test -f "$PROOF_DIR/C1-finish.json";;
   W7) test -f "$PROOF_DIR/retirement.txt";;
   *) echo 'FAIL no implemented forward close for this window; STOP' >&2; exit 1;;
  esac
 fi
 test ! -e "$PROOF_DIR/closed.txt"
-if test "$CLOSE_RESULT" = success && { test "$WINDOW" = W5 || test "$WINDOW" = W6 || test "$WINDOW" = W7; }; then
+if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6 && test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
+ ai_run ai-inputs
  test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-else
+elif test "$WINDOW" = W7; then
+ test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = "$(cat "$PROOF_DIR/retirement-gate-state.txt")"
+elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 fi
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
@@ -2084,7 +2349,7 @@ rm -r -- "$PREP_DIR" || { printf 'FAIL cleanup refused %s; report exact guard me
 test ! -e "$PREP_DIR"
 ```
 
-Archives on the box are nonsecret and retained for W5 remeasurement. Do not
+Archives on the box are nonsecret and retained for W6 remeasurement. Do not
 remove immutable release/proof directories; future retention is a separate
 assignment. Every close is recorded in the operator's LOG.md with actual
 start/end, identities, gate/probe receipts, approved rollback decision and

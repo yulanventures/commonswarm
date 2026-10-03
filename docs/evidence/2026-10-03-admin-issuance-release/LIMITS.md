@@ -1,67 +1,64 @@
-# Execution limits and remaining gaps
+# Execution limits and remaining inputs
 
-Prepared and locally syntax/contract-tested; no production window has run.
-Every baseline, timer/service unit and unit digest remains a validated input
-measured from the box. No operational SHA literal or assumed live identity is
-embedded in the plan. HezLead supplies exact landed release archives, historical
-migration archives/backfill evidence, backup/restore status, complete independent
-same-build gate receipts and live ordinary-controls receipts before opening.
-These are live-run inputs; static tests cannot supply or replace them.
+Prepared and locally tested; no production window has run. HezLead owns the
+independent cross-family refute and all live operations. The worker has not
+contacted production, dispatched Actions, started Docker, used a browser/GUI,
+read a keychain, or fetched credentials. Test secrets stayed in fresh 0700
+/private/tmp/anvil-secret.XXXXXX directories and were removed with guarded rm.
+HOME was not changed. Reserve SQL remains verbatim.
 
-The old implementation gaps are closed in the merged tree: activation uses the
-issuer coordinator plus MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1, the activation-only
-issuer overlay, SQL cutover and measured release. W2 omits the overlay and leaves
-the env unset; W5 installs it and proves GET/HEAD open; rollback closes SQL,
-removes env/overlay and proves closed. Gate cancellation and the registry decision
-remain required same-build controls, not obsolete hard-false STOPs.
+W1 verifies a fresh database/object backup and completed isolated restore
+receipt. W2 applies M1–M5, including 20261003000005, the ledger/checksum pairs
+and historical checksum backfills in one transaction, then provisions the issuer
+credential on the box. The credential is 0440 root:986, readable by the AS group;
+it is never printed or copied off the box. Initial provisioning refuses an
+existing credential. Rotation needs a separately reviewed window.
 
-HezLead's W1 credential block generates the password on the box, uses file/stdin
-SQL, writes the AS JSON credential at 0440 root:986 and verifies a TLS role login.
-Rollback disables login/clears the new password/removes the new file. No password
-leaves the box or enters 1Password this window. Existing credentials cause this
-initial provisioning block to refuse; rotation needs its own reviewed window.
+W3 releases OAuth with the admin env unset and issuer overlay absent. W4
+releases edge /admin, Caddy GET/HEAD /admin/gate, terminal legacy closure, and
+the measured recycle drop-in. W5 releases the site with the CIMD document and
+callback and records GET/HEAD gate CLOSED after the site and browser ownership
+close. W1–W5 do not depend on BROWSER-READY or consent. Additive schema, audit,
+tombstones and historical evidence survive rollback.
 
-HezLead's W3 recycle drop-in binds exact measured units and installs pre-restart
-invalidation plus post-restart remeasurement of health, target, image, mounts and
-archive bytes. Generation changes prevent stale post-hooks from reopening after
-rollback. Drop-in rollback closes issuance before guarded removal/daemon reload.
-Generic later edge releases must use these hooks and update their release inputs
-in their own reviewed plan; this preparation does not authorize an unrelated edge
-release or modify another plan.
+Integration inputs: this lane base does not include the companion site's
+strengthened ownership helper and EXPECTED_SITE_SHA input, or the lane-11
+published smoke client/callback. The plan references their combined release,
+not this preparation tip as an executable release SHA. The site uses the
+existing site2-07-manifest-close; its actual CLOSE.txt and manifest are checked
+by ai-w5-closed. No separate ownership-close step or invented receipt is needed.
+HezLead integrates the companion lanes and refutes the combined landed SHA.
 
-W6 has two newly observed task-versus-code conflicts. They cannot honestly be
-reported as “only needs live run” without a HezLead ruling:
+W6 contains activation and C1. The Mac checks the canonical BROWSER-READY file
+is newer than the bound W5 close; the box repeats the check on the nonsecret
+transport copy before opening or activating. Activation still requires every
+same-build gate, exact measured release and migration checksums. No static
+receipt substitutes for the live prerequisites or production C1.
 
-1. TASK-2 requires /Users/yulanbot/work/dcr-rt/authorize.url and
-   /private/tmp/dcr-rt-callback.url. scripts/admin-smoke.mjs privatePath requires
-   their parent to be a fresh /private/tmp/anvil-secret.XXXXXX directory and
-   rejects symlink parents. The setup rule likewise requires secret staging there.
-   Proposed complete blocks use private authorize/callback/fence files and a
-   nonsecret dcr-rt pointer. W6 requires path_revision_approval before opening.
-2. TASK-2 asks for workspace-scoped approve_admin_client. The production command
-   accepts client_id and verification_version only; its owner approval is account
-   scoped. The account envelope rejects workspace_id. The runner creates a new
-   workspace through full-account consent, which can cover future owned spaces.
-   The plan describes this accurately, limits the client ceiling to smoke scopes,
-   withdraws approval afterward and requires account_approval_revision first.
-   No source implementation was changed or scope control invented in this lane.
+D8 resolves the handoff path conflict: the runner reads and writes only its
+fresh secret directory; the release exports redacted receipts. The fixed 0600
+~/work/dcr-rt/c1-smoke.pointer contains only absolute authorize/callback file
+paths, exact existing workspace name, canonical request scopes checked against
+the spec, home=false, required full-account choice and UTC expiry. The browser
+worker follows only those choices and refuses expiry. The pointer and secret
+directory are removed at W6 close. There is no path_revision_approval input.
 
-All other W6 pieces are prepared: canonical fetched-CIMD digest/version validation,
-owner file-store approval, BROWSER-READY consent handoff, runner --verify-fenced,
-read-only SQL D3 counts for the exact smoke grant/family, human revoke verb,
-family-tombstone readback, client approval withdrawal, guarded cleanup and redacted
-C1-SMOKE-REPORT.md. The runner demonstrates a refused still-live access call after
-human revoke; SQL proves the refresh family tombstone. It does not perform a
-post-revoke refresh request, and the receipt never claims one. Workspace
-“c1-smoke-<runid> (test, archive me)” is accepted residue (D4), with Tom's /app
-archive follow-up. W7 is retained and requires real C1 evidence and separate
-retirement approval. W7/W4b schedules a later reviewed site commit/release removing
-site/public/oauth/c1-smoke/client.json and measuring public 404.
+D9 resolves approval scope honestly: approve_admin_client is account-wide for
+owner/client/version, immediately before consent. In the same W6, withdraw
+approval, revoke the smoke grant/family and measure a refused still-live access
+call plus the refresh-family tombstone. The receipt includes approval_at,
+withdrawn_at, revoked_at and the refused follow-up call. It does not claim a
+post-revoke refresh request. There is no account_approval_revision input.
 
-No live C1, schema/role/credential change, SSH, Docker, deployment, restart,
-browser/GUI, keychain, 1Password or GitHub Actions operation was performed by this
-worker. HezLead owns independent cross-family review and every live operation.
-The distinct tests/admin-release-plan.test.ts filename avoids collision with
-main's unrelated tests/plan-baseline-inputs.test.ts; both test sets must survive
-when integration later merges main. Reserve SQL siblings remain verbatim and
-additive schema, tombstones, audit and history are retained on rollback.
+W6 defaults to removing the env/overlay, closing SQL cutover and proving public
+GET/HEAD CLOSED after smoke. Keeping OPEN requires keep_open=true and a separate
+exact release/window/plan-bound keep-admin-issuance-open approval. W7's
+retirement proof stays separate and preserves W6's measured gate state.
+The runner-created c1-smoke-<runid> (test, archive me) workspace is accepted
+residue: Tom archives it in /app. W7/W5b is a later reviewed site release that
+removes the test client document and measures public 404.
+
+HezLead must supply exact landed archives, baseline measurements, historical
+migration archives/backfill evidence, backup/restore status and independent
+same-build/live ordinary-control receipts. RESULT-3.md lists every W1–W5 input.
+No live-run PASS or deployment claim is made by these local tests.
