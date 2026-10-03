@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PassThrough } from "node:stream";
+import { ADMIN_TOKEN_INGRESS } from "./provider-admin-pin.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { ADMIN_AS_ISSUANCE_ENABLED, AdminConsentError } from "./admin-consent.js";
 import { AdminTransactionCoordinator } from "./admin-transaction.js";
@@ -8,30 +8,6 @@ import { AdminTokenLifecycle, requireMeasuredAdminRelease } from "./admin-lifecy
 import { hashOpaque, parseCookies, SESSION_COOKIE } from "./browser-security.js";
 
 const hash = value => createHash("sha256").update(value).digest("base64url");
-async function tokenBody(request, maxBytes, timeoutMs) {
-  if (String(request.headers["content-type"] ?? "").split(";")[0] !== "application/x-www-form-urlencoded") {
-    throw new AdminConsentError("invalid_request", 400);
-  }
-  const chunks = []; let size = 0;
-  const timeout = setTimeout(() => request.destroy(), timeoutMs); timeout.unref();
-  try {
-    for await (const chunk of request) {
-      size += chunk.length;
-      if (size > maxBytes) throw new AdminConsentError("request_too_large", 413);
-      chunks.push(chunk);
-    }
-  } finally { clearTimeout(timeout); }
-  const bytes = Buffer.concat(chunks), form = new URLSearchParams(bytes.toString("utf8"));
-  for (const key of ["grant_type", "code", "refresh_token", "client_id", "resource", "scope", "code_verifier"]) {
-    if (form.getAll(key).length > 1) throw new AdminConsentError("invalid_request", 400);
-  }
-  const replay = new PassThrough();
-  for (const key of ["method", "url", "headers", "rawHeaders", "httpVersion", "httpVersionMajor", "httpVersionMinor", "socket", "connection"]) {
-    replay[key] = request[key];
-  }
-  replay.end(bytes);
-  return { request: replay, params: Object.fromEntries(form) };
-}
 function json(response, status, body, nonce) {
   response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store",
     ...(nonce ? { "DPoP-Nonce": nonce } : {}) });
@@ -40,16 +16,24 @@ function json(response, status, body, nonce) {
 
 // The sole public ingress into dormant AS lifecycle code. Candidate/consume
 // observations are server reads; a requested resource never relabels a family.
-export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid,
-  maxBodyBytes = 65536, requestTimeoutMs = 10000 }) {
+export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid }) {
   const coordinator = issuerPool ? new AdminTransactionCoordinator(issuerPool) : null;
   const lifecycle = new AdminTokenLifecycle({ activeKid });
-  return async (original, response) => {
+  const dispatch = async (original, response, tokenContext, tokenOperation) => {
     let request = original, params, candidate, ingress, continuationUid;
     const url = new URL(request.url, "https://mcp.commonswarm.com");
     try {
       if (url.pathname === "/token" && request.method === "POST") {
-        ({ request, params } = await tokenBody(request, maxBodyBytes, requestTimeoutMs));
+        if (!tokenContext) {
+          request[ADMIN_TOKEN_INGRESS] = (ctx, operation) => dispatch(original, response, ctx, operation);
+          return handler(request, response);
+        }
+        params = tokenContext.oidc.params;
+        const resources = Array.isArray(params.resource) ? params.resource : [params.resource];
+        if (!resources.includes(ADMIN_RESOURCE)) return tokenOperation();
+        tokenContext.respond = false;
+        if (!ADMIN_AS_ISSUANCE_ENABLED || !coordinator) throw new AdminConsentError("admin_issuance_disabled", 503);
+        if (params.resource !== ADMIN_RESOURCE) throw new AdminConsentError("invalid_target", 400);
         const model = params.grant_type === "refresh_token" ? "RefreshToken" : "AuthorizationCode";
         const value = model === "RefreshToken" ? params.refresh_token : params.code;
         if (typeof value === "string") {
@@ -114,7 +98,10 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
           if (!candidate) throw new AdminConsentError("invalid_grant", 400);
           await lifecycle.prepareContinuation(candidate, continuationUid);
         }
-        await handler(request, response);
+        if (tokenOperation) {
+          await tokenOperation();
+          json(response, tokenContext.status, tokenContext.body);
+        } else await handler(request, response);
         await lifecycle.finishContinuation();
       }, capability);
       if (result.outcome !== "committed") await recordAdminSecurityFailure(issuerPool, "transaction_failed");
@@ -125,4 +112,5 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
       }
     }
   };
+  return (request, response) => dispatch(request, response);
 }

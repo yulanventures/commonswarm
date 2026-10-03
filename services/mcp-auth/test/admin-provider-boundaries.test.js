@@ -78,8 +78,10 @@ test("admin-scopes-resource-only: provider resource scopes are separate from OID
   await assert.rejects(adapter.upsert("bad",{resources:{[RESOURCE]:"mcp",[ADMIN_RESOURCE]:"admin:read"}},60),{error:"invalid_target"});
   await assert.rejects(adapter.upsert("admin",{resources:{[ADMIN_RESOURCE]:"admin:read"}},60),{code:"admin_transaction_required"});
   await adapter.upsert("mcp",{resources:{[RESOURCE]:"mcp"}},60);
+  await adapter.upsert("native-mcp",{resource:[RESOURCE]},60);
+  await assert.rejects(adapter.upsert("multi-resource",{resource:[RESOURCE,ADMIN_RESOURCE]},60),{error:"invalid_target"});
   let mutations=0;
-  const boundAdapter=createPostgresAdapter({query:async()=>({rows:[{grant_class:"delegated_admin"}]}),
+  const boundAdapter=createPostgresAdapter({query:async()=>({rows:[{payload:{resource:ADMIN_RESOURCE,grantId:"bound-admin-family"}}]}),
     connect:async()=>{++mutations;throw new Error("unexpected mutation connection");}})("RefreshToken");
   await assert.rejects(boundAdapter.upsert("new-unlabelled-admin-refresh",{grantId:"bound-admin-family"},60),
     {code:"admin_transaction_required"});
@@ -98,4 +100,32 @@ test("admin-issuance-closed-before-cutover: admin authorization/code/refresh ref
     assert.equal(response.status,503);
   }
   assert.equal(typeof (await f.tokens()).refresh_token,"string");
+});
+
+test("ordinary /token delegates the original unread HTTP stream without an admin lookup", async t => {
+  const body = "grant_type=refresh_token&resource=https%3A%2F%2Fmcp.commonswarm.com%2Fmcp&refresh_token=transport-control";
+  let delegated = false, lookups = 0, originalStream, unread, received = "";
+  const server = createServer((original, response) => createAdminHttpHandler({
+    runtimePool: { query: async () => { ++lookups; return { rows: [] }; } }, issuerPool: null,
+    handler: async request => {
+      originalStream = request === original;
+      unread = request.readable;
+      for await (const chunk of request) received += chunk.toString();
+      delegated = true;
+      response.writeHead(200);
+      response.end("delegated");
+    },
+  })(original, response));
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const result = await fetch(`http://127.0.0.1:${server.address().port}/token`, {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(await result.text(), "delegated");
+  assert.equal(originalStream, true, "the provider must receive the IncomingMessage, not a replay stream");
+  assert.equal(unread, true, "ingress must leave body parsing to the provider");
+  assert.equal(received, body);
+  assert.equal(delegated, true);
+  assert.equal(lookups, 0, "ordinary token ingress must not query admin state");
 });
