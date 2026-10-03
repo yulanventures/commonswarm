@@ -23,6 +23,9 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const challenge = verifier => createHash('sha256').update(verifier).digest('base64url');
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const exact = (v, keys) => object(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
+const utc = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) &&
+  Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+const EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
 const idOK = id => typeof id === 'string' && /^[A-Za-z0-9_-]{24,200}$/.test(id);
 class Failure extends Error {
   constructor(expected, got) { super('control_failed'); this.expected = expected; this.got = got; }
@@ -31,10 +34,10 @@ const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new
 
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 600_000, totalMs: 1_300_000 };
-  demand(['consent', 'window'].includes(o.command), 'consent or window', 'invalid subcommand');
-  const common = ['release-sha', 'phase', 'cred-dir', 'out'];
+  demand(['consent', 'window', 'final-cleanup'].includes(o.command), 'consent, window or final-cleanup', 'invalid subcommand');
+  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['phase'])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
-    ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'])];
+    o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
   const timeouts = { 'request-timeout-ms': ['requestMs', 10_000], 'consent-timeout-ms': ['consentMs', 600_000], 'total-timeout-ms': ['totalMs', 1_300_000] };
   const seen = new Set();
   for (let i = 0; i < args.length; i++) {
@@ -50,9 +53,9 @@ function options(args) {
     }
   }
   demand(/^[a-f0-9]{40}$/.test(o['release-sha'] ?? ''), '40 hex release SHA', 'invalid SHA');
-  demand((o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
+  demand(o.command === 'final-cleanup' || (o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
   const required = [...common, ...(o.command === 'consent' ? ['pointer-dir', ...(o.phase === 'post-W5' ? ['prior-consent'] : [])] :
-    ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'])];
+    o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
   demand(required.every(k => typeof o[k] === 'string' && o[k].length > 0), 'all required options', 'missing option');
   if (o.command === 'window') demand(/^W[1-7]$/.test(o.window) && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W1..W7 and 6 alnum window ID');
   for (const k of allowed.filter(k => k.endsWith('-dir') || k.endsWith('-profile') || ['out', 'prior-consent', 'consent-receipt'].includes(k))) {
@@ -106,9 +109,11 @@ function consentReceipt(bytes, release, producer, phase) {
     exact(r.controls, ['cimd_consent', 'dcr_registration_consent']) && Object.values(r.controls).every(v => v === true) &&
     Array.isArray(r.dcr_client_ids) && r.dcr_client_ids.length > 0 && r.dcr_client_ids.every(idOK), 'release-bound consent schema');
   demand(r.consent_phase === 'pre-W1' ? r.cleanup === null :
-    exact(r.cleanup, ['grants_revoked', 'dcr_clients_removed']) && r.cleanup.grants_revoked === true &&
-    Array.isArray(r.cleanup.dcr_clients_removed) && r.cleanup.dcr_clients_removed.every(idOK) &&
-    r.dcr_client_ids.every(id => r.cleanup.dcr_clients_removed.includes(id)), 'consent cleanup schema');
+    exact(r.cleanup, ['grants_revoked', 'dcr_clients_expiring']) && r.cleanup.grants_revoked === true &&
+    Array.isArray(r.cleanup.dcr_clients_expiring) && r.cleanup.dcr_clients_expiring.length > 0 &&
+    new Set(r.cleanup.dcr_clients_expiring.map(c => c.client_id)).size === r.cleanup.dcr_clients_expiring.length &&
+    r.cleanup.dcr_clients_expiring.every(c => exact(c, ['client_id', 'expires_after']) && idOK(c.client_id) &&
+      utc(c.expires_after) && Date.parse(c.expires_after) > Date.now() && !r.dcr_client_ids.includes(c.client_id)), 'consent cleanup schema');
   return r;
 }
 function endpoint(value) {
@@ -148,7 +153,12 @@ async function boundedBody(response) {
 function plan(o) {
   const requests = [{ method: 'GET', url: `${ISSUER}/.well-known/oauth-authorization-server` },
     { method: 'GET', url: `${ISSUER}/.well-known/oauth-protected-resource/mcp` }];
-  if (o.command === 'consent') {
+  const fence = { method: 'POST', url: '<revocation endpoint if advertised; otherwise token endpoint>',
+    body: 'revoke bound CIMD grant; rotation/replay fallback, then require refresh invalid_grant' };
+  const expiry = { method: 'REPORT', body: 'leave recorded DCR clients to expire; journal last registration/token time + 30 days; no deletion' };
+  if (o.command === 'final-cleanup') requests.push(fence, expiry);
+  else if (o.command === 'consent') {
+    if (o.phase === 'post-W5') requests.push({ ...fence, grant: 'pre-W1' }, expiry);
     const flow = clientId => [
       { method: 'HANDOFF', url: '<authorize endpoint>', client_id: clientId, pkce: 'S256',
         files: '<leg>-authorize-url.txt, <leg>-callback-url.txt (0600)', expected: 'human consent; bound full callback' },
@@ -159,11 +169,6 @@ function plan(o) {
     ];
     requests.push({ method: 'GET', url: CLIENT }, ...flow(CLIENT),
       { method: 'POST', url: '<registration endpoint>', body: 'fresh public web client' }, ...flow('<fresh DCR id>'));
-    if (o.phase === 'post-W5') requests.push(
-      { method: 'POST', url: '<revocation endpoint if advertised; otherwise token endpoint>',
-        body: 'revoke each retained grant; refresh rotation/replay fallback, then verify invalid_grant' },
-      { method: 'GET', url: '<authorize endpoint for every journal/prior/current DCR id>',
-        expected: 'invalid_client proves id unavailable; interaction redirect means still live and cleanup fails (no management API)' });
   }
   else requests.push(
     { method: 'POST', url: '<token endpoint>', body: 'refresh retained CIMD grant' },
@@ -218,7 +223,14 @@ async function run(o) {
     demand(exact(journal, ['release_sha', 'grants']) && journal.release_sha === release && Array.isArray(journal.grants) &&
       journal.grants.every(g => exact(g, ['client_id', 'refresh_token', 'consent_sha256', 'revoked']) &&
         (g.client_id === CLIENT || idOK(g.client_id)) && typeof g.refresh_token === 'string' && /^[a-f0-9]{64}$/.test(g.consent_sha256) && typeof g.revoked === 'boolean'), 'same-release grant journal');
-    demand(exact(ids, ['release_sha', 'ids']) && ids.release_sha === release && Array.isArray(ids.ids) && ids.ids.every(idOK), 'same-release DCR ids journal');
+    demand(exact(ids, ['release_sha', 'ids']) && ids.release_sha === release && Array.isArray(ids.ids) &&
+      ids.ids.every(c => exact(c, ['client_id', 'last_used_at']) && idOK(c.client_id) && utc(c.last_used_at) && Date.parse(c.last_used_at) <= Date.now()) &&
+      new Set(ids.ids.map(c => c.client_id)).size === ids.ids.length, 'same-release timestamped DCR ids journal');
+    if (o.command === 'final-cleanup' || (o.command === 'consent' && o.phase === 'post-W5')) {
+      demand(journalBytes && idsBytes && ids.ids.length > 0, 'retained grant and complete DCR journals', 'missing journal');
+      demand(journal.grants.filter(g => g.client_id !== CLIENT).every(g => ids.ids.some(c => c.client_id === g.client_id)),
+        'complete consent DCR journal', 'missing journal ids');
+    }
     const saveGrants = async () => { await writePrivate(journalPath, JSON.stringify(journal) + '\n', !journalBytes); journalBytes = true; };
     const saveIds = async () => { await writePrivate(idsPath, JSON.stringify(ids) + '\n', !idsBytes); idsBytes = true; };
     const request = async (url, { status = 200, ...init } = {}) => {
@@ -242,8 +254,8 @@ async function run(o) {
         grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: SCOPE };
       const c = await request(registerUrl, { method: 'POST', status: 201, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       demand(idOK(c.client_id), 'safe DCR client id');
-      demand(!ids.ids.includes(c.client_id), 'fresh DCR client id', 'duplicate registration id');
-      ids.ids.push(c.client_id); await saveIds(); // Retain id even if echoed metadata is wrong.
+      demand(!ids.ids.some(entry => entry.client_id === c.client_id), 'fresh DCR client id', 'duplicate registration id');
+      ids.ids.push({ client_id: c.client_id, last_used_at: new Date().toISOString() }); await saveIds(); // Retain id even if echoed metadata is wrong.
       demand(c.token_endpoint_auth_method === 'none' && !c.client_secret && !c.registration_access_token &&
         c.application_type === body.application_type && JSON.stringify(c.redirect_uris) === JSON.stringify(body.redirect_uris) &&
         JSON.stringify(c.grant_types) === JSON.stringify(body.grant_types) && JSON.stringify(c.response_types) === JSON.stringify(body.response_types) && c.scope === SCOPE,
@@ -271,17 +283,60 @@ async function run(o) {
     };
     const refresh = async g => tokenContract(await request(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
       refresh_token: g.refresh_token, resource: RESOURCE })));
+    const boundGrant = bytes => {
+      const g = journal.grants.find(g => g.client_id === CLIENT && g.consent_sha256 === sha256(bytes));
+      demand(g, 'retained CIMD grant bound to consent receipt', 'missing grant'); return g;
+    };
+    const expiring = entries => entries.map(c => ({ client_id: c.client_id,
+      expires_after: new Date(Date.parse(c.last_used_at) + EXPIRY_MS).toISOString() }));
+    const completeIds = clientIds => demand(clientIds.every(id => ids.ids.some(c => c.client_id === id)),
+      'complete receipt DCR journal', 'missing journal ids');
+    const fence = async g => {
+      const rejected = async refreshToken => {
+        const response = await transport(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
+          refresh_token: refreshToken, resource: RESOURCE }));
+        demand([200, 400].includes(response.status) && response.headers.get('content-type')?.split(';')[0].trim() === 'application/json',
+          'HTTP 400 JSON invalid_grant proof', `HTTP ${response.status} or wrong content type`);
+        const result = json(await boundedBody(response));
+        if (response.status !== 400 || result.error !== 'invalid_grant') {
+          // Retain rotation if a dishonest revocation still issued a token.
+          if (typeof result.refresh_token === 'string' && result.refresh_token.length > 0 && result.refresh_token.length <= 8192) {
+            g.refresh_token = result.refresh_token; g.revoked = false; await saveGrants();
+          }
+          throw new Failure('revoked refresh rejected with invalid_grant', 'revocation unproven');
+        }
+      };
+      if (!g.revoked) {
+        if (discovery.revocation_endpoint) {
+          const r = await transport(endpoint(discovery.revocation_endpoint), form({ client_id: g.client_id, token: g.refresh_token, token_type_hint: 'refresh_token' }));
+          demand([200, 204].includes(r.status), 'grant revocation success', `HTTP ${r.status}`); await boundedBody(r);
+        } else {
+          // This issuer's rotation/replay path fences the entire grant family.
+          const old = g.refresh_token, rotated = await refresh(g);
+          demand(rotated.refresh_token !== old, 'rotating refresh credential', 'unchanged refresh token');
+          g.refresh_token = rotated.refresh_token; await saveGrants(); await rejected(old);
+        }
+      }
+      await rejected(g.refresh_token); g.revoked = true; await saveGrants();
+    };
     let receipt;
     if (o.command === 'consent') {
       leg = 'consent_files'; await directory(o['pointer-dir']);
       for (const name of ['cimd', 'dcr']) for (const suffix of ['authorize-url', 'callback-url']) await absent(join(o['pointer-dir'], `${name}-${suffix}.txt`));
-      let prior;
+      let cleanup = null;
       if (o.phase === 'post-W5') {
-        prior = consentReceipt(await privateRead(o['prior-consent']), release, producer, 'pre-W1');
-        demand(prior.dcr_client_ids.every(id => ids.ids.includes(id)), 'complete prior DCR journal');
+        leg = 'cleanup';
+        const priorBytes = await privateRead(o['prior-consent']);
+        const prior = consentReceipt(priorBytes, release, producer, 'pre-W1');
+        completeIds(prior.dcr_client_ids);
+        cleanup = { grants_revoked: true, dcr_clients_expiring: expiring(ids.ids) };
+        demand(cleanup.dcr_clients_expiring.every(c => Date.parse(c.expires_after) > Date.now()),
+          'future DCR expiration deadlines', 'journal deadline elapsed');
+        // Prove the old grant is fenced BEFORE either new consent handoff.
+        await fence(boundGrant(priorBytes));
       }
       receipt = { kind: 'c1-consent', release_sha: release, consent_phase: o.phase, measured_at: '', producer_sha256: producer,
-        controls: { cimd_consent: false, dcr_registration_consent: false }, dcr_client_ids: [], cleanup: null };
+        controls: { cimd_consent: false, dcr_registration_consent: false }, dcr_client_ids: [], cleanup };
       const newGrants = [];
       for (const name of ['cimd', 'dcr']) {
         leg = name === 'cimd' ? 'cimd_consent' : 'dcr_registration_consent';
@@ -294,49 +349,38 @@ async function run(o) {
         while (Date.now() < end) { bytes = await privateRead(callbackPath, true); if (bytes?.length) break; await sleep(100); }
         demand(bytes?.length, 'callback within consent timeout', 'handoff timeout');
         const code = callback(bytes, a.state);
-        const t = tokenContract(await request(tokenUrl, form({ grant_type: 'authorization_code', client_id: clientId, redirect_uri: REDIRECT,
-          code, code_verifier: a.verifier, resource: RESOURCE })));
+        const issued = await request(tokenUrl, form({ grant_type: 'authorization_code', client_id: clientId, redirect_uri: REDIRECT,
+          code, code_verifier: a.verifier, resource: RESOURCE }));
+        if (name === 'dcr') {
+          ids.ids.find(c => c.client_id === clientId).last_used_at = new Date().toISOString(); await saveIds();
+        }
+        const t = tokenContract(issued);
         const g = { client_id: clientId, refresh_token: t.refresh_token, consent_sha256: '0'.repeat(64), revoked: false };
         journal.grants.push(g); newGrants.push(g); await saveGrants();
         await mcp(t); receipt.controls[leg] = true;
       }
-      if (o.phase === 'post-W5') {
-        leg = 'cleanup';
-        const priorHash = sha256(await privateRead(o['prior-consent']));
-        demand(journal.grants.some(g => g.client_id === CLIENT && g.consent_sha256 === priorHash), 'retained pre-W1 grant family');
-        for (const g of journal.grants) {
-          if (g.revoked) continue;
-          if (discovery.revocation_endpoint) {
-            const r = await transport(endpoint(discovery.revocation_endpoint), form({ client_id: g.client_id, token: g.refresh_token, token_type_hint: 'refresh_token' }));
-            demand([200, 204].includes(r.status), 'grant revocation success', `HTTP ${r.status}`); await boundedBody(r);
-          } else {
-            // The current issuer disables RFC 7009; its tested rotation/replay
-            // path revokes the whole family. Keep the winner until verified.
-            const old = g.refresh_token, rotated = await refresh(g);
-            g.refresh_token = rotated.refresh_token; await saveGrants();
-            const replay = await request(tokenUrl, { ...form({ grant_type: 'refresh_token', client_id: g.client_id, refresh_token: old, resource: RESOURCE }), status: 400 });
-            demand(replay.error === 'invalid_grant', 'refresh replay family fence');
-          }
-          const check = await request(tokenUrl, { ...form({ grant_type: 'refresh_token', client_id: g.client_id, refresh_token: g.refresh_token, resource: RESOURCE }), status: 400 });
-          demand(check.error === 'invalid_grant', 'revoked replacement refresh rejected'); g.revoked = true; await saveGrants();
-        }
-        const allIds = [...new Set([...prior.dcr_client_ids, ...receipt.dcr_client_ids, ...ids.ids])], removed = []; let live = 0;
-        // There is no RFC 7592 API in this issuer. Probe resolver expiry using
-        // a valid authorization request, never treat arbitrary 4xx as expiry.
-        for (const id of allIds) {
-          const r = await transport(authorization(authorize, id).url, { headers: { Accept: 'application/json' } });
-          const b = await boundedBody(r); const type = r.headers.get('content-type')?.split(';')[0].trim();
-          const expired = r.status === 400 && (type === 'application/json' ? json(b).error === 'invalid_client' :
-            type === 'text/html' && /<pre><strong>error<\/strong>:\s*invalid_client<\/pre>/.test(b.toString('utf8')));
-          if (expired) removed.push(id); else live++;
-        }
-        demand(live === 0, 'every DCR id removed or proven expired', `no DCR removal API; ${live} ids not proven expired`);
-        receipt.cleanup = { grants_revoked: true, dcr_clients_removed: removed };
-      }
+      if (cleanup) demand(receipt.dcr_client_ids.every(id => !cleanup.dcr_clients_expiring.some(c => c.client_id === id)),
+        'cleanup disjoint from new consent ids', 'own ids in cleanup');
       receipt.measured_at = new Date().toISOString();
       const bytes = JSON.stringify(receipt, null, 2) + '\n';
+      if (cleanup) leg = 'cleanup';
+      consentReceipt(Buffer.from(bytes), release, producer, o.phase);
       for (const g of newGrants) g.consent_sha256 = sha256(bytes);
       await saveGrants(); receiptBytes = bytes;
+    } else if (o.command === 'final-cleanup') {
+      leg = 'final_cleanup';
+      const bytes = await privateRead(o['consent-receipt']);
+      const consent = consentReceipt(bytes, release, producer, 'post-W5');
+      completeIds([...consent.dcr_client_ids, ...consent.cleanup.dcr_clients_expiring.map(c => c.client_id)]);
+      for (const c of consent.cleanup.dcr_clients_expiring) {
+        const entry = ids.ids.find(entry => entry.client_id === c.client_id);
+        demand(expiring([entry])[0].expires_after === c.expires_after, 'unchanged prior DCR expiration journal', 'journal time mismatch');
+      }
+      await fence(boundGrant(bytes));
+      const earlier = new Set(consent.cleanup.dcr_clients_expiring.map(c => c.client_id));
+      receipt = { kind: 'c1-final-cleanup', release_sha: release, measured_at: new Date().toISOString(), producer_sha256: producer,
+        grants_revoked: true, dcr_clients_expiring: expiring(ids.ids.filter(c => !earlier.has(c.client_id))) };
+      receiptBytes = JSON.stringify(receipt, null, 2) + '\n';
     } else {
       leg = 'consent_binding'; const bytes = await privateRead(o['consent-receipt']);
       const expectedPhase = ['W6', 'W7'].includes(o.window) || (o.window === 'W5' && o.phase !== 'before') ? 'post-W5' : 'pre-W1';
@@ -410,7 +454,7 @@ async function run(o) {
     }
   }
   if (receiptBytes && !process.exitCode) {
-    try { await writePrivate(o.out, receiptBytes); process.stdout.write('PASS live ordinary controls; receipt written\n'); }
+    try { await writePrivate(o.out, receiptBytes); process.stdout.write(`PASS live ordinary controls; ${o.command === 'final-cleanup' ? 'final-cleanup report' : 'receipt'} written\n`); }
     catch { process.stderr.write('FAIL receipt: output expected fresh 0600 receipt got file failure; STOP\n'); process.exitCode = 1; }
   }
 }

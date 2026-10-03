@@ -30,6 +30,7 @@ async function fixture(t, config = {}) {
   const root = await mkdtemp('/private/tmp/anvil-secret.'); await chmod(root, 0o700);
   const creds = join(root, 'credentials'), human = join(root, 'human'), seat = join(root, 'seat');
   for (const dir of [creds, human, seat]) await mkdir(dir, { mode: 0o700 });
+  const clientTimes = new Map();
   const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
   const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
   const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
@@ -50,7 +51,7 @@ async function fixture(t, config = {}) {
       const raw = Buffer.concat(chunks).toString('utf8');
       const p = req.headers['content-type']?.startsWith('application/x-www-form-urlencoded') ? new URLSearchParams(raw) : null;
       const body = raw && !p ? JSON.parse(raw) : null;
-      events.push({ path: url.pathname, method: req.method, grant: p?.get('grant_type'), client: p?.get('client_id'), rpc: body?.method, command: body?.command?.kind });
+      const event = { at: Date.now(), path: url.pathname, method: req.method, grant: p?.get('grant_type'), client: p?.get('client_id'), rpc: body?.method, command: body?.command?.kind }; events.push(event);
       if (config.failPath === url.pathname) return emit(res, 500, { error: secret() });
       if (url.pathname === '/.well-known/oauth-authorization-server') return emit(res, 200, {
         issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/reg`,
@@ -63,7 +64,7 @@ async function fixture(t, config = {}) {
         assert.equal(req.method, 'POST'); assert.equal(body.token_endpoint_auth_method, 'none');
         assert.deepEqual(body.redirect_uris, [redirect]); assert.deepEqual(body.grant_types, ['authorization_code', 'refresh_token']);
         assert.equal(body.scope, scope);
-        const id = config.duplicateRegistration ? [...clients][0] : randomBytes(24).toString('base64url'); clients.add(id);
+        const id = config.duplicateRegistration ? [...clients][0] : randomBytes(24).toString('base64url'); clients.add(id); clientTimes.set(id, event.at);
         return emit(res, 201, { ...body, client_id: id, ...(config.badRegistration ? { token_endpoint_auth_method: 'client_secret_basic' } : {}) });
       }
       if (url.pathname === '/authorize') {
@@ -85,22 +86,22 @@ async function fixture(t, config = {}) {
           const c = codes.get(p.get('code')); assert.ok(c, 'callback code was approved');
           assert.equal(c.clientId, id); assert.equal(p.get('redirect_uri'), redirect);
           assert.equal(b64hash(p.get('code_verifier')), c.challenge); secrets.push(p.get('code_verifier')); codes.delete(p.get('code'));
-          return token(res, { clientId: id, revoked: false });
+          event.family = { clientId: id, revoked: false };
+          if (id !== client) clientTimes.set(id, event.at);
+          return token(res, event.family);
         }
         assert.equal(p.get('grant_type'), 'refresh_token'); const stored = families.get(p.get('refresh_token'));
-        if (!stored || stored.family.revoked) return emit(res, 400, { error: 'invalid_grant' });
-        assert.equal(stored.family.clientId, id);
-        if (stored.consumed) { stored.family.revoked = true;
-          // A fixture-side clock/maintenance action expires registrations;
-          // the executable must independently probe each id afterwards.
-          if (config.expireAtFence) clients.clear();
-          return emit(res, 400, { error: 'invalid_grant' }); }
+        if (!stored || stored.family.revoked) { event.rejected = true; event.family = stored?.family;
+          return emit(res, config.proofStatus200 ? 200 : 400, { error: config.wrongRejection ? 'invalid_request' : 'invalid_grant' }); }
+        assert.equal(stored.family.clientId, id); event.family = stored.family;
+        if (stored.consumed) { if (!config.replayLies) stored.family.revoked = true;
+          event.rejected = true; return emit(res, 400, { error: config.wrongRejection ? 'invalid_request' : 'invalid_grant' }); }
         stored.consumed = true; return token(res, stored.family);
       }
       if (url.pathname === '/revoke') {
         const stored = families.get(p.get('token')); assert.ok(stored); assert.equal(stored.family.clientId, p.get('client_id'));
         if (!config.revokeLies) stored.family.revoked = true;
-        if (config.expireAtFence) clients.clear(); return emit(res, 204, null);
+        return emit(res, 204, null);
       }
       if (url.pathname === '/mcp') {
         assert.ok(access.has(req.headers.authorization?.slice(7))); assert.equal(body.jsonrpc, '2.0');
@@ -162,7 +163,7 @@ async function fixture(t, config = {}) {
     const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
     const out = outName ?? join(root, `receipt${sequence}.json`);
     const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
-      ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+      command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] : ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
     // Overrides replace their original pair, so the runner still tests duplicate refusal.
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
@@ -198,7 +199,7 @@ async function fixture(t, config = {}) {
     catch (e) { if (e.code !== 'ENOENT') throw e; }
     return { exit, output, receipt, bytes, out, pointer };
   }
-  const f = { root, creds, human, seat, clients, families, config, events, run, consent: undefined };
+  const f = { root, creds, human, seat, clients, clientTimes, families, config, events, run, consent: undefined };
   return f;
 }
 
@@ -209,7 +210,14 @@ function consentSchema(r, phase, producer) {
   assert.ok(Date.parse(r.measured_at) <= Date.now()); assert.deepEqual(r.controls, { cimd_consent: true, dcr_registration_consent: true });
   assert.equal(r.dcr_client_ids.length, 1); assert.match(r.dcr_client_ids[0], /^[A-Za-z0-9_-]{24,200}$/);
   if (phase === 'pre-W1') assert.equal(r.cleanup, null);
-  else { keys(r.cleanup, ['grants_revoked', 'dcr_clients_removed']); assert.equal(r.cleanup.grants_revoked, true); assert.ok(r.cleanup.dcr_clients_removed.includes(r.dcr_client_ids[0])); }
+  else { keys(r.cleanup, ['grants_revoked', 'dcr_clients_expiring']); assert.equal(r.cleanup.grants_revoked, true);
+    assert.ok(r.cleanup.dcr_clients_expiring.length > 0);
+    for (const c of r.cleanup.dcr_clients_expiring) {
+      keys(c, ['client_id', 'expires_after']); assert.equal(typeof c.client_id, 'string');
+      assert.ok(!r.dcr_client_ids.includes(c.client_id));
+      assert.equal(new Date(c.expires_after).toISOString(), c.expires_after); assert.ok(Date.parse(c.expires_after) > Date.now());
+    }
+  }
 }
 async function pre(f) {
   const r = await f.run('consent'); assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
@@ -230,16 +238,16 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
     assert.equal(r.bytes.toString(), JSON.stringify(r.receipt, null, 2) + '\n');
     for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) assert.equal((await stat(join(f.creds, name))).mode & 0o777, 0o600);
     const record = JSON.parse(await readFile(join(f.human, `${hash(api).slice(0, 24)}.json`))); assert.equal(record.generation, ++generation);
-    const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json'))); assert.deepEqual(ids.ids, [...f.clients]);
+    const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json'))); assert.deepEqual(ids.ids.map(c => c.client_id), [...f.clients]);
   }
   assert.equal(f.events.filter(e => e.command === 'post_signal').length, 3);
 });
 
-test('dry-run of both subcommands makes zero requests and writes no files', async t => {
+test('dry-run of all subcommands makes zero requests and writes no files', async t => {
   const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
-  for (const command of ['consent', 'window']) {
+  for (const command of ['consent', 'window', 'final-cleanup']) {
     const r = await f.run(command, ['--dry-run']); assert.equal(r.exit, 0, r.output); await missing(r.out);
-    const plan = JSON.parse(r.output); assert.equal(plan.dry_run, true); assert.equal(plan.user_agent, 'curl/8.7.1'); assert.ok(plan.requests.length > 5);
+    const plan = JSON.parse(r.output); assert.equal(plan.dry_run, true); assert.equal(plan.user_agent, 'curl/8.7.1'); assert.ok(plan.requests.length >= 4);
   }
   assert.equal(f.events.length, 0);
 });
@@ -280,25 +288,132 @@ test('private path and profile refusals happen before refresh, registration or n
   });
 });
 
-test('post-W5 fences all retained families and reconciles both consent and window ids; expiry proof is required', async t => {
-  for (const [name, config] of [['rotation-replay', { expireAtFence: true, expiryHTML: true }], ['RFC7009', { rfcRevoke: true, expireAtFence: true }]]) await t.test(name, async t => {
-    const f = await fixture(t, config), p = await pre(f), w = await f.run('window'); assert.equal(w.exit, 0, w.output);
-    const post = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]); assert.equal(post.exit, 0, post.output);
-    consentSchema(post.receipt, 'post-W5', hash(await readFile(script)));
-    const all = [...p.receipt.dcr_client_ids, ...w.receipt.dcr_client_ids, ...post.receipt.dcr_client_ids];
-    assert.deepEqual(post.receipt.cleanup.dcr_clients_removed.sort(), all.sort());
-    assert.ok([...f.families.values()].every(r => r.family.revoked));
-    f.consent = post.out; const after = await f.run('window', ['--window', 'W6', '--phase', 'after']);
-    assert.equal(after.exit, 1); assert.match(after.output, /missing or revoked grant/); await missing(after.out);
+async function post(f, p) {
+  const r = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]);
+  assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
+}
+function expirationTimes(entries, journal, f) {
+  for (const entry of entries) {
+    const last = journal.ids.find(c => c.client_id === entry.client_id).last_used_at;
+    assert.equal(Date.parse(entry.expires_after), Date.parse(last) + 30 * 24 * 60 * 60 * 1000);
+    // The journal must reflect the independent fixture's latest registration/token request,
+    // including token issuance renewing the consent DCR client after registration.
+    assert.ok(Date.parse(last) >= f.clientTimes.get(entry.client_id));
+    assert.ok(Date.parse(last) - f.clientTimes.get(entry.client_id) < 1000);
+  }
+}
+
+test('post-W5 proves pre-W1 CIMD revocation before new consent and retains the new grant through final cleanup', async t => {
+  for (const [name, config] of [['rotation-replay', {}], ['RFC7009', { rfcRevoke: true }]]) await t.test(name, async t => {
+    const f = await fixture(t, config), p = await pre(f);
+    const preFamily = f.events.find(e => e.grant === 'authorization_code' && e.client === client).family;
+    const earlierIds = [...p.receipt.dcr_client_ids];
+    for (const window of ['W1', 'W2', 'W3', 'W4', 'W5']) {
+      const w = await f.run('window', ['--window', window]); assert.equal(w.exit, 0, w.output);
+      earlierIds.push(...w.receipt.dcr_client_ids);
+      assert.equal(f.events.filter(e => e.grant === 'refresh_token').at(-1).family, preFamily);
+    }
+    // A failed window still created a client: cleanup must include its journal entry.
+    f.config.badRegistration = true;
+    const failedBefore = await f.run('window', ['--window', 'W5']); assert.equal(failedBefore.exit, 1); await missing(failedBefore.out);
+    earlierIds.push([...f.clients].at(-1)); f.config.badRegistration = false;
+    const start = f.events.length, q = await post(f, p);
+    consentSchema(q.receipt, 'post-W5', hash(await readFile(script)));
+    assert.equal(q.bytes.toString(), JSON.stringify(q.receipt, null, 2) + '\n');
+    assert.deepEqual(q.receipt.cleanup.dcr_clients_expiring.map(c => c.client_id), earlierIds);
+    assert.ok(preFamily.revoked);
+    const events = f.events.slice(start), newToken = events.findIndex(e => e.grant === 'authorization_code');
+    const proofs = events.filter(e => e.grant === 'refresh_token' && e.rejected);
+    assert.ok(proofs.length > 0); assert.ok(events.indexOf(proofs.at(-1)) < newToken);
+    assert.ok(proofs.every(e => e.family === preFamily));
+    const postFamily = events.find(e => e.grant === 'authorization_code' && e.client === client).family;
+    assert.notEqual(preFamily, postFamily); assert.equal(postFamily.revoked, false);
+    assert.ok([...f.clients].length > 0, 'registrations remain live; expiry is scheduled, never removed');
+    assert.ok(f.events.every(e => e.method !== 'DELETE'));
+    const afterIds = [...q.receipt.dcr_client_ids];
+    for (const [window, phase] of [['W5', 'after'], ['W5', 'recovery'], ['W6', 'before'], ['W6', 'after'], ['W7', 'before'], ['W7', 'after']]) {
+      const w = await f.run('window', ['--window', window, '--phase', phase]); assert.equal(w.exit, 0, w.output);
+      assert.equal(w.receipt.consent_receipt_sha256, hash(q.bytes)); afterIds.push(...w.receipt.dcr_client_ids);
+      assert.equal(f.events.filter(e => e.grant === 'refresh_token').at(-1).family, postFamily);
+    }
+    f.config.badRegistration = true;
+    const failedAfter = await f.run('window', ['--window', 'W7', '--phase', 'after']); assert.equal(failedAfter.exit, 1); await missing(failedAfter.out);
+    afterIds.push([...f.clients].at(-1)); f.config.badRegistration = false;
+    const journal = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json')));
+    expirationTimes(q.receipt.cleanup.dcr_clients_expiring, journal, f);
+    const final = await f.run('final-cleanup'); assert.equal(final.exit, 0, final.output);
+    keys(final.receipt, ['kind', 'release_sha', 'measured_at', 'producer_sha256', 'grants_revoked', 'dcr_clients_expiring']);
+    assert.equal(final.receipt.kind, 'c1-final-cleanup'); assert.equal(final.receipt.release_sha, release);
+    assert.equal(final.receipt.producer_sha256, hash(await readFile(script))); assert.equal(final.receipt.grants_revoked, true);
+    assert.equal(new Date(final.receipt.measured_at).toISOString(), final.receipt.measured_at);
+    assert.deepEqual(final.receipt.dcr_clients_expiring.map(c => c.client_id), afterIds);
+    expirationTimes(final.receipt.dcr_clients_expiring, journal, f);
+    assert.equal((await stat(final.out)).mode & 0o777, 0o600); assert.ok(postFamily.revoked);
+    assert.equal(final.bytes.toString(), JSON.stringify(final.receipt, null, 2) + '\n');
+    const blocked = await f.run('window', ['--window', 'W7', '--phase', 'after']);
+    assert.equal(blocked.exit, 1); assert.match(blocked.output, /missing or revoked grant/); await missing(blocked.out);
   });
 });
 
-test('cleanup refuses still-live registrations, arbitrary authorization errors, and dishonest revocation', async t => {
-  for (const [name, config] of [['live', {}], ['unrelated-400', { authorizeError: true }], ['revocation-lies', { rfcRevoke: true, revokeLies: true }]]) await t.test(name, async t => {
-    const f = await fixture(t, config), p = await pre(f);
-    const post = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]); assert.equal(post.exit, 1, post.output); await missing(post.out);
-    assert.match(post.output, /FAIL cleanup:/);
-    if (name !== 'revocation-lies') assert.match(post.output, /no DCR removal API; \d+ ids not proven expired/);
+test('post-W5 and final cleanup refuse unproven revocation without publishing evidence', async t => {
+  for (const command of ['consent', 'final-cleanup']) for (const [name, config] of [
+    ['RFC7009-lies', { rfcRevoke: true, revokeLies: true }], ['replay-lies', { replayLies: true }],
+    ['wrong-error', { wrongRejection: true }], ['wrong-status', { rfcRevoke: true, proofStatus200: true }],
+  ]) await t.test(`${command}/${name}`, async t => {
+    const f = await fixture(t), p = await pre(f);
+    if (command === 'final-cleanup') await post(f, p);
+    Object.assign(f.config, config); const start = f.events.length;
+    const r = await f.run(command, command === 'consent' ? ['--phase', 'post-W5', '--prior-consent', p.out] : []);
+    assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.match(r.output, /FAIL (cleanup|final_cleanup):/);
+    assert.ok(f.events.slice(start).some(e => e.grant === 'refresh_token'));
+    assert.ok(f.events.slice(start).every(e => e.grant !== 'authorization_code' && e.path !== '/reg'));
+    if (command === 'consent') await missing(join(r.pointer, 'cimd-authorize-url.txt'));
+  });
+});
+
+test('cleanup refuses incomplete or unsafe journals before any grant change', async t => {
+  for (const command of ['consent', 'final-cleanup']) for (const kind of ['missing-id', 'missing-journal', 'missing-grant', 'missing-time', 'unsafe-file']) await t.test(`${command}/${kind}`, async t => {
+    const f = await fixture(t), p = await pre(f);
+    if (command === 'final-cleanup') await post(f, p);
+    const idPath = join(f.creds, 'dcr-client-ids.json'), grantPath = join(f.creds, 'live-controls-state.json');
+    const ids = JSON.parse(await readFile(idPath));
+    if (kind === 'missing-id') { ids.ids.shift(); await privateWrite(idPath, ids); }
+    if (kind === 'missing-journal') await promisify(execFile)('/Users/yulanbot/.local/bin/rm', [idPath]);
+    if (kind === 'missing-grant') { const j = JSON.parse(await readFile(grantPath)); j.grants = []; await privateWrite(grantPath, j); }
+    if (kind === 'missing-time') { delete ids.ids[0].last_used_at; await privateWrite(idPath, ids); }
+    if (kind === 'unsafe-file') await chmod(idPath, 0o644);
+    const start = f.events.length;
+    const r = await f.run(command, command === 'consent' ? ['--phase', 'post-W5', '--prior-consent', p.out] : []);
+    assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.match(r.output, /journal|missing grant|unsafe file/);
+    assert.ok(f.events.slice(start).every(e => e.method === 'GET' && e.path.includes('.well-known')));
+  });
+});
+
+test('post-W5 refuses journal deadlines that have already elapsed before revoking the grant', async t => {
+  const f = await fixture(t), p = await pre(f), path = join(f.creds, 'dcr-client-ids.json');
+  const ids = JSON.parse(await readFile(path)); ids.ids[0].last_used_at = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  await privateWrite(path, ids); const start = f.events.length;
+  const r = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]);
+  assert.equal(r.exit, 1, r.output); await missing(r.out); assert.match(r.output, /journal deadline elapsed/);
+  assert.ok(f.events.slice(start).every(e => e.method === 'GET' && e.path.includes('.well-known')));
+});
+
+test('post-W5 cleanup schema refuses own ids, empty lists, obsolete keys and invalid expiry times', async t => {
+  for (const command of ['window', 'final-cleanup']) for (const kind of ['own-id', 'empty', 'obsolete', 'past', 'non-UTC', 'extra-key']) await t.test(`${command}/${kind}`, async t => {
+    const f = await fixture(t), p = await pre(f), q = await post(f, p), r = q.receipt;
+    const c = r.cleanup.dcr_clients_expiring[0];
+    if (kind === 'own-id') c.client_id = r.dcr_client_ids[0];
+    if (kind === 'empty') r.cleanup.dcr_clients_expiring = [];
+    if (kind === 'obsolete') { r.cleanup.dcr_clients_removed = [c.client_id]; delete r.cleanup.dcr_clients_expiring; }
+    if (kind === 'past') c.expires_after = new Date(Date.now() - 1000).toISOString();
+    if (kind === 'non-UTC') c.expires_after = c.expires_after.replace('Z', '+00:00');
+    if (kind === 'extra-key') c.removed = true;
+    await privateWrite(q.out, r); const start = f.events.length;
+    const failed = await f.run(command, command === 'window' ? ['--window', 'W6'] : []);
+    assert.equal(failed.exit, 1, failed.output); await missing(failed.out); assert.match(failed.output, /consent cleanup schema/);
+    assert.ok(f.events.slice(start).every(e => e.method === 'GET' && e.path.includes('.well-known')));
   });
 });
 
@@ -327,7 +442,7 @@ test('a refused public registration remains journaled for cleanup', async t => {
   const f = await fixture(t); await pre(f); f.config.badRegistration = true;
   const r = await f.run('window'); assert.equal(r.exit, 1); await missing(r.out);
   const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json')));
-  assert.deepEqual(ids.ids, [...f.clients]); assert.equal(ids.ids.length, 2);
+  assert.deepEqual(ids.ids.map(c => c.client_id), [...f.clients]); assert.equal(ids.ids.length, 2);
 });
 
 test('consent rejects unsafe credential directories and existing run locks without HTTP', async t => {
