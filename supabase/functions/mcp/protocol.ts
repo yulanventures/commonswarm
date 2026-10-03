@@ -2,6 +2,9 @@ import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
 
+// @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
+import { hostedToolError } from "./tool-errors.ts";
+
 export const PROTECTED_RESOURCE_METADATA_PATH =
   "/.well-known/oauth-protected-resource/mcp";
 export const RESOURCE_METADATA_URL =
@@ -234,7 +237,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       return failed(403, { error: "origin_not_allowed" });
     }
     if (concurrent >= options.limits.maxConcurrentRequests) {
-      return failed(429, { error: "too_many_requests" }, { "retry-after": "1" });
+      return failed(429, { error: "too_many_requests", message: "Too many concurrent requests. Retry in 1 second." }, { "retry-after": "1" });
     }
     const token = bearer(request);
     if (token === null) {
@@ -260,7 +263,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
         value = JSON.parse(source);
       } catch (error) {
         if (error instanceof RangeError) return failed(413, { error: "request_too_large" });
-        if (lifetime.signal.aborted) return failed(504, { error: "request_timeout" });
+        if (lifetime.signal.aborted) return failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
         return failed(400, rpcError(null, -32700, "Parse error"));
       }
       if (!boundedJsonTree(value)) return failed(400, rpcError(null, -32600, "Invalid Request"));
@@ -310,10 +313,11 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
         const params = record(message.params);
         if (params === null || Object.keys(params).some((key) => !["name", "arguments"].includes(key)) ||
             typeof params.name !== "string" || !hostedToolName(params.name)) {
-          return failed(400, rpcError(message.id, -32602, "Invalid params"));
+          return failed(400, rpcError(message.id, -32602,
+            `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map((tool) => tool.name).join(", ")}) and arguments as a JSON object.`));
         }
         try {
-          const args = validateHostedToolArguments(params.name, params.arguments ?? {});
+          const args = validateHostedToolArguments(params.name, params.arguments === undefined ? {} : params.arguments);
           toolOperation = options.executeTool({
             name: params.name,
             arguments: args,
@@ -327,17 +331,16 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
           const output = await beforeAbort(toolOperation, lifetime.signal);
           result = { content: [{ type: "text", text: JSON.stringify(output) }] };
         } catch (error) {
-          if (lifetime.signal.aborted) return failed(504, { error: "request_timeout" });
+          if (lifetime.signal.aborted) return failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
           if (error instanceof HostedToolInputError) {
             return failed(400, rpcError(message.id, -32602, error.message));
           }
-          const code = error instanceof Error && /^hosted_[a-z0-9_]+$/u.test(error.message)
-            ? error.message
-            : "tool_failed";
+          const failure = hostedToolError(error, params.name);
+          const code = failure.error;
           logFailure("tool_failed");
           result = {
             isError: true,
-            content: [{ type: "text", text: JSON.stringify({ error: code }) }],
+            content: [{ type: "text", text: JSON.stringify(failure) }],
             // These stable executor codes cover inactive provider grants and
             // durable seat authorization denials. Batch ownership and ordinary
             // tool failures do not ask the client to reconnect. Transport JWT
@@ -366,7 +369,7 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       });
     } catch {
       return lifetime.signal.aborted
-        ? failed(504, { error: "request_timeout" })
+        ? failed(504, { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." })
         : failed(500, { error: "internal_error" });
     } finally {
       lifetime.close();

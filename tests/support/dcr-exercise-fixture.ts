@@ -3,6 +3,8 @@
 import { createMcpProtocolHandler } from '../../supabase/functions/mcp/protocol.ts';
 // @ts-expect-error TS5097: Deno source extension is required.
 import { HOSTED_TOOL_TABLE } from '../../supabase/functions/mcp/tools.ts';
+// @ts-expect-error TS5097: Deno source extension is required.
+import { HostedToolFailure } from '../../supabase/functions/mcp/tool-errors.ts';
 
 const issuer = 'https://mcp.commonswarm.com';
 const workspace = '12345678-1234-4234-8234-123456789abc';
@@ -26,7 +28,7 @@ const serve = createMcpProtocolHandler({
       return seat;
     }
     const seat = seats.get(String(args.seat));
-    if (!seat) throw new Error('hosted_seat_forbidden');
+    if (!seat) throw new HostedToolFailure('hosted_seat_forbidden');
     if (name === 'whoami') return { ...seat, [privateValue]: privateValue };
     if (name === 'members') return { members: [], agents: [...seats.values()] };
     if (name === 'check') return { batch_id: workspace, signals: signals.filter(s =>
