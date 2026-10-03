@@ -104,3 +104,4 @@ tests/ci-compare-failures.test.mjs
 tests/affected-suites.test.mjs
 tests/run-test-list.test.ts
 tests/release-preflight.test.mjs
+tests/plan-guards-errexit.test.mjs
