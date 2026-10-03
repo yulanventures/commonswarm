@@ -279,6 +279,42 @@ test('dry-run of all subcommands makes zero requests and writes no files', async
   assert.equal(f.events.length, 0);
 });
 
+test('timeout defaults allow two 25-minute consent legs and CLI overrides stay bounded', async t => {
+  const root = join(realpathSync(tmpdir()), 'live-controls-timeout-dry-run');
+  for (const command of ['consent', 'window', 'final-cleanup']) await t.test(command, () => {
+    const args = [command, '--dry-run', '--release-sha', release, '--cred-dir', root, '--out', join(root, 'receipt.json')];
+    if (command !== 'final-cleanup') args.push('--workspace-id', wid);
+    if (command === 'consent') args.push('--phase', 'pre-W1', '--pointer-dir', root);
+    else {
+      args.push('--consent-receipt', join(root, 'consent.json'));
+      if (command === 'window') args.push('--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--human-profile', root, '--seat-profile', root);
+    }
+    const run = extra => {
+      const r = spawnSync(process.execPath, [script, ...args, ...extra], { encoding: 'utf8', timeout: 5000 });
+      assert.ifError(r.error); assert.equal(r.signal, null); return r;
+    };
+    const defaults = run([]); assert.equal(defaults.status, 0, defaults.stderr);
+    const plan = JSON.parse(defaults.stdout);
+    assert.equal(plan.request_timeout_ms, 10_000);
+    assert.equal(plan.consent_timeout_ms, 1_500_000);
+    assert.equal(plan.total_timeout_ms, 3_300_000);
+    assert.ok(plan.total_timeout_ms > 2 * plan.consent_timeout_ms, 'total leaves time for requests after both consent legs');
+    for (const [option, field, max] of [
+      ['request-timeout-ms', 'request_timeout_ms', 10_000],
+      ['consent-timeout-ms', 'consent_timeout_ms', 1_500_000],
+      ['total-timeout-ms', 'total_timeout_ms', 3_300_000],
+    ]) {
+      for (const value of [1, max]) {
+        const r = run([`--${option}`, String(value)]); assert.equal(r.status, 0, r.stderr);
+        assert.equal(JSON.parse(r.stdout)[field], value);
+      }
+      const refused = run([`--${option}`, String(max + 1)]);
+      assert.equal(refused.status, 1); assert.equal(refused.stdout, '');
+      assert.match(refused.stderr, /FAIL options:.*bounded positive timeout.*invalid timeout/);
+    }
+  });
+});
+
 test('consent and window require a valid workspace UUID even for dry-run', async t => {
   const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
   for (const command of ['consent', 'window']) {
