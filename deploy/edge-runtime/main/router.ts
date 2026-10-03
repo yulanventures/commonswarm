@@ -5,6 +5,7 @@ export const FUNCTION_NAMES = [
   "activity",
   "h0",
   "mcp",
+  "admin",
 ] as const;
 
 export type FunctionName = (typeof FUNCTION_NAMES)[number];
@@ -211,6 +212,11 @@ export async function withWorkerRetiredRetry<T>(
  * the rest of the path stay intact.
  */
 function resolvePreparedFunctionRoute(pathname: string): FunctionRoute | null {
+  // The admin resource has a canonical public path outside the Functions prefix.
+  // Both ingress forms reach the same worker; proof htu stays the public /admin URI.
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return { functionName: "admin", pathname };
+  }
   if (!pathname.startsWith(FUNCTION_PREFIX)) return null;
 
   const publicPath = pathname.slice(FUNCTION_PREFIX.length);
@@ -302,6 +308,9 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   // Forwarded verbs call command's handler in the H0 worker.
   h0: H0_COMMAND_ENV,
   mcp: MCP_ENV_NAMES,
+  // The admin entry delegates to the account command adapter, including its
+  // worker-delivery boundary. It needs the same reviewed environment.
+  admin: COMMAND_ENV,
 };
 
 export const COMMAND_TEST_HOOKS = new Set([

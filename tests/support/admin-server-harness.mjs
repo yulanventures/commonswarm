@@ -17,7 +17,11 @@ const publicJwk = { ...await crypto.subtle.exportKey('jwk', signing.publicKey), 
 const upstreamFetch = globalThis.fetch;
 globalThis.fetch = async (...args) => {
   const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-  if (url === 'https://mcp.commonswarm.com/jwks') return new Response(JSON.stringify({ keys: [publicJwk, {...publicJwk,kid:"independent-key"}] }));
+  if (url === 'https://mcp.commonswarm.com/jwks') {
+    const response = new Response(JSON.stringify({ keys: [publicJwk, {...publicJwk,kid:"independent-key"}] }));
+    Object.defineProperty(response, 'url', { value: url });
+    return response;
+  }
   return await upstreamFetch(...args);
 };
 const base64url = bytes => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -336,10 +340,14 @@ try {
       check((await http(input,token)).status===503 && await count()===before+1,'failure receipt retains stable retry outcome');
     } else if (scenario === 'replay') {
       const postgres = (await import('npm:postgres@3.4.9')).default;
+      const firstDb=postgres(config.local.DB_URL,{prepare:false,max:1});
       const otherDb=postgres(config.local.DB_URL,{prepare:false,max:1});
       const {createAdminRequestVerifier}=await import('../../supabase/functions/_shared/admin-oauth-db.ts');
       try {
-        const first=createAdminRequestVerifier(db), second=createAdminRequestVerifier(otherDb), jti=id();
+        const [firstPid]=await firstDb`SELECT pg_backend_pid() AS pid`;
+        const [secondPid]=await otherDb`SELECT pg_backend_pid() AS pid`;
+        check(firstPid.pid!==secondPid.pid,'two verifier pools have distinct PostgreSQL backends');
+        const first=createAdminRequestVerifier(firstDb), second=createAdminRequestVerifier(otherDb), jti=id();
         const request=await oauth.request(readWire(grant),'admin_command',{jti});
         const outcomes=await Promise.allSettled([first.verify(request,'admin_command'),second.verify(request.clone(),'admin_command')]);
         check(outcomes.filter(r=>r.status==='fulfilled').length===1 && outcomes.filter(r=>r.status==='rejected' && r.reason.code==='replay').length===1,'two edge verifier instances admit one signed proof');
@@ -349,15 +357,23 @@ try {
         const rollback=new Error('domain rollback'); let reached=false;
         await db.begin(async tx=>{await tx`SELECT set_config('role','swarm_command',true)`;check((await adminTransaction(tx,readWire(grant),{kind:'oauth',admission:accepted})).result.status===200,'replay test enters real authority');reached=true;throw rollback;}).catch(error=>{if(error!==rollback)throw error;});
         check(reached,'authority rollback executes');
-        const restarted=createAdminRequestVerifier(otherDb);
-        let replay=false;try{await restarted.verify(request.clone(),'admin_command');}catch(error){replay=error.code==='replay';}
-        check(replay,'restarting verifier cannot release accepted proof');
-        replay=false;try{await restarted.verify(rollbackRequest.clone(),'admin_command');}catch(error){replay=error.code==='replay';}
-        check(replay,'authority rollback cannot release production-verifier proof');
-        replay=false;try{await restarted.verify(await oauth.request({},'admin_mcp',{jti}),'admin_mcp');}catch(error){replay=error.code==='replay';}
-        check(replay,'re-signed correct second-entry URI reaches shared uniqueness');
-        check(!!(await restarted.verify(await oauth.request({},'admin_mcp'),'admin_mcp')),'new jti correct URI is positive control');
-      } finally {await otherDb.end();}
+        // Retire both participating pools before a completely new Deno process
+        // verifies the original proof and a re-signed, correct second-entry proof.
+        await firstDb.end(); await otherDb.end();
+        const wireRequest=(req,surface)=>({url:req.url,headers:Object.fromEntries(req.headers),surface});
+        const replays=[wireRequest(request,'admin_command'),wireRequest(rollbackRequest,'admin_command'),
+          wireRequest(await oauth.request({},'admin_mcp',{jti}),'admin_mcp')];
+        const child=new Deno.Command('deno',{args:['run','--no-lock','--config','supabase/functions/command/deno.json',
+          '--allow-net','--allow-env','tests/support/admin-replay-restart.mjs'],stdin:'piped',stdout:'piped',stderr:'null'}).spawn();
+        const output=child.output();
+        const writer=child.stdin.getWriter();
+        await writer.write(new TextEncoder().encode(JSON.stringify({databaseUrl:config.local.DB_URL,issuerJwk:publicJwk,
+          replays,fresh:wireRequest(await oauth.request({},'admin_mcp'),'admin_mcp')})));
+        await writer.close();
+        const result=await output;
+        check(result.success && new TextDecoder().decode(result.stdout).trim()==='ADMIN_REPLAY_RESTART_OK',
+          'fresh verifier process refuses committed and rolled-back cross-entry replays; fresh proof succeeds');
+      } finally {await firstDb.end();await otherDb.end();}
     } else if (scenario === 'issuance') {
       const sign=async changes=>oauth.sign({typ:'at+jwt',alg:'ES256',kid:publicJwk.kid},{...oauth.claims,...changes},signing.privateKey);
       for (const changes of [{jti:id()},{connection_id:id()},{admin_identity_id:id()},{client_id:'foreign'},{manifest_digest:'f'.repeat(64)}]) {

@@ -32,7 +32,7 @@ async function nonce(f: Awaited<ReturnType<typeof cryptoFixture>>, access: strin
   return challenge!;
 }
 
-test('edge-dpop-shared-replay: real signatures, nonce challenges, cross-entry proofs, separate verifiers and restart with fresh-proof controls', async () => {
+test('admin-dpop-verifier-unit: real signatures, nonce challenges, cross-entry proofs, separate verifiers and restart with fresh-proof controls', async () => {
   const shared = store(), f = await cryptoFixture(shared), access = await f.token(), n = await nonce(f, access), jti = randomUUID();
   const first = await f.request(access, 'admin_command', {}, { nonce: n, jti });
   const secondVerifier = new AdminRequestVerifier(f.jwt, shared);
@@ -47,7 +47,7 @@ test('edge-dpop-shared-replay: real signatures, nonce challenges, cross-entry pr
   assert.equal(isAdminAdmission(await restarted.verify(await f.request(access, 'admin_mcp', {}, { nonce: n }), 'admin_mcp')), true);
 });
 
-test('edge-dpop-shared-replay: reject Bearer, class/cnf, key, hash, method, configured URI, time, nonce and ambiguous headers before authority', async () => {
+test('admin-dpop-verifier-unit: reject Bearer, class/cnf, key, hash, method, configured URI, time, nonce and ambiguous headers before authority', async () => {
   const shared = store(), f = await cryptoFixture(shared), access = await f.token(), n = await nonce(f, access);
   for (const changes of [{ grant_class: undefined }, { cnf: undefined }, { aud: [ADMIN_MCP_URI] }, { grant_id: undefined }, { admin_grant_id: undefined }, { admin_identity_id: undefined }, { scope: 'mcp' }, { registry_version: 1 }, { exp: f.claims.iat + 301 }, { iat: f.claims.iat + 1 }, { nbf: f.claims.iat + 1 }]) {
     await assert.rejects(f.verifier.verify(await f.request(await f.token(changes), 'admin_command', {}, { nonce: n }), 'admin_command'), AdminTokenError);
@@ -81,7 +81,7 @@ test('admin-boundary-isolation: denial classification recognizes both schemes wh
   assert.equal(presentsAdminCredential(new Request(ADMIN_MCP_URI, { headers: { authorization: 'Bearer swm_worker_test' } })), false);
 });
 
-test('edge-dpop-shared-replay: unavailable proof storage and nonce persistence fail closed without an in-memory fallback', async () => {
+test('admin-dpop-verifier-unit: unavailable proof storage and nonce persistence fail closed without an in-memory fallback', async () => {
   const broken = { admit: async () => { throw new Error('unavailable'); }, registerNonce: async () => false };
   const f = await cryptoFixture(broken), access = await f.token();
   await assert.rejects(f.verifier.verify(await f.request(access), 'admin_command'), AdminProofError);
@@ -90,9 +90,15 @@ test('edge-dpop-shared-replay: unavailable proof storage and nonce persistence f
 });
 
 
-test('unavailable or unpinned JWKS never admits an admin token; pinned issuer positive control succeeds', async () => {
+test('unavailable JWKS, empty or mismatched URL pins never admit an admin token; pinned issuer positive control succeeds', async () => {
   const shared=store(), f=await cryptoFixture(shared), access=await f.token();
-  for (const fetch of [async()=>{throw new Error('offline');},async()=>new Response(JSON.stringify({keys:[]})),async()=>new Response(null,{status:302,headers:{location:'https://untrusted.example/jwks'}})]) {
+  const jwks = (url: string, emptyKeys = false) => {
+    const response = new Response(JSON.stringify({ keys: emptyKeys ? [] : [f.issuerJwk] }));
+    Object.defineProperty(response, 'url', { value: url });
+    return response;
+  };
+  // Valid keys and signatures make these URL negatives reach the pin itself.
+  for (const fetch of [async()=>{throw new Error('offline');},async()=>jwks(''),async()=>jwks('https://untrusted.example/jwks'),async()=>jwks('https://mcp.commonswarm.com/jwks', true),async()=>new Response(null,{status:302,headers:{location:'https://untrusted.example/jwks'}})]) {
     const verifier=new AdminRequestVerifier(new AdminJwtVerifier({fetch}),shared);
     await assert.rejects(verifier.verify(await f.request(access),'admin_command'),AdminTokenError);
   }

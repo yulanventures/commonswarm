@@ -24,10 +24,15 @@ const jwk = {
   use: "sig",
 };
 const upstream = globalThis.fetch;
-globalThis.fetch = async (...args) =>
-  String(args[0]) === "https://mcp.commonswarm.com/jwks"
-    ? new Response(JSON.stringify({ keys: [jwk] }))
-    : upstream(...args);
+globalThis.fetch = async (...args) => {
+  const url = String(args[0]);
+  if (url === "https://mcp.commonswarm.com/jwks") {
+    const response = new Response(JSON.stringify({ keys: [jwk] }));
+    Object.defineProperty(response, "url", { value: url });
+    return response;
+  }
+  return upstream(...args);
+};
 const id = () => crypto.randomUUID();
 const b64 = (bytes) =>
   btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_")

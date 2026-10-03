@@ -30,11 +30,13 @@ export async function cryptoFixture(store: AdminProofStore, now = Math.floor(Dat
     });
   const jwt = new AdminJwtVerifier({ now: () => now, fetch: async url => {
     if (url !== 'https://mcp.commonswarm.com/jwks') throw new Error('unexpected_key_source');
-    return new Response(JSON.stringify({ keys: [issuerJwk] }));
+    const response = new Response(JSON.stringify({ keys: [issuerJwk] }));
+    Object.defineProperty(response, 'url', { value: String(url) });
+    return response;
   } });
   const verifier = new AdminRequestVerifier(jwt, store);
   const request = async (access: string, surface: 'admin_command' | 'admin_mcp' = 'admin_command', body: unknown = {}, overrides = {}, scheme = 'DPoP', extra: Record<string,string> = {}) => new Request(surface === 'admin_command' ? ADMIN_COMMAND_URI : ADMIN_MCP_URI, {
     method: 'POST', headers: { authorization: `${scheme} ${access}`, dpop: await proof(access, surface, overrides), ...extra }, body: JSON.stringify(body),
   });
-  return { token, proof, request, jwt, verifier, claims, jkt, publicKey, possession, issuer, sign };
+  return { token, proof, request, jwt, verifier, claims, jkt, publicKey, possession, issuer, issuerJwk, sign };
 }
