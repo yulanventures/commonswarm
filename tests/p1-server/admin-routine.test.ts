@@ -1,13 +1,12 @@
+import { adminEdgeDatabase } from '../support/admin-edge-database.js';
 /** Lane C: transactions, credential delivery and ancestry; server suite only. */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { createClient } from "@supabase/supabase-js";
-import postgres from "postgres";
 
 const scenarios = {
   workspace:
@@ -16,6 +15,8 @@ const scenarios = {
     "routine invitations bind recipients, record pending authorization and revoke without budget refunds",
   renewal:
     "routine worker delivery, renewal and bounded replacement exclude secrets from replay and preserve ancestry",
+  delivery:
+    "protected worker delivery cancellation rolls back credentials while consuming the OAuth proof",
   history:
     "human history retains minimal linked cards for routine seat and credential revocation",
   expiry:
@@ -50,11 +51,14 @@ for (const [scenario, label] of Object.entries(scenarios)) {
         "local stack required",
       );
     }
-    const root = realpathSync(tmpdir());
-    const secretDir = mkdtempSync(join(root, "anvil-secret."));
+    const root = '/private/tmp';
+    const secretDir = execFileSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' }).trim();
     chmodSync(secretDir, 0o700);
-    const sql = postgres(local.DB_URL, { prepare: false });
+    let isolated: Awaited<ReturnType<typeof adminEdgeDatabase>> | undefined;
     try {
+      isolated = await adminEdgeDatabase(local.DB_URL);
+      local.DB_URL = isolated.url;
+      const sql = isolated.db;
       const auth = createClient(local.API_URL, local.SERVICE_ROLE_KEY, {
         auth: { persistSession: false, autoRefreshToken: false },
       });
@@ -86,10 +90,12 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       const owner = created.data.user.id,
         workspace = randomUUID(),
         recipient = invited.data.user.id;
+      await sql`INSERT INTO auth.users(id, aud, role, email) VALUES(${owner}::uuid, 'authenticated', 'authenticated', ${email})`;
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${owner}::uuid, 'Lane C owner')`;
       await sql`INSERT INTO swarm.workspaces(workspace_id, name, created_by) VALUES (${workspace}::uuid, 'Lane C', ${owner}::uuid)`;
       await sql`INSERT INTO swarm.memberships(workspace_id, user_id, role) VALUES (${workspace}::uuid, ${owner}::uuid, 'owner')`;
       await sql`INSERT INTO swarm.streams(stream_id, workspace_id, kind) VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace')`;
+      await sql`INSERT INTO auth.users(id, aud, role, email) VALUES(${recipient}::uuid, 'authenticated', 'authenticated', ${`recipient-${recipient}@example.test`})`;
       await sql`INSERT INTO swarm.users(user_id, display_name) VALUES (${recipient}::uuid, 'Invitation recipient')`;
       const configPath = join(secretDir, "local.json");
       writeFileSync(
@@ -117,25 +123,23 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       ], {
         encoding: "utf8",
         timeout: 150000,
-        env: {
-          PATH: process.env.PATH ?? "",
-          ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
-        },
+        env: process.env,
       });
       // Forward only the handler's sanitized one-line diagnostics, never raw stderr.
       const failures = run.stderr.split(/\r?\n/u).filter(line => line.startsWith("admin_command_failed ")).join("\n");
       assert.equal(run.status, 0, run.stdout + failures);
       assert.match(run.stdout, /ADMIN_ROUTINE_SERVER_OK/u);
     } finally {
-      await sql.end();
-      const resolved = realpathSync(secretDir);
-      assert.ok(
-        dirname(resolved) === root &&
-          basename(resolved).startsWith("anvil-secret.") &&
-          resolved !== process.env.HOME,
-        "unsafe cleanup path",
-      );
-      execFileSync("rm", ["-r", resolved], { stdio: "pipe" });
+      try { await isolated?.close(); } finally {
+        const resolved = realpathSync(secretDir);
+        assert.ok(
+          dirname(resolved) === root &&
+            basename(resolved).startsWith("anvil-secret.") &&
+            resolved !== process.env.HOME,
+          "unsafe cleanup path",
+        );
+        execFileSync("rm", ["-r", resolved], { stdio: "pipe" });
+      }
     }
   });
 }

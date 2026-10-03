@@ -56,7 +56,7 @@ test("command preflight authorizes the production browser request", () => {
       headers: {
         origin: productionOrigin,
         "access-control-request-method": "POST",
-        "access-control-request-headers": "authorization,apikey,content-type",
+        "access-control-request-headers": "authorization,apikey,content-type,dpop",
       },
     }),
     commandAllowedOrigins(undefined),
@@ -74,7 +74,7 @@ test("command preflight authorizes the production browser request", () => {
   );
   assert.equal(
     response.headers.get("access-control-allow-headers"),
-    "authorization, content-type, apikey",
+    "authorization, content-type, apikey, dpop",
   );
   assert.equal(response.headers.get("access-control-max-age"), "600");
   assert.equal(response.headers.get("vary"), "origin");
@@ -84,7 +84,7 @@ test("command responses preserve status and body while exposing only allowed ori
   const allowed = commandAllowedOrigins(undefined);
   const upstream = new Response(JSON.stringify({ error: "forbidden" }), {
     status: 403,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json; charset=utf-8", "dpop-nonce": "challenge", "access-control-expose-headers": "DPoP-Nonce" },
   });
   const response = withCommandCors(
     new Request("https://example.supabase.co/functions/v1/command", {
@@ -96,6 +96,8 @@ test("command responses preserve status and body while exposing only allowed ori
   );
 
   assert.equal(response.status, 403);
+  assert.equal(response.headers.get("dpop-nonce"), "challenge");
+  assert.equal(response.headers.get("access-control-expose-headers"), "DPoP-Nonce");
   assert.deepEqual(await response.json(), { error: "forbidden" });
   assert.equal(
     response.headers.get("access-control-allow-origin"),
@@ -213,7 +215,7 @@ test("edge entrypoint wires preflight before the command handler and CORS onto r
     false,
   );
   assert.equal(
-    commandCorsIsWired(source.replace("withCommandCors(", "unusedCors(")),
+    commandCorsIsWired(source.replaceAll("withCommandCors(", "unusedCors(")),
     false,
   );
 });

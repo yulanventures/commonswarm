@@ -5,9 +5,9 @@ import ts from "typescript";
 import { safeAdminError } from "../../supabase/functions/command/failures.js";
 
 // The formatter tests cannot catch a handler reverting to safeError or logging
-// the exception directly. Inspect the three real transaction failure boundaries
-// independently; this test never calls the formatter to produce its expectation.
-test("all three admin transaction failure handlers route diagnostics through the imported safeAdminError", () => {
+// the exception directly. OAuth failure handlers emit only fixed codes. Inspect
+// the remaining exception-bearing human boundary; this test never calls the formatter to produce its expectation.
+test("human admin transaction failure handler route diagnostics through the imported safeAdminError", () => {
   const source = ts.createSourceFile("command/index.ts", readFileSync(
     new URL("../../supabase/functions/command/index.ts", import.meta.url), "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -20,7 +20,7 @@ test("all three admin transaction failure handlers route diagnostics through the
     });
   const formatter = bindings.find(binding => (binding.propertyName ?? binding.name).text === "safeAdminError");
   assert.ok(formatter, "admin formatter must come from the failure boundary module");
-  for (const name of ["runAdminAccountCommand", "handleAdminRuntimeCommand", "handleAdminWorkerRuntimeCommand"]) {
+  for (const name of ["runAdminAccountCommand"]) {
     const handler = source.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === name);
     assert.ok(handler && ts.isFunctionDeclaration(handler) && handler.body, `${name}: handler missing`);
     const transactionCatch = handler.body.statements.filter(ts.isTryStatement)[0]?.catchClause;
@@ -69,4 +69,19 @@ test("admin failure diagnostics remove credential material, SQL values and log c
   assert.ok(!/[\n\u001b\u202e]/u.test(diagnostic));
   assert.match(diagnostic, /^Error: invalid input/u);
   assert.ok(safeAdminError(new Error("x".repeat(1000))).length <= 512);
+});
+
+test("OAuth admin failure boundaries emit only fixed diagnostic codes", () => {
+  const source = ts.createSourceFile("command/index.ts", readFileSync(new URL("../../supabase/functions/command/index.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  for (const name of ["runAdminOAuthCommand", "handleAdminWorkerCommand"]) {
+    const handler = source.statements.find(s => ts.isFunctionDeclaration(s) && s.name?.text === name);
+    assert.ok(handler && ts.isFunctionDeclaration(handler) && handler.body);
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(source) === "console") {
+        assert.ok(node.arguments.every(ts.isStringLiteral), `${name}: dynamic diagnostic can disclose credential or SQL values`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(handler.body);
+  }
 });

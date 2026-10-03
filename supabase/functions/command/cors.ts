@@ -54,7 +54,7 @@ export function commandPreflight(
   headers.set("access-control-allow-methods", "POST, OPTIONS");
   headers.set(
     "access-control-allow-headers",
-    "authorization, content-type, apikey",
+    "authorization, content-type, apikey, dpop",
   );
   headers.set("access-control-max-age", "600");
   return new Response(null, { status: 204, headers });
