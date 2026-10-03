@@ -9,6 +9,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+export function renderConsentDestination({ clientName, redirectUri, metadataHost }) {
+  const hostname = new URL(redirectUri).hostname;
+  const destination = ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
+    ? "a program on this computer (localhost)"
+    : hostname;
+  return `<p class="notice">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong><br>
+    After you approve, you return to <strong>${escapeHtml(destination)}</strong>.
+    ${metadataHost ? `<br>Client ID URL host: <strong>${escapeHtml(metadataHost)}</strong>.` : ""}</p>`;
+}
+
 function stepLabel(step, names) {
   if (step.kind === "begin") return "Connection created in pending state";
   if (step.kind === "activate") return "Connection activated";
@@ -44,6 +54,7 @@ function renderClientIdentity(clientDisplay) {
 export function renderConsentPage({
   interactionUid,
   clientDisplay,
+  redirectUri,
   identity,
   workspaces,
   selectedWorkspaceIds = [],
@@ -100,6 +111,7 @@ export function renderConsentPage({
     <fieldset><legend>Select at least one workspace</legend><ul class="workspace-list">${workspaceRows}</ul></fieldset>
     <p class="notice">This connection can create up to <strong>10 hosted seats</strong> across the selected workspaces. You can revoke the whole connection or one seat later in <strong>/app → Connected apps</strong>.</p>
     <p class="warning"><strong>Before you continue:</strong> ${CONSENT_WARNING}</p>
+    ${renderConsentDestination({ clientName: clientDisplay.declaredName, redirectUri, metadataHost: clientDisplay.metadataHost })}
     <div class="actions"><button type="submit">Allow connection</button><a href="https://commonswarm.com/app">Cancel and return to /app</a></div>
   </form>
 </main></body></html>`;

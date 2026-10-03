@@ -64,7 +64,11 @@ test("consent interaction serves HTML from the bound browser identity and owner 
   let readerIdentity;
   const handler = createInteractionHandler({
     provider: {
-      interactionDetails: async () => interactionDetails(),
+      interactionDetails: async () => ({ ...interactionDetails(), params: {
+        ...interactionDetails().params, redirect_uri: "https://callback.example:8443/return?state=private",
+      } }),
+      Client: { find: async () => ({ clientName: 'Registered <app> & "friends"',
+        redirectUris: ["https://unused.example/callback", "https://callback.example:8443/return?state=private"] }) },
     },
     store: {
       requireSession: async () => ({
@@ -93,13 +97,19 @@ test("consent interaction serves HTML from the bound browser identity and owner 
   assert.match(response.headers["content-security-policy"], /frame-ancestors 'none'/u);
   assert.equal(readerIdentity.userId, USER);
   assert.match(response.body, /Workspace One/u);
+  assert.match(response.body, /Client name \(supplied by the client\): <strong>Registered &lt;app&gt; &amp; &quot;friends&quot;<\/strong>/u);
+  assert.match(response.body, /After you approve, you return to <strong>callback\.example<\/strong>/u);
+  assert.match(response.body, /Client ID URL host: <strong>client\.example<\/strong>/u);
+  assert.doesNotMatch(response.body, /unused\.example|state=private/u);
   assert.doesNotMatch(response.body, /oauth-state-not-rendered/u);
 });
 
 test("consent page escapes every untrusted label and contains the complete disclosure", () => {
   const html = renderConsentPage({
     interactionUid: "interaction-1",
-    clientDisplay: { verified: true, primary: "client.example<script>alert(1)</script>" },
+    clientDisplay: { verified: true, primary: "client.example<script>alert(1)</script>",
+      declaredName: "App <script>alert(1)</script> & \"friends's\"", metadataHost: "metadata.example" },
+    redirectUri: "https://callback.example/return",
     identity: { ...identity, displayName: "Human <img src=x>" },
     workspaces: [{ id: W1, name: "Workspace <script>bad()</script>" }],
     selectionVersion: 0,
@@ -110,8 +120,27 @@ test("consent page escapes every untrusted label and contains the complete discl
   assert.match(html, /\/app → Connected apps/u);
   assert.doesNotMatch(html, /<script>|<img src=x>|client logos?|logo[_.-]?uri/iu);
   assert.match(html, /Human &lt;img src=x&gt;/u);
+  assert.match(html, /App &lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;friends&#39;s&quot;/u);
   assert.match(html, /Workspace &lt;script&gt;bad\(\)&lt;\/script&gt;/u);
   assert.doesNotMatch(html, /access_token|refresh_token|authorization_code|server-held-token/iu);
+});
+
+test("consent destination is prominent beside approval and describes loopback programs", () => {
+  for (const [redirectUri, destination] of [
+    ["https://different.example:8443/private?code=hidden", "different.example"],
+    ["http://localhost:4321/callback", "a program on this computer (localhost)"],
+    ["http://127.0.0.1:5432/callback", "a program on this computer (localhost)"],
+    ["http://[::1]:6543/callback", "a program on this computer (localhost)"],
+  ]) {
+    const html = renderConsentPage({ interactionUid: "destination", redirectUri,
+      clientDisplay: { verified: false, primary: "metadata.example", declaredName: "Registered app" },
+      identity, workspaces: [], selectionVersion: 0, csrfToken: "csrf" });
+    assert.ok(html.includes(`After you approve, you return to <strong>${destination}</strong>`));
+    const nearApproval = html.slice(html.lastIndexOf('<p class="notice">'), html.indexOf('<button type="submit">'));
+    assert.ok(nearApproval.includes("Registered app"));
+    assert.ok(nearApproval.includes(destination));
+    assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden/u);
+  }
 });
 
 test("partial consent reports completed steps, stays inactive, and retries stable commands", async () => {
@@ -163,6 +192,7 @@ test("partial consent reports completed steps, stays inactive, and retries stabl
   const partialPage = renderConsentPage({
     interactionUid: input.interactionRef,
     clientDisplay: { verified: true, primary: "client.example" },
+    redirectUri: "https://client.example/callback",
     identity,
     workspaces: [{ id: W1, name: "One" }, { id: W2, name: "Two" }],
     selectedWorkspaceIds: [W1, W2],
@@ -265,6 +295,8 @@ test("failed form consent keeps the submitted home workspace on its retry page",
   await handler(postRequest(form.toString(), "application/x-www-form-urlencoded"), response,
     new URL("https://mcp.commonswarm.com/interaction/interaction-failure/consent"));
   assert.equal(response.status, 502);
+  assert.match(response.body, /After you approve, you return to <strong>claude\.ai<\/strong>/u);
+  assert.match(response.body, /Client ID URL host: <strong>client\.example<\/strong>/u);
   assert.equal(response.headers["content-security-policy"],
     "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://claude.ai; frame-ancestors 'none'; base-uri 'none'");
   assert.match(response.body,

@@ -17,6 +17,7 @@ import {
   type VerifiedMcpToken,
 } from "./auth.ts";
 import { executeClaimSeat } from "./claim-seat.ts";
+import { commandOutput, readOutput, HostedToolFailure } from "./tool-errors.ts";
 import {
   createMcpProtocolHandler,
   WWW_AUTHENTICATE,
@@ -229,41 +230,6 @@ function hostedCommand(
   };
 }
 
-function commandOutput(result: CommandResult): Record<string, unknown> {
-  if (result.status < 200 || result.status >= 300) {
-    const error = typeof result.body.error === "string" ? result.body.error : "hosted_command_failed";
-    throw new Error(/^hosted_[a-z0-9_]+$/u.test(error) ? error : "hosted_command_failed");
-  }
-  const signal = result.body.signal;
-  if (signal !== null && typeof signal === "object" && !Array.isArray(signal)) {
-    const row = signal as Record<string, unknown>;
-    return {
-      signal_id: row.id,
-      kind: row.kind,
-      created_at: row.created_at,
-      in_reply_to: row.in_reply_to ?? null,
-    };
-  }
-  if (typeof result.body.handle === "string") {
-    return {
-      grant_id: result.body.grant_id,
-      workspace_id: result.body.workspace_id,
-      seat_id: result.body.seat_id,
-      principal_id: result.body.principal_id,
-      handle: result.body.handle,
-      name: result.body.name,
-    };
-  }
-  return result.body;
-}
-
-function readOutput(result: ReadResult): Record<string, unknown> {
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error("hosted_read_failed");
-  }
-  return result.body;
-}
-
 async function executeTool(call: HostedToolCall): Promise<Record<string, unknown>> {
   if (call.signal.aborted) throw call.signal.reason;
   const args = call.arguments;
@@ -280,9 +246,9 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
   }
   const handle = String(args.seat);
   const binding = await resolveSeatBinding(call.token, handle);
-  if (binding === null) throw new Error("hosted_seat_forbidden");
+  if (binding === null) throw new HostedToolFailure("hosted_seat_forbidden");
   const capability = await seatCapability(call.token, binding, call.name);
-  if (capability === null) throw new Error("hosted_seat_forbidden");
+  if (capability === null) throw new HostedToolFailure("hosted_seat_forbidden");
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
       resource: call.name,
