@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { releaseCatalogQuery } from "./support/release-catalog-query.js";
 
 const ROOT = new URL("../deploy/release-proofs/", import.meta.url).pathname;
 
@@ -59,6 +60,29 @@ test("controls: the check rejects a trailing semicolon, a missing \\gset and the
   assert.match(proofFormatProblem("x/1-catalog.sql", "SELECT true AS catalog_ok;\n\\gset\n")!, /no semicolon/);
   assert.match(proofFormatProblem("x/1-rollback-catalog.sql", good)!, /rollback_ok/);
   assert.equal(proofFormatProblem("x/1-rollback-catalog.sql", "SELECT true AS rollback_ok\n\\gset\n"), null);
+});
+
+test("postgres.js catalog queries preserve predicates and diagnostics without the psql variable round trip", () => {
+  for (const alias of ['catalog_ok', 'rollback_ok'] as const) {
+    const predicates = "WITH checks(label,ok) AS (VALUES ('positive',true),('negative',false))\n";
+    const aggregate = "SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS " + alias + "_failed_checks,\n"
+      + "  COALESCE(bool_and(ok),false) AS ";
+    const source = predicates + aggregate + alias + "_checks_ok FROM checks\n"
+      + `\\gset\n\\if :${alias}_checks_ok\n\\else\n\\warn failed checks: :${alias}_failed_checks\n\\endif\n`
+      + `SELECT :'${alias}_checks_ok'::boolean AS ${alias}\n\\gset\n`;
+    assert.equal(releaseCatalogQuery(source, alias), predicates + aggregate + alias + " FROM checks;\n");
+    assert.equal(releaseCatalogQuery(`SELECT false AS ${alias}\n\\gset\n`, alias), `SELECT false AS ${alias};\n`);
+    assert.throws(() => releaseCatalogQuery(source.replace('\\warn', '\\echo'), alias), /Unsupported catalog proof wrapper/);
+    assert.throws(() => releaseCatalogQuery(source, alias === 'catalog_ok' ? 'rollback_ok' : 'catalog_ok'), /Unsupported catalog proof wrapper/);
+  }
+  // Real release inputs exercise the wrapper consumed by the HM rollback drill,
+  // including part 14's labelled admin proofs. No database or service is needed.
+  for (const file of catalogProofs(ROOT).filter(file => /\/item-ai\/|\/item-hm\/20260928000002-/u.test(file))) {
+    const alias = file.endsWith('rollback-catalog.sql') ? 'rollback_ok' : 'catalog_ok';
+    const query = releaseCatalogQuery(readFileSync(file, 'utf8'), alias);
+    assert.doesNotMatch(query, /^\s*\\/m, file);
+    assert.doesNotMatch(query, /:'(?:catalog_ok|rollback_ok)_checks_ok'/, file);
+  }
 });
 
 const releaseRunbook = (): string =>

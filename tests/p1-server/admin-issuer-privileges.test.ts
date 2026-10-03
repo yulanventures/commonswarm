@@ -1,7 +1,8 @@
 /** D1 effective application privileges: literal reviewed ACL inventory, CI/Docker only. */
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { catalog, dbAssert, refuses, runSql } from '../support/admin-schema-db.js';
+import { randomUUID } from 'node:crypto';
+import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
 const literal = JSON.stringify(allowlist).replaceAll("'", "''");
@@ -66,7 +67,7 @@ DECLARE unexpected text;
 BEGIN
  SELECT string_agg(privilege::text,E'\n' ORDER BY privilege::text) INTO unexpected FROM issuer_widening;
  IF unexpected IS NOT NULL THEN
-   RAISE EXCEPTION 'issuer privilege widening:%',E'\n'||unexpected USING ERRCODE='ZX002';
+   RAISE EXCEPTION 'issuer privilege widening (grantee/kind/object/privilege/grantable):%',E'\n'||unexpected USING ERRCODE='ZX002';
  END IF;
  IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
@@ -78,14 +79,60 @@ BEGIN
    OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime') AND rolinherit)
    OR EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass
      AND refobjid IN ('commonswarm_admin_issuer'::regrole,'commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole) AND deptype='o') THEN
-   RAISE EXCEPTION 'issuer role widening' USING ERRCODE='ZX002';
+   -- Catalog metadata only: show each edge, role option and owned object that
+   -- failed the assertion. Include the grantor so duplicate PG17 edges are clear.
+   SELECT string_agg(privilege::text,E'\n' ORDER BY privilege::text) INTO unexpected FROM (
+     SELECT jsonb_build_array(member.rolname,'MEMBERSHIP',parent.rolname||' GRANTED BY '||grantor.rolname,
+       format('ADMIN=%s INHERIT=%s SET=%s',m.admin_option,m.inherit_option,m.set_option),m.admin_option) AS privilege
+     FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member
+     JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles grantor ON grantor.oid=m.grantor
+     WHERE member.rolname IN ('commonswarm_oauth_runtime','swarm_command')
+       OR (member.rolname='commonswarm_admin_issuer' AND (parent.rolname NOT IN ('commonswarm_oauth_runtime','swarm_command')
+         OR m.admin_option OR m.inherit_option OR NOT m.set_option
+         OR (SELECT count(*) FROM pg_auth_members edge WHERE edge.member=m.member AND edge.roleid=m.roleid)<>1))
+     UNION ALL
+     SELECT jsonb_build_array(r.rolname,'ROLE',r.rolname,
+       format('LOGIN=%s INHERIT=%s SUPERUSER=%s CREATEDB=%s CREATEROLE=%s REPLICATION=%s BYPASSRLS=%s',
+         r.rolcanlogin,r.rolinherit,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls),false)
+     FROM pg_roles r WHERE r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+       AND (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR NOT r.rolcanlogin
+         OR (r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime') AND r.rolinherit))
+     UNION ALL
+     SELECT jsonb_build_array(r.rolname,'OWNERSHIP',
+       CASE WHEN d.dbid IN (0,(SELECT oid FROM pg_database WHERE datname=current_database()))
+         THEN pg_describe_object(d.classid,d.objid,d.objsubid)
+         ELSE format('database=%s catalog=%s object=%s subobject=%s',d.dbid,d.classid,d.objid,d.objsubid) END,'OWNER',false)
+     FROM pg_shdepend d JOIN pg_roles r ON r.oid=d.refobjid
+     WHERE d.refclassid='pg_authid'::regclass AND r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+       AND d.deptype='o'
+   ) failures;
+   RAISE EXCEPTION 'issuer role widening (grantee/kind/object/privilege/grantable):%',E'\n'||coalesce(unexpected,'missing required issuer membership') USING ERRCODE='ZX002';
  END IF;
 END $check$;
 REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 `;
 
 test('admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls', () => {
+  const grantor = `ai_issuer_grantor_${randomUUID().replaceAll('-', '')}`;
+  const issuerGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$issuer\$[\s\S]*?END \$issuer\$;/)![0];
   runSql(`${inventory}
+SELECT pg_temp.assert_issuer();
+${catalog('20261003000002')}
+-- Reproduce production's constrained applying principal even when CI initially
+-- applied M2 as a superuser. All role/edge changes roll back with this fixture.
+${repoSql('supabase/admin-delegation-reserve/20261003000002-rollback.sql').match(/DO \$issuer_memberships\$[\s\S]*?END \$issuer_memberships\$;/)![0]}
+CREATE ROLE ${grantor} NOLOGIN NOINHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+GRANT commonswarm_admin_issuer,commonswarm_oauth_runtime,swarm_command TO ${grantor} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+SET LOCAL ROLE ${grantor};
+${issuerGuard}
+RESET ROLE;
+${dbAssert(`SELECT count(*)=2 AND bool_and(grantor='${grantor}'::regrole) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole`, 'both issuer edges have a different constrained grantor')}
+SELECT pg_temp.assert_issuer();
+SAVEPOINT duplicate_grantor;
+GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+${dbAssert("SELECT count(*)=3 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'unqualified administrator grant creates a third edge')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ROLLBACK TO SAVEPOINT duplicate_grantor;
 SELECT pg_temp.assert_issuer();
 GRANT EXECUTE ON FUNCTION pg_temp.assert_issuer() TO PUBLIC;
 ${dbAssert("SELECT count(*)=1 AND bool_and(privilege=jsonb_build_array('PUBLIC','FUNCTION',(SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema())||'.assert_issuer()','EXECUTE',false)) FROM issuer_widening", 'temporary PUBLIC EXECUTE is the offending inventory row')}
@@ -131,9 +178,24 @@ REVOKE SELECT ON swarm.admin_accounts FROM commonswarm_admin_issuer;
 GRANT DELETE ON swarm.admin_accounts TO swarm_command;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE DELETE ON swarm.admin_accounts FROM swarm_command;
-${['ADMIN TRUE','INHERIT TRUE','SET FALSE'].map(option => `GRANT swarm_command TO commonswarm_admin_issuer WITH ${option};
+-- Mutate the existing edge, not a second edge owned by the test administrator.
+-- M2 may have been applied by a different, constrained release principal.
+${['ADMIN TRUE','INHERIT TRUE','SET FALSE'].map(option => `DO $membership_mutation$
+DECLARE grantor_name text;
+BEGIN
+  SELECT grantor.rolname INTO STRICT grantor_name FROM pg_auth_members m JOIN pg_roles grantor ON grantor.oid=m.grantor
+    WHERE m.member='commonswarm_admin_issuer'::regrole AND m.roleid='swarm_command'::regrole;
+  EXECUTE format('GRANT swarm_command TO commonswarm_admin_issuer WITH ${option} GRANTED BY %I',grantor_name);
+END $membership_mutation$;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
-GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;`).join('\n')}
+DO $membership_restore$
+DECLARE grantor_name text;
+BEGIN
+  SELECT grantor.rolname INTO STRICT grantor_name FROM pg_auth_members m JOIN pg_roles grantor ON grantor.oid=m.grantor
+    WHERE m.member='commonswarm_admin_issuer'::regrole AND m.roleid='swarm_command'::regrole;
+  EXECUTE format('GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE GRANTED BY %I',grantor_name);
+END $membership_restore$;
+SELECT pg_temp.assert_issuer();`).join('\n')}
 GRANT swarm_read TO swarm_command WITH INHERIT TRUE, SET TRUE;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE swarm_read FROM swarm_command;
@@ -144,6 +206,10 @@ REVOKE INSERT ON public.issuer_mutation_control FROM commonswarm_oauth_runtime;
 GRANT SELECT ON public.issuer_mutation_control TO PUBLIC;
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE SELECT ON public.issuer_mutation_control FROM PUBLIC;
+ALTER TABLE public.issuer_mutation_control OWNER TO commonswarm_admin_issuer;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ALTER TABLE public.issuer_mutation_control OWNER TO supabase_admin;
+SELECT pg_temp.assert_issuer();
 CREATE FUNCTION public.issuer_function_mutation() RETURNS boolean LANGUAGE sql AS 'SELECT true';
 ${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
 REVOKE ALL ON FUNCTION public.issuer_function_mutation() FROM PUBLIC;
