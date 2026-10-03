@@ -38,15 +38,16 @@ ALTER TABLE swarm.household_object_events OWNER TO swarm_admin;
 ALTER TABLE swarm.household_object_events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY swarm_command_all ON swarm.household_object_events FOR ALL TO swarm_command USING (true) WITH CHECK (true);
 REVOKE ALL ON swarm.household_object_events FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT SELECT, INSERT ON swarm.household_object_events TO swarm_command;
+GRANT INSERT ON swarm.household_object_events TO swarm_command;
 ALTER TABLE swarm.household_object_audit OWNER TO swarm_admin;
 ALTER TABLE swarm.household_object_audit ENABLE ROW LEVEL SECURITY;
 CREATE POLICY swarm_command_all ON swarm.household_object_audit FOR ALL TO swarm_command USING (true) WITH CHECK (true);
 REVOKE ALL ON swarm.household_object_audit FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT SELECT, INSERT ON swarm.household_object_audit TO swarm_command;
+GRANT INSERT ON swarm.household_object_audit TO swarm_command;
 
 -- Reserve rollback (verbatim in supabase/household-storage-reserve/ and
 -- deploy/release-proofs/household-storage/; approved release procedure only):
+-- -- Dropping the ledgers removes their INSERT-only command grants.
 -- DROP TABLE IF EXISTS swarm.household_object_audit;
 -- DROP TABLE IF EXISTS swarm.household_object_events;
 -- DROP TABLE IF EXISTS swarm.household_object_streams;
