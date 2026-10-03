@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -35,7 +35,9 @@ def owned(value):
     if not p.is_absolute() or not str(p).startswith(str(root)+'/'): refuse()
     return p
 def output(value): print(value)
-if name=='python3':
+if name=='node':
+    raise SystemExit(97) # Positive-control boundary: ai-db-session reached its first credential operation.
+elif name=='python3':
     if args==['-'] or (args and args[0]=='-'):
         source=sys.stdin.read(); sys.argv=['-']+args[1:]
     elif len(args)>=2 and args[0]=='-c': source=args[1]; sys.argv=['-c']+args[2:]
@@ -171,7 +173,7 @@ function fixture(config: Record<string, unknown> = {}) {
     put('oauth/releases/'+baseline+'/deploy/mcp-auth/'+file, 'reviewed '+file);
   }
   put('release/scripts/live-ordinary-controls.mjs', producerSource);
-  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp']) {
+  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
     writeFileSync(join(bin, name), '#!'+python+'\n'+dispatcher, { mode: 0o700 });
   }
   const env = { ...process.env, PATH: bin, FIXTURE_ROOT: root, WINDOW: 'W3', PROOF_DIR: proof, SECRET_STAGE: stage,
@@ -245,11 +247,14 @@ test('backup-restore-gate / stale-or-failed-status-refused: fails closed on stal
 const ordinaryKeys = ['hosted_mcp_consent_refresh', 'dcr_registration_consent', 'cimd_consent', 'human_recovery', 'worker_command_read'];
 const producerSha = digest(producerSource);
 type Json = Record<string, unknown>;
+const inDays = (days: number) => new Date(Date.now() + days * 86400_000).toISOString();
+const expiring = (ids: string[], days = 30) => ids.map(client_id => ({ client_id, expires_after: inDays(days) }));
 function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Json = {}): Json {
   return { kind: 'c1-consent', release_sha: sha, consent_phase: phase,
     measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: producerSha,
     controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-fixture-1', 'dcr-fixture-2'],
-    cleanup: phase === 'pre-W1' ? null : { grants_revoked: true, dcr_clients_removed: ['dcr-fixture-0', 'dcr-fixture-1', 'dcr-fixture-2'] },
+    // Amendments A/B: post-W5 cleanup lists earlier clients left to expire, never this run's own.
+    cleanup: phase === 'pre-W1' ? null : { grants_revoked: true, dcr_clients_expiring: expiring(['dcr-pre-w1-1', 'dcr-w4-before-1']) },
     ...change };
 }
 function liveReceipt(window: string, windowId: string, phase: string, consentText: string, change: Json = {}): Json {
@@ -376,20 +381,27 @@ test('ordinary-paths-unchanged / producer-binding: ai-open refuses receipts not 
   { const o = openFixture('W1', producerSource, false), { text, live } = openPair('W1', 'pre-W1');
     openRefused(o, o.open(text, live), 'FAIL ai-open: scripts/live-ordinary-controls.mjs in BOX_ARCHIVE_PATH expected regular-file got missing; STOP'); }
 });
-test('ordinary-paths-unchanged / per-window-consent-phase: ai-live-controls binds W1-W4 and W5 before to pre-W1, W5 after/recovery and W6/W7 to cleaned post-W5', () => {
+test('ordinary-paths-unchanged / per-window-consent-phase: ai-live-controls binds W1-W4 and W5 before to pre-W1, W5 after/recovery and W6/W7 to post-W5 with Amendment A/B cleanup', () => {
   for (const [window, phase, consentPhase] of [['W1', 'after', 'pre-W1'], ['W4', 'recovery', 'pre-W1'], ['W5', 'before', 'pre-W1'], ['W5', 'after', 'post-W5'], ['W5', 'recovery', 'post-W5'], ['W6', 'before', 'post-W5'], ['W7', 'after', 'post-W5']] as const) {
     const run = liveRun(window, phase, consentReceipt(consentPhase)); pass(run.result);
     assert.equal(readFileSync(join(run.f.proof, `consent-${consentPhase}.json`), 'utf8'), run.text);
     assert.ok(existsSync(join(run.f.proof, `ordinary-${phase}.json`)));
   }
-  const removed = (ids: string[]) => ({ cleanup: { grants_revoked: true, dcr_clients_removed: ids } });
+  const cleaned = (entries: unknown[]) => ({ cleanup: { grants_revoked: true, dcr_clients_expiring: entries } });
   const cases: Array<[string, string, Json | string, Json, string]> = [
     ['W5', 'after', consentReceipt('pre-W1'), {}, 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'],
     ['W6', 'after', consentReceipt('pre-W1'), {}, 'FAIL ai-live-controls: consent_phase for W6 after expected post-W5 got pre-W1; STOP'],
     ['W2', 'after', consentReceipt('post-W5'), {}, 'FAIL ai-live-controls: consent_phase for W2 after expected pre-W1 got post-W5; STOP'],
     ['W5', 'after', consentReceipt('post-W5', { cleanup: null }), {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
-    ['W5', 'after', consentReceipt('post-W5', removed(['dcr-fixture-1'])), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_removed expected superset-of-consent-dcr_client_ids got missing-ids; STOP'],
-    ['W5', 'recovery', consentReceipt('post-W5', { cleanup: { grants_revoked: false, dcr_clients_removed: ['dcr-fixture-1', 'dcr-fixture-2'] } }), {}, 'FAIL ai-live-controls: post-W5 cleanup grants_revoked expected true got non-true; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', cleaned([])), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring expected nonempty-list got other; STOP'],
+    ['W6', 'after', consentReceipt('post-W5', cleaned(['dcr-pre-w1-1'])), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring entry expected exact-client_id-and-expires_after got other; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', cleaned([{ ...expiring(['dcr-pre-w1-1'])[0], removed: true }])), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring entry expected exact-client_id-and-expires_after got other; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', cleaned(expiring(['dcr-pre-w1-1', 'dcr-fixture-2']))), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring client_id expected not-own-dcr_client_id got own-id; STOP'],
+    ['W7', 'after', consentReceipt('post-W5', cleaned(expiring(['dcr-pre-w1-1'], -1))), {}, 'FAIL ai-live-controls: post-W5 cleanup expires_after expected future got past-or-invalid; STOP'],
+    ['W6', 'before', consentReceipt('post-W5', cleaned([{ client_id: 'dcr-pre-w1-1', expires_after: '2026-11-02' }])), {}, 'FAIL ai-live-controls: post-W5 cleanup expires_after expected UTC-ISO-8601-Z got other; STOP'],
+    ['W7', 'after', consentReceipt('post-W5', { cleanup: { grants_revoked: true } }), {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', { cleanup: { grants_revoked: true, dcr_clients_removed: ['dcr-pre-w1-1'] } }), {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
+    ['W5', 'recovery', consentReceipt('post-W5', { cleanup: { grants_revoked: false, dcr_clients_expiring: expiring(['dcr-pre-w1-1']) } }), {}, 'FAIL ai-live-controls: post-W5 cleanup grants_revoked expected true got non-true; STOP'],
     ['W3', 'after', consentReceipt('pre-W1', { release_sha: 'e'.repeat(40) }), {}, 'FAIL ai-live-controls: consent release_sha expected input-release-sha got mismatch; STOP'],
     ['W3', 'after', consentReceipt('pre-W1'), { consent_receipt_sha256: 'f'.repeat(64) }, 'FAIL ai-live-controls: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP'],
     ['W3', 'after', consentReceipt('pre-W1'), { producer_sha256: 'f'.repeat(64) }, 'FAIL ai-live-controls: live producer_sha256 expected sha256-of-released-script got mismatch; STOP'],
@@ -426,6 +438,45 @@ test('ordinary-paths-unchanged / open-receipts-retained: W3 preflight refuses wi
   const result = f.run(['ai-w3-preflight']);
   stopped(result, 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP');
   assert.ok(!result.calls.some(c => c[0] === 'cp' || c[0] === 'docker')); assert.ok(!existsSync(join(f.root, 'oauth/releases', sha)));
+});
+// Former statement-level `A && B` guards: each half now refuses on its own line.
+test('release-plan-contract / ai-open-proof-dir-and-archive-guards: refuses an existing or symlinked PROOF_DIR and a missing or symlinked archive', () => {
+  openGood('W1', 'pre-W1');
+  const admitted = (r: ReturnType<ReturnType<typeof fixture>['run']>) => !r.calls.some(c => ['mkdir', 'install', 'mktemp', 'cp', 'date'].includes(c[0]!));
+  { const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1'); mkdirSync(o.proof);
+    const r = o.open(text, live); stopped(r, 'FAIL ai-open: PROOF_DIR expected absent got present; STOP');
+    assert.ok(admitted(r)); assert.deepEqual(readdirSync(o.proof), [], 'existing proof directory untouched'); }
+  { const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1'); const other = join(o.f.root, 'elsewhere'); mkdirSync(other);
+    symlinkSync(other, o.proof); const r = o.open(text, live); stopped(r, 'FAIL ai-open: PROOF_DIR expected absent got present; STOP');
+    assert.ok(admitted(r)); assert.deepEqual(readdirSync(other), []); }
+  { const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1');
+    symlinkSync(join(o.f.root, 'absent-target'), o.proof); const r = o.open(text, live);
+    stopped(r, 'FAIL ai-open: PROOF_DIR expected not-symlink got symlink; STOP'); assert.ok(admitted(r)); assert.ok(!existsSync(join(o.f.root, 'absent-target'))); }
+  { const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1'); const archive = join(o.f.root, 'archive', `admin-issuance-${sha}-${openId}.tar`);
+    const moved = join(o.f.root, 'moved.tar'); renameSync(archive, moved);
+    let r = o.open(text, live); stopped(r, 'FAIL ai-open: BOX_ARCHIVE_PATH expected regular-file got missing; STOP'); assert.ok(admitted(r)); assert.ok(!existsSync(o.proof));
+    symlinkSync(moved, archive); r = o.open(text, live);
+    stopped(r, 'FAIL ai-open: BOX_ARCHIVE_PATH expected not-symlink got symlink; STOP'); assert.ok(admitted(r)); assert.ok(!existsSync(o.proof)); }
+});
+test('release-plan-contract / ai-db-session-open-close-guards: refuses without open.txt or after closed.txt', () => {
+  // Positive control: both guards admit and the block reaches its first credential command.
+  const good = fixture(); good.put('proof/open.txt', 'open\n');
+  const reached = good.run(['ai-db-session'], 'W2');
+  assert.equal(reached.status, 97, reached.stderr); assert.ok(reached.calls.some(c => c[0] === 'node'));
+  const missing = fixture(); const r1 = missing.run(['ai-db-session'], 'W2');
+  stopped(r1, 'FAIL ai-db-session: open.txt expected present got missing; STOP'); assert.ok(!r1.calls.some(c => c[0] === 'node'));
+  const closed = fixture(); closed.put('proof/open.txt', 'open\n'); closed.put('proof/closed.txt', 'closed\n');
+  const r2 = closed.run(['ai-db-session'], 'W2');
+  stopped(r2, 'FAIL ai-db-session: closed.txt expected absent got present; STOP'); assert.ok(!r2.calls.some(c => c[0] === 'node'));
+});
+test('release-plan-contract / w3-new-oauth-release-guards: refuses an existing or symlinked new OAuth release directory before copying', () => {
+  const good = fixture(); pass(good.run(['ai-w3-preflight'])); assert.ok(existsSync(join(good.root, 'oauth/releases', sha)));
+  const present = fixture(); mkdirSync(join(present.root, 'oauth/releases', sha));
+  let r = present.run(['ai-w3-preflight']); stopped(r, 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; STOP');
+  assert.ok(!r.calls.some(c => c[0] === 'cp')); assert.deepEqual(readdirSync(join(present.root, 'oauth/releases', sha)), []);
+  const linked = fixture(); symlinkSync(join(linked.root, 'absent-release'), join(linked.root, 'oauth/releases', sha));
+  r = linked.run(['ai-w3-preflight']); stopped(r, 'FAIL ai-w3-preflight: new OAuth release directory expected not-symlink got symlink; STOP');
+  assert.ok(!r.calls.some(c => c[0] === 'cp')); assert.ok(!existsSync(join(linked.root, 'absent-release')));
 });
 test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-password-guarded-file-removal: fails closed when guarded cleanup refuses', () => {
   for (const refused of [false, true]) {

@@ -633,6 +633,14 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
   writeFileSync(calls,''); result=finish(true); assert.equal(result.status,0,result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
   assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-probes');
+  // Former `A && B` guard: each receipt now refuses on its own line before any probe.
+  for(const file of ['C1-fence.txt','client-withdraw.json']) {
+    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); writeFileSync(calls,''); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
+    result=finish(undefined); assert.notEqual(result.status,0);
+    assert.match(result.stderr,new RegExp(`FAIL ai-w6-finish: ${file.replace('.','\\.')} expected present got missing; STOP`));
+    assert.equal(readFileSync(calls,'utf8'),''); assert.ok(!existsSync(join(proof,'C1-finish.json')));
+    writeFileSync(join(proof,file),saved);
+  }
 });
 
 test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
@@ -734,6 +742,21 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     assert.notEqual(unbound.status,0); assert.match(unbound.stderr,/FAIL ai-close: retained consent receipt expected consent-post-W5\.json got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     writeFileSync(join(proof,'consent-post-W5.json'),'{}');
+    // Former `A && B` case-arm guards: each forward-close receipt refuses on its own.
+    rmSync(join(proof,'C1-cleanup.txt'));
+    const noCleanup=run(harness+close,{...env,CLOSE_RESULT:'success'});
+    assert.notEqual(noCleanup.status,0); assert.match(noCleanup.stderr,/FAIL ai-close: W6 C1-cleanup\.txt expected present got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
+    writeFileSync(join(proof,'consent-pre-W1.json'),'{}'); writeFileSync(join(proof,'schema-committed.txt'),'PASS'); writeFileSync(join(proof,'issuer-credential.txt'),'PASS');
+    const w2=run(harness+close,{...env,WINDOW:'W2',CLOSE_RESULT:'success'});
+    assert.notEqual(w2.status,0); assert.match(w2.stderr,/FAIL ai-close: W2 W2-probes\.txt expected present got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    // A guarded rm that reports success but leaves the stage must not close the window.
+    const fakeRm=join(scratch,'close-fake-rm'); mkdirSync(fakeRm); writeFileSync(join(fakeRm,'rm'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+    const kept=run(harness+close,{...env,CLOSE_RESULT:'success',PATH:shim+':'+fakeRm+':'+process.env.PATH});
+    assert.notEqual(kept.status,0); assert.match(kept.stderr,/FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
   } finally {

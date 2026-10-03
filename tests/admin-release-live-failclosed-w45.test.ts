@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -29,6 +29,22 @@ after(() => {
 });
 
 const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64);
+// Test-data stand-in for the released producer bytes at RELEASE_SHA (never written under repo scripts/).
+const producerSource = 'export const fixtureProducer = "live-ordinary-controls";\n';
+const planPath = resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
+const ordinaryKeys = ['hosted_mcp_consent_refresh', 'dcr_registration_consent', 'cimd_consent', 'human_recovery', 'worker_command_read'];
+const inDays = (days: number) => new Date(Date.now() + days * 86400_000).toISOString();
+function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Record<string, unknown> = {}) {
+  return { kind: 'c1-consent', release_sha: sha, consent_phase: phase, measured_at: new Date(Date.now() - 60_000).toISOString(),
+    producer_sha256: hash(producerSource), controls: { cimd_consent: true, dcr_registration_consent: true },
+    dcr_client_ids: ['dcr-post-w5-1'],
+    cleanup: phase === 'pre-W1' ? null : { grants_revoked: true, dcr_clients_expiring: [{ client_id: 'dcr-pre-w1-1', expires_after: inDays(30) }] },
+    ...change };
+}
+function liveReceipt(phase: string, consentText: string, change: Record<string, unknown> = {}) {
+  return { release_sha: sha, window_id: 'Fix123', window: 'W5', phase, controls: Object.fromEntries(ordinaryKeys.map(k => [k, true])),
+    consent_receipt_sha256: hash(consentText), producer_sha256: hash(producerSource), dcr_client_ids: ['dcr-w5-after-1'], ...change };
+}
 const client = { client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json',
   redirect_uris: ['https://commonswarm.com/oauth/c1-smoke/callback'] };
 // All commands record argv. PATH contains only these stubs, with no daemon fallback.
@@ -94,7 +110,16 @@ elif name=='node':
     if args!=['scripts/admin-smoke.mjs','--print-client-metadata']: refuse()
     print(json.dumps(cfg['client']))
 elif name=='git':
-    if args!=['merge-base','--is-ancestor',cfg['sha'],'origin/main']: refuse()
+    if args==['show',cfg['sha']+':scripts/live-ordinary-controls.mjs']: sys.stdout.write(cfg.get('producer',''))
+    elif args==['rev-parse','HEAD']: print(cfg.get('head',cfg['sha']))
+    elif args==['status','--porcelain']: sys.stdout.write(cfg.get('dirty',''))
+    elif args!=['merge-base','--is-ancestor',cfg['sha'],'origin/main']: refuse()
+elif name=='ssh':
+    # Positive-control boundary: every local guard admitted before the first remote operation.
+    print('ADMITTED ssh'); raise SystemExit(97)
+elif name=='mkdir' and args and args[0]=='-p':
+    # Positive-control boundary: every guard admitted before the first directory creation.
+    print('ADMITTED mkdir -p'); raise SystemExit(97)
 elif name=='mkdir':
     if len(args)!=1: refuse()
     owned(args[0]).mkdir()
@@ -126,6 +151,8 @@ elif name=='ai_ro':
 elif name=='date':
     if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
     print('2026-10-03T12:00:00Z')
+elif name=='systemctl' and args==['is-active','--quiet','fixture-recycle.timer']:
+    raise SystemExit(0 if cfg.get('timer_active') else 3)
 elif name=='systemctl':
     if args==['stop','fixture-recycle.timer'] or args==['reload','caddy']: pass
     elif args==['show','-p','ActiveState','--value','fixture-recycle.service']: print('inactive')
@@ -142,6 +169,8 @@ elif name=='mv':
 elif name=='docker':
     edge=str(root/'edge/releases'/cfg['sha']); compose=edge+'/deploy/edge-runtime'
     if args==['inspect','--format','{{.State.Health.Status}}','commonswarm-edge-edge-runtime-1']: print('healthy')
+    elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.config_files"}}','commonswarm-edge-edge-runtime-1']:
+        old=str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime'); print(old+'/compose.yaml,'+old+'/compose.override.yaml')
     elif args==['inspect','commonswarm-edge-edge-runtime-1']:
         print(json.dumps([{'Image':cfg['image'],'State':{'Health':{'Status':'healthy'}},'Config':{'Labels':{'com.docker.compose.project.working_dir':compose}},'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dest,'Source':edge+'/'+rel,'RW':False} for dest,rel in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
     elif args==['compose','--project-name','commonswarm-edge','-f',compose+'/compose.yaml','-f',compose+'/compose.override.yaml','up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']:
@@ -178,10 +207,14 @@ function fixture(config: Record<string, unknown> = {}) {
   put('site/manifest.json', manifest);
   const goodClose = `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${hash(manifest)}\n`;
   put('site/CLOSE.txt', goodClose);
-  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
+  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: baseline, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
     baseline_caddyfile_sha256: '', archive_sha256: '' };
   put('authorization.json', { approver: 'HezLead', release_sha: sha, task_ref: 'fixture-qa', browser: 'headless-bundled-chromium' });
-  put('fixture.json', { sha, image, client, ...config });
+  put('fixture.json', { sha, baseline, image, client, producer: producerSource, ...config });
+  // W5 forward close inputs: post-W5 consent and the window's phase-after live receipt.
+  const consentText = JSON.stringify(consentReceipt('post-W5'));
+  put('consent.json', consentText); put('live.json', liveReceipt('after', consentText));
+  mkdirSync(join(root, 'prep'), { mode: 0o700 });
   put('commands.jsonl', ''); put('http.jsonl', '');
   put('bin/_dispatch', dispatcher);
   chmodSync(join(bin, '_dispatch'), 0o700);
@@ -219,6 +252,7 @@ function fixture(config: Record<string, unknown> = {}) {
       ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
       ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
+      ['/etc/systemd/system', join(root, 'systemd')],
     ] as const) source = source.split(from).join(to);
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
@@ -226,7 +260,9 @@ function fixture(config: Record<string, unknown> = {}) {
         INPUTS_FILE: join(root, 'inputs.json'), SITE_EVIDENCE: site, SITE_RELEASE_SHA: sha, EXPECTED_SITE_SHA: baseline,
         SITE_QA_AUTHORIZATION_FILE: join(root, 'authorization.json'), WINDOW: 'W4', WINDOW_ID: data.window_id,
         SECRET_STAGE: stage, PROOF_DIR: proof, NEW_EDGE: newEdge, RELEASE_ROOT: join(root, 'release'), RELEASE_SHA: sha,
-        EDGE_RECYCLE_TIMER: 'fixture-recycle.timer', EDGE_RECYCLE_SERVICE: 'fixture-recycle.service', ...env },
+        EDGE_RECYCLE_TIMER: 'fixture-recycle.timer', EDGE_RECYCLE_SERVICE: 'fixture-recycle.service',
+        LIVE_CONTROLS_FILE: join(root, 'live.json'), CONSENT_RECEIPT_FILE: join(root, 'consent.json'), PLAN_FILE: planPath,
+        PREP_DIR: join(root, 'prep'), ...env },
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
@@ -367,4 +403,123 @@ test('site-build-qa / GET-HEAD-admin-gate-closed-after-W5: fails closed on an op
     assert.ok(!refused.calls.some(c => c[0] === 'node')); assert.ok(!existsSync(bad.closedRoot), 'no W5 receipts');
     assert.doesNotMatch(refused.stdout, /PASS W5/);
   }
+});
+
+// W5 forward close (Amendment A): ai-w5-closed runs the complete ai-live-controls
+// block, phase after, bound to the post-W5 consent receipt, before any outside probe.
+function w5Refused(f: Fixture, r: Result, text: string) {
+  stopped(f, r, text); assert.doesNotMatch(r.stderr, /Traceback/);
+  assert.deepEqual(r.requests, [], 'no outside probe after a live-controls refusal');
+  assert.ok(!r.calls.some(c => c[0] === 'node')); assert.ok(!existsSync(f.closedRoot), 'no W5 close receipts');
+}
+function w5Pair(f: Fixture, consent: Record<string, unknown>, phase = 'after', change: Record<string, unknown> = {}) {
+  const text = JSON.stringify(consent); f.put('consent.json', text); f.put('live.json', liveReceipt(phase, text, change));
+}
+test('ordinary-paths-unchanged / w5-forward-close-live-controls: ai-w5-closed refuses unless phase-after controls bind to the post-W5 consent receipt', () => {
+  const good = fixture(), r = good.run(); pass(good, r);
+  assert.equal(readFileSync(join(good.closedRoot, 'consent-post-W5.json'), 'utf8'), readFileSync(join(good.root, 'consent.json'), 'utf8'));
+  assert.deepEqual(JSON.parse(readFileSync(join(good.closedRoot, 'ordinary-after.json'), 'utf8')), JSON.parse(readFileSync(join(good.root, 'live.json'), 'utf8')));
+  assert.ok(r.calls.some(c => c[0] === 'git' && c[1] === 'show' && c[2] === sha + ':scripts/live-ordinary-controls.mjs'));
+  const expiring = (entries: unknown[]) => consentReceipt('post-W5', { cleanup: { grants_revoked: true, dcr_clients_expiring: entries } });
+  const cases: Array<[Record<string, unknown>, string, Record<string, unknown>, string]> = [
+    [consentReceipt('pre-W1'), 'after', {}, 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'],
+    [consentReceipt('pre-W1'), 'before', {}, 'FAIL ai-w5-closed: W5 forward-close live controls phase expected after got other; STOP'],
+    [consentReceipt('post-W5', { cleanup: null }), 'after', {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
+    [expiring([{ client_id: 'dcr-pre-w1-1', expires_after: inDays(-1) }]), 'after', {}, 'FAIL ai-live-controls: post-W5 cleanup expires_after expected future got past-or-invalid; STOP'],
+    [expiring([{ client_id: 'dcr-pre-w1-1', expires_after: inDays(30), note: 'x' }]), 'after', {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring entry expected exact-client_id-and-expires_after got other; STOP'],
+    [expiring([{ client_id: 'dcr-post-w5-1', expires_after: inDays(30) }]), 'after', {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring client_id expected not-own-dcr_client_id got own-id; STOP'],
+    [consentReceipt('post-W5'), 'after', { controls: { ...Object.fromEntries(ordinaryKeys.map(k => [k, true])), human_recovery: false } }, 'FAIL ai-live-controls: live control human_recovery expected true got false; STOP'],
+  ];
+  for (const [consent, phase, change, message] of cases) { const f = fixture(); w5Pair(f, consent, phase, change); w5Refused(f, f.run(), message); }
+  { const f = fixture({ producer: 'export const other = 1;\n' });
+    w5Refused(f, f.run(), 'FAIL ai-live-controls: live producer_sha256 expected sha256-of-released-script got mismatch; STOP'); }
+  for (const name of ['LIVE_CONTROLS_FILE', 'CONSENT_RECEIPT_FILE', 'PLAN_FILE']) {
+    const f = fixture(); const refused = f.run(['ai-w5-closed'], { [name]: '' });
+    w5Refused(f, refused, `FAIL ai-w5-closed: ${name} expected absolute-regular-file got unset; STOP`);
+    assert.ok(!refused.calls.some(c => c[0] === 'git'));
+  }
+  { const f = fixture(); mkdirSync(join(f.root, 'prep/w5-live-controls'));
+    const refused = f.run(); w5Refused(f, refused, 'FAIL ai-w5-closed: live-controls staging expected absent got present; STOP');
+    assert.ok(!refused.calls.some(c => c[0] === 'git')); }
+});
+
+// Former statement-level `A && B` guards, each half now refusing on its own line.
+function admitted(r: Result, marker: string) {
+  assert.equal(r.status, 97, r.stderr); assert.match(r.stdout, new RegExp(marker)); assert.doesNotMatch(r.stderr, /FAIL/);
+}
+function guardRefused(f: Fixture, r: Result, text: string) {
+  stopped(f, r, text); assert.doesNotMatch(r.stdout, /ADMITTED/);
+}
+test('release-plan-contract / w4-apply-candidate-guards: refuses a missing MCP or API Caddy candidate before closing issuance', () => {
+  for (const [present, message] of [[[], 'FAIL ai-w4-apply: mcp.new.caddy candidate expected present got missing; STOP'],
+    [['mcp.new.caddy'], 'FAIL ai-w4-apply: api.new.caddy candidate expected present got missing; STOP']] as const) {
+    const f = fixture(); for (const file of present) f.put('stage/' + file, 'candidate\n');
+    const r = f.run(['ai-w4-apply']); guardRefused(f, r, message);
+    assert.ok(!r.calls.some(c => c[0] === 'ai_db')); assert.ok(!existsSync(join(f.proof, 'edge-attempted.txt')));
+  }
+});
+test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses a missing or symlinked override and an existing or symlinked new edge release', () => {
+  const ready = (f: Fixture, override = true) => {
+    f.put('proof/ordinary-before.json', '{}'); f.put('proof/consent-pre-W1.json', '{}');
+    if (override) f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
+    renameSync(join(f.root, 'edge/releases', sha), join(f.root, 'moved-new-edge'));
+  };
+  const good = fixture(); ready(good); admitted(good.run(['ai-w4-preflight']), 'ADMITTED mkdir -p');
+  const missing = fixture(); ready(missing, false);
+  guardRefused(missing, missing.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected regular-file got missing; STOP');
+  const linked = fixture(); ready(linked, false); linked.put('real-override.yaml', 'reviewed override\n');
+  mkdirSync(join(linked.root, `edge/releases/${baseline}/deploy/edge-runtime`), { recursive: true });
+  symlinkSync(join(linked.root, 'real-override.yaml'), join(linked.root, `edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`));
+  guardRefused(linked, linked.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected not-symlink got symlink; STOP');
+  const present = fixture(); ready(present); mkdirSync(join(present.root, 'edge/releases', sha));
+  guardRefused(present, present.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected absent got present; STOP');
+  const dangling = fixture(); ready(dangling); symlinkSync(join(dangling.root, 'absent-edge'), join(dangling.root, 'edge/releases', sha));
+  guardRefused(dangling, dangling.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP');
+  assert.ok(!existsSync(join(dangling.root, 'absent-edge')));
+});
+test('release-plan-contract / recycle-install-dropin-guards: refuses an existing or symlinked recycle drop-in', () => {
+  const good = fixture(); admitted(good.run(['ai-recycle-install']), 'ADMITTED mkdir -p');
+  const dropin = 'systemd/fixture-recycle.service.d/50-admin-measurement.conf';
+  const present = fixture(); present.put(dropin, '[Service]\n');
+  guardRefused(present, present.run(['ai-recycle-install']), 'FAIL ai-recycle-install: recycle drop-in expected absent got present; STOP');
+  assert.equal(readFileSync(join(present.root, dropin), 'utf8'), '[Service]\n');
+  const linked = fixture(); mkdirSync(dirname(join(linked.root, dropin)), { recursive: true });
+  symlinkSync(join(linked.root, 'absent-dropin'), join(linked.root, dropin));
+  guardRefused(linked, linked.run(['ai-recycle-install']), 'FAIL ai-recycle-install: recycle drop-in expected not-symlink got symlink; STOP');
+});
+test('release-plan-contract / w6-prepare-checkout-and-proof-guards: refuses a wrong HEAD, dirty tree, or existing or symlinked C1 proof directory', () => {
+  const env = { WINDOW: 'W6' };
+  const good = fixture(); admitted(good.run(['ai-w6-prepare'], env), 'ADMITTED mkdir -p');
+  const wrong = fixture({ head: 'c'.repeat(40) });
+  guardRefused(wrong, wrong.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: checkout HEAD expected release-sha got mismatch; STOP');
+  const dirty = fixture({ dirty: ' M site/index.html\n' });
+  guardRefused(dirty, dirty.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: worktree expected clean got dirty; STOP');
+  const c1 = (f: Fixture) => join(f.root, 'receipts', `c1-${sha}-Fix123`);
+  const present = fixture(); mkdirSync(c1(present), { recursive: true });
+  guardRefused(present, present.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: C1_PROOF_DIR expected absent got present; STOP');
+  const linked = fixture(); mkdirSync(join(linked.root, 'receipts')); symlinkSync(join(linked.root, 'absent-c1'), c1(linked));
+  guardRefused(linked, linked.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: C1_PROOF_DIR expected not-symlink got symlink; STOP');
+});
+test('release-plan-contract / w6-transfer-file-guards: refuses a missing or symlinked upload and an existing or symlinked download target', () => {
+  const env = (direction: string, file: string, f: Fixture) => ({ WINDOW: 'W6', C1_TRANSFER_DIRECTION: direction, C1_TRANSFER_FILE: file, C1_PROOF_DIR: join(f.root, 'c1') });
+  const up = fixture(); up.put('c1/agent.json', '{}'); admitted(up.run(['ai-w6-transfer'], env('upload', 'agent.json', up)), 'ADMITTED ssh');
+  const missing = fixture(); mkdirSync(join(missing.root, 'c1'));
+  let r = missing.run(['ai-w6-transfer'], env('upload', 'agent.json', missing));
+  guardRefused(missing, r, 'FAIL ai-w6-transfer: upload file expected regular-file got missing; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  const linked = fixture(); linked.put('elsewhere.json', '{}'); mkdirSync(join(linked.root, 'c1'));
+  symlinkSync(join(linked.root, 'elsewhere.json'), join(linked.root, 'c1/agent.json'));
+  r = linked.run(['ai-w6-transfer'], env('upload', 'agent.json', linked));
+  guardRefused(linked, r, 'FAIL ai-w6-transfer: upload file expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  // Download positive: guards admit; the remote read's stdout lands in the new 0600 target.
+  const down = fixture(); mkdirSync(join(down.root, 'c1')); r = down.run(['ai-w6-transfer'], env('download', 'C1-audit.json', down));
+  assert.equal(r.status, 97, r.stderr); assert.doesNotMatch(r.stderr, /FAIL/);
+  assert.equal(readFileSync(join(down.root, 'c1/C1-audit.json'), 'utf8'), 'ADMITTED ssh\n');
+  const present = fixture(); present.put('c1/C1-audit.json', 'retained\n');
+  r = present.run(['ai-w6-transfer'], env('download', 'C1-audit.json', present));
+  guardRefused(present, r, 'FAIL ai-w6-transfer: download target expected absent got present; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.equal(readFileSync(join(present.root, 'c1/C1-audit.json'), 'utf8'), 'retained\n');
+  const dangling = fixture(); mkdirSync(join(dangling.root, 'c1')); symlinkSync(join(dangling.root, 'absent-audit'), join(dangling.root, 'c1/C1-audit.json'));
+  r = dangling.run(['ai-w6-transfer'], env('download', 'C1-audit.json', dangling));
+  guardRefused(dangling, r, 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.ok(!existsSync(join(dangling.root, 'absent-audit')));
 });

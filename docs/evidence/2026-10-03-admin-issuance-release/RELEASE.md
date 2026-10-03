@@ -83,7 +83,7 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | W2 SCHEMA | common preflight/open/session; ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (five separate transactions, probes after each), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
 | W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
-| W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
+| W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
 | W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
 | W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
 
@@ -379,10 +379,12 @@ found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert l
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
 ;; esac
-test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
+test ! -e "$PROOF_DIR" || { printf 'FAIL ai-open: PROOF_DIR expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$PROOF_DIR" || { printf 'FAIL ai-open: PROOF_DIR expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 : "${LIVE_CONTROLS_FILE:?FAIL ai-open: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
 : "${CONSENT_RECEIPT_FILE:?FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
-test -f "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH"
+test -f "$BOX_ARCHIVE_PATH" || { printf 'FAIL ai-open: BOX_ARCHIVE_PATH expected regular-file got missing; STOP\n' >&2; exit 1; }
+test ! -L "$BOX_ARCHIVE_PATH" || { printf 'FAIL ai-open: BOX_ARCHIVE_PATH expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 test "$(stat -c %a "$BOX_ARCHIVE_PATH")" = 600
 test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")"
 # Live before receipt and its release-bound consent receipt (SCHEMA section 3);
@@ -435,9 +437,17 @@ if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
 else:
     k=c['cleanup']
-    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_removed'},'post-W5 consent cleanup','object','null-or-other')
+    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_expiring'},'post-W5 consent cleanup','object','null-or-other')
     need(k['grants_revoked'] is True,'post-W5 cleanup grants_revoked','true','non-true')
-    need(strings(k['dcr_clients_removed']) and set(k['dcr_clients_removed'])>=set(c['dcr_client_ids']),'post-W5 cleanup dcr_clients_removed','superset-of-consent-dcr_client_ids','missing-ids')
+    expiring=k['dcr_clients_expiring']
+    need(isinstance(expiring,list) and len(expiring)>0,'post-W5 cleanup dcr_clients_expiring','nonempty-list','other')
+    for x in expiring:
+        need(isinstance(x,dict) and set(x)=={'client_id','expires_after'} and isinstance(x['client_id'],str),'post-W5 cleanup dcr_clients_expiring entry','exact-client_id-and-expires_after','other')
+        need(x['client_id'] not in c['dcr_client_ids'],'post-W5 cleanup dcr_clients_expiring client_id','not-own-dcr_client_id','own-id')
+        need(isinstance(x['expires_after'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',x['expires_after']) is not None,'post-W5 cleanup expires_after','UTC-ISO-8601-Z','other')
+        try: until=datetime.datetime.fromisoformat(x['expires_after'].replace('Z','+00:00'))
+        except ValueError: until=None
+        need(until is not None and until>datetime.datetime.now(datetime.timezone.utc),'post-W5 cleanup expires_after','future','past-or-invalid')
 if d['window']=='W1':
     age=(datetime.datetime.now(datetime.timezone.utc)-measured).total_seconds()
     need(age>=0,'pre-W1 consent measured_at','not-future','future')
@@ -498,7 +508,8 @@ printf 'PASS ai-open: %s; secret cleanup pointer retained\n' "$WINDOW"
 # readonly: no
 # host: box root; task files only, database queries read-only until apply
 set -euo pipefail
-test -f "$PROOF_DIR/open.txt" && test ! -e "$PROOF_DIR/closed.txt"
+test -f "$PROOF_DIR/open.txt" || { printf 'FAIL ai-db-session: open.txt expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/closed.txt" || { printf 'FAIL ai-db-session: closed.txt expected absent got present; STOP\n' >&2; exit 1; }
 MIGRATE=$RELEASE_ROOT/deploy/supabase-stack/migrate
 PGSERVICE_FILE=$SECRET_STAGE/service.conf
 PGPASS_FILE=$SECRET_STAGE/pass
@@ -619,14 +630,22 @@ The producer is `scripts/live-ordinary-controls.mjs` from this RELEASE_SHA. A
 dedicated controls worker started by HezLead's chain runs it; that worker reads
 credentials only from 0600 files and is never the read-only preparation worker.
 Its consent legs run twice per release: once before W1 opens (`pre-W1`) and
-once after W5 closes (`post-W5`). Each consent click goes only through the
+once after W5's site release and before W5's forward close (`post-W5`). Each consent click goes only through the
 pointer-file handoff to HezLead's consent worker; the script writes the
 authorize URL to a 0600 pointer file, waits for the callback file and never
 opens a browser. Its non-consent legs run before and after every window and
 produce LIVE_CONTROLS_FILE. Its only writes are recorded DCR registrations, a
 refresh of its own test grant and one note per run to workspace
-"c1-controls (test)". The post-W5 run's cleanup revokes the test grant family
-and removes every recorded DCR client of both consent runs of this release.
+"c1-controls (test)". The pre-W1 run's CIMD grant serves the W1–W5 refresh
+legs. The post-W5 run obtains a new CIMD grant for the W5-after, W6 and W7
+legs. Its cleanup revokes the pre-W1 grant family, proven by a rejected refresh,
+and lists every DCR client recorded by the pre-W1 run and by the window runs up
+to W5 before, but not its own new clients, with each client's expiry time. The
+issuer has no DCR deletion route and the plan makes no production deletes: DCR
+test clients are left to expire after 30 days unused (token use renews them).
+After W7 (or the last window run), HezLead's chain runs the producer's final
+cleanup, which revokes the post-W5 grant family and writes a 0600 report of
+every remaining DCR client and its expiry; it is not a plan receipt.
 ai-open and ai-live-controls bind every live receipt to its consent receipt and
 both to the producer bytes released in this archive. Without both receipts,
 STOP before the window opens.
@@ -686,9 +705,17 @@ if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
 else:
     k=c['cleanup']
-    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_removed'},'post-W5 consent cleanup','object','null-or-other')
+    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_expiring'},'post-W5 consent cleanup','object','null-or-other')
     need(k['grants_revoked'] is True,'post-W5 cleanup grants_revoked','true','non-true')
-    need(strings(k['dcr_clients_removed']) and set(k['dcr_clients_removed'])>=set(c['dcr_client_ids']),'post-W5 cleanup dcr_clients_removed','superset-of-consent-dcr_client_ids','missing-ids')
+    expiring=k['dcr_clients_expiring']
+    need(isinstance(expiring,list) and len(expiring)>0,'post-W5 cleanup dcr_clients_expiring','nonempty-list','other')
+    for x in expiring:
+        need(isinstance(x,dict) and set(x)=={'client_id','expires_after'} and isinstance(x['client_id'],str),'post-W5 cleanup dcr_clients_expiring entry','exact-client_id-and-expires_after','other')
+        need(x['client_id'] not in c['dcr_client_ids'],'post-W5 cleanup dcr_clients_expiring client_id','not-own-dcr_client_id','own-id')
+        need(isinstance(x['expires_after'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',x['expires_after']) is not None,'post-W5 cleanup expires_after','UTC-ISO-8601-Z','other')
+        try: until=datetime.datetime.fromisoformat(x['expires_after'].replace('Z','+00:00'))
+        except ValueError: until=None
+        need(until is not None and until>datetime.datetime.now(datetime.timezone.utc),'post-W5 cleanup expires_after','future','past-or-invalid')
 proof=pathlib.Path(sys.argv[5]); copy=proof/('consent-'+phase+'.json')
 need(not copy.exists() or copy.read_bytes()==consent_raw,'retained '+copy.name,'absent-or-identical','different-bytes')
 copy.write_bytes(consent_raw)
@@ -1225,7 +1252,8 @@ import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
 assert not any(r.split('=',1)[0] in ('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE') for r in rows), 'FAIL W3 admin env must be unset; STOP'
 PY
-test ! -e "$NEW_OAUTH" && test ! -L "$NEW_OAUTH"
+test ! -e "$NEW_OAUTH" || { printf 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$NEW_OAUTH" || { printf 'FAIL ai-w3-preflight: new OAuth release directory expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p "$NEW_OAUTH"
 cp -a "$RELEASE_ROOT/." "$NEW_OAUTH/"
 printf 'PASS W3 baseline Compose exact; schema present; admin activation OFF\n'
@@ -1381,8 +1409,10 @@ BASELINE_EDGE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1
 OLD_EDGE=/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA
 NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
 test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' commonswarm-edge-edge-runtime-1)" = "$OLD_EDGE/deploy/edge-runtime/compose.yaml,$OLD_EDGE/deploy/edge-runtime/compose.override.yaml"
-test -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" && test ! -L "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml"
-test ! -e "$NEW_EDGE" && test ! -L "$NEW_EDGE"
+test -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" || { printf 'FAIL ai-w4-preflight: baseline compose.override.yaml expected regular-file got missing; STOP\n' >&2; exit 1; }
+test ! -L "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" || { printf 'FAIL ai-w4-preflight: baseline compose.override.yaml expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+test ! -e "$NEW_EDGE" || { printf 'FAIL ai-w4-preflight: new edge release directory expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$NEW_EDGE" || { printf 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p "$NEW_EDGE"
 cp -a "$RELEASE_ROOT/." "$NEW_EDGE/"
 cp "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml"
@@ -1501,7 +1531,8 @@ ai_deadline
 test ! -e "$PROOF_DIR/edge-attempted.txt"
 ai_run ai-inputs
 ai_run ai-gates
-test -f "$SECRET_STAGE/mcp.new.caddy" && test -f "$SECRET_STAGE/api.new.caddy"
+test -f "$SECRET_STAGE/mcp.new.caddy" || { printf 'FAIL ai-w4-apply: mcp.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
+test -f "$SECRET_STAGE/api.new.caddy" || { printf 'FAIL ai-w4-apply: api.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
@@ -1790,7 +1821,8 @@ test "$WINDOW" = W4
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" && exit 1
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 RECYCLE_DROPIN=/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
-test ! -e "$RECYCLE_DROPIN" && test ! -L "$RECYCLE_DROPIN"
+test ! -e "$RECYCLE_DROPIN" || { printf 'FAIL ai-recycle-install: recycle drop-in expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$RECYCLE_DROPIN" || { printf 'FAIL ai-recycle-install: recycle drop-in expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p /etc/commonswarm-admin-release /usr/local/libexec "$(dirname "$RECYCLE_DROPIN")"
 chmod 0700 /etc/commonswarm-admin-release
 python3 - "$PLAN_FILE" "$SECRET_STAGE/recycle.sh" "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
@@ -1905,6 +1937,10 @@ is its explicit preselected failure path; it never retries deployment. Its
 protected build env recovery uses the service-account token file. Any rm refusal
 STOPs cleanup, with the exact path/message retained. The caller does not execute
 the next W window until that referenced site's window is verified closed.
+ai-w5-closed is W5's forward close: it runs the complete ai-live-controls block
+with phase after and the post-W5 CONSENT_RECEIPT_FILE before any outside probe,
+reads the producer from the exact RELEASE_SHA commit, stages under PREP_DIR and
+retains ordinary-after.json and consent-post-W5.json beside W5-closed.json.
 
 ```sh
 # step: ai-w5-closed
@@ -1912,7 +1948,32 @@ the next W window until that referenced site's window is verified closed.
 # host: HezLead Mac; after referenced site manifest and browser ownership close
 set -euo pipefail
 : "${SITE_EVIDENCE:?}" "${INPUTS_FILE:?}"
-python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" <<'PY'
+: "${LIVE_CONTROLS_FILE:?FAIL ai-w5-closed: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
+: "${CONSENT_RECEIPT_FILE:?FAIL ai-w5-closed: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
+: "${PLAN_FILE:?FAIL ai-w5-closed: PLAN_FILE expected absolute-regular-file got unset; STOP}"
+: "${PREP_DIR:?FAIL ai-w5-closed: PREP_DIR expected prep-directory got unset; STOP}"
+# W5 forward close: the complete ai-live-controls block, phase after, bound to the
+# post-W5 consent receipt; producer bytes come from the exact RELEASE_SHA commit.
+W5_RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+W5_LIVE=$PREP_DIR/w5-live-controls
+test ! -e "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+mkdir "$W5_LIVE"
+mkdir "$W5_LIVE/release"
+mkdir "$W5_LIVE/release/scripts"
+git show "${W5_RELEASE_SHA}:scripts/live-ordinary-controls.mjs" >"$W5_LIVE/release/scripts/live-ordinary-controls.mjs"
+python3 - "$PLAN_FILE" "$W5_LIVE/live-controls.sh" <<'PY'
+import pathlib,re,sys
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-w5-closed: ai-live-controls block expected one got '+str(len(found))+'; STOP')
+pathlib.Path(sys.argv[2]).write_text(found[0])
+PY
+/bin/bash -n "$W5_LIVE/live-controls.sh"
+INPUTS_FILE="$INPUTS_FILE" LIVE_CONTROLS_FILE="$LIVE_CONTROLS_FILE" CONSENT_RECEIPT_FILE="$CONSENT_RECEIPT_FILE" \
+ RELEASE_ROOT="$W5_LIVE/release" PROOF_DIR="$W5_LIVE" /bin/bash "$W5_LIVE/live-controls.sh"
+test -f "$W5_LIVE/ordinary-after.json" || { printf 'FAIL ai-w5-closed: W5 forward-close live controls phase expected after got other; STOP\n' >&2; exit 1; }
+python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" "$W5_LIVE" <<'PY'
 import datetime,hashlib,json,pathlib,subprocess,urllib.request,sys
 d=json.load(open(sys.argv[1])); site=pathlib.Path(sys.argv[2])
 assert d['window']=='W5' and site.is_absolute() and site.is_dir() and not site.is_symlink()
@@ -1954,6 +2015,7 @@ root=pathlib.Path('/Users/yulanbot/work/hm37-live-release')/(d['release_sha']+'-
 root.mkdir(mode=0o700,parents=True,exist_ok=False)
 (root/'inputs.json').write_text(json.dumps(d)+'\n')
 (root/'W5-closed.json').write_text(json.dumps({'state':'closed','site_ownership_close':'PASS'})+'\n')
+for name in ('ordinary-after.json','consent-post-W5.json'): (root/name).write_bytes(pathlib.Path(sys.argv[3],name).read_bytes())
 (root/'closed.txt').write_text(datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')+'\n')
 print('PASS W5 site ownership close and outside GET/HEAD gate CLOSED; retain W5 closed.txt for W6')
 PY
@@ -2322,9 +2384,11 @@ PY
 set -euo pipefail
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
-test "$(git rev-parse HEAD)" = "$RELEASE_SHA" && test -z "$(git status --porcelain)"
+test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || { printf 'FAIL ai-w6-prepare: checkout HEAD expected release-sha got mismatch; STOP\n' >&2; exit 1; }
+test -z "$(git status --porcelain)" || { printf 'FAIL ai-w6-prepare: worktree expected clean got dirty; STOP\n' >&2; exit 1; }
 C1_PROOF_DIR=/Users/yulanbot/work/hm37-live-release/c1-${RELEASE_SHA}-${WINDOW_ID}
-test ! -e "$C1_PROOF_DIR" && test ! -L "$C1_PROOF_DIR"
+test ! -e "$C1_PROOF_DIR" || { printf 'FAIL ai-w6-prepare: C1_PROOF_DIR expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$C1_PROOF_DIR" || { printf 'FAIL ai-w6-prepare: C1_PROOF_DIR expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p "$C1_PROOF_DIR" /Users/yulanbot/work/dcr-rt
 chmod 0700 "$C1_PROOF_DIR"
 install -m 0600 "$C1_INPUTS_FILE" "$C1_PROOF_DIR/C1-inputs.json"
@@ -2340,7 +2404,8 @@ C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-$
 case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
  upload:C1-inputs.json|upload:agent.json|upload:agent-final.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
   C1_UPLOAD=/tmp/admin-c1-${WINDOW_ID}-${C1_TRANSFER_FILE}
-  test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
+  test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected regular-file got missing; STOP\n' >&2; exit 1; }
+  test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'test ! -e %q' "$C1_UPLOAD"
   ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
   scp -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
@@ -2348,7 +2413,8 @@ case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
   ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
   ;;
  download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt|download:C1-finish.json)
-  test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
+  test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected absent got present; STOP\n' >&2; exit 1; }
+  test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'sudo -n cat %q' "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
   ( set -C; umask 077; ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
   ;;
@@ -2672,7 +2738,8 @@ printf 'PASS private handoffs removed; redacted receipts and accepted residue re
 set -euo pipefail
 test "$WINDOW" = W6
 ai_run ai-inputs
-test -f "$PROOF_DIR/C1-fence.txt" && test -f "$PROOF_DIR/client-withdraw.json"
+test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
+test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
 python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
@@ -2788,10 +2855,16 @@ test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: ret
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
   W1) test -f "$PROOF_DIR/backup-gate.json";;
-  W2) test -f "$PROOF_DIR/schema-committed.txt" && test -f "$PROOF_DIR/W2-probes.txt" && test -f "$PROOF_DIR/issuer-credential.txt";;
+  W2)
+   test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-close: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/W2-probes.txt" || { printf 'FAIL ai-close: W2 W2-probes.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; };;
   W3) test -f "$PROOF_DIR/W3-probes.txt";;
   W4) test -f "$PROOF_DIR/W4-readback.txt";;
-  W6) test -f "$PROOF_DIR/C1.json" && test -f "$PROOF_DIR/C1-cleanup.txt" && test -f "$PROOF_DIR/C1-finish.json";;
+  W6)
+   test -f "$PROOF_DIR/C1.json" || { printf 'FAIL ai-close: W6 C1.json expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/C1-cleanup.txt" || { printf 'FAIL ai-close: W6 C1-cleanup.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/C1-finish.json" || { printf 'FAIL ai-close: W6 C1-finish.json expected present got missing; STOP\n' >&2; exit 1; };;
   W7) test -f "$PROOF_DIR/retirement.txt";;
   *) echo 'FAIL no implemented forward close for this window; STOP' >&2; exit 1;;
  esac
@@ -2816,7 +2889,8 @@ assert p.stat().st_mode & 0o777==0o700
 PY
 # Use guarded PATH rm; a refusal stops cleanup.
 rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
-test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"
+test ! -e "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 ```
