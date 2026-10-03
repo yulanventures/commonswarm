@@ -106,7 +106,7 @@ test("Codex bridge version parser accepts package and bare SemVer shapes", () =>
 test("Codex child env preserves HOME but strips inherited Codex and credential state", () => {
   const env = buildCodexChildEnv({
     PATH: "/usr/bin",
-    HOME: "/Users/test",
+    HOME: process.env.HOME,
     USER: "test",
     LANG: "en_US.UTF-8",
     CODEX_THREAD_ID: "codex",
@@ -117,7 +117,7 @@ test("Codex child env preserves HOME but strips inherited Codex and credential s
   });
   assert.deepEqual(env, {
     PATH: "/usr/bin",
-    HOME: "/Users/test",
+    HOME: process.env.HOME,
     USER: "test",
     LANG: "en_US.UTF-8",
   });

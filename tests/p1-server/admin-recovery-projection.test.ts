@@ -91,8 +91,10 @@ test('admin-recovery committed issuance coverage, dependencies and verification 
   const f=fixture(),issued=issuance(f),workspace=randomUUID(),spaces=[workspace,randomUUID(),randomUUID()];
   runSql(`${openIssuanceForTest}${f.sql}${issued.sql}
 SET LOCAL ROLE commonswarm_oauth_runtime;
-INSERT INTO commonswarm_oauth.admin_oauth_audit(owner_user_id,admin_identity_id,admin_grant_id,connection_id,provider_grant_id,manifest_digest,event_kind,outcome)
-VALUES('${f.owner}','${f.identity}','${f.grant}','${f.connection}','${f.provider}','${f.digest}','read','committed');
+-- Request kinds require the authenticated owner-definer helper: direct AS
+-- INSERT is intentionally refused by the security-invoker audit trigger.
+${dbAssert(`SELECT commonswarm_oauth.record_admin_request_audit('${issued.jti}',decode('${issued.tokenDigest}','hex'),
+  'read','${randomUUID()}','committed',NULL,NULL,NULL,'{}'::uuid[]) IS NOT NULL`, 'authenticated read audit committed')}
 RESET ROLE;
 ${spaces.map(w=>`INSERT INTO swarm.workspaces(workspace_id,name,created_by,created_at) VALUES('${w}','Selected coverage','${f.owner}',date_trunc('milliseconds',transaction_timestamp())+interval '0.0001 seconds');
 INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES('${w}','${f.owner}','owner');`).join('\n')}

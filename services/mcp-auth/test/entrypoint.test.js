@@ -92,11 +92,13 @@ async function entrypoint(t, env) {
   assert.fail("entrypoint did not serve discovery within 5 seconds");
 }
 
-test("real node src/server.js entrypoint starts enabled and leaves disabled mode dark without management inputs", async (t) => {
+test("real node src/server.js entrypoint starts enabled and leaves disabled mode dark without management inputs; absent issuer keeps admin closed", async (t) => {
   for (const enabled of [false, true]) {
     await t.test(enabled ? "enabled bindings" : "disabled unchanged", async (t) => {
       const env = await fixture(t);
       env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED = enabled ? "1" : "0";
+      env.MCP_OAUTH_ADMIN_ISSUANCE_ENABLED = "1";
+      delete env.MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE;
       if (!enabled) delete env.MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE;
       const root = await entrypoint(t, env);
       if (root === null) return;
@@ -106,6 +108,9 @@ test("real node src/server.js entrypoint starts enabled and leaves disabled mode
       assert.equal(response.status, enabled ? 400 : 503);
       if (enabled) assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
       await response.body.cancel();
+      const gate = await fetch(`${root}/admin/gate`);
+      assert.equal(gate.status, 200);
+      assert.deepEqual(await gate.json(), { state: "closed" });
     });
   }
 });

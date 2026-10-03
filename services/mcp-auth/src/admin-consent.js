@@ -1,4 +1,6 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
+import { interactionRow } from "./interaction-store.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { hashOpaque, opaqueMatches } from "./browser-security.js";
 import { metadataUrlAllowed, createPinnedMetadataFetch } from "./metadata-fetch.js";
@@ -8,9 +10,6 @@ import {
   adminAvailableCapabilities, adminConsentOptions, adminManifestValid, canonicalAdminJson,
 } from "./admin-policy.generated.js";
 
-// Lane 4 must replace this only after its transaction proof and lane-5 closure.
-// Neither configuration nor an injected database row can open lane 3 issuance.
-export const ADMIN_AS_ISSUANCE_ENABLED = false;
 export const ADMIN_AUTH_MAX_AGE_MS = 5 * 60 * 1000;
 const OIDC_SCOPES = new Set(["openid", "offline_access"]);
 const DPOP_ALGS = new Set(["ES256", "Ed25519", "EdDSA"]);
@@ -49,6 +48,28 @@ function requirePendingReceipt(input, current, parent, r) {
 }
 export function adminDigest(value) {
   return createHash("sha256").update(canonicalAdminJson(value)).digest("hex");
+}
+
+// CIMD verification pins adminDigest of the complete fetched JSON document,
+// before provider defaults/field filtering. Use this snapshot at every admin
+// checkpoint; the ordinary provider cache cannot establish current eligibility.
+export async function resolveAdminClientMetadata({ client, source, fetchMetadata }) {
+  try {
+    const runtime = client.metadata();
+    if (source === "static") return runtime;
+    if (source !== "cimd") refuse();
+    const result = await fetchMetadata(client.clientId ?? runtime.client_id);
+    if (!result.ok) refuse();
+    const metadata = await result.json();
+    // Fresh metadata cannot authorize a cached client with different wire behavior.
+    for (const key of ["client_id", "application_type", "redirect_uris", "dpop_signing_alg"]) {
+      if (canonicalAdminJson(runtime[key]) !== canonicalAdminJson(metadata[key])) refuse();
+    }
+    return metadata;
+  } catch (error) {
+    if (error instanceof AdminConsentError) throw error;
+    refuse();
+  }
 }
 function hostedHttps(uri) {
   // This also rejects literal/private/loopback hosts, userinfo and fragments.
@@ -178,7 +199,7 @@ export class PostgresAdminConsentStore {
       WHERE interaction_uid=$1 AND completed_at IS NULL AND expires_at>statement_timestamp() FOR UPDATE`, [uid])).rows[0];
     const receipt = (await tx.query(`SELECT * FROM commonswarm_oauth.admin_interactions
       WHERE interaction_uid=$1 AND expires_at>statement_timestamp() FOR UPDATE`, [uid])).rows[0];
-    return { parent, receipt };
+    return { parent: interactionRow(parent), receipt };
   }
   async stage(tx, input, manifest, policy, summary) {
     const { uid, sessionId, ownerUserId, csrfToken, version, params } = input;
@@ -202,7 +223,7 @@ export class PostgresAdminConsentStore {
       manifest.mode === "full_account" ? hashOpaque(summary.secondToken) : null,
       manifest.mode === "full_account", params.code_challenge, params.dpop_jkt, parent.expires_at])).rows[0];
     if (!receipt) refuse("consent_receipt_invalid", 409);
-    return { parent, receipt };
+    return { parent: interactionRow(parent), receipt };
   }
 }
 
@@ -218,20 +239,8 @@ export function createAdminConsentService({ store, provider, fetchMetadata = cre
     try {
       const client = await provider.Client.find(input.params.client_id);
       if (!client) refuse();
-      const runtime = client.metadata();
-      if (staticClientIds.has(input.params.client_id)) {
-        metadata = runtime;
-        source = "static";
-      } else {
-        const result = await fetchMetadata(input.params.client_id);
-        if (!result.ok) refuse();
-        metadata = await result.json();
-        source = "cimd";
-        // Fresh metadata cannot authorize a cached client with different wire behavior.
-        for (const key of ["client_id", "application_type", "redirect_uris", "dpop_signing_alg"]) {
-          if (canonicalAdminJson(runtime[key]) !== canonicalAdminJson(metadata[key])) refuse();
-        }
-      }
+      source = staticClientIds.has(input.params.client_id) ? "static" : "cimd";
+      metadata = await resolveAdminClientMetadata({ client, source, fetchMetadata });
     } catch (error) {
       if (error instanceof AdminConsentError) throw error;
       refuse();
@@ -270,12 +279,12 @@ export function createAdminConsentService({ store, provider, fetchMetadata = cre
               !opaqueMatches(completion.second_token, r.second_confirmation_binding)))) {
           refuse("consent_receipt_invalid", 409);
         }
-        const cutover = await store.cutover(tx); // Fresh read even though this lane stays closed.
-        if (!ADMIN_AS_ISSUANCE_ENABLED || cutover?.admin_issuance_enabled !== true || cutover.legacy_closed !== true) {
+        await store.cutover(tx); // Retain the consent store's fresh cutover read; the shared gate decides.
+        if (await effectiveAdminGate() !== "open") {
           refuse("admin_issuance_disabled", 503);
         }
-        // Lane 4 owns the coordinator and commit-before-response. Never finish a
-        // provider interaction from this lane, even if configuration is wrong.
+        // Consent completion remains inside the issuer coordinator; its buffered
+        // provider response cannot be released before the transaction commits.
         if (typeof completeInTransaction !== "function") refuse("admin_issuance_disabled", 503);
         return completeInTransaction(tx, {
           parent, receipt: r, policy: current,

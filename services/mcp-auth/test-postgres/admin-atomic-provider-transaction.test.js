@@ -18,37 +18,23 @@ import { verifyAdminProof, admitAdminProof } from "../src/admin-dpop.js";
 import { bindProviderAdminNonceStore } from "../src/provider-admin-pin.js";
 const ISSUER = "https://mcp.commonswarm.com", ADMIN = "https://api.commonswarm.com/admin";
 const require = createRequire(import.meta.url);
-function absoluteImports(source,url) {
-  return source.replace(/from "([^"]+)"/gu, (match,path) => path.startsWith("node:") || path.startsWith("data:") || path.startsWith("file:") ? match
-    : `from "${path.startsWith(".") ? new URL(path,url).href : pathToFileURL(require.resolve(path)).href}"`);
-}
+
 
 const redirectUri = "https://client.example/callback";
 const verifier = "atomic-provider-verifier-0123456789abcdef0123456789";
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 const digest = value => createHash("sha256").update(value).digest();
+// Preserve only stable error codes, never provider messages, SQL or artifacts.
+function failureCode(error) {
+  const code = error.code ?? error.error;
+  return typeof code === "string" && /^(?:[A-Z0-9]{5}|admin_[a-z_]+|invalid_grant|invalid_target|consent_receipt_invalid|unauthorized_client)$/u.test(code)
+    ? code : "unclassified_failure";
+}
 
-// Force ONLY the imported test copy of lane 3a's gate. No source/file/env change,
-// no new production switch. Its policy, receipt checks and completion hook run.
+// Exercise the production configurable gate; no imported source is patched.
 async function testConsentModule() {
-  const url = new URL("../src/admin-consent.js", import.meta.url);
-  let source = await readFile(url, "utf8");
-  const gate = "export const ADMIN_AS_ISSUANCE_ENABLED = false;";
-  assert.equal(source.split(gate).length, 2);
-  source = source.replace(gate, "export const ADMIN_AS_ISSUANCE_ENABLED = true;")
-    .replace(/from "(\.\/[^"]+)"/gu, (_match, path) => `from "${new URL(path, url).href}"`);
-  const consentUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-  const lifecycleUrl = new URL("../src/admin-lifecycle.js", import.meta.url);
-  const lifecycle = (await readFile(lifecycleUrl, "utf8"))
-    .replace('from "./admin-consent.js"', `from "${consentUrl}"`)
-    .replace(/from "(\.\/[^"]+)"/gu, (_match, path) => `from "${new URL(path, lifecycleUrl).href}"`);
-  const lifecycleDataUrl = `data:text/javascript;base64,${Buffer.from(absoluteImports(lifecycle,lifecycleUrl)).toString("base64")}`;
-  const providerUrl = new URL("../src/provider.js", import.meta.url);
-  const providerSource = (await readFile(providerUrl,"utf8"))
-    .replace('from "./admin-consent.js"',`from "${consentUrl}"`)
-    .replace('from "./admin-lifecycle.js"',`from "${lifecycleDataUrl}"`);
-  return { ...await import(consentUrl), ...await import(lifecycleDataUrl),
-    ...await import(`data:text/javascript;base64,${Buffer.from(absoluteImports(providerSource,providerUrl)).toString("base64")}`) };
+  return { ...await import("../src/admin-consent.js"),
+    ...await import("../src/admin-lifecycle.js"), ...await import("../src/provider.js") };
 }
 
 async function fixture({ consentLifetimeMs=86400000 } = {}) {
@@ -97,7 +83,12 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   providerInstance(provider).configuration.formats.customizers.jwt = async () => {
     if (db.current().fault === "signing") throw new Error("test signing failure");
   };
-  provider.on("server_error", () => {});
+  const providerFailure = (_ctx, error) => {
+    const trace = traces.get(testRequests.getStore()?.id);
+    if (trace) trace.failure = failureCode(error);
+  };
+  provider.on("server_error", providerFailure);
+  provider.on("authorization.error", providerFailure);
   const store = new PostgresAdminConsentStore(db.pool);
   await bindProviderAdminNonceStore(provider);
   const service = createAdminConsentService({ store, provider, staticClientIds: new Set([clientId]),
@@ -146,10 +137,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   // production owns transaction control and never obtains setup privileges.
   const coordinatorPool = { connect: async () => {
     const physical = await pool.connect(), owned = testRequests.getStore();
-    const trace = { calls: [], writes: [], committed: false };
+    const trace = { calls: [], writes: [], committed: false, phase: owned.phase };
     traces.set(owned.id,trace);
     const raw = physical.query.bind(physical);
-    let original,originalChecksums;
+    let original,originalChecksums,role = "commonswarm_admin_issuer";
     return { processID: physical.processID, release: bad => physical.release(bad), async query(sql,values) {
       if (sql === "BEGIN") {
         const result = await raw(sql);
@@ -179,7 +170,21 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         if (owned.fault === "commit-response-lost") throw Object.assign(new Error("test lost COMMIT acknowledgement"),{ code:"ECONNRESET" });
         return result;
       }
-      const result = await raw(sql,values);
+      let result;
+      try {
+        result = await raw(sql,values);
+        const selected = /^SET LOCAL ROLE (commonswarm_oauth_runtime|swarm_command)$/u.exec(sql);
+        if (selected) role = selected[1];
+      } catch (error) {
+        // Fixed labels only: never retain PostgreSQL messages, SQL or values.
+        trace.failureStatement ??= sql.includes("FROM commonswarm_oauth.admin_cutover_state") ? "measured_release_read"
+          : sql.includes("migration_checksum_failures()") ? "migration_checksum_read"
+          : sql.includes("INSERT INTO commonswarm_oauth.admin_oauth_audit") ? "lifecycle_audit_insert"
+          : sql.includes("record_admin_request_audit(") ? "authenticated_request_audit"
+          : "other_statement";
+        trace.failureRole ??= role;
+        throw error;
+      }
       if (!["ROLLBACK"].includes(sql) && !/^\s*(?:SET|SAVEPOINT|RELEASE)/iu.test(sql)) {
         const stamp=(await raw("SELECT txid_current()::text AS xid,pg_backend_pid() AS pid")).rows[0];
         trace.calls.push({ ...stamp,sql:sql.trim().split(/\s+/u).slice(0,3).join(" ") });
@@ -191,9 +196,12 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       return result;
     } };
   } };
-  const coordinator = new AdminTransactionCoordinator(coordinatorPool);
+  const coordinator = new AdminTransactionCoordinator(coordinatorPool, { adminIssuanceEnabled: true });
   const server = createServer(async (request,response) => {
     const id=request.headers["x-spike-id"],owned={ id,...controls.get(id) };
+    const path = new URL(request.url, ISSUER).pathname;
+    owned.phase = path === "/authorize" ? "authorize" : path.startsWith("/authorize/") ? "resume"
+      : path.startsWith("/interaction/") ? "interaction" : path === "/token" ? "token" : "revoke";
     try {
       let proof;
       if (owned.body && new URL(request.url,ISSUER).pathname === "/token") {
@@ -209,6 +217,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         proof=await admitAdminProof(proofPool,await verifyAdminProof(request,jkt));
       }
       await testRequests.run(owned,()=>coordinator.run(response,async scope=>{
+        try {
         scope.fault=owned.fault; traces.get(id).pending=scope.pending;
         if (request.url === "/test-revoke") {
           const binding=(await db.pool.query(`SELECT * FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[family])).rows[0];
@@ -216,8 +225,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         } else if (request.url.startsWith("/interaction/")) {
           const details = await provider.interactionDetails(request, response);
           if (details.prompt.name === "login") {
+            traces.get(id).phase = "login";
             await provider.interactionFinished(request, response, { login: { accountId: owner } });
           } else if (request.method === "GET") {
+            traces.get(id).phase = "consent-selection";
             await base.bindInteraction({ interactionUid: details.uid, sessionId, userId: owner, clientId,
               redirectUri, resource: ADMIN, scopes: details.params.scope.split(" "), pkceChallenge: challenge,
               oauthState: details.params.state });
@@ -230,6 +241,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
               completion: { summary_digest: selected.summary.digest } };
             response.statusCode = 204; response.end();
           } else {
+            traces.get(id).phase = "consent-confirmation";
             const grantId = await service.confirm(pendingConsent.input, pendingConsent.completion);
             await provider.interactionFinished(request, response, { consent: { grantId } });
           }
@@ -247,7 +259,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
           await callback(request,response);
           await lifecycle.finishContinuation();
         }
-
+        } catch (error) {
+          traces.get(id).failure = failureCode(error);
+          throw error;
+        }
       },{ kind:proof ? "token" : "human",owner,proof,sessionHash:hashOpaque(sessionId) }));
     } catch {
       response.statusCode=503; response.end('{"error":"temporarily_unavailable"}');
@@ -351,14 +366,14 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         registrationEnabled:false,registrationStore:{find:async id=>id===clientId ? metadata:undefined,markUsed:async()=>{}},
         providerGrantResource:async id=>(await db.pool.query(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
           WHERE provider_grant_id=$1`,[id])).rows[0]?.resource});
-      provider.on("server_error",()=>{});callback=provider.callback();
+      provider.on("server_error",providerFailure);provider.on("authorization.error",providerFailure);callback=provider.callback();
     },
     consent: () => pendingConsent,
     async close() { await new Promise(resolve => server.close(resolve)); await proofPool.end(); await pool.end(); } };
 }
 
 function atomic(trace) {
-  assert.equal(trace.committed, true);
+  assert.equal(trace.committed, true, `phase=${trace.phase}; failure=${trace.failure ?? "not_recorded"}; statement=${trace.failureStatement ?? "not_recorded"}; role=${trace.failureRole ?? "not_recorded"}`);
   assert.ok(trace.writes.length > 0);
   assert.equal(new Set(trace.calls.map(call => `${call.pid}:${call.xid}`)).size, 1,
     "ALL actual provider/status/authority calls must share a backend transaction");
@@ -554,6 +569,7 @@ test("admin-atomic-provider-transaction: genuine D1 login isolates two overlappi
     seen.push({...stamp,id:scope.requestId}); if(seen.length===2) entered();
     await barrier;
     await withAdminRole("swarm_command",()=>adminQuery("SELECT 1 FROM swarm.admin_accounts WHERE owner_user_id=$1",[f.owner]));
+    if (_request.url === "/rollback") throw new Error("test rollback after authority role");
     response.statusCode=204;response.end();
   }));
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
@@ -565,6 +581,21 @@ test("admin-atomic-provider-transaction: genuine D1 login isolates two overlappi
     assert.equal(new Set(seen.map(x=>x.id)).size,2);
     assert.ok(seen.every(x=>x.principal==="commonswarm_admin_issuer" && x.role==="commonswarm_oauth_runtime"));
     unblock(); assert.deepEqual((await Promise.all(operations)).map(x=>x.status),[204,204]);
+    async function assertIssuerRestored() {
+      const clients=[];
+      try {
+        // Hold both so the pool cannot hand us the same idle connection twice.
+        for (let i=0;i<2;i++) clients.push(await f.proofPool.connect());
+        for (const client of clients) {
+          const {rows}=await client.query("SELECT session_user AS principal,current_user AS role");
+          assert.equal(rows[0].principal,"commonswarm_admin_issuer");
+          assert.equal(rows[0].role,"commonswarm_admin_issuer","transaction-local authority role must not leak into the pool");
+        }
+      } finally {for (const client of clients) client.release();}
+    }
+    await assertIssuerRestored();
+    assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/rollback`)).status,503);
+    await assertIssuerRestored();
   } finally {unblock();await new Promise(resolve=>server.close(resolve));await f.close();}
 });
 

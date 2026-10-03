@@ -1,5 +1,6 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { ADMIN_RESOURCE, adminConsentOptions } from "./admin-policy.generated.js";
-import { ADMIN_AS_ISSUANCE_ENABLED, adminDigest } from "./admin-consent.js";
+import { adminDigest, resolveAdminClientMetadata } from "./admin-consent.js";
 import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
 import { bindProviderAdminNonceStore } from "./provider-admin-pin.js";
@@ -59,6 +60,11 @@ export async function createMcpProvider({
   const metadataFetch = injectedMetadataFetch ?? (injectedFetch === undefined
     ? createPinnedMetadataFetch()
     : createMetadataFetch(injectedFetch));
+  // Admin eligibility always checks the current document, independently of the
+  // ordinary CIMD transport/cache used for provider client resolution.
+  const adminMetadataFetch = injectedFetch === undefined
+    ? createPinnedMetadataFetch()
+    : createMetadataFetch(injectedFetch);
   if (!Number.isFinite(cimdCacheDuration?.min) || !Number.isFinite(cimdCacheDuration?.max) ||
       cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
     throw new TypeError("CIMD cache duration must have bounded min and max seconds");
@@ -117,14 +123,23 @@ export async function createMcpProvider({
         },
         getResourceServerInfo: async (ctx, resource, client) => {
           if (resource === ADMIN_RESOURCE) {
-            if (!ADMIN_AS_ISSUANCE_ENABLED) throw new errors.InvalidTarget("admin issuance closed");
+            if (await effectiveAdminGate() !== "open") throw new errors.InvalidTarget("admin issuance closed");
             await requireMeasuredAdminRelease();
             const policy = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_verified_clients
               WHERE client_id=$1 AND active AND withdrawn_at IS NULL`, [client.clientId])).rows[0];
             const registered = (await adminQuery(`SELECT 1 FROM commonswarm_oauth.registered_clients WHERE client_id=$1`, [client.clientId])).rowCount;
             if (!policy || registered || policy.application_type !== "web" || !policy.dpop_tested ||
                 !policy.pkce_s256_tested || !policy.origin_control_verified || !policy.redirect_tested ||
-                !metadataUrlAllowed(client.clientId) || policy.metadata_digest !== adminDigest(client.metadata())) {
+                !metadataUrlAllowed(client.clientId)) {
+              throw new errors.InvalidTarget("verified hosted admin client required");
+            }
+            try {
+              const source = client.clientIdMetadataDocument ? "cimd" : "static";
+              const metadata = await resolveAdminClientMetadata({ client, source, fetchMetadata: adminMetadataFetch });
+              if (source !== policy.registration_source || policy.metadata_digest !== adminDigest(metadata)) {
+                throw new errors.InvalidTarget("verified hosted admin client required");
+              }
+            } catch {
               throw new errors.InvalidTarget("verified hosted admin client required");
             }
             const unit = adminTransactionContext().token;
@@ -229,9 +244,11 @@ export async function createMcpProvider({
   provider.use(async (ctx, next) => {
     // oidc-provider filters unknown authorization scopes. Refuse escalation
     // explicitly rather than silently turning it into a narrower request.
+    const adminOpen = ctx.path === "/authorize" && ctx.query.resource === ADMIN_RESOURCE
+      && await effectiveAdminGate() === "open";
     if (ctx.path === "/authorize" && typeof ctx.query.scope === "string" &&
         ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope) &&
-          !(ctx.query.resource === ADMIN_RESOURCE && ADMIN_AS_ISSUANCE_ENABLED &&
+          !(adminOpen &&
             adminConsentOptions().some(o => o.available && o.scope === scope)))) {
       ctx.status = 400;
       ctx.body = { error: "invalid_scope" };

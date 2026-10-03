@@ -179,7 +179,7 @@ export async function startServer({
   const runtimePool = createPool(config);
   const issuerPool = config.adminIssuer ? new Pool({ ...config.database,
     user: config.adminIssuer.user, password: config.adminIssuer.password,
-    application_name: "commonswarm-admin-issuer" }) : null;
+    application_name: "commonswarm-admin-issuer", connectionTimeoutMillis: 2000 }) : null;
   const pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : runtimePool.query(...args),
     connect: () => adminTransactionContext(false)
       ? Promise.resolve({ query: adminQuery, release() {} }) : runtimePool.connect(),
@@ -281,9 +281,9 @@ export async function startServer({
     }),
   }) : undefined;
   const handler = createHandler({ provider, pool, logger, interactionHandler,
-    adminGateHandler: createAdminGateHandler({ issuerPool }), ...config });
+    adminGateHandler: createAdminGateHandler({ issuerPool, adminIssuanceEnabled: config.adminIssuanceEnabled }), ...config });
   const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool,
-    activeKid: config.activeSigningKid });
+    activeKid: config.activeSigningKid, adminIssuanceEnabled: config.adminIssuanceEnabled });
   const server = createServer((request, response) =>
     request.url?.split("?", 1)[0] === "/admin/gate"
       ? handler(request, response) : ingress(request, response));
