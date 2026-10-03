@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { matchesGlob, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
@@ -21,7 +22,7 @@ const pureCliCommand =
  * carries the flag). The pin moves WITH the claim it guards: all files stay
  * reachable only through test:p1-local, never through a pure gate. */
 const localStackCommand =
-  "node --import tsx --test --test-concurrency=1 tests/p1-local/local-integration.test.ts tests/p1-local/file-artifacts-e2e.test.ts tests/p1-local/delivery-receipts-postgres.test.ts tests/p1-local/human-seen-browser.test.ts tests/p1-local/standing-grants-postgres.test.ts tests/p1-local/activity-realtime-auth.test.ts tests/p1-local/chat-channels-postgres.test.ts tests/p1-local/chat-recipients-postgres.test.ts tests/p1-local/wake-realtime-auth.test.ts tests/p1-local/idempotency-retention.test.ts";
+  "node scripts/run-test-list.mjs tests/lists/test:p1-local.txt --test-concurrency=1";
 const localStackTests = [
   "tests/p1-local/activity-realtime-auth.test.ts",
   "tests/p1-local/chat-channels-postgres.test.ts",
@@ -49,11 +50,25 @@ async function findTestFiles(directory: string): Promise<string[]> {
   return paths.flat().sort();
 }
 
+/* A script that runs `scripts/run-test-list.mjs <list>` takes its test paths
+ * from that list file (one path per line, # comments); the strictness is the
+ * same as for paths written inline in the command. */
+function listFilePatterns(segment: string): string[] | null {
+  const match = segment.match(/(?:^|\s)node\s+scripts\/run-test-list\.mjs\s+(\S+)/);
+  if (match === null) return null;
+  return readFileSync(resolve(repoRoot, match[1]!), "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"));
+}
+
 function testPathPatterns(command: string): string[] {
   const withoutComment = command.replace(/\s+#.*$/, "");
   return withoutComment
     .split(/\s*(?:&&|\|\||;)\s*/)
     .flatMap((segment) => {
+      const fromList = listFilePatterns(segment);
+      if (fromList !== null) return fromList;
       const tokens = segment.trim().split(/\s+/);
       const testFlag = tokens.indexOf("--test");
       if (testFlag === -1) return [];
@@ -66,7 +81,7 @@ function testPathPatterns(command: string): string[] {
 function executionScripts(packageJson: PackageJson): Map<string, string[]> {
   return new Map(
     Object.entries(packageJson.scripts ?? {})
-      .filter(([, command]) => /(?:^|\s)--test(?:\s|$)/.test(command))
+      .filter(([, command]) => /(?:^|\s)--test(?:\s|$)/.test(command) || /scripts\/run-test-list\.mjs\s/.test(command))
       .map(([name, command]) => [name, testPathPatterns(command)]),
   );
 }
@@ -125,6 +140,10 @@ test("D-030: the pure CLI gate cannot reach the stack-touching suite", async () 
   assert.equal(packageJson.scripts?.["posttest:p1-cli"], undefined);
   assert.equal(packageJson.scripts?.["test:p1-cli"], pureCliCommand);
   assert.equal(packageJson.scripts?.["test:p1-local"], localStackCommand);
+  assert.deepEqual(
+    [...(listFilePatterns(localStackCommand) ?? [])].sort(),
+    localStackTests,
+  );
   assert.deepEqual(
     files.filter((file) => file.startsWith("tests/p1-local/")),
     localStackTests,

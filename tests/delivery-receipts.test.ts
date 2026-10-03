@@ -712,5 +712,7 @@ test("root npm test literally reaches the delivery receipt controls", async () =
   const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
     scripts: { test: string };
   };
-  assert.match(packageJson.scripts.test, /tests\/delivery-receipts\.test\.ts/);
+  assert.match(packageJson.scripts.test, /run-test-list\.mjs tests\/lists\/test\.txt/);
+  const list = (await readFile("tests/lists/test.txt", "utf8")).split(/\r?\n/);
+  assert.ok(list.includes("tests/delivery-receipts.test.ts"));
 });
