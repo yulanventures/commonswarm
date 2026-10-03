@@ -142,7 +142,11 @@ test("the edge catch uses one post-rollback insert and keeps retry policy unchan
     source.indexOf("async function insertCommandFailure"),
     source.indexOf("async function handlePostRequest"),
   );
-  const catchBlock = source.slice(source.lastIndexOf("  } catch (error) {"));
+  const handlerStart = source.indexOf("async function handlePostRequest(");
+  const handlerEnd = source.indexOf("export async function handleRequest(", handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, "worker POST handler must be bounded");
+  const handler = source.slice(handlerStart, handlerEnd);
+  const catchBlock = handler.slice(handler.lastIndexOf("  } catch (error) {"));
 
   assert.equal(
     (insertFunction.match(/INSERT INTO swarm\.command_failures/gu) ?? []).length,
