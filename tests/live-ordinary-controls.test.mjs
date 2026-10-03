@@ -1,0 +1,347 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createServer } from 'node:http';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
+
+const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
+const preload = fileURLToPath(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url));
+const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
+const client = 'https://commonswarm.com/oauth/c1-controls/client.json';
+const redirect = 'https://commonswarm.com/oauth/c1-controls/callback', resource = `${issuer}/mcp`;
+const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
+const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const hash = b => createHash('sha256').update(b).digest('hex');
+const b64hash = b => createHash('sha256').update(b).digest('base64url');
+const uid = '11111111-1111-4111-8111-111111111111', wid = '22222222-2222-4222-8222-222222222222';
+const pid = '33333333-3333-4333-8333-333333333333';
+const keys = (v, names) => assert.deepEqual(Object.keys(v).sort(), [...names].sort());
+const privateWrite = (p, b) => writeFile(p, typeof b === 'string' ? b : JSON.stringify(b), { mode: 0o600 });
+async function missing(p) { await assert.rejects(lstat(p), { code: 'ENOENT' }); }
+
+// The fixture checks the wire independently: PKCE, code single-use, refresh
+// rotation/replay/family fencing, bearer use, CLI note ordering and tenancy.
+async function fixture(t, config = {}) {
+  const root = await mkdtemp('/private/tmp/anvil-secret.'); await chmod(root, 0o700);
+  const creds = join(root, 'credentials'), human = join(root, 'human'), seat = join(root, 'seat');
+  for (const dir of [creds, human, seat]) await mkdir(dir, { mode: 0o700 });
+  const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
+  const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
+  const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
+  const clientMetadata = JSON.parse(await readFile(new URL('../site/public/oauth/c1-controls/client.json', import.meta.url)));
+  const emit = (res, status, body, headers = {}) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(body === null ? undefined : JSON.stringify(body));
+  };
+  const token = (res, f) => {
+    const a = secret(), r = secret(); access.add(a); families.set(r, { family: f, consumed: false });
+    return emit(res, 200, { token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 300, scope: 'mcp', ignored_cookie: secret() });
+  };
+  let signal;
+  const server = createServer(async (req, res) => {
+    try {
+      assert.equal(req.headers['user-agent'], 'curl/8.7.1');
+      const url = new URL(req.url, issuer), chunks = [];
+      for await (const b of req) chunks.push(b);
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const p = req.headers['content-type']?.startsWith('application/x-www-form-urlencoded') ? new URLSearchParams(raw) : null;
+      const body = raw && !p ? JSON.parse(raw) : null;
+      events.push({ path: url.pathname, method: req.method, grant: p?.get('grant_type'), client: p?.get('client_id'), rpc: body?.method, command: body?.command?.kind });
+      if (config.failPath === url.pathname) return emit(res, 500, { error: secret() });
+      if (url.pathname === '/.well-known/oauth-authorization-server') return emit(res, 200, {
+        issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/reg`,
+        code_challenge_methods_supported: ['S256'], scopes_supported: ['openid', 'offline_access', 'mcp'],
+        ...(config.rfcRevoke ? { revocation_endpoint: `${issuer}/revoke` } : {}),
+      });
+      if (url.pathname === '/.well-known/oauth-protected-resource/mcp') return emit(res, 200, { resource, authorization_servers: [issuer], scopes_supported: ['mcp'] });
+      if (url.pathname === '/oauth/c1-controls/client.json') return emit(res, 200, config.badMetadata ? { ...clientMetadata, dpop_bound_access_tokens: true } : clientMetadata);
+      if (url.pathname === '/reg') {
+        assert.equal(req.method, 'POST'); assert.equal(body.token_endpoint_auth_method, 'none');
+        assert.deepEqual(body.redirect_uris, [redirect]); assert.deepEqual(body.grant_types, ['authorization_code', 'refresh_token']);
+        assert.equal(body.scope, scope);
+        const id = config.duplicateRegistration ? [...clients][0] : randomBytes(24).toString('base64url'); clients.add(id);
+        return emit(res, 201, { ...body, client_id: id, ...(config.badRegistration ? { token_endpoint_auth_method: 'client_secret_basic' } : {}) });
+      }
+      if (url.pathname === '/authorize') {
+        assert.equal(url.searchParams.get('resource'), resource); assert.equal(url.searchParams.get('scope'), scope);
+        assert.equal(url.searchParams.get('redirect_uri'), redirect); assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+        assert.equal(url.searchParams.get('response_type'), 'code'); assert.equal(url.searchParams.get('prompt'), 'consent');
+        if (url.searchParams.get('client_id') !== client && !clients.has(url.searchParams.get('client_id'))) {
+          if (config.expiryHTML) { res.writeHead(400, { 'Content-Type': 'text/html' }); return res.end('<pre><strong>error</strong>: invalid_client</pre>'); }
+          return emit(res, 400, { error: 'invalid_client' });
+        }
+        if (config.authorizeError) return emit(res, 400, { error: 'invalid_request' });
+        res.writeHead(config.badRedirect ? 302 : 303, { location: `${issuer}/interaction/${randomBytes(12).toString('hex')}`, 'set-cookie': `session=${secret()}; HttpOnly` }); return res.end();
+      }
+      if (url.pathname === '/token') {
+        assert.equal(req.method, 'POST'); assert.equal(p.get('resource'), resource);
+        if (config.hangToken) return;
+        const id = p.get('client_id');
+        if (p.get('grant_type') === 'authorization_code') {
+          const c = codes.get(p.get('code')); assert.ok(c, 'callback code was approved');
+          assert.equal(c.clientId, id); assert.equal(p.get('redirect_uri'), redirect);
+          assert.equal(b64hash(p.get('code_verifier')), c.challenge); secrets.push(p.get('code_verifier')); codes.delete(p.get('code'));
+          return token(res, { clientId: id, revoked: false });
+        }
+        assert.equal(p.get('grant_type'), 'refresh_token'); const stored = families.get(p.get('refresh_token'));
+        if (!stored || stored.family.revoked) return emit(res, 400, { error: 'invalid_grant' });
+        assert.equal(stored.family.clientId, id);
+        if (stored.consumed) { stored.family.revoked = true;
+          // A fixture-side clock/maintenance action expires registrations;
+          // the executable must independently probe each id afterwards.
+          if (config.expireAtFence) clients.clear();
+          return emit(res, 400, { error: 'invalid_grant' }); }
+        stored.consumed = true; return token(res, stored.family);
+      }
+      if (url.pathname === '/revoke') {
+        const stored = families.get(p.get('token')); assert.ok(stored); assert.equal(stored.family.clientId, p.get('client_id'));
+        if (!config.revokeLies) stored.family.revoked = true;
+        if (config.expireAtFence) clients.clear(); return emit(res, 204, null);
+      }
+      if (url.pathname === '/mcp') {
+        assert.ok(access.has(req.headers.authorization?.slice(7))); assert.equal(body.jsonrpc, '2.0');
+        if (body.method === 'notifications/initialized') return emit(res, 202, null);
+        let result;
+        if (body.method === 'initialize') {
+          assert.equal(body.params.clientInfo.name, 'c1-live-controls'); result = { protocolVersion: '2025-06-18', serverInfo: { name: 'commonswarm' } };
+        } else {
+          assert.equal(body.method, 'tools/list'); assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
+          result = { tools: (config.badTools ? tools.slice(1) : tools).map(name => ({ name })) };
+        }
+        return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
+      }
+      if (url.pathname === '/auth/v1/token') {
+        assert.equal(url.searchParams.get('grant_type'), 'refresh_token'); assert.equal(body.refresh_token, humanRefresh); assert.equal(req.headers.apikey, anon);
+        const now = new Date().toISOString(); humanRefresh = secret(); return emit(res, 200, { access_token: secret(), refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
+          user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
+      }
+      if (url.pathname === '/rest/v1/workspaces') {
+        assert.equal(req.headers.apikey, anon); assert.equal(req.headers['accept-profile'], 'swarm_read');
+        assert.equal(url.searchParams.get('workspace_id'), `eq.${wid}`);
+        return emit(res, 200, [{ workspace_id: wid, name: config.wrongWorkspace ? 'Customer workspace' : 'c1-controls (test)' }]);
+      }
+      if (url.pathname === '/functions/v1/read') {
+        assert.equal(req.headers.authorization, `Bearer ${seatToken}`); assert.equal(req.headers.apikey, anon); assert.equal(body.workspace_id, wid);
+        if (body.resource === 'members') return emit(res, 200, { members: [], agents: [], identity: {
+          credential_valid: true, workspace_id: wid, principal_id: pid, owner_user_id: uid,
+          workspace_name: config.wrongSeat ? 'Customer workspace' : 'c1-controls (test)',
+        } });
+        assert.equal(body.resource, 'signals'); assert.ok(signal, 'write precedes read');
+        return emit(res, 200, { signals: config.noReadback ? [] : [signal] });
+      }
+      if (url.pathname === '/functions/v1/command') {
+        assert.equal(req.headers.authorization, `Bearer ${seatToken}`); assert.equal(body.workspace_id, wid);
+        assert.equal(body.command.kind, 'post_signal'); assert.equal(body.command.signal_kind, 'note'); assert.match(body.command.body, /^C1 ordinary control W[1-7]\//);
+        assert.deepEqual(body.stream, { kind: 'workspace' }); assert.equal(body.command.to_user_id, null); assert.equal(body.command.to_agent_principal_id, null);
+        signal = { id: randomUUID(), workspace_id: wid, from: pid, from_kind: 'agent', to: null, to_agent: null, in_reply_to: null, about: null,
+          kind: 'note', body: body.command.body, until: new Date(Date.now() + 60000).toISOString(), created_at: new Date().toISOString() };
+        return emit(res, 200, { status: 'accepted', ok: true, event_ids: [], signal });
+      }
+      throw new Error('unexpected wire request');
+    } catch { violations.push({ path: req.url.split('?')[0], reason: 'wire contract failure' }); emit(res, 500, { error: 'fixture_contract_violation' }); }
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => { server.closeAllConnections(); await new Promise(r => server.close(r));
+    assert.deepEqual(violations, [], 'independent wire contract');
+    assert.ok(root.startsWith('/private/tmp/anvil-secret.'));
+    await promisify(execFile)('/Users/yulanbot/.local/bin/rm', ['-r', root]); });
+  const profileId = hash(api).slice(0, 24);
+  await privateWrite(join(human, 'target.json'), { url: api, anon_key: anon });
+  await privateWrite(join(human, `${profileId}.json`), { version: 1, refreshToken: humanRefresh, generation: 0, deviceId: randomUUID(), userId: uid });
+  await privateWrite(join(human, `${profileId}.profile.json`), { version: 1, userId: uid, workspaceId: wid, pendingCommands: {} });
+  await privateWrite(join(seat, 'profile.json'), { version: 1, url: api, anon_key: anon, workspace_id: wid, principal_id: pid, credential_file: join(seat, 'credential.json') });
+  await privateWrite(join(seat, 'credential.json'), { message: 'Agent credential minted. It is bound to this run, so the agent\'s work is attributable to it.',
+    status: 'accepted', principal_id: pid, token_id: randomUUID(), run_id: randomUUID(), agent_token: seatToken });
+  let sequence = 0;
+  async function run(command, extra = [], { handoff = true, outName } = {}) {
+    const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
+    const out = outName ?? join(root, `receipt${sequence}.json`);
+    const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
+      ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+    // Overrides replace their original pair, so the runner still tests duplicate refusal.
+    for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
+      if (n >= 0) args.splice(n, 2);
+      args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]); }
+    const child = spawn(process.execPath, ['--import', preload, script, ...args, '--release-sha', release, '--cred-dir', creds, '--out', out,
+      '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], { env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '', done = false, handoffError;
+    child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+    const completed = new Promise((r, j) => { child.once('error', j); child.once('exit', code => { done = true; r(code); }); });
+    const handoffs = (async () => {
+      if (command !== 'consent' || !handoff) return;
+      for (const name of ['cimd', 'dcr']) {
+        const path = join(pointer, `${name}-authorize-url.txt`); let a;
+        while (!done) {
+          try {
+            const text = (await readFile(path, 'utf8')).trim();
+            if (!text) { await sleep(10); continue; }
+            a = new URL(text); break;
+          }
+          catch (e) { if (e.code !== 'ENOENT') throw e; await sleep(10); }
+        }
+        if (!a) break;
+        assert.equal((await stat(path)).mode & 0o777, 0o600);
+        const code = secret(); codes.set(code, { clientId: a.searchParams.get('client_id'), challenge: a.searchParams.get('code_challenge') });
+        const cb = new URL(redirect); cb.search = new URLSearchParams({ code, state: config.wrongState ? secret() : a.searchParams.get('state'), iss: issuer });
+        await writeFile(join(pointer, `${name}-callback-url.txt`), cb.href, { mode: config.unsafeCallback ? 0o644 : 0o600 });
+      }
+    })().catch(e => { handoffError = e; child.kill(); });
+    const exit = await completed; await handoffs; if (handoffError) throw handoffError;
+    for (const value of secrets) assert.ok(!output.includes(value), 'no secret in process output');
+    let receipt, bytes;
+    try { bytes = await readFile(out); receipt = JSON.parse(bytes); for (const value of secrets) assert.ok(!bytes.includes(Buffer.from(value)), 'no secret in receipt'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    return { exit, output, receipt, bytes, out, pointer };
+  }
+  const f = { root, creds, human, seat, clients, families, config, events, run, consent: undefined };
+  return f;
+}
+
+function consentSchema(r, phase, producer) {
+  keys(r, ['kind', 'release_sha', 'consent_phase', 'measured_at', 'producer_sha256', 'controls', 'dcr_client_ids', 'cleanup']);
+  assert.equal(r.kind, 'c1-consent'); assert.equal(r.release_sha, release); assert.equal(r.consent_phase, phase);
+  assert.equal(r.producer_sha256, producer); assert.equal(new Date(r.measured_at).toISOString(), r.measured_at);
+  assert.ok(Date.parse(r.measured_at) <= Date.now()); assert.deepEqual(r.controls, { cimd_consent: true, dcr_registration_consent: true });
+  assert.equal(r.dcr_client_ids.length, 1); assert.match(r.dcr_client_ids[0], /^[A-Za-z0-9_-]{24,200}$/);
+  if (phase === 'pre-W1') assert.equal(r.cleanup, null);
+  else { keys(r.cleanup, ['grants_revoked', 'dcr_clients_removed']); assert.equal(r.cleanup.grants_revoked, true); assert.ok(r.cleanup.dcr_clients_removed.includes(r.dcr_client_ids[0])); }
+}
+async function pre(f) {
+  const r = await f.run('consent'); assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
+}
+
+test('executable produces exact consent/live bytes with real PKCE, rotating refresh, CLI file persistence and synthetic readback', async t => {
+  const f = await fixture(t), p = await pre(f), producer = hash(await readFile(script));
+  consentSchema(p.receipt, 'pre-W1', producer); assert.equal((await stat(p.out)).mode & 0o777, 0o600);
+  assert.equal(p.bytes.toString(), JSON.stringify(p.receipt, null, 2) + '\n');
+  let generation = 0;
+  for (const [window, phase] of [['W1', 'before'], ['W2', 'after'], ['W3', 'recovery']]) {
+    const r = await f.run('window', ['--window', window, '--phase', phase]); assert.equal(r.exit, 0, r.output);
+    keys(r.receipt, ['release_sha', 'window_id', 'window', 'phase', 'controls', 'consent_receipt_sha256', 'producer_sha256', 'dcr_client_ids']);
+    assert.deepEqual(r.receipt.controls, { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true });
+    assert.equal(r.receipt.release_sha, release); assert.equal(r.receipt.window_id, 'ABC123'); assert.equal(r.receipt.window, window); assert.equal(r.receipt.phase, phase);
+    assert.equal(r.receipt.consent_receipt_sha256, hash(p.bytes)); assert.equal(r.receipt.producer_sha256, producer);
+    assert.equal(r.receipt.dcr_client_ids.length, 1); assert.equal((await stat(r.out)).mode & 0o777, 0o600);
+    assert.equal(r.bytes.toString(), JSON.stringify(r.receipt, null, 2) + '\n');
+    for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) assert.equal((await stat(join(f.creds, name))).mode & 0o777, 0o600);
+    const record = JSON.parse(await readFile(join(f.human, `${hash(api).slice(0, 24)}.json`))); assert.equal(record.generation, ++generation);
+    const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json'))); assert.deepEqual(ids.ids, [...f.clients]);
+  }
+  assert.equal(f.events.filter(e => e.command === 'post_signal').length, 3);
+});
+
+test('dry-run of both subcommands makes zero requests and writes no files', async t => {
+  const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
+  for (const command of ['consent', 'window']) {
+    const r = await f.run(command, ['--dry-run']); assert.equal(r.exit, 0, r.output); await missing(r.out);
+    const plan = JSON.parse(r.output); assert.equal(plan.dry_run, true); assert.equal(plan.user_agent, 'curl/8.7.1'); assert.ok(plan.requests.length > 5);
+  }
+  assert.equal(f.events.length, 0);
+});
+
+test('every failed window leg withholds the entire receipt and redacts remote failures', async t => {
+  for (const [control, config] of [
+    ['hosted_mcp_consent_refresh', { failPath: '/mcp' }], ['dcr_registration_consent', { badRegistration: true }], ['dcr_registration_consent', { duplicateRegistration: true }],
+    ['cimd_consent', { badRedirect: true }], ['human_recovery', { wrongWorkspace: true }], ['worker_command_read', { noReadback: true }],
+  ]) await t.test(`${control} (${Object.keys(config)[0]})`, async t => {
+    const f = await fixture(t), p = await pre(f); Object.assign(f.config, config);
+    const r = await f.run('window'); assert.equal(r.exit, 1, r.output); assert.match(r.output, new RegExp(`FAIL ${control}:`)); await missing(r.out);
+    assert.ok(p.receipt.controls.cimd_consent);
+  });
+});
+
+test('consent callback binding, timeout, catalog and metadata failures produce no receipt', async t => {
+  for (const [name, config, handoff] of [['state', { wrongState: true }, true], ['timeout', {}, false], ['catalog', { badTools: true }, true], ['metadata', { badMetadata: true }, true], ['callback-mode', { unsafeCallback: true }, true]]) {
+    await t.test(name, async t => { const f = await fixture(t, config), r = await f.run('consent', [], { handoff });
+      assert.equal(r.exit, 1, r.output); await missing(r.out); assert.match(r.output, /FAIL cimd_consent:/); });
+  }
+});
+
+test('private path and profile refusals happen before refresh, registration or note writes', async t => {
+  for (const kind of ['directory', 'file', 'symlink', 'hardlink', 'wrong-seat', 'receipt-bind']) await t.test(kind, async t => {
+    const f = await fixture(t); await pre(f); const count = f.events.length;
+    if (kind === 'directory') await chmod(f.seat, 0o755);
+    if (kind === 'file') await chmod(join(f.seat, 'credential.json'), 0o644);
+    if (kind === 'symlink') await symlink(join(f.seat, 'credential.json'), join(f.seat, 'unsafe.json'));
+    if (kind === 'hardlink') await link(join(f.seat, 'credential.json'), join(f.seat, 'unsafe.json'));
+    if (kind === 'wrong-seat') {
+      const path = join(f.seat, 'profile.json'), p = JSON.parse(await readFile(path)); p.workspace_id = randomUUID(); await privateWrite(path, p);
+    }
+    if (kind === 'receipt-bind') {
+      const p = JSON.parse(await readFile(f.consent)); p.release_sha = 'b'.repeat(40); await privateWrite(f.consent, p);
+    }
+    const r = await f.run('window'); assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.ok(f.events.slice(count).every(e => e.method === 'GET' && e.path.includes('.well-known')));
+  });
+});
+
+test('post-W5 fences all retained families and reconciles both consent and window ids; expiry proof is required', async t => {
+  for (const [name, config] of [['rotation-replay', { expireAtFence: true, expiryHTML: true }], ['RFC7009', { rfcRevoke: true, expireAtFence: true }]]) await t.test(name, async t => {
+    const f = await fixture(t, config), p = await pre(f), w = await f.run('window'); assert.equal(w.exit, 0, w.output);
+    const post = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]); assert.equal(post.exit, 0, post.output);
+    consentSchema(post.receipt, 'post-W5', hash(await readFile(script)));
+    const all = [...p.receipt.dcr_client_ids, ...w.receipt.dcr_client_ids, ...post.receipt.dcr_client_ids];
+    assert.deepEqual(post.receipt.cleanup.dcr_clients_removed.sort(), all.sort());
+    assert.ok([...f.families.values()].every(r => r.family.revoked));
+    f.consent = post.out; const after = await f.run('window', ['--window', 'W6', '--phase', 'after']);
+    assert.equal(after.exit, 1); assert.match(after.output, /missing or revoked grant/); await missing(after.out);
+  });
+});
+
+test('cleanup refuses still-live registrations, arbitrary authorization errors, and dishonest revocation', async t => {
+  for (const [name, config] of [['live', {}], ['unrelated-400', { authorizeError: true }], ['revocation-lies', { rfcRevoke: true, revokeLies: true }]]) await t.test(name, async t => {
+    const f = await fixture(t, config), p = await pre(f);
+    const post = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]); assert.equal(post.exit, 1, post.output); await missing(post.out);
+    assert.match(post.output, /FAIL cleanup:/);
+    if (name !== 'revocation-lies') assert.match(post.output, /no DCR removal API; \d+ ids not proven expired/);
+  });
+});
+
+test('window enforces the schema consent phase, producer identity and exact input keys', async t => {
+  for (const name of ['phase', 'producer', 'extra-key', 'control', 'future', 'stale']) await t.test(name, async t => {
+    const f = await fixture(t); await pre(f);
+    const p = JSON.parse(await readFile(f.consent));
+    if (name === 'producer') p.producer_sha256 = 'b'.repeat(64);
+    if (name === 'extra-key') p.extra = true;
+    if (name === 'control') p.controls.cimd_consent = 'true';
+    if (name === 'future') p.measured_at = new Date(Date.now() + 60000).toISOString();
+    if (name === 'stale') p.measured_at = new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString();
+    await privateWrite(f.consent, p);
+    const r = await f.run('window', name === 'phase' ? ['--window', 'W5', '--phase', 'after'] : []);
+    assert.equal(r.exit, 1, r.output); assert.match(r.output, /FAIL consent_binding:/); await missing(r.out);
+  });
+});
+
+test('HTTP timeout is bounded and emits neither a token nor a receipt', async t => {
+  const f = await fixture(t, { hangToken: true }), started = Date.now();
+  const r = await f.run('consent'); assert.equal(r.exit, 1, r.output); await missing(r.out);
+  assert.match(r.output, /FAIL cimd_consent:/); assert.ok(Date.now() - started < 5000);
+});
+
+test('a refused public registration remains journaled for cleanup', async t => {
+  const f = await fixture(t); await pre(f); f.config.badRegistration = true;
+  const r = await f.run('window'); assert.equal(r.exit, 1); await missing(r.out);
+  const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json')));
+  assert.deepEqual(ids.ids, [...f.clients]); assert.equal(ids.ids.length, 2);
+});
+
+test('consent rejects unsafe credential directories and existing run locks without HTTP', async t => {
+  for (const kind of ['directory', 'lock']) await t.test(kind, async t => {
+    const f = await fixture(t);
+    if (kind === 'directory') await chmod(f.creds, 0o755);
+    else await privateWrite(join(f.creds, 'live-controls.lock'), 'running\n');
+    const r = await f.run('consent'); assert.equal(r.exit, 1, r.output); await missing(r.out); assert.equal(f.events.length, 0);
+    assert.match(r.output, /FAIL files:/);
+  });
+});
+
+test('receipt cannot alias a credential journal and leave secrets at the requested output', async t => {
+  const f = await fixture(t), outName = join(f.creds, 'live-controls-state.json');
+  const r = await f.run('consent', [], { outName }); assert.equal(r.exit, 1, r.output);
+  assert.match(r.output, /file path collision/); await missing(outName); assert.equal(f.events.length, 0);
+});
