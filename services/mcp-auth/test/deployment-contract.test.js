@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { chmod, lstat, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
 
@@ -14,10 +14,15 @@ import { loadConfig } from "../src/config.js";
 const root = new URL("../../../", import.meta.url);
 const execFileAsync = promisify(execFile);
 const fixtureDirectories = [];
+function assertFixtureDirectory(directory) {
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  assert.equal(resolve(directory), directory);
+  assert.ok(fixtureDirectories.includes(directory), "cleanup requires an owned fixture directory");
+}
 after(async () => {
   for (const directory of fixtureDirectories) {
-    assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
-    await execFileAsync("/Users/yulanbot/.local/bin/rm", ["-rf", directory]);
+    assertFixtureDirectory(directory);
+    await execFileAsync("rm", ["-rf", directory]);
   }
 });
 
@@ -28,6 +33,7 @@ async function text(path) {
 async function configFixture() {
   const { stdout } = await execFileAsync("mktemp", ["-d", "/private/tmp/anvil-secret.XXXXXX"]);
   const directory = stdout.trim();
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
   fixtureDirectories.push(directory);
   await chmod(directory, 0o700);
   const paths = Object.fromEntries(["signing", "cookies", "database", "ca"].map(
@@ -64,6 +70,14 @@ async function configFixture() {
     },
   };
 }
+
+test("cleanup accepts only the exact fixture directories it created", async () => {
+  const { directory } = await configFixture();
+  assert.doesNotThrow(() => assertFixtureDirectory(directory));
+  for (const unsafe of ["", "/", process.env.HOME, `${directory}/child`, `${directory}/../other`, `${directory}unowned`]) {
+    assert.throws(() => assertFixtureDirectory(unsafe));
+  }
+});
 
 test("container is pinned, unprivileged, and starts the production server", async () => {
   const dockerfile = await text("services/mcp-auth/Dockerfile");

@@ -234,7 +234,7 @@ test("credential travels only over child stdin, never argv or env", async () => 
     credentialArtifact: secret,
     env: {
       PATH: "/usr/bin",
-      HOME: "/Users/test",
+      HOME: process.env.HOME,
       SWARM_AGENT_TOKEN: secret,
       DATABASE_URL: "postgres://secret",
     },
@@ -253,7 +253,7 @@ test("credential travels only over child stdin, never argv or env", async () => 
   );
   assert.deepEqual(capturedOptions.env, {
     PATH: "/usr/bin",
-    HOME: "/Users/test",
+    HOME: process.env.HOME,
   });
   assert.equal(capturedOptions.detached, true);
   assert.deepEqual(capturedOptions.stdio, ["pipe", "ignore", "ignore"]);
