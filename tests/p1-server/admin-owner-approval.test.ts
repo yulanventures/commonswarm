@@ -102,8 +102,10 @@ try {
   }
   const verificationBefore = await tx\`SELECT * FROM commonswarm_oauth.admin_verified_clients ORDER BY verification_version\`;
   step = 'actor-refusals';
+  // A non-human without verified OAuth admission is unauthenticated. Human
+  // session/CSRF refusals below still reach the human confirmation policy.
+  assert.equal((await run(wire(approve.command),{ kind:'system',owner_user_id:config.alice })).status,401);
   for (const auth of [
-    { kind:'system',owner_user_id:config.alice },
     { ...human,identity:{...human.identity,csrf_verified:false} },
     { ...human,identity:{...human.identity,interactive_at_seconds:0} },
   ]) assert.equal((await run(wire(approve.command),auth)).status,403);
