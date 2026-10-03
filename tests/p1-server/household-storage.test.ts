@@ -306,6 +306,11 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   for (const id of ids) script += proof(id,'catalog') + requireProof('catalog_ok',true);
   script += 'GRANT UPDATE ON swarm.household_object_events TO swarm_command;\n' + proof(ids[1],'catalog') + requireProof('catalog_ok',false);
   script += 'REVOKE UPDATE ON swarm.household_object_events FROM swarm_command;\n' + proof(ids[1],'catalog') + requireProof('catalog_ok',true);
+  // Command reads use the projection; widening either append-only ledger to SELECT must fail the proof.
+  for (const ledger of ['household_object_events','household_object_audit']) {
+    script += `GRANT SELECT ON swarm.${ledger} TO swarm_command;\n` + proof(ids[1],'catalog') + requireProof('catalog_ok',false);
+    script += `REVOKE SELECT ON swarm.${ledger} FROM swarm_command;\n` + proof(ids[1],'catalog') + requireProof('catalog_ok',true);
+  }
   for (const id of [...ids].reverse()) script += proof(id,'rollback') + proof(id,'rollback-catalog') + requireProof('rollback_ok',true) + proof(id,'catalog') + requireProof('catalog_ok',false);
   script += 'ROLLBACK;\n';
   execFileSync('docker', ['exec','-i',containers[0]!, 'psql','-X','-q','-U','postgres','-d','postgres','-v','ON_ERROR_STOP=1'], { input: script, stdio: ['pipe','pipe','pipe'] });

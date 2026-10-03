@@ -5,6 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
+// Household boundary SELECT/INSERT/UPDATE: check and establish purpose; UPDATE also permits FOR SHARE locks.
+// Household member-role SELECT/INSERT/UPDATE: check consent and record human-confirmed roles/revocations.
+// Household connection SELECT/INSERT/UPDATE: check and record per-agent consent, operation ceilings and revocations.
+// Household stream SELECT/INSERT/UPDATE: load, initialize and persist the reducer projection and sequence.
+// Household events INSERT: append committed reducer events; authorized history reads the stream projection.
+// Household audit INSERT: append command outcomes and digests; the command path never reads this ledger.
+// Household bindings SELECT/INSERT: resolve or establish stable object-to-file identity.
+// Household artifacts SELECT/INSERT/UPDATE: verify retained bytes, register versions and settle reservations.
 const literal = JSON.stringify(allowlist).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
