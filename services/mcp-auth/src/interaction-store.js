@@ -24,6 +24,19 @@ function conflict(message) {
   return new InteractionStateError("interaction_binding_mismatch", message);
 }
 
+// PostgreSQL stores this CAS counter as bigint. pg returns int8 as text by
+// default; the HTTP forms, JSON API and consent digest use safe JS integers.
+export function interactionRow(row) {
+  if (!row) return row;
+  const raw = row.selection_version;
+  const version = typeof raw === "string" && /^(?:0|[1-9][0-9]*)$/u.test(raw)
+    ? Number(raw) : raw;
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw conflict("interaction selection version is invalid");
+  }
+  return { ...row, selection_version: version };
+}
+
 export class InteractionStore {
   constructor(pool, { sessionTtlSeconds = 3600, interactionTtlSeconds = 600 } = {}) {
     this.pool = pool;
@@ -111,7 +124,7 @@ export class InteractionStore {
         binding.oauthState ?? null, this.interactionTtlSeconds, binding.userId ?? null],
     );
     if (result.rowCount !== 1) throw conflict("OAuth interaction binding changed");
-    return result.rows[0];
+    return interactionRow(result.rows[0]);
   }
 
   async beginSignIn(interactionUid, sessionId, { state, verifier }) {
@@ -146,7 +159,7 @@ export class InteractionStore {
           WHERE interaction_uid = $1`,
         [interactionUid],
       );
-      return row;
+      return interactionRow(row);
     });
   }
 
@@ -172,7 +185,7 @@ export class InteractionStore {
         [user.id, interactionUid, sessionHash],
       );
       if (interaction.rowCount !== 1) throw conflict("sign-in interaction is unavailable");
-      return interaction.rows[0];
+      return interactionRow(interaction.rows[0]);
     });
   }
 
@@ -188,7 +201,7 @@ export class InteractionStore {
       [hashOpaque(token), interactionUid, hashOpaque(sessionId), userId],
     );
     if (result.rowCount !== 1) throw conflict("consent interaction is unavailable");
-    return { token, selectionVersion: result.rows[0].selection_version };
+    return { token, selectionVersion: interactionRow(result.rows[0]).selection_version };
   }
 
   async selectWithToken({ interactionUid, sessionId, userId, token, selectionVersion, workspaceIds }) {
@@ -211,7 +224,7 @@ export class InteractionStore {
         selectionVersion, hashOpaque(token)],
     );
     if (result.rowCount !== 1) throw conflict("selection token is stale, swapped, or already used");
-    return { interaction: result.rows[0], token: nextToken };
+    return { interaction: interactionRow(result.rows[0]), token: nextToken };
   }
 
   async bindProviderGrant(interactionUid, providerGrantId, commonswarmGrantId) {
@@ -227,7 +240,7 @@ export class InteractionStore {
       [providerGrantId, commonswarmGrantId, interactionUid],
     );
     if (result.rowCount !== 1) throw conflict("provider grant binding changed");
-    return result.rows[0];
+    return interactionRow(result.rows[0]);
   }
 
   async consumeConsent({ interactionUid, sessionId, userId, token, selectionVersion }) {
@@ -242,7 +255,7 @@ export class InteractionStore {
       [interactionUid, hashOpaque(sessionId), userId, selectionVersion, hashOpaque(token)],
     );
     if (result.rowCount !== 1) throw conflict("consent token is stale, swapped, or already used");
-    return result.rows[0];
+    return interactionRow(result.rows[0]);
   }
 
   async selectAndConsumeConsent({
@@ -277,7 +290,7 @@ export class InteractionStore {
         selectionVersion, hashOpaque(token)],
     );
     if (result.rowCount !== 1) throw conflict("consent token is stale, swapped, or already used");
-    return result.rows[0];
+    return interactionRow(result.rows[0]);
   }
 
   async complete(interactionUid) {

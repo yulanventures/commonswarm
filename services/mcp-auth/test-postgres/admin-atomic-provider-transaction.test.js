@@ -27,6 +27,12 @@ const redirectUri = "https://client.example/callback";
 const verifier = "atomic-provider-verifier-0123456789abcdef0123456789";
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 const digest = value => createHash("sha256").update(value).digest();
+// Preserve only stable error codes, never provider messages, SQL or artifacts.
+function failureCode(error) {
+  const code = error.code ?? error.error;
+  return typeof code === "string" && /^(?:[A-Z0-9]{5}|admin_[a-z_]+|invalid_grant|invalid_target|consent_receipt_invalid|unauthorized_client)$/u.test(code)
+    ? code : "unclassified_failure";
+}
 
 // Force ONLY the imported test copy of lane 3a's gate. No source/file/env change,
 // no new production switch. Its policy, receipt checks and completion hook run.
@@ -97,7 +103,12 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   providerInstance(provider).configuration.formats.customizers.jwt = async () => {
     if (db.current().fault === "signing") throw new Error("test signing failure");
   };
-  provider.on("server_error", () => {});
+  const providerFailure = (_ctx, error) => {
+    const trace = traces.get(testRequests.getStore()?.id);
+    if (trace) trace.failure = failureCode(error);
+  };
+  provider.on("server_error", providerFailure);
+  provider.on("authorization.error", providerFailure);
   const store = new PostgresAdminConsentStore(db.pool);
   await bindProviderAdminNonceStore(provider);
   const service = createAdminConsentService({ store, provider, staticClientIds: new Set([clientId]),
@@ -146,7 +157,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   // production owns transaction control and never obtains setup privileges.
   const coordinatorPool = { connect: async () => {
     const physical = await pool.connect(), owned = testRequests.getStore();
-    const trace = { calls: [], writes: [], committed: false };
+    const trace = { calls: [], writes: [], committed: false, phase: owned.phase };
     traces.set(owned.id,trace);
     const raw = physical.query.bind(physical);
     let original,originalChecksums;
@@ -194,6 +205,9 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   const coordinator = new AdminTransactionCoordinator(coordinatorPool);
   const server = createServer(async (request,response) => {
     const id=request.headers["x-spike-id"],owned={ id,...controls.get(id) };
+    const path = new URL(request.url, ISSUER).pathname;
+    owned.phase = path === "/authorize" ? "authorize" : path.startsWith("/authorize/") ? "resume"
+      : path.startsWith("/interaction/") ? "interaction" : path === "/token" ? "token" : "revoke";
     try {
       let proof;
       if (owned.body && new URL(request.url,ISSUER).pathname === "/token") {
@@ -209,6 +223,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         proof=await admitAdminProof(proofPool,await verifyAdminProof(request,jkt));
       }
       await testRequests.run(owned,()=>coordinator.run(response,async scope=>{
+        try {
         scope.fault=owned.fault; traces.get(id).pending=scope.pending;
         if (request.url === "/test-revoke") {
           const binding=(await db.pool.query(`SELECT * FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[family])).rows[0];
@@ -216,8 +231,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         } else if (request.url.startsWith("/interaction/")) {
           const details = await provider.interactionDetails(request, response);
           if (details.prompt.name === "login") {
+            traces.get(id).phase = "login";
             await provider.interactionFinished(request, response, { login: { accountId: owner } });
           } else if (request.method === "GET") {
+            traces.get(id).phase = "consent-selection";
             await base.bindInteraction({ interactionUid: details.uid, sessionId, userId: owner, clientId,
               redirectUri, resource: ADMIN, scopes: details.params.scope.split(" "), pkceChallenge: challenge,
               oauthState: details.params.state });
@@ -230,6 +247,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
               completion: { summary_digest: selected.summary.digest } };
             response.statusCode = 204; response.end();
           } else {
+            traces.get(id).phase = "consent-confirmation";
             const grantId = await service.confirm(pendingConsent.input, pendingConsent.completion);
             await provider.interactionFinished(request, response, { consent: { grantId } });
           }
@@ -247,7 +265,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
           await callback(request,response);
           await lifecycle.finishContinuation();
         }
-
+        } catch (error) {
+          traces.get(id).failure = failureCode(error);
+          throw error;
+        }
       },{ kind:proof ? "token" : "human",owner,proof,sessionHash:hashOpaque(sessionId) }));
     } catch {
       response.statusCode=503; response.end('{"error":"temporarily_unavailable"}');
@@ -351,14 +372,14 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         registrationEnabled:false,registrationStore:{find:async id=>id===clientId ? metadata:undefined,markUsed:async()=>{}},
         providerGrantResource:async id=>(await db.pool.query(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
           WHERE provider_grant_id=$1`,[id])).rows[0]?.resource});
-      provider.on("server_error",()=>{});callback=provider.callback();
+      provider.on("server_error",providerFailure);provider.on("authorization.error",providerFailure);callback=provider.callback();
     },
     consent: () => pendingConsent,
     async close() { await new Promise(resolve => server.close(resolve)); await proofPool.end(); await pool.end(); } };
 }
 
 function atomic(trace) {
-  assert.equal(trace.committed, true);
+  assert.equal(trace.committed, true, `phase=${trace.phase}; failure=${trace.failure ?? "not_recorded"}`);
   assert.ok(trace.writes.length > 0);
   assert.equal(new Set(trace.calls.map(call => `${call.pid}:${call.xid}`)).size, 1,
     "ALL actual provider/status/authority calls must share a backend transaction");

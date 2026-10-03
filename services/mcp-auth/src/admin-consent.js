@@ -1,4 +1,5 @@
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
+import { interactionRow } from "./interaction-store.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { hashOpaque, opaqueMatches } from "./browser-security.js";
 import { metadataUrlAllowed, createPinnedMetadataFetch } from "./metadata-fetch.js";
@@ -178,7 +179,7 @@ export class PostgresAdminConsentStore {
       WHERE interaction_uid=$1 AND completed_at IS NULL AND expires_at>statement_timestamp() FOR UPDATE`, [uid])).rows[0];
     const receipt = (await tx.query(`SELECT * FROM commonswarm_oauth.admin_interactions
       WHERE interaction_uid=$1 AND expires_at>statement_timestamp() FOR UPDATE`, [uid])).rows[0];
-    return { parent, receipt };
+    return { parent: interactionRow(parent), receipt };
   }
   async stage(tx, input, manifest, policy, summary) {
     const { uid, sessionId, ownerUserId, csrfToken, version, params } = input;
@@ -202,7 +203,7 @@ export class PostgresAdminConsentStore {
       manifest.mode === "full_account" ? hashOpaque(summary.secondToken) : null,
       manifest.mode === "full_account", params.code_challenge, params.dpop_jkt, parent.expires_at])).rows[0];
     if (!receipt) refuse("consent_receipt_invalid", 409);
-    return { parent, receipt };
+    return { parent: interactionRow(parent), receipt };
   }
 }
 
