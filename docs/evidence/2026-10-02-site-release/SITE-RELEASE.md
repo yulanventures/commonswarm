@@ -235,10 +235,16 @@ PY
   test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   SITE_RELEASE_VERSION=$(node -p 'require(process.argv[1]).version' "$SITE_RELEASE_REPO/package.json")
   case "$SITE_RELEASE_VERSION" in ''|*[!0-9A-Za-z.+-]*) exit 1 ;; esac
-  if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
-    printf '%s\n' 'STOP: another local site release process exists' >&2
-    exit 1
-  fi
+  # Bash holds the executing script open; query open paths without setuid tools.
+  python3 - <<'PYLOCALRELEASE'
+import subprocess
+result = subprocess.run(["lsof", "-nP", "-F", "n"], capture_output=True)
+if result.returncode != 0:
+    raise SystemExit("STOP: local site release process query unavailable")
+if any(line.startswith(b"n") and line.endswith((b"/deploy/site/deploy.sh", b"/finalize-release.sh"))
+       for line in result.stdout.splitlines()):
+    raise SystemExit("STOP: another local site release process exists")
+PYLOCALRELEASE
 
   box_open_file="$SITE_EVIDENCE/site2-01-box-open.txt"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s >"$box_open_file" <<'BOX'
@@ -250,10 +256,19 @@ test "$(id -un)" = commonswarm
 test ! -e /tmp/commonswarm-site-window.env
 test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
 test -z "$(find "$root/releases" -maxdepth 1 \( -type d -o -type l \) -name '.site-window-pin-*' -print)"
-if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
-  printf '%s\n' 'STOP: another box site release process exists' >&2
-  exit 1
-fi
+python3 - <<'PYBOXRELEASE'
+import pathlib
+# Linux exposes argv directly; inspect names without executing process tools.
+for path in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        arguments = path.read_bytes().split(b"\0")
+    except FileNotFoundError:
+        continue
+    except PermissionError:
+        raise SystemExit("STOP: box site release process query unavailable")
+    if any(arg.endswith((b"deploy/site/deploy.sh", b"finalize-release.sh")) for arg in arguments):
+        raise SystemExit("STOP: another box site release process exists")
+PYBOXRELEASE
 test -w "$root" && test -w "$root/releases"
 previous=$(readlink -f "$root/current")
 test -L "$root/current"
@@ -614,104 +629,149 @@ retaining raw browser output in the public evidence directory.
   chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
-  # Sandbox-safe ownership helper: proc_pidinfo reads the actual start time;
-  # pgrep matches only the exact recorded PID/command and enumerates its children.
+  # Ownership uses the saved PID, liveness, and libproc's path/start-time APIs.
+  # Start time guards same-binary PID reuse; no process-name/group kills.
   cat >"$browser_root/browser-process.py" <<'PY'
-import ctypes, json, os, pathlib, re, signal, subprocess, sys, time
+import ctypes, json, os, pathlib, signal, sys, time
 mode, root, pid_text, binary, profile = sys.argv[1:]
 root = pathlib.Path(root)
-pid = int(pid_text)
-if pid <= 1 or profile != str(root / "browser-profile"):
-    raise SystemExit("STOP: invalid task browser identity; leave state for HezLead reconciliation")
 receipt = root / "browser-process.json"
-# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo.
+field = "pid"
+
+def alive():
+    try:
+        os.kill(pid, 0)  # kill -0: only ESRCH means already gone; EPERM stops.
+        return True
+    except ProcessLookupError:
+        return False
+
+# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo (136 bytes).
 class BsdInfo(ctypes.Structure):
     _fields_ = [("header", ctypes.c_uint32 * 12), ("names", ctypes.c_char * 48),
-                ("tail", ctypes.c_uint32 * 6), ("start_sec", ctypes.c_uint64),
-                ("start_usec", ctypes.c_uint64)]
-libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                              ctypes.c_void_p, ctypes.c_int]
-libproc.proc_pidinfo.restype = ctypes.c_int
+                ("tail", ctypes.c_uint32 * 6), ("pbi_start_tvsec", ctypes.c_uint64),
+                ("pbi_start_tvusec", ctypes.c_uint64)]
 
-def identity(target):
-    os.kill(target, 0)
+def start_time():
+    global field
+    field = "start_time"
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                   ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_pidinfo.restype = ctypes.c_int
     info = BsdInfo()
     size = ctypes.sizeof(info)
-    if size != 136 or libproc.proc_pidinfo(target, 3, 0, ctypes.byref(info), size) != size:
+    if size != 136 or libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
         raise RuntimeError("process start time unavailable")
-    if info.header[3] != target or info.header[5] != os.getuid():
-        raise RuntimeError("process identity unavailable")
-    return {"pid": target, "ppid": int(info.header[4]), "pgid": int(info.tail[1]),
-            "start": [int(info.start_sec), int(info.start_usec)]}
+    if info.pbi_start_tvsec == 0 or info.pbi_start_tvusec >= 1000000:
+        raise RuntimeError("invalid process start time")
+    return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)]
 
-def pgrep(*args):
-    result = subprocess.run(["/usr/bin/pgrep", *args], capture_output=True, text=True)
-    if result.returncode not in (0, 1):
-        raise RuntimeError("pgrep ownership query failed")
-    return result.stdout.splitlines()
+def executable_path():
+    global field
+    field = "executable_path"
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    libproc.proc_pidpath.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
+        raise RuntimeError("executable path unavailable")
+    return str(pathlib.Path(os.fsdecode(buffer.value)).resolve())
 
-def browser():
-    before = identity(pid)
-    pattern = re.escape(binary) + r" .* --user-data-dir=" + re.escape(profile) + r"( |$)"
-    matches = [line for line in pgrep("-lf", pattern) if line.startswith(str(pid) + " ")]
-    if len(matches) != 1 or identity(pid) != before or before["pgid"] != pid:
-        raise RuntimeError("task browser command/start time not proved")
-    return {"identity": before, "command": matches[0], "binary": binary, "profile": profile}
+def verified():
+    global field
+    field = "pid"
+    if not alive():
+        return False
+    observed = executable_path()
+    pathlib.Path(observed).relative_to(cache)
+    field = "recorded_executable_path"
+    if observed != recorded["executable_path"] or observed != expected:
+        raise RuntimeError("PID reused or executable path changed")
+    observed_start = start_time()
+    field = "recorded_start_time"
+    if observed_start != recorded["start_time"]:
+        raise RuntimeError("PID reused or start time changed")
+    return True
+
+def signal_verified(signum):
+    if verified():
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass  # The verified process exited between the identity read and signal.
 
 try:
-    current = browser()
+    pid = int(pid_text)
+    if pid <= 1 or mode not in ("record", "check", "stop"):
+        raise ValueError("invalid PID or operation")
+    field = "profile"
+    if profile != str(root / "browser-profile"):
+        raise ValueError("invalid profile")
+    field = "executable_path"
+    cache = (pathlib.Path.home() / "Library/Caches/ms-playwright").resolve()
+    expected = str(pathlib.Path(binary).resolve())
     if mode == "record":
-        with receipt.open("x", encoding="utf-8") as output:
+        pathlib.Path(expected).relative_to(cache)
+        # The launcher execs Chromium in place; wait for that executable transition.
+        for attempt in range(100):
+            if not alive():
+                raise RuntimeError("browser exited before recording")
+            launched_start = start_time()
+            observed = executable_path()
+            if observed == expected:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError("launch executable not proved")
+        if start_time() != launched_start:
+            raise RuntimeError("PID reused during launch recording")
+        current = {"pid": pid, "executable_path": observed, "start_time": launched_start,
+                   "profile": profile}
+        field = "receipt"
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(current, output, sort_keys=True)
         receipt.chmod(0o600)
     else:
-        if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
-            raise RuntimeError("recorded browser identity unavailable")
-        if json.loads(receipt.read_text()) != current:
-            raise RuntimeError("recorded PID/start time/command changed")
-        if mode == "stop":
-            # Snapshot only the exact verified PID tree, never a process-name/group kill.
-            tree = [current["identity"]]
-            for parent in tree:
-                if identity(parent["pid"]) != parent:
-                    raise RuntimeError("parent identity changed")
-                for child_text in pgrep("-P", str(parent["pid"])):
-                    child = identity(int(child_text))
-                    if child["ppid"] != parent["pid"] or child["pgid"] != pid:
-                        raise RuntimeError("child ownership not proved")
-                    if child["pid"] in {item["pid"] for item in tree}:
-                        raise RuntimeError("unexpected process tree")
-                    tree.append(child)
-                if identity(parent["pid"]) != parent:
-                    raise RuntimeError("parent identity changed")
-            # Retain identities before signalling, including if reconciliation is needed.
-            tree_file = root / "browser-process-tree.json"
-            tree_file.write_text(json.dumps(tree, sort_keys=True), encoding="utf-8")
-            tree_file.chmod(0o600)
-            if browser() != current:
-                raise RuntimeError("browser identity changed before stop")
-            # Root first prevents new descendants; each signal rechecks PID/start time.
-            for member in tree:
-                try:
-                    live = identity(member["pid"])
-                except ProcessLookupError:
-                    continue
-                if live["start"] != member["start"] or live["pgid"] != pid:
-                    raise RuntimeError("PID reused or ownership changed; not signalled")
-                os.kill(member["pid"], signal.SIGTERM)
-            for attempt in range(100):
-                if not pgrep("-g", str(pid)):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("task process tree still running after 10 seconds")
-        elif mode != "check":
-            raise RuntimeError("invalid ownership operation")
-except (OSError, ValueError, RuntimeError):
-    # Never print the command, private browser output, or arbitrary exception details.
-    raise SystemExit("STOP: task browser ownership/cleanup not proved; no unverified PID signalled; "
-                     "retain private staging and window state for HezLead reconciliation") from None
+        # Check liveness before reading a path: ESRCH is successful cleanup.
+        field = "pid"
+        if not alive():
+            if mode == "check":
+                raise RuntimeError("browser already gone")
+        else:
+            field = "executable_path"
+            pathlib.Path(expected).relative_to(cache)
+            field = "receipt"
+            if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
+                raise RuntimeError("recorded identity unavailable")
+            recorded = json.loads(receipt.read_text())
+            field = "recorded_pid"
+            if recorded["pid"] != pid or recorded["profile"] != profile:
+                raise RuntimeError("recorded PID/profile changed")
+            owned = verified()
+            if not owned and mode == "check":
+                raise RuntimeError("browser already gone")
+            if owned and mode == "stop":
+                # Recheck recorded path AND start time immediately before each signal.
+                signal_verified(signal.SIGTERM)
+                for attempt in range(100):
+                    if not alive():
+                        break
+                    time.sleep(0.1)
+                else:
+                    signal_verified(signal.SIGKILL)
+                    for attempt in range(50):
+                        if not alive():
+                            break
+                        time.sleep(0.1)
+                    else:
+                        field = "pid"
+                        raise RuntimeError("browser still alive")
+except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+    # Field names only; never print private paths or arbitrary exception details.
+    raise SystemExit("STOP: task browser ownership/cleanup not proved; fields=pid,executable_path," +
+                     field + "; no unverified PID signalled; retain private staging and window state "
+                     "for HezLead reconciliation") from None
 PY
   chmod 0600 "$browser_root/browser-process.py"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
@@ -731,12 +791,12 @@ PY
     --no-first-run --no-default-browser-check about:blank \
     </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
   chrome_pid=$!
+  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
   port_file="$profile/DevToolsActivePort"
   tries=0
   while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
     tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
   done
-  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
   endpoint="http://127.0.0.1:$chrome_port"
   {
     printf 'SITE_BROWSER_ROOT=%q\n' "$browser_root"
