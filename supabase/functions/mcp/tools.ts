@@ -168,43 +168,51 @@ export function hostedToolName(value: string): value is HostedToolName {
   return HOSTED_TOOL_TABLE.some((tool) => tool.name === value);
 }
 
+const EXPECTED: Record<string, string> = {
+  seat: "provide the seat_ handle returned by claim_seat (22 to 64 letters, digits, underscores or hyphens after seat_)",
+  name: "provide 1 to 80 characters with no surrounding spaces or control characters",
+  request_id: "provide 8 to 72 letters, digits, underscores or hyphens; reuse it only for the same request",
+  workspace_id: "provide a real workspace UUID or omit it to use the grant's home workspace",
+  ack: "provide the batch UUID returned by check, or omit ack to open the inbox",
+  body: "provide 1 to 8000 characters with non-whitespace text; only tab, newline and carriage return are allowed control characters",
+  recipients: "provide 1 to 20 objects with only kind (user or agent) and id (UUID); use members to find recipients",
+  signal_id: "provide the signal UUID from check that you want to reply to",
+};
+
 export function validateHostedToolArguments(
   name: HostedToolName,
   value: unknown,
 ): HostedToolArguments {
   const args = record(value);
-  if (args === null) throw new HostedToolInputError("Expected an object of tool arguments.");
+  if (args === null) throw new HostedToolInputError("Expected an object of tool arguments. Send arguments as a JSON object.");
   const shape = KEYS[name];
   if (Object.keys(args).some((key) => !shape.allowed.includes(key))) {
-    throw new HostedToolInputError("Unknown tool argument.");
+    // Unknown keys and supplied values can contain secrets; list trusted keys.
+    throw new HostedToolInputError(`Unknown tool argument. Use only: ${shape.allowed.join(", ")}.`);
   }
-  if (shape.required.some((key) => !Object.hasOwn(args, key))) {
-    throw new HostedToolInputError("Missing required tool argument.");
+  for (const key of shape.required) {
+    if (!Object.hasOwn(args, key)) throw new HostedToolInputError(`Missing ${key}: ${EXPECTED[key]}.`);
   }
+  const invalid = (key: string): never => {
+    throw new HostedToolInputError(`Invalid ${key}: ${EXPECTED[key]}.`);
+  };
   if (name === "claim_seat") {
     if (Object.hasOwn(args, "workspace_id") &&
-        (!validUuid(args.workspace_id) ||
-          claimWorkspace.not.enum.includes(args.workspace_id))) {
-      throw new HostedToolInputError("Invalid workspace_id: provide a real workspace UUID or omit it to use the grant's home workspace.");
-    }
-    if (!validSeatName(args.name) ||
-        !validRequestId(args.request_id)) throw new HostedToolInputError("Invalid tool argument.");
+        (!validUuid(args.workspace_id) || claimWorkspace.not.enum.includes(args.workspace_id))) invalid("workspace_id");
+    if (!validSeatName(args.name)) invalid("name");
+    if (!validRequestId(args.request_id)) invalid("request_id");
     return args;
   }
-  if (!validHandle(args.seat)) throw new HostedToolInputError("Invalid tool argument.");
+  if (!validHandle(args.seat)) invalid("seat");
   if (name === "check") {
-    if (args.ack !== undefined && !validUuid(args.ack)) throw new HostedToolInputError("Invalid tool argument.");
+    if (args.ack !== undefined && !validUuid(args.ack)) invalid("ack");
     return args;
   }
   if (name === "whoami" || name === "members") return args;
-  if (!validBody(args.body) || !validRequestId(args.request_id)) {
-    throw new HostedToolInputError("Invalid tool argument.");
-  }
+  if (!validBody(args.body)) invalid("body");
+  if (!validRequestId(args.request_id)) invalid("request_id");
   if ((name === "ask" && !validRecipients(args.recipients)) ||
-      (name === "note" && args.recipients !== undefined && !validRecipients(args.recipients)) ||
-      (name === "reply" && !validUuid(args.signal_id)) ||
-      (name === "working_on" && Object.hasOwn(args, "recipients"))) {
-    throw new HostedToolInputError("Invalid tool argument.");
-  }
+      (name === "note" && args.recipients !== undefined && !validRecipients(args.recipients))) invalid("recipients");
+  if (name === "reply" && !validUuid(args.signal_id)) invalid("signal_id");
   return args;
 }

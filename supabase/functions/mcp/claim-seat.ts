@@ -2,6 +2,8 @@ import type postgres from "npm:postgres@3.4.9";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { authenticateHostedGrantCapability, type HostedGrantCapability, type ProviderGrantStatus } from "../_shared/hosted-seat-auth.ts";
 import type { CommandResult, HostedCommandInput } from "../command/contract.d.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
+import { HostedToolFailure } from "./tool-errors.ts";
 import type { HostedToolCall } from "./tools.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
@@ -44,7 +46,7 @@ export async function executeClaimSeat(
     });
     return capability === null ? null : { capability, workspaceId };
   });
-  if (authorized === null) throw new Error("hosted_grant_forbidden");
+  if (authorized === null) throw new HostedToolFailure("hosted_grant_forbidden");
   return await dependencies.handleCommand({
     command_id: call.arguments.request_id,
     client_version: "0.1.80",
