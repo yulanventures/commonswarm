@@ -576,6 +576,37 @@ async function unpinAskRateWindow(): Promise<void> {
   `);
 }
 
+test("ask rate buckets use the database-clock minute and ten-minute slots (no pin)", async () => {
+  const [a, b] = fixture.seats;
+  await sql`DROP TRIGGER IF EXISTS test_pin_ask_rate_window ON swarm.rate_buckets`;
+  await clearAskRates();
+  const [t0] = await sql<{ t: Date }[]>`SELECT clock_timestamp() AS t`;
+  const posted = await command(a!.token, ask(b!.principal));
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const [t1] = await sql<{ t: Date }[]>`SELECT clock_timestamp() AS t`;
+  const senderKey = `ask:sender:${fixture.workspace}:${a!.principal}`;
+  const pairKey = `ask:pair:${fixture.workspace}:${a!.principal}:${b!.principal}`;
+  // The ask ran at some instant in [t0, t1]; accept only the slots of those instants.
+  const [r] = await sql<{ sender_ok: boolean; pair_ok: boolean; n: number }[]>`
+    WITH slots AS (
+      SELECT t,
+        date_trunc('minute', t) AS minute_slot,
+        date_trunc('hour', t) + floor(date_part('minute', t) / 10) * interval '10 minutes' AS ten_slot
+      FROM (VALUES (${t0!.t}::timestamptz), (${t1!.t}::timestamptz)) AS v(t)
+    )
+    SELECT
+      EXISTS (SELECT 1 FROM swarm.rate_buckets rb, slots s
+        WHERE rb.bucket_key = ${senderKey} AND rb.window_start = s.minute_slot) AS sender_ok,
+      EXISTS (SELECT 1 FROM swarm.rate_buckets rb, slots s
+        WHERE rb.bucket_key = ${pairKey} AND rb.window_start = s.ten_slot) AS pair_ok,
+      (SELECT count(*)::int FROM swarm.rate_buckets WHERE bucket_key IN (${senderKey}, ${pairKey})) AS n
+  `;
+  assert.equal(r?.sender_ok, true, "sender bucket window_start is the minute the ask ran in");
+  assert.equal(r?.pair_ok, true, "pair bucket window_start is the ten-minute slot the ask ran in");
+  assert.equal(r?.n, 2);
+  await clearAskRates();
+});
+
 test("sender and pair limits are principal-scoped and fixed windows reset", async () => {
   const [a, b] = fixture.seats;
   assert.ok(a!.secondToken);
