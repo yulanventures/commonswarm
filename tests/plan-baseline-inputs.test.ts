@@ -195,3 +195,109 @@ test("site input and measured-source comparison require the full resolved SHA", 
     assert.match(output(bad), new RegExp(`EXPECTED_SITE_SHA expected=${mismatch} observed=${observed}; STOP`));
   }
 });
+
+// This owns the release safety contract: executable-path ownership must work
+// without setuid process tools, and a stale receipt must never authorize a kill.
+test("site browser cleanup uses recorded PID/path and never signals an unverified process", () => {
+  const sources = [...readFileSync(SITE, "utf8").matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1]!);
+  for (const source of sources) assert.doesNotMatch(source, /\b(?:ps|pgrep)\b/);
+  const preflight = block(SITE, "site2-03-browser-session-preflight");
+  const source = preflight.match(/cat >"\$browser_root\/browser-process\.py" <<'PY'\n([\s\S]*?)\nPY\n/)?.[1];
+  assert.ok(source, "preflight must stage the browser ownership helper");
+  assert.match(source, /proc_pidpath/);
+  assert.match(source, /ms-playwright/);
+  assert.match(source, /os\.kill\([^\n]+, 0\)/);
+  assert.match(preflight, /chrome_pid=\$!/);
+  assert.match(preflight, /browser-process\.py" record/);
+  for (const step of ["site2-05-browser-acceptance", "site2-06"]) {
+    assert.match(block(SITE, step), /kill -0 "\$SITE_CHROME_PID"/);
+    assert.match(block(SITE, step), /browser-process\.py" check/);
+  }
+  for (const step of ["site2-07-pre-pin-manifest-close", "site2-07-manifest-close"]) {
+    const close = block(SITE, step);
+    assert.ok(close.indexOf('browser-process.py" stop') < close.indexOf('rm -r -- "$SITE_BROWSER_ROOT"'));
+    assert.match(close, /browser-process\.py" stop "\$SITE_BROWSER_ROOT" "\$SITE_CHROME_PID"/);
+  }
+  const root = mkdtempSync("/private/tmp/plan-baselines-");
+  try {
+    const script = join(root, "browser-process.py");
+    writeFileSync(script, source, { mode: 0o600 });
+    // Mock only OS observations. Execute the exact staged helper and persist its
+    // real receipt; signal observations prove refusal, TERM and KILL ordering.
+    const result = spawnSync("python3", ["-", script, root], { encoding: "utf8", input: String.raw`
+import ctypes, errno, json, os, pathlib, runpy, signal, sys, time
+script, root = sys.argv[1:]
+root = pathlib.Path(root)
+binary = str(pathlib.Path.home() / "Library/Caches/ms-playwright/control/chrome")
+profile = str(root / "browser-profile")
+receipt = root / "browser-process.json"
+state = {}
+class PathReader:
+    def __call__(self, pid, buffer, size):
+        state["path_reads"] += 1
+        if state.get("path_unavailable"): return 0
+        if state.get("reuse_before_term") and state["path_reads"] >= 2: state["path"] = "/bin/sleep"
+        buffer.value = state["path"].encode()
+        return len(buffer.value)
+class Libproc:
+    proc_pidpath = PathReader()
+ctypes.CDLL = lambda *args, **kwargs: Libproc()
+def kill(pid, sig):
+    assert pid == 424242
+    if sig == 0:
+        if state.get("denied"): raise PermissionError(errno.EPERM, "denied")
+        if not state["alive"]: raise ProcessLookupError(errno.ESRCH, "gone")
+    else:
+        state["signals"].append(sig)
+        if sig == signal.SIGKILL and not state.get("ignore_kill") or sig == signal.SIGTERM and not state.get("ignore_term"):
+            state["alive"] = False
+        if state.get("reuse_after_term"): state["path"] = "/bin/sleep"
+os.kill = kill
+time.sleep = lambda seconds: None
+def reset(**changes):
+    state.clear()
+    state.update(alive=True, path=binary, signals=[], path_reads=0)
+    state.update(changes)
+def run(mode, ok):
+    sys.argv = [script, mode, str(root), "424242", binary, profile]
+    try:
+        runpy.run_path(script, run_name="__main__")
+    except SystemExit as error:
+        assert not ok, str(error)
+        assert "STOP" in str(error) and "pid" in str(error).lower() and "executable_path" in str(error)
+    else:
+        assert ok, mode + " unexpectedly passed"
+reset()
+run("record", True)
+saved = receipt.read_text()
+assert receipt.stat().st_mode & 0o777 == 0o600
+assert json.loads(saved)["pid"] == 424242
+assert json.loads(saved)["executable_path"] == binary
+run("check", True)
+assert state["signals"] == []
+for changes in ({"alive": False}, {"path": "/bin/sleep"}, {"path": binary + "-reused"},
+                {"denied": True}, {"path_unavailable": True}, {"reuse_before_term": True}):
+    reset(**changes)
+    run("stop", not state["alive"])
+    assert state["signals"] == []
+    if not state["alive"]: assert state["path_reads"] == 0
+for field, value in (("pid", 424243), ("executable_path", binary + "-reused")):
+    wrong = json.loads(saved); wrong[field] = value
+    receipt.write_text(json.dumps(wrong))
+    reset(); run("stop", False)
+    assert state["signals"] == []
+receipt.write_text(saved)
+for changes, expected in (({}, [signal.SIGTERM]), ({"ignore_term": True}, [signal.SIGTERM, signal.SIGKILL])):
+    reset(**changes); run("stop", True)
+    assert state["signals"] == expected and not state["alive"]
+reset(ignore_term=True, reuse_after_term=True)
+run("stop", False)
+assert state["signals"] == [signal.SIGTERM], "reused PID must not receive SIGKILL"
+reset(ignore_term=True, ignore_kill=True)
+run("stop", False)
+assert state["alive"] and state["signals"] == [signal.SIGTERM, signal.SIGKILL], "cleanup must prove the PID gone"
+print("ownership lifecycle: PASS (gone, unverified, permission, PID/path reuse, TERM, KILL)")
+` });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  } finally { cleanup(root); }
+});
