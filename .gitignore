@@ -32,3 +32,6 @@ supabase/.branches
 supabase/.temp
 uxtest/rounds/*
 uxtest/rounds/*/*
+
+# Deterministic ChatGPT submission draft built from distribution/chatgpt-apps.
+dist-chatgpt/
