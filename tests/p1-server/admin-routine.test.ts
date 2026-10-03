@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
 import { createClient } from "@supabase/supabase-js";
@@ -51,8 +52,8 @@ for (const [scenario, label] of Object.entries(scenarios)) {
         "local stack required",
       );
     }
-    const root = '/private/tmp';
-    const secretDir = execFileSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' }).trim();
+    const root = realpathSync(process.platform === 'darwin' ? '/private/tmp' : tmpdir());
+    const secretDir = execFileSync('mktemp', ['-d', join(root, 'anvil-secret.XXXXXX')], { encoding: 'utf8' }).trim();
     chmodSync(secretDir, 0o700);
     let isolated: Awaited<ReturnType<typeof adminEdgeDatabase>> | undefined;
     try {
