@@ -17,11 +17,13 @@ export async function adminEdgeDatabase(localUrl: string) {
   let created = false;
   const close = async () => {
     try {
-      await db.end();
-      if (created) {
-        if (!/^admin_edge_[a-f0-9]{32}$/u.test(name)) throw new Error('unsafe_database_cleanup');
-        await master.unsafe(`DROP DATABASE ${name} WITH (FORCE)`);
-        created = false;
+      try { await db.end(); } finally {
+        // Even a failed disconnect must attempt to remove the allocated database.
+        if (created) {
+          if (!/^admin_edge_[a-f0-9]{32}$/u.test(name)) throw new Error('unsafe_database_cleanup');
+          await master.unsafe(`DROP DATABASE ${name} WITH (FORCE)`);
+          created = false;
+        }
       }
     } finally { await master.end(); }
   };
@@ -59,6 +61,11 @@ export async function adminEdgeDatabase(localUrl: string) {
       GRANT USAGE ON SCHEMA extensions TO PUBLIC;`);
     phase = 'restore';
     await db.unsafe(dump.replace(/^\\(?:un)?restrict \S+\r?$/gm, ''));
+    phase = 'restore-session';
+    // pg_dump leaves row_security=off, search_path='' and other session SETs.
+    // max:1 reuses that session for cutover and subsequent fixture operations.
+    // Restore connection defaults before switching to non-BYPASSRLS roles.
+    await db.unsafe('RESET ALL');
     phase = 'test-cutover';
     await db.begin(async tx => {
       // --schema-only copies no singleton or migration-ledger rows.

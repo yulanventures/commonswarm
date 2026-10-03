@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import postgres from "postgres";
 
@@ -19,6 +20,10 @@ const rollbackUrl = new URL(
 );
 const dcrRollbackUrl = new URL(
   "../../deploy/release-proofs/oauth-dcr/20261002000001-rollback.sql",
+  import.meta.url,
+);
+const dcrMigrationUrl = new URL(
+  "../../supabase/migrations/20261002000001_oauth_registered_clients.sql",
   import.meta.url,
 );
 
@@ -319,11 +324,12 @@ async function rollbackAndAssertRemoved(
 }
 
 test("OAuth catalog is structural and all creator apply paths are safe", async () => {
-  const [migration, catalog, rollback, dcrRollback] = await Promise.all([
+  const [migration, catalog, rollback, dcrRollback, dcrMigration] = await Promise.all([
     readFile(migrationUrl, "utf8"),
     readFile(catalogUrl, "utf8"),
     readFile(rollbackUrl, "utf8"),
     readFile(dcrRollbackUrl, "utf8"),
+    readFile(dcrMigrationUrl, "utf8"),
   ]);
   assert.doesNotMatch(
     catalog,
@@ -354,7 +360,20 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       SELECT to_regclass('commonswarm_oauth.registered_clients') IS NOT NULL AS present
     `;
     assert.equal(dcr?.present, true, "reset also applied the later DCR migration");
-    await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
+    // Admin migrations extend HM6 tables and grant the issuer SET membership.
+    // Keep their data, dependencies and role OID intact under temporary names.
+    // Replay the actual HM6 + DCR boundary with a fresh runtime role; the outer
+    // rollback restores the original names, role memberships and migration ledger.
+    const suffix = randomUUID().replaceAll("-", "");
+    await tx.unsafe(`
+      ALTER SCHEMA commonswarm_oauth RENAME TO hm6_saved_oauth_${suffix};
+      ALTER ROLE commonswarm_oauth_runtime RENAME TO hm6_saved_runtime_${suffix};
+    `);
+    await tx`DELETE FROM supabase_migrations.schema_migrations WHERE version = ${migrationVersion}`;
+    await tx.unsafe(migration);
+    await recordMigrationLedger(tx);
+    await tx.unsafe(dcrMigration);
+    await assertCatalogPasses(tx, proof, "positive control: isolated real HM6 and DCR apply");
     await assert.rejects(
       tx.savepoint(async (sp) => await rollbackAsMigrationOwner(sp, inverse)),
       { code: "2BP01" },
@@ -368,12 +387,12 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
     await assertMigrationDatabaseGrant(
       tx,
       undefined,
-      "reset-applied migration",
+      "isolated real HM6 migration",
     );
     await rollbackAndAssertRemoved(
       tx,
       inverse,
-      "reset-applied migration rollback removes the role and every dependency",
+      "isolated real HM6 rollback removes the role and every dependency",
     );
     await tx.unsafe("RESET ROLE");
     const [roleCollision] = await tx<{ present: boolean }[]>`
