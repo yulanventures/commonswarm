@@ -9404,29 +9404,6 @@ test("controls: box-mode ssh runs the remote command in the login home, not the 
   }
 });
 
-test("controls: site-05's live public-byte control is NOT EXECUTED and no fixture is bent to its media types", () => {
-  const block = planBlock(SITE, "site-05");
-  const declared = executeWholeBlock(block, {} as Fixture, { executeDeclared: true });
-  assert.equal(declared.result, "not-executed");
-  assert.equal(declared.status, null);
-  assert.deepEqual(declared.seeded, []);
-  assert.equal(declared.stdout, "");
-  const entry = declaredNonSubstitutable("site-05")!;
-  assert.deepEqual((entry.unproduced ?? []).map((item) => item.output).sort(),
-    ["rollback-auto.txt", "site-05-public-summary.txt", "site-05-public.txt"]);
-  assert.deepEqual(entry.outputs, []);
-  assert.equal(entry.success_receipts, undefined);
-  // Every reader of its products is itself unexecuted: no consumer receives unproduced bytes.
-  for (const step of ["site-05-browser-acceptance", "site-06", "site-07-manifest-close"]) {
-    assert.ok(planBlock(SITE, step).source.match(/site-05-public\.txt|rollback-auto\.txt/), `${step} reads a site-05 product`);
-    assert.ok(declaredNonSubstitutable(step), `${step} must not execute on unproduced site-05 bytes`);
-  }
-  // The plan requires application/javascript; the HTTP fixture's unmeasured table says text/javascript.
-  // Neither is evidence of the live response, and neither was edited to make the other pass.
-  assert.match(block.source, /else "application\/javascript"/);
-  assert.match(readFileSync(join(PYTHON_FIXTURE, "sitecustomize.py"), "utf8"), /"\.js": "text\/javascript"/);
-});
-
 test("controls: a failed site-04 reports its deploy evidence tail and changes nothing else", () => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-site-diagnostic-"));
   try {

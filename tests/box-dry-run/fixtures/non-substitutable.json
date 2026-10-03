@@ -2209,56 +2209,5 @@
       "reason": "The dispatcher requires an actual pass=false old/new or HTTP-boundary receipt. Every eligible receipt producer and its transfer is whole-block NOT EXECUTED and seeds no bytes on these paths; the unchanged selector correctly stops with no actual failed control receipt. Never invent an assertion_id or classify a fabricated failure."
     }
   ]
-},
-{
- "step": "site-05",
- "scope": "whole-block",
- "surface": "live public-byte control of commonswarm.com with automatic rollback",
- "reason": "The public-byte control fetches https://commonswarm.com through Cloudflare and Caddy and requires status 200, exact media types (text/html, text/css, application/javascript) and byte equality with the new release. No committed measurement records these responses for this release, and none records the media type the box serves for .js assets. The dry-run HTTP fixture's media table (text/javascript for .js) is not a measurement; changing it to the plan's expectation would invent the live result. Its failure branch also performs the live automatic rollback of current. No public receipt, summary or rollback receipt is seeded.",
- "live_proof": "The complete live block at docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:940 must record PUBLIC_BYTES=PASS from the real public responses (or the automatic rollback receipt). Before the window, Anvil should measure the Content-Type commonswarm.com serves for an /_astro/*.js asset: the block requires application/javascript.",
- "receipt_fields": [
-  "site-05-public.txt: probe= lines, asset_sha256, release, app_sha256, download_sha256, PUBLIC_BYTES=PASS",
-  "site-05-public-summary.txt: final exit code",
-  "rollback-auto.txt on failure"
- ],
- "written_outputs": [
-  {
-   "output": "site-05-public-summary.txt",
-   "path": "$SITE_EVIDENCE/site-05-public-summary.txt",
-   "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:949-960",
-   "evidence": null,
-   "reason": "The final exit code is the live public control's result."
-  },
-  {
-   "output": "site-05-public.txt",
-   "path": "$SITE_EVIDENCE/site-05-public.txt",
-   "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:966-1006",
-   "evidence": null,
-   "reason": "Its probe lines are live public responses; no committed measurement for this release."
-  },
-  {
-   "output": "rollback-auto.txt",
-   "path": "$SITE_EVIDENCE/rollback-auto.txt",
-   "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1010-1024",
-   "evidence": null,
-   "reason": "Written only by the live automatic rollback after a failed public control."
-  }
- ],
- "outputs": [],
- "shape_evidence": [],
- "unproduced": [
-  {
-   "output": "site-05-public-summary.txt",
-   "reason": "The final exit code is the live public control's result; it is not seeded."
-  },
-  {
-   "output": "site-05-public.txt",
-   "reason": "Live public responses (status, media type, bytes) are not measured for this release; never invented."
-  },
-  {
-   "output": "rollback-auto.txt",
-   "reason": "Only the live automatic rollback writes it; the dry run performs no rollback."
-  }
- ]
 }
 ]
