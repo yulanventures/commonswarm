@@ -1056,8 +1056,8 @@ docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172
  --volume /etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro \
  --entrypoint psql "$PSQL_IMAGE" -X --set=ON_ERROR_STOP=1 -Atq \
  --command "SELECT current_user='commonswarm_admin_issuer' AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user;" \
- >"$SECRET_STAGE/issuer-login.result" 2>"$SECRET_STAGE/issuer-login.log"
-test "$(cat "$SECRET_STAGE/issuer-login.result")" = t
+ >"$SECRET_STAGE/issuer-login.result" 2>"$SECRET_STAGE/issuer-login.log" || { printf 'FAIL ai-w2-issuer-credential: TLS psql login exit status expected 0 got %s; STOP\n' "$?" >&2; exit 1; }
+test "$(cat "$SECRET_STAGE/issuer-login.result")" = t || { printf 'FAIL ai-w2-issuer-credential: dedicated-role measurement expected t got non-t; STOP\n' >&2; exit 1; }
 printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"$PROOF_DIR/issuer-credential.txt"
 ```
 
@@ -1095,9 +1095,9 @@ test -f "$PROOF_DIR/ordinary-before.json"
 BASELINE_OAUTH_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_sha"])' "$INPUTS_FILE")
 OLD_OAUTH=/home/commonswarm/oauth/releases/$BASELINE_OAUTH_SHA
 NEW_OAUTH=/home/commonswarm/oauth/releases/$RELEASE_SHA
-test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' commonswarm-oauth-oauth-1)" = "$OLD_OAUTH/deploy/mcp-auth/compose.yaml,$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml"
-cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.yaml"
-cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.management.yaml"
+test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' commonswarm-oauth-oauth-1)" = "$OLD_OAUTH/deploy/mcp-auth/compose.yaml,$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" || { printf 'FAIL ai-w3-preflight: active Compose files expected baseline-base-and-management got mismatch; STOP\n' >&2; exit 1; }
+cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.yaml" || { printf 'FAIL ai-w3-preflight: compose.yaml bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
+cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.management.yaml" || { printf 'FAIL ai-w3-preflight: compose.management.yaml bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 python3 - /etc/commonswarm-oauth/service.env <<'PY'
 import pathlib,sys
@@ -1123,14 +1123,14 @@ if test -n "$CACHED"; then
  IMAGE=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
  test "$IMAGE" = "$CACHED"
 else
- test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true'
+ test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true' || { printf 'FAIL ai-w3-build: CPU cap support expected true-true got unsupported; STOP\n' >&2; exit 1; }
  DOCKER_BUILDKIT=0 nice -n 15 docker build --pull=false \
   --cpu-period=100000 --cpu-quota=300000 --tag "$IMAGE_TAG" \
   --label "org.opencontainers.image.revision=$RELEASE_SHA" \
   --file "$NEW_OAUTH/services/mcp-auth/Dockerfile" "$NEW_OAUTH" >"$SECRET_STAGE/build.log" 2>&1
  IMAGE=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 fi
-test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$RELEASE_SHA"
+test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$RELEASE_SHA" || { printf 'FAIL ai-w3-build: image source label expected release-sha got mismatch; STOP\n' >&2; exit 1; }
 printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e \
  'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.existsSync("src/admin-authority.generated.js")) process.exit(1)' >/dev/null 2>&1
@@ -1145,8 +1145,8 @@ set -euo pipefail
 test "$WINDOW" = W3
 ai_deadline
 test ! -e "$PROOF_DIR/oauth-attempted.txt"
-cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env"
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" || { printf 'FAIL ai-w3-apply: compose.env bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
+cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" || { printf 'FAIL ai-w3-apply: service.env bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE/compose.env" "$PROOF_DIR/oauth-image.id" "$SECRET_STAGE/compose.new.env" <<'PY'
 import pathlib,re,sys
 source=pathlib.Path(sys.argv[1]).read_text(); image=pathlib.Path(sys.argv[2]).read_text().strip()
@@ -1200,8 +1200,13 @@ mandatory with CORS. Baseline route availability is measured, never guessed.
 set -euo pipefail
 python3 - <<'PY'
 import json,urllib.request
-with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r:
-    assert r.status==200 and json.loads(r.read(4096))=={'state':'closed'}
+try:
+    with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r:
+        assert r.status==200 and json.loads(r.read(4096))=={'state':'closed'}
+except json.JSONDecodeError:
+    raise SystemExit('FAIL ai-w3-local-gate: gate body expected JSON got non-JSON; STOP') from None
+except AssertionError:
+    raise SystemExit('FAIL ai-w3-local-gate: gate status/body expected HTTP-200-and-closed got mismatch; STOP') from None
 print('PASS local AS /admin/gate closed')
 PY
 printf 'PASS\n' >"$PROOF_DIR/W3-probes.txt"

@@ -248,10 +248,9 @@ test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-p
   assert.equal(readFileSync(target, 'utf8'), 'must survive');
 });
 
-// These complete-block probes remain TODO/MISSING, never PASS evidence: the
-// plan currently has no STOP diagnostic on the named bad measurement. Test-only
-// scope forbids repairing the owner. Each positive control still runs first.
-test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set admin keys or active issuer overlay', { todo: 'PLAN DEFECT RELEASE.md:1098: active overlay exits silently' }, () => {
+// Complete-block diagnostics must identify the failed measurement without
+// printing protected values. Each positive control still runs first.
+test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set admin keys or active issuer overlay', () => {
   const good = fixture(); pass(good.run(['ai-w3-preflight']));
   for (const key of ['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED', 'MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE']) {
     const f = fixture(); f.put('etc/commonswarm-oauth/service.env', 'MCP_OAUTH_ENABLED=1\n'+key+'=fixture\n');
@@ -263,62 +262,68 @@ test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set a
   f.put('oauth/releases/'+baseline+'/deploy/mcp-auth/compose.admin-issuer.yaml', 'active overlay');
   const result = f.run(['ai-w3-preflight']); assert.ok(!result.calls.some(c => c[0] === 'cp'));
   assert.ok(!existsSync(join(f.root, 'oauth/releases', sha)));
-  stopped(result, 'STOP');
+  stopped(result, 'FAIL ai-w3-preflight: active Compose files expected baseline-base-and-management got mismatch; STOP');
 });
-test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', { todo: 'PLAN DEFECT RELEASE.md:1052-1060: login/role failure has no STOP diagnostic' }, () => {
+test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', () => {
   const good = fixture(); const positive = good.run(['ai-w2-issuer-credential'], 'W2'); pass(positive);
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
   assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /sslmode = verify-full/);
   assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /user = commonswarm_admin_issuer/);
-  const observations = [];
-  for (const config of [{ login: 'f' }, { tls_failed: true }]) {
+  for (const [config, message] of [
+    [{ login: 'f' }, 'FAIL ai-w2-issuer-credential: dedicated-role measurement expected t got non-t; STOP'],
+    [{ tls_failed: true }, 'FAIL ai-w2-issuer-credential: TLS psql login exit status expected 0 got 1; STOP'],
+  ] as const) {
     const f = fixture(config), result = f.run(['ai-w2-issuer-credential'], 'W2');
     assert.ok(!existsSync(join(f.proof, 'issuer-credential.txt')));
     assert.ok(result.calls.some(c => c[0] === 'docker' && c.includes('psql')));
-    assert.notEqual(result.status, 0); observations.push(result);
+    stopped(result, message);
   }
-  for (const result of observations) stopped(result, 'STOP');
 });
-test('oauth-build-route / cpu-capped-build-once-source-label: fails closed on unsupported CPU caps or wrong source label', { todo: 'PLAN DEFECT RELEASE.md:1126,1133: bad CPU/label measurement exits silently' }, () => {
+test('oauth-build-route / cpu-capped-build-once-source-label: fails closed on unsupported CPU caps or wrong source label', () => {
   const good = fixture(); const positive = good.run(['ai-w3-build']); pass(positive);
   assert.equal(positive.calls.filter(c => c[0] === 'docker' && c[1] === 'build').length, 1);
   assert.equal(readFileSync(join(good.proof, 'oauth-image.id'), 'utf8').trim(), image);
   const cached = fixture({ cached: image }); const cachedResult = cached.run(['ai-w3-build']); pass(cachedResult);
   assert.equal(cachedResult.calls.filter(c => c[0] === 'docker' && c[1] === 'build').length, 0);
-  const observations = [];
-  for (const config of [{ cpu: 'false false' }, { label: 'e'.repeat(40) }]) {
+  for (const [config, message] of [
+    [{ cpu: 'false false' }, 'FAIL ai-w3-build: CPU cap support expected true-true got unsupported; STOP'],
+    [{ label: 'e'.repeat(40) }, 'FAIL ai-w3-build: image source label expected release-sha got mismatch; STOP'],
+  ] as const) {
     const f = fixture(config), result = f.run(['ai-w3-build']);
     assert.ok(!existsSync(join(f.proof, 'oauth-image.id')));
     assert.ok(!result.calls.some(c => c[0] === 'docker' && c[1] === 'run'));
     if ('cpu' in config) assert.ok(!result.calls.some(c => c[0] === 'docker' && c[1] === 'build'));
-    assert.notEqual(result.status, 0); observations.push(result);
+    stopped(result, message);
   }
-  for (const result of observations) stopped(result, 'STOP');
 });
-test('oauth-build-route / ordinary-on-config: fails closed on baseline Compose drift or service env drift before apply', { todo: 'PLAN DEFECT RELEASE.md:1099-1100,1148-1149: config drift exits silently' }, () => {
+test('oauth-build-route / ordinary-on-config: fails closed on baseline Compose drift or service env drift before apply', () => {
   const good = fixture(); good.put('proof/oauth-image.id', image); const positive = good.run(['ai-w3-preflight', 'ai-w3-apply']); pass(positive);
   assert.equal(positive.calls.filter(c => c[0] === 'docker' && c[1] === 'compose').length, 1);
   assert.equal(readFileSync(join(good.root, 'etc/commonswarm-oauth/service.env'), 'utf8'), 'MCP_OAUTH_ENABLED=1\n');
-  const observations = [];
-  const preflight = fixture(); preflight.put('oauth/releases/'+baseline+'/deploy/mcp-auth/compose.management.yaml', 'unreviewed config');
-  const before = preflight.run(['ai-w3-preflight', 'ai-w3-apply']);
-  assert.ok(!existsSync(join(preflight.proof, 'oauth-attempted.txt'))); assert.ok(!before.calls.some(c => c[0] === 'cp' || c[0] === 'install' || (c[0] === 'docker' && c[1] === 'compose')));
-  assert.notEqual(before.status, 0); observations.push(before);
-  const apply = fixture(); apply.put('proof/oauth-image.id', image); pass(apply.run(['ai-w3-preflight']));
-  apply.put('etc/commonswarm-oauth/service.env', 'MCP_OAUTH_ENABLED=0\n');
-  const after = apply.run(['ai-w3-apply']);
-  assert.ok(!existsSync(join(apply.proof, 'oauth-attempted.txt'))); assert.ok(!after.calls.some(c => c[0] === 'install' || (c[0] === 'docker' && c[1] === 'compose')));
-  assert.notEqual(after.status, 0); observations.push(after);
-  for (const result of observations) stopped(result, 'STOP');
-});
-test('oauth-build-route / local-gate-closed: fails closed on open or non-JSON gate', { todo: 'PLAN DEFECT RELEASE.md:1203-1204: open/non-JSON raises exception without STOP diagnostic' }, () => {
-  const good = fixture(); pass(good.run(['ai-w3-local-gate'])); assert.equal(readFileSync(join(good.proof, 'W3-probes.txt'), 'utf8'), 'PASS\n');
-  const observations = [];
-  for (const gate_body of ['{"state":"open"}', 'not-json']) {
-    const f = fixture({ gate_body }), result = f.run(['ai-w3-local-gate']);
-    assert.ok(!existsSync(join(f.proof, 'W3-probes.txt'))); assert.notEqual(result.status, 0); observations.push(result);
+  for (const file of ['compose.yaml', 'compose.management.yaml']) {
+    const preflight = fixture(); preflight.put('oauth/releases/'+baseline+'/deploy/mcp-auth/'+file, 'unreviewed config');
+    const before = preflight.run(['ai-w3-preflight', 'ai-w3-apply']);
+    assert.ok(!existsSync(join(preflight.proof, 'oauth-attempted.txt'))); assert.ok(!before.calls.some(c => c[0] === 'cp' || c[0] === 'install' || (c[0] === 'docker' && c[1] === 'compose')));
+    stopped(before, `FAIL ai-w3-preflight: ${file} bytes expected identical got different-or-unreadable; STOP`);
   }
-  for (const result of observations) stopped(result, 'STOP');
+  for (const file of ['compose.env', 'service.env']) {
+    const apply = fixture(); apply.put('proof/oauth-image.id', image); pass(apply.run(['ai-w3-preflight']));
+    apply.put('etc/commonswarm-oauth/'+file, 'unreviewed env\n');
+    const after = apply.run(['ai-w3-apply']);
+    assert.ok(!existsSync(join(apply.proof, 'oauth-attempted.txt'))); assert.ok(!after.calls.some(c => c[0] === 'install' || (c[0] === 'docker' && c[1] === 'compose')));
+    stopped(after, `FAIL ai-w3-apply: ${file} bytes expected identical got different-or-unreadable; STOP`);
+  }
+});
+test('oauth-build-route / local-gate-closed: fails closed on open or non-JSON gate', () => {
+  const good = fixture(); pass(good.run(['ai-w3-local-gate'])); assert.equal(readFileSync(join(good.proof, 'W3-probes.txt'), 'utf8'), 'PASS\n');
+  for (const [gate_body, message] of [
+    ['{"state":"open"}', 'FAIL ai-w3-local-gate: gate status/body expected HTTP-200-and-closed got mismatch; STOP'],
+    ['not-json', 'FAIL ai-w3-local-gate: gate body expected JSON got non-JSON; STOP'],
+  ]) {
+    const f = fixture({ gate_body }), result = f.run(['ai-w3-local-gate']);
+    assert.ok(!existsSync(join(f.proof, 'W3-probes.txt'))); stopped(result, message!);
+    assert.doesNotMatch(result.stderr, /Traceback/);
+  }
 });
 
 // Cleanup goes through the host's PATH-first rm guard, only for our own resolved root.
