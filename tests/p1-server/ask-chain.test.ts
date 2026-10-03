@@ -547,42 +547,108 @@ test("the fourth child is too wide and simultaneous children cannot exceed the c
   assert.equal(count?.count, CHAIN_MAX_CHILDREN);
 });
 
+/* The limiter keys fixed windows on the database clock (date_trunc of
+ * statement_timestamp()), so a minute boundary crossing mid-test splits the count
+ * across two buckets. This test-only trigger rewrites every ask bucket's window_start
+ * to one constant instant, so the "current" window cannot roll over while the test
+ * runs. The explicit window_start back-shift below still moves a row out of that
+ * instant, which the next insert (pinned again) treats as a fresh window. */
+async function pinAskRateWindow(): Promise<void> {
+  await sql.unsafe(`
+    CREATE OR REPLACE FUNCTION swarm.test_pin_ask_rate_window() RETURNS trigger
+    LANGUAGE plpgsql AS $pin$
+    BEGIN
+      IF NEW.bucket_key LIKE 'ask:%' THEN
+        NEW.window_start := timestamptz '2100-01-01 00:00:00+00';
+      END IF;
+      RETURN NEW;
+    END $pin$;
+    DROP TRIGGER IF EXISTS test_pin_ask_rate_window ON swarm.rate_buckets;
+    CREATE TRIGGER test_pin_ask_rate_window BEFORE INSERT ON swarm.rate_buckets
+      FOR EACH ROW EXECUTE FUNCTION swarm.test_pin_ask_rate_window();
+  `);
+}
+
+async function unpinAskRateWindow(): Promise<void> {
+  await sql.unsafe(`
+    DROP TRIGGER IF EXISTS test_pin_ask_rate_window ON swarm.rate_buckets;
+    DROP FUNCTION IF EXISTS swarm.test_pin_ask_rate_window();
+  `);
+}
+
+test("ask rate buckets use the database-clock minute and ten-minute slots (no pin)", async () => {
+  const [a, b] = fixture.seats;
+  await sql`DROP TRIGGER IF EXISTS test_pin_ask_rate_window ON swarm.rate_buckets`;
+  await clearAskRates();
+  const [t0] = await sql<{ t: Date }[]>`SELECT clock_timestamp() AS t`;
+  const posted = await command(a!.token, ask(b!.principal));
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const [t1] = await sql<{ t: Date }[]>`SELECT clock_timestamp() AS t`;
+  const senderKey = `ask:sender:${fixture.workspace}:${a!.principal}`;
+  const pairKey = `ask:pair:${fixture.workspace}:${a!.principal}:${b!.principal}`;
+  // The ask ran at some instant in [t0, t1]; accept only the slots of those instants.
+  const [r] = await sql<{ sender_ok: boolean; pair_ok: boolean; n: number }[]>`
+    WITH slots AS (
+      SELECT t,
+        date_trunc('minute', t) AS minute_slot,
+        date_trunc('hour', t) + floor(date_part('minute', t) / 10) * interval '10 minutes' AS ten_slot
+      FROM (VALUES (${t0!.t}::timestamptz), (${t1!.t}::timestamptz)) AS v(t)
+    )
+    SELECT
+      EXISTS (SELECT 1 FROM swarm.rate_buckets rb, slots s
+        WHERE rb.bucket_key = ${senderKey} AND rb.window_start = s.minute_slot) AS sender_ok,
+      EXISTS (SELECT 1 FROM swarm.rate_buckets rb, slots s
+        WHERE rb.bucket_key = ${pairKey} AND rb.window_start = s.ten_slot) AS pair_ok,
+      (SELECT count(*)::int FROM swarm.rate_buckets WHERE bucket_key IN (${senderKey}, ${pairKey})) AS n
+  `;
+  assert.equal(r?.sender_ok, true, "sender bucket window_start is the minute the ask ran in");
+  assert.equal(r?.pair_ok, true, "pair bucket window_start is the ten-minute slot the ask ran in");
+  assert.equal(r?.n, 2);
+  await clearAskRates();
+});
+
 test("sender and pair limits are principal-scoped and fixed windows reset", async () => {
   const [a, b] = fixture.seats;
   assert.ok(a!.secondToken);
-  await clearAskRates();
-  for (let index = 0; index < ASK_SENDER_PER_MINUTE; index++) {
-    const bearer = index % 2 === 0 ? a!.token : a!.secondToken!;
-    const posted = await command(bearer, ask(null));
-    assert.equal(posted.status, 200, `sender ${index}: ${JSON.stringify(posted.body)}`);
-  }
-  const beforeSender = await counts();
-  const senderLimited = await command(a!.secondToken!, ask(null));
-  assert.equal(senderLimited.status, 429);
-  assert.equal(senderLimited.body.error, "rate_limited");
-  assert.equal(senderLimited.body.limit, ASK_SENDER_PER_MINUTE);
-  assert.deepEqual(await counts(), beforeSender);
-  await sql`UPDATE swarm.rate_buckets SET window_start = window_start - interval '1 minute'
-    WHERE bucket_key = ${`ask:sender:${fixture.workspace}:${a!.principal}`}`;
-  assert.equal((await command(a!.token, ask(null))).status, 200, "next fixed minute accepts");
+  await pinAskRateWindow();
+  try {
+    await clearAskRates();
+    for (let index = 0; index < ASK_SENDER_PER_MINUTE; index++) {
+      const bearer = index % 2 === 0 ? a!.token : a!.secondToken!;
+      const posted = await command(bearer, ask(null));
+      assert.equal(posted.status, 200, `sender ${index}: ${JSON.stringify(posted.body)}`);
+    }
+    const beforeSender = await counts();
+    const senderLimited = await command(a!.secondToken!, ask(null));
+    assert.equal(senderLimited.status, 429);
+    assert.equal(senderLimited.body.error, "rate_limited");
+    assert.equal(senderLimited.body.limit, ASK_SENDER_PER_MINUTE);
+    assert.deepEqual(await counts(), beforeSender);
+    await sql`UPDATE swarm.rate_buckets SET window_start = window_start - interval '1 minute'
+      WHERE bucket_key = ${`ask:sender:${fixture.workspace}:${a!.principal}`}`;
+    assert.equal((await command(a!.token, ask(null))).status, 200, "next fixed minute accepts");
 
-  await clearAskRates();
-  for (let index = 0; index < ASK_PAIR_PER_10_MINUTES; index++) {
-    const bearer = index % 2 === 0 ? a!.token : a!.secondToken!;
-    const posted = await command(bearer, ask(b!.principal));
-    assert.equal(posted.status, 200, `pair ${index}: ${JSON.stringify(posted.body)}`);
+    await clearAskRates();
+    for (let index = 0; index < ASK_PAIR_PER_10_MINUTES; index++) {
+      const bearer = index % 2 === 0 ? a!.token : a!.secondToken!;
+      const posted = await command(bearer, ask(b!.principal));
+      assert.equal(posted.status, 200, `pair ${index}: ${JSON.stringify(posted.body)}`);
+    }
+    const beforePair = await counts();
+    // UUID spelling cannot split one recipient principal across pair buckets.
+    const pairLimited = await command(a!.secondToken!, ask(b!.principal.toUpperCase()));
+    assert.equal(pairLimited.status, 429);
+    assert.equal(pairLimited.body.error, "rate_limited");
+    assert.equal(pairLimited.body.limit, ASK_PAIR_PER_10_MINUTES);
+    assert.deepEqual(await counts(), beforePair);
+    await sql`UPDATE swarm.rate_buckets SET window_start = window_start - interval '10 minutes'
+      WHERE bucket_key LIKE 'ask:%'`;
+    assert.equal((await command(a!.token, ask(b!.principal))).status, 200,
+      "next fixed ten-minute window accepts");
+  } finally {
+    await unpinAskRateWindow();
+    await clearAskRates();
   }
-  const beforePair = await counts();
-  // UUID spelling cannot split one recipient principal across pair buckets.
-  const pairLimited = await command(a!.secondToken!, ask(b!.principal.toUpperCase()));
-  assert.equal(pairLimited.status, 429);
-  assert.equal(pairLimited.body.error, "rate_limited");
-  assert.equal(pairLimited.body.limit, ASK_PAIR_PER_10_MINUTES);
-  assert.deepEqual(await counts(), beforePair);
-  await sql`UPDATE swarm.rate_buckets SET window_start = window_start - interval '10 minutes'
-    WHERE bucket_key LIKE 'ask:%'`;
-  assert.equal((await command(a!.token, ask(b!.principal))).status, 200,
-    "next fixed ten-minute window accepts");
 });
 
 test("a root ask charges every agent recipient pair at positions 1 through 8", async () => {
