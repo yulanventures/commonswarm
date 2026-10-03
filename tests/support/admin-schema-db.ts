@@ -10,6 +10,10 @@ export const migrationNames = [
   '20261003000002_admin_oauth_policy.sql',
   '20261003000003_admin_oauth_cutover.sql',
 ] as const;
+export const checksumGateVersion = '20261003000004';
+export const checksumGateMigrationName = '20261003000004_migration_checksums.sql';
+export const schemaVersions = [...versions, checksumGateVersion] as const;
+export const schemaMigrationNames = [...migrationNames, checksumGateMigrationName] as const;
 export function repoSql(path: string): string {
   return readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 }
@@ -121,7 +125,7 @@ FROM swarm.admin_grants WHERE grant_id='${grant}';` }] : [])];
 
 export function issuance(f: ReturnType<typeof fixture>, generation = 0) {
   const jti = `access-${randomUUID()}`, event = randomUUID(), audit = randomUUID();
-  const tokenDigest = '42'.repeat(32);
+  const tokenDigest = createHash('sha256').update(jti).digest('hex');
   const eventInsert = `INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
 VALUES('${f.owner}',${generation + 2},'${event}','issue-${generation}',jsonb_build_object('stream_kind','account','owner_user_id','${f.owner}',
   'seq',${generation + 2},'type','${generation === 0 ? 'AdminCredentialIssued' : 'AdminCredentialRotated'}','grant_id','${f.grant}',
@@ -152,19 +156,19 @@ END $capture$;
     '${f.provider}','${f.grant}','${overrides.owner ?? f.owner}',${generation},'${f.client}','https://api.commonswarm.com/admin',
     '${f.jkt}','${f.digest}',current_setting('schema_test.issued_at_${generation}')::timestamptz,
     current_setting('schema_test.expires_at_${generation}')::timestamptz,'test-kid')`;
-  return { jti, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
+  return { jti, tokenDigest, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
 }
 
 /** Exact reviewed activation set, including the migration that installs the gate. */
 export const checksumVersions = [
   '20261001000001', '20261001000002', '20261001000003', '20261001000004', '20261001000005',
-  '20260928000003', '20261002000001', ...versions, '20261003000004',
+  '20260928000003', '20261002000001', ...schemaVersions,
 ] as const;
 const checksumMigrationNames = [
   '20261001000001_admin_delegation.sql', '20261001000002_admin_routine.sql',
   '20261001000003_admin_recovery_read.sql', '20261001000004_admin_worker_read_fence.sql',
   '20261001000005_admin_routine_workspace_history.sql', '20260928000003_hm_oauth_store.sql',
-  '20261002000001_oauth_registered_clients.sql', ...migrationNames, '20261003000004_migration_checksums.sql',
+  '20261002000001_oauth_registered_clients.sql', ...schemaMigrationNames,
 ] as const;
 const reviewedChecksums = checksumMigrationNames.map((name, i) => [checksumVersions[i]!,
   createHash('sha256').update(repoSql(`supabase/migrations/${name}`)).digest('hex')]);

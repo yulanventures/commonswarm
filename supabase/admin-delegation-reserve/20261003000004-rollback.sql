@@ -7,6 +7,7 @@ DO $reserve$ BEGIN
 END $reserve$;
 DROP TABLE commonswarm_ops.migration_checksums;
 DROP FUNCTION commonswarm_ops.migration_checksum_failures();
+DROP FUNCTION commonswarm_ops.migration_ledger_versions();
 DROP FUNCTION commonswarm_ops.guard_migration_checksums();
 REVOKE USAGE ON SCHEMA commonswarm_ops FROM commonswarm_admin_release,commonswarm_oauth_runtime,swarm_command;
--- Retain the possibly pre-existing schema and owner's migration-ledger read ACL.
+-- Retain the possibly pre-existing schema and all pre-existing migration-ledger ACLs.

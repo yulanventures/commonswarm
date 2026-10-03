@@ -51,5 +51,22 @@ REVOKE SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verificat
 REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
 -- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.
-REVOKE commonswarm_oauth_runtime,swarm_command FROM commonswarm_admin_issuer;
+-- REVOKE without GRANTED BY only targets the applying role's selected grantor.
+-- Enumerate the actual edges, including grants from a prior release principal.
+-- PostgreSQL refuses an unauthorized GRANTED BY; never leave a partial fence.
+DO $issuer_memberships$
+DECLARE edge record;
+BEGIN
+  FOR edge IN SELECT parent.rolname AS parent_name,grantor.rolname AS grantor_name
+    FROM pg_catalog.pg_auth_members m
+    JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid
+    JOIN pg_catalog.pg_roles grantor ON grantor.oid=m.grantor
+    WHERE m.member='commonswarm_admin_issuer'::regrole
+    ORDER BY parent.rolname,grantor.rolname LOOP
+    EXECUTE format('REVOKE %I FROM commonswarm_admin_issuer GRANTED BY %I',edge.parent_name,edge.grantor_name);
+  END LOOP;
+  IF EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole) THEN
+    RAISE EXCEPTION 'reserve rollback refused: issuer memberships remain' USING ERRCODE='55000';
+  END IF;
+END $issuer_memberships$;
 -- Retain the constrained issuer login; it has no direct privileges or SET memberships.

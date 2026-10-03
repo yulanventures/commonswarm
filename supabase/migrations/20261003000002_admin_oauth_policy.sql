@@ -40,7 +40,7 @@ BEGIN
 END $roles$;
 
 DO $issuer$
-DECLARE creator_is_cluster_administrator boolean;
+DECLARE creator_is_cluster_administrator boolean; parent_name text;
 BEGIN
   SELECT rolsuper INTO creator_is_cluster_administrator FROM pg_catalog.pg_roles WHERE rolname=current_user;
   IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='commonswarm_admin_issuer') THEN
@@ -68,10 +68,25 @@ BEGIN
     WHERE roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole) THEN
     RAISE EXCEPTION 'issuer creator membership is unsafe';
   END IF;
+  -- Preserve a reviewed edge regardless of its grantor. Re-granting as a
+  -- different release principal creates another pg_auth_members row on PG17.
+  -- Duplicate edges are refused, never collapsed by the catalog proof.
+  IF EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members
+    WHERE member='commonswarm_admin_issuer'::regrole GROUP BY roleid HAVING count(*)<>1) THEN
+    RAISE EXCEPTION 'duplicate admin issuer membership';
+  END IF;
+  FOREACH parent_name IN ARRAY ARRAY['commonswarm_oauth_runtime','swarm_command'] LOOP
+    IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members
+      WHERE member='commonswarm_admin_issuer'::regrole AND roleid=parent_name::regrole) THEN
+      EXECUTE format('GRANT %I TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE',parent_name);
+    END IF;
+  END LOOP;
+  IF (SELECT count(*) FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)<>2 THEN
+    RAISE EXCEPTION 'admin issuer must have exactly two memberships';
+  END IF;
 END $issuer$;
--- The migration principal must hold ADMIN on both parent roles. No password or
--- direct schema/table/function/database grant is added to the issuer.
-GRANT commonswarm_oauth_runtime,swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+-- The applying principal needs ADMIN only for missing parent memberships.
+-- No password or direct schema/table/function/database grant is added.
 
 GRANT USAGE ON SCHEMA commonswarm_oauth TO commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 REVOKE ALL ON SCHEMA swarm FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
@@ -509,5 +524,22 @@ GRANT EXECUTE ON FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,te
 -- REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
 -- -- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.
--- REVOKE commonswarm_oauth_runtime,swarm_command FROM commonswarm_admin_issuer;
+-- -- REVOKE without GRANTED BY only targets the applying role's selected grantor.
+-- -- Enumerate the actual edges, including grants from a prior release principal.
+-- -- PostgreSQL refuses an unauthorized GRANTED BY; never leave a partial fence.
+-- DO $issuer_memberships$
+-- DECLARE edge record;
+-- BEGIN
+--   FOR edge IN SELECT parent.rolname AS parent_name,grantor.rolname AS grantor_name
+--     FROM pg_catalog.pg_auth_members m
+--     JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid
+--     JOIN pg_catalog.pg_roles grantor ON grantor.oid=m.grantor
+--     WHERE m.member='commonswarm_admin_issuer'::regrole
+--     ORDER BY parent.rolname,grantor.rolname LOOP
+--     EXECUTE format('REVOKE %I FROM commonswarm_admin_issuer GRANTED BY %I',edge.parent_name,edge.grantor_name);
+--   END LOOP;
+--   IF EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole) THEN
+--     RAISE EXCEPTION 'reserve rollback refused: issuer memberships remain' USING ERRCODE='55000';
+--   END IF;
+-- END $issuer_memberships$;
 -- -- Retain the constrained issuer login; it has no direct privileges or SET memberships.

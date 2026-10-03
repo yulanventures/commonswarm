@@ -1,7 +1,7 @@
 /** admin-schema-isolation: real migration/ACL/lifecycle boundary, Docker gate only. */
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
-import { catalog, dbAssert, fixture, issuance, migrationNames, openIssuanceForTest, refuses, repoSql, runSql, versions } from '../support/admin-schema-db.js';
+import { catalog, checksumGateVersion, checksumVersions, dbAssert, expectedMigrationHashes, fixture, issuance, openIssuanceForTest, recordChecksumEvidenceForTest, refuses, repoSql, runSql, schemaMigrationNames, schemaVersions, versions } from '../support/admin-schema-db.js';
 
 test('admin-schema-isolation: prerequisite upgrade as a non-superuser and data-free reverse reserves', () => {
   const role = `ai_migration_${randomUUID().replaceAll('-', '')}`;
@@ -9,8 +9,8 @@ test('admin-schema-isolation: prerequisite upgrade as a non-superuser and data-f
   const roleGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$roles\$[\s\S]*?END \$roles\$;/)![0];
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), provider = randomUUID();
   runSql(`
-${versions.map(v => catalog(v)).join('\n')}
-${[...versions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false)).join('\n')}
+${schemaVersions.map(v => catalog(v)).join('\n')}
+${[...schemaVersions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false)).join('\n')}
 -- In the isolated rollback transaction, also exercise the non-superuser CREATE
 -- ROLE path. The reserve itself retains these dormant/operator-owned roles.
 -- Remove their ACLs on the saved originals too; all changes roll back. These
@@ -25,6 +25,19 @@ DROP OWNED BY commonswarm_admin_issuer;
 DROP ROLE commonswarm_admin_issuer;
 DROP OWNED BY commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 DROP ROLE commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
+CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+GRANT swarm_admin TO ${role};
+GRANT commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+-- The release session can read/write the ledger, without owning it or being
+-- able to delegate SELECT. Remove any old M4 owner-read ACL in this rollback
+-- fixture so the new predicate must cross the narrow reader boundary.
+ALTER SCHEMA supabase_migrations OWNER TO supabase_admin;
+ALTER TABLE supabase_migrations.schema_migrations OWNER TO supabase_admin;
+REVOKE ALL ON SCHEMA supabase_migrations FROM swarm_admin;
+REVOKE ALL ON supabase_migrations.schema_migrations FROM swarm_admin;
+GRANT USAGE ON SCHEMA supabase_migrations TO ${role};
+GRANT SELECT,INSERT ON supabase_migrations.schema_migrations TO ${role};
+SAVEPOINT hosted_prerequisite;
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
 INSERT INTO swarm.users(user_id,display_name) VALUES('${owner}','Hosted prerequisite owner');
 INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES('${workspace}','Hosted prerequisite','${owner}');
@@ -32,12 +45,17 @@ INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,hom
   selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at)
 VALUES('${hosted}','${provider}','${owner}','${workspace}','ordinary-client','https://mcp.commonswarm.com/mcp',ARRAY['${workspace}']::uuid[],
   decode(repeat('ab',32),'hex'),'reviewed-hosted-interaction','active',statement_timestamp(),statement_timestamp());
-CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE;
-GRANT swarm_admin TO ${role};
-GRANT commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
 SET LOCAL ROLE ${role};
-${dbAssert(`SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user`, 'migration role must be constrained')}
-${migrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
+${dbAssert(`SELECT rolcreaterole AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user`, 'migration role must be constrained')}
+${dbAssert(`SELECT has_table_privilege(current_user,'supabase_migrations.schema_migrations','SELECT')
+  AND has_table_privilege(current_user,'supabase_migrations.schema_migrations','INSERT')
+  AND NOT has_table_privilege(current_user,'supabase_migrations.schema_migrations','SELECT WITH GRANT OPTION')
+  AND NOT has_schema_privilege(current_user,'supabase_migrations','USAGE WITH GRANT OPTION')
+  AND (SELECT nspowner<>current_user::regrole FROM pg_namespace WHERE nspname='supabase_migrations')
+  AND (SELECT relowner<>current_user::regrole FROM pg_class WHERE oid='supabase_migrations.schema_migrations'::regclass)`, 'ledger read and write without ownership or grant option')}
+${dbAssert(`SELECT NOT has_table_privilege('swarm_admin','supabase_migrations.schema_migrations','SELECT')`, 'gate owner has no direct ledger read')}
+${schemaMigrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
+${dbAssert(`SELECT proowner='${role}'::regrole FROM pg_proc WHERE oid='commonswarm_ops.migration_ledger_versions()'::regprocedure`, 'ledger reader retains constrained migration owner')}
 ${dbAssert(`SELECT count(*)=3 AND bool_and(m.admin_option AND NOT m.inherit_option AND NOT m.set_option)
   FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid JOIN pg_roles member ON member.oid=m.member
   WHERE parent.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance') AND member.rolname='${role}'`, 'constrained creator memberships retained')}
@@ -46,13 +64,99 @@ CREATE ROLE ${noncreator} NOLOGIN INHERIT CREATEROLE;
 SET LOCAL ROLE ${noncreator};
 ${refuses(roleGuard, 'P0001')}
 RESET ROLE;
-${versions.map(v => catalog(v)).join('\n')}
+${schemaVersions.map(v => catalog(v)).join('\n')}
 ${dbAssert('SELECT NOT admin_issuance_enabled AND NOT legacy_closed AND measured_at IS NULL FROM commonswarm_oauth.admin_cutover_state', 'upgrade must remain dormant')}
 ${dbAssert(`SELECT grant_class='hosted_mcp' AND resource='https://mcp.commonswarm.com/mcp' AND hosted_grant_id='${hosted}'::uuid AND connection_id='${hosted}'::uuid
   FROM commonswarm_oauth.provider_grant_resources WHERE provider_grant_id='${provider}'`, 'verified hosted binding backfilled')}
 SET LOCAL ROLE commonswarm_oauth_runtime;
 ${dbAssert(`SELECT active AND grant_class='hosted_mcp' FROM commonswarm_oauth.resolve_provider_grant_status('${provider}','${owner}','test-kid')`, 'ordinary hosted status retained')}
 RESET ROLE;
+SAVEPOINT checksum_control;
+${recordChecksumEvidenceForTest}
+SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations='${expectedMigrationHashes}'::jsonb;
+RESET ROLE;
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert('SELECT count(*)=0 FROM commonswarm_ops.migration_checksum_failures()', 'upgraded zero-arg gate accepts complete evidence')}
+${refuses('SELECT * FROM commonswarm_ops.migration_ledger_versions()', '42501')}
+${refuses('SELECT * FROM supabase_migrations.schema_migrations', '42501')}
+RESET ROLE;
+DELETE FROM supabase_migrations.schema_migrations WHERE version='${checksumGateVersion}';
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert(`SELECT count(*)=1 AND bool_and(version='${checksumGateVersion}' AND reason='missing_ledger')
+  FROM commonswarm_ops.migration_checksum_failures()`, 'upgraded gate reads live ledger through constrained definer')}
+RESET ROLE;
+ROLLBACK TO SAVEPOINT checksum_control;
+-- Restore the empty prerequisite state rather than deleting immutable hosted
+-- bindings. Reapply and reverse all four migrations as the same CREATEROLE.
+ROLLBACK TO SAVEPOINT hosted_prerequisite;
+SET LOCAL ROLE ${role};
+${schemaMigrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
+${schemaVersions.map(v => catalog(v)).join('\n')}
+${dbAssert(`SELECT count(*)=${checksumVersions.length} FROM commonswarm_ops.migration_checksum_failures()`, 'empty evidence gate remains closed before reserves')}
+${[...schemaVersions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false)).join('\n')}
+RESET ROLE;
+`);
+});
+
+test('admin-schema-isolation: issuer memberships preserve either grantor, refuse duplicates/options and reverse across release principals', () => {
+  const role = `ai_grantor_${randomUUID().replaceAll('-', '')}`;
+  const issuerGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$issuer\$[\s\S]*?END \$issuer\$;/)![0];
+  runSql(`
+${catalog('20261003000002')}
+CREATE TEMP TABLE issuer_membership_before AS
+  SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members
+  WHERE member='commonswarm_admin_issuer'::regrole;
+CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+GRANT swarm_admin TO ${role};
+GRANT commonswarm_admin_issuer,commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+SET LOCAL ROLE ${role};
+-- An existing safe edge must retain its original grantor without duplication.
+${issuerGuard}
+RESET ROLE;
+${dbAssert("SELECT NOT EXISTS((SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole EXCEPT SELECT * FROM issuer_membership_before) UNION ALL (SELECT * FROM issuer_membership_before EXCEPT SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole))", 'existing issuer memberships retain exact options and grantors')}
+${catalog('20261003000002')}
+-- Empty fixture: remove every actual edge as the cluster administrator.
+${repoSql('supabase/admin-delegation-reserve/20261003000002-rollback.sql').match(/DO \$issuer_memberships\$[\s\S]*?END \$issuer_memberships\$;/)![0]}
+SET LOCAL ROLE ${role};
+${issuerGuard}
+${dbAssert(`SELECT count(*)=2 AND bool_and(grantor='${role}'::regrole AND NOT admin_option AND NOT inherit_option AND set_option) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole`, 'constrained applying principal is both grants actual grantor')}
+RESET ROLE;
+${catalog('20261003000002')}
+-- Superuser reapplication also preserves the constrained principal's edges.
+${issuerGuard}
+${catalog('20261003000002')}
+SAVEPOINT duplicate_membership;
+GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+${dbAssert("SELECT count(*)=3 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'duplicate-grantor mutation adds a third edge')}
+${catalog('20261003000002', false, false)}
+SELECT :'catalog_ok_failed_checks'='20261003000002-002-issuer-memberships,20261003000002-003-issuer-memberships' AS diagnostic_ok
+\\gset
+\\if :diagnostic_ok
+\\else
+DO $diagnostic$ BEGIN RAISE EXCEPTION 'duplicate membership diagnostic mismatch'; END $diagnostic$;
+\\endif
+${refuses(issuerGuard, 'P0001')}
+ROLLBACK TO SAVEPOINT duplicate_membership;
+${catalog('20261003000002')}
+${['ADMIN TRUE', 'INHERIT TRUE', 'SET FALSE'].map(option => `
+SAVEPOINT unsafe_membership;
+SET LOCAL ROLE ${role};
+GRANT swarm_command TO commonswarm_admin_issuer WITH ${option};
+RESET ROLE;
+${catalog('20261003000002', false, false)}
+SELECT :'catalog_ok_failed_checks'='20261003000002-002-issuer-memberships' AS diagnostic_ok
+\\gset
+\\if :diagnostic_ok
+\\else
+DO $diagnostic$ BEGIN RAISE EXCEPTION 'membership option diagnostic mismatch'; END $diagnostic$;
+\\endif
+${refuses(issuerGuard, 'P0001')}
+ROLLBACK TO SAVEPOINT unsafe_membership;
+${catalog('20261003000002')}`).join('\n')}
+-- Reverse with a DIFFERENT applying principal from the constrained grantor.
+${[...schemaVersions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true)).join('\n')}
+${dbAssert("SELECT count(*)=0 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'cross-principal reserve removes every issuer membership')}
 `);
 });
 

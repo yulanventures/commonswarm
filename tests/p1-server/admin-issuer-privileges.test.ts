@@ -62,8 +62,12 @@ SELECT jsonb_build_array(grantee,kind,name,privilege_type,is_grantable) AS privi
 WHERE NOT (grantee='commonswarm_oauth_runtime' AND kind='DATABASE' AND name=current_database() AND privilege_type='CONNECT' AND NOT is_grantable)
 EXCEPT SELECT value FROM jsonb_array_elements('${literal}'::jsonb);
 CREATE FUNCTION pg_temp.assert_issuer() RETURNS void LANGUAGE plpgsql AS $check$
+DECLARE unexpected text;
 BEGIN
- IF EXISTS(SELECT 1 FROM issuer_widening) THEN RAISE EXCEPTION 'issuer privilege widening' USING ERRCODE='ZX002'; END IF;
+ SELECT string_agg(privilege::text,E'\n' ORDER BY privilege::text) INTO unexpected FROM issuer_widening;
+ IF unexpected IS NOT NULL THEN
+   RAISE EXCEPTION 'issuer privilege widening:%',E'\n'||unexpected USING ERRCODE='ZX002';
+ END IF;
  IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
    IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
@@ -77,18 +81,48 @@ BEGIN
    RAISE EXCEPTION 'issuer role widening' USING ERRCODE='ZX002';
  END IF;
 END $check$;
+REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 `;
 
 test('admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls', () => {
   runSql(`${inventory}
 SELECT pg_temp.assert_issuer();
+GRANT EXECUTE ON FUNCTION pg_temp.assert_issuer() TO PUBLIC;
+${dbAssert("SELECT count(*)=1 AND bool_and(privilege=jsonb_build_array('PUBLIC','FUNCTION',(SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema())||'.assert_issuer()','EXECUTE',false)) FROM issuer_widening", 'temporary PUBLIC EXECUTE is the offending inventory row')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
+SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
 ${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}
-SET LOCAL ROLE commonswarm_admin_issuer;
+-- SET ROLE checks the session user, not a previously selected current_user.
+-- Use the cluster admin only to establish the real issuer session identity.
+SET LOCAL SESSION AUTHORIZATION commonswarm_admin_issuer;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'issuer session identity positive')}
 ${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='commonswarm_oauth_runtime'", 'issuer can select OAuth parent')}
+SELECT * FROM commonswarm_oauth.provider_artifacts;
+RESET ROLE;
 SET LOCAL ROLE swarm_command;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='swarm_command'", 'issuer can select command parent')}
 SELECT * FROM swarm.admin_accounts;
 RESET ROLE;
+DO $role_denials$
+DECLARE target text; tested integer := 0;
+BEGIN
+  FOR target IN SELECT rolname FROM pg_roles WHERE rolname NOT IN
+    ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command') LOOP
+    BEGIN
+      EXECUTE format('SET LOCAL ROLE %I',target);
+      RAISE EXCEPTION 'issuer admitted unexpected role: %',target USING ERRCODE='ZX001';
+    EXCEPTION WHEN insufficient_privilege THEN tested := tested + 1;
+    END;
+  END LOOP;
+  IF tested=0 THEN RAISE EXCEPTION 'no other roles tested'; END IF;
+END $role_denials$;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'role denials retain issuer identity')}
+${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+RESET SESSION AUTHORIZATION;
 ${catalog('20261003000002')}
 GRANT SELECT ON swarm.admin_accounts TO commonswarm_admin_issuer;
 ${catalog('20261003000002',false,false)}
