@@ -1,9 +1,9 @@
 -- Exact owned relation set, column order, constraints, RLS and least privilege.
 -- Missing objects yield catalog_ok=f, rather than a regclass cast failure.
-WITH expected(name,columns,can_update,fks,checks,uniques) AS (VALUES
-('household_object_streams',ARRAY['workspace_id','stream_id','last_seq','projection']::text[],true,1,2,1),
-('household_object_events',ARRAY['workspace_id','seq','event_id','event']::text[],false,1,3,1),
-('household_object_audit',ARRAY['audit_id','workspace_id','command_id','actor_user','actor_principal','occurred_at','command_kind','request_digest','outcome','reason_code']::text[],false,1,1,0)
+WITH expected(name,columns,can_select,can_update,fks,checks,uniques) AS (VALUES
+('household_object_streams',ARRAY['workspace_id','stream_id','last_seq','projection']::text[],true,true,1,2,1),
+('household_object_events',ARRAY['workspace_id','seq','event_id','event']::text[],false,false,1,3,1),
+('household_object_audit',ARRAY['audit_id','workspace_id','command_id','actor_user','actor_principal','occurred_at','command_kind','request_digest','outcome','reason_code']::text[],false,false,1,1,0)
 ), actual AS (
  SELECT e.*,c.oid,c.relowner,c.relkind,c.relrowsecurity,c.relforcerowsecurity
  FROM expected e LEFT JOIN pg_class c ON c.oid=to_regclass('swarm.'||e.name)
@@ -22,7 +22,7 @@ SELECT coalesce((SELECT count(*)=3 AND bool_and(
  AND EXISTS (SELECT 1 FROM pg_policy WHERE polrelid=t.oid AND polname='swarm_command_all' AND polpermissive AND polcmd='*'
    AND polroles=ARRAY[(SELECT oid FROM pg_roles WHERE rolname='swarm_command')]
    AND pg_get_expr(polqual,polrelid)='true' AND pg_get_expr(polwithcheck,polrelid)='true')
- AND has_table_privilege('swarm_command',oid,'SELECT') AND has_table_privilege('swarm_command',oid,'INSERT')
+ AND has_table_privilege('swarm_command',oid,'SELECT')=can_select AND has_table_privilege('swarm_command',oid,'INSERT')
  AND has_table_privilege('swarm_command',oid,'UPDATE')=can_update
  AND NOT EXISTS (SELECT 1 FROM (VALUES ('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) p(privilege) WHERE has_table_privilege('swarm_command',oid,p.privilege))
  AND NOT EXISTS (SELECT 1 FROM (VALUES ('swarm_read'),('anon'),('authenticated')) r(name)
