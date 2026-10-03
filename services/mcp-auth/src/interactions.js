@@ -101,10 +101,11 @@ async function findClient(provider, clientId) {
 }
 
 async function clientConsentDisplay(provider, clientId, redirectUri) {
-  if (metadataUrlAllowed(clientId)) {
-    return { verified: true, primary: new URL(clientId).host };
-  }
   const client = await findClient(provider, clientId);
+  if (metadataUrlAllowed(clientId)) {
+    return { verified: true, primary: new URL(clientId).host,
+      metadataHost: new URL(clientId).hostname, declaredName: client?.clientName ?? null };
+  }
   const redirect = new URL(redirectUri);
   return {
     verified: false,
@@ -286,6 +287,7 @@ export function createInteractionHandler({
       const csrf = await store.issueConsentToken(interactionUid, browser.id, session.user_id);
       respondHtml(response, 200, renderConsentPage({
         interactionUid,
+        redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: currentIdentity,
         workspaces,
@@ -331,6 +333,7 @@ export function createInteractionHandler({
         : { selectionVersion: body.selection_version, token: csrfToken };
       respondHtml(response, 400, renderConsentPage({
         interactionUid,
+        redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, details.params.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces: workspaces ?? await workspaceReader(identity(session)),
@@ -471,6 +474,7 @@ export function createInteractionHandler({
       const workspaces = await workspaceReader(identity(session));
       respondHtml(response, 502, renderConsentPage({
         interactionUid,
+        redirectUri: details.params.redirect_uri,
         clientDisplay: await clientConsentDisplay(provider, consent.client_id, details.params.redirect_uri),
         identity: identity(session),
         workspaces,
