@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import { createAdminGateHandler, effectiveAdminGate } from "../src/admin-gate.js";
 import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 import { createHandler } from "../src/server.js";
+import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
+import { adminDigest } from "../src/admin-consent.js";
+import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
+import { createLogger, subscribeProviderErrors } from "../src/logger.js";
 
 const measured = {
   admin_issuance_enabled: true, legacy_closed: true, auth_contract_version: 2,
@@ -141,4 +147,82 @@ test("admin gate deadline also terminates transaction setup and uncertain COMMIT
     assert.equal(c.statements.includes("ROLLBACK"), false, "aborted connection cannot be reused for rollback");
   }
   assert.equal(await effectiveAdminGate({coordinator:coordinator().instance}), "open");
+});
+
+test("admin authorization opens only with coordinator, measurement and ledger; gate refusals emit a safe reason", async t => {
+  const clientId = "https://client.example/gate-test", redirectUri = "https://client.example/callback";
+  const metadata = { client_id: clientId, application_type: "web", redirect_uris: [redirectUri],
+    grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
+    token_endpoint_auth_method: "none", dpop_bound_access_tokens: true, dpop_signing_alg: "ES256" };
+  const provider = await createMcpProvider({ registrationEnabled: false,
+    registrationStore: { find: async id => id === clientId ? metadata : undefined, markUsed: async () => {} } });
+  const normalized = (await provider.Client.find(clientId)).metadata();
+  const verification = { client_id: clientId, application_type: "web", registration_source: "static",
+    metadata_digest: adminDigest(normalized), dpop_tested: true, pkce_s256_tested: true,
+    origin_control_verified: true, redirect_tested: true };
+  let options, outcome, failure;
+  const logs = [];
+  subscribeProviderErrors(provider, createLogger(line => logs.push(JSON.parse(line))));
+  const sql = [];
+  const pool = { connect: async () => ({ query: async statement => {
+    sql.push(statement);
+    if (statement.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+    if (statement.includes("admin_cutover_state")) {
+      if (options.failure) throw Object.assign(new Error("private database detail"), { code: "08006" });
+      return { rows: options.record ? [options.record] : [] };
+    }
+    if (statement.includes("migration_checksum_failures")) return { rows: [], rowCount: options.mismatches ?? 0 };
+    if (statement.includes("admin_verified_clients")) return { rows: [verification] };
+    if (statement.includes("clock_timestamp")) return { rows: [{ now: Math.floor(Date.now() / 1000) }] };
+    return { command: statement, rows: [], rowCount: 0 };
+  }, release() {} }) };
+  provider.on("authorization.error", (_ctx, error) => { failure = error.code ?? error.error; });
+  const callback = provider.callback();
+  const server = createServer(async (req, res) => {
+    outcome = options.absent ? (await callback(req, res), undefined)
+      : await new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: options.enabled })
+        .run(res, () => callback(req, res));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const query = resource => new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri,
+    response_type: "code", scope: resource === ADMIN_RESOURCE ? "openid offline_access admin:read" : "openid offline_access mcp",
+    resource, code_challenge: createHash("sha256").update("gate-verifier-0123456789abcdefghijklmnopqrstuvwxyz").digest("base64url"),
+    code_challenge_method: "S256", dpop_jkt: "b".repeat(43) });
+  const request = resource => fetch(`http://127.0.0.1:${server.address().port}/authorize?${query(resource)}`, {
+    headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host,
+      "x-forwarded-proto": "https", accept: "application/json" }, redirect: "manual" });
+  for (const [name, settings, expected] of [
+    ["open", { enabled: true, record: measured }, null],
+    ["absent coordinator", { absent: true }, "admin_issuance_disabled"],
+    ["flag off", { enabled: false, record: measured }, "admin_issuance_disabled"],
+    ["cutover closed", { enabled: true, record: { ...measured, admin_issuance_enabled: false } }, "admin_issuance_disabled"],
+    ["measurement invalidated", { enabled: true, record: { ...measured, invalidated_at: new Date() } }, "admin_issuance_disabled"],
+    ["ledger incomplete", { enabled: true, record: measured, mismatches: 1 }, "admin_migration_evidence_incomplete"],
+    ["database unavailable", { enabled: true, failure: true }, "admin_gate_unavailable"],
+  ]) await t.test(name, async () => {
+    options = settings; outcome = undefined; failure = undefined; sql.length = 0; logs.length = 0;
+    const res = await request(ADMIN_RESOURCE);
+    if (expected === null) {
+      assert.equal(res.status, 303);
+      assert.ok(new URL(res.headers.get("location"), ISSUER).pathname.startsWith("/interaction/"));
+      assert.equal(outcome.outcome, "committed");
+      assert.equal(failure, undefined);
+      assert.deepEqual(logs, []);
+    } else {
+      assert.equal(failure, expected, "a refused gate must record the stable cause without private detail");
+      assert.equal(res.status, settings.absent ? 400 : 503);
+      assert.equal((await res.json()).error, settings.absent ? "invalid_scope" : "temporarily_unavailable");
+      assert.equal(logs.length, 1);
+      assert.equal(logs[0].event, "authorization.error");
+      assert.equal(logs[0].error_code, expected);
+      assert.equal(JSON.stringify(logs).includes("private database detail"), false);
+      if (!settings.absent) {
+        assert.equal(outcome.outcome, "refused");
+        assert.equal(sql.includes("COMMIT"), false);
+      }
+    }
+    // The same provider must continue to accept an ordinary MCP authorization.
+    assert.equal((await request(RESOURCE)).status, 303);
+  });
 });

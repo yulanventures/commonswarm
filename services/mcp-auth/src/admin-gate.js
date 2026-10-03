@@ -14,14 +14,19 @@ function privateResponse() {
 
 // One gate for public status and every admin issuance reader. Inside an
 // issuance transaction, reuse its client/locks; never cache a positive result.
-export async function effectiveAdminGate({ coordinator, timeoutMs = 2000, signal } = {}) {
+export async function effectiveAdminGate({ coordinator, timeoutMs = 2000, signal, onRefusal } = {}) {
+  // Diagnostics receive only owned, stable reasons; never database messages,
+  // release records or SQL. Public gate responses still contain only state.
+  const refuse = (state, reason) => { onRefusal?.(reason); return state; };
   const scope = adminTransactionContext(false);
   coordinator ??= scope?.coordinator;
-  if (!coordinator || coordinator.adminIssuanceEnabled !== true) return "closed";
+  if (!coordinator || coordinator.adminIssuanceEnabled !== true) return refuse("closed", "admin_issuance_disabled");
   if (scope) {
     try { await requireMeasuredAdminRelease(); return "open"; }
     catch (error) {
-      return error instanceof AdminConsentError ? "closed" : "unavailable";
+      if (error instanceof AdminConsentError) return refuse("closed",
+        error.code === "admin_migration_evidence_incomplete" ? error.code : "admin_issuance_disabled");
+      return refuse("unavailable", "admin_gate_unavailable");
     }
   }
   const controller = new AbortController();
@@ -34,11 +39,11 @@ export async function effectiveAdminGate({ coordinator, timeoutMs = 2000, signal
     const response = privateResponse();
     const result = await coordinator.run(response, async () => {
       await adminQuery("SELECT set_config('statement_timeout',$1,true), set_config('lock_timeout',$1,true)", [String(timeoutMs)]);
-      state = await effectiveAdminGate();
+      state = await effectiveAdminGate({ onRefusal });
       response.end();
     }, undefined, { signal: controller.signal });
-    return result.outcome === "committed" ? state : "unavailable";
-  } catch { return "unavailable"; }
+    return result.outcome === "committed" ? state : refuse("unavailable", "admin_gate_unavailable");
+  } catch { return refuse("unavailable", "admin_gate_unavailable"); }
   finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", aborted);

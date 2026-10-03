@@ -51,7 +51,11 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   catch (error) { await pool.end(); throw error; }
   const db = { current: () => adminTransactionContext(), pool: scopedAdminPool() };
   const traces = new Map(), controls = new Map(), testRequests = new AsyncLocalStorage();
-  const { adminDigest, createAdminManifest, createAdminConsentService, PostgresAdminConsentStore, AdminTokenLifecycle, createMcpProvider } = await testConsentModule();
+  const { adminDigest, createAdminManifest, createAdminConsentService, PostgresAdminConsentStore, AdminTokenLifecycle,
+    requireMeasuredAdminRelease, createMcpProvider } = await testConsentModule();
+  // Fixture-local configuration, parsed exactly as loadConfig parses the flag.
+  // No process-wide environment or production configuration is changed.
+  const activationEnv = { MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: "1" };
   const owner = randomUUID(), clientId = `https://client.example/${randomUUID()}`;
   const key = await generateKeyPair("ES256", { extractable: true });
   const publicJwk = await exportJWK(key.publicKey), jkt = await calculateJwkThumbprint(publicJwk);
@@ -140,13 +144,18 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
     const trace = { calls: [], writes: [], committed: false, phase: owned.phase };
     traces.set(owned.id,trace);
     const raw = physical.query.bind(physical);
-    let original,originalChecksums,role = "commonswarm_admin_issuer";
+    let original,originalChecksums,stagedLedgerVersions,role = "commonswarm_admin_issuer";
     return { processID: physical.processID, release: bad => physical.release(bad), async query(sql,values) {
       if (sql === "BEGIN") {
         const result = await raw(sql);
         original = (await raw(`SELECT * FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE`)).rows[0];
         assert.equal(original.admin_issuance_enabled,false);
         await gate({ query: raw });
+        // D2 checks the live ledger independently of checksum evidence. A
+        // schema-only fixture has installed functions without ledger rows.
+        // Add only absent reviewed versions, and remove only those before COMMIT.
+        stagedLedgerVersions = (await raw(`INSERT INTO supabase_migrations.schema_migrations(version)
+          SELECT unnest($1::text[]) ON CONFLICT(version) DO NOTHING RETURNING version`, [versions])).rows.map(row => row.version);
         await raw("SET LOCAL ROLE swarm_admin");
         originalChecksums=(await raw("SELECT * FROM commonswarm_ops.migration_checksums WHERE version=ANY($1::text[])",[versions])).rows;
         for (const version of versions) await raw(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha)
@@ -158,6 +167,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       if (sql === "COMMIT") {
         await raw("RESET SESSION AUTHORIZATION");
         await gate({ query: raw },original);
+        await raw("DELETE FROM supabase_migrations.schema_migrations WHERE version=ANY($1::text[])", [stagedLedgerVersions]);
         await raw("SET LOCAL ROLE swarm_admin");
         await raw("DELETE FROM commonswarm_ops.migration_checksums WHERE version=ANY($1::text[])",[versions]);
         for (const row of originalChecksums) await raw(`INSERT INTO commonswarm_ops.migration_checksums
@@ -196,7 +206,8 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       return result;
     } };
   } };
-  const coordinator = new AdminTransactionCoordinator(coordinatorPool, { adminIssuanceEnabled: true });
+  const coordinator = new AdminTransactionCoordinator(coordinatorPool,
+    { adminIssuanceEnabled: activationEnv.MCP_OAUTH_ADMIN_ISSUANCE_ENABLED === "1" });
   const server = createServer(async (request,response) => {
     const id=request.headers["x-spike-id"],owned={ id,...controls.get(id) };
     const path = new URL(request.url, ISSUER).pathname;
@@ -219,6 +230,9 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       await testRequests.run(owned,()=>coordinator.run(response,async scope=>{
         try {
         scope.fault=owned.fault; traces.get(id).pending=scope.pending;
+        // Prove the OPEN-path fixture's complete measurement/ledger predicate
+        // before provider scope filtering can turn a gate failure into a 4xx.
+        await requireMeasuredAdminRelease();
         if (request.url === "/test-revoke") {
           const binding=(await db.pool.query(`SELECT * FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[family])).rows[0];
           await lifecycle.revokeFamily(binding); response.statusCode=204; response.end();
@@ -354,6 +368,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       FROM commonswarm_oauth.refresh_family_tombstones t WHERE grant_id IN
       (SELECT provider_grant_id FROM commonswarm_oauth.admin_grant_bindings WHERE owner_user_id=$1)`,[owner])).rows[0].rows);
     result.push((await pool.query(`SELECT to_jsonb(t) AS gate FROM commonswarm_oauth.admin_cutover_state t WHERE singleton`)).rows[0].gate);
+    for (const table of ["supabase_migrations.schema_migrations", "commonswarm_ops.migration_checksums"]) {
+      result.push((await pool.query(`SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY version),'[]') AS rows
+        FROM ${table} t WHERE version=ANY($1::text[])`, [versions])).rows[0].rows);
+    }
     // A failing assertion must not dump provider/session artifact payloads.
     return digest(JSON.stringify(result)).toString("hex");
   }

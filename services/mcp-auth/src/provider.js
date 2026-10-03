@@ -1,6 +1,6 @@
 import { effectiveAdminGate } from "./admin-gate.js";
 import { ADMIN_RESOURCE, adminConsentOptions } from "./admin-policy.generated.js";
-import { adminDigest, resolveAdminClientMetadata } from "./admin-consent.js";
+import { AdminConsentError, adminDigest, resolveAdminClientMetadata } from "./admin-consent.js";
 import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
 import { bindProviderAdminNonceStore } from "./provider-admin-pin.js";
@@ -244,12 +244,16 @@ export async function createMcpProvider({
   provider.use(async (ctx, next) => {
     // oidc-provider filters unknown authorization scopes. Refuse escalation
     // explicitly rather than silently turning it into a narrower request.
+    let gateRefusal;
     const adminOpen = ctx.path === "/authorize" && ctx.query.resource === ADMIN_RESOURCE
-      && await effectiveAdminGate() === "open";
+      && await effectiveAdminGate({ onRefusal: code => { gateRefusal = code; } }) === "open";
     if (ctx.path === "/authorize" && typeof ctx.query.scope === "string" &&
         ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope) &&
           !(adminOpen &&
             adminConsentOptions().some(o => o.available && o.scope === scope)))) {
+      // This middleware precedes the provider's error handler. Preserve the
+      // scope refusal while recording the gate cause through its normal logger.
+      if (gateRefusal) provider.emit("authorization.error", ctx, new AdminConsentError(gateRefusal, 503));
       ctx.status = 400;
       ctx.body = { error: "invalid_scope" };
       return;
