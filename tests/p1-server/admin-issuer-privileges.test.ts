@@ -62,8 +62,12 @@ SELECT jsonb_build_array(grantee,kind,name,privilege_type,is_grantable) AS privi
 WHERE NOT (grantee='commonswarm_oauth_runtime' AND kind='DATABASE' AND name=current_database() AND privilege_type='CONNECT' AND NOT is_grantable)
 EXCEPT SELECT value FROM jsonb_array_elements('${literal}'::jsonb);
 CREATE FUNCTION pg_temp.assert_issuer() RETURNS void LANGUAGE plpgsql AS $check$
+DECLARE unexpected text;
 BEGIN
- IF EXISTS(SELECT 1 FROM issuer_widening) THEN RAISE EXCEPTION 'issuer privilege widening' USING ERRCODE='ZX002'; END IF;
+ SELECT string_agg(privilege::text,E'\n' ORDER BY privilege::text) INTO unexpected FROM issuer_widening;
+ IF unexpected IS NOT NULL THEN
+   RAISE EXCEPTION 'issuer privilege widening:%',E'\n'||unexpected USING ERRCODE='ZX002';
+ END IF;
  IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
    WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
    IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
@@ -77,10 +81,16 @@ BEGIN
    RAISE EXCEPTION 'issuer role widening' USING ERRCODE='ZX002';
  END IF;
 END $check$;
+REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 `;
 
 test('admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls', () => {
   runSql(`${inventory}
+SELECT pg_temp.assert_issuer();
+GRANT EXECUTE ON FUNCTION pg_temp.assert_issuer() TO PUBLIC;
+${dbAssert("SELECT count(*)=1 AND bool_and(privilege=jsonb_build_array('PUBLIC','FUNCTION',(SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema())||'.assert_issuer()','EXECUTE',false)) FROM issuer_widening", 'temporary PUBLIC EXECUTE is the offending inventory row')}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
 ${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}

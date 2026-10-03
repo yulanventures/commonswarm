@@ -113,7 +113,7 @@ FROM swarm.admin_grants WHERE grant_id='${grant}';` : ''}
 
 export function issuance(f: ReturnType<typeof fixture>, generation = 0) {
   const jti = `access-${randomUUID()}`, event = randomUUID(), audit = randomUUID();
-  const tokenDigest = '42'.repeat(32);
+  const tokenDigest = createHash('sha256').update(jti).digest('hex');
   const eventInsert = `INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
 VALUES('${f.owner}',${generation + 2},'${event}','issue-${generation}',jsonb_build_object('stream_kind','account','owner_user_id','${f.owner}',
   'seq',${generation + 2},'type','${generation === 0 ? 'AdminCredentialIssued' : 'AdminCredentialRotated'}','grant_id','${f.grant}',
@@ -144,7 +144,7 @@ END $capture$;
     '${f.provider}','${f.grant}','${overrides.owner ?? f.owner}',${generation},'${f.client}','https://api.commonswarm.com/admin',
     '${f.jkt}','${f.digest}',current_setting('schema_test.issued_at_${generation}')::timestamptz,
     current_setting('schema_test.expires_at_${generation}')::timestamptz,'test-kid')`;
-  return { jti, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
+  return { jti, tokenDigest, event, audit, sql, eventInsert, auditInsert, accessInsert, active };
 }
 
 /** Exact reviewed activation set, including the migration that installs the gate. */

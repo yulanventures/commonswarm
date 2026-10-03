@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { catalog, dbAssert, fixture, issuance, openIssuanceForTest, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
-function request(jti: string, kind: string, outcome = 'committed', digest = '42'.repeat(32), reason = 'NULL', events = "'{}'::uuid[]") {
+function request(token: { jti: string; tokenDigest: string }, kind: string, outcome = 'committed', digest = token.tokenDigest, reason = 'NULL', events = "'{}'::uuid[]") {
+  const { jti } = token;
   return `commonswarm_oauth.record_admin_request_audit('${jti}',decode('${digest}','hex'),'${kind}',
     '${randomUUID()}','${outcome}',${reason},NULL,NULL,${events})`;
 }
@@ -12,13 +13,13 @@ test('admin-request-audit: derive authenticated binding, narrow ACL, wrong/unkno
   const f = fixture(), token = issuance(f);
   runSql(`${f.sql}${openIssuanceForTest}${token.sql}
 ${['commonswarm_oauth_runtime','swarm_command'].map(role => `SET LOCAL ROLE ${role};
-${dbAssert(`SELECT ${request(token.jti,'init')} IS NOT NULL`, `${role} authenticated initialization control`)}
-${dbAssert(`SELECT ${request(token.jti,'action','committed','42'.repeat(32),'NULL',`ARRAY['${token.event}']::uuid[]`)} IS NOT NULL`, `${role} event-bound action control`)}
-${refuses(`SELECT ${request(token.jti,'read','committed','99'.repeat(32))}`,'28000')}
-${refuses(`SELECT ${request('unknown-jti','list')}`,'28000')}
-${refuses(`SELECT ${request(token.jti,'invented')}`,'22023')}
-${refuses(`SELECT ${request(token.jti,'read','refused')}`,'22023')}
-${refuses(`SELECT ${request(token.jti,'action','committed','42'.repeat(32),'NULL',`ARRAY['${randomUUID()}']::uuid[]`)}`,'23514')}
+${dbAssert(`SELECT ${request(token,'init')} IS NOT NULL`, `${role} authenticated initialization control`)}
+${dbAssert(`SELECT ${request(token,'action','committed',token.tokenDigest,'NULL',`ARRAY['${token.event}']::uuid[]`)} IS NOT NULL`, `${role} event-bound action control`)}
+${refuses(`SELECT ${request(token,'read','committed','99'.repeat(32))}`,'28000')}
+${refuses(`SELECT ${request({ ...token, jti: 'unknown-jti' },'list')}`,'28000')}
+${refuses(`SELECT ${request(token,'invented')}`,'22023')}
+${refuses(`SELECT ${request(token,'read','refused')}`,'22023')}
+${refuses(`SELECT ${request(token,'action','committed',token.tokenDigest,'NULL',`ARRAY['${randomUUID()}']::uuid[]`)}`,'23514')}
 ${refuses('SELECT * FROM commonswarm_oauth.admin_oauth_audit_daily','42501')}
 RESET ROLE;`).join('\n')}
 ${dbAssert(`SELECT count(*)=4 AND bool_and(owner_user_id='${f.owner}' AND admin_identity_id='${f.identity}'
@@ -33,13 +34,13 @@ ${refuses(`INSERT INTO commonswarm_oauth.admin_oauth_audit(owner_user_id,admin_i
   '${f.provider}','${f.digest}','read','committed')`,'42501')}
 RESET ROLE;
 ${['anon','authenticated','swarm_read','commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance','commonswarm_admin_issuer'].map(role => `SET LOCAL ROLE ${role};
-${refuses(`SELECT ${request(token.jti,'read')}`,'42501')}
+${refuses(`SELECT ${request(token,'read')}`,'42501')}
 ${refuses("SELECT commonswarm_oauth.record_admin_security_failure('invalid_token')",'42501')}
 RESET ROLE;`).join('\n')}
 SET LOCAL ROLE swarm_command;
 SELECT commonswarm_oauth.fence_admin_family('${f.provider}','${f.owner}','revoked','audit_test');
-${refuses(`SELECT ${request(token.jti,'read')}`,'28000')}
-${dbAssert(`SELECT ${request(token.jti,'read','refused','42'.repeat(32),"'inactive'")} IS NOT NULL`, 'revoked authenticated refusal remains attributed')}
+${refuses(`SELECT ${request(token,'read')}`,'28000')}
+${dbAssert(`SELECT ${request(token,'read','refused',token.tokenDigest,"'inactive'")} IS NOT NULL`, 'revoked authenticated refusal remains attributed')}
 RESET ROLE;
 ${catalog('20261003000003')}
 `);
@@ -53,14 +54,14 @@ VALUES('${independent.grant}',(clock_timestamp() AT TIME ZONE 'UTC')::date-1,100
 SET LOCAL ROLE commonswarm_oauth_runtime;
 DO $fill$ DECLARE n integer; inserted uuid; BEGIN
  FOR n IN 1..1003 LOOP
-  SELECT commonswarm_oauth.record_admin_request_audit('${token.jti}',decode('${'42'.repeat(32)}','hex'),
+  SELECT commonswarm_oauth.record_admin_request_audit('${token.jti}',decode('${token.tokenDigest}','hex'),
     CASE n%3 WHEN 0 THEN 'init' WHEN 1 THEN 'list' ELSE 'read' END,'request-'||n,'committed',NULL,NULL,NULL,'{}') INTO inserted;
   IF (n<=1000 AND inserted IS NULL) OR (n>1000 AND inserted IS NOT NULL) THEN RAISE EXCEPTION 'cap boundary mismatch'; END IF;
  END LOOP;
 END $fill$;
-${dbAssert(`SELECT ${request(token.jti,'action')} IS NOT NULL`, 'action after exhausted read cap still inserts')}
-${dbAssert(`SELECT ${request(token.jti,'action','refused','42'.repeat(32),"'forbidden'")} IS NOT NULL`, 'refused action is never dropped')}
-${dbAssert(`SELECT ${request(second.jti,'read')} IS NOT NULL`, 'independent grant retains its own cap')}
+${dbAssert(`SELECT ${request(token,'action')} IS NOT NULL`, 'action after exhausted read cap still inserts')}
+${dbAssert(`SELECT ${request(token,'action','refused',token.tokenDigest,"'forbidden'")} IS NOT NULL`, 'refused action is never dropped')}
+${dbAssert(`SELECT ${request(second,'read')} IS NOT NULL`, 'independent grant retains its own cap')}
 RESET ROLE;
 ${dbAssert(`SELECT read_requests=1003 AND read_rows=1000 AND suppressed_read_rows=3 AND action_rows=2
   AND audit_day=(clock_timestamp() AT TIME ZONE 'UTC')::date FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id='${f.grant}'`, 'counted suppressed rows and action rows reconcile')}
@@ -70,7 +71,7 @@ ${dbAssert(`SELECT read_rows=1000 FROM commonswarm_oauth.admin_oauth_audit_daily
 ${dbAssert(`SELECT read_rows=1 FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id='${independent.grant}' AND audit_day=(clock_timestamp() AT TIME ZONE 'UTC')::date`, 'current UTC day gets its own cap')}
 ALTER TABLE commonswarm_oauth.admin_oauth_audit ADD CONSTRAINT request_audit_fault CHECK(event_kind<>'action') NOT VALID;
 SET LOCAL ROLE commonswarm_oauth_runtime;
-${refuses(`SELECT ${request(token.jti,'action')}`,'23514')}
+${refuses(`SELECT ${request(token,'action')}`,'23514')}
 RESET ROLE;
 ALTER TABLE commonswarm_oauth.admin_oauth_audit DROP CONSTRAINT request_audit_fault;
 ${dbAssert(`SELECT action_rows=2 FROM commonswarm_oauth.admin_oauth_audit_daily WHERE admin_grant_id='${f.grant}'`, 'failed action insert rolls back its counter')}

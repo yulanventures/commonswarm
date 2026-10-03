@@ -99,6 +99,67 @@ RESET ROLE;
 `);
 });
 
+test('admin-schema-isolation: issuer memberships preserve either grantor, refuse duplicates/options and reverse across release principals', () => {
+  const role = `ai_grantor_${randomUUID().replaceAll('-', '')}`;
+  const issuerGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$issuer\$[\s\S]*?END \$issuer\$;/)![0];
+  runSql(`
+${catalog('20261003000002')}
+CREATE TEMP TABLE issuer_membership_before AS
+  SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members
+  WHERE member='commonswarm_admin_issuer'::regrole;
+CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE NOSUPERUSER NOBYPASSRLS;
+GRANT swarm_admin TO ${role};
+GRANT commonswarm_admin_issuer,commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+SET LOCAL ROLE ${role};
+-- An existing safe edge must retain its original grantor without duplication.
+${issuerGuard}
+RESET ROLE;
+${dbAssert("SELECT NOT EXISTS((SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole EXCEPT SELECT * FROM issuer_membership_before) UNION ALL (SELECT * FROM issuer_membership_before EXCEPT SELECT roleid,member,grantor,admin_option,inherit_option,set_option FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole))", 'existing issuer memberships retain exact options and grantors')}
+${catalog('20261003000002')}
+-- Empty fixture: remove every actual edge as the cluster administrator.
+${repoSql('supabase/admin-delegation-reserve/20261003000002-rollback.sql').match(/DO \$issuer_memberships\$[\s\S]*?END \$issuer_memberships\$;/)![0]}
+SET LOCAL ROLE ${role};
+${issuerGuard}
+${dbAssert(`SELECT count(*)=2 AND bool_and(grantor='${role}'::regrole AND NOT admin_option AND NOT inherit_option AND set_option) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole`, 'constrained applying principal is both grants actual grantor')}
+RESET ROLE;
+${catalog('20261003000002')}
+-- Superuser reapplication also preserves the constrained principal's edges.
+${issuerGuard}
+${catalog('20261003000002')}
+SAVEPOINT duplicate_membership;
+GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;
+${dbAssert("SELECT count(*)=3 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'duplicate-grantor mutation adds a third edge')}
+${catalog('20261003000002', false, false)}
+SELECT :'catalog_ok_failed_checks'='20261003000002-002-issuer-memberships,20261003000002-003-issuer-memberships' AS diagnostic_ok
+\\gset
+\\if :diagnostic_ok
+\\else
+DO $diagnostic$ BEGIN RAISE EXCEPTION 'duplicate membership diagnostic mismatch'; END $diagnostic$;
+\\endif
+${refuses(issuerGuard, 'P0001')}
+ROLLBACK TO SAVEPOINT duplicate_membership;
+${catalog('20261003000002')}
+${['ADMIN TRUE', 'INHERIT TRUE', 'SET FALSE'].map(option => `
+SAVEPOINT unsafe_membership;
+SET LOCAL ROLE ${role};
+GRANT swarm_command TO commonswarm_admin_issuer WITH ${option};
+RESET ROLE;
+${catalog('20261003000002', false, false)}
+SELECT :'catalog_ok_failed_checks'='20261003000002-002-issuer-memberships' AS diagnostic_ok
+\\gset
+\\if :diagnostic_ok
+\\else
+DO $diagnostic$ BEGIN RAISE EXCEPTION 'membership option diagnostic mismatch'; END $diagnostic$;
+\\endif
+${refuses(issuerGuard, 'P0001')}
+ROLLBACK TO SAVEPOINT unsafe_membership;
+${catalog('20261003000002')}`).join('\n')}
+-- Reverse with a DIFFERENT applying principal from the constrained grantor.
+${[...schemaVersions].reverse().map(v => repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true)).join('\n')}
+${dbAssert("SELECT count(*)=0 FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole", 'cross-principal reserve removes every issuer membership')}
+`);
+});
+
 test('admin-schema-isolation: immutable resource/classes, account-scoped approval, owner status and append-only controls', () => {
   const f = fixture();
   runSql(`${f.sql}
