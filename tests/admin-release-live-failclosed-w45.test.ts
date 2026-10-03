@@ -214,7 +214,12 @@ function fixture(config: Record<string, unknown> = {}) {
   // W5 forward close inputs: post-W5 consent and the window's phase-after live receipt.
   const consentText = JSON.stringify(consentReceipt('post-W5'));
   put('consent.json', consentText); put('live.json', liveReceipt('after', consentText));
-  mkdirSync(join(root, 'prep'), { mode: 0o700 });
+  // W5 opening inputs: pre-W1 consent and the phase-before live receipt (ai-w5-preflight).
+  const preText = JSON.stringify(consentReceipt('pre-W1'));
+  put('consent-pre.json', preText); put('live-before.json', liveReceipt('before', preText));
+  mkdirSync(join(root, 'prep'), { mode: 0o700 }); mkdirSync(join(root, 'prep-open'), { mode: 0o700 });
+  // Close-path fixtures start from a passed W5 opening staged under PREP_DIR.
+  put('prep/w5-live-before/ordinary-before.json', liveReceipt('before', preText)); put('prep/w5-live-before/consent-pre-W1.json', preText);
   put('commands.jsonl', ''); put('http.jsonl', '');
   put('bin/_dispatch', dispatcher);
   chmodSync(join(bin, '_dispatch'), 0o700);
@@ -247,6 +252,7 @@ function fixture(config: Record<string, unknown> = {}) {
   put('inputs.json', data);
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
+    const opening = steps[0] === 'ai-w5-preflight';
     let source = steps.map(block).join('\n');
     for (const [from, to] of [
       ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
@@ -261,8 +267,9 @@ function fixture(config: Record<string, unknown> = {}) {
         SITE_QA_AUTHORIZATION_FILE: join(root, 'authorization.json'), WINDOW: 'W4', WINDOW_ID: data.window_id,
         SECRET_STAGE: stage, PROOF_DIR: proof, NEW_EDGE: newEdge, RELEASE_ROOT: join(root, 'release'), RELEASE_SHA: sha,
         EDGE_RECYCLE_TIMER: 'fixture-recycle.timer', EDGE_RECYCLE_SERVICE: 'fixture-recycle.service',
-        LIVE_CONTROLS_FILE: join(root, 'live.json'), CONSENT_RECEIPT_FILE: join(root, 'consent.json'), PLAN_FILE: planPath,
-        PREP_DIR: join(root, 'prep'), ...env },
+        LIVE_CONTROLS_FILE: join(root, opening ? 'live-before.json' : 'live.json'),
+        CONSENT_RECEIPT_FILE: join(root, opening ? 'consent-pre.json' : 'consent.json'), PLAN_FILE: planPath,
+        PREP_DIR: join(root, opening ? 'prep-open' : 'prep'), ...env },
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
@@ -356,7 +363,7 @@ test('edge-caddy-route / outside-origin-probe: fails closed on wrong CORS with t
 
 test('site-build-qa / exact-source-build-ci: fails closed on a site SHA different from the release input', () => {
   const good = fixture(); const r = good.run(['ai-w5-preflight']); pass(good, r);
-  assert.deepEqual(r.calls.filter(c => c[0] === 'git'), [['git', 'merge-base', '--is-ancestor', sha, 'origin/main']]);
+  assert.deepEqual(r.calls.filter(c => c[0] === 'git'), [['git', 'merge-base', '--is-ancestor', sha, 'origin/main'], ['git', 'show', sha + ':scripts/live-ordinary-controls.mjs']]);
   const bad = fixture(); const refused = bad.run(['ai-w5-preflight'], { SITE_RELEASE_SHA: 'c'.repeat(40) });
   stopped(bad, refused, 'FAIL ai-w5-preflight: SITE_RELEASE_SHA expected input-release-sha got mismatch; STOP');
   assert.ok(!refused.calls.some(c => c[0] === 'git'));
@@ -418,6 +425,13 @@ function w5Pair(f: Fixture, consent: Record<string, unknown>, phase = 'after', c
 test('ordinary-paths-unchanged / w5-forward-close-live-controls: ai-w5-closed refuses unless phase-after controls bind to the post-W5 consent receipt', () => {
   const good = fixture(), r = good.run(); pass(good, r);
   assert.equal(readFileSync(join(good.closedRoot, 'consent-post-W5.json'), 'utf8'), readFileSync(join(good.root, 'consent.json'), 'utf8'));
+  assert.equal(readFileSync(join(good.closedRoot, 'consent-pre-W1.json'), 'utf8'), readFileSync(join(good.root, 'consent-pre.json'), 'utf8'));
+  assert.ok(existsSync(join(good.closedRoot, 'ordinary-before.json')));
+  // Close refuses without the W5 opening receipts.
+  for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) {
+    const f = fixture(); renameSync(join(f.root, 'prep/w5-live-before', name), join(f.root, 'moved-' + name));
+    w5Refused(f, f.run(), `FAIL ai-w5-closed: W5 opening receipt expected ${name} got missing; STOP`);
+  }
   assert.deepEqual(JSON.parse(readFileSync(join(good.closedRoot, 'ordinary-after.json'), 'utf8')), JSON.parse(readFileSync(join(good.root, 'live.json'), 'utf8')));
   assert.ok(r.calls.some(c => c[0] === 'git' && c[1] === 'show' && c[2] === sha + ':scripts/live-ordinary-controls.mjs'));
   const expiring = (entries: unknown[]) => consentReceipt('post-W5', { cleanup: { grants_revoked: true, dcr_clients_expiring: entries } });
@@ -522,4 +536,37 @@ test('release-plan-contract / w6-transfer-file-guards: refuses a missing or syml
   r = dangling.run(['ai-w6-transfer'], env('download', 'C1-audit.json', dangling));
   guardRefused(dangling, r, 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
   assert.ok(!existsSync(join(dangling.root, 'absent-audit')));
+});
+
+// W5 opening: ai-w5-preflight runs ai-live-controls phase before with the pre-W1 consent
+// receipt before any site build, upload or other side effect.
+test('ordinary-paths-unchanged / w5-opening-live-controls: ai-w5-preflight refuses unless phase-before controls bind to the pre-W1 consent receipt', () => {
+  const good = fixture(), r = good.run(['ai-w5-preflight']); pass(good, r);
+  const staged = join(good.root, 'prep-open/w5-live-before');
+  assert.equal(readFileSync(join(staged, 'consent-pre-W1.json'), 'utf8'), readFileSync(join(good.root, 'consent-pre.json'), 'utf8'));
+  assert.deepEqual(JSON.parse(readFileSync(join(staged, 'ordinary-before.json'), 'utf8')), JSON.parse(readFileSync(join(good.root, 'live-before.json'), 'utf8')));
+  const refusedOpen = (f: Fixture, out: Result, text: string) => {
+    stopped(f, out, text); assert.doesNotMatch(out.stderr, /Traceback/);
+    assert.deepEqual(out.requests, []); assert.ok(!out.calls.some(c => ['node', 'npm', 'npx', 'ssh', 'docker'].includes(c[0])));
+    assert.ok(!existsSync(join(f.root, 'prep-open/w5-live-before/ordinary-before.json')));
+    assert.ok(!existsSync(join(f.root, 'prep-open/w5-live-before/consent-pre-W1.json')));
+  };
+  { const f = fixture(); refusedOpen(f, f.run(['ai-w5-preflight'], { LIVE_CONTROLS_FILE: join(f.root, 'absent-before.json') }),
+      'FAIL ai-live-controls: LIVE_CONTROLS_FILE expected absolute-regular-file got missing-or-not-regular; STOP'); }
+  { const f = fixture(); refusedOpen(f, f.run(['ai-w5-preflight'], { LIVE_CONTROLS_FILE: '' }),
+      'FAIL ai-w5-preflight: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP'); }
+  { const f = fixture(), post = JSON.stringify(consentReceipt('post-W5')); f.put('consent-pre.json', post); f.put('live-before.json', liveReceipt('before', post));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 before expected pre-W1 got post-W5; STOP'); }
+  { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8'); f.put('live-before.json', liveReceipt('after', pre));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'); }
+  { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8'); f.put('live-before.json', liveReceipt('after', pre, { phase: 'recovery' }));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 recovery expected post-W5 got pre-W1; STOP'); }
+  { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8');
+    f.put('live-before.json', liveReceipt('before', pre, { controls: { ...Object.fromEntries(ordinaryKeys.map(k => [k, true])), cimd_consent: false } }));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: live control cimd_consent expected true got false; STOP'); }
+  // A valid W5 phase-after pair presented at the opening passes ai-live-controls but not the opening phase check.
+  { const f = fixture(); f.put('consent-pre.json', readFileSync(join(f.root, 'consent.json'), 'utf8')); f.put('live-before.json', readFileSync(join(f.root, 'live.json'), 'utf8'));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: W5 opening live controls phase expected before got other; STOP'); }
+  { const f = fixture(); mkdirSync(join(f.root, 'prep-open/w5-live-before'));
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP'); }
 });

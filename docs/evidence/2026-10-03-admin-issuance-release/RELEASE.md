@@ -83,7 +83,7 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | W2 SCHEMA | common preflight/open/session; ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (five separate transactions, probes after each), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
 | W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
-| W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
+| W5 SITE | ai-w5-preflight (runs ai-live-controls phase before with the pre-W1 consent receipt), ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
 | W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
 | W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
 
@@ -1872,8 +1872,8 @@ launch. W6 consent authorization is not W5 browser authorization.
 
 ```sh
 # step: ai-w5-preflight
-# readonly: yes
-# host: Mac /bin/bash 3.2
+# readonly: no
+# host: Mac /bin/bash 3.2; writes only nonsecret live-controls staging under PREP_DIR
 set -euo pipefail
 : "${SITE_RELEASE_SHA:?}" "${EXPECTED_SITE_SHA:?}" "${SITE_QA_AUTHORIZATION_FILE:?}"
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
@@ -1892,6 +1892,30 @@ try:
 except AssertionError:
     raise SystemExit('FAIL ai-w5-preflight: browser/task_ref expected headless-bundled-chromium/nonempty-string got '+('headless-bundled-chromium' if r['browser']=='headless-bundled-chromium' else 'other-browser')+'/'+('nonempty-string' if isinstance(r['task_ref'],str) and r['task_ref'] else 'invalid-task-ref')+'; STOP') from None
 PY
+# W5 opening: the complete ai-live-controls block, phase before, bound to the
+# pre-W1 consent receipt, before any site build, upload or other side effect.
+: "${LIVE_CONTROLS_FILE:?FAIL ai-w5-preflight: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
+: "${CONSENT_RECEIPT_FILE:?FAIL ai-w5-preflight: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
+: "${PLAN_FILE:?FAIL ai-w5-preflight: PLAN_FILE expected absolute-regular-file got unset; STOP}"
+: "${PREP_DIR:?FAIL ai-w5-preflight: PREP_DIR expected prep-directory got unset; STOP}"
+W5_BEFORE=$PREP_DIR/w5-live-before
+test ! -e "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+mkdir "$W5_BEFORE"
+mkdir "$W5_BEFORE/release"
+mkdir "$W5_BEFORE/release/scripts"
+git show "${RELEASE_SHA}:scripts/live-ordinary-controls.mjs" >"$W5_BEFORE/release/scripts/live-ordinary-controls.mjs"
+python3 - "$PLAN_FILE" "$W5_BEFORE/live-controls.sh" <<'PY'
+import pathlib,re,sys
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-w5-preflight: ai-live-controls block expected one got '+str(len(found))+'; STOP')
+pathlib.Path(sys.argv[2]).write_text(found[0])
+PY
+/bin/bash -n "$W5_BEFORE/live-controls.sh"
+INPUTS_FILE="$INPUTS_FILE" LIVE_CONTROLS_FILE="$LIVE_CONTROLS_FILE" CONSENT_RECEIPT_FILE="$CONSENT_RECEIPT_FILE" \
+ RELEASE_ROOT="$W5_BEFORE/release" PROOF_DIR="$W5_BEFORE" /bin/bash "$W5_BEFORE/live-controls.sh"
+test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-preflight: W5 opening live controls phase expected before got other; STOP\n' >&2; exit 1; }
 ```
 
 ```sh
@@ -1937,10 +1961,15 @@ is its explicit preselected failure path; it never retries deployment. Its
 protected build env recovery uses the service-account token file. Any rm refusal
 STOPs cleanup, with the exact path/message retained. The caller does not execute
 the next W window until that referenced site's window is verified closed.
-ai-w5-closed is W5's forward close: it runs the complete ai-live-controls block
-with phase after and the post-W5 CONSENT_RECEIPT_FILE before any outside probe,
-reads the producer from the exact RELEASE_SHA commit, stages under PREP_DIR and
-retains ordinary-after.json and consent-post-W5.json beside W5-closed.json.
+W5 checks the non-consent legs before and after, like every other window.
+ai-w5-preflight runs the complete ai-live-controls block with phase before and
+the pre-W1 CONSENT_RECEIPT_FILE before any site build, upload or other side
+effect, and stages the result under `PREP_DIR/w5-live-before`. ai-w5-closed is
+W5's forward close: it requires those opening receipts, runs the complete
+ai-live-controls block with phase after and the post-W5 CONSENT_RECEIPT_FILE
+before any outside probe, and retains ordinary-before.json, consent-pre-W1.json,
+ordinary-after.json and consent-post-W5.json beside W5-closed.json. Both read
+the producer from the exact RELEASE_SHA commit.
 
 ```sh
 # step: ai-w5-closed
@@ -1955,6 +1984,9 @@ set -euo pipefail
 # W5 forward close: the complete ai-live-controls block, phase after, bound to the
 # post-W5 consent receipt; producer bytes come from the exact RELEASE_SHA commit.
 W5_RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+W5_BEFORE=$PREP_DIR/w5-live-before
+test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected ordinary-before.json got missing; STOP\n' >&2; exit 1; }
+test -f "$W5_BEFORE/consent-pre-W1.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 W5_LIVE=$PREP_DIR/w5-live-controls
 test ! -e "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
@@ -1973,7 +2005,7 @@ PY
 INPUTS_FILE="$INPUTS_FILE" LIVE_CONTROLS_FILE="$LIVE_CONTROLS_FILE" CONSENT_RECEIPT_FILE="$CONSENT_RECEIPT_FILE" \
  RELEASE_ROOT="$W5_LIVE/release" PROOF_DIR="$W5_LIVE" /bin/bash "$W5_LIVE/live-controls.sh"
 test -f "$W5_LIVE/ordinary-after.json" || { printf 'FAIL ai-w5-closed: W5 forward-close live controls phase expected after got other; STOP\n' >&2; exit 1; }
-python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" "$W5_LIVE" <<'PY'
+python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" "$W5_LIVE" "$W5_BEFORE" <<'PY'
 import datetime,hashlib,json,pathlib,subprocess,urllib.request,sys
 d=json.load(open(sys.argv[1])); site=pathlib.Path(sys.argv[2])
 assert d['window']=='W5' and site.is_absolute() and site.is_dir() and not site.is_symlink()
@@ -2016,6 +2048,7 @@ root.mkdir(mode=0o700,parents=True,exist_ok=False)
 (root/'inputs.json').write_text(json.dumps(d)+'\n')
 (root/'W5-closed.json').write_text(json.dumps({'state':'closed','site_ownership_close':'PASS'})+'\n')
 for name in ('ordinary-after.json','consent-post-W5.json'): (root/name).write_bytes(pathlib.Path(sys.argv[3],name).read_bytes())
+for name in ('ordinary-before.json','consent-pre-W1.json'): (root/name).write_bytes(pathlib.Path(sys.argv[4],name).read_bytes())
 (root/'closed.txt').write_text(datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')+'\n')
 print('PASS W5 site ownership close and outside GET/HEAD gate CLOSED; retain W5 closed.txt for W6')
 PY

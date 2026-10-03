@@ -180,6 +180,15 @@ const liveControlsFile = join(scratch, 'live-W5-after.json');
 writeFileSync(liveControlsFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'after',
   controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
   consent_receipt_sha256: digest(consentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-after'] }));
+// W5 opening: a phase-before live receipt bound to the pre-W1 consent receipt (ai-w5-preflight).
+const preConsentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'pre-W1',
+  measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
+  controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-pre-w1'], cleanup: null });
+const preConsentFile = join(scratch, 'consent-pre-W1.json'); writeFileSync(preConsentFile, preConsentText);
+const liveBeforeFile = join(scratch, 'live-W5-before.json');
+writeFileSync(liveBeforeFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'before',
+  controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
+  consent_receipt_sha256: digest(preConsentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-before'] }));
 // C1 inputs: synthetic owner/workspace, fixture target file (no key) and state directory.
 const c1Dir = join(scratch, 'c1'); mkdirSync(join(c1Dir, 'state'), { recursive: true, mode: 0o700 });
 writeFileSync(join(c1Dir, 'target.json'), JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'dry-run-fixture-not-a-key' }) + '\n');
@@ -395,7 +404,8 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
       SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo, SITE_EVIDENCE: siteEvidence,
-      LIVE_CONTROLS_FILE: liveControlsFile, CONSENT_RECEIPT_FILE: consentFile,
+      LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
+      CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
       // withdraw: the approve mode first requires the pointer that ai-w6-pointer publishes later.
       C1_INPUTS_FILE: c1InputsFile, C1_PROOF_DIR: c1ProofDir, C1_CLIENT_ACTION: 'withdraw',
