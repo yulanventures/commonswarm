@@ -19,7 +19,7 @@ export function isAdminCredential(value: string | null): boolean {
       Uint8Array.from(bytes, character => character.charCodeAt(0)),
     ));
     return claims !== null && typeof claims === 'object' &&
-      (claims.aud === ADMIN_RESOURCE ||
+      (claims.grant_class === 'delegated_admin' || claims.aud === ADMIN_RESOURCE ||
         Array.isArray(claims.aud) && claims.aud.includes(ADMIN_RESOURCE));
   } catch {
     return false;
@@ -28,5 +28,5 @@ export function isAdminCredential(value: string | null): boolean {
 
 export function presentsAdminCredential(request: Request): boolean {
   const header = request.headers.get('authorization');
-  return isAdminCredential(header === null ? null : /^Bearer +([^\s]+)$/iu.exec(header)?.[1] ?? null);
+  return isAdminCredential(header === null ? null : /^(?:Bearer|DPoP) +([^\s,]+)$/iu.exec(header)?.[1] ?? null);
 }

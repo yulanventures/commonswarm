@@ -1,10 +1,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
-  adminTransaction, adminDigest, recordAdminFailure, isAdminAccessCredential,
+  adminTransaction, adminDigest, recordAdminFailure,
   type AdminAuthentication, type AdminInput,
-  type AdminCredentialDelivery,
 } from "./admin-delegation.ts";
 import {
   REGISTRATION_SEAT_REVOKED,
@@ -1271,15 +1271,7 @@ type CredentialKind = "user" | "agent" | "hosted_seat";
 type SignalCredentialKind = "user" | "agent";
 type Role = "owner" | "admin" | "member";
 
-interface RequestBody {
-  command_id?: unknown;
-  client_version?: unknown;
-  client_build?: unknown;
-  workspace_id?: unknown;
-  stream?: unknown;
-  command?: unknown;
-  [key: string]: unknown;
-}
+type RequestBody = HostedCommandInput;
 
 interface AuthContext {
   credentialKind: CredentialKind;
@@ -1350,11 +1342,7 @@ interface PreparedWorkspace {
   renewalFacts: RenewalFacts | null;
 }
 
-interface HttpResult {
-  status: number;
-  headers?: Record<string, string>;
-  body: Record<string, unknown>;
-}
+type HttpResult = CommandResult;
 
 interface Audit {
   auth: AuditAuthContext;
@@ -9516,8 +9504,7 @@ interface HostedSeatClaimInput extends RequestBody {
   command: { kind: "claim_hosted_seat"; name: string };
 }
 
-export type HostedCommandInput = RequestBody;
-export type CommandResult = HttpResult;
+export type { HostedCommandInput, CommandResult } from "./contract.d.ts";
 export interface HostedHumanManagementIdentity {
   userId: string;
   email: string | null;
@@ -12934,36 +12921,59 @@ async function insertCommandFailure(
   `;
 }
 
-import { isAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { isAdminCredential, presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { createAdminHttpHandler } from '../_shared/admin-http.ts';
+import { adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
+import { admitAdminRequest } from './admin-admission.ts';
+import { createAdminWorkerChannel } from './admin-worker-delivery.ts';
+import type { AdminAdmission } from '../_shared/admin-oauth-auth.ts';
+
+const adminHttpDependencies = {
+  verifier: { verify: admitAdminRequest },
+  transact: runAdminOAuthCommand,
+  securityFailure: async (reason: Parameters<typeof adminSecurityFailure>[1]) => {
+    await db.begin(async tx => { await setTransaction(tx); await adminSecurityFailure(tx, reason); });
+  },
+};
+const handleAdminCommandRequest = createAdminHttpHandler(adminHttpDependencies, 'admin_command');
+const handleAdminMcpPost = createAdminHttpHandler(adminHttpDependencies, 'admin_mcp');
+export async function handleAdminMcpRequest(request: Request): Promise<Response> {
+  if (request.method === 'OPTIONS') return commandPreflight(request, allowedCommandOrigins, commandEnvironment);
+  return withCommandCors(request, await handleAdminMcpPost(request), allowedCommandOrigins, commandEnvironment);
+}
+
+async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission, kind: AdminAuditKind, signal: AbortSignal): Promise<HttpResult> {
+  const authentication: AdminAuthentication = { kind: 'oauth', admission };
+  try {
+    const outcome = await db.begin('isolation level read committed', async tx => {
+      await adminDbRole(tx, 'swarm_command');
+      const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
+      if (remaining <= 0 || signal.aborted) throw new Error('admin_request_expired');
+      await tx`SELECT set_config('statement_timeout', ${String(remaining)}, true)`;
+      const result = await adminTransaction(tx, input, authentication, kind);
+      if (signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('admin_request_expired');
+      return result;
+    });
+    return outcome.result;
+  } catch {
+    console.error('admin_command_failed', 'transaction_failed');
+    // Replay admission has already committed; rollback cannot make it reusable.
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication, kind); }); }
+    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
+    return { status: 503, body: { error: 'admin_command_failed' } };
+  }
+}
 
 async function handlePostRequest(request: Request): Promise<Response> {
   const credential = bearer(request);
-  // Runtime JWT proofs belong only to the trusted runtime adapter. Opaque
-  // access credentials may use the account path, never a worker command.
-  if (credential !== null && isAdminCredential(credential) &&
-      (!isAdminAccessCredential(credential) || request.method !== "POST")) {
-    return json(403, { error: "credential_kind_forbidden" });
+  if (/^DPoP(?:\s|$)/iu.test(request.headers.get('authorization') ?? '') ||
+      presentsAdminCredential(request) || isAdminCredential(credential)) {
+    return await handleAdminCommandRequest(request);
   }
-  if (request.method !== "POST") {
-    return json(405, { error: "method_not_allowed" });
-  }
-
+  if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' });
   const parsed = await readBody(request);
-  if (!parsed.ok) {
-    if (isAdminCredential(credential)) {
-      return json(403, { error: "credential_kind_forbidden" });
-    }
-    return parsed.response;
-  }
+  if (!parsed.ok) return parsed.response;
   const body = parsed.body;
-  // A separate account credential never reaches worker or GoTrue authentication.
-  if (credential !== null && isAdminAccessCredential(credential)) {
-    if (record(body.stream)?.kind !== "account") {
-      return json(403, { error: "credential_kind_forbidden" });
-    }
-    const result = await runAdminAccountCommand(body, { kind: "access", credential });
-    return json(result.status, result.body);
-  }
 
   const kind = commandKind(body);
   const publicHostedClaim = publicHostedCommandForbidden(kind);
@@ -13211,49 +13221,6 @@ async function runAdminAccountCommand(
     catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
     return { status: 500, body: { error: "admin_command_failed" } };
   }
-}
-
-/** Private credential-runtime channel. The transactional adapter verifies the
- * signed runtime credential against the pinned issuer and exact admin audience.
- * It must never expose the delivery callback to model-visible tool output.
- * No public HTTP body/header can select this identity or delivery channel.
- */
-export async function handleAdminRuntimeCommand(
-  input: AdminInput,
-  runtimeCredential: string,
-  deliver: (credential: AdminCredentialDelivery) => Promise<void>,
-  refreshCredential?: string,
-): Promise<HttpResult> {
-  const authentication: AdminAuthentication = { kind: "runtime", credential: runtimeCredential,
-    ...(refreshCredential === undefined ? {} : { refresh_credential: refreshCredential }) };
-  let outcome: Awaited<ReturnType<typeof adminTransaction>>;
-  try { outcome = await db.begin("isolation level read committed", async tx => {
-    await setTransaction(tx);
-    return await adminTransaction(tx, input, authentication);
-  }); } catch (error) {
-    console.error("admin_command_failed", safeAdminError(error)); try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
-    catch { return { status: 500, body: { error: "admin_failure_audit_unavailable" } }; }
-    return { status: 500, body: { error: "admin_command_failed" } };
-  }
-  if (outcome.delivery !== undefined) {
-    try { await deliver(outcome.delivery); }
-    catch {
-      // Delivery may have partially succeeded; terminally revoke the uncertain
-      // lineage before returning a failure. The original pending issue remains history.
-      try { await db.begin(async tx => {
-        await setTransaction(tx);
-        await recordAdminFailure(tx, input, authentication);
-        const owners = await tx<{ owner_user_id: string }[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id = ${outcome.delivery!.grant_id}::uuid`;
-        if (owners[0]) await adminTransaction(tx, { command_id: crypto.randomUUID(), stream: { kind: "account" },
-          resource: outcome.delivery!.resource, command: { kind: "revoke_admin_delegation", grant_id: outcome.delivery!.grant_id, reason_code: "credential_delivery_failed" } },
-          { kind: "system", owner_user_id: owners[0].owner_user_id });
-      }); } catch {
-        return { status: 500, body: { error: "admin_delivery_recovery_unavailable" } };
-      }
-      return { status: 503, body: { error: "credential_delivery_failed", next_action: "Approve a new connection before retrying issuance." } };
-    }
-  }
-  return outcome.result;
 }
 
 /** Closed internal wire shape for the durable hosted `check` command path. */
@@ -14259,42 +14226,70 @@ async function releaseAgentSession(
   return { status: 200, body: { ok: true, status: "accepted" } };
 }
 
-/** Private local-worker delivery. Both delegated access and signed recipient
- * runtime proof are checked in the transaction. HTTP cannot select this channel.
- * Delivery means runtime storage only; connection proof remains a separate step.
- */
-export async function handleAdminWorkerRuntimeCommand(
-  input: AdminInput,
-  accessCredential: string,
-  recipientRuntimeCredential: string,
-  deliver: (credential: import('./admin-routine.ts').AdminWorkerDelivery) => Promise<void>,
+
+/** Protected runtime worker delivery, authenticated with the same raw JWT/DPoP
+ * request as HTTP. The callback receives only a worker credential; there is no
+ * admin mint or recipient-runtime-proof authority path. */
+export async function handleAdminWorkerCommand(
+  input: AdminInput, request: Request,
+  deliver: (credential: import('./admin-routine.ts').AdminWorkerDelivery, signal: AbortSignal) => Promise<void>,
 ): Promise<HttpResult> {
-  const authentication: AdminAuthentication = { kind: 'access', credential: accessCredential,
-    recipient_runtime_credential: recipientRuntimeCredential };
-  let outcome: Awaited<ReturnType<typeof adminTransaction>>;
+  let admission: AdminAdmission;
+  try { admission = await adminHttpDependencies.verifier.verify(request, 'admin_command'); }
+  catch {
+    try { await adminHttpDependencies.securityFailure('invalid_dpop'); }
+    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
+    return { status: 401, body: { error: 'unauthenticated' } };
+  }
+  const authentication: AdminAuthentication = { kind: 'oauth', admission, worker_channel: createAdminWorkerChannel(admission) };
+  const deadline = new AbortController();
+  const abort = () => deadline.abort();
+  request.signal.addEventListener('abort', abort, { once: true });
+  if (request.signal.aborted) abort();
+  const timer = setTimeout(abort, Math.max(0, Math.min(25_000, admission.token.expires_at - Date.now())));
   try {
-    outcome = await db.begin('isolation level read committed', async tx => {
+    const outcome = await db.begin(async tx => {
       await setTransaction(tx);
-      return await adminTransaction(tx, input, authentication);
+      const remaining = Math.min(10_000, admission.token.expires_at - Date.now());
+      if (remaining <= 0 || deadline.signal.aborted) throw new Error('request_expired');
+      await tx`SELECT set_config('statement_timeout', ${String(remaining)}, true)`;
+      const result = await adminTransaction(tx, input, authentication);
+      if (deadline.signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('request_expired');
+      if (result.worker_delivery) {
+        // Keep credential publication inside the transaction. A delivery timeout
+        // rolls the credential back even if the recipient later receives bytes.
+        let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+        let stop: (() => void) | undefined;
+        try {
+          await Promise.race([
+            deliver(result.worker_delivery, deadline.signal),
+            new Promise<never>((_, reject) => {
+              stop = () => reject(new Error('request_expired'));
+              deadline.signal.addEventListener('abort', stop, { once: true });
+              deliveryTimer = setTimeout(() => { deadline.abort(); reject(new Error('delivery_timeout')); }, Math.min(10_000, remaining));
+              if (deadline.signal.aborted) stop();
+            }),
+          ]);
+        } catch {
+          if (deadline.signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('request_expired');
+          const revoke = await adminTransaction(tx, { command_id: crypto.randomUUID(), stream: { kind: 'account' }, resource: admission.token.resource, command: { kind: 'surrender_admin_delegation', grant_id: admission.token.admin_grant_id, reason_code: 'worker_delivery_failed' } }, { kind: 'oauth', admission });
+          if (revoke.result.status !== 200) throw new Error('worker_delivery_fence_failed');
+          await recordAdminFailure(tx, input, authentication);
+          return { result: { status: 503, body: { error: 'worker_delivery_failed' } } };
+        } finally {
+          if (deliveryTimer !== undefined) clearTimeout(deliveryTimer);
+          if (stop) deadline.signal.removeEventListener('abort', stop);
+        }
+      }
+      if (deadline.signal.aborted || Date.now() >= admission.token.expires_at) throw new Error('request_expired');
+      return result;
     });
-  } catch (error) {
-    console.error("admin_command_failed", safeAdminError(error)); try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx,input,authentication); }); }
-    catch { return {status:500,body:{error:'admin_failure_audit_unavailable'}}; }
-    return {status:500,body:{error:'admin_command_failed'}};
+    return Date.now() < admission.token.expires_at && !deadline.signal.aborted ? outcome.result : { status: 401, body: { error: 'credential_expired' } };
+  } catch {
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx, input, authentication); }); }
+    catch { return { status: 503, body: { error: 'admin_failure_audit_unavailable' } }; }
+    return { status: 503, body: { error: 'admin_command_failed' } };
+  } finally {
+    clearTimeout(timer); request.signal.removeEventListener('abort', abort);
   }
-  if (outcome.worker_delivery) {
-    try { await deliver(outcome.worker_delivery); }
-    catch {
-      // Partial delivery is uncertain access: terminally stop the parent, never
-      // show delivered or connected. Human consent is required for replacement.
-      try { await db.begin(async tx => {
-        await setTransaction(tx);
-        const [g] = await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id=${outcome.worker_delivery!.grant_id}::uuid`;
-        if (!g) throw new Error('worker delivery parent missing');
-        await adminTransaction(tx,{command_id:crypto.randomUUID(),stream:{kind:'account'},resource:'https://api.commonswarm.com/admin',command:{kind:'revoke_admin_delegation',grant_id:outcome.worker_delivery!.grant_id,reason_code:'worker_delivery_failed'}},{kind:'system',owner_user_id:g.owner_user_id});
-      }); } catch { return {status:500,body:{error:'admin_delivery_recovery_unavailable'}}; }
-      return {status:503,body:{error:'worker_delivery_failed',next_action:'Ask the granting person to approve a new connection.'}};
-    }
-  }
-  return outcome.result;
 }
