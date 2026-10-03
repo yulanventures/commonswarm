@@ -280,11 +280,16 @@ test('request timeout stops a hung token endpoint without an admin mutation', as
 test('dry-run makes no network request or file handoff and prints the agent/human plan', () => {
   const r = spawnSync(process.execPath, ['--import', noFetch, script, '--dry-run', '--verify-fenced'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(r.status, 0); assert.equal(r.stderr, ''); const plan = JSON.parse(r.stdout);
-  assert.equal(plan.client_id, CLIENT); assert.equal(plan.resource, RESOURCE); assert.ok(plan.steps.includes('verify_fenced'));
+  assert.equal(plan.client_id, CLIENT); assert.equal(plan.resource, RESOURCE);
+  assert.equal(plan.scope, `openid offline_access ${SCOPE}`); assert.ok(plan.steps.includes('verify_fenced'));
   assert.ok(!plan.steps.some(s => /registration|archive|revoke_delegation|audit_read/.test(s)));
 });
 
 test('printed CIMD metadata matches the independently pinned lane-11 fixture byte for byte, without fetch', async () => {
   const r = spawnSync(process.execPath, ['--import', noFetch, script, '--print-client-metadata'], { encoding: 'utf8', timeout: 5000 });
   assert.equal(r.status, 0); assert.equal(r.stderr, ''); assert.equal(r.stdout, await readFile(fixture, 'utf8'));
+  const metadata = JSON.parse(r.stdout);
+  assert.equal(Object.hasOwn(metadata, 'scope'), false, 'admin scopes belong to the resource authorization request');
+  assert.equal(metadata.dpop_bound_access_tokens, true);
+  assert.equal(metadata.dpop_signing_alg, 'ES256', 'AS admin verification reads this algorithm field');
 });

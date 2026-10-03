@@ -19,7 +19,9 @@ const METADATA = {
   client_id: CLIENT, client_name: 'CommonSwarm C1 smoke', client_uri: 'https://commonswarm.com',
   application_type: 'web', redirect_uris: [REDIRECT], token_endpoint_auth_method: 'none',
   grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
-  scope: SCOPE, dpop_bound_access_tokens: true,
+  // Admin scopes are resource-only: request them at authorization, not in CIMD.
+  // The provider reads the binding boolean; admin verification reads the alg.
+  dpop_bound_access_tokens: true, dpop_signing_alg: 'ES256',
 };
 const hash = value => createHash('sha256').update(value).digest('base64url');
 const record = value => value && typeof value === 'object' && !Array.isArray(value);

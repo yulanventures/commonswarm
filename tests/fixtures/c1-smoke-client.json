@@ -14,6 +14,6 @@
   "response_types": [
     "code"
   ],
-  "scope": "openid offline_access admin:read workspaces:create seats:create seats:revoke",
-  "dpop_bound_access_tokens": true
+  "dpop_bound_access_tokens": true,
+  "dpop_signing_alg": "ES256"
 }
