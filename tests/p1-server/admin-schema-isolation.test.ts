@@ -4,14 +4,17 @@ import { test } from 'node:test';
 import { sqlPhase } from '../support/admin-schema-process.js';
 import { catalog, checksumGateVersion, checksumVersions, dbAssert, expectedMigrationHashes, fixture, issuance, openIssuanceForTest, recordChecksumEvidenceForTest, refuses, repoSql, runSql, schemaMigrationNames, schemaVersions, versions } from '../support/admin-schema-db.js';
 
-test('admin-schema-isolation: prerequisite upgrade as a non-superuser and data-free reverse reserves', () => {
+test('admin-schema-isolation: non-superuser CREATEROLE upgrade 01 through 05 and data-free reverse reserves', () => {
+  // Keep M5 in this constrained-role path, independently of other M1-M4 drills.
+  const upgradeVersions = [...schemaVersions, '20261003000005'];
+  const upgradeNames = [...schemaMigrationNames, '20261003000005_admin_recovery_projection.sql'];
   const role = `ai_migration_${randomUUID().replaceAll('-', '')}`;
   const noncreator = `ai_noncreator_${randomUUID().replaceAll('-', '')}`;
   const roleGuard = repoSql('supabase/migrations/20261003000002_admin_oauth_policy.sql').match(/DO \$roles\$[\s\S]*?END \$roles\$;/)![0];
   const owner = randomUUID(), workspace = randomUUID(), hosted = randomUUID(), provider = randomUUID();
   runSql(`
-${schemaVersions.map(v => sqlPhase(`initial-catalog-${v}`, catalog(v))).join('\n')}
-${[...schemaVersions].reverse().map(v => sqlPhase(`initial-reserve-${v}`, repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false))).join('\n')}
+${upgradeVersions.map(v => sqlPhase(`initial-catalog-${v}`, catalog(v))).join('\n')}
+${[...upgradeVersions].reverse().map(v => sqlPhase(`initial-reserve-${v}`, repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false))).join('\n')}
 \\warn admin-schema-phase: constrained-role-setup
 -- In the isolated rollback transaction, also exercise the non-superuser CREATE
 -- ROLE path. The reserve itself retains these dormant/operator-owned roles.
@@ -57,7 +60,7 @@ ${dbAssert(`SELECT has_table_privilege(current_user,'supabase_migrations.schema_
   AND (SELECT nspowner<>current_user::regrole FROM pg_namespace WHERE nspname='supabase_migrations')
   AND (SELECT relowner<>current_user::regrole FROM pg_class WHERE oid='supabase_migrations.schema_migrations'::regclass)`, 'ledger read and write without ownership or grant option')}
 ${dbAssert(`SELECT NOT has_table_privilege('swarm_admin','supabase_migrations.schema_migrations','SELECT')`, 'gate owner has no direct ledger read')}
-${schemaMigrationNames.map(name => sqlPhase(`hosted-upgrade-${name}`, repoSql(`supabase/migrations/${name}`))).join('\n')}
+${upgradeNames.map(name => sqlPhase(`hosted-upgrade-${name}`, repoSql(`supabase/migrations/${name}`))).join('\n')}
 \\warn admin-schema-phase: hosted-upgrade-assertions
 ${dbAssert(`SELECT proowner='${role}'::regrole FROM pg_proc WHERE oid='commonswarm_ops.migration_ledger_versions()'::regprocedure`, 'ledger reader retains constrained migration owner')}
 ${dbAssert(`SELECT count(*)=3 AND bool_and(m.admin_option AND NOT m.inherit_option AND NOT m.set_option)
@@ -68,7 +71,7 @@ CREATE ROLE ${noncreator} NOLOGIN INHERIT CREATEROLE;
 SET LOCAL ROLE ${noncreator};
 ${refuses(roleGuard, 'P0001')}
 RESET ROLE;
-${schemaVersions.map(v => sqlPhase(`hosted-catalog-${v}`, catalog(v))).join('\n')}
+${upgradeVersions.map(v => sqlPhase(`hosted-catalog-${v}`, catalog(v))).join('\n')}
 \\warn admin-schema-phase: hosted-status-and-checksum-controls
 ${dbAssert('SELECT NOT admin_issuance_enabled AND NOT legacy_closed AND measured_at IS NULL FROM commonswarm_oauth.admin_cutover_state', 'upgrade must remain dormant')}
 ${dbAssert(`SELECT grant_class='hosted_mcp' AND resource='https://mcp.commonswarm.com/mcp' AND hosted_grant_id='${hosted}'::uuid AND connection_id='${hosted}'::uuid
@@ -93,13 +96,13 @@ ${dbAssert(`SELECT count(*)=1 AND bool_and(version='${checksumGateVersion}' AND 
 RESET ROLE;
 ROLLBACK TO SAVEPOINT checksum_control;
 -- Restore the empty prerequisite state rather than deleting immutable hosted
--- bindings. Reapply and reverse all four migrations as the same CREATEROLE.
+-- bindings. Reapply and reverse all five migrations as the same CREATEROLE.
 ROLLBACK TO SAVEPOINT hosted_prerequisite;
 SET LOCAL ROLE ${role};
-${schemaMigrationNames.map(name => sqlPhase(`empty-upgrade-${name}`, repoSql(`supabase/migrations/${name}`))).join('\n')}
-${schemaVersions.map(v => sqlPhase(`empty-catalog-${v}`, catalog(v))).join('\n')}
+${upgradeNames.map(name => sqlPhase(`empty-upgrade-${name}`, repoSql(`supabase/migrations/${name}`))).join('\n')}
+${upgradeVersions.map(v => sqlPhase(`empty-catalog-${v}`, catalog(v))).join('\n')}
 ${dbAssert(`SELECT count(*)=${checksumVersions.length} FROM commonswarm_ops.migration_checksum_failures()`, 'empty evidence gate remains closed before reserves')}
-${[...schemaVersions].reverse().map(v => sqlPhase(`constrained-reserve-${v}`, repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false))).join('\n')}
+${[...upgradeVersions].reverse().map(v => sqlPhase(`constrained-reserve-${v}`, repoSql(`supabase/admin-delegation-reserve/${v}-rollback.sql`) + catalog(v, true) + catalog(v, false, false))).join('\n')}
 RESET ROLE;
 `);
 });
