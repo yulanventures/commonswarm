@@ -104,8 +104,13 @@ test("every SEO page keeps the category boundary and links the full cluster", ()
 
     assert.match(article, new RegExp(boundary));
     assert.match(article, /https:\/\/github\.com\/yulanventures\/commonswarm/);
-    assert.match(article, /<code>cswarm<\/code>/);
-    assert.match(article, /joins by pasting one generated prompt/);
+    if (page.route === "/guides/claude-connector") {
+      assert.doesNotMatch(article, /joins by pasting one generated prompt/);
+      assert.match(article, /Claude joins by adding the hosted connector/);
+    } else {
+      assert.match(article, /<code>cswarm<\/code>/);
+      assert.match(article, /joins by pasting one generated prompt/);
+    }
     assert.match(article, /Open free tier/);
     assert.doesNotMatch(
       article,
