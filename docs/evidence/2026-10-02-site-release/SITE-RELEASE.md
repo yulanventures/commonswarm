@@ -416,7 +416,7 @@ PY
   . "$HOME/.commonswarm-site-window.env"
   python3 - >"$SITE_EVIDENCE/site2-00-mcp-live.txt" <<'PY'
 import json, urllib.error, urllib.request
-UA = "commonswarm-release-probe/1.0"
+UA = "curl/8.7.1"
 RESOURCE = "https://mcp.commonswarm.com/mcp"
 def fetch(url, method="GET", data=None):
     request = urllib.request.Request(url, method=method, data=data, headers={
@@ -1139,7 +1139,7 @@ These are fixed assertions, not window decisions:
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   test "${#EXPECTED_SITE_SHA}" -eq 40
   case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-00-mcp-live.txt" MCP_LIVE=PASS
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-00-mcp-live.txt" MCP_LIVE=PASS user_agent=curl/8.7.1
   python3 - "$SITE_EVIDENCE/site2-00-gate-evidence.txt" "$SITE_RELEASE_SHA" <<'PY'
 import os,runpy,sys
 check=runpy.run_path(os.environ['RELEASE_PREFLIGHT_TOOL'])['receipt']
@@ -1152,7 +1152,7 @@ PY
   umask 077
   python3 - >"$SITE_EVIDENCE/site2-03-mcp-live.txt" <<'PY'
 import json, urllib.error, urllib.request
-UA = "commonswarm-release-probe/1.0"
+UA = "curl/8.7.1"
 RESOURCE = "https://mcp.commonswarm.com/mcp"
 def fetch(url, method="GET", data=None):
     request = urllib.request.Request(url, method=method, data=data, headers={
@@ -1297,8 +1297,7 @@ BOX
 
 ## 5. Post-switch controls
 
-Every scripted public request uses `User-Agent:
-commonswarm-release-probe/1.0`. A failed public control automatically restores
+Post-switch public requests use `User-Agent: curl/8.7.1`. A failed public control automatically restores
 the pin. Browser state cannot prevent these page/asset checks from running.
 
 HezLead's acceptance decision table uses the mode selected by `site2-03`.
@@ -1361,7 +1360,7 @@ trap 'printf "FAIL site2-05: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 expected=$1
 python3 - "$expected" "$2" "$3" <<'PY'
 import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
-UA="commonswarm-release-probe/1.0"; root=pathlib.Path("/srv/commonswarm/site")
+UA="curl/8.7.1"; root=pathlib.Path("/srv/commonswarm/site")
 release=(root/"current").resolve(strict=True); assert str(release)==sys.argv[1]
 assert re.fullmatch(r"\d{8}T\d{6}Z-"+re.escape(sys.argv[2][:12])+r"-[0-9a-f]{16}",release.name)
 def fetch(path,media):
@@ -1450,7 +1449,7 @@ a non-blocking browser failure exits zero so the release continues to close.
   }
   trap 'finish_browser_acceptance "$?"' EXIT
   # Public acceptance is a prerequisite, regardless of browser outcome.
-  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS user_agent=curl/8.7.1
   test ! -f "$SITE_EVIDENCE/rollback-auto.txt"
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
@@ -1934,7 +1933,7 @@ trap 'printf "FAIL site2-06: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 pin=$1; test "$(readlink -f /srv/commonswarm/site/current)" = "$pin"
 python3 - "$pin" <<'PY'
 import pathlib,sys,urllib.request
-UA="commonswarm-release-probe/1.0"; release=pathlib.Path(sys.argv[1]); local=(release/"app/index.html").read_bytes()
+UA="curl/8.7.1"; release=pathlib.Path(sys.argv[1]); local=(release/"app/index.html").read_bytes()
 request=urllib.request.Request("https://commonswarm.com/app",headers={
  "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
 with urllib.request.urlopen(request,timeout=30) as response:
@@ -1943,7 +1942,7 @@ assert remote==local; print("ROLLBACK_PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
   chmod 0600 "$SITE_EVIDENCE/site2-06-rollback-verify.txt"
-  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS
+  python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS user_agent=curl/8.7.1
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
   test ! -e "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt"
@@ -2375,12 +2374,12 @@ trap release_close_exit EXIT
   fi
   pin=$(cat "$SITE_EVIDENCE/previous.release"); previous=$(cat "$SITE_EVIDENCE/previous.original")
   if test -f "$SITE_EVIDENCE/rollback-auto.txt"; then
-    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS
+    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-06-rollback-verify.txt" ROLLBACK_PUBLIC_BYTES=PASS user_agent=curl/8.7.1
     outcome=rolled-back
   elif test -f "$SITE_EVIDENCE/site2-04-reconciliation.txt"; then
     grep -qFx 'DEPLOYMENT=failed-before-switch' "$SITE_EVIDENCE/site2-04-reconciliation.txt"; outcome=failed-before-switch
   else
-    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS
+    python3 "$RELEASE_PREFLIGHT_TOOL" fields "$SITE_EVIDENCE/site2-05-public.txt" PUBLIC_BYTES=PASS user_agent=curl/8.7.1
     python3 - "$SITE_EVIDENCE" <<'PY'
 import json,pathlib,re,sys
 root=pathlib.Path(sys.argv[1]); label="site2-05-browser-acceptance"
@@ -2764,20 +2763,20 @@ new release actions or claiming an unproved close.
     "site2-plan-inputs": {"reads": [], "sha256": "00aaf8909b470ef510117082a7dbf032bf5179a5b2ac229df67efeca596d0778"},
     "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "28c0b132ea1afab8eb01180d9fb6a68ad886d06e7c82efb919f23373966cd995"},
     "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "bbf8fc164a43ca1c351da1871bb1417bf87ecbe8b4c00462a6da798aeff313f4"},
-    "site2-00-a-close-ingest": {"creates": ["$SITE_EVIDENCE/site2-00-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "9842d30b8bf7d0f6091311d4a0ae19ca142c2992bee552b91fffb8eb396171c6"},
+    "site2-00-a-close-ingest": {"creates": ["$SITE_EVIDENCE/site2-00-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "bdcf8bf51a5026bb16962bcfbfd75f606c2f3bb2cdb2ea1c9a514cd523a54ee5"},
     "site2-00-build-env": {"cleanup": ["SITE_BUILD_ENV_TEMP"], "cleanup_owners": {"$SITE_BUILD_ENV_TEMP": "site2-00-build-env"}, "creates": ["$SITE_BUILD_ENV_TEMP", "$SITE_EVIDENCE/site2-00-build-env.txt", "$SITE_RELEASE_REPO/site/.env", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env"], "reads": ["endpoint:https://api.commonswarm.com"], "sha256": "53096515681ef1c83b493dfc1f8e847ab8d31f5e8f5b24d4423e2de98b0d89d4"},
     "site2-02": {"creates": ["$SITE_EVIDENCE/site2-02-commits.txt", "$SITE_EVIDENCE/site2-02-name-status.txt", "$SITE_EVIDENCE/site2-02-numstat.txt", "$SITE_EVIDENCE/site2-02-summary.txt"], "reads": [], "sha256": "3344c32f1c0e123d8411d33782b769858ef6b4656ed688ade486e5a082093564"},
     "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "b74396352cc06f6c5d0b60abcf6faba48771fbff455f8fca86a4c2f465a6478d"},
     "site2-03": {"consumes": ["$SITE_EVIDENCE/site2-03-browser-preflight.json"], "reads": [], "sha256": "342f8f7a95591e60540d6026659c37817ca1db98fec8e9134898f6c796b1f3f8"},
     "site2-03-pin-previous": {"creates": ["$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/site2-03-pin.txt", "$pin", "pin"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "2c5f47b4b740c138a9c66c3ec5bc38c4f0919acc13f1a652fd91aeaccb5d13a5"},
-    "site2-03-go-record": {"consumes": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-00-mcp-live.txt", "$SITE_EVIDENCE/site2-02-summary.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-03-pin.txt"], "creates": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/site2-03-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "af7a3dc126c34b4d8bd05436cd8396898c40008632b7e6f551a6d3154fa821b4"},
+    "site2-03-go-record": {"consumes": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-00-mcp-live.txt", "$SITE_EVIDENCE/site2-02-summary.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-03-pin.txt"], "creates": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/site2-03-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "488d4bebc8c20291303511617c3d16e3d0ef7a88ddc3e01465b74579ddfee778"},
     "site2-04": {"consumes": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/deploy-status.txt", "$SITE_EVIDENCE/deploy.log", "$SITE_EVIDENCE/pin-after-deploy.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "edde0faa1760e38fd538e224d3def15e51c07d227dc4add5c036e2019ef17467"},
     "site2-04-reconcile-failure": {"creates": ["$SITE_EVIDENCE/retry-approved"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "command:readlink -f"], "sha256": "990c7a8846185a8bed831785b1d343cdc30b52c160dbf4ac197945f4aba0a142"},
-    "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "ec0781c2ae4e2d7c7f26769eb1a5bb691968bf7f7652d551ff9bf28ebf702538"},
-    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "09564a40c097ab78a6060bfe411bed84fb47193ead5956aa7da76a58508764c3"},
-    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "56f0b934f957d905f23dc3f0371b1dd217346831c9449d559aa2888534f18a0b"},
+    "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "8bd6020c646053184794ffdc3a8031a36bcb845e6951d292d9c657430db4bed3"},
+    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "3181082829bd4151a922b9784816a0ef192e6cd1e8faabe1390ce2cc9d93847e"},
+    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "188d2e7ef758c1cf1a5d94c00b358b36ec400f96acf937a8a22dcdfb369dec90"},
     "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "2e8a0f37a74721d73afbd66046ed7ee211e031c7b09cd7db75a4d90287f1378f"},
-    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "685c3c0f1bce3744d5ff1726b437ea07da8a3cfc0d815371933def63b094fb41"}
+    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "a3af8afebe171396efbb9a9a6de7887ccdbd4f20e9c782377b4328ec5a084200"}
   },
   "gate_receipts": [{"gates": ["site build", "site tests", "site CI"], "input": "GATE_EVIDENCE_FILE"}],
   "plan_input": "SITE_PLAN_FILE"

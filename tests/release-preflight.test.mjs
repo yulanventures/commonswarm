@@ -175,13 +175,71 @@ test('site deletion evidence runs genuine guard refusal and positive controls wi
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
-test('JWKS checks parse legal media-type variants while preserving type rejection', () => {
+test('JWKS route checks accept JSON base types with only an optional charset', () => {
   for (const file of [plans[1], plans[3]]) {
     const source = readFileSync(file, 'utf8');
-    const assertion = source.match(/assert response\.headers\.get_content_type\(\)\.lower\(\) in \{[^\n]+/)[0];
-    const result = run('python3', ['-'], { input: `from email.message import Message\nclass Response: pass\nresponse=Response()\nfacts='fixture'\nfor media,ok in [('Application/JWK-SET+JSON; profile="https://example.invalid"',True),('application/json; charset="UTF-8"; version=1',True),('application/jwk-set+json',True),('text/html',False),('application/not-jwks+json',False)]:\n response.headers=Message();response.headers['Content-Type']=media\n try:\n  ${assertion}\n except AssertionError:\n  assert not ok,media\n else:\n  assert ok,media\n` });
+    const assertion = source.match(/if path=='\/jwks':\n([\s\S]*?)\n\s+else:/)[1];
+    const lines = assertion.split('\n');
+    const indent = lines[0].match(/^\s*/)[0].length;
+    const check = lines.map(line => '  ' + line.slice(indent)).join('\n');
+    const result = run('python3', ['-'], { input: `import re\nfrom email.message import Message\nclass Response: pass\nresponse=Response()\nfacts='fixture'\nfor media,ok in [('Application/JWK-SET+JSON',True),('application/json',True),('application/json; charset="UTF-8"',True),('application/jwk-set+json ; CHARSET=utf-8',True),('application/jwk-set+json; profile=x',False),('application/json; charset=UTF-8; profile=x',False),('application/json; version=1',False),('text/html',False),('application/not-jwks+json',False)]:\n response.headers=Message();response.headers['Content-Type']=media\n content_type=media\n try:\n${check}\n except AssertionError:\n  assert not ok,media\n else:\n  assert ok,media\n` });
     assert.equal(result.status, 0, result.stderr);
   }
+});
+
+test('site public-byte, rollback and MCP receipt gates require the release probe UA', () => {
+  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  try {
+    const source = readFileSync(plans[2], 'utf8');
+    for (const step of ['site2-00-a-close-ingest', 'site2-03-go-record', 'site2-05', 'site2-06']) {
+      const producer = shellBlocks(source).find(b => b.startsWith(`# step: ${step} `) || b.startsWith(`# step: ${step}\n`));
+      assert.equal(JSON.parse(producer.match(/^UA\s*=\s*("[^"]+")/m)[1]), 'curl/8.7.1', `${step} must send and record the required UA`);
+    }
+    const gates = [...source.matchAll(/^\s*(python3 "\$RELEASE_PREFLIGHT_TOOL" fields "\$SITE_EVIDENCE\/([^"\n]+)" (PUBLIC_BYTES|ROLLBACK_PUBLIC_BYTES|MCP_LIVE)=PASS[^\n]*)$/gm)];
+    assert.equal(gates.length, 5, 'all five release receipt consumers must be exercised');
+    for (const [, command, name, key] of gates) {
+      const check = receipt => {
+        writeFileSync(join(root, name), receipt);
+        return run('/bin/bash', ['-euo', 'pipefail'], { input: command, env: { ...process.env, RELEASE_PREFLIGHT_TOOL: tool, SITE_EVIDENCE: root } });
+      };
+      assert.equal(check(`${key}=PASS user_agent=curl/8.7.1\n`).status, 0, command);
+      for (const receipt of [`${key}=PASS user_agent=wrong-agent\n`, `${key}=PASS\n`, `${key}=PASS user_agent=curl/8.7.1 user_agent=wrong-agent\n`, `${key}=FAIL user_agent=curl/8.7.1\n`]) {
+        assert.notEqual(check(receipt).status, 0, `${command}: accepted ${receipt}`);
+      }
+    }
+  } finally { cleanup(root); }
+});
+
+test('edge close classifies an already-closed budget failure as closure, and failed verification as deployment', () => {
+  const root = realpathSync(mkdtempSync('/private/tmp/release-preflight-test.'));
+  try {
+    const source = shellBlocks(readFileSync(plans[0], 'utf8')).find(b => b.startsWith('# step: edge-mcp-close\n'));
+    // Only remap the box state file; run the real phase assignments and branches.
+    const script = source.replace('. "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"', '. "$CLOSE_TEST_STATE"');
+    assert.notEqual(script, source);
+    const state = join(root, 'state.sh');
+    writeFileSync(state, `PROOF_DIR="$CLOSE_TEST_PROOF"\nNEW_EDGE=/fixture/verified-edge\nPREVIOUS_EDGE=/fixture/baseline-edge\nreadlink() { printf '%s\\n' "$NEW_EDGE"; }\nedge_check() { echo VERIFICATION_REACHED; return "$CLOSE_TEST_VERIFY_STATUS"; }\nedge_probes() { echo PROBES_REACHED; }\nexternal_check() { echo EXTERNAL_REACHED; }\ncmp() { return 0; }\nsystemctl() { echo TIMER_REACHED; return 23; }\n`);
+    for (const [name, closed, budget, verification, status, phase, action] of [
+      ['closed-success', true, 'yes', '0', 0, null, null],
+      ['closed-budget-failure', true, 'no', '0', 1, 'CLOSE_FAILED', 'retain-verified-bytes'],
+      ['verification-failure', false, 'yes', '23', 23, 'DEPLOY_FAILED', 'run-marked-recovery'],
+      ['timer-failure-after-verification', false, 'yes', '0', 23, 'CLOSE_FAILED', 'retain-verified-bytes'],
+    ]) {
+      const proof = join(root, name); mkdirSync(proof);
+      writeFileSync(join(proof, 'mcp-503-receipt.txt'), `budget_met=${budget}\n`);
+      if (closed) writeFileSync(join(proof, 'closed.txt'), 'closed\n');
+      const result = run('/bin/bash', ['-euo', 'pipefail'], { input: script, env: { ...process.env, CLOSE_TEST_STATE: state, CLOSE_TEST_PROOF: proof, CLOSE_TEST_VERIFY_STATUS: verification } });
+      assert.equal(result.status, status, name + ': ' + result.stderr);
+      if (phase) {
+        assert.match(result.stderr, new RegExp(`${phase} step=edge-mcp-close`));
+        assert.match(result.stderr, new RegExp(`ACTION=${action}`));
+      } else assert.doesNotMatch(result.stderr, /CLOSE_FAILED|DEPLOY_FAILED/);
+      if (closed) assert.doesNotMatch(result.stdout, /VERIFICATION_REACHED/);
+      else assert.match(result.stdout, /VERIFICATION_REACHED/);
+      if (verification === '23') assert.doesNotMatch(result.stdout, /PROBES_REACHED|TIMER_REACHED/);
+      if (!closed && verification === '0') assert.match(result.stdout, /TIMER_REACHED/);
+    }
+  } finally { cleanup(root); }
 });
 
 test('site assertions passing before a daemon/copy-back failure cannot request rollback', () => {

@@ -100,9 +100,9 @@ def fields(path, expected):
     # Existing machine receipts are key=value fields; ignore unrelated prose.
     rows = {}
     for line in pathlib.Path(path).read_text().splitlines():
-        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)(?:\s|$)', line)
-        if match:
-            rows.setdefault(match[1], []).append(match[2])
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', line):
+            for key, value in re.findall(r'(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)', line):
+                rows.setdefault(key, []).append(value)
     for key, value in expected.items():
         if rows.get(key) != [value]:
             raise ValueError('receipt field missing, duplicate or mismatching: ' + key)
