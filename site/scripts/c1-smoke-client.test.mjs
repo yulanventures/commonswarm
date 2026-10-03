@@ -9,11 +9,13 @@ test("C1 smoke metadata: built public client matches the hosted CIMD and DPoP co
   assert.deepEqual(metadata, {
     client_id: "https://commonswarm.com/oauth/c1-smoke/client.json",
     redirect_uris: ["https://commonswarm.com/oauth/c1-smoke/callback"],
-    client_name: "CommonSwarm C1 smoke test client",
+    client_name: "CommonSwarm C1 smoke",
+    client_uri: "https://commonswarm.com",
     application_type: "web",
     token_endpoint_auth_method: "none",
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
+    dpop_bound_access_tokens: true,
     dpop_signing_alg: "ES256",
   });
 });
