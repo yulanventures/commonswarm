@@ -1,6 +1,14 @@
 # Edge-only release from the MCP ON baseline
 Mac blocks must not call setuid/setgid tools.
 
+Box image-build rule: `nice -n 15` plus a hard three-CPU cap, using
+`systemd-run --scope -p CPUQuota=300%` around the build workers or a supported
+builder quota. Build once per `RELEASE_SHA`, look up a persistent SHA tag,
+build only if absent, and verify the image's recorded source SHA before reuse;
+unsupported caps or mismatched SHA labels are STOP. See the shared preamble in
+[RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md). This edge plan reuses its
+pinned runtime image and contains no image-build step.
+
 **Option (b): prepared, not executed.** HezLead supplies the reviewed, landed
 edge SHA and separately authorizes execution. This worker has made no live
 measurements. HezLead supplies `BASELINE_EDGE_SHA` as the full running edge
@@ -159,7 +167,7 @@ case "$BOX_STEP" in
 esac
 python3 - "$PLAN_FILE" "$BOX_STEP" >"$ARCHIVE_DIR/box-step.sh" <<'PY'
 import pathlib,re,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
 steps=['edge-mcp-preflight','edge-mcp-open'] if sys.argv[2]=='edge-mcp-preflight-open' else [sys.argv[2]]
 for step in steps:
     found=[b for b in blocks if re.search(r'^# step: '+re.escape(step)+r'$',b,re.M)]

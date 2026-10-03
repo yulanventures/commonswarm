@@ -1,6 +1,14 @@
 # C+D edge-only follow-up with migrations already applied
 Mac blocks must not call setuid/setgid tools.
 
+Box image-build rule: `nice -n 15` plus a hard three-CPU cap, using
+`systemd-run --scope -p CPUQuota=300%` around the build workers or a supported
+builder quota. Build once per `RELEASE_SHA`, look up a persistent SHA tag,
+build only if absent, and verify the image's recorded source SHA before reuse;
+unsupported caps or mismatched SHA labels are STOP. See the shared preamble in
+[RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md). This CD edge plan uses
+cached pinned images and contains no image-build step.
+
 **Prepared, not executed.** HezLead must independently review, land this lane,
 provide exact-SHA gate evidence, and separately authorize a new live window.
 Window 2 left migrations 20261001000001..05 applied and restored edge to
@@ -209,7 +217,7 @@ case "$CD_BOX_STEP" in
 esac
 python3 - "$CD_PLAN_FILE" "$CD_BOX_STEP" >"$CD_ARCHIVE_DIR/box-step.sh" <<'PYCODE'
 import pathlib,re,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
 found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
 assert len(found)==1, 'FAIL cd-transport: duplicate/missing step'
 print(found[0])

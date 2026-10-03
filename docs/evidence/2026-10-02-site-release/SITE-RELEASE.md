@@ -1,5 +1,13 @@
 # CommonSwarm site release — generalized ON-baseline plan
 
+Box image-build rule: `nice -n 15` plus a hard three-CPU cap, using
+`systemd-run --scope -p CPUQuota=300%` around the build workers or a supported
+builder quota. Build once per `RELEASE_SHA`, look up a persistent SHA tag,
+build only if absent, and verify the image's recorded source SHA before reuse;
+unsupported caps or mismatched SHA labels are STOP. See the shared preamble in
+[RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md). This site plan builds
+static files on the Mac and contains no box image-build step.
+
 **Release:** validated `SITE_RELEASE_SHA`, reviewed and landed on `origin/main`.
 
 **Baseline source:** validated `SITE_BASE_SHA`, reconciled with the box measurement.
