@@ -338,6 +338,15 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
           result = {
             isError: true,
             content: [{ type: "text", text: JSON.stringify({ error: code }) }],
+            // These stable executor codes cover inactive provider grants and
+            // durable seat authorization denials. Batch ownership and ordinary
+            // tool failures do not ask the client to reconnect. Transport JWT
+            // failures keep their existing HTTP 401 challenge above.
+            ...(["hosted_grant_forbidden", "hosted_seat_forbidden", "hosted_seat_revoked"].includes(code)
+              ? { _meta: { "mcp/www_authenticate": [
+                `${WWW_AUTHENTICATE}, error="invalid_token", error_description="Authorization is no longer valid. Reconnect your account."`,
+              ] } }
+              : {}),
           };
         }
       } else {

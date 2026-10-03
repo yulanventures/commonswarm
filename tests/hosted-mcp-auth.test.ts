@@ -44,6 +44,8 @@ async function token(
     aud: MCP_RESOURCE,
     sub: subject,
     grant_id: "provider-grant-1",
+    client_id: "fixture-client-id",
+    scope: "mcp",
     iat: now,
     exp: now + 300,
     ...overrides,
@@ -115,4 +117,40 @@ test("an unknown kid performs one bounded JWKS refresh and then fails closed", a
   assert.equal(source.calls(), 2);
   await assert.rejects(verifier.verify(await token(absent)), /invalid_token/u);
   assert.equal(source.calls(), 3, "one refresh is attempted for the unknown kid");
+});
+
+test("hosted JWT measures missing mcp scope without rejecting valid legacy tokens or logging credentials", async (t) => {
+  const signing = await key("scope-measurement");
+  const source = jwksFetch([{ keys: [signing.publicJwk] }]);
+  const verifier = new McpJwtVerifier({ fetch: source.fetch, now: () => now });
+  const logging = t.mock.method(console, "warn", () => undefined);
+  for (const [scope, hasMcp] of [
+    ["mcp", true], ["openid mcp offline_access", true], [undefined, false],
+    ["", false], ["openid", false], ["notmcp", false], ["mcp:read", false], [["mcp"], false],
+  ] as const) {
+    logging.mock.resetCalls();
+    const encoded = await token(signing, { scope, email: "private-user@example.invalid" });
+    assert.deepEqual(await verifier.verify(encoded), {
+      providerGrantId: "provider-grant-1", subject, expiresAt: now + 300,
+    }, "scope measurement must preserve successful verification");
+    assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => {
+      assert.equal(args.length, 1);
+      assert.equal(args[0].includes(encoded), false);
+      return JSON.parse(args[0]);
+    }), hasMcp ? [] : [{ event: "mcp_missing_scope", client_id_prefix: "fixture-" }]);
+  }
+
+  // Only verified, otherwise-valid tokens participate in measurement.
+  logging.mock.resetCalls();
+  await assert.rejects(verifier.verify(await token(signing, { scope: undefined, iat: now - 301, exp: now - 31 })), /invalid_token/u);
+  await assert.rejects(verifier.verify(await token(signing, { scope: undefined, aud: "https://wrong.invalid" })), /invalid_token/u);
+  assert.equal(logging.mock.callCount(), 0);
+
+  for (const [client_id, prefix] of [[undefined, null], ["tiny", "tin"], ["bad\n\"\\id-private", "bad___id"]] as const) {
+    logging.mock.resetCalls();
+    await verifier.verify(await token(signing, { scope: undefined, client_id }));
+    assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => JSON.parse(args[0])), [
+      { event: "mcp_missing_scope", client_id_prefix: prefix },
+    ], "missing and unusual client IDs cannot add fields or print a full ID");
+  }
 });
