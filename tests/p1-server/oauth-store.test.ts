@@ -17,6 +17,10 @@ const rollbackUrl = new URL(
   "../../deploy/release-proofs/item-hm/20260928000003-rollback.sql",
   import.meta.url,
 );
+const dcrRollbackUrl = new URL(
+  "../../deploy/release-proofs/oauth-dcr/20261002000001-rollback.sql",
+  import.meta.url,
+);
 
 const migrationRole = "hm6_oauth_migration_test";
 const migrationVersion = "20260928000003";
@@ -315,10 +319,11 @@ async function rollbackAndAssertRemoved(
 }
 
 test("OAuth catalog is structural and all creator apply paths are safe", async () => {
-  const [migration, catalog, rollback] = await Promise.all([
+  const [migration, catalog, rollback, dcrRollback] = await Promise.all([
     readFile(migrationUrl, "utf8"),
     readFile(catalogUrl, "utf8"),
     readFile(rollbackUrl, "utf8"),
+    readFile(dcrRollbackUrl, "utf8"),
   ]);
   assert.doesNotMatch(
     catalog,
@@ -345,7 +350,20 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
 
   await superuserSql.begin(async (tx) => {
     const bootstrapSuperuser = await bootstrapSuperuserName(tx);
+    const [dcr] = await tx<{ present: boolean }[]>`
+      SELECT to_regclass('commonswarm_oauth.registered_clients') IS NOT NULL AS present
+    `;
+    assert.equal(dcr?.present, true, "reset also applied the later DCR migration");
     await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
+    await assert.rejects(
+      tx.savepoint(async (sp) => await rollbackAsMigrationOwner(sp, inverse)),
+      { code: "2BP01" },
+      "HM6 rollback refuses while later DCR storage depends on its schema",
+    );
+    // Roll back later schema additions in reverse order using their real inverse.
+    // The enclosing transaction restores the complete reset state at the end.
+    await tx.unsafe(dcrRollback);
+    await assertCatalogPasses(tx, proof, "HM6 catalog still passes after DCR rollback");
 
     await assertMigrationDatabaseGrant(
       tx,

@@ -190,8 +190,12 @@ jobs:
       - name: MCP auth suite
         if: ${{ !cancelled() && matrix.suite == 'server' }}
         run: |
-          set -o pipefail
+          set -euo pipefail
+          # Entrypoint fixtures use the macOS temporary root; Ubuntu lacks its parent.
+          # This only creates a sticky shared temp directory on the ephemeral runner.
+          sudo install -d -m 1777 /private/tmp
           npm ci --prefix services/mcp-auth --ignore-scripts --no-audit --no-fund 2>&1 | tee -a server.log
+          node services/mcp-auth/build-management.mjs 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth test 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth run test:postgres 2>&1 | tee -a server.log
       - name: p1-cli suite

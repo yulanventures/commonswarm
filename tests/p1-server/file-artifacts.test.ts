@@ -1857,7 +1857,8 @@ test("item L derived ids replay one live version and upsert-off Storage refuses 
   const duplicate = await fetch(upload, { method: "PUT", headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
   assert.equal(duplicate.status, 400);
   const duplicateBody = await duplicate.json() as Record<string, unknown>;
-  assert.deepEqual(duplicateBody, { statusCode: "409", error: "Duplicate", message: "The resource already exists" });
+  // Storage API v1.77.5 includes the named code alongside its legacy error field.
+  assert.deepEqual(duplicateBody, { statusCode: "409", code: "KeyAlreadyExists", error: "Duplicate", message: "The resource already exists" });
   const commitBody = { kind: "file_version_commit", file_id: fileId, version_id: versionId, sha256: digest };
   const commit = await postCommand(f.agentToken, commitBody, f.workspaceA, commitId);
   assert.equal(commit.status, 200, JSON.stringify(commit.body));
