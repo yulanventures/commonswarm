@@ -35,10 +35,10 @@ const SECRET_ROOT = globalThis[Symbol.for('commonswarm.admin-smoke.secret-root')
 const SECRET_WINDOW = new RegExp(`^${SECRET_ROOT.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}/anvil-secret\\.[A-Za-z0-9]+$`);
 
 function options(args) {
-  const out = { consentMs: 600_000, fenceMs: 240_000, requestMs: 10_000, totalMs: 900_000 };
+  const out = { consentMs: 1_500_000, fenceMs: 240_000, requestMs: 10_000, totalMs: 1_800_000 };
   const paths = { '--authorize-url-file': 'authorize', '--callback-file': 'callback', '--receipt-file': 'receipt', '--fence-file': 'fence' };
-  const times = { '--consent-timeout-ms': ['consentMs', 600_000], '--fence-timeout-ms': ['fenceMs', 240_000],
-    '--request-timeout-ms': ['requestMs', 10_000], '--total-timeout-ms': ['totalMs', 900_000] };
+  const times = { '--consent-timeout-ms': ['consentMs', 1_500_000], '--fence-timeout-ms': ['fenceMs', 240_000],
+    '--request-timeout-ms': ['requestMs', 10_000], '--total-timeout-ms': ['totalMs', 1_800_000] };
   const seen = new Set();
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]; demand(!seen.has(arg), 'duplicate_option'); seen.add(arg);
