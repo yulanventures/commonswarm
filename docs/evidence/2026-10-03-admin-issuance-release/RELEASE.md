@@ -52,7 +52,11 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | approval | `null` W1–W5; W6/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 authorizes activation and assigned human consent |
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
 
-`PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files;
+`PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
+Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
+and ai-live-controls runners, ai-recycle-install) reads the plan once as bytes,
+refuses a symlink or non-regular file and any sha256 other than INPUTS
+plan_sha256, and extracts only from those verified bytes;
 `BOX_ARCHIVE_PATH=/tmp/admin-issuance-<release_sha>-<window_id>.tar` is an
 uploaded 0600 tar, exact checksum, never overwritten. `RELEASE_ROOT` and
 `PROOF_DIR` are derived at open, not caller-selected. `LIVE_CONTROLS_FILE`
@@ -198,10 +202,16 @@ printf 'PASS ai-prepare: archive retained at %s; upload %s\n' "$PREP_DIR" "$BOX_
 # readonly: no
 # host: Mac /bin/bash 3.2, outside window; no execution
 set -euo pipefail
-: "${PLAN_FILE:?}" "${STEP_ID:?}" "${PREP_DIR:?}"
-python3 - "$PLAN_FILE" "$STEP_ID" "$PREP_DIR/step.sh" <<'PY'
-import pathlib,re,sys
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+: "${PLAN_FILE:?}" "${STEP_ID:?}" "${PREP_DIR:?}" "${INPUTS_FILE:?}"
+python3 - "$PLAN_FILE" "$STEP_ID" "$PREP_DIR/step.sh" "$INPUTS_FILE" <<'PY'
+import hashlib,json,pathlib,re,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(sys.argv[1],sys.argv[4],'ai-extract'),re.M|re.S)
 found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
 assert len(found)==1 and re.fullmatch('ai-[a-z0-9-]+',sys.argv[2]), 'FAIL extraction; STOP'
 pathlib.Path(sys.argv[3]).write_text(found[0])
@@ -373,9 +383,15 @@ BOX_ARCHIVE_PATH=/tmp/admin-issuance-${RELEASE_SHA}-${WINDOW_ID}.tar
 PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-${WINDOW}-${WINDOW_ID}
 RELEASE_ROOT=/home/commonswarm/admin-issuance/releases/$RELEASE_SHA
 case "$WINDOW" in W5|W6|W7)
-python3 - "$PLAN_FILE" <<'PY'
-import pathlib,re,subprocess,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-open <<'PY'
+import hashlib,json,pathlib,re,subprocess,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -551,9 +567,15 @@ test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
  case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile) ;; *) return 1;; esac
- python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" <<'PY'
-import pathlib,re,sys
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+ python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" "$INPUTS_FILE" <<'PY'
+import hashlib,json,pathlib,re,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': released RELEASE.md expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(sys.argv[1],sys.argv[4],'ai_run'),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: '+sys.argv[2]+'\n')]
 assert len(found)==1
 pathlib.Path(sys.argv[3]).write_text(found[0])
@@ -878,12 +900,18 @@ assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromis
 PY
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2-preflight <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -1274,12 +1302,18 @@ test "$WINDOW" = W3
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w3-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w3-preflight <<'PY' || { printf 'FAIL ai-w3-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -1452,12 +1486,18 @@ test "$WINDOW" = W4
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w4-preflight <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -1886,8 +1926,14 @@ test ! -L "$RECYCLE_DROPIN" || { printf 'FAIL ai-recycle-install: recycle drop-i
 mkdir -p /etc/commonswarm-admin-release /usr/local/libexec "$(dirname "$RECYCLE_DROPIN")"
 chmod 0700 /etc/commonswarm-admin-release
 python3 - "$PLAN_FILE" "$SECRET_STAGE/recycle.sh" "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
-import json,pathlib,re,sys
-plan=pathlib.Path(sys.argv[1]).read_text(); blocks=re.findall(r'^```sh\n(.*?)^```$',plan,re.M|re.S)
+import hashlib,json,pathlib,re,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+plan=verified_plan(sys.argv[1],sys.argv[3],'ai-recycle-install'); blocks=re.findall(r'^```sh\n(.*?)^```$',plan,re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-recycle-hook\n')]; assert len(found)==1
 pathlib.Path(sys.argv[2]).write_text('#!/bin/bash\n'+found[0])
 d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
@@ -1965,12 +2011,18 @@ W5_BEFORE=$PREP_DIR/w5-live-before
 test ! -e "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_BEFORE"
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" before yes <<'PY' || { printf 'FAIL ai-w5-preflight: W5 opening live controls expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" before yes ai-w5-preflight <<'PY' || { printf 'FAIL ai-w5-preflight: W5 opening live controls expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -1984,9 +2036,15 @@ set -euo pipefail
 : "${SITE_STEP:?}" "${SITE_RELEASE_REPO:?}" "${PREP_DIR:?}"
 if test "$SITE_STEP" = site2-01; then
  export EDGE_RECEIPT_REMOTE=1
-python3 - "$PLAN_FILE" <<'PY'
-import pathlib,re,subprocess,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w5-reference <<'PY'
+import hashlib,json,pathlib,re,subprocess,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -2049,12 +2107,18 @@ test "$W5_WINDOW" = W5 || { printf 'FAIL ai-w5-closed: INPUTS window expected W5
 W5_BEFORE=$PREP_DIR/w5-live-before
 test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected ordinary-before.json got missing; STOP\n' >&2; exit 1; }
 test -f "$W5_BEFORE/consent-pre-W1.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$W5_BEFORE/ordinary-before.json" "$W5_BEFORE/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w5-closed: retained W5 opening receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$W5_BEFORE/ordinary-before.json" "$W5_BEFORE/consent-pre-W1.json" before no ai-w5-closed <<'PY' || { printf 'FAIL ai-w5-closed: retained W5 opening receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -2062,12 +2126,18 @@ W5_LIVE=$PREP_DIR/w5-live-controls
 test ! -e "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_LIVE"
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_LIVE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" after yes <<'PY' || { printf 'FAIL ai-w5-closed: W5 forward-close live controls expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_LIVE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" after yes ai-w5-closed <<'PY' || { printf 'FAIL ai-w5-closed: W5 forward-close live controls expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
@@ -2188,9 +2258,15 @@ PY
 set -euo pipefail
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
-python3 - "$PLAN_FILE" <<'PY'
-import pathlib,re,subprocess,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w6-activation-checks <<'PY'
+import hashlib,json,pathlib,re,subprocess,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -2249,9 +2325,15 @@ assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.
 PY
 test "$WINDOW" = W6
 ai_run ai-w6-readiness
-python3 - "$PLAN_FILE" <<'PY'
-import pathlib,re,subprocess,sys
-blocks=re.findall(r'^```sh\n(.*?)^```$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-w6-activation-apply <<'PY'
+import hashlib,json,pathlib,re,subprocess,sys
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]; assert len(found)==1
 subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
@@ -2953,12 +3035,18 @@ case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; reco
 case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
 case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
 test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
-import os,pathlib,re,subprocess,sys
-plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no ai-close <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def verified_plan(name,inputs,step):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    raw=p.read_bytes() if ok else b''
+    if not ok or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('digest-mismatch' if ok else 'missing-or-not-regular')+'; STOP')
+    return raw.decode()
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY

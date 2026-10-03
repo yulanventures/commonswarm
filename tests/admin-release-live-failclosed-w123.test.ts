@@ -179,7 +179,7 @@ function fixture(config: Record<string, unknown> = {}) {
     if (producer !== null) put('release/scripts/live-ordinary-controls.mjs', producer);
     const made = spawnSync(python, ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[2]+"/"+m,arcname=m) for m in sys.argv[3:]]', archive, join(root, 'release'), ...members], { encoding: 'utf8' });
     assert.equal(made.status, 0, made.stderr); chmodSync(archive, 0o600);
-    if (bindInputs) put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, archive_sha256: digest(readFileSync(archive)) });
+    if (bindInputs) put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(plan) });
   }
   buildArchive(producerSource);
   // A valid opening pair, as ai-open retains it.
@@ -323,7 +323,7 @@ function openGood(window: string, phase: 'pre-W1' | 'post-W5') {
 // ai-live-controls reads the producer from the release archive, re-verified against archive_sha256.
 function liveRun(window: string, phase: string, consent: Json | string, change: Json = {}, retained?: string) {
   const f = fixture(), text = typeof consent === 'string' ? consent : JSON.stringify(consent);
-  f.put('consent.json', text); f.put('inputs.json', { release_sha: sha, window_id: 'fixture', window, archive_sha256: digest(readFileSync(f.archive)) });
+  f.put('consent.json', text); f.put('inputs.json', { release_sha: sha, window_id: 'fixture', window, archive_sha256: digest(readFileSync(f.archive)), plan_sha256: digest(plan) });
   f.put('controls.json', liveReceipt(window, 'fixture', phase, text, change));
   for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) unlinkSync(join(f.proof, name));
   if (retained !== undefined) f.put('proof/'+retained.split('\n')[0], retained.split('\n').slice(1).join('\n'));
@@ -473,6 +473,20 @@ test('ordinary-paths-unchanged / retained-receipts-revalidated: W3 preflight re-
     'FAIL ai-live-controls: consent_phase for W3 before expected pre-W1 got post-W5; STOP');
   bad(f => { const other = join(f.root, 'elsewhere.json'); writeFileSync(other, readFileSync(join(f.proof, 'ordinary-before.json'))); unlinkSync(join(f.proof, 'ordinary-before.json')); symlinkSync(other, join(f.proof, 'ordinary-before.json')); },
     'FAIL ai-live-controls: LIVE_CONTROLS_FILE expected absolute-regular-file got missing-or-not-regular; STOP');
+});
+test('release-plan-contract / verified-plan-runner: W3 preflight runs ai-live-controls only from plan bytes bound to INPUTS plan_sha256', () => {
+  const good = fixture(); pass(good.run(['ai-w3-preflight']));
+  const noOp = join(scratch, 'noop-RELEASE.md');
+  writeFileSync(noOp, plan.split('# step: ai-live-controls\n').join('# step: ai-live-controls\nexit 0\n'));
+  const linked = join(scratch, 'linked-RELEASE.md'); if (!existsSync(linked)) symlinkSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), linked);
+  for (const [planFile, got] of [[noOp, 'digest-mismatch'], [linked, 'missing-or-not-regular']] as const) {
+    // A receipt the real validator refuses: a no-op validator would let it through.
+    const f = fixture(); f.put('proof/ordinary-before.json', '{}');
+    const r = f.run(['ai-w3-preflight'], 'W3', { PLAN_FILE: planFile });
+    stopped(r, `FAIL ai-w3-preflight: PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got ${got}; STOP`);
+    stopped(r, 'FAIL ai-w3-preflight: retained before receipts expected valid got refused; STOP');
+    assert.doesNotMatch(r.stdout, /PASS live authenticated/); assert.ok(!r.calls.some(c => c[0] === 'cp' || c[0] === 'docker'));
+  }
 });
 test('ordinary-paths-unchanged / open-receipts-retained: W3 preflight refuses without the retained pre-W1 consent copy', () => {
   const good = fixture(); pass(good.run(['ai-w3-preflight']));

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -18,11 +18,19 @@ const block = (id: string) => {
   assert.equal(matches.length, 1, `one complete ${id} block`);
   return matches[0]!;
 };
+// Inputs binding the in-repository plan bytes, for blocks that run ai_run.
+const releasedPlanInputs = (dir: string) => { const file = join(dir, 'released-plan-inputs.json'); writeFileSync(file, JSON.stringify({ plan_sha256: digest(plan) })); return file; };
 const run = (source: string, env: Record<string, string> = {}) => spawnSync('/bin/bash', [], {
   input: source, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 10_000,
 });
 // Nonsecret fixtures are retained under the task's temporary root; no HOME change/deletion.
 const scratch = mkdtempSync(join(tmpdir(), 'admin-plan-contract-'));
+// Valid-looking substituted plans: the executed validators become no-ops (digest differs).
+const substitutedPlan = join(scratch, 'substituted-RELEASE.md');
+writeFileSync(substitutedPlan, plan.split('# step: ai-edge-receipt\n').join('# step: ai-edge-receipt\nexit 0\n')
+  .split('# step: ai-live-controls\n').join('# step: ai-live-controls\nexit 0\n').split('# step: ai-gates\n').join('# step: ai-gates\nexit 0\n'));
+const linkedPlan = join(scratch, 'linked-RELEASE.md'); symlinkSync(planPath, linkedPlan);
+const planRefusal = (step: string, label: string, got: string) => `FAIL ${step}: ${label} expected absolute-regular-file-with-input-plan_sha256 got ${got}; STOP`;
 const receiptFile = join(scratch, 'receipt.json');
 writeFileSync(receiptFile, '{}\n');
 const sha = 'a'.repeat(40), hex = 'b'.repeat(64);
@@ -337,7 +345,9 @@ urllib.request.build_opener=lambda *args: Opener()
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
   const harness = `export VERSION\nai_deadline() { :; }\nai_ro() { python3 '${root}/db.py' read "$@"; }\nai_db() { python3 '${root}/db.py' apply "$@"; }\nai_run() {\n${dispatcher}\n`;
-  const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha,
+  // ai_run extracts only from plan bytes whose sha256 equals INPUTS plan_sha256.
+  const planInputs = join(root, 'plan-inputs.json'); writeFileSync(planInputs, JSON.stringify({ plan_sha256: digest(readFileSync(planCopy)) }));
+  const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha, INPUTS_FILE: planInputs,
     PYTHONPATH: shims, PATH: '/Users/yulanbot/.local/bin:' + process.env.PATH };
   return { proof, stage, env, harness, migrations, old,
     clean: () => removeStage(stage) };
@@ -458,7 +468,7 @@ esac
     return run(harness + guard + '\nsystemctl stop "$EDGE_RECYCLE_TIMER"\n' + body, {
       PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer',
       TIMER_STATE: state, TIMER_CALLS: calls, TIMER_RECOVERY_FAIL: fail ? '1' : '0',
-      RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+      RELEASE_ROOT: resolve('.'), SECRET_STAGE: root, INPUTS_FILE: releasedPlanInputs(root),
     });
   };
   for (const [body, status] of [[':', 0], ['false', 1], ['exit 42', 42], ['kill -INT "$$"', 130], ['kill -TERM "$$"', 143]] as const) {
@@ -508,7 +518,7 @@ esac
       const result = run(harness + body, {
         PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer', EDGE_RECYCLE_SERVICE: 'fixture.service',
         TIMER_STATE: state, TIMER_CALLS: calls, FAIL_STOP: failStop ? '1' : '0',
-        RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+        RELEASE_ROOT: resolve('.'), SECRET_STAGE: root, INPUTS_FILE: releasedPlanInputs(root),
       });
       assert.notEqual(result.status, 0, result.stderr);
       assert.equal(readFileSync(state, 'utf8'), 'active', source.split('\n')[0]);
@@ -972,6 +982,15 @@ subprocess.check_output = observe
       assert.doesNotMatch(negative.stdout, /ADMITTED/, `${name} operated after refusal`);
       assert.ok(readFileSync(queries,'utf8').trim(), `${name} refusal must use a fresh observation`);
     }
+    // The edge-receipt runner executes only verified plan bytes: a substituted or symlinked plan stops first.
+    writeFileSync(receipt, JSON.stringify(current));
+    for (const [planFile, got] of [[substitutedPlan, 'digest-mismatch'], [linkedPlan, 'missing-or-not-regular']] as const) {
+      writeFileSync(queries, '');
+      const refused = run(harness+block(step), { ...env, PLAN_FILE: planFile });
+      assert.notEqual(refused.status, 0, `${name} ran plan text from ${planFile}`);
+      assert.ok(refused.stderr.includes(planRefusal(step, 'PLAN_FILE', got)), `${name}: ${refused.stderr}`);
+      assert.doesNotMatch(refused.stdout + refused.stderr, /ADMITTED/); assert.equal(readFileSync(queries,'utf8'), '', `${name} read the box after refusal`);
+    }
   }
   // A current-looking receipt is refused when the hook invalidated the box row.
   writeFileSync(receipt, JSON.stringify(current));
@@ -1029,4 +1048,33 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
     'hold the generation row lock from receipt comparison through activation UPDATE');
   assert.match(sql, /AND release_generation=15 AND measured_generation=release_generation AND invalidated_at IS NULL/,
     'a completed recycle after the receipt was read must refuse the final activation transaction');
+});
+
+test('admin release plan: ai-extract and ai_run extract only from plan bytes bound to INPUTS plan_sha256', () => {
+  const prep = mkdtempSync(join(scratch, 'extract-')), inputs = inputFile(base());
+  const extract = (planFile: string) => run(block('ai-extract'), { PLAN_FILE: planFile, STEP_ID: 'ai-gates', PREP_DIR: prep, INPUTS_FILE: inputs });
+  const good = extract(planPath); assert.equal(good.status, 0, good.stderr);
+  assert.equal(readFileSync(join(prep, 'step.sh'), 'utf8'), block('ai-gates')); rmSync(join(prep, 'step.sh'));
+  for (const [planFile, got] of [[substitutedPlan, 'digest-mismatch'], [linkedPlan, 'missing-or-not-regular']] as const) {
+    const refused = extract(planFile); assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes(planRefusal('ai-extract', 'PLAN_FILE', got)), refused.stderr);
+    assert.ok(!existsSync(join(prep, 'step.sh')), 'no extracted step after refusal');
+  }
+  // ai_run (ai-db-session) reads the released plan copy; it must match the same digest.
+  const session = block('ai-db-session'), dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
+  const stage = mkdtempSync(join(scratch, 'airun-')), released = mkdtempSync(join(scratch, 'released-'));
+  const releasedPlan = join(released, 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
+  mkdirSync(dirname(releasedPlan), { recursive: true });
+  const callGates = () => run(dispatcher + 'ai_run ai-gates\n', { RELEASE_ROOT: released, SECRET_STAGE: stage, INPUTS_FILE: inputs });
+  writeFileSync(releasedPlan, readFileSync(substitutedPlan));
+  let r = callGates(); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'digest-mismatch')), r.stderr);
+  assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')), 'substituted step never written or sourced');
+  rmSync(releasedPlan); symlinkSync(planPath, releasedPlan);
+  r = callGates(); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'missing-or-not-regular')), r.stderr);
+  assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')));
+  // Positive control: verified bytes are extracted (the real ai-gates then runs and refuses for missing receipts).
+  rmSync(releasedPlan); writeFileSync(releasedPlan, plan);
+  r = callGates(); assert.equal(readFileSync(join(stage, 'step-ai-gates.sh'), 'utf8'), block('ai-gates'));
 });

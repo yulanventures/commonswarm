@@ -210,7 +210,7 @@ function fixture(config: Record<string, unknown> = {}) {
   const goodClose = `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${hash(manifest)}\n`;
   put('site/CLOSE.txt', goodClose);
   const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: baseline, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
-    baseline_caddyfile_sha256: '', archive_sha256: '' };
+    baseline_caddyfile_sha256: '', archive_sha256: '', plan_sha256: hash(readFileSync(planPath)) };
   put('authorization.json', { approver: 'HezLead', release_sha: sha, task_ref: 'fixture-qa', browser: 'headless-bundled-chromium' });
   put('fixture.json', { sha, baseline, image, client, producer: producerSource, ...config });
   // W5 forward close inputs: post-W5 consent and the window's phase-after live receipt.
@@ -596,6 +596,13 @@ test('ordinary-paths-unchanged / w5-opening-live-controls: ai-w5-preflight refus
     f.put('live-before.json', { ...liveReceipt('before', pre), window: 'W2' });
     const out = f.run(['ai-w5-preflight']); refusedOpen(f, out, 'FAIL ai-w5-preflight: INPUTS window expected W5 got other; STOP');
     assert.ok(!existsSync(join(f.root, 'prep-open/w5-live-before')), 'no staging for a non-W5 receipt'); }
+  // The W5 Mac runner executes ai-live-controls only from plan bytes bound to INPUTS plan_sha256.
+  { const noOp = join(scratch, 'noop-RELEASE.md'); writeFileSync(noOp, readFileSync(planPath, 'utf8').split('# step: ai-live-controls\n').join('# step: ai-live-controls\nexit 0\n'));
+    const linked = join(scratch, 'linked-RELEASE.md'); if (!existsSync(linked)) symlinkSync(planPath, linked);
+    for (const [planFile, got] of [[noOp, 'digest-mismatch'], [linked, 'missing-or-not-regular']] as const) {
+      const f = fixture(); f.put('live-before.json', '{}');
+      refusedOpen(f, f.run(['ai-w5-preflight'], { PLAN_FILE: planFile }), `FAIL ai-w5-preflight: PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got ${got}; STOP`);
+    } }
   // The prepared archive is re-verified at the opening too.
   { const f = fixture(); f.put('prep-open/release.tar', 'not the verified archive');
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP'); }
