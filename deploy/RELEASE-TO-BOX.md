@@ -27,6 +27,16 @@ input SHA and rollback decision, and reads the evidence. **CSwarmDevLead** gets
 the reviewed SHA onto `main` and supplies migration catalog checks and function
 verification requests. No other seat deploys. CI never deploys.
 
+Before an OAuth authorization-service or MCP edge release, the server suite
+must be green at the exact reviewed release SHA. This includes the HTTP
+OAuth/MCP contract in
+`services/mcp-auth/test-postgres/oauth-mcp-contract.test.js`, named in the
+literal `test:postgres` list and run by the server workflow's MCP auth step.
+It drives both CIMD and RFC 7591 clients through discovery, sign-in, consent,
+PKCE token exchange, and the actual Deno MCP handler's initialize/tools/list.
+A result from another SHA, a skipped test, or only the service-free auth tests
+does not satisfy this release gate. HezLead authorizes any needed Actions run.
+
 H0 was the first live use of this procedure on 2026-09-23. Its operator findings
 are incorporated below.
 
