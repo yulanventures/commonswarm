@@ -1,0 +1,10 @@
+{
+  "client_id": "https://commonswarm.com/oauth/c1-smoke/client.json",
+  "redirect_uris": ["https://commonswarm.com/oauth/c1-smoke/callback"],
+  "client_name": "CommonSwarm C1 smoke test client",
+  "application_type": "web",
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "dpop_signing_alg": "ES256"
+}
