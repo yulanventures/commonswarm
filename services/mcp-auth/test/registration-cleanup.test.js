@@ -37,15 +37,17 @@ async function harness(t, { enabled = true, unavailable = false } = {}) {
     queueMicrotask(callback);
     return this;
   });
-  t.mock.timers.enable({ apis: ["setInterval"] });
-  const scheduledInterval = globalThis.setInterval;
+  // Own only this scheduler boundary. Node 22's MockTimers warning is emitted
+  // asynchronously through console.error and contaminates the privacy assertion.
+  const activeIntervals = new Map();
   t.mock.method(globalThis, "setInterval", (callback, delay) => {
-    const timer = scheduledInterval(callback, delay);
-    // MockTimers implements unref as a no-op; observe the real scheduler's call.
-    const unref = t.mock.method(timer, "unref");
+    const unref = t.mock.fn();
+    const timer = { unref };
+    activeIntervals.set(timer, callback);
     intervals.push({ unref, delay });
     return timer;
   });
+  t.mock.method(globalThis, "clearInterval", (timer) => activeIntervals.delete(timer));
   const config = {
     publicAuthorizationEnabled: enabled, issuer: ISSUER, database: {},
     allowedOrigins: new Set([ISSUER]), gotrueUrl: "https://auth.example.test",
@@ -58,11 +60,15 @@ async function harness(t, { enabled = true, unavailable = false } = {}) {
   });
   t.after(async () => {
     running.server.emit("close");
+    assert.equal(activeIntervals.size, 0, "server close cancels hourly cleanup");
     await running.pool.end();
   });
   return { ...running, logs, queries, clients, intervals,
     recover: () => { down = false; },
-    async tick() { t.mock.timers.tick(HOUR); await nextTurn(); },
+    async tick() {
+      for (const callback of activeIntervals.values()) callback();
+      await nextTurn();
+    },
   };
 }
 

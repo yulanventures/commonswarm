@@ -33,7 +33,8 @@ after(async () => {
 
 async function cleanup(grantId) {
   await admin.query("DELETE FROM commonswarm_oauth.provider_artifacts WHERE grant_id = $1", [grantId]);
-  await admin.query("DELETE FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1", [grantId]);
+  // Unique test families retain their immutable tombstones until the disposable
+  // CI database is destroyed. Cleanup must never undo a durable replay fence.
 }
 
 test("two independent connections permit exactly one refresh consume and the winner rotates", async () => {
@@ -224,9 +225,6 @@ test("runtime role has only OAuth DML and client roles have no artifact access",
       "DELETE FROM commonswarm_oauth.provider_artifacts WHERE model = 'Session' AND artifact_id_hash = $1",
       [artifactHash],
     );
-    await admin.query(
-      "DELETE FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id = $1",
-      [tombstoneGrant],
-    );
+    // The privilege probe's tombstone INSERT was rolled back above.
   }
 });

@@ -5,11 +5,11 @@
  *                                               supabase/functions/command/index.ts:823
  *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :699
  *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :700
- *   fixed clock hour, not rolling           -> incrementRateBucket, :5393 uses
+ *   fixed clock hour, not rolling           -> incrementRateBucket, :5381 uses
  *                                              date_trunc('hour', statement_timestamp())
  *   body 1-8000                             -> supabase/migrations/20260827000001_expand_signal_body.sql
- *   about <= 500                            -> index.ts:2138-2141
- *   until <= 30d                            -> index.ts:2145-2148 (SIGNAL_MAX_UNTIL_MS)
+ *   about <= 500                            -> index.ts:2126-2129
+ *   until <= 30d                            -> index.ts:2133-2136 (SIGNAL_MAX_UNTIL_MS)
  *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :684
  *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :689
  *   file version <= 25 MB                   -> FILE_MAX_VERSION_BYTES,

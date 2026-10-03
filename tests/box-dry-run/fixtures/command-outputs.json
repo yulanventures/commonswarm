@@ -29,6 +29,6 @@
   },
   "browser_profile": {
     "source": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json:637-659",
-    "output": {"user_data_dir":"/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome","password_store":"basic","signed_in_account_label":"Ridgeio"}
+    "output": {"user_data_dir":{"evidence":"docs/evidence/2026-09-29-box-facts/box-facts-measured.json","path":"k4.items[id=K4-9].recorded_web_session.user_data_dir"},"password_store":"basic","signed_in_account_label":"Ridgeio"}
   }
 }

@@ -6,12 +6,44 @@ import {
   DISABLED_FUNCTION_NAMES,
   FUNCTION_ENV_NAMES,
   FUNCTION_NAMES,
+  handleGatewayRequest,
+  rewriteFunctionRequest,
   MCP_ENV_NAMES,
   resolveFunctionRoute,
   resolveGatewayRequest,
 } from "../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
+
+test("admin public and internal ingress reach one worker; unknown names never invoke it", async () => {
+  const invoked: string[] = [];
+  for (const path of ["/admin", "/functions/v1/admin", "/admin/.well-known/oauth-protected-resource",
+    "/functions/v1/admin/.well-known/oauth-protected-resource"]) {
+    const expectedPath = path.replace(/^\/functions\/v1/u, "");
+    const request = new Request(`https://api.commonswarm.com${path}?trace=1`, {
+      method: "POST", headers: { dpop: "proof", authorization: "DPoP credential" }, body: "payload",
+    });
+    const result = await handleGatewayRequest(request, false, async (route, original) => {
+      assert.equal(route.functionName, "admin");
+      const forwarded = rewriteFunctionRequest(original, route.pathname);
+      assert.equal(new URL(forwarded.url).pathname, expectedPath);
+      assert.equal(new URL(forwarded.url).search, "?trace=1");
+      assert.equal(forwarded.method, "POST");
+      assert.equal(forwarded.headers.get("dpop"), "proof");
+      assert.equal(forwarded.headers.get("authorization"), "DPoP credential");
+      assert.equal(await forwarded.text(), "payload");
+      invoked.push(route.functionName);
+      return new Response("admin worker");
+    });
+    assert.equal(await result.text(), "admin worker");
+  }
+  assert.equal(invoked.length, 4);
+  for (const path of ["/administrator", "/unknown", "/functions/v1/unknown"]) {
+    const result = await handleGatewayRequest(new Request(`https://api.commonswarm.com${path}`), false,
+      async () => assert.fail("unknown name invoked a worker"));
+    assert.equal(result.status, 404);
+  }
+});
 
 async function source(path: string): Promise<string> {
   return await readFile(resolve(repoRoot, path), "utf8");
@@ -25,6 +57,7 @@ test("HM7 keeps MCP dark in the main router until explicitly enabled", async () 
     "activity",
     "h0",
     "mcp",
+    "admin",
   ]);
   assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
   assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);

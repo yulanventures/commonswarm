@@ -1,6 +1,7 @@
 // No stack or runtime network permission. Exercise the production HTTP handlers;
 // Deno.serve is captured only to avoid opening a listener during imports.
 import assert from 'node:assert/strict';
+import { securityReasons } from './admin-boundary-db.mjs';
 Deno.env.set('SWARM_ENV', 'test');
 Deno.env.set('SWARM_DATABASE_URL', 'postgres://fixture:fixture@127.0.0.1:1/fixture');
 Deno.env.set('SUPABASE_URL', 'http://127.0.0.1:1');
@@ -72,7 +73,7 @@ assert.equal(smoke.status, 403);
 assert.match(smoke.headers.get('content-type'), /^application\/json\b/u);
 assert.deepEqual(await smoke.json(), { error: 'credential_kind_forbidden' });
 for (const token of tokens) {
-  assert.equal((await command(request('/command', token))).status, 403, 'malformed input cannot select an admin account path');
+  assert.equal((await command(request('/command', token))).status, 401, 'retired or Bearer admin cannot select account authority');
   assert.equal((await h0(request('/h0/register', worker, 'POST', JSON.stringify({
     joinCredential: token, attemptId: workspace, name: 'fixture',
   })))).status, 401, 'H0 refuses an admin credential in the registration body before forwarding');
@@ -95,8 +96,8 @@ for (const token of tokens) {
     const response = await command(request('/command', token, method,
       JSON.stringify({ command_id: crypto.randomUUID(), workspace_id: workspace, stream: { kind: 'workspace' },
         command: { kind: 'post_signal', body: 'fixture' } })));
-    assert.equal(response.status, 403, 'worker command rejects admin');
-    assert.deepEqual(await response.json(), { error: 'credential_kind_forbidden' });
+    assert.equal(response.status, 401, 'worker command rejects Bearer admin');
+    assert.deepEqual(await response.json(), { error: 'unauthenticated' });
     assert.equal((await activity(request('/activity', token, method))).status, 401, 'activity foreign credential');
     assert.equal((await capability(request('/capability', token, method))).status, 404, 'capability uniform refusal');
     const hosted = await mcp(request('/mcp', token, method));
@@ -108,5 +109,17 @@ for (const token of tokens) {
     }
   }
 }
+assert.equal(securityReasons.length, tokens.length * 3, 'every anonymous command refusal charges only the bounded security helper');
 assert.equal(authCalls, 0, 'admin never reaches GoTrue, JWKS, or a forwarded request');
+for (const token of tokens) {
+  for (const handler of [read, activity, capability, mcp, h0]) {
+    const req = request('/read',token);req.headers.set('authorization',`DPoP ${token}`);
+    const response = await handler(req);
+    if (handler === read) {
+      assert.equal(response.status,403,'DPoP admin is classified before method/body handling');
+      assert.deepEqual(await response.json(),{error:'credential_kind_forbidden'});
+    } else assert.ok(response.status>=400,'DPoP admin stays outside ordinary authority');
+  }
+}
+assert.equal(authCalls,0,'both admin schemes refused without GoTrue at ordinary surfaces');
 console.log('ADMIN_WORKER_BOUNDARY_OK');

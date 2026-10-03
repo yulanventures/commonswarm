@@ -1,3 +1,9 @@
+import { Pool } from "pg";
+import { adminQuery, adminTransactionContext, withAdminRole } from "./admin-transaction.js";
+import { createAdminHttpHandler } from "./admin-http.js";
+import { oauthErrorResponse } from "./admin-oauth-error.js";
+import { createAdminGateHandler } from "./admin-gate.js";
+import { AdminTokenLifecycle } from "./admin-lifecycle.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
@@ -9,6 +15,8 @@ import { createConsentOrchestrator, createPostgresConsentProgress } from "./cons
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
+import { createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
+import { createAdminInteractionHandler, createResourceInteractionHandler } from "./admin-interactions.js";
 import { createLogger, logProviderError, subscribeProviderErrors } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
 import { createPostgresAdapter } from "./postgres-adapter.js";
@@ -41,6 +49,8 @@ function rejectOversizedRequest(request, response) {
 }
 
 function clientErrorResponse(error) {
+  const oauth = oauthErrorResponse(error);
+  if (oauth) return oauth;
   if (!(error instanceof ClientError) && !(error instanceof InteractionStateError)) return null;
   return {
     status: error.status,
@@ -49,7 +59,7 @@ function clientErrorResponse(error) {
 }
 
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
-  interactionHandler }) {
+  interactionHandler, adminGateHandler = createAdminGateHandler({}) }) {
   subscribeProviderErrors(provider, logger);
   const oidc = provider.callback();
   return async function handle(request, response) {
@@ -59,6 +69,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
     response.setHeader("x-request-id", requestId);
     response.setHeader("cache-control", "no-store");
     try {
+      if (path === "/admin/gate") return await adminGateHandler(request, response);
       const contentLength = Number(request.headers["content-length"] ?? 0);
       if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxBodyBytes) {
         rejectOversizedRequest(request, response);
@@ -123,6 +134,9 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
 
 export function createProductionFindAccount(pool) {
   return async function findAccount(ctx, accountId, source) {
+    const admin = (adminTransactionContext(false)?.token ?? adminTransactionContext(false)?.continuation);
+    if (admin) return admin.binding.owner_user_id === accountId
+      ? { accountId, claims: async () => ({ sub: accountId }) } : undefined;
     const refreshGrantId = ctx?.oidc?.params?.grant_type === "refresh_token" &&
       typeof source?.grantId === "string" ? source.grantId : null;
     if (refreshGrantId !== null) {
@@ -164,7 +178,15 @@ export async function startServer({
       (typeof managementCommand !== "function" || typeof managementWorkspaceReader !== "function")) {
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
   }
-  const pool = createPool(config);
+  const runtimePool = createPool(config);
+  const issuerPool = config.adminIssuer ? new Pool({ ...config.database,
+    user: config.adminIssuer.user, password: config.adminIssuer.password,
+    application_name: "commonswarm-admin-issuer", connectionTimeoutMillis: 2000 }) : null;
+  const pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : runtimePool.query(...args),
+    connect: () => adminTransactionContext(false)
+      ? Promise.resolve({ query: adminQuery, release() {} }) : runtimePool.connect(),
+    end: async () => { await issuerPool?.end(); await runtimePool.end(); } };
+  const adminLifecycle = new AdminTokenLifecycle({ activeKid: config.activeSigningKid });
   let registrationStore;
   if (config.publicAuthorizationEnabled) {
     registrationStore = createPostgresRegistrationStore(pool);
@@ -173,6 +195,7 @@ export async function startServer({
   const metadataFetch = createPostgresCimdFetch(pool, createPinnedMetadataFetch());
   const provider = await createMcpProvider({
     adapter: createPostgresAdapter(pool),
+    activeSigningKid: config.activeSigningKid,
     ...(registrationStore ? { registrationStore } : {}),
     registrationEnabled: config.publicAuthorizationEnabled,
     cookieKeys: config.cookieKeys,
@@ -182,7 +205,16 @@ export async function startServer({
     refreshTokenTtlSeconds: config.refreshTokenTtlSeconds,
     nativeLoopbackEnabled: config.nativeLoopbackEnabled,
     metadataFetch,
+    providerGrantResource: async grantId => {
+      if (adminTransactionContext(false)) {
+        return (await adminQuery(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
+          WHERE provider_grant_id=$1`, [grantId])).rows[0]?.resource;
+      }
+      return (await pool.query(`SELECT resource FROM commonswarm_oauth.resolve_hosted_grant_status($1)`,[grantId])).rows[0]?.resource;
+    },
     providerGrantActive: async (grantId) => {
+      const unit = (adminTransactionContext(false)?.token ?? adminTransactionContext(false)?.continuation);
+      if (unit) return unit.binding.provider_grant_id === grantId;
       const result = await pool.query(
         `SELECT active
            FROM commonswarm_oauth.resolve_hosted_grant_status($1)
@@ -211,7 +243,7 @@ export async function startServer({
     findAccount: createProductionFindAccount(pool),
   });
   const logger = createLogger(writeLog);
-  const interactionHandler = config.publicAuthorizationEnabled
+  const mcpHandler = config.publicAuthorizationEnabled
     ? createInteractionHandler({
         provider,
         store: new InteractionStore(pool),
@@ -231,7 +263,32 @@ export async function startServer({
         bodyReadTimeoutMs: config.requestTimeoutMs,
       })
     : undefined;
-  const server = createServer(createHandler({ provider, pool, logger, interactionHandler, ...config }));
+  const interactionHandler = mcpHandler ? createResourceInteractionHandler({
+    mcpHandler,
+    adminHandler: createAdminInteractionHandler({
+      provider, store: new InteractionStore(pool),
+      service: createAdminConsentService({ store: new PostgresAdminConsentStore(pool), provider,
+        completeInTransaction: (...args) => adminLifecycle.completeConsent(...args) }),
+      gotrue: createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
+        provider: config.gotrueProvider }),
+      workspaceReader: async identity => {
+        if (!adminTransactionContext(false)) return managementWorkspaceReader(identity);
+        return withAdminRole("swarm_command", async () => (await adminQuery(`SELECT w.workspace_id AS id,w.name
+          FROM swarm.workspaces w JOIN swarm.memberships m USING(workspace_id)
+          WHERE m.user_id=$1 AND m.revoked_at IS NULL AND w.archived_at IS NULL ORDER BY w.name,w.workspace_id`,
+          [identity.userId])).rows);
+      }, allowedOrigins: config.allowedOrigins,
+      callbackUrl: `${config.issuer}/oauth/callback/gotrue`,
+      maxBodyBytes: config.maxBodyBytes, bodyReadTimeoutMs: config.requestTimeoutMs,
+    }),
+  }) : undefined;
+  const handler = createHandler({ provider, pool, logger, interactionHandler,
+    adminGateHandler: createAdminGateHandler({ issuerPool, adminIssuanceEnabled: config.adminIssuanceEnabled }), ...config });
+  const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool,
+    activeKid: config.activeSigningKid, adminIssuanceEnabled: config.adminIssuanceEnabled, logger });
+  const server = createServer((request, response) =>
+    request.url?.split("?", 1)[0] === "/admin/gate"
+      ? handler(request, response) : ingress(request, response));
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);
   server.maxHeadersCount = 64;
