@@ -28,7 +28,13 @@ function planFiles(): string[] {
   const design = readdirSync("docs/design", { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
     .map((entry) => join("docs/design", entry.name));
-  return [...evidence, ...design].sort();
+  const reusable = [
+    "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md",
+    "docs/evidence/2026-10-02-edge-mcp-release/RELEASE.md",
+    "docs/evidence/2026-10-02-site-release/SITE-RELEASE.md",
+    "docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md",
+  ];
+  return [...evidence, ...design, ...reusable].sort();
 }
 
 function extractShellBlocks(file: string, markdown: string): ShellBlock[] {

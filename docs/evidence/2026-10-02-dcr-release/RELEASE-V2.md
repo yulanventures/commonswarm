@@ -48,13 +48,15 @@ exact path/message and leave the file.
 | Input | Source / validation | Use |
 | --- | --- | --- |
 | RELEASE_SHA | HezLead; full reviewed landed main SHA including V2 and DCR | Exact archive/image source |
+| DCR_REVIEWED_CODE_SHA | HezLead; 40 lowercase hex reviewed implementation commit | Archive requires ancestry and no unreviewed code delta in the existing scoped paths |
+| EXPECTED_SCHEMA_MIGRATIONS | HezLead; nonempty comma-separated unique 14-digit applied versions | dcr-preflight reads the box migration catalog and compares the exact set |
 | DCR_PLAN_FILE | Absolute exact-release RELEASE-V2.md path, byte-checked against git | Marked extraction |
 | OAUTH_PLAN_FILE | Absolute exact-release 2026-10-02-mcp-auth-release/RELEASE.md | Unchanged reference extraction |
 | GATE_EVIDENCE_FILE | Regular nonsecret receipt: SHA=RELEASE_SHA, DCR release shell/Python: PASS, release-proof-format: PASS, OAuth DCR tests: PASS | Parsed by dcr-archive before execution |
 | WINDOW_END_UTC | Fresh HezLead future UTC timestamp, <=30 minutes | Preflight and OAuth forward deadline |
-| BASELINE_OAUTH_SHA | **00e8973892f8ab43e6ddb81882e612dac51ca0bb**, re-measured by HezLead | Checked running ON source/recovery |
-| BASELINE_OAUTH_IMAGE | **sha256:09a8f6c0d8d85fb5f0e6880eec440dd329374e9c8cfc98df805c1359827d71f1**, re-measured by HezLead | Checked running image/recovery |
-| DCR_BASELINE_EDGE_SHA | Measured once from canonical edge/current | Preserve existing edge source |
+| EXPECTED_OAUTH_SHA | HezLead's latest measured live ON report; required full 40 lowercase hex | Checked running ON source/recovery |
+| EXPECTED_OAUTH_IMAGE_DIGEST | Same measured report; required sha256 + 64 lowercase hex, no tag | Checked running image/recovery |
+| EXPECTED_EDGE_SHA | HezLead; required 40 lowercase hex | Preflight/open compare running edge source label and canonical current target; preserve edge source |
 | MAX_MCP_OUTAGE_SECONDS | **240**, fixed: 180 forward + 60 reserved recovery | Includes any second recovery interruption |
 | CADDY_FORWARD_SECONDS | **30**, fixed share of 180s | Validate/reload/OFF route probes |
 | TOM_ENABLE_APPROVAL | Named HezLead prompt input 2026-09-29 | Existing switch-on authorization |
@@ -68,7 +70,7 @@ exact path/message and leave the file.
 
 ## Run order
 
-1. **Read-only preflight:** dcr-archive on Mac; dcr-transport invokes dcr-stage,
+1. **Read-only preflight:** dcr-plan-inputs then dcr-archive on Mac; dcr-transport invokes dcr-stage,
    dcr-session, dcr-preflight on root. Require migration 20261002000001 ledger=1,
    forward=t, rollback=f. Save full ledger and cron inventory. No DDL, backup,
    stack release, or schema mutation. STOP on any disagreement.
@@ -124,12 +126,28 @@ The already-applied additive schema stays; it has no inverse execution here.
 After marked recovery closes OAuth, run dcr-transport dcr-check-cleanup,
 reference hm37-oauth-mac-close and dcr-mac-close. Keep both stages if recovery
 is OFF or unverified. Preflight cleanup is a task-file cleanup, not a schema
-window close. Baseline 00e89738 remains compatible with the additive table.
+window close. Historical baseline 00e89738 was compatible with the additive
+table; the current baseline is supplied and checked, never inferred here.
 server.js composes createPostgresRegistrationStore(pool) with the existing
 createPool, database-credentials and CA: **no new registration secret, env
 input name or 1Password item**. Schema presence is mandatory before new startup.
 
 ## 1. Read-only applied-schema preflight
+
+```sh
+# step: dcr-plan-inputs
+# readonly: yes
+# host: Mac /bin/bash 3.2 before archive; schema input forwarded by transport
+set -euo pipefail
+python3 - "${DCR_REVIEWED_CODE_SHA:-}" "${EXPECTED_SCHEMA_MIGRATIONS:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid DCR_REVIEWED_CODE_SHA; STOP')
+value=sys.argv[2]
+if not re.fullmatch(r'[0-9]{14}(,[0-9]{14})*',value) or len(value.split(','))!=len(set(value.split(','))):
+    raise SystemExit('FAIL: invalid EXPECTED_SCHEMA_MIGRATIONS; STOP')
+PYINPUT
+export DCR_REVIEWED_CODE_SHA EXPECTED_SCHEMA_MIGRATIONS
+```
 
 ```sh
 # step: dcr-archive
@@ -145,8 +163,12 @@ git remote get-url origin | python3 -c 'import sys; assert sys.stdin.read().stri
 git fetch origin main
 test "$(git rev-parse "${RELEASE_SHA}^{commit}")" = "$RELEASE_SHA"
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-git merge-base --is-ancestor 5f9e9225 "$RELEASE_SHA"
-git diff --quiet 12accef57c3ba8c798d900430e41e89294319209 "$RELEASE_SHA" -- services/mcp-auth deploy/mcp-auth supabase/functions src supabase/migrations deploy/release-proofs/oauth-dcr deploy/supabase-stack/commonswarm-mcp.caddy
+python3 - "${DCR_REVIEWED_CODE_SHA:-}" <<'PYCODE'
+import re,sys
+assert re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]), 'FAIL: invalid DCR_REVIEWED_CODE_SHA; STOP'
+PYCODE
+git merge-base --is-ancestor "$DCR_REVIEWED_CODE_SHA" "$RELEASE_SHA"
+git diff --quiet "$DCR_REVIEWED_CODE_SHA" "$RELEASE_SHA" -- services/mcp-auth deploy/mcp-auth supabase/functions src supabase/migrations deploy/release-proofs/oauth-dcr deploy/supabase-stack/commonswarm-mcp.caddy
 python3 - "$DCR_PLAN_FILE" "$OAUTH_PLAN_FILE" "$GATE_EVIDENCE_FILE" "$RELEASE_SHA" <<'PYCODE'
 import pathlib,subprocess,sys
 for value,relative in zip(sys.argv[1:3],['docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md','docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md']):
@@ -196,8 +218,8 @@ found=[b for b in blocks if b.splitlines()[0]=='# step: '+sys.argv[2]]
 assert len(found)==1, 'FAIL dcr-transport: duplicate/missing step'
 print(found[0])
 PYCODE
-printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q' \
- "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$WINDOW_END_UTC"
+printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q %q' \
+ "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$WINDOW_END_UTC" "${EXPECTED_SCHEMA_MIGRATIONS:?FAIL: EXPECTED_SCHEMA_MIGRATIONS missing; STOP}"
 ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE_COMMAND" <"$DCR_ARCHIVE_DIR/box-step.sh"
 ```
 
@@ -209,6 +231,12 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE_COMMAND" <"
 set -euo pipefail
 trap 'echo "FAIL dcr-stage: line $LINENO; services/schema untouched; STOP" >&2' ERR
 RELEASE_SHA=${1:?}; DCR_WINDOW_ID=${2:?}; DCR_BOX_ARCHIVE_PATH=${3:?}; DCR_ARCHIVE_SHA256=${4:?}; WINDOW_END_UTC=${5:?}
+EXPECTED_SCHEMA_MIGRATIONS=${6:?FAIL: EXPECTED_SCHEMA_MIGRATIONS missing; STOP}
+python3 - "$EXPECTED_SCHEMA_MIGRATIONS" <<'PYINPUT'
+import re,sys
+value=sys.argv[1]
+assert re.fullmatch(r'[0-9]{14}(,[0-9]{14})*',value) and len(value.split(','))==len(set(value.split(','))), 'FAIL: invalid EXPECTED_SCHEMA_MIGRATIONS; STOP'
+PYINPUT
 test "$(id -u)" = 0
 python3 - "$RELEASE_SHA" "$DCR_WINDOW_ID" "$DCR_BOX_ARCHIVE_PATH" "$DCR_ARCHIVE_SHA256" "$WINDOW_END_UTC" <<'PYCODE'
 import datetime,pathlib,re,sys
@@ -246,7 +274,7 @@ for suffix in ['catalog.sql','rollback-catalog.sql']:
 print('PASS dcr-stage: exact archive and read-only catalog proofs; release symlinks untouched')
 PYCODE
 {
- for name in RELEASE_SHA DCR_WINDOW_ID DCR_BOX_ARCHIVE_PATH DCR_ARCHIVE_SHA256 WINDOW_END_UTC PROOF_DIR DCR_SOURCE_DIR; do printf '%s=%q\n' "$name" "${!name}"; done
+ for name in EXPECTED_SCHEMA_MIGRATIONS RELEASE_SHA DCR_WINDOW_ID DCR_BOX_ARCHIVE_PATH DCR_ARCHIVE_SHA256 WINDOW_END_UTC PROOF_DIR DCR_SOURCE_DIR; do printf '%s=%q\n' "$name" "${!name}"; done
 } >"$PROOF_DIR/state.sh"
 chmod 0600 "$PROOF_DIR/state.sh"
 ```
@@ -364,6 +392,19 @@ release_psql_ro -q --file "$PROOF_DIR/identity.sql"
 test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
 
 release_psql_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/applied-before.txt"
+python3 - "${EXPECTED_SCHEMA_MIGRATIONS:-}" "$PROOF_DIR/applied-before.txt" <<'PYSCHEMA'
+import pathlib,re,sys
+value=sys.argv[1]
+if not re.fullmatch(r'[0-9]{14}(,[0-9]{14})*',value) or len(value.split(','))!=len(set(value.split(','))):
+    raise SystemExit('FAIL: invalid EXPECTED_SCHEMA_MIGRATIONS; STOP')
+expected=set(value.split(',')); rows=pathlib.Path(sys.argv[2]).read_text().splitlines()
+if any(not re.fullmatch(r'[0-9]{14}',row) for row in rows) or len(rows)!=len(set(rows)):
+    raise SystemExit('FAIL: invalid observed EXPECTED_SCHEMA_MIGRATIONS catalog; STOP')
+observed=set(rows)
+if expected!=observed:
+    raise SystemExit('FAIL: EXPECTED_SCHEMA_MIGRATIONS expected='+','.join(sorted(expected))+' observed='+','.join(sorted(observed))+'; STOP')
+print('PASS: EXPECTED_SCHEMA_MIGRATIONS exact applied set matched')
+PYSCHEMA
 test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
 test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
@@ -377,7 +418,7 @@ printf '20261002000001 ledger=1 catalog=t rollback=f; read-only\n' >"$PROOF_DIR/
 ## 2. OAUTH SERVICE RELEASE from ON
 
 The adapted baseline/preflight/open/enable blocks retain the existing procedure:
-require ON; measure edge source instead of eb2a87ac; use curl/8.7.1 only with
+require ON; check supplied edge identity (the historical template pinned eb2a87ac); use curl/8.7.1 only with
 status-only JSON receipts; keep Caddy active and byte-identical while both
 flags enforce OFF; Caddy routes are installed before enable; enforce the 240s
 receipt. Other blocks are referenced
@@ -391,10 +432,54 @@ baseline/preflight/open/enable alongside these. Snapshot recovery is preserved.
 set -euo pipefail
 : "${RELEASE_SHA:?}" "${DCR_WINDOW_ID:?}" "${WINDOW_END_UTC:?}"
 OAUTH_RELEASE_SHA=$RELEASE_SHA
-BASELINE_OAUTH_SHA=00e8973892f8ab43e6ddb81882e612dac51ca0bb
-BASELINE_OAUTH_IMAGE=sha256:09a8f6c0d8d85fb5f0e6880eec440dd329374e9c8cfc98df805c1359827d71f1
+: "${EXPECTED_OAUTH_SHA:?FAIL: measured OAuth baseline SHA missing}"
+: "${EXPECTED_OAUTH_IMAGE_DIGEST:?FAIL: measured OAuth baseline image missing}"
+dcr_expected_baselines() {
+python3 - "${1:-check}" "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "${EXPECTED_EDGE_SHA:-}" <<'PYBASELINE'
+import json,pathlib,re,subprocess,sys
+mode=sys.argv[1]
+assert mode in ('validate','check'), 'FAIL: baseline check mode; STOP'
+fields=['EXPECTED_OAUTH_SHA', 'EXPECTED_OAUTH_IMAGE_DIGEST', 'EXPECTED_EDGE_SHA']
+values=dict(zip(fields,sys.argv[2:]))
+for field,value in values.items():
+    pattern=r'sha256:[0-9a-f]{64}' if field.endswith('_IMAGE_DIGEST') else r'[0-9a-f]{40}'
+    if not re.fullmatch(pattern,value): raise SystemExit('FAIL: invalid '+field+'; STOP')
+if mode=='validate': raise SystemExit(0)
+def equal(field,observed):
+    expected=values[field]
+    if observed!=expected:
+        raise SystemExit(f'FAIL: {field} expected={expected} observed={observed}; STOP')
+def inspect(service):
+    return json.loads(subprocess.check_output(['docker','inspect',service],stderr=subprocess.DEVNULL))[0]
+def current(surface):
+    p=pathlib.Path('/home/commonswarm/'+surface+'/current')
+    field='EXPECTED_'+surface.upper()+'_SHA'
+    try: release=p.resolve(strict=True)
+    except OSError: equal(field,'missing current target')
+    if not p.is_symlink() or release.parent!=pathlib.Path('/home/commonswarm/'+surface+'/releases'):
+        equal(field,'invalid current release path')
+    return release.name
+if 'EXPECTED_EDGE_SHA' in values:
+    data=inspect('commonswarm-edge-edge-runtime-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/edge/releases/([0-9a-f]{40})/deploy/edge-runtime',work)
+    equal('EXPECTED_EDGE_SHA',match[1] if match else 'invalid edge source label')
+    equal('EXPECTED_EDGE_SHA',current('edge'))
+    equal('EXPECTED_EDGE_SHA',(pathlib.Path('/home/commonswarm/edge/releases')/values['EXPECTED_EDGE_SHA']/'RELEASE_SHA').read_text().strip())
+if 'EXPECTED_OAUTH_SHA' in values:
+    data=inspect('commonswarm-oauth-oauth-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/oauth/releases/([0-9a-f]{40})/deploy/mcp-auth',work)
+    equal('EXPECTED_OAUTH_SHA',match[1] if match else 'invalid OAuth source label')
+    equal('EXPECTED_OAUTH_SHA',current('oauth'))
+    equal('EXPECTED_OAUTH_SHA',(pathlib.Path('/home/commonswarm/oauth/releases')/values['EXPECTED_OAUTH_SHA']/'RELEASE_SHA').read_text().strip())
+    equal('EXPECTED_OAUTH_IMAGE_DIGEST',data['Image'])
+print('PASS: expected live baseline identities matched')
+PYBASELINE
+}
+dcr_expected_baselines validate
 MAX_MCP_OUTAGE_SECONDS=240
-export OAUTH_RELEASE_SHA MAX_MCP_OUTAGE_SECONDS
+export OAUTH_RELEASE_SHA EXPECTED_OAUTH_SHA EXPECTED_OAUTH_IMAGE_DIGEST EXPECTED_EDGE_SHA MAX_MCP_OUTAGE_SECONDS
 python3 - "$WINDOW_END_UTC" <<'PYCODE'
 import datetime,sys
 end=datetime.datetime.strptime(sys.argv[1],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
@@ -522,10 +607,8 @@ test ! -e "$DCR_PROOF/closed.txt" && test -f "$DCR_PROOF/preflight.txt"
 test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20261002000001';")" = 1
 printf '\\i /proof/20261002000001-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' >"$READBACK_SQL"
 test "$(release_psql_ro -Atq --file "$READBACK_SQL")" = t
-DCR_BASELINE_EDGE_SHA=$(basename "$(readlink -f /home/commonswarm/edge/current)")
-case "$DCR_BASELINE_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
-test "${#DCR_BASELINE_EDGE_SHA}" = 40
-export DCR_PROOF DCR_BASELINE_EDGE_SHA
+dcr_expected_baselines check
+export DCR_PROOF EXPECTED_EDGE_SHA
 BASELINE_MCP_MODE=$(hm37_baseline_mode) || exit 1
 test "$BASELINE_MCP_MODE" = on
 MCP_EXPECTED_MODE=$BASELINE_MCP_MODE
@@ -597,6 +680,7 @@ esac
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-preflight line $LINENO" >&2' ERR
 : "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+dcr_expected_baselines check
 MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-preflight REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
 MCP_EXPECTED_MODE=$MODE
@@ -607,14 +691,14 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$MODE" "$DCR_BASELINE_EDGE_SHA" <<'PY'
+python3 - "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "$MODE" "$EXPECTED_EDGE_SHA" <<'PY'
 import json, pathlib, posixpath, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-preflight REQ {number}: {description}; STOP")
 baseline_sha,baseline_image,mode,edge_sha=sys.argv[1:]
 assert re.fullmatch(r"[0-9a-f]{40}",edge_sha)
-require(re.fullmatch(r"[0-9a-f]{40}",baseline_sha),1,"BASELINE_OAUTH_SHA must be 40 lowercase hex")
-require(re.fullmatch(r"sha256:[0-9a-f]{64}",baseline_image),2,"BASELINE_OAUTH_IMAGE must be an immutable image ID")
+require(re.fullmatch(r"[0-9a-f]{40}",baseline_sha),1,"EXPECTED_OAUTH_SHA must be 40 lowercase hex")
+require(re.fullmatch(r"sha256:[0-9a-f]{64}",baseline_image),2,"EXPECTED_OAUTH_IMAGE_DIGEST must be an immutable image ID")
 def inspect(name):
     return json.loads(subprocess.check_output(['docker','inspect',name], text=True))[0]
 for name, project, service, sha in [
@@ -632,10 +716,10 @@ for name, project, service, sha in [
         require(work.is_absolute() and work.parts[-2:]==('deploy','mcp-auth'),3,'baseline Compose working_dir is an OAuth release path')
         release=work.parent.parent
         require(release.parent==root/'releases' and release.is_dir() and release.resolve(strict=True)==release,4,'baseline release directory is canonical')
-        require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,5,'running OAuth source equals BASELINE_OAUTH_SHA')
+        require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,5,'running OAuth source equals EXPECTED_OAUTH_SHA')
         require((root/'current').is_symlink() and (root/'current').exists() and (root/'current').resolve(strict=True)==release,6,'OAuth current symlink equals measured release directory')
         require(labels.get('com.docker.compose.project.config_files')==str(work/'compose.yaml')+(','+str(work/'compose.management.yaml') if mode=='on' else '') and (work/'compose.yaml').is_file(),7,'baseline Compose label selects its existing base Compose file')
-        require(data['Image']==baseline_image,8,'running OAuth image equals BASELINE_OAUTH_IMAGE')
+        require(data['Image']==baseline_image,8,'running OAuth image equals EXPECTED_OAUTH_IMAGE_DIGEST')
     else:
         release=(root/'current').resolve(strict=True)
         assert release==root/'releases'/sha and (release/'RELEASE_SHA').read_text().strip()==sha
@@ -684,6 +768,7 @@ PY
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-open line $LINENO" >&2' ERR
 : "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+dcr_expected_baselines check
 MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
 MCP_EXPECTED_MODE=$MODE
@@ -699,14 +784,14 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$OAUTH_RELEASE_SHA" "$MODE" <<'PY'
+python3 - "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "$OAUTH_RELEASE_SHA" "$MODE" <<'PY'
 import json, pathlib, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-open REQ {number}: {description}; STOP")
 sha,image,new_sha,mode=sys.argv[1:]
-require(re.fullmatch(r'[0-9a-f]{40}',sha),1,'BASELINE_OAUTH_SHA must be 40 lowercase hex')
-require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),2,'BASELINE_OAUTH_IMAGE must be an immutable image ID')
-require(new_sha!=sha,3,'OAUTH_RELEASE_SHA must differ from BASELINE_OAUTH_SHA; preserve baseline proofs')
+require(re.fullmatch(r'[0-9a-f]{40}',sha),1,'EXPECTED_OAUTH_SHA must be 40 lowercase hex')
+require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),2,'EXPECTED_OAUTH_IMAGE_DIGEST must be an immutable image ID')
+require(new_sha!=sha,3,'OAUTH_RELEASE_SHA must differ from EXPECTED_OAUTH_SHA; preserve baseline proofs')
 data=json.loads(subprocess.check_output(['docker','inspect','commonswarm-oauth-oauth-1'],text=True))[0]
 labels=data['Config']['Labels']
 require(labels.get('com.docker.compose.project')=='commonswarm-oauth' and labels.get('com.docker.compose.service')=='oauth',4,'running container is the OAuth Compose service')
@@ -714,12 +799,12 @@ work=pathlib.Path(labels.get('com.docker.compose.project.working_dir',''))
 require(work.is_absolute() and work.parts[-2:]==('deploy','mcp-auth'),5,'baseline Compose working_dir is an OAuth release path')
 release=work.parent.parent
 require(release.parent==pathlib.Path('/home/commonswarm/oauth/releases') and release.is_dir() and release.resolve(strict=True)==release,6,'baseline release directory is canonical')
-require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,7,'running OAuth source equals BASELINE_OAUTH_SHA')
+require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,7,'running OAuth source equals EXPECTED_OAUTH_SHA')
 current=pathlib.Path('/home/commonswarm/oauth/current')
 require(current.is_symlink() and current.exists() and current.resolve(strict=True)==release,8,'OAuth current symlink equals measured release directory')
 compose=work/'compose.yaml'
 require(labels.get('com.docker.compose.project.config_files')==str(compose)+(','+str(work/'compose.management.yaml') if mode=='on' else '') and compose.is_file(),9,'baseline Compose label selects its existing base Compose file')
-require(data['Image']==image,10,'running OAuth image equals BASELINE_OAUTH_IMAGE')
+require(data['Image']==image,10,'running OAuth image equals EXPECTED_OAUTH_IMAGE_DIGEST')
 env=dict(x.split('=',1) for x in data['Config']['Env'])
 require(data['State']['Health']['Status']=='healthy' and env.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0')==('1' if mode=='on' else '0'),11,'baseline OAuth is healthy in checked MODE')
 PY
@@ -786,15 +871,15 @@ MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 23: MODE drift during snapshot; STOP' >&2; exit 1; }
 printf '%s\n' "$BASELINE_MCP_MODE" >"$PROOF_DIR/baseline-mcp-mode"
 EDGE_DIR=$(readlink -f /home/commonswarm/edge/current) || exit 1
-test "$EDGE_DIR" = "/home/commonswarm/edge/releases/$DCR_BASELINE_EDGE_SHA"
+test "$EDGE_DIR" = "/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA"
 sha256sum /etc/caddy/Caddyfile >"$DCR_PROOF/apex-before.sha256"
 cp "$SECRET_STAGE/mcp.caddy" "$DCR_PROOF/mcp-before.caddy"
 chmod 0600 "$DCR_PROOF/mcp-before.caddy"
 sha256sum "$DCR_PROOF/mcp-before.caddy" >"$DCR_PROOF/mcp-before.sha256"
 STATE=$PROOF_DIR/hm37-window.sh
 umask 077
-printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%q\nBASELINE_OAUTH_SHA=%q\nBASELINE_OAUTH_IMAGE=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
-  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" \
+printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%q\nEXPECTED_OAUTH_SHA=%q\nEXPECTED_OAUTH_IMAGE_DIGEST=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
+  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$EXPECTED_OAUTH_SHA" "$EXPECTED_OAUTH_IMAGE_DIGEST" \
   "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" "$EDGE_DIR" >"$STATE"
 cat >>"$STATE" <<'SH'
 dcr_run_step() {
@@ -927,18 +1012,18 @@ rollback_to_off() {
 }
 baseline_rollback_off() {
   local OAUTH_RELEASE_DIR="$BASELINE_OAUTH_DIR"
-python3 - "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY' || return 1
+python3 - "$EXPECTED_OAUTH_SHA" "$EXPECTED_OAUTH_IMAGE_DIGEST" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY' || return 1
 import pathlib, re, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-rollback REQ {number}: {description}; STOP")
 sha,image,directory,compose=sys.argv[1:]; release=pathlib.Path(directory); file=pathlib.Path(compose)
 require(re.fullmatch(r'[0-9a-f]{40}',sha) and re.fullmatch(r'sha256:[0-9a-f]{64}',image),1,'saved baseline inputs have valid immutable identities')
-require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains BASELINE_OAUTH_SHA')
+require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains EXPECTED_OAUTH_SHA')
 require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved measured baseline Compose file exists in that release')
 PY
-  docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" rollback_to_off compose.baseline.off.env || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" rollback_to_off compose.baseline.off.env || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   test -L /home/commonswarm/oauth/current || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
   MCP_EXPECTED_MODE=off mcp_route_probes || return 1
@@ -957,11 +1042,11 @@ restore_baseline_on() {
     cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
     cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
   test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose config --quiet || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose config --quiet || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
@@ -1031,7 +1116,7 @@ SH
 printf 'DCR_PROOF=%q\nMAX_MCP_OUTAGE_SECONDS=240\nWINDOW_END_UTC=%q\n' "$DCR_PROOF" "$WINDOW_END_UTC" >>"$STATE"
 declare -f hm37_baseline_mode mcp_route_probes >>"$STATE"
 . "$STATE"
-prepare_off_inputs "$BASELINE_OAUTH_IMAGE" || { echo 'FAIL hm37-oauth-open REQ 24: OFF inputs could not be prepared; baseline unchanged; STOP' >&2; exit 1; }
+prepare_off_inputs "$EXPECTED_OAUTH_IMAGE_DIGEST" || { echo 'FAIL hm37-oauth-open REQ 24: OFF inputs could not be prepared; baseline unchanged; STOP' >&2; exit 1; }
 cp "$SECRET_STAGE/compose.env" "$SECRET_STAGE/compose.baseline.off.env" || exit 1
 caddy_sites_import || exit 1
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
@@ -1648,7 +1733,7 @@ set -euo pipefail
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 test "$(hm37_baseline_mode)" = on
 test "$(readlink -f /home/commonswarm/oauth/current)" = "$BASELINE_OAUTH_DIR"
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE"
+test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
 for pair in 'service.env /etc/commonswarm-oauth/service.env' 'compose.env /etc/commonswarm-oauth/compose.env' 'edge.env /home/commonswarm/.env' 'mcp.caddy /etc/caddy/sites/20-commonswarm-mcp.caddy' 'management.baseline /etc/commonswarm-oauth/management-database-credentials'; do
  read -r saved live <<<"$pair"
  cmp -s "$SECRET_STAGE/$saved" "$live"
@@ -1782,8 +1867,8 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
 if test -n "${OAUTH_RELEASE_SHA:-}" && test -n "${DCR_PROOF:-}"; then
  test ! -f "/home/commonswarm/oauth/release-proofs/$OAUTH_RELEASE_SHA/open-ready.txt"
  test "$(hm37_baseline_mode)" = on
- test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$BASELINE_OAUTH_SHA"
- test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE"
+ test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$EXPECTED_OAUTH_SHA"
+ test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST"
  MCP_EXPECTED_MODE=on mcp_route_probes
 fi
 python3 - "$SECRET_STAGE" <<'PYCODE'
