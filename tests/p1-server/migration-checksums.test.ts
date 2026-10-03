@@ -56,6 +56,7 @@ RESET ROLE;
 ${['commonswarm_oauth_runtime','swarm_command'].map(role => `SET LOCAL ROLE ${role};
 ${dbAssert(`SELECT count(*)=0 FROM ${call}`,`${role} full required set positive`)}
 ${refuses('SELECT * FROM supabase_migrations.schema_migrations','42501')}
+${refuses('SELECT * FROM commonswarm_ops.migration_ledger_versions()','42501')}
 ${refuses(`UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations='{}'`,'42501')}
 -- No caller-selected version subset or expected digest API remains.
 ${refuses(`SELECT * FROM commonswarm_ops.migration_checksum_failures('[{"version":"${version}","sha256":"${'a'.repeat(64)}"}]'::jsonb)`,'42883')}
@@ -99,6 +100,10 @@ ${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source
 ${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('29991003000005',repeat('a',64),'expected',repeat('b',40))`,'23514')}
 ${refuses(`INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES('29991003000005',repeat('a',64),'release','BAD')`,'23514')}
 RESET ROLE;
+${catalog('20261003000004')}
+GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_ledger_versions() TO commonswarm_oauth_runtime;
+${catalog('20261003000004',false,false)}
+REVOKE EXECUTE ON FUNCTION commonswarm_ops.migration_ledger_versions() FROM commonswarm_oauth_runtime;
 ${catalog('20261003000004')}
 GRANT UPDATE ON commonswarm_ops.migration_checksums TO commonswarm_oauth_runtime;
 ${catalog('20261003000004',false,false)}

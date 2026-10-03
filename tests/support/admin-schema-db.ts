@@ -10,6 +10,10 @@ export const migrationNames = [
   '20261003000002_admin_oauth_policy.sql',
   '20261003000003_admin_oauth_cutover.sql',
 ] as const;
+export const checksumGateVersion = '20261003000004';
+export const checksumGateMigrationName = '20261003000004_migration_checksums.sql';
+export const schemaVersions = [...versions, checksumGateVersion] as const;
+export const schemaMigrationNames = [...migrationNames, checksumGateMigrationName] as const;
 export function repoSql(path: string): string {
   return readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 }
@@ -146,13 +150,13 @@ END $capture$;
 /** Exact reviewed activation set, including the migration that installs the gate. */
 export const checksumVersions = [
   '20261001000001', '20261001000002', '20261001000003', '20261001000004', '20261001000005',
-  '20260928000003', '20261002000001', ...versions, '20261003000004',
+  '20260928000003', '20261002000001', ...schemaVersions,
 ] as const;
 const checksumMigrationNames = [
   '20261001000001_admin_delegation.sql', '20261001000002_admin_routine.sql',
   '20261001000003_admin_recovery_read.sql', '20261001000004_admin_worker_read_fence.sql',
   '20261001000005_admin_routine_workspace_history.sql', '20260928000003_hm_oauth_store.sql',
-  '20261002000001_oauth_registered_clients.sql', ...migrationNames, '20261003000004_migration_checksums.sql',
+  '20261002000001_oauth_registered_clients.sql', ...schemaMigrationNames,
 ] as const;
 const reviewedChecksums = checksumMigrationNames.map((name, i) => [checksumVersions[i]!,
   createHash('sha256').update(repoSql(`supabase/migrations/${name}`)).digest('hex')]);

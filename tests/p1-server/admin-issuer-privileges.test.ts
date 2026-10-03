@@ -84,11 +84,35 @@ test('admin-issuer-privileges: enumerate reachable roles, options, ownership and
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
 ${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}
-SET LOCAL ROLE commonswarm_admin_issuer;
+-- SET ROLE checks the session user, not a previously selected current_user.
+-- Use the cluster admin only to establish the real issuer session identity.
+SET LOCAL SESSION AUTHORIZATION commonswarm_admin_issuer;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'issuer session identity positive')}
 ${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+SET LOCAL ROLE commonswarm_oauth_runtime;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='commonswarm_oauth_runtime'", 'issuer can select OAuth parent')}
+SELECT * FROM commonswarm_oauth.provider_artifacts;
+RESET ROLE;
 SET LOCAL ROLE swarm_command;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user='swarm_command'", 'issuer can select command parent')}
 SELECT * FROM swarm.admin_accounts;
 RESET ROLE;
+DO $role_denials$
+DECLARE target text; tested integer := 0;
+BEGIN
+  FOR target IN SELECT rolname FROM pg_roles WHERE rolname NOT IN
+    ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command') LOOP
+    BEGIN
+      EXECUTE format('SET LOCAL ROLE %I',target);
+      RAISE EXCEPTION 'issuer admitted unexpected role: %',target USING ERRCODE='ZX001';
+    EXCEPTION WHEN insufficient_privilege THEN tested := tested + 1;
+    END;
+  END LOOP;
+  IF tested=0 THEN RAISE EXCEPTION 'no other roles tested'; END IF;
+END $role_denials$;
+${dbAssert("SELECT session_user='commonswarm_admin_issuer' AND current_user=session_user", 'role denials retain issuer identity')}
+${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+RESET SESSION AUTHORIZATION;
 ${catalog('20261003000002')}
 GRANT SELECT ON swarm.admin_accounts TO commonswarm_admin_issuer;
 ${catalog('20261003000002',false,false)}

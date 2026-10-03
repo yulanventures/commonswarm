@@ -49,8 +49,22 @@ CREATE TRIGGER migration_checksums_append_only BEFORE UPDATE OR DELETE ON common
 -- distinct from the independently recorded release/backfill checksum evidence.
 -- Include this gate migration itself: its installed function is insufficient
 -- without proof that M4 was applied and recorded at the reviewed checksum.
-GRANT USAGE ON SCHEMA supabase_migrations TO swarm_admin;
-GRANT SELECT ON supabase_migrations.schema_migrations TO swarm_admin;
+-- The release session (deploy/RELEASE-TO-BOX.md, runbook-17/27) already
+-- reads/writes the live ledger. It need not own it or hold GRANT OPTION.
+-- Keep this narrow reader owned by that applying principal, rather than
+-- granting ledger access to swarm_admin or any application runtime.
+DO $ledger_reader$ BEGIN
+  IF NOT has_schema_privilege(current_user,'supabase_migrations','USAGE')
+    OR NOT has_table_privilege(current_user,'supabase_migrations.schema_migrations','SELECT') THEN
+    RAISE EXCEPTION 'migration principal must be able to read the live ledger' USING ERRCODE='42501';
+  END IF;
+END $ledger_reader$;
+CREATE FUNCTION commonswarm_ops.migration_ledger_versions() RETURNS TABLE(version text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+  SELECT l.version::text FROM supabase_migrations.schema_migrations l;
+$fn$;
+REVOKE ALL ON FUNCTION commonswarm_ops.migration_ledger_versions() FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release;
+GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_ledger_versions() TO swarm_admin;
 CREATE FUNCTION commonswarm_ops.migration_checksum_failures()
 RETURNS TABLE(version text,required_sha256 text,recorded_sha256 text,reason text)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
@@ -69,7 +83,7 @@ BEGIN
     FROM required r
     LEFT JOIN expected e ON true
     LEFT JOIN commonswarm_ops.migration_checksums c ON c.version=r.version
-    LEFT JOIN supabase_migrations.schema_migrations l ON l.version=r.version
+    LEFT JOIN commonswarm_ops.migration_ledger_versions() l ON l.version=r.version
     WHERE l.version IS NULL OR c.version IS NULL
       OR e.required_migrations->>r.version IS NULL
       OR c.sha256 IS DISTINCT FROM e.required_migrations->>r.version
@@ -89,6 +103,7 @@ GRANT EXECUTE ON FUNCTION commonswarm_ops.migration_checksum_failures() TO commo
 -- END $reserve$;
 -- DROP TABLE commonswarm_ops.migration_checksums;
 -- DROP FUNCTION commonswarm_ops.migration_checksum_failures();
+-- DROP FUNCTION commonswarm_ops.migration_ledger_versions();
 -- DROP FUNCTION commonswarm_ops.guard_migration_checksums();
 -- REVOKE USAGE ON SCHEMA commonswarm_ops FROM commonswarm_admin_release,commonswarm_oauth_runtime,swarm_command;
--- -- Retain the possibly pre-existing schema and owner's migration-ledger read ACL.
+-- -- Retain the possibly pre-existing schema and all pre-existing migration-ledger ACLs.
