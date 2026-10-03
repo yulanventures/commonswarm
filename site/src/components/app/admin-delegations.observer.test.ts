@@ -8,6 +8,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { build } from "esbuild";
+import { fixture, policy } from "./admin-delegations.fixture.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 test("admin account view keeps hostile labels inert and reuses an uncertain revoke request", { skip: process.platform === "darwin", timeout: 90000 }, async () => {
@@ -22,29 +23,38 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
   const signOut = await bundleScript('import { client } from "../../lib/commonswarm"; void client()!.auth.signOut({ scope: "local" });');
   const id = "11111111-1111-4111-8111-111111111111", time = new Date(Date.now() + 86400000).toISOString();
   const user = { id, aud: "authenticated", role: "authenticated", email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: time };
-  const grant = { grant_id: id, admin_identity_id: id, connection_id: id, client_id: '<img src=x onerror="window.injected=true">',
-    mode: "full_account", scope_names: ["admin:read", "workspaces:create"], workspace_selector: "owned_and_selected", workspace_ids: [], withdrawn_workspace_ids: [],
-    created_at: "2026-10-01T00:00:00.000Z", expires_at: time, reason_code: null };
-  const action = { seq: "1", event_id: id, occurred_at_server: "2026-10-01T00:00:00.000Z", grant_id: id, admin_identity_id: id, actor_user: null,
-    action: "admin_prepare_connection", target_kind: "connection", target_id: id, workspace_id: null, outcome: "refused", reason_code: "human_confirmation_required",
-    next_action: "Ask the granting person to review this connection.", recovery_kind: "human", related_event_ids: [] };
+  const grant = fixture.grants[0]!, action = fixture.actions[0]!;
   // Mock only the HTTP boundary. The component, auth client and revoke helper are real.
   const setup = `<script>
-    const user = ${JSON.stringify(user)}, grant = ${JSON.stringify(grant)}, action = ${JSON.stringify(action)};
-    let revoked = false;
+    const user = ${JSON.stringify(user)}, grant = ${JSON.stringify(grant)}, action = ${JSON.stringify(action)}, fixture = ${JSON.stringify(fixture)};
+    let revoked = false, approvalWithdrawn = false, metadataChanged = false, reapproved = false, foreignProjection = false;
+    window.adminFixtureChangeMetadata = () => { metadataChanged = true; };
+    window.adminFixtureForeignProjection = () => { foreignProjection = true; };
     const requests = [];
     window.fetch = async (input, init) => {
       const request = new Request(input, init);
       if (request.url.endsWith("/auth/v1/user")) return Response.json(user);
       if (request.url.includes("/auth/v1/logout")) return new Response(null, { status: 204 });
+      if (request.url === "https://mcp.commonswarm.com/admin/gate") return Response.json({ state: "closed" });
       if (!request.url.startsWith("https://api.test.invalid/functions/v1/")) throw new Error("Unexpected fixture request");
       const body = await request.json();
       if (request.url.endsWith("/command")) {
         requests.push(body);
-        if (requests.length === 1) return Response.json({ error: "internal_error" }, { status: 502 });
-        revoked = true; return Response.json({ status: "accepted", events: [] });
+        if (body.command.kind === "revoke_admin_delegation") {
+          if (requests.length === 1) return Response.json({ error: "internal_error" }, { status: 502 });
+          revoked = true;
+        } else if (body.command.kind === "withdraw_admin_client_approval") { approvalWithdrawn = true; revoked = true; }
+        else if (body.command.kind === "approve_admin_client") { reapproved = true; }
+        else throw new Error("Unexpected command kind");
+        return Response.json({ status: "accepted", events: [] });
       }
-      return Response.json({ grants: body.resource === "admin_grants" ? [{ ...grant, state: revoked ? "revoked" : "active" }] : [],
+      const visibleClient = metadataChanged ? { ...fixture.clients[0], verification_version: 3, reapproval_required: !reapproved,
+        approval: reapproved ? { ...fixture.clients[0].approval, verification_version: 3 } : null } :
+        { ...fixture.clients[0], approval: { ...fixture.clients[0].approval, withdrawn_at: approvalWithdrawn ? fixture.grants[0].created_at : null } };
+      return Response.json({ grants: body.resource === "admin_grants" ? [{ ...grant, client: visibleClient, owner_user_id: foreignProjection ? "22222222-2222-4222-8222-222222222222" : grant.owner_user_id, state: revoked ? "revoked" : "active", refresh_token: "PRIVATE_OBSERVER_SENTINEL" }] : [],
+        clients: body.resource === "admin_clients" ? [visibleClient] : [],
+        workers: body.resource === "admin_workers" ? fixture.workers : [],
+        coverage: body.resource === "admin_coverage" ? fixture.coverage : [],
         actions: body.resource === "admin_history" ? [action] : [], next_before: null,
         active: { grant_count: revoked ? 0 : 1, full_account_count: revoked ? 0 : 1, expires_at: revoked ? null : grant.expires_at, full_account_expires_at: revoked ? null : grant.expires_at } });
     };
@@ -66,26 +76,47 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       const fullAccount = one("[data-admin-indicator]").dataset.fullAccount;
       one("[data-admin-indicator]").click();
       await waitFor(() => revokeButton() && !revokeButton().disabled);
+      const automaticCommands = requests.length;
       const inert = {
         images: one("[data-admin-grants]").querySelectorAll("img").length,
         labels: one("[data-admin-grants]").textContent,
         history: one("[data-admin-actions]").textContent,
+        clients: one("[data-admin-clients]").textContent,
+        dependencies: one("[data-admin-dependencies]").textContent,
+        gate: one("[data-admin-gate]").textContent,
+        renewalButtons: [...one("[data-admin-grants]").querySelectorAll("button")].filter(b => /renew|consent/i.test(b.textContent)).length,
         injected: typeof window.injected,
       };
       revokeButton().click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("result is unavailable"));
+      const unknown = one("[data-admin-status]").textContent;
       revokeButton().click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("grant is revoked"));
-      await waitFor(() => one("[data-admin-indicator]").hidden);
+      await waitFor(() => one("[data-admin-indicator-title]").textContent === "Admin clients and history");
       const revokeButtons = revokeButton() ? 1 : 0;
+      const approvalButton = label => [...one("[data-admin-clients]").querySelectorAll("button")].find(b => b.textContent === label);
+      approvalButton("Withdraw client approval").click();
+      await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was withdrawn"));
+      window.adminFixtureChangeMetadata(); one("[data-admin-refresh]").click();
+      await waitFor(() => approvalButton("Approve client version 3") && !approvalButton("Approve client version 3").disabled);
+      const commandsBeforeReapproval = requests.length;
+      approvalButton("Approve client version 3").click();
+      await waitFor(() => one("[data-admin-status]").textContent.includes("Your client approval was recorded"));
+      const noSecrets = !one("admin-delegations").textContent.includes("PRIVATE_OBSERVER_SENTINEL");
+      window.adminFixtureForeignProjection(); one("[data-admin-refresh]").click();
+      await waitFor(() => one("[data-admin-status]").textContent.includes("could not be verified"));
+      const foreignRowsRemoved = !one("[data-admin-grants]").textContent.includes(grant.client_id) && !one("[data-admin-clients]").textContent.includes(grant.client_id);
+      const historyEntryVisible = !one("[data-admin-indicator]").hidden;
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);
       await waitFor(() => one("admin-delegations").hidden);
-      report({ fullAccount, inert, requests, revokeButtons, indicatorHidden: one("[data-admin-indicator]").hidden,
+      report({ fullAccount, inert, requests, unknown, revokeButtons, automaticCommands, commandsBeforeReapproval, noSecrets, foreignRowsRemoved, historyEntryVisible, indicatorHidden: one("[data-admin-indicator]").hidden,
         privateRows: one("[data-admin-grants]").textContent });
     })().catch(error => report({ error: String(error) }));
   </script>`;
-  const html = `<!doctype html><html><body>${source.split("<script>")[0]}${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
+  const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!
+    .replace("data-admin-policy={JSON.stringify(policy)}", `data-admin-policy='${JSON.stringify(policy).replaceAll("&", "&amp;").replaceAll("'", "&#39;")}'`);
+  const html = `<!doctype html><html><body>${markup}${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
   const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(request.url === "/signout" ? `<!doctype html><html><body>${setup}<script>${signOut}</script></body></html>` : html);
@@ -107,11 +138,24 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     assert.ok(result.inert.labels.includes(grant.client_id));
     assert.ok(result.inert.history.includes("refused"));
     assert.equal(result.inert.injected, "undefined");
+    assert.ok(result.inert.clients.includes("Account-owner approval"));
+    assert.ok(result.inert.dependencies.includes("Worker"));
+    assert.ok(result.inert.gate.includes("No admin client can connect yet"));
+    assert.ok(result.inert.labels.includes("Registry version 1"));
+    assert.ok(result.inert.labels.includes("Registry version 2"));
+    assert.ok(result.inert.labels.includes("To renew, reconnect from your assistant; you will be asked to approve again."));
+    assert.equal(result.inert.renewalButtons, 0);
     const requests = result.requests;
-    assert.equal(requests.length, 2); assert.equal(requests[0].command_id, requests[1].command_id);
+    assert.ok(result.unknown.includes(requests[0].command_id));
+    assert.equal(result.automaticCommands, 0); assert.equal(result.commandsBeforeReapproval, 3);
+    assert.equal(result.noSecrets, true); assert.equal(result.foreignRowsRemoved, true);
+    assert.equal(requests.length, 4);
+    assert.equal(requests[2].command.kind, "withdraw_admin_client_approval");
+    assert.equal(requests[3].command.kind, "approve_admin_client");
+    assert.equal(requests[3].command.verification_version, 3); assert.equal(requests[0].command_id, requests[1].command_id);
     assert.deepEqual(requests[1].stream, { kind: "account" }); assert.equal(requests[1].resource, "https://api.commonswarm.com/admin");
     assert.equal(requests[1].command.kind, "revoke_admin_delegation"); assert.equal(Object.hasOwn(requests[1], "workspace_id"), false);
-    assert.equal(result.revokeButtons, 0); assert.equal(result.indicatorHidden, true);
+    assert.equal(result.revokeButtons, 0); assert.equal(result.indicatorHidden, true); assert.equal(result.historyEntryVisible, true);
     assert.equal(result.privateRows, "");
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

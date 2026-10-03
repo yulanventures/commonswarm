@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { adminQuery, adminTransactionContext, withAdminRole } from "./admin-transaction.js";
 import { createAdminHttpHandler } from "./admin-http.js";
+import { createAdminGateHandler } from "./admin-gate.js";
 import { AdminTokenLifecycle } from "./admin-lifecycle.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -56,7 +57,7 @@ function clientErrorResponse(error) {
 }
 
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
-  interactionHandler }) {
+  interactionHandler, adminGateHandler = createAdminGateHandler({}) }) {
   subscribeProviderErrors(provider, logger);
   const oidc = provider.callback();
   return async function handle(request, response) {
@@ -66,6 +67,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
     response.setHeader("x-request-id", requestId);
     response.setHeader("cache-control", "no-store");
     try {
+      if (path === "/admin/gate") return await adminGateHandler(request, response);
       const contentLength = Number(request.headers["content-length"] ?? 0);
       if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxBodyBytes) {
         rejectOversizedRequest(request, response);
@@ -278,9 +280,13 @@ export async function startServer({
       maxBodyBytes: config.maxBodyBytes, bodyReadTimeoutMs: config.requestTimeoutMs,
     }),
   }) : undefined;
-  const handler = createHandler({ provider, pool, logger, interactionHandler, ...config });
-  const server = createServer(createAdminHttpHandler({ handler, runtimePool, issuerPool,
-    activeKid: config.activeSigningKid }));
+  const handler = createHandler({ provider, pool, logger, interactionHandler,
+    adminGateHandler: createAdminGateHandler({ issuerPool }), ...config });
+  const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool,
+    activeKid: config.activeSigningKid });
+  const server = createServer((request, response) =>
+    request.url?.split("?", 1)[0] === "/admin/gate"
+      ? handler(request, response) : ingress(request, response));
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);
   server.maxHeadersCount = 64;
