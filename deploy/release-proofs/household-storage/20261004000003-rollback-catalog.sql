@@ -1,0 +1,2 @@
+SELECT to_regclass('swarm.household_object_bindings') IS NULL AND to_regclass('swarm.household_object_artifacts') IS NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('swarm.files') AND attname='household_managed' AND NOT attisdropped) AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('swarm.file_versions') AND conname='household_version_tenant') AND to_regprocedure('swarm.guard_household_artifact_settlement()') IS NULL AS rollback_ok
+\gset
