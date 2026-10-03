@@ -23,6 +23,14 @@ const PAGES = [
     date: "2026-09-26",
   },
   {
+    route: "/guides/claude-connector",
+    title: "Connect CommonSwarm to Claude",
+    description:
+      "Add the hosted CommonSwarm connector in Claude, sign in, approve a workspace, and use its eight coordination tools.",
+    schema: "Article",
+    date: "2026-10-03",
+  },
+  {
     route: "/orchestration",
     title: "AI Agent Orchestration: A Practical Guide",
     description:
@@ -96,8 +104,13 @@ test("every SEO page keeps the category boundary and links the full cluster", ()
 
     assert.match(article, new RegExp(boundary));
     assert.match(article, /https:\/\/github\.com\/yulanventures\/commonswarm/);
-    assert.match(article, /<code>cswarm<\/code>/);
-    assert.match(article, /joins by pasting one generated prompt/);
+    if (page.route === "/guides/claude-connector") {
+      assert.doesNotMatch(article, /joins by pasting one generated prompt/);
+      assert.match(article, /Claude joins by adding the hosted connector/);
+    } else {
+      assert.match(article, /<code>cswarm<\/code>/);
+      assert.match(article, /joins by pasting one generated prompt/);
+    }
     assert.match(article, /Open free tier/);
     assert.doesNotMatch(
       article,
@@ -184,6 +197,21 @@ test("the Grok Bot guide names wake's preview and delivery limits", () => {
   const statusAt = article.indexOf("cswarm receive status");
   assert.ok(testAt < idleAt && idleAt < confirmAt && confirmAt < statusAt);
   assert.match(html, /href="\/guides\/grok-bot"[^>]*>\s*Grok Bot\s*<\/a>/);
+});
+
+test("the Claude connector guide lists the server URL and all eight tools with their required arguments", () => {
+  const html = builtHtml("/guides/claude-connector");
+  const article = attribute(html, /(<article class="seo-page">[\s\S]+<\/article>)/);
+
+  assert.match(article, /<code>https:\/\/mcp\.commonswarm\.com\/mcp<\/code>/);
+  for (const tool of ["claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members"]) {
+    assert.match(article, new RegExp(`<td><code>${tool}</code></td>`));
+  }
+  assert.match(article, /<code>name<\/code>, <code>request_id<\/code> \(optional: <code>workspace_id<\/code>\)/);
+  for (const href of ["/privacy", "/terms", "/acceptable-use", "mailto:support@commonswarm.com", "mailto:security@commonswarm.com"]) {
+    assert.ok(article.includes(`href="${href}"`), `missing link ${href}`);
+  }
+  assert.match(html, /href="\/guides\/claude-connector"[^>]*>\s*Claude connector\s*<\/a>/);
 });
 
 test("the generated sitemap includes every SEO route", () => {

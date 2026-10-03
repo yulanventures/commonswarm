@@ -40,6 +40,11 @@ const routes = [
     path: "/guides/grok-bot",
     file: "guides/grok-bot/index.html",
   },
+  {
+    name: "claude-connector",
+    path: "/guides/claude-connector",
+    file: "guides/claude-connector/index.html",
+  },
 ];
 
 const decode = (value) =>
