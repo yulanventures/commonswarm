@@ -16,5 +16,5 @@ measured result. A rollback failure cannot become a closed-success row. Record
 rm refusals with exact path and the guard's message; retain the refused file.
 
 W1 preserves all checksum/backfill evidence and historical data after COMMIT.
-W3 closure is permanent even after edge rollback. W5/W6 are implementation STOPs.
+W3 closure is permanent even after edge rollback. W5 has runnable activation/rollback blocks. W6 refuses unresolved path/scope rulings.
 W7 cannot receive PASS without a verified production C1 report and its approval.

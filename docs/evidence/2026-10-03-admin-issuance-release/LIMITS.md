@@ -1,29 +1,67 @@
-# Execution limits and required follow-ups
+# Execution limits and remaining gaps
 
-This directory is a reviewable preparation, not a production-ready activation
-plan. Stop the affected window before mutation when any named input is absent.
+Prepared and locally syntax/contract-tested; no production window has run.
+Every baseline, timer/service unit and unit digest remains a validated input
+measured from the box. No operational SHA literal or assumed live identity is
+embedded in the plan. HezLead supplies exact landed release archives, historical
+migration archives/backfill evidence, backup/restore status, complete independent
+same-build gate receipts and live ordinary-controls receipts before opening.
+These are live-run inputs; static tests cannot supply or replace them.
 
-| Window | Exact missing support / required input | Stop behavior |
-| --- | --- | --- |
-| W1 | Box measurements; actual historical released-SHA archives for every applied migration; current backup verification; independent real PostgreSQL upgrade/reserve/ACL/D2/D3 receipts; reviewed live authenticated ordinary MCP/DCR/CIMD/human/worker probe procedure and protected client inputs | No apply without them. The plan includes anonymous route probes, but these cannot stand in for the live authenticated procedure. Its execution blocks must be incorporated in a newly reviewed revision before open. |
-| W2 | Same-build capped image and ordinary path evidence; box baseline and source-compatible two-file Compose configuration | No guessed baseline/config; no issuer credential is installed here. Gate closed is proven at AS loopback before Caddy exists. |
-| W3 | Explicit irreversible terminal-fence approval; actual Caddy import/route baseline; exact edge image/override; same-build legacy-unreachable/DB-fence proofs | Stop on baseline drift. Recycle is paused/restored within this window; closing issuance and invalidating the release record precede each source change. |
-| W4 | Generalized site's exact named inputs, explicit headless QA assignment and build/lifecycle/CI receipts | No execution of browser blocks without that assignment; no production release by this preparation worker. |
-| W5 | `services/mcp-auth/src/admin-consent.js` exports `ADMIN_AS_ISSUANCE_ENABLED = false`; there is no production activation config. `deploy/mcp-auth/compose.yaml` / `compose.management.yaml` do not mount the optional `MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE`. No reviewed production issuer credential provisioning/rotation step accompanies them. `services/mcp-auth/src/admin-gate.js` timeout races the coordinator without AbortSignal. The global authenticated `admin_clients` registry decision in 05 is unsettled. The existing six-hour `commonswarm-edge-recycle.service` restarts edge without release-record invalidation/remeasurement. Generic edge release/recreation/rollback plans likewise need this sequence before activation. | Explicit implementation STOP even with approval. Do not flip only the database row, patch the image or invent a switch. A new code/plan revision and complete same-build gates are required. |
-| W6 | Hard-false pin; no checked-in production admin client smoke runner with saved command IDs, hosted full-account second confirmation, token/DPoP-nonce/store/refresh/audit/cleanup handling. `scripts/dcr-roundtrip.mjs` is ordinary MCP, Bearer and hidden stdin, not the task-described callback-file protocol. No verified reviewer client/owner approval/live C1 receipt is supplied. | Intentional `smoke-runtime-path-unavailable` and `smoke-runtime-delivery-unavailable` FAIL, before files/consent/workspace mutations. Complete private authorize-URL/callback-wait/pointer-cleanup blocks are prepared in RELEASE.md, behind the STOP gate and an independent live gate-open check. Token exchange and audited MCP action/cleanup runner blocks still need a separate reviewed implementation task. |
-| W7 | Explicit retirement approval and a real C1 report cannot currently be supplied through this build | Refuse without approval/C1. Runtime mint is already removed by lane 5; DB closure is W3. W7 attests final retirement and never drops history or restores opaque access. |
+The old implementation gaps are closed in the merged tree: activation uses the
+issuer coordinator plus MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1, the activation-only
+issuer overlay, SQL cutover and measured release. W2 omits the overlay and leaves
+the env unset; W5 installs it and proves GET/HEAD open; rollback closes SQL,
+removes env/overlay and proves closed. Gate cancellation and the registry decision
+remain required same-build controls, not obsolete hard-false STOPs.
 
-The requested `tests/plan-baseline-inputs.test.ts` example does not exist in the
-supplied tree. This lane creates it using the existing line-anchored shell-block
-parser convention (`tests/plan-readonly-marker.test.ts` and
-`tests/box-window-plans.test.ts`), adds executable input/approval negative
-controls and syntax-checks complete shell/Python bodies with Bash 3.2.
+HezLead's W1 credential block generates the password on the box, uses file/stdin
+SQL, writes the AS JSON credential at 0440 root:986 and verifies a TLS role login.
+Rollback disables login/clears the new password/removes the new file. No password
+leaves the box or enters 1Password this window. Existing credentials cause this
+initial provisioning block to refuse; rotation needs its own reviewed window.
 
-The reserve siblings are byte copies, not rewritten inverses. Their actual
-database verification belongs to the required independent same-build schema
-receipt. No Docker/database suite ran in this worker. A successful W1 makes
-04's inverse refuse because checksum evidence exists; retain additive schema.
-No reserve deletes evidence to make itself usable. Future activation must also
-require recovery migration 05 (the present zero-argument checksum function
-checks 01–04); this plan independently reconciles 05 and includes it in the
-expected set and named activation proof contract.
+HezLead's W3 recycle drop-in binds exact measured units and installs pre-restart
+invalidation plus post-restart remeasurement of health, target, image, mounts and
+archive bytes. Generation changes prevent stale post-hooks from reopening after
+rollback. Drop-in rollback closes issuance before guarded removal/daemon reload.
+Generic later edge releases must use these hooks and update their release inputs
+in their own reviewed plan; this preparation does not authorize an unrelated edge
+release or modify another plan.
+
+W6 has two newly observed task-versus-code conflicts. They cannot honestly be
+reported as “only needs live run” without a HezLead ruling:
+
+1. TASK-2 requires /Users/yulanbot/work/dcr-rt/authorize.url and
+   /private/tmp/dcr-rt-callback.url. scripts/admin-smoke.mjs privatePath requires
+   their parent to be a fresh /private/tmp/anvil-secret.XXXXXX directory and
+   rejects symlink parents. The setup rule likewise requires secret staging there.
+   Proposed complete blocks use private authorize/callback/fence files and a
+   nonsecret dcr-rt pointer. W6 requires path_revision_approval before opening.
+2. TASK-2 asks for workspace-scoped approve_admin_client. The production command
+   accepts client_id and verification_version only; its owner approval is account
+   scoped. The account envelope rejects workspace_id. The runner creates a new
+   workspace through full-account consent, which can cover future owned spaces.
+   The plan describes this accurately, limits the client ceiling to smoke scopes,
+   withdraws approval afterward and requires account_approval_revision first.
+   No source implementation was changed or scope control invented in this lane.
+
+All other W6 pieces are prepared: canonical fetched-CIMD digest/version validation,
+owner file-store approval, BROWSER-READY consent handoff, runner --verify-fenced,
+read-only SQL D3 counts for the exact smoke grant/family, human revoke verb,
+family-tombstone readback, client approval withdrawal, guarded cleanup and redacted
+C1-SMOKE-REPORT.md. The runner demonstrates a refused still-live access call after
+human revoke; SQL proves the refresh family tombstone. It does not perform a
+post-revoke refresh request, and the receipt never claims one. Workspace
+“c1-smoke-<runid> (test, archive me)” is accepted residue (D4), with Tom's /app
+archive follow-up. W7 is retained and requires real C1 evidence and separate
+retirement approval. W7/W4b schedules a later reviewed site commit/release removing
+site/public/oauth/c1-smoke/client.json and measuring public 404.
+
+No live C1, schema/role/credential change, SSH, Docker, deployment, restart,
+browser/GUI, keychain, 1Password or GitHub Actions operation was performed by this
+worker. HezLead owns independent cross-family review and every live operation.
+The distinct tests/admin-release-plan.test.ts filename avoids collision with
+main's unrelated tests/plan-baseline-inputs.test.ts; both test sets must survive
+when integration later merges main. Reserve SQL siblings remain verbatim and
+additive schema, tombstones, audit and history are retained on rollback.

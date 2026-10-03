@@ -36,6 +36,7 @@ const base = () => ({
   baseline_mcp_caddy_sha256: hex, baseline_api_caddy_sha256: hex, baseline_caddyfile_sha256: hex,
   baseline_ledger_sha256: hex, gate_receipt_sha256: digest('{}\n'), rollback_decision: 'retain-additive',
   approval: null, legacy_fence_approval: null,
+  edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
 });
 type Input = Record<string, unknown>;
 const inputFile = (input: Input) => {
@@ -95,6 +96,7 @@ test('admin release plan: full baseline inputs pass; omissions, prefixes, malfor
     ['baseline_caddyfile_sha256', 'abc'], ['archive_sha256', 'no'],
     ['window_end_utc', '2020-01-01T00:00:00Z'], ['window_id', '../bad'],
     ['baseline_site_target', '/srv/commonswarm/site/current'], ['window', 'W8'],
+    ['edge_recycle_service','../evil.service'], ['edge_recycle_timer','fixture.service'], ['edge_recycle_sha256','bad'],
     ['rollback_decision', 'drop-history'], ['plan_sha256', hex], ['gate_receipt_sha256', hex],
   ];
   for (const [key, value] of bad) {
@@ -104,7 +106,7 @@ test('admin release plan: full baseline inputs pass; omissions, prefixes, malfor
   }
 });
 
-test('admin release plan: W5 and W7 approval is action/release/window/plan bound; W5 still stops with approval', () => {
+test('admin release plan: W5 and W7 approval is action/release/window/plan bound; activation refuses absent approval before any operation', () => {
   for (const [window, action, id] of [
     ['W5', 'activate-admin-issuance', 'ai-w5-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
@@ -124,17 +126,16 @@ test('admin release plan: W5 and W7 approval is action/release/window/plan bound
       assert.notEqual(run(block(id!), { INPUTS_FILE: inputFile(changed) }).status, 0);
     }
     if (window === 'W5') {
-      const apply = run(block('ai-w5-apply'), { INPUTS_FILE: inputFile(input) });
+      const apply = run(block('ai-w5-apply'), { INPUTS_FILE: inputFile({ ...input, approval: null }) });
       assert.notEqual(apply.status, 0);
-      assert.match(apply.stderr, /activation-switch-unavailable/);
-      assert.match(apply.stderr, /STOP without mutation/);
+      assert.match(apply.stderr, /activation approval required; STOP/);
     }
   }
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-approval/);
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-preflight/);
 });
 
-test('admin release plan: W3 requires separate terminal fence approval and W6 refuses fake delivery', () => {
+test('admin release plan: W3 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
   const edge: Input = { ...base(), window: 'W3', rollback_decision: 'restore-service' };
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
@@ -144,8 +145,7 @@ test('admin release plan: W3 requires separate terminal fence approval and W6 re
   assert.equal(validate(smoke).status, 0);
   const result = run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(smoke) });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /smoke-runtime-path-unavailable.*smoke-runtime-delivery-unavailable/);
-  assert.match(result.stderr, /STOP before consent or mutation/);
+  assert.match(result.stderr, /C1 approval inputs absent; STOP/);
 });
 
 test('admin release plan: no operational SHA literals, secret output, HOME changes or guard bypasses', () => {
@@ -202,4 +202,71 @@ test('admin release plan: checker receipt validates exact build, controls and re
   gate.controls = []; assert.match(check().stderr, /positive\/negative controls/); gate.controls = contract.gates[name];
   gate.file = '../outside'; assert.match(check().stderr, /relative file/); gate.file = 'control.txt';
   gate.sha256 = 'c'.repeat(64); assert.match(check().stderr, /evidence digest/);
+});
+
+
+test('admin release plan: C1 owner approval inputs and explicit conflict rulings refuse when absent', () => {
+  const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile' };
+  input.approval = approval(input, 'admin-smoke-human-consent');
+  const c1 = { release_sha: input.release_sha, window_id: input.window_id, plan_sha256: input.plan_sha256,
+    owner_user_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', smoke_workspace_id: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+    verification_version: 1, metadata_digest: hex, target_file: receiptFile, state_directory: scratch,
+    path_revision_approval: 'task/path-correction', account_approval_revision: 'task/account-scope-ruling' };
+  const c1File = join(scratch, 'c1-inputs.json');
+  const check = (c: Input) => {
+    writeFileSync(c1File, JSON.stringify(c));
+    return run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(input), C1_INPUTS_FILE: c1File });
+  };
+  assert.equal(check(c1).status, 0, 'positive C1 input control');
+  for (const key of Object.keys(c1)) {
+    const missing: Input = { ...c1 }; delete missing[key];
+    assert.notEqual(check(missing).status, 0, `missing C1 ${key} accepted`);
+  }
+  for (const key of ['path_revision_approval', 'account_approval_revision']) {
+    const refused = check({ ...c1, [key]: '' });
+    assert.match(refused.stderr, new RegExp(`${key} required; STOP`));
+  }
+});
+
+test('admin release plan: credential material is file/stdin only and generating it emits nothing', () => {
+  const source = block('ai-w1-issuer-credential');
+  assert.match(source, /openssl rand -hex 32 >"\$SECRET_STAGE\/issuer-password"/);
+  assert.match(source, /ai_db -q --file - <"\$SECRET_STAGE\/issuer.sql"/);
+  assert.match(source, /install -o root -g 986 -m 0440/);
+  assert.doesNotMatch(source, /echo\b|set -x|cat "\$SECRET_STAGE\/issuer-password"|--password|PGPASSWORD=/);
+  assert.match(block('ai-w1-issuer-rollback'), /NOLOGIN PASSWORD NULL/);
+  // Execute the actual secret-producing Python body with synthetic on-box inputs.
+  const made = spawnSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' });
+  assert.equal(made.status, 0); const stage = made.stdout.trim();
+  assert.match(stage, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/);
+  try {
+    writeFileSync(join(stage, 'issuer-password'), 'a'.repeat(64)+'\n', { mode: 0o600 });
+    writeFileSync(join(stage, 'service.conf'), '[target]\nhost=db.commonswarm.internal\nport=5432\ndbname=postgres\nuser=supabase_admin\n', { mode: 0o600 });
+    writeFileSync(join(stage, 'pass'), 'db.commonswarm.internal:5432:postgres:supabase_admin:fixture\n', { mode: 0o600 });
+    const python = source.match(/^python3[^\n]*<<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+    const result = spawnSync('python3', ['-', stage], { input: python, encoding: 'utf8' });
+    assert.ok(result.status===0, 'credential producer failed');
+    assert.ok(result.stdout.length===0 && result.stderr.length===0, 'credential producer emitted output');
+    const credential = JSON.parse(readFileSync(join(stage, 'issuer.json'), 'utf8'));
+    assert.ok(credential.user==='commonswarm_admin_issuer' && credential.password==='a'.repeat(64), 'AS credential contract');
+    assert.ok(readFileSync(join(stage, 'issuer.sql'),'utf8').includes("ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"), 'password SQL not staged');
+  } finally {
+    const cleanup = spawnSync('/Users/yulanbot/.local/bin/rm', ['-r', '--', stage], { encoding: 'utf8' });
+    assert.equal(cleanup.status, 0, `guarded fixture cleanup refused ${stage}: ${cleanup.stderr}`);
+  }
+});
+
+test('admin release plan: recycle invalidates before restart, remeasures after and has drop-in rollback', () => {
+  const install = block('ai-recycle-install'), hook = block('ai-recycle-hook'), rollback = block('ai-recycle-rollback');
+  assert.match(install, /ExecStartPre=\/usr\/local\/libexec\/commonswarm-admin-edge-recycle before/);
+  assert.match(install, /ExecStartPost=\/usr\/local\/libexec\/commonswarm-admin-edge-recycle after/);
+  assert.match(hook, /invalidated_at=statement_timestamp\(\),release_generation=release_generation\+1/);
+  assert.match(hook, /measured_generation=release_generation/);
+  assert.match(hook, /tarfile.open\(archive\)/);
+  assert.match(hook, /State.*Health/);
+  assert.match(rollback, /rm -- "\$RECYCLE_DROPIN"/);
+  assert.ok(rollback.indexOf('admin_issuance_enabled=false') < rollback.indexOf('rm -- "$RECYCLE_DROPIN"'), 'close before removing hook');
+  assert.match(rollback, /systemctl daemon-reload/);
+  assert.match(block('ai-w5-rollback'), /MCP_OAUTH_ADMIN_ISSUANCE_ENABLED/);
+  assert.doesNotMatch(block('ai-w5-rollback'), /-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose.admin-issuer.yaml"/);
 });

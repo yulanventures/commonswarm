@@ -3,9 +3,9 @@
 Prepared, not executed. This plan releases one reviewed `RELEASE_SHA`, landed on
 main, in seven separately authorized windows. The preparation worker has made
 no box measurements. Neither this document nor a PASS receipt grants approval.
-Admin issuance remains OFF. **W5 and W6 deliberately STOP on this source tree**:
-`ADMIN_AS_ISSUANCE_ENABLED` is a compile-time false pin. Do not replace the pin,
-patch a running image, or invent an environment switch during a window.
+Admin issuance remains OFF until HezLead executes W5: the reviewed issuer
+coordinator, activation-only overlay, exact `MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1`,
+open DB cutover and independently measured release are all required.
 
 Authority: the admin issuance specification's boundaries, lane 8, findings and
 D1–D3 decisions; `deploy/RELEASE-TO-BOX.md`; the generalized October 2 OAuth,
@@ -45,6 +45,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | baseline_stack_sha, baseline_postgres_image | Live stack `current`/RELEASE_SHA and PostgreSQL container image |
 | baseline_site_sha, baseline_site_target | Exact source from box site release-name prefix resolved uniquely against repository history; canonical release target |
 | baseline_mcp_caddy_sha256, baseline_api_caddy_sha256, baseline_caddyfile_sha256 | SHA-256 of the three live Caddy files; compare on box, never assume repository bytes are live |
+| edge_recycle_service, edge_recycle_timer, edge_recycle_sha256 | Exact recycle units discovered from box timer/service inventory and systemctl cat byte digest, remeasured per window |
 | baseline_ledger_sha256 | SHA-256 of sorted version lines from live migration ledger, including final newline |
 | gate_receipt_sha256 | Independent checker's receipt digest; see GATES.json; exact combined build, no stale lane receipts |
 | rollback_decision | `retain-additive` W1; `restore-service` W2–W4; `close-and-reconcile` W5–W7 |
@@ -74,13 +75,13 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
-| W1 SCHEMA | ai-inputs, ai-gates, ai-prepare, ai-box-preflight; ai-open, ai-db-session, ai-w1-preflight, ai-w1-apply, ai-w1-reconcile, ai-w1-probes, ai-close. One transaction applies 01→05, then inserts all five ledger/checksum pairs and historical backfills. Failure before COMMIT rolls back the whole transaction. After COMMIT retain additive schema; never drop evidence/history. |
-| W2 OAUTH | common ai-inputs/ai-gates/preflight/open/session; ai-w2-preflight, ai-w2-build, ai-w2-apply, ai-w2-local-gate, ai-ordinary-probes, ai-close. On failure ai-w2-rollback, common ordinary controls, then close. Existing ordinary MCP stays ON; admin pin remains OFF. |
+| W1 SCHEMA | ai-inputs, ai-gates, ai-prepare, ai-box-preflight; ai-open, ai-db-session, ai-w1-preflight, ai-w1-apply, ai-w1-reconcile, ai-w1-probes, ai-w1-issuer-credential (HezLead), ai-close. One transaction applies 01→05, then inserts all five ledger/checksum pairs and historical backfills. Failure before COMMIT rolls back the whole transaction. After COMMIT retain additive schema; never drop evidence/history. |
+| W2 OAUTH | common ai-inputs/ai-gates/preflight/open/session; ai-w2-preflight, ai-w2-build, ai-w2-apply, ai-w2-local-gate, ai-ordinary-probes, ai-close. On failure ai-w2-rollback, common ordinary controls, then close. Existing ordinary MCP stays ON; admin env is unset and overlay absent. |
 | W3 EDGE/CADDY | common ai-inputs/ai-gates/preflight/open/session; ai-w3-preflight, ai-w3-caddy-candidate, ai-w3-apply (close/invalidate, edge switch, terminal legacy fence, measured record, both Caddy routes, validate/reload), ai-w3-probes, ai-w3-readback, ai-close. Failure ai-w3-rollback, ordinary controls, close; legacy fence is permanent. |
 | W4 SITE | common preflight; ai-w4-preflight, ai-w4-reference for the generalized site plan's complete preflight/open/build/probe/rollback/close sequence. No browser step without separately assigned QA authorization. Site baseline is remeasured by that plan; admin gate remains closed. |
-| W5 ACTIVATION | ai-w5-approval, common preflight/open/session, ai-w5-checks, ai-w5-apply **STOP**. Approval never overrides a missing implementation. No open-gate receipt on this tree. Rollback ai-emergency-close; preserve history, human grant/family reconciliation under separate approved plan. |
-| W6 C1 ADMIN SMOKE | ai-w6-preflight **STOP before open/consent/mutations on this tree**. Future hosted consent and callback-file contract is below; no surrogate human bearer or direct SQL admin grant. |
-| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight **STOP without C1**, ai-w7-proof, ai-close. This build already removes the runtime mint; retirement is proof/attestation, not reintroducing it until W7. Failure ai-emergency-close; never restore opaque authentication. |
+| W5 ACTIVATION | ai-w5-approval, common preflight/open/session, ai-w5-checks, ai-w5-apply, ai-w5-probes, ai-w5-readback, ordinary controls, ai-close. Activation adds issuer overlay + env 1 + SQL open. Rollback ai-w5-rollback/ai-emergency-close; preserve history, human grant/family reconciliation under separate approved plan. |
+| W6 C1 ADMIN SMOKE | ai-w6-preflight (requires explicit path/scope rulings), common preflight/open/session, ai-w6-prepare/transfer, ai-w6-client-check, owner approve, ai-w6-start, audit, human revoke/verify-fenced, fence readback, owner withdrawal, secret close, report, ordinary controls, ai-close. Separate assigned browser consent; accepted workspace residue and W7/W4b site removal. |
+| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (refuse without C1), ai-w7-proof, ai-close. This build already removes the runtime mint; retirement is proof/attestation, not reintroducing it until W7. Failure ai-emergency-close; never restore opaque authentication. |
 
 After any failure STOP forward work and record the step and fixed failure code in
 LOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,
@@ -111,7 +112,7 @@ def regular(name):
     return p
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
-keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval'.split()
+keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
 need(isinstance(d,dict) and set(d)==set(keys), 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
@@ -120,6 +121,8 @@ for k in keys:
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{64}',d[k]), k)
     elif k.endswith('_image'):
         need(isinstance(d[k],str) and re.fullmatch('sha256:[0-9a-f]{64}',d[k]), k)
+for k,suffix in [('edge_recycle_service','.service'),('edge_recycle_timer','.timer')]:
+    need(isinstance(d[k],str) and re.fullmatch(r'[A-Za-z0-9_-]+'+re.escape(suffix),d[k]), k)
 need(d['window'] in ['W'+str(x) for x in range(1,8)], 'window')
 need(isinstance(d['window_id'],str) and re.fullmatch('[A-Za-z0-9]{6}',d['window_id']), 'window_id')
 need(isinstance(d['window_end_utc'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',d['window_end_utc']), 'window_end_utc')
@@ -191,6 +194,29 @@ PY
 ```
 
 ```sh
+# step: ai-recycle-inventory
+# readonly: yes
+# host: HezLead box root preflight, before window inputs are finalized
+set -euo pipefail
+python3 - <<'PY'
+import hashlib,json,re,subprocess
+rows=subprocess.check_output(['systemctl','list-unit-files','--type=timer','--no-legend','--no-pager'],text=True,stderr=subprocess.DEVNULL).splitlines()
+found=[]
+for row in rows:
+    timer=row.split()[0]
+    if not re.fullmatch(r'[A-Za-z0-9_-]+\.timer',timer): continue
+    services=subprocess.check_output(['systemctl','show','-p','Triggers','--value',timer],text=True,stderr=subprocess.DEVNULL).split()
+    for service in services:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+\.service',service): continue
+        unit=subprocess.check_output(['systemctl','cat',service],text=True,stderr=subprocess.DEVNULL).strip()+'\n'
+        if 'docker' in unit and 'restart' in unit and 'commonswarm-edge' in unit:
+            found.append({'edge_recycle_timer':timer,'edge_recycle_service':service,'edge_recycle_sha256':hashlib.sha256(unit.encode()).hexdigest()})
+assert len(found)==1, 'FAIL unique edge recycle unit discovery required; STOP'
+print(json.dumps(found[0],sort_keys=True))
+PY
+```
+
+```sh
 # step: ai-box-preflight
 # readonly: yes
 # host: approved box root Bash shell; repeat immediately before open
@@ -237,8 +263,13 @@ for name,path in [('mcp','/etc/caddy/sites/20-commonswarm-mcp.caddy'),('api','/e
     key='baseline_'+(name+'_caddy' if name!='caddyfile' else name)+'_sha256'
     p=pathlib.Path(path); need(p.is_file() and not p.is_symlink(),name+' Caddy regular file')
     need(hashlib.sha256(p.read_bytes()).hexdigest()==d[key],name+' Caddy bytes')
-need(output(['systemctl','is-active','commonswarm-edge-recycle.timer'])=='active','recycle timer active')
-need(output(['systemctl','show','-p','ActiveState','--value','commonswarm-edge-recycle.service'])=='inactive','recycle service inactive')
+need(output(['systemctl','is-active',d['edge_recycle_timer']])=='active','recycle timer active')
+need(output(['systemctl','show','-p','ActiveState','--value',d['edge_recycle_service']])=='inactive','recycle service inactive')
+need(d['edge_recycle_service'] in output(['systemctl','show','-p','Triggers','--value',d['edge_recycle_timer']]).split(),'timer target')
+unit=output(['systemctl','cat',d['edge_recycle_service']])+'\n'
+need(hashlib.sha256(unit.encode()).hexdigest()==d['edge_recycle_sha256'],'recycle unit bytes')
+need('docker' in unit and 'restart' in unit and 'commonswarm-edge' in unit,'measured edge recycle operation')
+need(output(['systemctl','show','-p','User','--value',d['edge_recycle_service']]) in ('','root'),'root recycle unit')
 print('PASS ai-box-preflight: baseline reconciled; paths/images/ON flags/Caddy exact')
 PY
 ```
@@ -330,6 +361,8 @@ PG_SERVICE_OUTPUT="$PGSERVICE_FILE" PG_PASS_OUTPUT="$PGPASS_FILE" \
  COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
  node "$MIGRATE/make-pg-service.mjs" >"$SECRET_STAGE/db-session.log" 2>&1
 chmod 0600 "$PGSERVICE_FILE" "$PGPASS_FILE"
+EDGE_RECYCLE_SERVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_service"])' "$INPUTS_FILE")
+EDGE_RECYCLE_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE")
 PSQL_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_postgres_image"])' "$INPUTS_FILE")
 ai_db() {
  docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
@@ -353,7 +386,7 @@ ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations 
 test "$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-inputs|ai-gates|ai-w5-approval|ai-w7-approval|ai-w7-preflight) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-inputs|ai-gates|ai-w5-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-w5-rollback|ai-emergency-close) ;; *) return 1;; esac
  python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
@@ -459,10 +492,9 @@ print('PASS live authenticated ordinary controls')
 PY
 ```
 
-The receipt is an input, not an invented smoke runner. Its missing public-path
-execution blocks are listed in LIMITS.md; W1–W4 cannot open until HezLead
-supplies and reviews them. Do not execute prose as a command or treat offline
-tests as a live unchanged-path proof.
+HezLead supplies the independently generated live-controls receipt before
+open and after each window. This plan only validates that external input; no
+operator-authored probe is permitted during the release window.
 
 ## W1: one schema window before any code release
 
@@ -646,11 +678,79 @@ grants/NOINHERIT/local-role isolation, tombstone/upsert, D2 ledger atomicity and
 D3 cap/count/action/security-bucket controls. Catalogs alone are insufficient.
 ai-gates enforces these named controls before any schema apply.
 
-## W2: OAuth code release, ordinary MCP ON, issuance pin OFF
+## HezLead box block: W1 issuer credential
 
-W2 uses the existing ON service configuration and management credential. It
-does not install the missing dedicated admin-issuer mount; it remains a W5
-blocker. All baseline Compose files must be exactly the two reviewed base and
+Run after ai-w1-reconcile/ai-w1-probes, before W1 close. The password is
+created on the box, never printed and never copied to the Mac or 1Password
+this window (HezLead's ruling). The AS format is JSON `{user,password}`.
+The fresh role has no existing credential; an existing file stops this initial
+provisioning. Rotation is a separate credential window alongside management.
+Rollback disables login and clears the new password; it retains additive schema.
+
+```sh
+# step: ai-w1-issuer-credential
+# readonly: no
+# host: HezLead ONLY, box root, W1 schema window
+set -euo pipefail
+test "$WINDOW" = W1
+ai_deadline
+test -f "$PROOF_DIR/schema-committed.txt"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
+openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"
+chmod 0600 "$SECRET_STAGE/issuer-password"
+python3 - "$SECRET_STAGE" <<'PY'
+import configparser,json,pathlib,re,sys
+try:
+    p=pathlib.Path(sys.argv[1]); value=(p/'issuer-password').read_text().strip()
+    assert re.fullmatch('[0-9a-f]{64}',value)
+    (p/'issuer.json').write_text(json.dumps({'user':'commonswarm_admin_issuer','password':value})+'\n')
+    # Value is in a stdin SQL file only, never in argv, env or nonsecret proof.
+    (p/'issuer.sql').write_text("SET password_encryption='scram-sha-256'; ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"+value+"';\n")
+    c=configparser.ConfigParser(interpolation=None); c.read(p/'service.conf')
+    assert c.has_section('target'); c['target']['user']='commonswarm_admin_issuer'
+    with (p/'issuer-service.conf').open('w') as f: c.write(f)
+    rows=(p/'pass').read_text().splitlines(); assert len(rows)==1
+    parts=rows[0].split(':'); assert len(parts)==5
+    (p/'issuer-pass').write_text(':'.join(parts[:3]+['commonswarm_admin_issuer',value])+'\n')
+    for name in ['issuer.json','issuer.sql','issuer-service.conf','issuer-pass']: (p/name).chmod(0o600)
+except Exception:
+    raise SystemExit('FAIL issuer credential preparation; STOP') from None
+PY
+ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log"
+install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
+docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
+ --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
+ --volume "$SECRET_STAGE/issuer-service.conf:/run/service.conf:ro" \
+ --volume "$SECRET_STAGE/issuer-pass:/run/pass:ro" \
+ --volume /etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro \
+ --entrypoint psql "$PSQL_IMAGE" -X --set=ON_ERROR_STOP=1 -Atq \
+ --command "SELECT current_user='commonswarm_admin_issuer' AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user;" \
+ >"$SECRET_STAGE/issuer-login.result" 2>"$SECRET_STAGE/issuer-login.log"
+test "$(cat "$SECRET_STAGE/issuer-login.result")" = t
+printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"$PROOF_DIR/issuer-credential.txt"
+```
+
+```sh
+# step: ai-w1-issuer-rollback
+# readonly: no
+# host: HezLead ONLY, box root; failed initial provisioning, not a rotation
+set -euo pipefail
+test "$WINDOW" = W1
+ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null
+if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials; then
+ test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
+ rm -- /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL guarded issuer cleanup refused; STOP\n' >&2; exit 1; }
+fi
+test "$(ai_ro -Atq --command "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';")" = t
+printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt"
+```
+
+## W2: OAuth code release, ordinary MCP ON, issuance admin activation OFF
+
+W2 keeps ordinary MCP ON with the management overlay. It omits the
+admin-issuer overlay and leaves the activation environment variable unset. All baseline Compose files must be exactly the two reviewed base and
 management files. No unreviewed override is silently dropped. Store resolved
 config and diagnostics only inside SECRET_STAGE. Source and image identity
 are independently checked; local image ID is an immutable sha256 reference.
@@ -670,14 +770,15 @@ test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.proj
 cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.yaml"
 cmp -s "$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" "$RELEASE_ROOT/deploy/mcp-auth/compose.management.yaml"
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-python3 - "$RELEASE_ROOT/services/mcp-auth/src/admin-consent.js" <<'PY'
-import pathlib,re,sys
-assert re.search(r'^export const ADMIN_AS_ISSUANCE_ENABLED = false;$',pathlib.Path(sys.argv[1]).read_text(),re.M), 'FAIL OFF pin changed; STOP'
+python3 - /etc/commonswarm-oauth/service.env <<'PY'
+import pathlib,sys
+rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert not any(r.split('=',1)[0] in ('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE') for r in rows), 'FAIL W2 admin env must be unset; STOP'
 PY
 test ! -e "$NEW_OAUTH" && test ! -L "$NEW_OAUTH"
 mkdir -p "$NEW_OAUTH"
 cp -a "$RELEASE_ROOT/." "$NEW_OAUTH/"
-printf 'PASS W2 baseline Compose exact; schema present; pin OFF\n'
+printf 'PASS W2 baseline Compose exact; schema present; admin activation OFF\n'
 ```
 
 ```sh
@@ -703,8 +804,8 @@ fi
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$RELEASE_SHA"
 printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e \
- 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.readFileSync("src/admin-consent.js","utf8").includes("export const ADMIN_AS_ISSUANCE_ENABLED = false;") || !fs.existsSync("src/admin-authority.generated.js")) process.exit(1)' >/dev/null 2>&1
-printf 'PASS W2 CPU-capped image; immutable source label; pin OFF\n'
+ 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.existsSync("src/admin-authority.generated.js")) process.exit(1)' >/dev/null 2>&1
+printf 'PASS W2 CPU-capped image; immutable source label; admin activation OFF\n'
 ```
 
 ```sh
@@ -808,9 +909,9 @@ query/cookie/auth redaction. Raw logs are never release evidence.
 
 Before switching/recreating/rolling back edge, close DB issuance and invalidate
 the measurement in a committed release-role transaction. The recycle timer is
-paused only during this window and restored on success/failure. Before activation
-its restart path still needs reviewed invalidation/remeasurement wiring: W5 STOPs
-until all authorized edge paths implement it. Readiness JSON is diagnostic only.
+paused only during this window and restored on success/failure. HezLead installs the marked recycle hooks before restoring the timer. They
+invalidate before restart and remeasure afterward; failed measurement keeps
+issuance closed. Other edge release paths must use the same marked hooks. Readiness JSON is diagnostic only.
 
 ```sh
 # step: ai-w3-preflight
@@ -944,11 +1045,11 @@ test ! -e "$PROOF_DIR/edge-attempted.txt"
 ai_run ai-inputs
 ai_run ai-gates
 test -f "$SECRET_STAGE/mcp.new.caddy" && test -f "$SECRET_STAGE/api.new.caddy"
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp() WHERE singleton; COMMIT;" >/dev/null
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
-systemctl stop commonswarm-edge-recycle.timer
-test "$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)" = inactive
+systemctl stop "$EDGE_RECYCLE_TIMER"
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 ln -s "$NEW_EDGE" /home/commonswarm/edge/current.admin-issuance
 mv -Tf /home/commonswarm/edge/current.admin-issuance /home/commonswarm/edge/current
@@ -997,8 +1098,9 @@ install -o root -g root -m 0644 "$SECRET_STAGE/mcp.new.caddy" /etc/caddy/sites/2
 install -o root -g root -m 0644 "$SECRET_STAGE/api.new.caddy" /etc/caddy/sites/10-commonswarm-api.caddy
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-live-validate.log" 2>&1
 systemctl reload caddy
-systemctl start commonswarm-edge-recycle.timer
-systemctl is-active --quiet commonswarm-edge-recycle.timer
+ai_run ai-recycle-install
+systemctl start "$EDGE_RECYCLE_TIMER"
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 printf 'PASS W3 switched and measured; legacy permanently fenced; issuance OFF\n'
 ```
 
@@ -1044,8 +1146,9 @@ cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.new.caddy"
 # readonly: no
 # host: box root; leave legacy closure permanent and issuance closed
 set -euo pipefail
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp() WHERE singleton; COMMIT;" >/dev/null
-systemctl stop commonswarm-edge-recycle.timer
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+systemctl stop "$EDGE_RECYCLE_TIMER"
+ai_run ai-recycle-rollback
 install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
 install -o root -g root -m 0644 "$SECRET_STAGE/api.caddy" /etc/caddy/sites/10-commonswarm-api.caddy
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-rollback.log" 2>&1
@@ -1059,8 +1162,8 @@ COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name comm
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
 test "$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")"
 test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE"
-systemctl start commonswarm-edge-recycle.timer
-systemctl is-active --quiet commonswarm-edge-recycle.timer
+systemctl start "$EDGE_RECYCLE_TIMER"
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 printf 'PASS W3 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
 ```
 
@@ -1069,9 +1172,148 @@ printf 'PASS W3 baseline source/Caddy restored; measurement invalid; legacy rema
 # readonly: no
 # host: box root; also available after a failed rollback; not a close receipt
 set -euo pipefail
-systemctl start commonswarm-edge-recycle.timer
-systemctl is-active --quiet commonswarm-edge-recycle.timer
+systemctl start "$EDGE_RECYCLE_TIMER"
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 printf 'Timer restored; window remains open until service recovery is verified\n'
+```
+
+## HezLead box block: measured six-hour recycle
+
+In preflight HezLead executes ai-recycle-inventory, which enumerates timers,
+reads each timer's Triggers and matches the box's recycle service, then supplies the exact
+unit names plus SHA-256 of `systemctl cat <service>` including its final newline
+as `edge_recycle_timer`, `edge_recycle_service`, `edge_recycle_sha256`.
+These are measured inputs, never presumed unit names. ai-box-preflight binds
+and validates them. Each later window must remeasure the unit including the
+drop-in. Install in W3 while the timer is stopped, before restoring it.
+The hook closes issuance/increments generation in ExecStartPre, before the
+existing restart, then remeasures target, image, health, immutable mounts and
+all archive bytes in ExecStartPost. Only a previously open, still-approved
+release can reopen. Failed restart/measurement stays closed. HezLead executes
+these blocks; this preparation worker never installs or invokes a hook.
+
+```sh
+# step: ai-recycle-hook
+# readonly: no
+# host: box root, installed by HezLead; systemd invokes before/after
+set -euo pipefail
+: "${1:?before or after}"
+case "$1" in before|after) ;; *) exit 1;; esac
+umask 077
+HOOK_SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
+chmod 0700 "$HOOK_SECRET_STAGE"
+ai_hook_cleanup() {
+ python3 - "$HOOK_SECRET_STAGE" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p))
+assert p.is_dir() and not p.is_symlink() and p.resolve()==p and p.stat().st_mode & 0o777==0o700
+PY
+ rm -r -- "$HOOK_SECRET_STAGE" || { printf 'FAIL recycle secret cleanup refused %s; STOP\n' "$HOOK_SECRET_STAGE" >&2; return 1; }
+}
+trap ai_hook_cleanup EXIT
+python3 - "$1" "$HOOK_SECRET_STAGE" <<'PY'
+import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time
+stage=pathlib.Path(sys.argv[2]); mode=sys.argv[1]
+try:
+    path=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
+    assert path.is_file() and not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode & 0o777==0o600
+    r=json.loads(path.read_text()); sha=r['release_sha']; target='/home/commonswarm/edge/releases/'+sha
+    assert re.fullmatch('[0-9a-f]{40}',sha) and r['target']==target
+    assert re.fullmatch('sha256:[0-9a-f]{64}',r['image_digest']) and re.fullmatch('[0-9a-f]{64}',r['artifact_digest'])
+    archive=pathlib.Path(r['archive']); assert archive.is_file() and not archive.is_symlink()
+    assert re.fullmatch(r'/tmp/admin-issuance-'+sha+r'-[A-Za-z0-9]{6}\.tar',str(archive))
+    root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
+    env=dict(os.environ); env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
+    with (stage/'session.log').open('w') as log:
+        subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
+    for name in ['service.conf','pass']: (stage/name).chmod(0o600)
+    assert re.fullmatch('sha256:[0-9a-f]{64}',r['postgres_image'])
+    args=['docker','run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(stage/'service.conf')+':/run/service.conf:ro','--volume',str(stage/'pass')+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--entrypoint','psql',r['postgres_image'],'-X','--set=ON_ERROR_STOP=1','-Atq','--file','-']
+    def db(sql):
+        with (stage/'db.log').open('w') as log:
+            return subprocess.check_output(args,input=sql,text=True,stderr=log).strip()
+    intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
+    if mode=='before':
+        # Stale intent can never be used after a failed/unknown pre-hook.
+        intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
+        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
+        assert len(result)==2 and result[0] in ('t','f') and result[1].isdigit()
+        intent.write_text(json.dumps({'reopen':result[0]=='t','generation':int(result[1])})+'\n')
+    else:
+        state=json.loads(intent.read_text()); assert isinstance(state['generation'],int) and type(state['reopen']) is bool
+        live=pathlib.Path('/home/commonswarm/edge/current').resolve(strict=True); assert str(live)==target
+        for attempt in range(46):
+            c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],stderr=subprocess.DEVNULL))[0]
+            if c['State'].get('Health',{}).get('Status')=='healthy': break
+            if attempt==45: raise ValueError('health timeout')
+            time.sleep(2)
+        assert c['Image']==r['image_digest'] and c['State']['Health']['Status']=='healthy'
+        assert c['Config']['Labels']['com.docker.compose.project.working_dir']==target+'/deploy/edge-runtime'
+        assert c['HostConfig']['NetworkMode']=='commonswarm-net' and c['HostConfig']['Memory']==2147483648
+        for dst,rel in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]:
+            mounts=[m for m in c['Mounts'] if m['Destination']==dst]
+            assert len(mounts)==1 and mounts[0]['Source']==target+'/'+rel and mounts[0]['RW'] is False
+        assert hashlib.sha256(archive.read_bytes()).hexdigest()==r['artifact_digest']
+        with tarfile.open(archive) as tar:
+            for member in tar.getmembers():
+                dest=live/member.name
+                assert not pathlib.PurePosixPath(member.name).is_absolute() and '..' not in pathlib.PurePosixPath(member.name).parts
+                if member.isfile(): assert not dest.is_symlink() and dest.read_bytes()==tar.extractfile(member).read()
+                elif member.issym(): assert dest.is_symlink() and dest.readlink().as_posix()==member.linkname
+        gen=str(state['generation']); enabled='true' if state['reopen'] else 'false'
+        sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; "
+        sql+="UPDATE commonswarm_oauth.admin_cutover_state SET measured_edge_release_sha='"+sha+"',measured_edge_target='"+target+"',measured_mount='"+target+"',measured_image_digest='"+r['image_digest']+"',measured_artifact_digest='"+r['artifact_digest']+"',measured_generation=release_generation,measured_at=statement_timestamp(),measurement_evidence_ref='systemd/recycle/"+gen+"',invalidated_at=NULL,admin_issuance_enabled="+enabled+" WHERE singleton; COMMIT;"
+        if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        db(sql)
+except Exception:
+    raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
+PY
+```
+
+```sh
+# step: ai-recycle-install
+# readonly: no
+# host: HezLead ONLY, box root, W3 with timer stopped
+set -euo pipefail
+test "$WINDOW" = W3
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" && exit 1
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
+RECYCLE_DROPIN=/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
+test ! -e "$RECYCLE_DROPIN" && test ! -L "$RECYCLE_DROPIN"
+mkdir -p /etc/commonswarm-admin-release /usr/local/libexec "$(dirname "$RECYCLE_DROPIN")"
+chmod 0700 /etc/commonswarm-admin-release
+python3 - "$PLAN_FILE" "$SECRET_STAGE/recycle.sh" "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
+import json,pathlib,re,sys
+plan=pathlib.Path(sys.argv[1]).read_text(); blocks=re.findall(r'^```sh\n(.*?)^```$',plan,re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-recycle-hook\n')]; assert len(found)==1
+pathlib.Path(sys.argv[2]).write_text('#!/bin/bash\n'+found[0])
+d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
+p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json'); p.write_text(json.dumps(r)+'\n'); p.chmod(0o600)
+PY
+/bin/bash -n "$SECRET_STAGE/recycle.sh"
+install -o root -g root -m 0700 "$SECRET_STAGE/recycle.sh" /usr/local/libexec/commonswarm-admin-edge-recycle
+printf '[Service]\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
+chmod 0644 "$RECYCLE_DROPIN"
+systemctl daemon-reload
+systemctl cat "$EDGE_RECYCLE_SERVICE" >"$PROOF_DIR/recycle-unit-after.txt"
+printf 'PASS recycle pre-invalidation/post-measurement hooks installed; no restart performed\n'
+```
+
+```sh
+# step: ai-recycle-rollback
+# readonly: no
+# host: HezLead ONLY, box root; close issuance before removing hook
+set -euo pipefail
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+systemctl stop "$EDGE_RECYCLE_TIMER"
+RECYCLE_DROPIN=/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
+test ! -L "$RECYCLE_DROPIN"
+if test -e "$RECYCLE_DROPIN"; then
+ rm -- "$RECYCLE_DROPIN" || { printf 'FAIL guarded drop-in removal refused %s; STOP\n' "$RECYCLE_DROPIN" >&2; exit 1; }
+fi
+systemctl daemon-reload
+test ! -e "$RECYCLE_DROPIN"
+printf 'PASS recycle drop-in removed; issuance closed; reenable timer only after recovery\n'
 ```
 
 ## W4: /app site release
@@ -1158,7 +1400,7 @@ d=json.load(open(sys.argv[1])); a=d.get('approval')
 assert d.get('window')=='W5' and isinstance(a,dict), 'FAIL W5 explicit activation approval required; STOP'
 assert a.get('action')=='activate-admin-issuance' and a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref'), 'FAIL W5 approval identity; STOP'
 assert all(a.get(k)==d.get(k) and isinstance(d.get(k),str) and d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL W5 approval binding; STOP'
-print('W5 approval present; implementation and every named proof remain required')
+print('W5 approval present; every named proof and measured production prerequisites remain required')
 PY
 ```
 
@@ -1205,13 +1447,13 @@ with tarfile.open(archive) as t:
     for member in t.getmembers():
         if member.isfile(): assert (pathlib.Path(target)/member.name).read_bytes()==t.extractfile(member).read()
 PY
-printf 'PASS W5 DB release identity/checksum/legacy controls; implementation still required\n'
+printf 'PASS W5 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W5-checks.txt"
 ```
 
 ```sh
 # step: ai-w5-apply
-# readonly: yes
-# host: box root; intentional implementation STOP; approval cannot bypass
+# readonly: no
+# host: HezLead, box root; approved activation only
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
@@ -1219,229 +1461,480 @@ import json,sys
 d=json.load(open(sys.argv[1])); a=d.get('approval')
 assert d.get('window')=='W5' and isinstance(a,dict) and a.get('action')=='activate-admin-issuance', 'FAIL W5 activation approval required; STOP'
 assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')), 'FAIL W5 approval binding; STOP'
-raise SystemExit('FAIL W5 activation-switch-unavailable: ADMIN_AS_ISSUANCE_ENABLED is hard false; issuer mount/rotation, gate cancellation and all edge restart measurement paths need reviewed implementation; STOP without mutation')
+PY
+test "$WINDOW" = W5
+ai_run ai-inputs
+ai_run ai-w5-approval
+ai_run ai-gates
+ai_deadline
+test -f "$PROOF_DIR/W5-checks.txt"
+test ! -e "$PROOF_DIR/activation-attempted.txt"
+OAUTH_TARGET=/home/commonswarm/oauth/releases/$RELEASE_SHA
+test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_TARGET"
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
+test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
+# Both hooks are marked complete blocks installed in W3; no generated operator script.
+systemctl stop "$EDGE_RECYCLE_TIMER"
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
+/usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
+/usr/local/libexec/commonswarm-admin-edge-recycle after >"$SECRET_STAGE/measure-after.log" 2>&1
+python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
+import pathlib,sys
+rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
+keys=('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE')
+assert not any(r.split('=',1)[0] in keys for r in rows), 'FAIL activation baseline must be unset; STOP'
+pathlib.Path(sys.argv[2]).write_text('\n'.join(rows+['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1'])+'\n')
+pathlib.Path(sys.argv[2]).chmod(0o600)
+PY
+cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/activation-attempted.txt"
+install -o root -g root -m 0600 "$SECRET_STAGE/service.active.env" /etc/commonswarm-oauth/service.env
+docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
+ -f "$OAUTH_TARGET/deploy/mcp-auth/compose.yaml" -f "$OAUTH_TARGET/deploy/mcp-auth/compose.management.yaml" \
+ -f "$OAUTH_TARGET/deploy/mcp-auth/compose.admin-issuer.yaml" \
+ up -d --no-build --pull never --force-recreate oauth >"$SECRET_STAGE/activation.log" 2>&1
+timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
+python3 - "$RELEASE_SHA" <<'PY'
+import json,subprocess,sys
+c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-oauth-oauth-1'],stderr=subprocess.DEVNULL))[0]
+e=dict(x.split('=',1) for x in c['Config']['Env'])
+assert e['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED']=='1'
+assert e['MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE']=='/run/commonswarm-oauth/admin-issuer-database-credentials'
+assert c['Config']['User']=='996:986'
+m=[m for m in c['Mounts'] if m['Destination']=='/run/commonswarm-oauth/admin-issuer-database-credentials']
+assert len(m)==1 and m[0]['Source']=='/etc/commonswarm-oauth/admin-issuer-database-credentials' and m[0]['RW'] is False
+assert subprocess.check_output(['docker','image','inspect','--format','{{index .Config.Labels "org.opencontainers.image.revision"}}',c['Image']],text=True).strip()==sys.argv[1]
+PY
+python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql" <<'PY'
+import json,pathlib,re,sys
+d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']
+assert re.fullmatch('[0-9a-f]{40}',sha) and re.fullmatch('[0-9a-f]{64}',h)
+sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation checks refused'; END IF; END $$; "
+sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+h+"',admin_issuance_enabled=true WHERE singleton; COMMIT;\n"
+pathlib.Path(sys.argv[2]).write_text(sql)
+PY
+ai_db -q --file /proof/activate.sql >/dev/null
+systemctl start "$EDGE_RECYCLE_TIMER"
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+printf 'PASS W5 overlay/env/cutover active; require outside gate probe before close\n'
+```
+
+```sh
+# step: ai-w5-probes
+# readonly: probe
+# host: Mac outside ingress, then HezLead box receipt
+set -euo pipefail
+python3 - <<'PY'
+import json,urllib.request
+for method in ['GET','HEAD']:
+    req=urllib.request.Request('https://mcp.commonswarm.com/admin/gate',method=method,headers={'Origin':'https://commonswarm.com','User-Agent':'curl/8.7.1'})
+    with urllib.request.urlopen(req,timeout=15) as r:
+        body=r.read(4097)
+        assert r.status==200 and r.headers.get('Access-Control-Allow-Origin')=='*' and 'no-store' in r.headers.get('Cache-Control','') and len(body)<=4096
+        assert json.loads(body)=={'state':'open'} if method=='GET' else body==b''
+print('PASS outside GET/HEAD gate open + CORS; exact approved combined release')
 PY
 ```
 
-There is intentionally no DB flag flip pretending to open the AS. A future
-reviewed plan revision must (1) implement and check the real switch, (2) stage
-the NOINHERIT issuer credential/mount and prove production grants/rotation,
-(3) reconcile all GATES.json controls, (4) invalidate/remeasure edge immediately
-before activation, (5) write lane8_evidence_digest and expected migration hashes
-while DB issuance is closed, (6) confirm zero checksum failures, (7) flip the
-DB and AS gates through that implemented control, (8) probe actual GET/HEAD
-`/admin/gate` open with CORS, and (9) execute W6. This checklist is **not runnable**
-and grants no authority to invent SQL or restart commands.
+```sh
+# step: ai-w5-readback
+# readonly: no
+# host: HezLead box root; after outside ai-w5-probes PASS
+set -euo pipefail
+test "$WINDOW" = W5
+test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AND lane8_evidence_digest IS NOT NULL AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+test "$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')" = 0
+printf 'PASS W5 measured release, overlay/env and public gate open\n' >"$PROOF_DIR/W5-probes.txt"
+```
+
+```sh
+# step: ai-w5-rollback
+# readonly: no
+# host: HezLead box root; remove activation env/overlay and close cutover
+set -euo pipefail
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+OAUTH_TARGET=$(readlink -f /home/commonswarm/oauth/current)
+python3 - "$OAUTH_TARGET" "$SECRET_STAGE/service.closed.env" <<'PY'
+import pathlib,re,sys
+assert re.fullmatch(r'/home/commonswarm/oauth/releases/[0-9a-f]{40}',sys.argv[1])
+p=pathlib.Path('/etc/commonswarm-oauth/service.env'); rows=p.read_text().splitlines()
+keys=('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE')
+out=pathlib.Path(sys.argv[2]); out.write_text('\n'.join(r for r in rows if r.split('=',1)[0] not in keys)+'\n'); out.chmod(0o600)
+PY
+install -o root -g root -m 0600 "$SECRET_STAGE/service.closed.env" /etc/commonswarm-oauth/service.env
+docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
+ -f "$OAUTH_TARGET/deploy/mcp-auth/compose.yaml" -f "$OAUTH_TARGET/deploy/mcp-auth/compose.management.yaml" \
+ up -d --no-build --pull never --force-recreate oauth >"$SECRET_STAGE/activation-rollback.log" 2>&1
+timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
+python3 - <<'PY'
+import json,subprocess,urllib.request
+c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-oauth-oauth-1'],stderr=subprocess.DEVNULL))[0]
+e=dict(x.split('=',1) for x in c['Config']['Env'])
+assert 'MCP_OAUTH_ADMIN_ISSUANCE_ENABLED' not in e and 'MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE' not in e
+assert not any(m['Destination']=='/run/commonswarm-oauth/admin-issuer-database-credentials' for m in c['Mounts'])
+with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r: assert json.loads(r.read(4096))=={'state':'closed'}
+PY
+test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+systemctl start "$EDGE_RECYCLE_TIMER"
+printf 'PASS W5 env/overlay removed; DB closed; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+```
 
 ```sh
 # step: ai-emergency-close
 # readonly: no
-# host: box root; approved recovery only; never reopens opaque authentication
+# host: HezLead box root; W5–W7 recovery, never reopens opaque authentication
 set -euo pipefail
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp() WHERE singleton; COMMIT;" >/dev/null
-test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-printf 'DB issuance closed, measurement invalidated; existing grants require explicit human revoke/family reconciliation\n'
+ai_run ai-w5-rollback
+printf 'Issuance closed; existing grants require the W6 human revoke/approval withdrawal or separately approved incident reconciliation\n'
 ```
 
-## W6: C1 hosted OAuth admin smoke, blocked until real activation
+## W6: C1 hosted OAuth admin smoke
 
-The task asks for an agent to obtain a hosted-consented admin grant, create a
-test workspace, add a seat, revoke it, read D3 audit and clean up. The current
-tree cannot execute that chain. **This plan retains the FAIL gates**, rather
-than accepting a supplied token, self-signed JWT, direct database grant or
-the retired private delivery callback. W6 cannot write an authorize URL or
-create any workspace until W5 has genuinely opened and the revised client
-smoke runner exists. Required runner work is spelled out in LIMITS.md.
+The delivered `scripts/admin-smoke.mjs` owns PKCE, DPoP proofs/nonces, code
+exchange, init/list/read/actions, saved command IDs, workspace/seat creation,
+seat revoke, refresh and access-fence verification. Keep the same process alive
+through the human fence: its key/token state is in memory. No browser starts
+from these blocks. HezLead's assigned browser worker performs fresh full-account
+second confirmation only after `/Users/yulanbot/work/BROWSER-READY` exists.
+
+Two observed contracts conflict with TASK-2 and require HezLead to settle
+before W6 opens. The requested `/Users/yulanbot/work/dcr-rt/authorize.url` and
+`/private/tmp/dcr-rt-callback.url` are refused by the runner's privatePath guard:
+all private handoffs must be directly in a fresh secret directory, with no
+symlink parent. The plan below uses `$C1_SECRET_STAGE/authorize.url` and
+`$C1_SECRET_STAGE/callback.url`; the requested dcr-rt directory is only a
+nonsecret pointer rendezvous. This correction needs an explicit path ruling.
+Also `approve_admin_client` accepts only client_id/verification_version and
+stores account-owner approval, with no workspace scope. Its account envelope
+rejects workspace_id. The runner creates a workspace after full-account consent;
+its grant can cover future owned workspaces. A smoke-only client ceiling and
+prompt withdrawal reduce residue but do not make approval workspace-scoped.
+Do not claim otherwise: a separate scope ruling is required. ai-w6-preflight
+refuses absent rulings. No window runs the incompatible original paths/command.
+
+`C1_INPUTS_FILE` is a regular absolute nonsecret JSON input supplied by HezLead:
+release_sha/window_id/plan_sha256; owner_user_id and existing smoke_workspace_id;
+verification_version, metadata_digest; a target_file (protected JSON url/anonKey),
+owner file-store state_directory; and path_revision_approval plus
+account_approval_revision, each a nonempty explicit HezLead prompt reference.
+The verification row is an external reviewed input prepared by the release
+role, not created by owner approval. PASS10 pins lowercase SHA-256 of
+`canonicalAdminJson(fetched_document)` via the production `adminDigest`.
+Never hash provider-normalized defaults or confuse the document's byte digest
+with its canonical JSON digest. Approval uses the exact version after the
+published document, reviewed digest and DB row are reconciled.
 
 ```sh
 # step: ai-w6-preflight
 # readonly: yes
-# host: Mac /bin/bash 3.2; before consent, files, network or mutations
+# host: Mac Bash 3.2; no files/network/mutations before assignment checks
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1])); a=d.get('approval')
 assert d.get('window')=='W6' and isinstance(a,dict) and a.get('action')=='admin-smoke-human-consent', 'FAIL W6 human consent assignment required; STOP'
-assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')), 'FAIL W6 approval binding; STOP'
-raise SystemExit('FAIL W6 smoke-runtime-path-unavailable / smoke-runtime-delivery-unavailable: hard-false AS pin and no reviewed admin PKCE/DPoP callback-file smoke runner; STOP before consent or mutation')
+assert a.get('approver') in ('Tom','HezLead') and a.get('prompt_ref') and all(a.get(k)==d.get(k) and isinstance(d.get(k),str) and d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL W6 approval binding; STOP'
+PY
+: "${C1_INPUTS_FILE:?C1 approval inputs absent; STOP}"
+python3 - "$INPUTS_FILE" "$C1_INPUTS_FILE" <<'PY'
+import json,pathlib,re,sys
+d=json.load(open(sys.argv[1])); p=pathlib.Path(sys.argv[2])
+assert p.is_absolute() and p.is_file() and not p.is_symlink(), 'FAIL C1 regular input required; STOP'
+c=json.loads(p.read_text())
+assert all(c.get(k)==d[k] for k in ('release_sha','window_id','plan_sha256')), 'FAIL C1 window binding; STOP'
+for k in ['owner_user_id','smoke_workspace_id']: assert re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}',c.get(k,'')), 'FAIL C1 owner/workspace input; STOP'
+assert type(c.get('verification_version')) is int and c['verification_version']>0
+assert re.fullmatch('[0-9a-f]{64}',c.get('metadata_digest',''))
+for k in ['path_revision_approval','account_approval_revision']:
+    assert isinstance(c.get(k),str) and re.fullmatch('[A-Za-z0-9/_.:-]{1,200}',c[k]), 'FAIL C1 '+k+' required; STOP'
+for k in ['target_file','state_directory']:
+    path=pathlib.Path(c.get(k,'')); assert path.is_absolute() and path.exists() and not path.is_symlink(), 'FAIL C1 owner session input; STOP'
+print('PASS C1 assignment, corrected-path/scope rulings and reviewed approval inputs')
 PY
 ```
 
-The future W6 callback protocol must use `/Users/yulanbot/work/dcr-rt/` only
-as a **nonsecret rendezvous pointer**: a newly allocated task-named manifest
-file points to the fresh `/private/tmp/anvil-secret.XXXXXX` directory. The
-authorize URL file, state, verifier, private DPoP key, callback URL/code and
-token store all live in that secret directory, mode 0600. HezLead's assigned
-browser worker reads the URL file and writes the complete callback URL to the
-callback file in that same directory, atomically, without logging either.
-Wait at most ten minutes, poll without starting a browser, require exact
-redirect URI/state/optional issuer and one code, reject OAuth errors/duplicates,
-and never send secrets to the `.invalid` redirect host. Keep the URL out of
-stdout and public evidence. `scripts/dcr-roundtrip.mjs` currently uses hidden
-stdin, not files; the task's claimed same protocol is a **contract gap**, not
-permission to retrofit that script in this docs-only lane.
-
-Future C1 runner contract (all mandatory, exact build; no code here can pass it):
-
-1. Verify AS/edge/site live identities, checksum gate, closure, gate open,
-   pinned hosted HTTPS CIMD/static client verification, fresh account-owner
-   `/app` approval and PKCE/DPoP compatibility. Reject DCR/native/loopback.
-   Use full-account consent with an explicit reviewed routine capability list
-   if creating the test workspace after the grant; granular consent cannot
-   silently select a workspace that does not exist. No dormant scopes/delegation.
-2. Hosted consent is a fresh human action: display exact client, manifest,
-   expiry and full-account second confirmation. Require one
-   AdminDelegationGranted from human recovery, receipt/digests/binding IDs only.
-3. Exchange the code using S256 verifier, explicit admin resource and ES256
-   same-key DPoP at canonical issuer `/token`, including nonce challenge/fresh
-   jti protocol. Consume HTTP 200 directly to a 0600 protected runtime store;
-   require token_type DPoP, exact granted scopes, bound key and deadline-clipped
-   TTL <=300, one committed AdminCredentialIssued audit. Never dump claims/body.
-4. Through the actual admin MCP transport initialize, list, read and act with
-   fresh proofs; pair wrong-key/no-proof refusal with live valid-key control.
-   Save command IDs **before** send. Create the test workspace through the
-   supported admin routine, add a seat, revoke it. Require linked domain events,
-   account cards and bounded D3 init/list/read/action audit tied to grant/family.
-5. Refresh once with same client/resource/key, unchanged consent deadline and
-   no scope/budget reset. Any replay-kill test needs a second separately approved
-   grant; it must not kill the grant used for the positive smoke.
-6. Fresh human owner revokes the smoke grant/family, proves previously valid
-   access and refresh both refused, archives the workspace through the human
-   command path, and verifies history survives. Unknown outcomes STOP using
-   saved command IDs; separately reviewed reconciliation only, no automatic retry.
-7. Redacted `C1.json` contains exact release_sha, manifest digest, safe generated
-   IDs/event IDs, bounded request statuses, deadline/TTL PASS booleans, each
-   audit kind PASS, cleanup/revoke/refresh refusal PASS and overall PASS. Exclude
-   URLs, callback, headers, tokens, proofs, key material, session bindings and
-   raw remote payloads. Close removes secret files with guarded rm and leaves
-   only allowlisted receipts plus nonsecret rendezvous pointer removal.
-
-The following two complete file-handshake blocks are prepared for the revised
-W6 runner. **They are unreachable in this revision**: ai-w6-preflight STOPs,
-and the URL producer independently requires an actually open gate before it
-writes any secret. `ADMIN_REVIEW_CLIENT_FILE` is a reviewed nonsecret JSON
-file containing only client_id and redirect_uri; both are pinned hosted HTTPS
-URIs, never a DCR/native/loopback client. The W5 verification/owner-approval
-receipt binds these exact values. No .invalid redirect callback is fetched.
+```sh
+# step: ai-w6-prepare
+# readonly: no
+# host: HezLead Mac; only after ai-w6-preflight/ai-inputs/ai-gates PASS
+set -euo pipefail
+RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
+test "$(git rev-parse HEAD)" = "$RELEASE_SHA" && test -z "$(git status --porcelain)"
+C1_PROOF_DIR=/Users/yulanbot/work/hm37-live-release/c1-${RELEASE_SHA}-${WINDOW_ID}
+test ! -e "$C1_PROOF_DIR" && test ! -L "$C1_PROOF_DIR"
+mkdir -p "$C1_PROOF_DIR" /Users/yulanbot/work/dcr-rt
+chmod 0700 "$C1_PROOF_DIR"
+install -m 0600 "$C1_INPUTS_FILE" "$C1_PROOF_DIR/C1-inputs.json"
+```
 
 ```sh
-# step: ai-w6-consent-url
-# readonly: probe
-# host: future authorized Mac worker; no browser launch
+# step: ai-w6-transfer
+# readonly: no
+# host: HezLead Mac; nonsecret receipts only, whole block per selected file
 set -euo pipefail
-: "${INPUTS_FILE:?}" "${SECRET_STAGE:?}" "${ADMIN_REVIEW_CLIENT_FILE:?}"
-node --input-type=module - "$INPUTS_FILE" "$SECRET_STAGE" "$ADMIN_REVIEW_CLIENT_FILE" <<'JS'
-import fs from 'node:fs';
-import path from 'node:path';
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
-const [inputFile, stage, clientFile] = process.argv.slice(2);
-const need = (ok) => { if (!ok) throw new Error('contract'); };
+: "${C1_TRANSFER_DIRECTION:?upload or download}" "${C1_TRANSFER_FILE:?}" "${C1_PROOF_DIR:?}"
+C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
+case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
+ upload:C1-inputs.json|upload:agent.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
+  C1_UPLOAD=/tmp/admin-c1-${WINDOW_ID}-${C1_TRANSFER_FILE}
+  test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
+  printf -v C1_REMOTE 'test ! -e %q' "$C1_UPLOAD"
+  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
+  scp -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
+  printf -v C1_REMOTE 'sudo -n install -o root -g root -m 0600 %q %q' "$C1_UPLOAD" "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
+  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
+  ;;
+ download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt)
+  test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" && test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE"
+  printf -v C1_REMOTE 'sudo -n cat %q' "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
+  ( set -C; umask 077; ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
+  ;;
+ *) printf 'FAIL nonsecret C1 transfer allowlist; STOP\n' >&2; exit 1;;
+esac
+```
+
+Use this exact transfer block to upload C1-inputs.json (set the box's
+C1_INPUTS_FILE to that derived proof path), download C1-client-check.txt before
+owner approval, upload agent.json before SQL audit (C1_AGENT_RECEIPT on box),
+download C1-audit.json before human revoke, and download C1-fence.txt before
+reporting. After report/cleanup, upload C1.json and C1-cleanup.txt for W6 close.
+The immutable C1.json and its measured digest become W7's C1_REPORT_FILE input.
+This allowlist excludes private authorize/callback/key/token/session files.
+
+```sh
+# step: ai-w6-client-check
+# readonly: no
+# host: HezLead box root, W6 read-only SQL; before owner approval
+set -euo pipefail
+test "$WINDOW" = W6
+: "${C1_INPUTS_FILE:?}"
+test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
+test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
+test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+test "$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')" = 0
+python3 - "$C1_INPUTS_FILE" "$PROOF_DIR/client-check.sql" <<'PY'
+import json,pathlib,re,sys
+c=json.load(open(sys.argv[1])); v=c['verification_version']; h=c['metadata_digest']; owner=c['owner_user_id']; ws=c['smoke_workspace_id']
+assert type(v) is int and v>0 and re.fullmatch('[0-9a-f]{64}',h)
+for value in [owner,ws]: assert re.fullmatch(r'[0-9a-fA-F-]{36}',value)
+sql="SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='https://commonswarm.com/oauth/c1-smoke/client.json' AND verification_version="+str(v)+" AND metadata_digest='"+h+"' AND active AND withdrawn_at IS NULL AND registration_source='cimd' AND application_type='web' AND redirect_uris=ARRAY['https://commonswarm.com/oauth/c1-smoke/callback']::text[] AND scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND full_account_eligible AND NOT delegation_eligible AND pkce_s256_tested AND dpop_tested AND redirect_tested AND origin_control_verified) AND EXISTS(SELECT 1 FROM swarm.memberships WHERE user_id='"+owner+"'::uuid AND workspace_id='"+ws+"'::uuid AND role='owner' AND revoked_at IS NULL);\n"
+pathlib.Path(sys.argv[2]).write_text(sql)
+PY
+test "$(ai_ro -Atq --file /proof/client-check.sql)" = t
+printf 'PASS exact C1 version/canonical digest/reviewed ceiling and smoke workspace owner\n' >"$PROOF_DIR/C1-client-check.txt"
+```
+
+```sh
+# step: ai-w6-owner-client-command
+# readonly: no
+# host: HezLead Mac owner file-store CLI session; approve or withdraw only
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_CLIENT_ACTION:?approve or withdraw}"
+case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
+# Execute ai-w6-preflight and retain box C1-client-check.txt first.
+test -f "$C1_PROOF_DIR/C1-client-check.txt"
+node --import tsx --input-type=module - "$C1_INPUTS_FILE" "$C1_PROOF_DIR" "$C1_CLIENT_ACTION" <<'JS'
+import { readFile, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { credentialStore } from './src/cloud/storage.ts';
+import { refreshedCredential } from './src/cloud/auth.ts';
+import { cloudTarget, commandEndpoint, CLIENT_PROTOCOL_VERSION } from './src/cloud/config.ts';
+import { withClientBuild } from './src/cloud/client-build.ts';
+import { canonicalAdminJson } from './src/protocol/admin-policy.ts';
+import { createHash } from 'node:crypto';
+const [file,proof,action]=process.argv.slice(2);
 try {
-  const input = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
-  const a = input.approval;
-  need(input.window === 'W6' && a?.action === 'admin-smoke-human-consent' &&
-    ['Tom', 'HezLead'].includes(a.approver) && a.prompt_ref &&
-    ['release_sha', 'window_id', 'plan_sha256'].every(k => a[k] === input[k]));
-  const r = await fetch('https://mcp.commonswarm.com/admin/gate', {
-    headers: { Origin: 'https://commonswarm.com', 'User-Agent': 'curl/8.7.1' },
-    redirect: 'error', signal: AbortSignal.timeout(10_000),
-  });
-  need(r.status === 200 && r.headers.get('access-control-allow-origin') === '*');
-  const gate = await r.text(); need(gate.length <= 4096 && JSON.parse(gate).state === 'open');
-  need(/^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/.test(stage) &&
-    fs.realpathSync(stage) === stage && !fs.lstatSync(stage).isSymbolicLink() &&
-    (fs.statSync(stage).mode & 0o777) === 0o700);
-  need(path.isAbsolute(clientFile) && !fs.lstatSync(clientFile).isSymbolicLink());
-  const client = JSON.parse(fs.readFileSync(clientFile, 'utf8'));
-  need(Object.keys(client).sort().join(',') === 'client_id,redirect_uri');
-  for (const value of [client.client_id, client.redirect_uri]) {
-    const u = new URL(value);
-    need(u.protocol === 'https:' && !u.username && !u.password && !u.hash &&
-      !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname));
-  }
-  const verifier = randomBytes(32).toString('base64url');
-  const state = randomBytes(32).toString('base64url');
-  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
-  const jwk = publicKey.export({ format: 'jwk' });
-  const jkt = createHash('sha256').update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })).digest('base64url');
-  const uri = new URL('https://mcp.commonswarm.com/authorize');
-  uri.search = new URLSearchParams({ client_id: client.client_id, redirect_uri: client.redirect_uri,
-    response_type: 'code', resource: 'https://api.commonswarm.com/admin',
-    scope: 'openid offline_access admin:read workspaces:create seats:create seats:revoke',
-    code_challenge: createHash('sha256').update(verifier, 'ascii').digest('base64url'),
-    code_challenge_method: 'S256', dpop_jkt: jkt, state }).toString();
-  const save = (name, value) => fs.writeFileSync(path.join(stage, name), value, { mode: 0o600, flag: 'wx' });
-  save('pkce-state.json', JSON.stringify({ verifier, state, jkt, client, created_at: Date.now() }));
-  save('dpop-private.pem', privateKey.export({ format: 'pem', type: 'pkcs8' }));
-  save('authorize.url', uri.href + '\n');
-  const rendezvous = '/Users/yulanbot/work/dcr-rt';
-  fs.mkdirSync(rendezvous, { recursive: true, mode: 0o700 });
-  need(fs.realpathSync(rendezvous) === rendezvous && !fs.lstatSync(rendezvous).isSymbolicLink());
-  const pointer = path.join(rendezvous, `admin-${input.window_id}.json`);
-  fs.writeFileSync(pointer, JSON.stringify({ release_sha: input.release_sha,
-    authorize_file: path.join(stage, 'authorize.url'), callback_file: path.join(stage, 'callback.url') }) + '\n',
-    { mode: 0o600, flag: 'wx' });
-  console.log('PASS W6 URL written privately; assigned consent worker may read the rendezvous pointer');
-} catch { console.error('FAIL W6 consent-url contract or gate closed; STOP'); process.exitCode = 1; }
+ const c=JSON.parse(await readFile(file,'utf8'));
+ const t=JSON.parse(await readFile(c.target_file,'utf8')); if(t.url!=='https://api.commonswarm.com') throw Error();
+ const target=cloudTarget(t.url,t.anonKey);
+ const response=await fetch('https://commonswarm.com/oauth/c1-smoke/client.json',{redirect:'error',signal:AbortSignal.timeout(10000)});
+ if(!response.ok || response.headers.get('content-type')?.split(';')[0]!=='application/json') throw Error();
+ const bytes=await response.text(); if(Buffer.byteLength(bytes)>4096) throw Error();
+ const doc=JSON.parse(bytes);
+ const digest=createHash('sha256').update(canonicalAdminJson(doc)).digest('hex');
+ if(digest!==c.metadata_digest || doc.client_id!=='https://commonswarm.com/oauth/c1-smoke/client.json') throw Error();
+ const store=await credentialStore({target,stateDirectory:c.state_directory,forceFile:true,warn:()=>{}});
+ const human=await refreshedCredential(target,store); if(human.userId!==c.owner_user_id) throw Error();
+ const commandId=randomUUID(); await writeFile(`${proof}/${action}-request-id`,commandId+'\n',{flag:'wx',mode:0o600});
+ const command={kind:action==='approve'?'approve_admin_client':'withdraw_admin_client_approval',client_id:doc.client_id,verification_version:c.verification_version,...(action==='withdraw'?{reason_code:'smoke_cleanup'}:{})};
+ const r=await fetch(commandEndpoint(target),{method:'POST',headers:{authorization:`Bearer ${human.accessToken}`,apikey:target.anonKey,'content-type':'application/json'},body:JSON.stringify(withClientBuild({command_id:commandId,client_version:CLIENT_PROTOCOL_VERSION,stream:{kind:'account'},resource:'https://api.commonswarm.com/admin',command})),signal:AbortSignal.timeout(15000)});
+ const result=await r.json(); if(!r.ok || result.status!=='accepted') throw Error();
+ await writeFile(`${proof}/client-${action}.json`,JSON.stringify({status:'PASS',command_id:commandId,client_id:doc.client_id,verification_version:c.verification_version,metadata_digest:digest})+'\n',{flag:'wx',mode:0o600});
+ console.log('PASS owner client command; canonical document/version bound; no credentials emitted');
+} catch { console.error('FAIL owner client command; outcome may be unknown; reconcile saved request ID; STOP'); process.exitCode=1; }
 JS
 ```
 
 ```sh
-# step: ai-w6-wait-callback
+# step: ai-w6-start
 # readonly: no
-# host: future authorized Mac worker; only protected file I/O, no token exchange
+# host: HezLead Mac, after preflight/client approve; no browser launch
 set -euo pipefail
-: "${SECRET_STAGE:?}"
-node --input-type=module - "$SECRET_STAGE" <<'JS'
-import fs from 'node:fs';
-import path from 'node:path';
-const stage = process.argv[2], callback = path.join(stage, 'callback.url');
-const need = ok => { if (!ok) throw new Error('contract'); };
+: "${C1_PROOF_DIR:?}"
+test -f "$C1_PROOF_DIR/client-approve.json"
+test -f /Users/yulanbot/work/BROWSER-READY
+C1_SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
+chmod 0700 "$C1_SECRET_STAGE"
+printf '%s\n' "$C1_SECRET_STAGE" >"$C1_PROOF_DIR/secret-stage.path"
+# Nonsecret pointer only; never write the URL/code/key/tokens here.
+C1_POINTER=/Users/yulanbot/work/dcr-rt/admin-c1-${WINDOW_ID}.pointer
+( set -C; umask 077; printf '%s\n' "$C1_SECRET_STAGE" >"$C1_POINTER" )
+node scripts/admin-smoke.mjs \
+ --authorize-url-file "$C1_SECRET_STAGE/authorize.url" \
+ --callback-file "$C1_SECRET_STAGE/callback.url" \
+ --receipt-file "$C1_PROOF_DIR/agent.json" \
+ --verify-fenced --fence-file "$C1_SECRET_STAGE/fenced" \
+ >"$C1_PROOF_DIR/agent-status.log" 2>&1 &
+C1_RUNNER_PID=$!
+printf '%s\n' "$C1_RUNNER_PID" >"$C1_PROOF_DIR/runner.pid"
+```
+
+HezLead's browser worker reads the pointer, waits for the 0600 authorize file,
+performs fresh consent with the exact smoke capabilities and full-account
+second confirmation, then atomically writes the full callback URL as 0600 to
+the secret callback path without logging it. This is a separate browser-worker
+assignment; this plan never launches the installed Chrome app. HezLead starts
+the following box steps as soon as the agent reports
+`agent_steps_complete_awaiting_human_fence`; the access token must remain live.
+The box locates the smoke grant by the saved run-specific command ID, not a
+most-recent-grant guess. Copy only agent.json (redacted command IDs) to the box.
+
+```sh
+# step: ai-w6-audit
+# readonly: no
+# host: HezLead box root; READ-ONLY SQL, smoke grant/family only
+set -euo pipefail
+: "${C1_AGENT_RECEIPT:?}" "${C1_INPUTS_FILE:?}"
+python3 - "$C1_AGENT_RECEIPT" "$C1_INPUTS_FILE" "$PROOF_DIR/c1-audit.sql" <<'PY'
+import json,pathlib,re,sys
+r=json.load(open(sys.argv[1])); c=json.load(open(sys.argv[2])); run=r['run_id']; owner=c['owner_user_id']
+assert re.fullmatch('[0-9a-f]{16}',run) and re.fullmatch(r'[0-9a-fA-F-]{36}',owner)
+assert r['steps']['read_metadata_after_refresh']['result']=='pass'
+command='c1_'+run+'_create_workspace'
+assert r['steps']['create_workspace']['command_id']==command
+# Audit has no client_id column: bind client through the durable grant row.
+base="SELECT DISTINCT a.admin_grant_id,a.provider_grant_id FROM commonswarm_oauth.admin_oauth_audit a JOIN commonswarm_oauth.admin_grant_bindings b USING(admin_grant_id,provider_grant_id) WHERE a.owner_user_id='"+owner+"'::uuid AND a.request_id='"+command+"' AND b.client_id='https://commonswarm.com/oauth/c1-smoke/client.json'"
+sql="BEGIN READ ONLY; SELECT count(*)=1 AS c1_one FROM ("+base+") s \\gset\n\\if :c1_one\n\\else\nDO $$ BEGIN RAISE EXCEPTION 'ambiguous smoke binding'; END $$;\n\\endif\n"
+sql+="WITH smoke AS ("+base+") SELECT json_build_object('grant_id',s.admin_grant_id,'provider_grant_id',s.provider_grant_id,'audit_counts',(SELECT json_object_agg(k.kind,k.n) FROM (SELECT kinds.kind,count(a.audit_id) AS n FROM (VALUES ('init'),('list'),('read'),('action')) kinds(kind) LEFT JOIN commonswarm_oauth.admin_oauth_audit a ON a.admin_grant_id=s.admin_grant_id AND a.provider_grant_id=s.provider_grant_id AND a.event_kind=kinds.kind AND a.outcome='committed' GROUP BY kinds.kind) k)) FROM smoke s; COMMIT;\n"
+pathlib.Path(sys.argv[3]).write_text(sql)
+PY
+ai_ro -Atq --file /proof/c1-audit.sql >"$PROOF_DIR/C1-audit.json"
+python3 - "$PROOF_DIR/C1-audit.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); assert set(r['audit_counts'])=={'init','list','read','action'} and all(type(n) is int and n>0 for n in r['audit_counts'].values())
+PY
+```
+
+```sh
+# step: ai-w6-human-revoke
+# readonly: no
+# host: HezLead Mac, OWNER's file-store CLI session; human revoke verb D6
+set -euo pipefail
+: "${C1_PROOF_DIR:?}" "${C1_SECRET_STAGE:?}"
+# Copy the nonsecret C1-audit.json from the box into C1_PROOF_DIR first.
+C1_GRANT_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["grant_id"])' "$C1_PROOF_DIR/C1-audit.json")
+C1_REVOKE_REQUEST_ID=$(node -e 'console.log(require("node:crypto").randomUUID())')
+( set -C; printf '%s\n' "$C1_REVOKE_REQUEST_ID" >"$C1_PROOF_DIR/revoke-request-id" )
+# Saved default CLI target/session must be the owner and production API; preflight checks below.
+node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS'
+import { readFile } from 'node:fs/promises';
+import { credentialStore,defaultCredentialStateDirectory } from './src/cloud/storage.ts';
+import { cloudTarget } from './src/cloud/config.ts';
+import { refreshedCredential } from './src/cloud/auth.ts';
+import { readCurrentTarget } from './src/cloud/current-target.ts';
 try {
-  need(/^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/.test(stage) && fs.realpathSync(stage) === stage &&
-    !fs.lstatSync(stage).isSymbolicLink() && (fs.statSync(stage).mode & 0o777) === 0o700);
-  const saved = JSON.parse(fs.readFileSync(path.join(stage, 'pkce-state.json'), 'utf8'));
-  need(Number.isSafeInteger(saved.created_at));
-  const end = saved.created_at + 600_000;
-  while (!fs.existsSync(callback) && Date.now() < end) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  need(Date.now() < end && fs.existsSync(callback) && !fs.lstatSync(callback).isSymbolicLink() &&
-    fs.statSync(callback).isFile() && fs.statSync(callback).size <= 16384 && (fs.statSync(callback).mode & 0o777) === 0o600);
-  const url = new URL(fs.readFileSync(callback, 'utf8').trim());
-  const redirect = new URL(saved.client.redirect_uri);
-  need(url.origin + url.pathname === redirect.origin + redirect.pathname && !url.hash && !url.username && !url.password);
-  need(url.searchParams.getAll('state').length === 1 && url.searchParams.get('state') === saved.state);
-  need(!url.searchParams.has('error') && url.searchParams.getAll('code').length === 1 && url.searchParams.get('code'));
-  if (url.searchParams.has('iss')) need(url.searchParams.getAll('iss').length === 1 &&
-    url.searchParams.get('iss') === 'https://mcp.commonswarm.com');
-  fs.writeFileSync(path.join(stage, 'authorization-code.json'), JSON.stringify({ code: url.searchParams.get('code') }),
-    { mode: 0o600, flag: 'wx' });
-  console.log('PASS W6 callback privately bound; reviewed token/delivery block still required');
-} catch { console.error('FAIL W6 callback contract/timeout; STOP without token exchange'); process.exitCode = 1; }
+ const c=JSON.parse(await readFile(process.argv[2],'utf8')); const t=await readCurrentTarget();
+ if(t?.url!=='https://api.commonswarm.com' || c.state_directory!==defaultCredentialStateDirectory()) throw Error();
+ const store=await credentialStore({target:t,forceFile:true,warn:()=>{}}); const human=await refreshedCredential(t,store);
+ if(human.userId!==c.owner_user_id) throw Error();
+} catch { console.error('FAIL owner CLI target/session mismatch; STOP'); process.exitCode=1; }
+JS
+node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
+ --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
+ >"$C1_PROOF_DIR/human-revoke.json" 2>"$C1_PROOF_DIR/human-revoke-status.log"
+python3 - "$C1_PROOF_DIR/human-revoke.json" "$C1_PROOF_DIR/agent.json" "$C1_SECRET_STAGE/fenced" <<'PY'
+import json,os,pathlib,sys
+r=json.load(open(sys.argv[1])); assert r['state']=='revoked'
+a=json.load(open(sys.argv[2])); p=pathlib.Path(sys.argv[3]); assert not p.exists() and not p.is_symlink()
+fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+with os.fdopen(fd,'w') as f: f.write(a['run_id']+'\n')
+PY
+# Same runner performs --verify-fenced with a still-live token. Never restart it.
+wait "$C1_RUNNER_PID"
+```
+
+```sh
+# step: ai-w6-fence-readback
+# readonly: no
+# host: HezLead box root; read-only DB fence proof, grant/family from C1 audit only
+set -euo pipefail
+python3 - "$PROOF_DIR/C1-audit.json" "$PROOF_DIR/c1-fence.sql" <<'PY'
+import json,pathlib,re,sys
+r=json.load(open(sys.argv[1])); g=r['grant_id']; family=r['provider_grant_id']
+assert re.fullmatch(r'[0-9a-fA-F-]{36}',g) and isinstance(family,str) and 0<len(family)<=2048
+quoted="'"+family.replace("'","''")+"'"
+sql="SELECT g.state='revoked' AND b.state='revoked' AND t.grant_id IS NOT NULL FROM swarm.admin_grants g JOIN commonswarm_oauth.admin_grant_bindings b ON b.admin_grant_id=g.grant_id LEFT JOIN commonswarm_oauth.refresh_family_tombstones t ON t.grant_id=b.provider_grant_id WHERE g.grant_id='"+g+"'::uuid AND b.provider_grant_id="+quoted+";\n"
+pathlib.Path(sys.argv[2]).write_text(sql)
+PY
+test "$(ai_ro -Atq --file /proof/c1-fence.sql)" = t
+printf 'PASS grant revoked and refresh family tombstoned; live follow-up refusal recorded by runner\n' >"$PROOF_DIR/C1-fence.txt"
+```
+
+After the fence, execute ai-w6-owner-client-command with
+`C1_CLIENT_ACTION=withdraw`; copy its redacted receipt and C1-fence.txt to the
+Mac proof directory. Do not edit the runner receipt to invent human results.
+The receipt below combines independently observed audit, human and agent proof.
+The workspace remains **`c1-smoke-<runid> (test, archive me)`**, accepted residue
+(D4), with a 10-second `/app` archive step on Tom's morning list. No archive is
+claimed. W7/W4b follow-up: a separately reviewed site release removes
+`site/public/oauth/c1-smoke/client.json` (or returns 404); verify public absence
+and keep the callback free of secrets. Never leave a long-lived approved client.
+
+```sh
+# step: ai-w6-report
+# readonly: no
+# host: HezLead Mac; redacted report and machine receipt
+set -euo pipefail
+node --input-type=module - "$C1_PROOF_DIR" "$INPUTS_FILE" <<'JS'
+import { readFile,writeFile } from 'node:fs/promises';
+const [root,input]=process.argv.slice(2);
+try {
+ if(!(await readFile(`${root}/C1-cleanup.txt`,'utf8')).startsWith('PASS')) throw Error();
+ const d=JSON.parse(await readFile(input,'utf8'));
+ const a=JSON.parse(await readFile(`${root}/agent.json`,'utf8'));
+ const audit=JSON.parse(await readFile(`${root}/C1-audit.json`,'utf8'));
+ const revoke=JSON.parse(await readFile(`${root}/human-revoke.json`,'utf8'));
+ const withdrawal=JSON.parse(await readFile(`${root}/client-withdraw.json`,'utf8'));
+ const fence=await readFile(`${root}/C1-fence.txt`,'utf8');
+ if(!a.ok || a.refused_after_fence?.refusal_code==null || ![401,403].includes(a.refused_after_fence.http_status) || revoke.state!=='revoked' || withdrawal.status!=='PASS' || !fence.startsWith('PASS') || !a.workspace.accepted_residue || !Object.values(audit.audit_counts).every(n=>Number.isSafeInteger(n)&&n>0)) throw Error();
+ const r={release_sha:d.release_sha,status:'PASS',cleanup:true,audit_kinds:['init','list','read','action'],audit_counts:audit.audit_counts,grant_revoked:true,refresh_family_tombstoned:true,live_access_refused:true,client_approval_withdrawn:true,accepted_residue:a.workspace.name,site_document_removal:'W7/W4b next reviewed site release'};
+ await writeFile(`${root}/C1.json`,JSON.stringify(r,null,2)+'\n',{flag:'wx',mode:0o600});
+ const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W4b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
+ await writeFile('/Users/yulanbot/work/hm37-live-release/C1-SMOKE-REPORT.md',text,{flag:'wx',mode:0o600});
+} catch { console.error('FAIL C1 report evidence incomplete; STOP'); process.exitCode=1; }
 JS
 ```
 
-After the revised smoke runner has cleaned up, remove its exact nonsecret
-rendezvous pointer using this marked block; never remove another task's pointer.
-This is also available after a failed consent, followed by guarded secret close.
-
 ```sh
-# step: ai-w6-pointer-close
+# step: ai-w6-secret-close
 # readonly: no
-# host: future authorized Mac worker
+# host: HezLead Mac; success or stopped runner, guarded private cleanup
 set -euo pipefail
-: "${INPUTS_FILE:?}"
-WINDOW_ID=$(python3 -c 'import json,re,sys; d=json.load(open(sys.argv[1])); assert d["window"]=="W6" and re.fullmatch("[A-Za-z0-9]{6}",d["window_id"]); print(d["window_id"])' "$INPUTS_FILE")
-POINTER=/Users/yulanbot/work/dcr-rt/admin-${WINDOW_ID}.json
-test -f "$POINTER" && test ! -L "$POINTER"
-test "$(command -v rm)" = /Users/yulanbot/.local/bin/rm
-rm -- "$POINTER" || { printf 'FAIL pointer cleanup refused %s; retain and report guard message; STOP\n' "$POINTER" >&2; exit 1; }
-test ! -e "$POINTER"
+: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_PROOF_DIR:?}" "${C1_RUNNER_PID:?}"
+if kill -0 "$C1_RUNNER_PID" 2>/dev/null; then printf 'FAIL runner still active; STOP before cleanup\n' >&2; exit 1; fi
+python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_PROOF_DIR/secret-stage.path" <<'PY'
+import pathlib,re,sys
+p=pathlib.Path(sys.argv[1]); pointer=pathlib.Path(sys.argv[2]); saved=pathlib.Path(sys.argv[3])
+assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p)) and p.is_dir() and not p.is_symlink() and p.resolve()==p and p.stat().st_mode & 0o777==0o700
+assert saved.read_text().strip()==str(p)
+assert re.fullmatch(r'/Users/yulanbot/work/dcr-rt/admin-c1-[A-Za-z0-9]{6}\.pointer',str(pointer)) and not pointer.is_symlink() and pointer.read_text().strip()==str(p)
+PY
+rm -r -- "$C1_SECRET_STAGE" || { printf 'FAIL cleanup refused %s; STOP\n' "$C1_SECRET_STAGE" >&2; exit 1; }
+rm -- "$C1_POINTER" || { printf 'FAIL cleanup refused %s; STOP\n' "$C1_POINTER" >&2; exit 1; }
+printf 'PASS private handoffs removed; redacted receipts and accepted residue retained\n' >"$C1_PROOF_DIR/C1-cleanup.txt"
 ```
-
-No C1 receipt is supplied by this preparation. Both old smoke FAIL gates remain.
 
 ## W7: separately approved retirement proof
 
@@ -1479,7 +1972,7 @@ p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is
 assert re.fullmatch('[0-9a-f]{64}',sys.argv[2]) and hashlib.sha256(p.read_bytes()).hexdigest()==sys.argv[2]
 r=json.loads(p.read_text())
 assert r.get('release_sha')==sys.argv[3] and r.get('status')=='PASS' and r.get('cleanup') is True
-assert r.get('audit_kinds')==['init','list','read','action'] and r.get('access_refresh_revoked') is True, 'FAIL W7 C1 incomplete; STOP'
+assert r.get('audit_kinds')==['init','list','read','action'] and r.get('grant_revoked') is True and r.get('refresh_family_tombstoned') is True and r.get('live_access_refused') is True and r.get('client_approval_withdrawn') is True, 'FAIL W7 C1 incomplete; STOP'
 PY
 ```
 
@@ -1505,14 +1998,18 @@ PY
 printf 'PASS W7 legacy runtime and DB auth permanently unreachable; history retained\n' >"$PROOF_DIR/retirement.txt"
 ```
 
+W7/W4b site cleanup follow-up: make a separately reviewed commit removing
+`site/public/oauth/c1-smoke/client.json`, release the resulting landed SHA with
+the W4 site procedure, then retain a public 404 probe receipt. This plan never
+removes a tracked file inside an immutable release or rebuilds an old SHA.
+
 ## Close and abort cleanup
 
 Before forward close run ai-ordinary-probes, the window's specific probes and
 ai-live-controls phase after. Before recovered close use phase recovery. Supply
 `CLOSE_RESULT=success|recovered` only after those proofs; it is an outcome input,
-not permission to skip probes. Failed recovery cannot close. W5/W6 blocked
-preflight creates nothing; a later W5 open followed by implementation STOP can
-close recovered only after emergency DB close and ordinary recovery controls.
+not permission to skip probes. Failed recovery cannot close. W6 creates nothing while its explicit rulings or approval inputs are absent.
+Recovered close requires emergency env/overlay/DB close and ordinary controls.
 
 ```sh
 # step: ai-close
@@ -1523,16 +2020,22 @@ set -euo pipefail
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
-  W1) test -f "$PROOF_DIR/schema-committed.txt" && test -f "$PROOF_DIR/W1-probes.txt";;
+  W1) test -f "$PROOF_DIR/schema-committed.txt" && test -f "$PROOF_DIR/W1-probes.txt" && test -f "$PROOF_DIR/issuer-credential.txt";;
   W2) test -f "$PROOF_DIR/W2-probes.txt";;
   W3) test -f "$PROOF_DIR/W3-readback.txt";;
+  W5) test -f "$PROOF_DIR/W5-probes.txt";;
+  W6) test -f "$PROOF_DIR/C1.json" && test -f "$PROOF_DIR/C1-cleanup.txt";;
   W7) test -f "$PROOF_DIR/retirement.txt";;
   *) echo 'FAIL no implemented forward close for this window; STOP' >&2; exit 1;;
  esac
 fi
 test ! -e "$PROOF_DIR/closed.txt"
-test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-systemctl is-active --quiet commonswarm-edge-recycle.timer
+if test "$CLOSE_RESULT" = success && { test "$WINDOW" = W5 || test "$WINDOW" = W6 || test "$WINDOW" = W7; }; then
+ test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+else
+ test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+fi
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); assert pathlib.Path(sys.argv[2]).read_text().strip()==str(p)
@@ -1542,7 +2045,7 @@ assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p)) and p.i
 assert p.stat().st_mode & 0o777==0o700
 PY
 # Use guarded PATH rm; a refusal stops cleanup.
-rm -rf -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
+rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
@@ -1560,7 +2063,7 @@ import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(p))
 assert p.is_dir() and not p.is_symlink() and p.resolve(strict=True)==p and p.stat().st_mode & 0o777==0o700
 PY
-rm -rf -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; report guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
+rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; report guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 test ! -e "$SECRET_STAGE"
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/aborted-before-mutation.txt"
 ```
@@ -1577,7 +2080,7 @@ import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); assert re.fullmatch(r'/private/tmp/admin-issuance-prep\.[A-Za-z0-9]{6}',str(p))
 assert p.is_dir() and not p.is_symlink() and p.resolve(strict=True)==p and p.stat().st_mode & 0o777==0o700
 PY
-rm -rf -- "$PREP_DIR" || { printf 'FAIL cleanup refused %s; report exact guard message; STOP\n' "$PREP_DIR" >&2; exit 1; }
+rm -r -- "$PREP_DIR" || { printf 'FAIL cleanup refused %s; report exact guard message; STOP\n' "$PREP_DIR" >&2; exit 1; }
 test ! -e "$PREP_DIR"
 ```
 

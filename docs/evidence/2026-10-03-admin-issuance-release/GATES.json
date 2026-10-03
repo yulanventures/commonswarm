@@ -50,7 +50,9 @@
       "native-loopback-custom-scheme-denied-with-approval-row",
       "metadata-withdrawal-denied",
       "dpop-incompatible-denied",
-      "stale-session-csrf-digest-duplicate-receipt-denied"
+      "stale-session-csrf-digest-duplicate-receipt-denied",
+      "cimd-canonical-complete-document-pin-consent-resource-same",
+      "provider-defaults-key-order-positive-changed-fields-denied"
     ],
     "admin-owner-approval-scoped": [
       "account-owner-positive",
@@ -194,13 +196,23 @@
     "edge-release-measurement-paths": [
       "switch-recreate-rollback-recycle-invalidate-before-change",
       "same-step-box-remeasurement",
-      "stale-receipt-cannot-open"
+      "stale-receipt-cannot-open",
+      "measured-systemd-service-timer-inputs",
+      "execstartpre-close-generation-invalidate-before-restart",
+      "execstartpost-health-image-mount-artifact-remeasure",
+      "failed-restart-remains-closed",
+      "dropin-rollback-close-remove-daemon-reload"
     ],
     "release-plan-contract": [
       "whole-block-extraction-bash32-python-syntax",
       "input-negative-controls",
       "gui-denied-sandbox-dry-run",
-      "redaction-secret-cleanup-refusal"
+      "redaction-secret-cleanup-refusal",
+      "approval-inputs-required-before-mutation",
+      "issuer-producer-no-output",
+      "recycle-dropin-rollback-present",
+      "activation-env-overlay-db-all-required",
+      "w2-unset-env-overlay-absent"
     ],
     "oauth-build-route": [
       "cpu-capped-build-once-source-label",
@@ -217,6 +229,23 @@
       "exact-source-build-ci",
       "public-byte-rollback-controls",
       "authorized-headless-view-only-qa"
+    ],
+    "admin-issuer-credential-provisioning": [
+      "on-box-password-never-stdout-argv-env",
+      "json-user-password-0440-root-986",
+      "dedicated-role-tls-login-positive",
+      "failed-provisioning-nologin-clear-password-guarded-file-removal"
+    ],
+    "admin-c1-smoke": [
+      "canonical-published-client-exact-version-owner-approval",
+      "explicit-handoff-path-account-scope-rulings",
+      "browser-ready-assigned-human-second-confirmation",
+      "real-pkce-dpop-nonce-init-list-read-action-refresh",
+      "read-only-d3-counts-smoke-grant-family-only",
+      "human-owner-file-store-revoke-live-access-refusal-family-tombstone",
+      "client-approval-withdrawal",
+      "accepted-workspace-residue-next-site-client-removal",
+      "secret-handoffs-guarded-cleanup-redacted-report"
     ]
   },
   "windows": {
@@ -225,7 +254,8 @@
       "admin-issuer-grants-no-widening",
       "admin-schema-reserve",
       "ordinary-paths-unchanged",
-      "release-plan-contract"
+      "release-plan-contract",
+      "admin-issuer-credential-provisioning"
     ],
     "W2": [
       "oauth-build-route",
@@ -237,7 +267,8 @@
       "legacy-db-fence",
       "edge-caddy-route",
       "ordinary-paths-unchanged",
-      "release-plan-contract"
+      "release-plan-contract",
+      "edge-release-measurement-paths"
     ],
     "W4": [
       "admin-site-lifecycle",
@@ -281,17 +312,22 @@
       "release-plan-contract",
       "oauth-build-route",
       "edge-caddy-route",
-      "site-build-qa"
+      "site-build-qa",
+      "admin-issuer-credential-provisioning"
     ],
     "W6": [
       "admin-activation-chain",
       "admin-site-lifecycle",
-      "legacy-admin-unreachable"
+      "legacy-admin-unreachable",
+      "admin-c1-smoke",
+      "admin-consent-client-policy",
+      "release-plan-contract"
     ],
     "W7": [
       "legacy-admin-unreachable",
       "legacy-db-fence",
-      "admin-delegation-v1-denied"
+      "admin-delegation-v1-denied",
+      "admin-c1-smoke"
     ]
   }
 }
