@@ -218,7 +218,8 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
       while (words[0]?.startsWith("-")) {
         const flag = tokens(words.shift()!)[0]!;
         flags.push(flag);
-        const known = command === "scp" ? /^-[prqCv]+$/.test(flag) : /^-[avzhn]+$/.test(flag) || ["--delete", "--ignore-existing", "--relative"].includes(flag);
+        if (command === "scp" && (flag !== "-p" || flags.length !== 1)) unknown(line);
+        const known = command === "scp" ? flag === "-p" : /^-[avzhn]+$/.test(flag) || ["--delete", "--ignore-existing", "--relative"].includes(flag);
         if (!known && !["-e", "--rsh", "--exclude", "--include", "-o", "-P", "-i"].includes(flag)) unknown(line);
         if (["-e", "--rsh", "--exclude", "--include", "-o", "-P", "-i"].includes(flag)) {
           if (!words.length) unknown(line);
@@ -390,7 +391,15 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
         const found = scripts.get(path);
         // Data-file stdin must remain a dependency. Executable bash stdin
         // still needs its visible writer; no opaque script is admitted here.
-        if (!found && (/\bbash\s+-s\b/.test(command) || /[\x60*?]|\$\(|\$\{[^}]*[@*]/.test(path))) unknown(line);
+        if (!found) {
+          // Only hm37b-stage-transfer's protected data writer admits an
+          // external stdin file. Flags and the complete remote command are
+          // part of the boundary; other opaque stdin remains unmodeled.
+          const writer = /^ssh -o BatchMode=yes ops@(?:100\.115\.66\.74|yulan-vps-1)\s+(.+)$/.exec(command);
+          const remote = String.raw`"sudo -n -i /bin/bash -c 'set -euo pipefail; umask 077; test ! -e \"$STAGING_ROOT/human-session.json\"; test ! -L \"$STAGING_ROOT/human-session.json\"; cat >\"$STAGING_ROOT/human-session.json\"; chmod 0600 \"$STAGING_ROOT/human-session.json\"'"`;
+          if (writer?.[1] !== remote || sshText.slice(end).trim() !== input[0].trim() ||
+              /[\x60*?]|\$\(|\$\{[^}]*[@*]/.test(path)) unknown(line);
+        }
         operations.push({ remote: { command: commandExpansion(command), ...(found ?? { stdinFile: expand(path)[0]! }), ...formatted, ...localOutputs, ...(capture ? { capture } : {}) } });
         continue;
       }

@@ -3846,25 +3846,23 @@ test("box preflight reports every shared fixture precondition in one pass", {
   }
 });
 
-test("Mac harness uses a temporary local clone and recorded command stubs only", { skip: MAC_ONLY }, () => {
+test("Mac harness uses a temporary local clone and recorded command stubs only", () => {
   const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
   try {
     const clone = join(temporary, "checkout");
-    const home = join(temporary, "child-home");
     const bin = join(temporary, "bin");
     const log = join(temporary, "stub.log");
-    mkdirSync(home, { mode: 0o700 });
     mkdirSync(bin, { mode: 0o700 });
     const cloned = spawnSync("git", ["clone", "--no-hardlinks", "--no-checkout", ".", clone], {
       encoding: "utf8",
-      env: explicitEnvironment({ HOME: home }),
+      env: explicitEnvironment({ HOME: process.env.HOME }),
     });
     assert.equal(cloned.status, 0, cloned.stderr);
     for (const command of ["docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown"]) {
       const target = join(bin, command);
       symlinkSync(resolve(STUB), target);
     }
-    const baseEnv = explicitEnvironment({ HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, BOX_DRY_RUN_STUB_LOG: log });
+    const baseEnv = explicitEnvironment({ HOME: process.env.HOME, PATH: `${bin}:${process.env.PATH ?? ""}`, BOX_DRY_RUN_STUB_LOG: log });
     assert.notEqual(spawnSync("ssh", ["ops@box", "true"], { env: baseEnv }).status, 0);
     assert.notEqual(spawnSync("scp", ["fixture", "ops@box:/tmp/fixture"], { env: baseEnv }).status, 0);
     assert.notEqual(spawnSync("op", ["read", "op://placeholder"], { env: baseEnv }).status, 0);
@@ -5682,8 +5680,8 @@ test("controls: a Mac block that starts an absolute-path application is denied a
     // Negative 1: the fake absolute Applications path reaches exec and is denied by containment.
     const denied = executeWholeBlock({ ...preflight, source: head.replace(executableCheck, "") + versionCall }, fixture, { executeDeclared: true });
     assert.equal(denied.result, "failed", "a Mac block started an application under /Applications");
-    // bash 3.2 reports 126 for a refused exec, and 1 when errexit ends the subshell that made it.
-    assert.ok([1, 126].includes(denied.status ?? -1), `status ${denied.status}: ${denied.stderr}`);
+    // The plan's bash 3.2 subshell and ERR trap report a refused exec as 1.
+    assert.equal(denied.status, 1, denied.stderr);
     assert.match(denied.stderr, /Operation not permitted/);
     assert.match(denied.firstFailingCommand ?? "", /"\$chrome" --version/);
     assert.doesNotMatch(denied.stdout, /CHROME_GUARD_FAKE_RAN/, "the application ran");
@@ -6485,7 +6483,7 @@ test("historical controls execute and reproduce the named failures while current
   }
 });
 
-test("lane 8 executes its declared plan and reports current unproduced inputs", { skip: MAC_ONLY }, (t) => {
+test("lane 8 declares all 16 site steps in order", () => {
   const site = blocks(SITE);
   assert.equal(site.length, 16);
   assert.deepEqual(site.map(shortStep), [
@@ -6493,6 +6491,9 @@ test("lane 8 executes its declared plan and reports current unproduced inputs", 
     "site-03-browser-session-preflight", "site-03", "site-03-pin-previous", "site-03-go-record", "site-04",
     "site-04-reconcile-failure", "site-05", "site-05-browser-acceptance", "site-06", "site-07-pre-pin-manifest-close", "site-07-manifest-close",
   ]);
+});
+
+test("lane 8 executes its declared plan and reports current unproduced inputs", { skip: MAC_ONLY }, (t) => {
   const report = unproducedReport().filter((line) => line.includes("[run=lane-8/FULL-CONTROL "));
   const laneBlocks = resolveSteps("lane-8", siteOrder());
   const fixture = prepareMacFixture(laneBlocks);
@@ -8438,12 +8439,27 @@ cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s' <"$SCRIPT"; cat </tmp/later
   assert.equal(operations.length, 2);
   assert.equal(operations[0]!.remote.script, undefined);
   assert.equal(operations[1]!.remote.script, "printf '%s\\n' scoped >/tmp/ssh-scoped-output\n");
-  const data = { ...block, source: `ssh -o BatchMode=yes ops@100.115.66.74 "sudo -n /bin/bash -c 'umask 077; cat >/tmp/protected-data; chmod 0600 /tmp/protected-data'" </tmp/owned-input` };
+  const writer = planBlock(HM37B, "hm37b-stage-transfer").source
+    .match(/  ssh -o BatchMode=yes[^\n]*\\\n[^\n]*\\\n[^\n]*/)![0].trim();
+  const data = { ...block, source: `STAGING_ROOT=/run/commonswarm-hm37-control\nHUMAN_SESSION_SOURCE=/tmp/owned-input\n${writer}` };
   const dataOperation = macBoundaryOperations(data)[0]!;
   assert.ok("remote" in dataOperation);
   assert.equal(dataOperation.remote.stdinFile, "/tmp/owned-input", "data stdin must remain a producer dependency");
-  assert.deepEqual(transferProducts(data).map((product) => product.path), ["/tmp/protected-data"]);
-  assert.throws(() => macBoundaryOperations({ ...data, source: data.source.replace("</tmp/owned-input", '<"$(printf /tmp/owned-input)"') }), /unknown transfer form/);
+  assert.deepEqual(transferProducts(data).map((product) => product.path), ["/run/commonswarm-hm37-control/human-session.json"]);
+  for (const source of [
+    data.source.replace('<"$HUMAN_SESSION_SOURCE"', '<"$(printf /tmp/owned-input)"'),
+    data.source.replace("-o BatchMode=yes", "-o StrictHostKeyChecking=no"),
+    data.source.replace("-o BatchMode=yes ", ""),
+    data.source.replace("-o BatchMode=yes", "-o BatchMode=yes -t"),
+    data.source.replace("sudo -n -i /bin/bash -c", "sudo -n /bin/bash -c"),
+    data.source.replace("umask 077", "umask 022"),
+    data.source.replace("chmod 0600", "chmod 0644"),
+    data.source.replace("test ! -L", "test -L"),
+    data.source.replace("human-session.json", "other.json"),
+    data.source.replace('<"$HUMAN_SESSION_SOURCE"', '<"$HUMAN_SESSION_SOURCE" /tmp/extra'),
+    "ssh -o StrictHostKeyChecking=no ops@100.115.66.74 'sudo reboot' </tmp/x",
+    "ssh -o BatchMode=yes ops@100.115.66.74 'sudo reboot' </tmp/x",
+  ]) assert.throws(() => macBoundaryOperations({ ...data, source }), /unknown transfer form/, source);
   const missing = { ...block, source: "cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s'; cat </tmp/later" };
   assert.throws(() => macBoundaryOperations(missing), /unknown transfer form/);
   for (const source of [
@@ -8484,6 +8500,12 @@ test("controls: an unknown transfer form fails the inventory test", () => {
     source: "scp /tmp/local ops@100.115.66.74:/tmp/known" };
   const consumer: Block = { ...producer, host: "box /bin/bash 5.2 as root", step: "read", source: "cat /tmp/known" };
   assert.ok(crossHostHandoffs([producer, consumer]).some((item) => item.path === "/tmp/known"));
+  const preserved = { ...producer, source: "scp -p /tmp/local ops@100.115.66.74:/tmp/known" };
+  assert.ok(crossHostHandoffs([preserved, consumer]).some((item) => item.path === "/tmp/known"));
+  for (const flag of ["-r", "-q", "-C", "-v", "-pp", "-p -p", "-pr", "-o BatchMode=yes", "-P 22", "-i /tmp/key"]) {
+    assert.throws(() => crossHostHandoffs([{ ...producer,
+      source: `scp ${flag} /tmp/local ops@100.115.66.74:/tmp/known` }, consumer]), /unknown transfer form/, flag);
+  }
   for (const source of ["sftp ops@100.115.66.74 <<'FILES'\nput /tmp/local /tmp/unknown\nFILES", "scp -Z /tmp/local ops@100.115.66.74:/tmp/unknown", "ssh ops@100.115.66.74 'bash -s' <<'BOX'\nsftp other@box\nBOX", "ssh ops@100.115.66.74 'bash -s' <<'BOX'\nscp /tmp/input other@box:/tmp/output\nBOX"]) {
     assert.throws(() => crossHostHandoffs([{ ...producer, source }, consumer]), /unknown-transfer-control:1: unknown transfer form:.*(?:sftp|scp)/);
   }
