@@ -172,8 +172,16 @@ export function createPostgresRegistrationStore(pool) {
         WHERE client_id = $1 AND expires_at > statement_timestamp()`, [id]);
     },
     async cleanup() {
-      return (await pool.query(`DELETE FROM commonswarm_oauth.registered_clients
-        WHERE expires_at <= statement_timestamp()`)).rowCount;
+      try {
+        return (await pool.query(`DELETE FROM commonswarm_oauth.registered_clients
+          WHERE expires_at <= statement_timestamp()`)).rowCount;
+      } catch (error) {
+        // Maintenance must not abort startup or the hourly retry. Request-time
+        // reads and writes still reject when the database is unavailable.
+        const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,40}$/u.test(error.code)
+          ? error.code : "UNKNOWN";
+        console.error(`mcp-auth registration cleanup failed (${code})`);
+      }
     },
     async list(limit = 100) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError("invalid listing limit");
