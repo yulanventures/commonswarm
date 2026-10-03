@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { CallToolResultSchema, InitializeResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/mcp/auth.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
@@ -62,6 +63,7 @@ async function authenticatedHandler() {
   const payload = Buffer.from(JSON.stringify({
     iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: verified.subject,
     grant_id: verified.providerGrantId, iat: now, exp: now + 300,
+    scope: "mcp", client_id: "claude-fixture-client",
   })).toString("base64url");
   const signature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" }, pair.privateKey,
@@ -112,6 +114,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         assert.equal(response.status, 200);
         assert.match(response.headers.get("content-type")!, /^application\/json/u);
         const initialize = await response.json();
+        InitializeResultSchema.parse(initialize.result);
         const negotiated = requested === "2025-03-26" ? requested : "2025-06-18";
         assert.deepEqual(initialize, {
           jsonrpc: "2.0", id,
@@ -133,10 +136,14 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         }, headers));
         assert.equal(listed.status, 200);
         const tools = await listed.json();
+        ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
         assert.equal(tools.result.tools.length, 8);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
+        for (const tool of tools.result.tools) {
+          assert.deepEqual(tool.securitySchemes, [{ type: "oauth2", scopes: ["mcp"] }]);
+        }
       });
     }
   }
@@ -148,7 +155,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
   assert.equal(get.headers.get("allow"), "POST");
 });
 
-test("tools/list advertises exact hosted titles and safety annotations after 2025-06-18 negotiation", async (t) => {
+test("tools/list snapshots eight hosted titles, safety annotations and OAuth security schemes after 2025-06-18 negotiation", async (t) => {
   const fixture = await authenticatedHandler();
   const initialized = await fixture.serve(post({
     jsonrpc: "2.0", id: "metadata-initialize", method: "initialize",
@@ -179,11 +186,41 @@ test("tools/list advertises exact hosted titles and safety annotations after 202
   assert.deepEqual(tools.map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
   for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
     await t.test(name, () => {
-      assert.deepEqual({ title: tools[index].title, annotations: tools[index].annotations }, {
+      assert.deepEqual({ title: tools[index].title, annotations: tools[index].annotations, securitySchemes: tools[index].securitySchemes }, {
         title,
         annotations: { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint: false },
+        securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }],
       });
     });
+  }
+});
+
+test("tool auth errors carry safe WWW-Authenticate metadata while ordinary errors and success do not", async (t) => {
+  let outcome = "ok";
+  const serve = handler({ executeTool: async () => {
+    if (outcome !== "ok") throw new Error(outcome);
+    return { ok: true };
+  } });
+  t.mock.method(console, "error", () => undefined);
+  const challenge = `Bearer resource_metadata="https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="Authorization is no longer valid. Reconnect your account."`;
+  for (const code of ["ok", "hosted_grant_forbidden", "hosted_seat_forbidden", "hosted_seat_revoked", "hosted_check_batch_forbidden", "hosted_command_failed", "private-error-must-not-leak"]) {
+    outcome = code;
+    const response = await serve(post({
+      jsonrpc: "2.0", id: "auth-metadata", method: "tools/call",
+      params: { name: "whoami", arguments: { seat: "seat_ABCDEFGHIJKLMNOPQRSTUV" } },
+    }));
+    assert.equal(response.status, 200);
+    const envelope = await response.json();
+    assert.equal(envelope.id, "auth-metadata");
+    assert.equal(envelope.jsonrpc, "2.0");
+    const result = envelope.result;
+    CallToolResultSchema.parse(result);
+    const needsAuth = ["hosted_grant_forbidden", "hosted_seat_forbidden", "hosted_seat_revoked"].includes(code);
+    assert.deepEqual(result._meta, needsAuth ? { "mcp/www_authenticate": [challenge] } : undefined);
+    assert.deepEqual(JSON.parse(result.content[0].text), code === "ok" ? { ok: true } : {
+      error: code === "private-error-must-not-leak" ? "tool_failed" : code,
+    });
+    assert.equal(result.isError, code === "ok" ? undefined : true);
   }
 });
 
@@ -421,7 +458,13 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
     jsonrpc: "2.0", id: 1, method: "tools/call",
     params: { name: "claim_seat", arguments: base },
   }));
-  assert.deepEqual(JSON.parse((await revoked.json()).result.content[0].text), { error: "hosted_grant_forbidden" });
+  const revokedResult = (await revoked.json()).result;
+  assert.deepEqual(JSON.parse(revokedResult.content[0].text), { error: "hosted_grant_forbidden" });
+  assert.equal(revokedResult.isError, true);
+  CallToolResultSchema.parse(revokedResult);
+  assert.deepEqual(revokedResult._meta, {
+    "mcp/www_authenticate": [`${WWW_AUTHENTICATE}, error="invalid_token", error_description="Authorization is no longer valid. Reconnect your account."`],
+  });
   assert.equal(commands.length, 2, "inactive provider never issues a command");
   const lookupsBeforeInvalidInput = grantLookups;
   for (const workspace_id of ["00000000-0000-4000-8000-000000000000", "00000000-0000-0000-0000-000000000000", null, "invalid"]) {

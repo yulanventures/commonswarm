@@ -1,5 +1,13 @@
 # CommonSwarm site release — generalized ON-baseline plan
 
+Box image-build rule: `nice -n 15` plus a hard three-CPU cap, using
+`systemd-run --scope -p CPUQuota=300%` around the build workers or a supported
+builder quota. Build once per `RELEASE_SHA`, look up a persistent SHA tag,
+build only if absent, and verify the image's recorded source SHA before reuse;
+unsupported caps or mismatched SHA labels are STOP. See the shared preamble in
+[RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md). This site plan builds
+static files on the Mac and contains no box image-build step.
+
 **Release:** validated `SITE_RELEASE_SHA`, reviewed and landed on `origin/main`.
 
 **Baseline source:** validated `SITE_BASE_SHA`, reconciled with the box measurement.
@@ -10,6 +18,14 @@
 Anvil runs every marked block on the Mac mini under HezLead's direction. Mac
 blocks use `/bin/bash` 3.2. They never assign `HOME`, print a credential, run
 Docker, deploy a second SHA, change Caddy or DNS, or restart a service.
+Mac blocks must not call setuid tools: the worker sandbox refuses them.
+
+Every headless browser launch in this plan or any plan copied from it passes
+`--no-sandbox` with `--password-store=basic`, `--use-mock-keychain`, and a fresh
+temporary profile: Chromium's macOS seatbelt cannot start inside the release
+worker's `sandbox-exec` profile (`~/.config/agent-sandbox/no-real-chrome.sb`),
+which supplies containment. Use only Playwright's bundled Chromium, never the
+installed Chrome. See the REDUCED-CONTROL rule under "Fresh headless Chromium session".
 
 Hosted MCP must be ON. `site2-00-a-close-ingest` now records the live
 protected-resource metadata and unauthenticated MCP POST checks that replace
@@ -485,7 +501,13 @@ must not execute them.
 The preflight compares any authenticated web user with the CLI human and the
 fixed expected ID, retains the original full-control assertions, and otherwise
 selects REDUCED-CONTROL. A fresh signed-out profile therefore reports the
-signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
+signed-in and mobile claims as NOT PROVED. Every headless Chromium launch uses
+`--no-sandbox`: Chromium's macOS seatbelt cannot initialize inside the release
+worker's sandbox. The worker's outer `sandbox-exec` profile
+`~/.config/agent-sandbox/no-real-chrome.sb` supplies containment, denying execution
+of installed Chrome and reads of real Chrome profiles and the macOS keychain.
+Only Playwright's bundled Chromium may run; later CDP controls reuse that process.
+A keychain dialog is STOP, never a
 click-through or reduced-control fallback. Close stops only the task-owned
 headless process and removes its private profile through guarded rm.
 
@@ -500,7 +522,9 @@ Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
 retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
 stderr categories, with arbitrary error details withheld. STEP 0 means harness
-setup failed before Python started. Steps 1–13 are attachment, navigation,
+setup failed before Python started; its one-line cause retains the exit code,
+signal when available, and first stderr line with home paths redacted and
+sensitive-looking details withheld. Steps 1–13 are attachment, navigation,
 document load, app readiness, state snapshot, keychain/challenge check, branch
 selection, account label, user identity, starting workspace, workspace switch,
 switch wait, and receipt write. STEP 4 requires a non-loading dashboard state
@@ -541,11 +565,12 @@ retaining raw browser output in the public evidence directory.
       fi
     fi
     if [ "$keep_browser" -eq 1 ] && [ "$status" -eq 0 ]; then exit 0; fi
-    if [ -n "$chrome_pid" ] && kill -0 "$chrome_pid" 2>/dev/null; then
-      case "$(ps -p "$chrome_pid" -o command= 2>/dev/null)" in
-        *"$chrome"*"--user-data-dir=$profile"*) kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true ;;
-        *) printf 'WARN site2-03-browser-session-preflight: pid %s is not the task-owned browser; not signalled\n' "$chrome_pid" >&2 ;;
-      esac
+    if [ -n "$chrome_pid" ]; then
+      if ! python3 "$browser_root/browser-process.py" stop "$browser_root" "$chrome_pid" "$chrome" "$profile"; then
+        printf 'STOP: preflight browser cleanup unproved; retain %s (recorded PID %s) and window state for HezLead reconciliation\n' "$browser_root" "$chrome_pid" >&2
+        exit 1
+      fi
+      wait "$chrome_pid" 2>/dev/null || true
     fi
     if ! rm -r -- "$browser_root"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
@@ -567,6 +592,106 @@ retaining raw browser output in the public evidence directory.
   chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
+  # Sandbox-safe ownership helper: proc_pidinfo reads the actual start time;
+  # pgrep matches only the exact recorded PID/command and enumerates its children.
+  cat >"$browser_root/browser-process.py" <<'PY'
+import ctypes, json, os, pathlib, re, signal, subprocess, sys, time
+mode, root, pid_text, binary, profile = sys.argv[1:]
+root = pathlib.Path(root)
+pid = int(pid_text)
+if pid <= 1 or profile != str(root / "browser-profile"):
+    raise SystemExit("STOP: invalid task browser identity; leave state for HezLead reconciliation")
+receipt = root / "browser-process.json"
+# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo.
+class BsdInfo(ctypes.Structure):
+    _fields_ = [("header", ctypes.c_uint32 * 12), ("names", ctypes.c_char * 48),
+                ("tail", ctypes.c_uint32 * 6), ("start_sec", ctypes.c_uint64),
+                ("start_usec", ctypes.c_uint64)]
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                              ctypes.c_void_p, ctypes.c_int]
+libproc.proc_pidinfo.restype = ctypes.c_int
+
+def identity(target):
+    os.kill(target, 0)
+    info = BsdInfo()
+    size = ctypes.sizeof(info)
+    if size != 136 or libproc.proc_pidinfo(target, 3, 0, ctypes.byref(info), size) != size:
+        raise RuntimeError("process start time unavailable")
+    if info.header[3] != target or info.header[5] != os.getuid():
+        raise RuntimeError("process identity unavailable")
+    return {"pid": target, "ppid": int(info.header[4]), "pgid": int(info.tail[1]),
+            "start": [int(info.start_sec), int(info.start_usec)]}
+
+def pgrep(*args):
+    result = subprocess.run(["/usr/bin/pgrep", *args], capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        raise RuntimeError("pgrep ownership query failed")
+    return result.stdout.splitlines()
+
+def browser():
+    before = identity(pid)
+    pattern = re.escape(binary) + r" .* --user-data-dir=" + re.escape(profile) + r"( |$)"
+    matches = [line for line in pgrep("-lf", pattern) if line.startswith(str(pid) + " ")]
+    if len(matches) != 1 or identity(pid) != before or before["pgid"] != pid:
+        raise RuntimeError("task browser command/start time not proved")
+    return {"identity": before, "command": matches[0], "binary": binary, "profile": profile}
+
+try:
+    current = browser()
+    if mode == "record":
+        with receipt.open("x", encoding="utf-8") as output:
+            json.dump(current, output, sort_keys=True)
+        receipt.chmod(0o600)
+    else:
+        if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError("recorded browser identity unavailable")
+        if json.loads(receipt.read_text()) != current:
+            raise RuntimeError("recorded PID/start time/command changed")
+        if mode == "stop":
+            # Snapshot only the exact verified PID tree, never a process-name/group kill.
+            tree = [current["identity"]]
+            for parent in tree:
+                if identity(parent["pid"]) != parent:
+                    raise RuntimeError("parent identity changed")
+                for child_text in pgrep("-P", str(parent["pid"])):
+                    child = identity(int(child_text))
+                    if child["ppid"] != parent["pid"] or child["pgid"] != pid:
+                        raise RuntimeError("child ownership not proved")
+                    if child["pid"] in {item["pid"] for item in tree}:
+                        raise RuntimeError("unexpected process tree")
+                    tree.append(child)
+                if identity(parent["pid"]) != parent:
+                    raise RuntimeError("parent identity changed")
+            # Retain identities before signalling, including if reconciliation is needed.
+            tree_file = root / "browser-process-tree.json"
+            tree_file.write_text(json.dumps(tree, sort_keys=True), encoding="utf-8")
+            tree_file.chmod(0o600)
+            if browser() != current:
+                raise RuntimeError("browser identity changed before stop")
+            # Root first prevents new descendants; each signal rechecks PID/start time.
+            for member in tree:
+                try:
+                    live = identity(member["pid"])
+                except ProcessLookupError:
+                    continue
+                if live["start"] != member["start"] or live["pgid"] != pid:
+                    raise RuntimeError("PID reused or ownership changed; not signalled")
+                os.kill(member["pid"], signal.SIGTERM)
+            for attempt in range(100):
+                if not pgrep("-g", str(pid)):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("task process tree still running after 10 seconds")
+        elif mode != "check":
+            raise RuntimeError("invalid ownership operation")
+except (OSError, ValueError, RuntimeError):
+    # Never print the command, private browser output, or arbitrary exception details.
+    raise SystemExit("STOP: task browser ownership/cleanup not proved; no unverified PID signalled; "
+                     "retain private staging and window state for HezLead reconciliation") from None
+PY
+  chmod 0600 "$browser_root/browser-process.py"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
   chrome="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' \
     "$(npm root -g)/playwright")"
@@ -579,7 +704,7 @@ retaining raw browser output in the public evidence directory.
   if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
   # setsid detaches from the block executor's process group; exec preserves $!.
   python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
+    "$chrome" --headless --no-sandbox --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
     --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
     </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
@@ -589,6 +714,7 @@ retaining raw browser output in the public evidence directory.
   while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
     tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
   done
+  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
   endpoint="http://127.0.0.1:$chrome_port"
   {
     printf 'SITE_BROWSER_ROOT=%q\n' "$browser_root"
@@ -700,7 +826,7 @@ path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site2-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
   python3 - "$harness_stdout" "$harness_stderr" "$harness_status" "$SITE_EVIDENCE" <<'PY'
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -723,6 +849,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout", "STOP: STEP 6 keychain dialog"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -739,8 +867,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-03-browser-preflight: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-03-browser-preflight-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
@@ -1205,14 +1346,10 @@ a non-blocking browser failure exits zero so the release continues to close.
       browser_reason='pid gone'
     fi
     if [ -z "$browser_reason" ]; then
-      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
-      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+      if [ -z "${SITE_BROWSER_ROOT:-}" ] || [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ] ||
+        ! python3 "$SITE_BROWSER_ROOT/browser-process.py" check "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
+          "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE" 2>/dev/null; then
         browser_reason='not ours'
-      else
-        case "$browser_command" in
-          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
-          *) browser_reason='not ours' ;;
-        esac
       fi
     fi
     if [ -z "$browser_reason" ]; then
@@ -1444,7 +1581,7 @@ print("STEP 14", flush=True)
 path=evidence/"site2-05-browser.json"; path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
     python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -1467,6 +1604,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -1483,8 +1622,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-05-browser-acceptance: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-05-browser-acceptance-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
@@ -1621,14 +1773,10 @@ PY
       browser_reason='pid gone'
     fi
     if [ -z "$browser_reason" ]; then
-      browser_command="$(ps -p "$SITE_CHROME_PID" -o command= 2>/dev/null)" || browser_command=
-      if [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ]; then
+      if [ -z "${SITE_BROWSER_ROOT:-}" ] || [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ] ||
+        ! python3 "$SITE_BROWSER_ROOT/browser-process.py" check "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
+          "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE" 2>/dev/null; then
         browser_reason='not ours'
-      else
-        case "$browser_command" in
-          "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
-          *) browser_reason='not ours' ;;
-        esac
       fi
     fi
     if [ -z "$browser_reason" ]; then
@@ -1791,7 +1939,7 @@ else:
 print("STEP 12", flush=True)
 PY
   python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
-import collections, pathlib, re, sys
+import collections, pathlib, re, signal, sys
 stdout, stderr = map(pathlib.Path, sys.argv[1:3])
 code = int(sys.argv[3])
 names = {0:"harness setup", 1:"attachment", 2:"navigation", 3:"document load",
@@ -1814,6 +1962,8 @@ classes = ("RuntimeError", "TimeoutError", "ConnectionError", "ConnectionRefused
 named = {"STOP: STEP 1 endpoint ownership", "STOP: STEP 3 document load timeout",
     "STOP: STEP 4 app readiness timeout"}
 with stderr.open(encoding="utf-8", errors="replace") as stream:
+    first_stderr = stream.readline().rstrip("\r\n")
+    stream.seek(0)
     tail = collections.deque(stream, maxlen=20)
 safe = []
 for raw in tail:
@@ -1830,8 +1980,21 @@ for raw in tail:
         match = re.fullmatch(r'\s*File "<string>", line ([0-9]{1,6})(?:, in .*)?', line)
         if match: safe.append("Python line " + match[1])
 summary = [f"site2-06-browser: STEP {step} ({names[step]}); exit code {code}"]
-summary += ["stderr: " + line for line in safe[-8:]]
-if not safe: summary.append("stderr: no safe detail retained")
+if step == 0 and code != 0:
+    signum = -code if code < 0 else code - 128 if 128 < code <= 192 else 0
+    if signum:
+        try: summary[0] += "; signal " + signal.Signals(signum).name
+        except ValueError: pass
+    # Redact quoted home paths (including spaces), then unquoted home paths.
+    home = re.escape(str(pathlib.Path.home()))
+    cause = re.sub(r"([\"'])" + home + r"(?:/[^\r\n]*?)?\1",
+        "[HOME]", first_stderr)
+    cause = re.sub(home + r"(?:/[^\s\"'<>]*)?", "[HOME]", cause)
+    if unsafe.search(cause): cause = "sensitive stderr details withheld"
+    summary[0] += "; stderr: " + (cause[:500] or "no stderr emitted")
+else:
+    summary += ["stderr: " + line for line in safe[-8:]]
+    if not safe: summary.append("stderr: no safe detail retained")
 text = "\n".join(summary) + "\n"
 path = pathlib.Path(sys.argv[4]) / "site2-06-browser-summary.txt"
 path.write_text(text, encoding="utf-8"); path.chmod(0o600)
@@ -1973,24 +2136,10 @@ BOX
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test ! -L "$SITE_BROWSER_ROOT"
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-      browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in
-        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
-        *) exit 1 ;;
-      esac
-      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-        printf '%s\n' 'WARN site2-07-pre-pin-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
-        exit 1
-      fi
-      for tries in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
-        sleep 1
-      done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-        printf '%s\n' 'WARN site2-07-pre-pin-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
-        exit 1
-      fi
+    if ! python3 "$SITE_BROWSER_ROOT/browser-process.py" stop "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
+      "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE"; then
+      printf '%s\n' 'STOP site2-07-pre-pin-manifest-close: browser cleanup unproved; retain private staging and window state for HezLead reconciliation' >&2
+      exit 1
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
@@ -2228,24 +2377,10 @@ PY
     case "$SITE_CHROME_PID" in ''|*[!0-9]*) exit 1 ;; esac
     test "$SITE_CHROME_PID" -gt 1
     test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-      browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
-      case "$browser_command" in
-        "$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE "*|"$SITE_CHROME_BINARY "*" --user-data-dir=$SITE_CHROME_PROFILE") ;;
-        *) exit 1 ;;
-      esac
-      if ! kill "$SITE_CHROME_PID" 2>/dev/null && kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-        printf '%s\n' 'WARN site2-07-manifest-close: task-owned Chromium could not be stopped; private profile retained' >&2
-        exit 1
-      fi
-      for tries in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
-        sleep 1
-      done
-      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-        printf '%s\n' 'WARN site2-07-manifest-close: task-owned Chromium still running after 10 seconds; private profile retained' >&2
-        exit 1
-      fi
+    if ! python3 "$SITE_BROWSER_ROOT/browser-process.py" stop "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
+      "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE"; then
+      printf '%s\n' 'STOP site2-07-manifest-close: browser cleanup unproved; retain private staging and window state for HezLead reconciliation' >&2
+      exit 1
     fi
     if ! rm -r -- "$SITE_BROWSER_ROOT"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2

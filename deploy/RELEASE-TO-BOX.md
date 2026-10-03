@@ -1,4 +1,21 @@
 # CommonSwarm release procedure for `yulan-vps-1`
+Mac blocks must not call setuid/setgid tools.
+
+Every box image build must run at `nice -n 15` with a hard three-CPU cap:
+`systemd-run --scope -p CPUQuota=300%` with the build workers in that scope,
+or a builder-supported equivalent. A scope around only the Docker client does
+not cap daemon-owned build workers. For the existing `docker build`, use
+`DOCKER_BUILDKIT=0 nice -n 15 docker build --cpu-period=100000 --cpu-quota=300000`;
+the legacy builder runs Dockerfile steps sequentially under that quota. Its
+multi-stage OAuth Dockerfile needs no BuildKit-only features. If the installed
+builder cannot enforce the cap, STOP; never retry uncapped. See
+[Docker's builder options](https://docs.docker.com/reference/cli/docker/image/build/).
+Build each image once per reviewed `RELEASE_SHA` (the OAuth plan calls it
+`OAUTH_RELEASE_SHA`): look up a persistent local SHA tag first, build only when
+absent, record `org.opencontainers.image.revision` on creation, and verify that
+label equals the reviewed SHA before reuse or deployment. A mismatched label
+is STOP. Retain the tag across retries/windows and deploy the immutable image
+ID. Plans using pinned images or static-site builds add no box image build.
 
 This is the repository procedure for releasing CommonSwarm to the production
 box. The cross-repository `hetzner-handoff/HETZNER-OPERATIONS.md` remains the

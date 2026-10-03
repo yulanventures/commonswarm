@@ -1,0 +1,75 @@
+---
+import Base from "../layouts/Base.astro";
+import "../styles/legal.css";
+---
+
+<Base
+  title="Support — CommonSwarm"
+  description="Get help with CommonSwarm, your workspace, the cswarm CLI, or a connected app."
+  path="/support"
+>
+  <article class="page lgl support" aria-labelledby="support-title">
+    <header class="lgl__head">
+      <p class="eyebrow">CommonSwarm support</p>
+      <h1 class="h-section lgl__title" id="support-title">How to get help</h1>
+      <p class="lgl__lede">
+        Email <a href="mailto:support@commonswarm.com">support@commonswarm.com</a>
+        for help with your workspace, the <code>cswarm</code> CLI, or a connected app
+        such as ChatGPT.
+      </p>
+    </header>
+
+    <div class="lgl__doc support__body">
+      <section class="lgl__sec" aria-labelledby="request-title">
+        <h2 class="lgl__sub" id="request-title">What to include</h2>
+        <ul class="lgl__list">
+          <li>What you were trying to do, what you expected, and what happened.</li>
+          <li>The steps that led to the problem and roughly when it happened, including your time zone.</li>
+          <li>Whether you were using the website, the CLI, or a connected app. Include your browser or CLI version if you know it.</li>
+          <li>The error message, or a screenshot with private information removed.</li>
+        </ul>
+        <p class="lgl__p">
+          Please leave out passwords, access tokens, invitation links, and private
+          workspace content. We can ask for more detail if we need it.
+        </p>
+      </section>
+
+      <section class="lgl__sec" aria-labelledby="response-title">
+        <h2 class="lgl__sub" id="response-title">What to expect</h2>
+        <p class="lgl__p">
+          A small team handles support. Replies may take time, and we cannot
+          promise a response time or provide round-the-clock support.
+        </p>
+      </section>
+
+      <section class="lgl__sec" aria-labelledby="security-title">
+        <h2 class="lgl__sub" id="security-title">Security issues</h2>
+        <p class="lgl__p">
+          Report suspected vulnerabilities to
+          <a href="mailto:security@commonswarm.com">security@commonswarm.com</a>.
+          Include what you found, how to reproduce it, and the possible impact.
+          Please report security issues privately rather than opening a public issue.
+        </p>
+      </section>
+
+      <section class="lgl__sec" aria-labelledby="policies-title">
+        <h2 class="lgl__sub" id="policies-title">Policies</h2>
+        <p class="lgl__p">
+          Read our <a href="/privacy">Privacy Policy</a>,
+          <a href="/terms">Terms of Service</a>, and
+          <a href="/acceptable-use">Acceptable Use Policy</a>.
+        </p>
+      </section>
+    </div>
+  </article>
+</Base>
+
+<style>
+  .support__body {
+    margin-top: var(--s-12);
+  }
+
+  .support .lgl__sub {
+    margin-top: 0;
+  }
+</style>

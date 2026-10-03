@@ -1,4 +1,14 @@
 # HM37 OAuth binding release and MCP switch-on
+Mac blocks must not call setuid/setgid tools.
+
+Box image-build rule: build once per `OAUTH_RELEASE_SHA` and reuse the
+persistent local `commonswarm-oauth:release-<SHA>` tag across retries/windows.
+Verify `org.opencontainers.image.revision` equals that SHA before reuse or
+deployment; build only if absent. The marked build explicitly selects the
+legacy builder with `DOCKER_BUILDKIT=0`, then uses `nice -n 15` and
+`--cpu-period=100000 --cpu-quota=300000` to cap its sequential build steps at
+three CPUs. Unsupported caps or mismatched labels are STOP. See the shared
+preamble in [RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md).
 
 **Prepared, not executed.** Base: origin/main `68a0d2a6715bfb4c874655cda6a4c490eea5baae`.
 That tree has no production lane-2 composition: Docker CMD and npm start run
@@ -767,12 +777,24 @@ set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-build line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
 BASE_REFERENCE=node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
-docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
-docker build --pull=false \
-  --iidfile "$PROOF_DIR/oauth-image.id" \
-  --file "$OAUTH_RELEASE_DIR/services/mcp-auth/Dockerfile" \
-  "$OAUTH_RELEASE_DIR" || { echo 'FAIL: OAuth image build' >&2; exit 1; }
+IMAGE_TAG=commonswarm-oauth:release-$OAUTH_RELEASE_SHA
+CACHED_IMAGE=$(docker image ls --no-trunc --quiet --filter "reference=$IMAGE_TAG") || { echo 'FAIL: image lookup' >&2; exit 1; }
+if [ -n "$CACHED_IMAGE" ]; then
+  IMAGE=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG") || exit 1
+  test "$IMAGE" = "$CACHED_IMAGE" || { echo 'FAIL: image lookup changed' >&2; exit 1; }
+  printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
+else
+  test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
+  docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
+  DOCKER_BUILDKIT=0 nice -n 15 docker build --pull=false \
+    --cpu-period=100000 --cpu-quota=300000 \
+    --tag "$IMAGE_TAG" --label "org.opencontainers.image.revision=$OAUTH_RELEASE_SHA" \
+    --iidfile "$PROOF_DIR/oauth-image.id" \
+    --file "$OAUTH_RELEASE_DIR/services/mcp-auth/Dockerfile" \
+    "$OAUTH_RELEASE_DIR" || { echo 'FAIL: capped OAuth image build' >&2; exit 1; }
+fi
 IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || exit 1
+test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
 case "$IMAGE" in sha256:*) ;; *) echo 'FAIL: image must be immutable' >&2; exit 1;; esac
 test "${#IMAGE}" -eq 71 || exit 1
 docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || exit 1

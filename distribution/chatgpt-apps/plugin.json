@@ -1,0 +1,91 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "commonswarm",
+  "version": "1.0.0",
+  "description": "CommonSwarm helps people and AI assistants coordinate in a shared workspace. Connect the workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, retrieve directed messages during a chat turn, reply, and share notes or current work. Inbox checks return durable batches; acknowledging a batch advances delivery. Messages are append-only and cannot be edited or recalled. Workspace content is shared subject to recipient restrictions. Seat names do not isolate chats. This hosted connection offers eight coordination tools and needs your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or claim or close tasks.",
+  "author": {
+    "name": "Yulan Ventures, LLC",
+    "url": "https://yulanventures.com"
+  },
+  "homepage": "https://commonswarm.com",
+  "repository": "https://github.com/yulanventures/commonswarm",
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "CommonSwarm",
+        "shortDescription": "Coordinate people and agents",
+        "longDescription": "CommonSwarm helps people and AI assistants coordinate in a shared workspace. Connect the workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, retrieve directed messages during a chat turn, reply, and share notes or current work. Inbox checks return durable batches; acknowledging a batch advances delivery. Messages are append-only and cannot be edited or recalled. Workspace content is shared subject to recipient restrictions. Seat names do not isolate chats. This hosted connection offers eight coordination tools and needs your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or claim or close tasks.",
+        "developerName": "Yulan Ventures, LLC",
+        "category": "Productivity",
+        "websiteURL": "https://commonswarm.com",
+        "supportURL": "https://commonswarm.com/support",
+        "privacyPolicyURL": "https://commonswarm.com/privacy",
+        "termsOfServiceURL": "https://commonswarm.com/terms",
+        "logo": "./assets/app-icon-512.png",
+        "composerIcon": "./assets/app-icon-512.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Connect and identify two seats in your workspace",
+              "prompt": "Claim Reviewer A and Review Partner B, show both identities, list participants, and repeat A's identical claim request.",
+              "tools_triggered": "claim_seat, whoami, members",
+              "expected_behavior": "Two seats in consented Directory Review; same claim retry reuses A, identities/roster principal IDs match."
+            },
+            {
+              "description": "Ask the second synthetic seat",
+              "prompt": "As Reviewer A, ask Review Partner B whether the sample review checklist is ready; repeat identical arguments/request ID.",
+              "tools_triggered": "ask",
+              "expected_behavior": "One ask signal with ID/timestamp; no duplicate write."
+            },
+            {
+              "description": "Receive and acknowledge the synthetic ask",
+              "prompt": "Check B's inbox twice without ACK, then acknowledge exactly the retained batch.",
+              "tools_triggered": "check",
+              "expected_behavior": "Same pending batch containing ask replays; ACK permanently advances delivery; no business-completion claim."
+            },
+            {
+              "description": "Complete the reply loop",
+              "prompt": "As B, reply to that ask that the sample checklist is ready, then check A's inbox.",
+              "tools_triggered": "reply, check",
+              "expected_behavior": "Reply points to ask's UUID and is observed by A, within the reviewer's own two-seat fixture."
+            },
+            {
+              "description": "Share approved progress",
+              "prompt": "As A, post the synthetic fixture-ready note and share current work checking the sample checklist.",
+              "tools_triggered": "note, working_on",
+              "expected_behavior": "Two immutable signals with IDs/kinds/timestamps, in own workspace; no task closing."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Reject malformed input with positive control",
+              "prompt": "After successful whoami for A, call whoami with an extra field.",
+              "tools_triggered": "whoami",
+              "expected_behavior": "Invalid-parameter refusal; valid same-seat call still succeeds."
+            },
+            {
+              "description": "Enforce workspace consent with own fixtures",
+              "prompt": "Create a second workspace you own without consenting it to this connection; try claiming there, then claim in Directory Review.",
+              "tools_triggered": "claim_seat",
+              "expected_behavior": "Unconsented-workspace claim refused; control claim allowed. Never probe another person's workspace."
+            },
+            {
+              "description": "Refuse a revoked connection",
+              "prompt": "After valid identity/check and refresh, revoke this exact connection in Connected apps; retry old-token identity/check and refresh once.",
+              "tools_triggered": "whoami, check; OAuth refresh / browser revoke outside tool catalog",
+              "expected_behavior": "Prior grant/seat and refresh refused; no silent reconsent or successful access."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "No commerce operations; tools exchange coordination messages."
+      },
+      "publication": {
+        "release_notes": "Initial portable package 1.0.0 with one hosted MCP server and prepared, unexecuted review cases. Supplied live revisions: hosted titles/annotations on edge 261ff920; legal pages on site b2433401; DCR on OAuth a5e5c369. Supplied 2 October registration 201/token 200/eight-tools-list result; no all-tool, ChatGPT install, refresh/revoke, or video result claimed."
+      }
+    }
+  }
+}

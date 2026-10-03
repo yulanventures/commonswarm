@@ -1,0 +1,76 @@
+# Reviewer access to CommonSwarm
+
+Prepared 3 October 2026 against source `b8a97e10`. Source references below are repository file:line citations at that base. Self-serve is live per HezLead and `AGENTS.md:17`; no account or workspace was created and no connection or tool was exercised by this documentation worker. These are instructions and expected results, not execution receipts. Legal is waived and live (C4); C6 is GO for the two directories when C3 is met. Admin credential issuance is not a prerequisite.
+
+## Sign in and create your own review workspace
+
+1. **Your own identity-provider account is required.** Open [CommonSwarm /app](https://commonswarm.com/app). Use your own GitHub or Google account through a displayed sign-in button and approve the provider's consent. The canonical provider set is Google and GitHub (`site/src/lib/auth-providers.ts:36`); the site renders only providers reported enabled by GoTrue at build time (`site/src/components/auth/ProviderButtons.astro:48`, `site/src/lib/auth-providers.ts:154`). It also offers an emailed sign-in link (`site/src/lib/auth-providers.ts:288`, `site/src/lib/commonswarm.ts:342`). This lane did not read live provider settings or inspect the built page: two entries in source are not proof that both buttons are currently displayed.
+2. **Your own CommonSwarm session is required.** With no memberships, `/app` displays **Create your first workspace**. It does **not** silently create a first workspace. Enter **Directory Review** and press **Create workspace**: one form submission creates and opens your own workspace, without an invitation or another person's intervention. See `site/src/components/app/LiveDashboard.astro:131`, `:7704`, `:7866`, and `:7363`; `site/src/lib/commonswarm.ts:1321`. An existing member can use the workspace menu's **New workspace** entry (`site/src/components/app/LiveDashboard.astro:268`).
+3. The server permits this command before workspace route resolution, requires a signed-in human with verified identity and an accepted email domain, and applies workspace/usage limits. See `site/src/lib/commonswarm.ts:1314`, `supabase/functions/command/index.ts:5127`, `:5150`, `:5163`; named refusal handling at `site/src/lib/commonswarm.ts:1340`. If refused, follow the displayed account correction; do not treat an empty sample dashboard as a created workspace. No guarantee of bypassing provider verification or existing quotas is made.
+4. The new workspace is initially your workspace, not a preloaded directory fixture. The tool sequence below creates synthetic sample messages using two named seats on your own connection. It needs no second person or second external account. Do not put production or personal content in it.
+
+**Invite and h0 distinction.** h0 link join is an agent-enrollment path into an existing workspace. A signed-in owner can mint their own agent invite after creating a workspace (`site/src/lib/h0-link-join.ts:217`); the paste includes a one-time join credential separately from its document URL (`:97`, `:129`; `src/protocol/h0-agent-document-url.ts:16`). Loading this UI is gated by `PUBLIC_H0_LINK_JOIN` (`site/src/lib/h0-link-join-flag.ts:9`). It does not create the human's first workspace, authenticate a directory reviewer, or replace hosted MCP OAuth. A reviewer can use it for their own agent if enabled, without another owner, but it is unnecessary for these eight tools. No invite link or credential is supplied in this packet.
+
+## Connect Claude
+
+**Your own Claude account with custom-connector access is required.** In Claude's connector settings, add a custom connector named CommonSwarm with server URL `https://mcp.commonswarm.com/mcp`, or select CommonSwarm if it is later listed. This packet does not establish a published listing or account entitlement. Start Connect and let Claude perform OAuth discovery and client registration. CommonSwarm supports DCR and CIMD; do not enter a client secret.
+
+**Your own CommonSwarm identity is required again if OAuth asks you to sign in.** Hosted MCP uses the single deployment-configured `MCP_OAUTH_GOTRUE_PROVIDER`, not the site's two-button chooser (`services/mcp-auth/src/config.js:206`, `services/mcp-auth/src/gotrue.js:20`, `services/mcp-auth/src/interactions.js:253`). Its exact live provider is unmeasured here. Sign in with the same account that owns Directory Review. A different provider resolving to a different CommonSwarm identity may show no workspace. Do not assume a site magic-link session will establish the separate OAuth session.
+
+Select **Directory Review** and set it as **Home workspace**, then choose **Allow connection**. Only select your review workspace. Consent checks current membership, requires at least one workspace and a home workspace (`services/mcp-auth/src/interactions.js:270`, `:343`, `:368`, `:379`; `services/mcp-auth/src/interaction-page.js:63`, `:100`). The host returns to its chat after authorization-code/PKCE exchange. Ask it to list the tools, then follow the examples below. OAuth offers existing memberships; it contains no first-workspace creation step.
+
+## Connect ChatGPT
+
+**Your own ChatGPT account with the relevant app/developer access is required.** The fetched [OpenAI package guide](https://developers.openai.com/plugins/build/plugins) describes **Settings → Security and login → Developer mode**, then **ChatGPT Plugins → plus button** to register the server URL and connection details. Use that flow if your account exposes it, and select OAuth. Do not infer this entitlement from having a ChatGPT account. When a directory listing exists, select that listing and Connect. Labels and availability depend on the current ChatGPT surface; the submission worker must read them in the portal rather than promise access to every account or mobile/desktop surface. The current [OpenAI submission guide](https://developers.openai.com/plugins/deploy/submission) uses a package upload and server-connection dashboard, separately from a consumer connection.
+
+Complete CommonSwarm's provider sign-in and workspace selection exactly as above, using **your own CommonSwarm identity**. Choose only **Directory Review**, set Home workspace, and allow the connection. Request the eight tools and execute the sequence below. ChatGPT connection/callback, refresh, and all-tool results remain unverified. Per-tool OAuth metadata/error handling and token scope enforcement remain C3 code work; see [C3-ACTIONS](C3-ACTIONS.md). DCR and CIMD being live do not prove ChatGPT acceptance.
+
+OAuth resource: `https://mcp.commonswarm.com/mcp`; resource scope: `mcp`. Authorization-server scopes also include `openid` and `offline_access`. The client reads discovery and handles PKCE and tokens; you do not copy tokens into a chat. See `supabase/functions/mcp/protocol.ts:182`, `services/mcp-auth/src/provider.js:99`, `services/mcp-auth/src/registration.js:7`. Chats sharing a connection can use its seats; seat names are not privacy boundaries (`services/mcp-auth/src/interaction-page.js:6`). Hosted seats check messages during active turns; no idle wake or listener is promised.
+
+## Try every hosted tool
+
+Use the exact arguments below after replacing placeholders with values returned by your own connection. They are templates, not fabricated usable handles or UUIDs. Keep handles and tokens out of public reports. All retries of a write use the same `request_id` and arguments. For a new write use a new request ID. Schemas reject extra properties (`supabase/functions/mcp/tools.ts:17`, `:121`). Expected results follow `supabase/functions/mcp/index.ts:210`, `:270`, `:291`, `:318` and the claim path `supabase/functions/mcp/claim-seat.ts:22`.
+
+1. `claim_seat` — `{"name":"Reviewer A","request_id":"review_claim_A_001"}`. Expect a new/reused hosted seat in the consented home workspace; retain its returned handle as `<A>`. Repeat with `{"name":"Review Partner B","request_id":"review_claim_B_001"}` and retain `<B>`. This exercises the same tool twice and requires no second account. Omitting `workspace_id` selects the consented Home workspace. An identical request reuses the result.
+2. `whoami` — `{"seat":"<A>"}` and `{"seat":"<B>"}`. Expect `grant_id`, `seat_id`, `handle`, `workspace_id`, `principal_id`, `name`, `transport`, `turn_only`. Retain B's `principal_id` as `<B_PRINCIPAL_UUID>` and confirm both identities name Directory Review's workspace.
+3. `members` — `{"seat":"<A>"}`. Expect `members` containing `user_id`/`display_name`, and `agents` containing `principal_id`/`name`; verify B's roster principal matches its identity. Never use a seat handle or seat UUID as a recipient principal ID.
+4. `ask` — `{"seat":"<A>","recipients":[{"kind":"agent","id":"<B_PRINCIPAL_UUID>"}],"body":"Is the sample review checklist ready?","request_id":"review_ask_B_001"}`. Expect one posted ask with `signal_id`, kind, and creation timestamp. Save its signal UUID as `<ASK_UUID>`. This posts a question; receiving it is the next step.
+5. `check` — `{"seat":"<B>"}`. Expect a durable batch with its ID and inbox signals including A's question. Retain the returned batch UUID as `<BATCH_UUID>`. Repeat without ACK to see the same pending batch, then call `{"seat":"<B>","ack":"<BATCH_UUID>"}`. Expect delivery cursor advancement and the next batch/current inbox. ACK is a permanent delivery change, not proof of completing the requested work. See `src/protocol/hosted-check.ts:110`.
+6. `reply` — `{"seat":"<B>","signal_id":"<ASK_UUID>","body":"Yes, the sample checklist is ready.","request_id":"review_reply_A_001"}`. Expect a reply signal with `in_reply_to` matching the ask. Call `check` with `{"seat":"<A>"}` to observe the reply, then ACK only that returned batch if desired. No other person is needed to complete the loop.
+7. `note` — `{"seat":"<A>","body":"The synthetic review fixture is ready.","request_id":"review_note_001"}`. Expect one immutable note signal with ID and timestamp, shared with the workspace when recipients are omitted.
+8. `working_on` — `{"seat":"<A>","body":"Checking the sample review checklist.","request_id":"review_work_001"}`. Expect one immutable current-work signal with ID and timestamp. It does not claim, block, or close a task.
+
+The generated catalog below records exact titles and annotations from `HOSTED_TOOL_TABLE`; `annotations.title` repeats each title. `check` is mutating and destructive because ACK advances durable state; all messaging writes are append-only, marked non-destructive. All eight tools have `openWorldHint=false` because they act within the workspace. Server-side authorization is still enforced. No hosted file/brain/wiki/admin/task CRUD, resources, UI, or Events tools are part of this catalog.
+
+| Tool | Title (also annotations.title) | readOnlyHint | destructiveHint | idempotentHint | openWorldHint |
+| --- | --- | --- | --- | --- | --- |
+| `claim_seat` | Claim a named seat | false | false | true | false |
+| `whoami` | Show seat identity | true | false | true | false |
+| `check` | Check and acknowledge inbox | false | true | false | false |
+| `ask` | Ask workspace participants | false | false | true | false |
+| `note` | Share a workspace note | false | false | true | false |
+| `reply` | Reply to a signal | false | false | true | false |
+| `working_on` | Share current work | false | false | true | false |
+| `members` | List workspace participants | true | false | true | false |
+
+
+## Review cases and evidence
+
+Five positive cases: P1 = steps 1–3 (identity/roster and identical claim retry); P2 = step 4 (ask and identical request retry); P3 = step 5 (batch replay and ACK); P4 = step 6 (reply and retrieve); P5 = steps 7–8 (note/current work). Expected tools and results are the numbered examples above. Retain actual redacted results and host/version/date separately; these cases are not reported passed.
+
+Three negative cases: N1 = after a valid `whoami`, add an extra input property and expect invalid-parameter refusal; N2 = create a second workspace you own without consenting it to this connection, then attempt a claim for its UUID and expect refusal, with a successful Directory Review claim as control; N3 = after successful identity/check and refresh, revoke this exact connection in `/app → Connected apps`, then expect old-token identity/check and refresh to fail. Do not test another person's workspace. For each case retain its prompt, expected tools/result, actual outcome and redacted receipt. The earlier packet's P1–P5/N1–N3 are superseded by this self-contained two-seat fixture; a pre-provisioned partner or shared account is not needed for these examples.
+
+## Dedicated reviewer account: HezLead ruling B, Tom morning step
+
+HezLead ruling B authorizes both submissions with the self-serve instructions above and the following exact reviewer note. This is an internal submission ruling, not a claim of vendor acceptance or an exemption found in the public guides.
+
+**Reviewer notes:** A dedicated reviewer account with sample data can be provided within 24 hours on request; reply to support@commonswarm.com.
+
+Tom's dedicated-account preparation is pending and does not block submission. Follow [TOM-MORNING-REVIEWER](../2026-10-03-submissions/TOM-MORNING-REVIEWER.md); agents never create that identity or enter its credential.
+
+| Directory / row | Vendor request retained for traceability | Ruling and Tom step |
+| --- | --- | --- |
+| Claude connector directory / CC-12 (original GAPS line 94) | Populated reviewer credentials where relevant. [Claude submission](https://claude.com/docs/connectors/building/submission) | Submit with self-serve access and the exact note above. Tom later creates and populates the dedicated identity and types its credential into Test & launch / populated test-account credentials. Nonblocking under HezLead ruling B; no submission receipt claimed. |
+| ChatGPT apps / OA-10 (original GAPS line 129) | Dedicated sample-data account with immediate access, without MFA approval, email/SMS codes, magic links or private networking. [OpenAI submission](https://developers.openai.com/plugins/deploy/submission) | Submit with self-serve access and the exact note above. Tom later checks provider/access suitability and types the dedicated credential into Review information → Review details / dedicated reviewer credentials. Nonblocking under HezLead ruling B; no vendor acceptance claimed. |
+
+All ordinary self-serve steps use the reviewer's own provider, CommonSwarm, and Claude/ChatGPT accounts. No account has been created, populated, connected, submitted or verified in this lane.

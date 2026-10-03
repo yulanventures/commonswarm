@@ -28,6 +28,13 @@ WITH role_state AS (
     to_regprocedure('commonswarm_oauth.hosted_grant_is_active(text,timestamp with time zone,boolean,boolean)') AS active_oid,
     to_regprocedure('commonswarm_oauth.resolve_hosted_grant_status(text)') AS status_oid,
     to_regprocedure('commonswarm_oauth.provider_family_active(text)') AS family_oid
+), hm6_tables AS (
+  -- Later migrations (such as OAuth DCR) own additional tables in this schema.
+  -- Keep exact index/policy counts for HM6's tables; their proofs own the additions.
+  SELECT unnest(ARRAY[object_state.artifacts_oid, object_state.tombstones_oid,
+    object_state.sessions_oid, object_state.interactions_oid, object_state.cimd_oid,
+    object_state.orchestration_oid]) AS table_oid
+  FROM object_state
 )
 SELECT COALESCE((SELECT
   role_state.present
@@ -114,7 +121,7 @@ SELECT COALESCE((SELECT
     ), false)
     ELSE false END
   AND COALESCE((
-    SELECT count(*) = 15 AND bool_and(indexname = ANY (ARRAY[
+    SELECT count(*) = 15 AND bool_and(index_rel.relname::text = ANY (ARRAY[
       'provider_artifacts_pkey', 'provider_artifacts_grant_idx',
       'provider_artifacts_uid_idx', 'provider_artifacts_user_code_idx',
       'provider_artifacts_expiry_idx', 'refresh_family_tombstones_pkey',
@@ -123,8 +130,9 @@ SELECT COALESCE((SELECT
       'cimd_cache_pkey', 'cimd_cache_expiry_idx',
       'consent_orchestration_pkey', 'consent_orchestration_command_id_key'
     ]::text[]))
-    FROM pg_indexes
-    WHERE schemaname = 'commonswarm_oauth'
+    FROM pg_index AS index_state
+    JOIN pg_class AS index_rel ON index_rel.oid = index_state.indexrelid
+    WHERE index_state.indrelid IN (SELECT table_oid FROM hm6_tables)
   ), false)
   AND COALESCE((
     SELECT count(*) FILTER (WHERE contype = 'p') = 6
@@ -137,8 +145,10 @@ SELECT COALESCE((SELECT
       object_state.orchestration_oid)
   ), false)
   AND COALESCE((
-    SELECT count(*) = 7 AND bool_and(roles = ARRAY['commonswarm_oauth_runtime']::name[])
-    FROM pg_policies WHERE schemaname = 'commonswarm_oauth'
+    SELECT count(*) = 7 AND bool_and(polroles = ARRAY[
+      (SELECT oid FROM pg_roles WHERE rolname = 'commonswarm_oauth_runtime')
+    ])
+    FROM pg_policy WHERE polrelid IN (SELECT table_oid FROM hm6_tables)
   ), false)
   AND CASE WHEN role_state.present AND object_state.tombstones_oid IS NOT NULL
     THEN has_table_privilege('commonswarm_oauth_runtime', object_state.tombstones_oid, 'SELECT')
