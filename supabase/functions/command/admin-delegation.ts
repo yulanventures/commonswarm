@@ -11,7 +11,7 @@ import {
   ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, ADMIN_GRANT_TTL_SECONDS,
   ADMIN_SCOPE_REGISTRY, adminRatePolicy, adminEffectiveCapabilities, adminGrantManifest,
   ADMIN_UUID_RE, adminRecord, adminExactKeys, adminManifestValid, adminScopes,
-  canonicalAdminJson, parseAdminClientApprovalCommand, parseAdminRoutineCommand, decideAdminRoutine, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
+  canonicalAdminJson, parseAdminClientApprovalCommand, parseAdminRoutineCommand, decideAdminRoutine, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount, adminAccountWithDurableGrants,
 } from '../_shared/protocol.js';
 import type { AdminActor, AdminCommand, AdminAccountState, AdminAccountEvent, AdminConsent, AdminClientApproval, AdminDecisionContext } from '../_shared/admin-authority.d.ts';
 import type { AdminManifest, AdminScope } from '../_shared/admin-policy.d.ts';
@@ -200,18 +200,19 @@ export async function adminTransaction(tx: Sql, input: AdminInput, authenticatio
   if (!account) return await finish(errorResult(403, 'forbidden'));
   const clock = await tx<{ now: number }[]>`SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::float8 AS now`;
   const now = clock[0]!.now;
-  const state = account.projection ?? emptyAdminAccount();
+  let state = account.projection ?? emptyAdminAccount();
   const receipts = await tx<(Omit<AdminConsent, 'expires_at' | 'consumed_at'> & { expires_at: Date; consumed_at: Date | null })[]>`SELECT * FROM swarm.admin_consents WHERE owner_user_id = ${owner}::uuid`;
   for (const c of receipts) state.consents[c.consent_receipt_id] = { ...c, expires_at: new Date(c.expires_at).getTime(), consumed_at: c.consumed_at === null ? null : new Date(c.consumed_at).getTime() };
-  // Recheck durable grant/credential under account lock; stale projections fail closed.
-  const durableGrants = await tx<{ grant_id: string; state: string; manifest_digest: string; expires_at: Date; refresh_deadline: Date }[]>`
-    SELECT grant_id, state, manifest_digest, expires_at, refresh_deadline FROM swarm.admin_grants
+  // Policy-triggered terminal fences are durable authority, even while the
+  // cached projection lags. Other mismatches still fail closed.
+  const durableGrants = await tx<{ grant_id: string; state: 'active' | 'suspended' | 'revoked' | 'expired'; manifest_digest: string; expires_at: Date; refresh_deadline: Date; revoked_at: Date | null; suspended_at: Date | null; reason_code: string | null }[]>`
+    SELECT grant_id, state, manifest_digest, expires_at, refresh_deadline, revoked_at, suspended_at, reason_code FROM swarm.admin_grants
     WHERE owner_user_id = ${owner}::uuid ORDER BY grant_id FOR UPDATE`;
-  if (durableGrants.length !== Object.keys(state.grants).length || durableGrants.some(row => {
-    const g = state.grants[row.grant_id];
-    return !g || g.state !== row.state || g.manifest_digest !== row.manifest_digest ||
-      g.expires_at !== row.expires_at.getTime() || g.refresh_deadline !== row.refresh_deadline.getTime();
-  })) throw new Error('admin projection inconsistent');
+  const reconciled = adminAccountWithDurableGrants(state, durableGrants.map(row => ({ ...row,
+    expires_at: row.expires_at.getTime(), refresh_deadline: row.refresh_deadline.getTime(),
+    revoked_at: row.revoked_at?.getTime() ?? null, suspended_at: row.suspended_at?.getTime() ?? null })));
+  if (!reconciled) throw new Error('admin projection inconsistent');
+  state = reconciled;
   if (token) {
     const bound = state.grants[token.admin_grant_id];
     if (!bound || bound.owner_user_id !== token.owner_user_id || bound.admin_identity_id !== token.admin_identity_id ||

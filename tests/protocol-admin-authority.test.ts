@@ -3,13 +3,51 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import {
   ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, ADMIN_SCOPE_NAMES,
-  adminManifestValid, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount,
+  adminManifestValid, decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount, adminAccountWithDurableGrants,
   adminConsentOptions, adminAvailableCapabilities,
   type AdminActor, type AdminCommand, type AdminManifest,
 } from '../src/protocol/index.js';
 import { adminCoreFixture, adminManifest, adminManifestDigest } from './support/admin-fixture.js';
 
 const activate = (f: ReturnType<typeof adminCoreFixture>) => f.run({ kind: 'grant_admin_delegation', grant_id: f.grantId, consent_receipt_id: f.receipt, replaces_grant_id: null });
+
+test('durable policy fences reduce the cached grant and its dependents while independent grants remain usable', () => {
+  const f = adminCoreFixture();
+  assert.equal(activate(f).ok, true);
+  const state = f.state(), grant = state.grants[f.grantId]!;
+  const independentId = randomUUID(), lineageId = randomUUID(), attemptId = randomUUID();
+  state.grants[independentId] = { ...grant, grant_id: independentId, connection_id: randomUUID(), admin_identity_id: randomUUID() };
+  state.lineages[lineageId] = { credential_lineage_id: lineageId, grant_id: f.grantId, generation: 0,
+    scope_names: ['admin:read'], access_expires_at: f.now + 300000, refresh_deadline: grant.refresh_deadline,
+    state: 'active', delivery_state: 'awaiting_delivery' };
+  state.connections = { [attemptId]: { attempt_id: attemptId, parent_admin_grant_id: f.grantId,
+    workspace_id: randomUUID(), intended_owner_user_id: f.owner, intended_agent_id: randomUUID(),
+    recipient_connection_id: grant.connection_id, requested_name: 'Pending', transport: 'local', ttl_seconds: 300,
+    capability_set: [], state: 'awaiting_authorization', created_at: f.now, expires_at: f.now + 300000,
+    cancelled_at: null, reason_code: null } };
+  for (const status of ['revoked', 'suspended', 'expired'] as const) {
+    const fence = { ...grant, state: status, reason_code: 'issuer_key_denied',
+      revoked_at: status === 'revoked' ? f.now + 1000 : null, suspended_at: status === 'suspended' ? f.now + 1000 : null };
+    const rows = [fence, state.grants[independentId]!];
+    const next = adminAccountWithDurableGrants(state, rows)!;
+    assert.ok(next);
+    assert.equal(next.grants[f.grantId]!.state, status);
+    assert.equal(next.lineages[lineageId]!.state, 'revoked');
+    assert.equal(next.connections![attemptId]!.state, 'cancelled');
+    assert.equal(next.grants[independentId]!.state, 'active');
+    assert.equal(state.grants[f.grantId]!.state, 'active', 'reconciliation does not mutate the stored snapshot');
+    assert.equal(decideAdminAuthority({ kind: 'admin_read_metadata', grant_id: independentId, resource_kind: 'grant', workspace_id: null }, next,
+      { ...f.ctx, actor: { kind: 'delegated_admin', grant_id: independentId, admin_identity_id: next.grants[independentId]!.admin_identity_id,
+        connection_id: next.grants[independentId]!.connection_id, resource: ADMIN_RESOURCE, scope_names: ['admin:read'], access_expires_at: f.now + 300000 } }).ok, true);
+    for (const change of [{ manifest_digest: 'changed' }, { expires_at: grant.expires_at + 1000 },
+      { refresh_deadline: grant.refresh_deadline + 1000 }]) {
+      assert.equal(adminAccountWithDurableGrants(state, [{ ...fence, ...change }, rows[1]!]), null);
+    }
+    assert.equal(adminAccountWithDurableGrants(next, [grant, rows[1]!]), null, 'durable rows cannot reactivate a projected fence');
+    assert.equal(adminAccountWithDurableGrants(state, [fence, fence]), null, 'duplicate rows cannot hide a missing grant');
+    assert.equal(adminAccountWithDurableGrants(state, [fence]), null, 'missing grants refuse');
+  }
+});
 test('v1 consent is refused while historical v1 grants retain human recovery, revoke and audit without conversion', () => {
   for (const mode of ['granular', 'full_account'] as const) {
     const f = adminCoreFixture();

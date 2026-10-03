@@ -6,6 +6,40 @@ import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 import { requireMeasuredAdminRelease, adminTokenLifetime } from "../src/admin-lifecycle.js";
 import { createAdminManifest } from "../src/admin-consent.js";
 import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount } from "../src/admin-authority.generated.js";
+import { AdminAuthorityBridge } from "../src/admin-authority.js";
+
+test("AS account loading accepts a durable key fence without blocking an independent grant and refuses other drift", async t => {
+  const now = Date.now(), owner = randomUUID(), denied = randomUUID(), independent = randomUUID();
+  const grant = { ...createAdminManifest({ mode: 'granular', scope_names: ['admin:read'], workspace_ids: [] },
+    { verification: { client_id: 'https://client.example' }, resourceScopes: ['admin:read'] }, now),
+    grant_id: denied, owner_user_id: owner, manifest_digest: 'a'.repeat(64), consent_receipt_id: randomUUID(),
+    created_at: now, state: 'active', revoked_at: null, suspended_at: null, reason_code: null, withdrawn_workspace_ids: [] };
+  const projection = { ...emptyAdminAccount(), grants: { [denied]: grant, [independent]: { ...grant, grant_id: independent } } };
+  const durable = Object.values(projection.grants).map(g => ({ ...g, expires_at: new Date(g.expires_at),
+    refresh_deadline: new Date(g.refresh_deadline), ...(g.grant_id === denied ? { state: 'revoked', revoked_at: new Date(now), reason_code: 'issuer_key_denied' } : {}) }));
+  let rows = durable;
+  const pool = { connect: async () => ({ async query(sql) {
+    if (sql.includes('session_user')) return { rows: [{ principal: 'commonswarm_admin_issuer' }] };
+    if (sql.includes('SELECT * FROM swarm.admin_accounts')) return { rows: [{ owner_user_id: owner, projection }] };
+    if (sql.includes('FROM swarm.admin_grants')) return { rows };
+    return { rows: [], command: sql.split(' ')[0] };
+  }, release() {} }) };
+  let loaded;
+  const coordinator = new AdminTransactionCoordinator(pool);
+  const server = createServer((_request, response) => coordinator.run(response, async () => {
+    loaded = await new AdminAuthorityBridge().account(owner);
+    response.statusCode = 204; response.end();
+  }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(url)).status, 204);
+  assert.equal(loaded.projection.grants[denied].state, 'revoked');
+  assert.equal(loaded.projection.grants[independent].state, 'active');
+  assert.equal(projection.grants[denied].state, 'active');
+  rows = durable.map(g => g.grant_id === independent ? { ...g, refresh_deadline: new Date(g.refresh_deadline.getTime() + 1000) } : g);
+  assert.equal((await fetch(url)).status, 503, 'an unrelated deadline mismatch remains fail-closed');
+});
 
 function measurement() {
   const sha = "a".repeat(40), target = `/home/commonswarm/edge/releases/${sha}`;

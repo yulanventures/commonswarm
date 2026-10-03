@@ -5,7 +5,7 @@ import {
 } from "../command/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
-import { isAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { adminReadRequest, readAdminRecovery, type AdminReadRequest } from "./admin-recovery.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
@@ -422,7 +422,7 @@ async function handle(
 ): Promise<Response> {
   setPhase("auth");
   const token = bearer(request);
-  if (isAdminCredential(token)) {
+  if (presentsAdminCredential(request)) {
     return json(403, { error: "credential_kind_forbidden" });
   }
   if (request.method !== "POST") {

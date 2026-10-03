@@ -5,12 +5,13 @@ import { Pool } from "pg";
 import { InteractionStore } from "../src/interaction-store.js";
 import { PostgresAdminConsentStore, adminDigest, createAdminConsentService } from "../src/admin-consent.js";
 import { hashOpaque } from "../src/browser-security.js";
+import { localClusterAdminUrl } from "../../../tests/support/admin-schema-db.js";
 
 // All fixture writes and lifecycle history roll back. This suite uses the real
 // application migrations/triggers and runtime role, never hand-written DDL.
 async function fixture(callback) {
-  const pool = new Pool({ connectionString: process.env.MCP_OAUTH_TEST_DATABASE_URL ??
-    "postgresql://postgres:postgres@127.0.0.1:54322/postgres", max: 1 });
+  const pool = new Pool({ connectionString: localClusterAdminUrl(process.env.MCP_OAUTH_TEST_DATABASE_URL ??
+    "postgresql://postgres:postgres@127.0.0.1:54322/postgres"), max: 1 });
   const tx = await pool.connect();
   try {
     await tx.query("BEGIN");
@@ -34,7 +35,7 @@ async function fixture(callback) {
     await tx.query("RESET ROLE");
     await tx.query("SET LOCAL ROLE swarm_command");
     await tx.query(`INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
-      VALUES($1,1,$2,'approval-fixture',jsonb_build_object('stream_kind','account','owner_user_id',$1::text,
+      VALUES($1::uuid,1,$2,'approval-fixture',jsonb_build_object('stream_kind','account','owner_user_id',$1::text,
         'seq',1,'type','AdminClientApproved','actor_user',$1::text,
         'payload',jsonb_build_object('client_id',$3::text,'verification_version',1)))`, [owner, event, clientId]);
     await tx.query(`INSERT INTO commonswarm_oauth.admin_client_owner_approvals

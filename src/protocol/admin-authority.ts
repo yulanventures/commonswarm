@@ -91,6 +91,36 @@ export interface AdminDecisionContext {
 export interface AdminDecision { ok: boolean; reason: string | null; events: AdminAccountEvent[] }
 export function emptyAdminAccount(): AdminAccountState { return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} }; }
 
+export type AdminDurableGrant = Pick<AdminGrant, 'grant_id' | 'state' | 'manifest_digest' |
+  'expires_at' | 'refresh_deadline' | 'revoked_at' | 'suspended_at' | 'reason_code'>;
+
+/** Database policy fences can precede the cached account projection. Apply only
+ * terminal authority reductions, using the same projection logic as events.
+ * All other drift still refuses the account; this can never reactivate a grant.
+ * Callers read these rows under the account/grant locks, never from client input. */
+export function adminAccountWithDurableGrants(state: AdminAccountState, rows: readonly AdminDurableGrant[]): AdminAccountState | null {
+  if (rows.length !== Object.keys(state.grants).length || new Set(rows.map(row => row.grant_id)).size !== rows.length) return null;
+  for (const row of rows) {
+    const g = state.grants[row.grant_id];
+    if (!g || g.manifest_digest !== row.manifest_digest || g.expires_at !== row.expires_at ||
+        g.refresh_deadline !== row.refresh_deadline) return null;
+    if (g.state === row.state) continue;
+    if (!(g.state === 'active' && ['revoked', 'suspended', 'expired'].includes(row.state) ||
+          g.state === 'suspended' && ['revoked', 'expired'].includes(row.state))) return null;
+    const at = row.state === 'revoked' ? row.revoked_at : row.state === 'suspended' ? row.suspended_at : row.expires_at;
+    if (at === null || !Number.isSafeInteger(at) || !row.reason_code) return null;
+  }
+  let next = state;
+  for (const row of rows) {
+    if (next.grants[row.grant_id]!.state === row.state) continue;
+    const at = row.state === 'revoked' ? row.revoked_at! : row.state === 'suspended' ? row.suspended_at! : row.expires_at;
+    next = projectTerminalGrant(next, row.grant_id, row.state, at, row.reason_code!);
+    next = { ...next, grants: { ...next.grants, [row.grant_id]: { ...next.grants[row.grant_id]!,
+      revoked_at: row.revoked_at, suspended_at: row.suspended_at } } };
+  }
+  return next;
+}
+
 /** Shared strict wire validation; these commands never accept an owner or verification facts. */
 export function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCommand, { client_id: string }> | null {
   const c = adminRecord(input);
@@ -425,13 +455,18 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
     return { ...state, grants: { ...state.grants, [id]: { ...grant, ...p.manifest as AdminManifest, manifest_digest: String(p.new_manifest_digest), consent_receipt_id: receipt } }, consents: { ...state.consents, [receipt]: { ...consent, consumed_at: event.occurred_at_server } } };
   }
   const status = event.type === 'AdminDelegationRevoked' ? 'revoked' : event.type === 'AdminDelegationSuspended' ? 'suspended' : 'expired';
-  const cancelledAt = status === 'expired' ? grant.expires_at : event.occurred_at_server;
+  return projectTerminalGrant(state, id, status, event.occurred_at_server, String(p.reason_code));
+}
+
+function projectTerminalGrant(state: AdminAccountState, id: string, status: AdminGrant['state'], at: number, reason: string): AdminAccountState {
+  const grant = state.grants[id]!;
+  const cancelledAt = status === 'expired' ? grant.expires_at : at;
   const routine = state.routine ? { ...state.routine, invitations: Object.fromEntries(Object.entries(state.routine.invitations).map(([key, invitation]) => [key, invitation.parent_admin_grant_id === id && invitation.accepted_at === null ? { ...invitation, revoked_at: invitation.revoked_at ?? cancelledAt } : invitation])) } : undefined;
   return { ...state, ...(routine ? {routine} : {}),
-    ...cancelPendingConnections(state, id, cancelledAt, String(p.reason_code)),
-    grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: String(p.reason_code),
-    revoked_at: status === 'revoked' ? event.occurred_at_server : grant.revoked_at,
-    suspended_at: status === 'suspended' ? event.occurred_at_server : grant.suspended_at } },
+    ...cancelPendingConnections(state, id, cancelledAt, reason),
+    grants: { ...state.grants, [id]: { ...grant, state: status, reason_code: reason,
+    revoked_at: status === 'revoked' ? at : grant.revoked_at,
+    suspended_at: status === 'suspended' ? at : grant.suspended_at } },
     lineages: Object.fromEntries(Object.entries(state.lineages).map(([key, l]) => [key, l.grant_id === id ? { ...l, state: 'revoked' as const } : l])) };
 }
 

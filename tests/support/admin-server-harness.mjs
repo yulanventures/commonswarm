@@ -311,6 +311,10 @@ try {
       check((await http(cachedKeyRead,independent.access)).status===403,'key denial invalidates cached result');
       check((await http(wire({kind:'surrender_admin_delegation',grant_id:independentGrant.grantId,reason_code:'test'}),independent.access)).status===403,'key denial refuses action');
       check((await http(readWire(keyControlGrant),keyControl.access)).status===200,'independent issuer key positive after denial');
+      const [reconciled] = await db`SELECT projection FROM swarm.admin_accounts WHERE owner_user_id=${config.owner}::uuid`;
+      check(reconciled.projection.grants[independentGrant.grantId].state==='revoked' &&
+        reconciled.projection.grants[keyControlGrant.grantId].state==='active','independent request persists terminal fence without resurrecting the denied grant');
+      check((await http(readWire(independentGrant))).status===200,'human recovery remains usable after issuer key denial');
     } else if (scenario === 'expiry') {
       const independentGrant=await activate(), independent=await issue(independentGrant);
       await db`UPDATE swarm.memberships SET revoked_at=statement_timestamp() WHERE workspace_id=${config.workspace}::uuid AND user_id=${config.owner}::uuid`;

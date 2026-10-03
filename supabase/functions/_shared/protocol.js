@@ -1501,6 +1501,29 @@ var ADMIN_EVENT_TYPES = [
 function emptyAdminAccount() {
   return { grants: {}, consents: {}, lineages: {}, rate_buckets: {} };
 }
+function adminAccountWithDurableGrants(state, rows) {
+  if (rows.length !== Object.keys(state.grants).length || new Set(rows.map((row) => row.grant_id)).size !== rows.length) return null;
+  for (const row of rows) {
+    const g = state.grants[row.grant_id];
+    if (!g || g.manifest_digest !== row.manifest_digest || g.expires_at !== row.expires_at || g.refresh_deadline !== row.refresh_deadline) return null;
+    if (g.state === row.state) continue;
+    if (!(g.state === "active" && ["revoked", "suspended", "expired"].includes(row.state) || g.state === "suspended" && ["revoked", "expired"].includes(row.state))) return null;
+    const at = row.state === "revoked" ? row.revoked_at : row.state === "suspended" ? row.suspended_at : row.expires_at;
+    if (at === null || !Number.isSafeInteger(at) || !row.reason_code) return null;
+  }
+  let next = state;
+  for (const row of rows) {
+    if (next.grants[row.grant_id].state === row.state) continue;
+    const at = row.state === "revoked" ? row.revoked_at : row.state === "suspended" ? row.suspended_at : row.expires_at;
+    next = projectTerminalGrant(next, row.grant_id, row.state, at, row.reason_code);
+    next = { ...next, grants: { ...next.grants, [row.grant_id]: {
+      ...next.grants[row.grant_id],
+      revoked_at: row.revoked_at,
+      suspended_at: row.suspended_at
+    } } };
+  }
+  return next;
+}
 function parseAdminClientApprovalCommand(input) {
   const c = adminRecord(input);
   if (!c || typeof c.client_id !== "string" || new TextEncoder().encode(c.client_id).length < 1 || new TextEncoder().encode(c.client_id).length > 2048 || typeof c.verification_version !== "number" || !Number.isSafeInteger(c.verification_version) || c.verification_version < 1 || c.verification_version > 2147483647) return null;
@@ -1919,18 +1942,22 @@ function reduceAdminAuthority(previous, event2) {
     return { ...state, grants: { ...state.grants, [id]: { ...grant, ...p.manifest, manifest_digest: String(p.new_manifest_digest), consent_receipt_id: receipt } }, consents: { ...state.consents, [receipt]: { ...consent, consumed_at: event2.occurred_at_server } } };
   }
   const status = event2.type === "AdminDelegationRevoked" ? "revoked" : event2.type === "AdminDelegationSuspended" ? "suspended" : "expired";
-  const cancelledAt = status === "expired" ? grant.expires_at : event2.occurred_at_server;
+  return projectTerminalGrant(state, id, status, event2.occurred_at_server, String(p.reason_code));
+}
+function projectTerminalGrant(state, id, status, at, reason) {
+  const grant = state.grants[id];
+  const cancelledAt = status === "expired" ? grant.expires_at : at;
   const routine = state.routine ? { ...state.routine, invitations: Object.fromEntries(Object.entries(state.routine.invitations).map(([key2, invitation]) => [key2, invitation.parent_admin_grant_id === id && invitation.accepted_at === null ? { ...invitation, revoked_at: invitation.revoked_at ?? cancelledAt } : invitation])) } : void 0;
   return {
     ...state,
     ...routine ? { routine } : {},
-    ...cancelPendingConnections(state, id, cancelledAt, String(p.reason_code)),
+    ...cancelPendingConnections(state, id, cancelledAt, reason),
     grants: { ...state.grants, [id]: {
       ...grant,
       state: status,
-      reason_code: String(p.reason_code),
-      revoked_at: status === "revoked" ? event2.occurred_at_server : grant.revoked_at,
-      suspended_at: status === "suspended" ? event2.occurred_at_server : grant.suspended_at
+      reason_code: reason,
+      revoked_at: status === "revoked" ? at : grant.revoked_at,
+      suspended_at: status === "suspended" ? at : grant.suspended_at
     } },
     lineages: Object.fromEntries(Object.entries(state.lineages).map(([key2, l]) => [key2, l.grant_id === id ? { ...l, state: "revoked" } : l]))
   };
@@ -3687,6 +3714,7 @@ export {
   UpcastError,
   WORKSPACE_EVENT_TYPES,
   WORKSPACE_ROLES,
+  adminAccountWithDurableGrants,
   adminAvailabilityDigest,
   adminAvailableCapabilities,
   adminCapabilityAvailable,

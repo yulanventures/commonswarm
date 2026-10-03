@@ -1,6 +1,6 @@
 import { adminProofAdmitted } from "./admin-dpop.js";
 import { randomUUID, createHash } from "node:crypto";
-import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount, adminRatePolicy } from "./admin-authority.generated.js";
+import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount, adminRatePolicy, adminAccountWithDurableGrants } from "./admin-authority.generated.js";
 import { adminManifestValid, canonicalAdminJson } from "./admin-policy.generated.js";
 import { adminTransactionContext, adminQuery, withAdminRole, AdminTransactionError } from "./admin-transaction.js";
 
@@ -25,15 +25,15 @@ export class AdminAuthorityBridge {
         VALUES($1,$2) ON CONFLICT(owner_user_id) DO NOTHING`, [owner, randomUUID()]);
       const row = (await adminQuery(`SELECT * FROM swarm.admin_accounts
         WHERE owner_user_id=$1 FOR UPDATE`, [owner])).rows[0];
-      const state = structuredClone(row.projection ?? emptyAdminAccount());
-      const grants = (await adminQuery(`SELECT grant_id,state,manifest_digest,expires_at,refresh_deadline
+      let state = structuredClone(row.projection ?? emptyAdminAccount());
+      const grants = (await adminQuery(`SELECT grant_id,state,manifest_digest,expires_at,refresh_deadline,revoked_at,suspended_at,reason_code
         FROM swarm.admin_grants WHERE owner_user_id=$1 ORDER BY grant_id FOR UPDATE`, [owner])).rows;
-      if (grants.length !== Object.keys(state.grants).length || grants.some(g => {
-        const projected = state.grants[g.grant_id];
-        return !projected || projected.state !== g.state || projected.manifest_digest !== g.manifest_digest ||
-          projected.expires_at !== new Date(g.expires_at).getTime() ||
-          projected.refresh_deadline !== new Date(g.refresh_deadline).getTime();
-      })) throw new AdminTransactionError("admin_projection_inconsistent");
+      const reconciled = adminAccountWithDurableGrants(state, grants.map(g => ({ ...g,
+        expires_at: new Date(g.expires_at).getTime(), refresh_deadline: new Date(g.refresh_deadline).getTime(),
+        revoked_at: g.revoked_at == null ? null : new Date(g.revoked_at).getTime(),
+        suspended_at: g.suspended_at == null ? null : new Date(g.suspended_at).getTime() })));
+      if (!reconciled) throw new AdminTransactionError("admin_projection_inconsistent");
+      state = reconciled;
       for (const consent of (await adminQuery(`SELECT * FROM swarm.admin_consents WHERE owner_user_id=$1`, [owner])).rows) {
         state.consents[consent.consent_receipt_id] = { ...consent,
           expires_at: new Date(consent.expires_at).getTime(),

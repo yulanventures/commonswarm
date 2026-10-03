@@ -301,7 +301,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
     [clientId, adminDigest(runtimeMetadata), [redirectUri]]);
     const approvalEvent = randomUUID();
     await setup.query(`INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
-      VALUES($1,1,$2,'approval',jsonb_build_object('stream_kind','account','owner_user_id',$1::text,'seq',1,
+      VALUES($1::uuid,1,$2,'approval',jsonb_build_object('stream_kind','account','owner_user_id',$1::text,'seq',1,
         'type','AdminClientApproved','actor_user',$1::text,'payload',jsonb_build_object('client_id',$3::text,'verification_version',1)))`,
     [owner, approvalEvent, clientId]);
     await setup.query(`INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,

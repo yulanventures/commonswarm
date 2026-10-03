@@ -114,7 +114,11 @@ assert.equal(authCalls, 0, 'admin never reaches GoTrue, JWKS, or a forwarded req
 for (const token of tokens) {
   for (const handler of [read, activity, capability, mcp, h0]) {
     const req = request('/read',token);req.headers.set('authorization',`DPoP ${token}`);
-    assert.ok((await handler(req)).status>=400,'DPoP admin stays outside ordinary authority');
+    const response = await handler(req);
+    if (handler === read) {
+      assert.equal(response.status,403,'DPoP admin is classified before method/body handling');
+      assert.deepEqual(await response.json(),{error:'credential_kind_forbidden'});
+    } else assert.ok(response.status>=400,'DPoP admin stays outside ordinary authority');
   }
 }
 assert.equal(authCalls,0,'both admin schemes refused without GoTrue at ordinary surfaces');

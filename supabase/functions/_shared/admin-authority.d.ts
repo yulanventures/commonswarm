@@ -194,6 +194,12 @@ export interface AdminDecision {
     events: AdminAccountEvent[];
 }
 export declare function emptyAdminAccount(): AdminAccountState;
+export type AdminDurableGrant = Pick<AdminGrant, 'grant_id' | 'state' | 'manifest_digest' | 'expires_at' | 'refresh_deadline' | 'revoked_at' | 'suspended_at' | 'reason_code'>;
+/** Database policy fences can precede the cached account projection. Apply only
+ * terminal authority reductions, using the same projection logic as events.
+ * All other drift still refuses the account; this can never reactivate a grant.
+ * Callers read these rows under the account/grant locks, never from client input. */
+export declare function adminAccountWithDurableGrants(state: AdminAccountState, rows: readonly AdminDurableGrant[]): AdminAccountState | null;
 /** Shared strict wire validation; these commands never accept an owner or verification facts. */
 export declare function parseAdminClientApprovalCommand(input: unknown): Extract<AdminCommand, {
     client_id: string;
