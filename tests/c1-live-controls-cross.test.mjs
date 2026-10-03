@@ -2,19 +2,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import { spawn, spawnSync, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 const temporaryRoot = realpathSync(tmpdir());
-const secretParent = join(temporaryRoot, 'anvil-secret-root');
-import { basename, dirname, join, resolve } from 'node:path';
+const secretParent = mkdtempSync(join(temporaryRoot, 'anvil-secret-root-'));
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp } from 'node:fs/promises';
+import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
@@ -146,7 +145,9 @@ async function liveFixture(t) {
   t.after(async () => {
     server.closeAllConnections(); await new Promise(r => server.close(r));
     assert.deepEqual(violations, []);
-    await promisify(execFile)('/Users/yulanbot/.local/bin/rm', ['-r', root]);
+    assert.ok(root.startsWith(`${secretParent}${sep}`), 'cleanup is inside the test-owned mkdtemp root');
+    assert.equal(realpathSync(root), root);
+    await rm(root, { recursive: true });
   });
   const profileId = hash(api).slice(0, 24);
   await privateWrite(join(human, 'target.json'), { url: api, anon_key: anon });
@@ -312,6 +313,7 @@ function planFixture(config = {}) {
     PROOF_DIR: proof, SECRET_STAGE: join(root, 'stage'), PSQL_IMAGE: 'fixture-postgres',
   };
   function remap(source) {
+    assert.ok(root.startsWith(`${scratch}${sep}`), 'plan fixture is inside the test-owned tmpdir root');
     for (const [from, to] of [
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
       ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
@@ -319,7 +321,10 @@ function planFixture(config = {}) {
       ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
       ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
       ['/etc/caddy/sites', join(root, 'caddy')],
-    ]) source = source.split(from).join(to);
+    ]) {
+      assert.ok(to.startsWith(`${root}${sep}`), 'plan path maps inside the test-owned mkdtemp root');
+      source = source.split(from).join(to);
+    }
     return source;
   }
   function run(steps, window, extra = {}) {

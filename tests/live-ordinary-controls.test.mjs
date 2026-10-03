@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import { spawn, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, rm, unlink } from 'node:fs/promises';
+import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -27,7 +28,7 @@ async function missing(p) { await assert.rejects(lstat(p), { code: 'ENOENT' }); 
 // The fixture checks the wire independently: PKCE, code single-use, refresh
 // rotation/replay/family fencing, bearer use, CLI note ordering and tenancy.
 async function fixture(t, config = {}) {
-  const root = await mkdtemp('/private/tmp/anvil-secret.'); await chmod(root, 0o700);
+  const root = await mkdtemp(join(realpathSync(tmpdir()), 'anvil-secret.')); await chmod(root, 0o700);
   const creds = join(root, 'credentials'), human = join(root, 'human'), seat = join(root, 'seat');
   for (const dir of [creds, human, seat]) await mkdir(dir, { mode: 0o700 });
   const clientTimes = new Map();
@@ -149,8 +150,9 @@ async function fixture(t, config = {}) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { server.closeAllConnections(); await new Promise(r => server.close(r));
     assert.deepEqual(violations, [], 'independent wire contract');
-    assert.ok(root.startsWith('/private/tmp/anvil-secret.'));
-    await promisify(execFile)('/Users/yulanbot/.local/bin/rm', ['-r', root]); });
+    assert.ok(root.startsWith(join(realpathSync(tmpdir()), 'anvil-secret.')));
+    assert.equal(realpathSync(root), root, 'cleanup stays at the test-owned mkdtemp root');
+    await rm(root, { recursive: true }); });
   const profileId = hash(api).slice(0, 24);
   await privateWrite(join(human, 'target.json'), { url: api, anon_key: anon });
   await privateWrite(join(human, `${profileId}.json`), { version: 1, refreshToken: humanRefresh, generation: 0, deviceId: randomUUID(), userId: uid });
@@ -379,7 +381,10 @@ test('cleanup refuses incomplete or unsafe journals before any grant change', as
     const idPath = join(f.creds, 'dcr-client-ids.json'), grantPath = join(f.creds, 'live-controls-state.json');
     const ids = JSON.parse(await readFile(idPath));
     if (kind === 'missing-id') { ids.ids.shift(); await privateWrite(idPath, ids); }
-    if (kind === 'missing-journal') await promisify(execFile)('/Users/yulanbot/.local/bin/rm', [idPath]);
+    if (kind === 'missing-journal') {
+      assert.ok(idPath.startsWith(`${f.root}${sep}`), 'journal is inside the test-owned mkdtemp root');
+      await unlink(idPath);
+    }
     if (kind === 'missing-grant') { const j = JSON.parse(await readFile(grantPath)); j.grants = []; await privateWrite(grantPath, j); }
     if (kind === 'missing-time') { delete ids.ids[0].last_used_at; await privateWrite(idPath, ids); }
     if (kind === 'unsafe-file') await chmod(idPath, 0o644);
