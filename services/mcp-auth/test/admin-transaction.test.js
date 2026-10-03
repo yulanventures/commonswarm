@@ -5,13 +5,14 @@ import { AdminTransactionCoordinator, AdminTransactionError, adminQuery, adminTr
   scopedAdminPool } from "../src/admin-transaction.js";
 
 const latch = () => { let release; return { promise: new Promise(r => { release = r; }), release: () => release() }; };
-function database({ commit, principal = "commonswarm_admin_issuer" } = {}) {
+function database({ commit, beforeQuery, principal = "commonswarm_admin_issuer" } = {}) {
   let id = 0;
   const clients = [];
   return { clients, connect: async () => {
     const client = { processID: ++id, sql: [], releases: [],
       async query(sql) {
         this.sql.push(sql);
+        await beforeQuery?.(sql, this);
         if (sql === "SELECT session_user AS principal") return { rows: [{ principal }] };
         if (sql === "COMMIT" && commit) return commit(this);
         return { command: sql.split(" ")[0], rows: [], rowCount: 0 };
@@ -56,6 +57,40 @@ test("production coordinator buffers direct interaction/HTTP output until COMMIT
   }
   assert.throws(() => adminTransactionContext(), { code: "admin_transaction_required" });
   await assert.rejects(scopedAdminPool().connect(), { code: "admin_transaction_required" });
+});
+
+test("failed admin units release their client; failed rollback destroys it and a later unit commits", async t => {
+  for (const mode of ["begin", "role", "write", "nested-write", "callback", "rollback"]) await t.test(mode, async t => {
+    const failure = Object.assign(new Error("injected database failure"), { code: "22012" });
+    const pool = database({ beforeQuery: (sql, client) => {
+      if (client.processID !== 1) return;
+      if ((mode === "begin" && sql === "BEGIN") ||
+          (mode === "role" && sql === "SET LOCAL ROLE swarm_command") ||
+          (["write", "nested-write"].includes(mode) && sql === "UPDATE revoke_fixture") ||
+          (mode === "rollback" && sql === "ROLLBACK")) throw failure;
+    } });
+    const origin = await serverFixture(t, pool, async (request, response) => {
+      response.end("staged-result");
+      if (request.url === "/healthy") return;
+      const write = () => withAdminRole("swarm_command", () => adminQuery("UPDATE revoke_fixture"));
+      // A provider catching its adapter's fault still poisons the whole unit.
+      if (mode === "nested-write") await joinAdminTransaction(write).catch(() => {});
+      else await write();
+      if (["callback", "rollback"].includes(mode)) throw failure;
+    });
+    const refused = await fetch(origin);
+    assert.equal(refused.status, 503);
+    assert.equal((await refused.json()).error, "temporarily_unavailable");
+    assert.equal(pool.clients[0].sql.includes("COMMIT"), false);
+    assert.equal(pool.clients[0].sql.includes("ROLLBACK"), true);
+    assert.deepEqual(pool.clients[0].releases, [mode === "rollback"]);
+
+    const healthy = await fetch(`${origin}/healthy`);
+    assert.equal(healthy.status, 200);
+    assert.equal(await healthy.text(), "staged-result");
+    assert.equal(pool.clients[1].sql.includes("COMMIT"), true);
+    assert.deepEqual(pool.clients[1].releases, [false]);
+  });
 });
 
 test("production coordinator refuses missing context, non-issuer login, caught faults, flushed/overflowed output and aborted commits", async t => {

@@ -517,7 +517,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
       }
       assert.ok(consentUrl, "real provider must reach lane-3a selection");
 
-      async function proveUnit(name, url, options, expected, concurrent = false) {
+      async function proveUnit(t, name, url, options, expected, concurrent = false) {
         const baseline = await f.snapshot();
         // First explore the real write count in a forced-rollback control.
         const probe = await f.request(url, { ...options, fault: "commit" });
@@ -596,7 +596,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         }
         return good;
       }
-      const finished = await proveUnit("consent finish", consentUrl, { method: "POST", body: {} }, 303,true);
+      const finished = await proveUnit(t, "consent finish", consentUrl, { method: "POST", body: {} }, 303,true);
       const singleUse = (await f.pool.query(`SELECT
         (SELECT count(*)::int FROM swarm.admin_grants WHERE owner_user_id=$1) AS grants,
         (SELECT count(*)::int FROM swarm.admin_consents WHERE owner_user_id=$1 AND consumed_at IS NOT NULL) AS consumed,
@@ -604,14 +604,14 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         (SELECT count(*)::int FROM commonswarm_oauth.admin_grant_bindings WHERE owner_user_id=$1) AS families`, [f.owner])).rows[0];
       assert.deepEqual(singleUse, { grants: 1, consumed: 1, events: 1, families: 1 },
         "overlapping consent confirmations consume one receipt and create exactly one grant/family");
-      const continued = await proveUnit("authorization continuation", finished.response.headers.get("location"), {}, 303);
+      const continued = await proveUnit(t, "authorization continuation", finished.response.headers.get("location"), {}, 303);
       const code = new URL(continued.response.headers.get("location")).searchParams.get("code");
       assert.equal(typeof code, "string");
-      const exchanged = await proveUnit("code exchange", "/token", { method: "POST", body: {
+      const exchanged = await proveUnit(t, "code exchange", "/token", { method: "POST", body: {
         client_id: f.clientId, grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: redirectUri, resource: ADMIN } }, 200,true);
       const initial = await exchanged.response.json();
       assert.equal(initial.token_type, "DPoP"); assert.equal(typeof initial.refresh_token, "string");
-      const rotated = await proveUnit("refresh", "/token", { method: "POST", body: {
+      const rotated = await proveUnit(t, "refresh", "/token", { method: "POST", body: {
         client_id: f.clientId, grant_type: "refresh_token", refresh_token: initial.refresh_token, resource: ADMIN } }, 200,true);
       const successor = await rotated.response.json();
       assert.equal(successor.token_type, "DPoP");
@@ -660,8 +660,8 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           JOIN swarm.admin_accounts a ON a.owner_user_id=b.owner_user_id WHERE b.provider_grant_id=$1`,[f.family()])).rows[0];
         assert.deepEqual(after,prior);
       });
-      await t.test("admin-revoke-family-atomic: every write rolls back; positive human revoke fences the family",async()=>{
-        const revoked=await proveUnit("human revoke","/test-revoke",{},204);
+      await t.test("admin-revoke-family-atomic: every write rolls back; positive human revoke fences the family",async t=>{
+        const revoked=await proveUnit(t,"human revoke","/test-revoke",{},204);
         atomic(revoked.trace);
         const state=(await f.pool.query(`SELECT b.state,g.state AS authority,
           EXISTS(SELECT 1 FROM commonswarm_oauth.refresh_family_tombstones t WHERE t.grant_id=b.provider_grant_id) AS fenced

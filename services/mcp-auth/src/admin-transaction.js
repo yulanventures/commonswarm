@@ -160,7 +160,7 @@ export class AdminTransactionCoordinator {
     const scope = { coordinator: this, physical, client: { query: adminQuery }, capability,
       requestId: randomUUID(), closed: false, failure: null, tail: Promise.resolve(),
       pending: new Set(), savepointNumber: 0, savepoint: null, fenceCommittedOnError: false };
-    let committing = false, committed = false, unknown = false;
+    let committing = false, committed = false, unknown = false, rollbackFailed = false;
     const abort = () => {
       scope.closed = true;
       scope.failure ??= signal.reason;
@@ -194,7 +194,9 @@ export class AdminTransactionCoordinator {
       unknown = committed || (committing && error.code !== "admin_commit_rolled_back");
       await scope.tail;
       scope.closed = true;
-      if (!unknown && !signal?.aborted) await physical.query("ROLLBACK").catch(() => {});
+      // A failed rollback can leave transaction locks and local roles active.
+      // Never return that connection to the pool for another issuance/revoke.
+      if (!unknown && !signal?.aborted) await physical.query("ROLLBACK").catch(() => { rollbackFailed = true; });
       held.discard();
       if (!response.destroyed) {
         const refusal = unknown ? null : oauthErrorResponse(error);
@@ -211,7 +213,7 @@ export class AdminTransactionCoordinator {
     } finally {
       scope.closed = true;
       signal?.removeEventListener("abort", abort);
-      raw.release(unknown || signal?.aborted === true);
+      raw.release(unknown || rollbackFailed || signal?.aborted === true);
     }
   }
 }
