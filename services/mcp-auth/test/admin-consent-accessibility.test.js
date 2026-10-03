@@ -51,7 +51,7 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   };
   const tree = htmlTree(renderAdminConsentPage({ uid: 'exact-interaction', user: { userId: 'owner-1', displayName: 'Owner' },
     params: { client_id: 'https://client.example/oauth.json', redirect_uri: 'https://callback.example/return' },
-    policy: { verification: { publisher_identity: 'Reviewed publisher', verification_version: 2 }, approval: { owner_user_id: 'owner-1' } },
+    policy: { metadata: { client_name: 'Admin <app> & "friends"' }, verification: { publisher_identity: 'Reviewed publisher', verification_version: 2 }, approval: { owner_user_id: 'owner-1' } },
     version: 3, receipt: { manifest }, summary: { token: 'csrf-exact', secondToken: 'second-exact', digest: 'digest-exact' },
     workspaces: [{ id: 'workspace-1', name: 'Selected <workspace>' }],
   }));
@@ -77,6 +77,9 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   const consentForm = one(tree, node => node.tag === 'form' && elements(node).includes(confirm));
   assert.equal(consentForm.attrs.method, 'post'); assert.equal(consentForm.attrs.action, '/interaction/exact-interaction/consent');
   assert.ok(elements(consentForm).includes(confirmation));
+  assert.ok(text(consentForm).includes('Client name (supplied by the client): Admin <app> & "friends"'));
+  assert.ok(text(consentForm).includes('After you approve, you return to callback.example'));
+  assert.ok(text(consentForm).includes('Client ID URL host: client.example'));
   for (const [name, value] of [['csrf_token','csrf-exact'], ['second_token','second-exact'], ['summary_digest','digest-exact'], ['selection_version','3']]) {
     assert.equal(one(consentForm, node => node.tag === 'input' && node.attrs.name === name).attrs.value, value);
   }
@@ -105,4 +108,26 @@ test('admin-site-lifecycle: second-confirmation-accessibility on hosted consent;
   const all = text(tree);
   assert.ok(all.includes('HTTPS client host: client.example'));
   assert.ok(all.includes('Authorization returns to: callback.example'));
+  assert.ok(all.includes('After you approve, you return to callback.example'));
+});
+
+test('admin consent selection escapes client names and uses the request destination including loopback', () => {
+  for (const [redirectUri, destination] of [
+    ['https://callback.example:8443/private?code=hidden', 'callback.example'],
+    ['http://localhost:4321/callback', 'a program on this computer (localhost)'],
+    ['http://127.0.0.1:5432/callback', 'a program on this computer (localhost)'],
+    ['http://[::1]:6543/callback', 'a program on this computer (localhost)'],
+  ]) {
+    const html = renderAdminConsentPage({ uid: 'selection', user: { userId: 'owner' },
+      params: { client_id: 'https://metadata.example/oauth.json', redirect_uri: redirectUri },
+      policy: { verification: {}, approval: {}, metadata: { client_name: '<script>bad()</script> & "friends\'s"',
+        redirect_uris: ['https://unused.example/return', redirectUri] } }, csrfToken: 'csrf', version: 0 });
+    assert.doesNotMatch(html, /<script>|code=hidden|unused\.example/u);
+    assert.ok(html.includes('&lt;script&gt;bad()&lt;/script&gt; &amp; &quot;friends&#39;s&quot;'));
+    const tree = htmlTree(html);
+    const review = one(tree, node => node.tag === 'button' && text(node) === 'Review exact permissions and limits');
+    const form = one(tree, node => node.tag === 'form' && elements(node).includes(review));
+    assert.ok(text(form).includes(`After you approve, you return to ${destination}`));
+    assert.ok(text(form).includes('Client ID URL host: metadata.example'));
+  }
 });
