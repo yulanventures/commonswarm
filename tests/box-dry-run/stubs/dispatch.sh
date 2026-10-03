@@ -198,6 +198,9 @@ run_in_box() {
 # plan-options: ssh BatchMode=yes ConnectTimeout=10
 
 case "$name" in
+  date)
+    userland date "$@"
+    ;;
   ssh)
     counter=${BOX_DRY_RUN_SSH_COUNTER_FILE:-}
     count=0

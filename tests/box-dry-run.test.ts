@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -425,14 +425,16 @@ assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
   "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
-  "browser-harness", "cp", "readlink", "rsync", "npm", "node",
+  "browser-harness", "cp", "readlink", "rsync", "npm", "node", "date",
   // Commands that leave the process tree or reach the operator: they start an application or read the keychain.
   "open", "osascript", "launchctl", "security",
 ];
 // GNU behavior the box has and the Mac lacks. These names exist only on a box script's PATH, never on a Mac block's.
 const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep", "diff", "tee"];
 // The Linux runner uses real GNU userland and real ownership; all box stub consumers share this inventory.
-const BOX_STUB_COMMANDS = STUB_COMMANDS.filter((command) => !BOX_USERLAND_COMMANDS.includes(command));
+// A plain SSH command or a /bin/sh deploy child cannot rely on a Bash
+// function. Its date executable must use the same clock as the prelude.
+const BOX_STUB_COMMANDS = STUB_COMMANDS.filter((command) => command === "date" || !BOX_USERLAND_COMMANDS.includes(command));
 // Host state a Mac block would otherwise read from the real Mac: its process table. These stub the Mac lane only;
 // on the box lane the runner's own ps and pgrep are the box's.
 const MAC_HOST_STATE_STUBS = ["pgrep", "ps"];
@@ -3268,7 +3270,62 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
   };
 }
 
-function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): Array<{ block: Block; execution: Execution }> {
+type BlockRecord = { block: Block; execution: Execution };
+
+// Only an inventoried product of an unavailable producer can make its consumer
+// unavailable. Missing files from executed producers and unknown command forms
+// still fail in the original block. No consumer creates replacement bytes.
+function unavailableConsumerInputs(block: Block, records: BlockRecord[], missingManifestMembers?: ReadonlySet<string>): string[] {
+  if (shortStep(block) !== "runbook-11" || block.source !== planBlock(RUNBOOK, "runbook-11").source ||
+      !missingManifestMembers?.size) return [];
+  const links = handoffInventory().filter((link) => link.consumer.file === block.file && link.consumer.step === block.step &&
+    missingManifestMembers.has(basename(link.path)));
+  if (links.some((link) => records.some((record) => record.block.file === link.producer.file &&
+      record.block.step === link.producer.step && record.execution.result === "passed"))) return [];
+  const reasons: string[] = [];
+  for (const link of links) {
+    const origin = records.find((record) => record.block.file === link.producer.file && record.block.step === link.producer.step);
+    const entry = declaredNonSubstitutable(shortStep(link.producer as Block));
+    const unavailable = entry?.written_outputs?.find((output) => output.path === link.path &&
+      entry.unproduced?.some((missing) => missing.output === output.output));
+    if (origin?.execution.result === "not-executed" && entry?.scope === "whole-block" && unavailable) {
+      reasons.push(`${link.path}: ${entry.step} is NOT EXECUTED; ${unavailable.reason}`);
+    } else if (!origin && [HM37, RUNBOOK].includes(link.producer.file) &&
+      selectedHmSequence().includes(shortStep(link.producer as Block)) && records.some((record) =>
+      record.block.file === HM37 && shortStep(record.block) === "hm37a-open-inputs")) {
+      // The runbook manifest is created before the commit point and includes
+      // future products. On an early-failure path their producers never run.
+      reasons.push(`${link.path}: ${shortStep(link.producer as Block)} is not reached on this path`);
+    }
+  }
+  if (shortStep(block) === "runbook-11" && missingManifestMembers) {
+    for (const record of records) {
+      if (record.execution.result !== "not-executed") continue;
+      const entry = declaredNonSubstitutable(shortStep(record.block));
+      if (entry?.scope !== "whole-block") continue;
+      for (const output of entry.written_outputs ?? []) {
+        if (output.path !== `/home/commonswarm/stack/release-proofs/{sha}/${output.output}` ||
+            !missingManifestMembers.has(output.output) ||
+            !entry.unproduced?.some((missing) => missing.output === output.output)) continue;
+        reasons.push(`${output.path}: ${entry.step} is NOT EXECUTED; ${output.reason}`);
+      }
+    }
+  }
+  // An unrelated missing member must still hit the original file check even
+  // when another member has a known unavailable producer.
+  if ([...missingManifestMembers].some((name) => !reasons.some((reason) =>
+    reason.startsWith(`/home/commonswarm/stack/release-proofs/{sha}/${name}:`)))) return [];
+  return [...new Set(reasons)].sort();
+}
+
+function unavailableConsumerExecution(block: Block, reasons: string[]): Execution {
+  return { step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded: [],
+    declared: { scope: "whole-block", surface: "consumer of unavailable producer products",
+      reason: reasons.join("\n"), live_proof: `The live whole block at ${block.file}:${block.line} requires the actual upstream products. No part executes and no output is seeded in this dry run.`,
+      receipt_fields: ["none: unavailable consumer creates no dry-run receipt"], written_outputs: [], outputs: [], unproduced: [] } };
+}
+
+function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): BlockRecord[] {
   const records: Array<{ block: Block; execution: Execution }> = [];
   for (const [index, block] of planBlocks.entries()) {
     const laterBlocks = planBlocks.slice(index + 1);
@@ -3278,6 +3335,30 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
       const execution = executeWholeBlock(block, fixture, { laterBlocks });
       records.push({ block, execution });
       if (execution.result === "failed") break;
+      continue;
+    }
+    let missingManifestMembers: Set<string> | undefined;
+    if (shortStep(block) === "runbook-11") {
+      const proof = part === "box" ? PROOF_DIR : join(fixture.boxRoot!, PROOF_DIR);
+      const manifest = join(proof, "copy-back.list");
+      if (pathExists(manifest)) {
+        const metadata = lstatSync(manifest);
+        const owned = part === "box" ? metadata.uid === 0 && metadata.gid === 0
+          : readBoxOwners(fixture.boxRoot!)[relative(fixture.boxRoot!, manifest)] === "root:root";
+        if (metadata.isFile() && !metadata.isSymbolicLink() && (metadata.mode & 0o777) === 0o600 && owned) {
+          const names = readFileSync(manifest, "utf8").replace(/\n$/, "").split("\n");
+          // A corrupt manifest still belongs to the original consumer checks.
+          if (names.includes("copy-back.list") && new Set(names).size === names.length && names.every((name) =>
+            /^[A-Za-z0-9_.-]+$/.test(name) && name !== "window.env" &&
+            (!name.endsWith(".log") || /^(?:commonswarm-edge-edge-runtime-1|commonswarm-postgres|commonswarm-gotrue|commonswarm-postgrest|commonswarm-realtime|commonswarm-storage-api)\.[0-9a-f]{40}\.docker\.log$/.test(name)))) {
+            missingManifestMembers = new Set(names.filter((name) => !pathExists(join(proof, name))));
+          }
+        }
+      }
+    }
+    const unavailable = unavailableConsumerInputs(block, records, missingManifestMembers);
+    if (unavailable.length) {
+      records.push({ block, execution: unavailableConsumerExecution(block, unavailable) });
       continue;
     }
     const isBoxBlock = block.host.startsWith("box ");
@@ -5229,9 +5310,9 @@ test("controls: window B opens from a passed window A's final state and refuses 
   }
 });
 
-// The five files a copy-back reads from the box's proof directory. Three are products of box blocks and are seeded
-// from their committed execution evidence (fixtures/box-block-products.json). The other two are staged from the Mac
-// by earlier blocks; their bytes come from the same committed evidence directory.
+// The isolated transfer controls supply these five historical files as INPUTS.
+// They are not products of the current live Window B blocks, which remain
+// whole-block NOT EXECUTED and seed no control/readback/copy-back bytes.
 const COPYBACK_MEMBERS = [
   "hm37-worker-boundary.txt", "hm37-hosted-control-inputs.txt", "hm37-hosted-check-control.json",
   "hm37-revocation-readback.json", "hm37-close-readback.txt",
@@ -5298,8 +5379,10 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
   const sequence = resolveSteps("abort producer control", windowBPaths().get("abort")!);
   const recovery = planBlock(HM37B, "hm37-hosted-control-cleanup-only");
   const hosted = planBlock(HM37B, "hm37-hosted-open-ack-control");
-  const dispatcher = planBlock(HM37B, "hm37b-failure-dispatch");
-  const copyback = planBlock(HM37B, "hm37b-copyback");
+  // Isolated boundary INPUTS exercise the unchanged scripts under control IDs;
+  // the live plan IDs remain whole-block NOT EXECUTED and seed nothing.
+  const dispatcher = { ...planBlock(HM37B, "hm37b-failure-dispatch"), step: "failure-input-dispatch-control" };
+  const copyback = { ...planBlock(HM37B, "hm37b-copyback"), step: "historical-copyback-input-control" };
   for (const omit of [false, true]) {
     const fixture = prepareMacFixture(sequence, { afterWindowA: true });
     try {
@@ -5797,7 +5880,7 @@ test("controls: runbook-31 manifest verification fails on a changed, a missing a
 });
 
 test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", { skip: MAC_ONLY }, () => {
-  const block = planBlock(HM37B, "hm37b-copyback");
+  const block = { ...planBlock(HM37B, "hm37b-copyback"), step: "historical-copyback-archive-control" };
   const boxFiles = "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'";
   const fixture = prepareMacFixture([block]);
   try {
@@ -7130,9 +7213,13 @@ test("controls: the box lane never ships the unproduced receipts of a NOT EXECUT
     const declared = executeWholeBlock(producer, fixture, { laterBlocks: [transfer] });
     assert.equal(declared.result, "not-executed", declared.stderr);
     assert.deepEqual(declared.seeded, []);
-    // Negative: the transfer of the directed receipts is refused, whose producer enumerates them as unavailable.
+    // The real transfer is unavailable as a whole and neither ships nor seeds
+    // bytes. A non-declared boundary control still refuses missing products.
     const logBefore = readFileSync(fixture.log, "utf8");
-    const refused = modelMacProducer(transfer, fixture)!;
+    const unavailable = modelMacProducer(transfer, fixture)!;
+    assert.equal(unavailable.result, "not-executed", unavailable.stderr);
+    assert.deepEqual(unavailable.seeded, []);
+    const refused = modelMacProducer({ ...transfer, step: "missing-product-transfer-control" }, fixture)!;
     assert.equal(refused.result, "failed", "the box lane shipped bytes for an unproduced Mac product");
     assert.equal(refused.status, 69, refused.stderr);
     assert.match(refused.stderr, /^UNPRODUCED Mac product hm37a-[a-z-]+\.json: its producer hm37a-directed-check-(?:old|new) is NOT EXECUTED/);
@@ -8184,7 +8271,8 @@ function successReceiptRows(): SuccessReceiptRow[] {
 test("controls: success receipts carry the exact label, a plan writer and an executed consumer", () => {
   const rows = successReceiptRows();
   assert.ok(rows.length > 0, "no success receipt is declared");
-  assert.equal(new Set(rows.map(({ receipt }) => receipt.path)).size, rows.length, "a success receipt is declared twice");
+  assert.equal(new Set(rows.map(({ receipt, producer }) => `${producer.file}:${receipt.path}`)).size, rows.length,
+    "a success receipt is declared twice in one window plan");
   for (const { entry, receipt, producer } of rows) {
     const label = `${entry.step}/${receipt.file}`;
     assert.equal(entry.scope, "whole-block", label);
@@ -8227,6 +8315,18 @@ test("controls: success receipts carry the exact label, a plan writer and an exe
   const literal = byFile("hm37-public-check-no-mutation.json");
   assert.throws(() => successReceiptBytes(literal.receipt, mutatedBlock(literal.producer, [['"gateway.public-hosted-command-refusal"}, indent=2', 'values}, indent=2']]).source),
     /prints more than literals/);
+  const bClose = rows.find(({ entry }) => entry.step === "hm37b-close-readback");
+  assert.ok(bClose);
+  assert.equal(successReceiptBytes(bClose.receipt, bClose.producer.source).toString("utf8"),
+    `release_sha=${RELEASE_SHA}\nedge_live=true\nedge_dark=true\nhosted_controls=true\nlive_grant_and_seat_revoke=true\ncleanup=true\ndeno_removed=true\nprotected_staging_removed=true\nclose=PASS\n`);
+  for (const replacement of ['print(value)', 'print("close=PASS", end="")', 'print(f"close={value}")',
+    'print("unexpected"); print("close=PASS")\nprint(value)', 'sys.stdout.write("unexpected")\nprint("close=PASS")']) {
+    assert.throws(() => successReceiptBytes(bClose.receipt,
+      mutatedBlock(bClose.producer, [['print("close=PASS")', replacement]]).source), /does not print only terminal literal lines/);
+  }
+  const changed = successReceiptBytes(bClose.receipt,
+    mutatedBlock(bClose.producer, [['print("close=PASS")', 'print("close=CHANGED")']]).source);
+  assert.match(changed.toString("utf8"), /close=CHANGED\n$/);
   const pinned = byFile("hm37-functional-after-control.txt");
   const pin = 'test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t';
   assert.throws(() => successReceiptBytes(pinned.receipt, mutatedBlock(pinned.producer, [[pin, `${pin}\n  ${pin.replace(/ = t$/, " = f")}`]]).source),
@@ -8269,10 +8369,10 @@ test("controls: a Python success writer's quoted True, False and None are printe
 
 test("controls: a success receipt is seeded only for a later read, after its producer's directory", { skip: MAC_ONLY }, () => {
   const apply = planBlock(RUNBOOK, "1-apply-release-directories");
-  const copyback = planBlock(RUNBOOK, "runbook-11");
   const producers = new Map(successReceiptRows().map(({ entry, producer }): [string, { entry: NonSubstitutableEntry; producer: Block }] =>
     [entry.step!, { entry, producer }]));
   for (const { entry, producer } of producers.values()) {
+    const copyback = producer.file === HM37B ? planBlock(HM37B, "hm37b-manifest-close") : planBlock(RUNBOOK, "runbook-11");
     const fixture = prepareMacFixture([apply, producer, copyback], { state: "s5" });
     try {
       const receipts = entry.success_receipts!;
@@ -9168,5 +9268,122 @@ test("controls: the OAuth database host line comes only from a measured fact", (
     }
   } finally {
     removeOwnedTemporary(temporary, "commonswarm-box-dry-run-h18-oauth-");
+  }
+});
+
+test("controls: all Python calls share the exact prelude wrapper and preserve argv stdin and exit status", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  try {
+    const bin = join(temporary, "bin");
+    makeStubBin(bin);
+    const env = explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`, BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
+      BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE });
+    const program = 'import json,sys; print(json.dumps(sys.argv[1:])); print(sys.stdin.read(), end=""); raise SystemExit(37)';
+    const file = join(temporary, "program.py");
+    writeFileSync(file, program);
+    for (const argv of [["-c", program, "space value", "'quote'", ""], [file, "space value", "'quote'", ""]]) {
+      const run = spawnSync("/bin/bash", ["-c", 'source "$1"; shift; python3 "$@"', "python-wrapper-control", PRELUDE, ...argv],
+        { env, encoding: "utf8", input: "stdin bytes\n" });
+      assert.equal(run.status, 37, run.stderr);
+      assert.equal(run.stdout, '["space value", "\'quote\'", ""]\nstdin bytes\n');
+      assert.equal(run.stderr, "");
+    }
+    const heredoc = spawnSync("/bin/bash", ["-c", 'source "$1"; python3 - "space value" <<\'PY\'\nimport sys\nassert sys.argv == ["-", "space value"]\nprint("heredoc executed")\nPY', "python-heredoc-control", PRELUDE],
+      { env, encoding: "utf8" });
+    assert.equal(heredoc.status, 0, heredoc.stderr);
+    assert.equal(heredoc.stdout, "heredoc executed\n");
+    const invalid = spawnSync("/bin/bash", ["-c", 'source "$1"; python3 --unsupported-fixture-flag', "python-refusal-control", PRELUDE],
+      { env, encoding: "utf8" });
+    assert.notEqual(invalid.status, 0);
+    assert.match(invalid.stderr, /unknown option/);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-"); }
+});
+
+test("controls: executable date and Python window checks use one clock across Bash and sh", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-clock-"));
+  try {
+    const bin = join(temporary, "bin");
+    makeStubBin(bin);
+    const env = explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`, BOX_DRY_RUN_STUB_LOG: join(temporary, "clock.log"),
+      BOX_DRY_RUN_BOX_CLOCK: WINDOW_START, BOX_DRY_RUN_USERLAND: USERLAND, BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE });
+    const block = planBlock(SITE, "site-04");
+    const program = /python3 - "\$box_now" "\$SITE_WINDOW_END_UTC" <<'PY'\n([\s\S]*?)\nPY/.exec(block.source)?.[1];
+    assert.ok(program);
+    for (const shell of ["/bin/bash", "/bin/sh"]) {
+      const now = spawnSync(shell, ["-c", "date -u +%Y-%m-%dT%H:%M:%SZ"], { env, encoding: "utf8" });
+      assert.equal(now.status, 0, now.stderr);
+      assert.equal(now.stdout, `${WINDOW_START}\n`, "an executable date observed the host clock instead of the shared fixture clock");
+      const clock = spawnSync(shell, ["-c", 'date -u +%Y-%m-%dT%H:%M:%SZ; date -u -d "$1 + 4 hours" +%Y-%m-%dT%H:%M:%SZ', "clock-control", WINDOW_START],
+        { env, encoding: "utf8" });
+      assert.equal(clock.status, 0, clock.stderr);
+      assert.equal(clock.stdout, `${WINDOW_START}\n2026-09-28T05:02:03Z\n`);
+      const dates = clock.stdout.trim().split("\n");
+      const run = (end: string): SpawnSyncReturns<string> => spawnSync("/bin/bash", ["-c", 'source "$1"; python3 - "$2" "$3"', "site-time-control", PRELUDE, dates[0]!, end],
+        { env, encoding: "utf8", input: program });
+      assert.equal(run(dates[1]!).status, 0);
+      const expired = run(dates[0]!);
+      assert.equal(expired.status, 1, expired.stderr);
+      assert.match(expired.stderr, /AssertionError/);
+      const unknown = spawnSync(shell, ["-c", "date -u -d yesterday +%s"], { env, encoding: "utf8" });
+      assert.equal(unknown.status, 69, unknown.stderr);
+      assert.match(unknown.stderr, /unhandled dry-run stub: date/);
+    }
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-clock-"); }
+});
+
+test("controls: unavailable consumers never supply bytes and unknown missing copy-back members still fail", () => {
+  const block = planBlock(RUNBOOK, "runbook-11");
+  const record = (file: string, step: string, result: Execution["result"]): BlockRecord => ({ block: planBlock(file, step),
+    execution: { step, result, status: result === "passed" ? 0 : null, stdout: "", stderr: "", seeded: [] } });
+  const records = [record(HM37, "hm37a-open-inputs", "not-executed"),
+    record(HM37, "hm37a-local-evidence-transfer", "not-executed")];
+  const missing = new Set(["edge-probe-start.txt", "hm37a-local-control-old.json"]);
+  const reasons = unavailableConsumerInputs(block, records, missing);
+  assert.ok(reasons.some((reason) => reason.includes("edge-probe-start.txt: runbook-33 is not reached")));
+  assert.ok(reasons.some((reason) => reason.includes("hm37a-local-control-old.json: hm37a-local-evidence-transfer is NOT EXECUTED")));
+  const unavailable = unavailableConsumerExecution(block, reasons);
+  assert.equal(unavailable.result, "not-executed");
+  assert.deepEqual(unavailable.seeded, []);
+  assert.equal(unavailable.stdout, "");
+  assert.deepEqual(unavailableConsumerInputs(block, records, new Set()), []);
+  assert.deepEqual(unavailableConsumerInputs(block, records, new Set(["unlisted-proof.txt"])), []);
+  assert.deepEqual(unavailableConsumerInputs(block, records, new Set([...missing, "unlisted-proof.txt"])), [],
+    "an unrelated missing member cannot be hidden by a known unavailable member");
+  assert.deepEqual(unavailableConsumerInputs({ ...block, source: `${block.source}\nunknown-command\n` }, records, missing), [],
+    "a changed command form must execute and fail closed, not inherit unavailable classification");
+  const executed = [...records, record(RUNBOOK, "runbook-33", "passed")];
+  assert.deepEqual(unavailableConsumerInputs(block, executed, new Set(["edge-probe-start.txt"])), [],
+    "an executed producer's missing product must fail the real consumer");
+  // A declaration's absence cannot silently turn an ordinary transfer into a
+  // passed run. Its real boundary refusal control remains independently owned.
+  const transfer = planBlock(HM37, "hm37a-local-evidence-transfer");
+  // The sequence boundary reports the unavailable transfer consumer and leaves
+  // both the real manifest and destination bytes unchanged. No runner or HOME
+  // replacement is needed because neither whole block is executed.
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-consumer-"));
+  try {
+    const root = join(temporary, "box");
+    const proof = join(root, PROOF_DIR);
+    mkdirSync(proof, { recursive: true });
+    const manifest = join(proof, "copy-back.list");
+    const manifestBytes = "copy-back.list\nhm37a-local-control-old.json\n";
+    writeMode(manifest, manifestBytes);
+    recordBoxOwner(root, join(PROOF_DIR, "copy-back.list"), "root:root");
+    const fixture = { part: "mac", boxRoot: root } as Fixture;
+    const classified = executePlanUntilFailure([transfer, block], fixture, "mac");
+    assert.deepEqual(classified.map(({ execution }) => execution.result), ["not-executed", "not-executed"]);
+    assert.deepEqual(classified[1]!.execution.seeded, []);
+    assert.match(classified[1]!.execution.declared!.reason, /hm37a-local-evidence-transfer is NOT EXECUTED/);
+    assert.equal(readFileSync(manifest, "utf8"), manifestBytes);
+    assert.equal(pathExists(join(proof, "hm37a-local-control-old.json")), false);
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-consumer-"); }
+  const declaration = executeWholeBlock(transfer, {} as Fixture, { executeDeclared: true });
+  assert.equal(declaration.result, "not-executed");
+  assert.deepEqual(declaration.seeded, []);
+  for (const [file, step] of [[HM37, "hm37a-failure-dispatch"], [SITE, "site-07-pre-pin-manifest-close"], [SITE, "site-07-manifest-close"],
+    ...["hm37b-live-revoke-readback", "hm37b-failure-dispatch", "hm37b-close-readback", "hm37b-copyback"].map((step) => [HM37B, step] as const)] as const) {
+    const close = executeWholeBlock(planBlock(file, step), {} as Fixture, { executeDeclared: true });
+    assert.equal(close.result, "not-executed");
+    assert.deepEqual(close.seeded, []);
   }
 });
