@@ -392,12 +392,39 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
         // Data-file stdin must remain a dependency. Executable bash stdin
         // still needs its visible writer; no opaque script is admitted here.
         if (!found) {
-          // Only hm37b-stage-transfer's protected data writer admits an
-          // external stdin file. Flags and the complete remote command are
-          // part of the boundary; other opaque stdin remains unmodeled.
-          const writer = /^ssh -o BatchMode=yes ops@(?:100\.115\.66\.74|yulan-vps-1)\s+(.+)$/.exec(command);
+          // External data stdin has exact plan writers. Keep the full
+          // commands pinned independently of the plan being inspected: a
+          // mutation must not become its own admission rule.
+          const writer = /^ssh -o BatchMode=yes ops@(?:100\.115\.66\.74|yulan-vps-1)\s+([\s\S]+)$/.exec(command);
           const remote = String.raw`"sudo -n -i /bin/bash -c 'set -euo pipefail; umask 077; test ! -e \"$STAGING_ROOT/human-session.json\"; test ! -L \"$STAGING_ROOT/human-session.json\"; cat >\"$STAGING_ROOT/human-session.json\"; chmod 0600 \"$STAGING_ROOT/human-session.json\"'"`;
-          if (writer?.[1] !== remote || sshText.slice(end).trim() !== input[0].trim() ||
+          const cleanup = String.raw`"sudo -n python3 -c '
+import os, pathlib, sys
+proof = pathlib.Path(\"/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\")
+required = sys.argv[1] == \"yes\"
+exists = proof.is_dir() and not proof.is_symlink()
+assert exists or (not required and not proof.exists() and not proof.is_symlink()), \"FAIL hm37a-prep-cleanup-transfer: active proof missing or unsafe\"
+data = sys.stdin.buffer.read()
+if exists:
+    dest = proof / \"hm37a-prep-cleanup.json\"
+    assert not dest.is_symlink(), \"FAIL hm37a-prep-cleanup-transfer: receipt symlink\"
+    dest.write_bytes(data)
+    os.chown(dest, 0, 0)
+    os.chmod(dest, 0o600)
+    state = dest.stat()
+    assert dest.is_file() and dest.read_bytes() == data and (state.st_uid, state.st_gid, state.st_mode & 0o777) == (0, 0, 0o600), \"FAIL hm37a-prep-cleanup-transfer: destination verification\"
+    print(\"hm37a-prep-cleanup-transfer: verified\")
+else:
+    print(\"hm37a-prep-cleanup-transfer: early abort; Mac receipt retained\")
+' '$REQUIRE_PROOF'"`;
+          const cleanupWriter = block.step === "hm37a-prep-seat-cleanup" &&
+            path === "$CLEANUP_RECEIPT" && writer?.[1] === cleanup;
+          const failure = String.raw`"sudo -n -i /bin/bash -c 'set -euo pipefail; proof=/home/commonswarm/stack/release-proofs/$SHA; test -d \"\$proof\"; test ! -L \"\$proof\"; umask 077; cat >\"\$proof/$FILE\"; chmod 0600 \"\$proof/$FILE\"'"`;
+          const failureWriter = block.step === "hm37a-failure-evidence-transfer" &&
+            path === "$EVIDENCE_DIR/$FILE" && writer?.[1] === failure &&
+            /^\s*for FILE in hm37a-local-control-old\.json hm37a-local-control-new\.json hm37-loopback-boundaries\.json hm37-public-boundaries\.json hm37-mcp-hostname-boundaries\.json; do$/m.test(block.source);
+          const resume = String.raw`'sudo -n python3 -c '\''import json,os,pathlib,sys; p=pathlib.Path("/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922"); assert p.is_dir() and not p.is_symlink(), "FAIL resume-transfer/proof"; data=sys.stdin.buffer.read(); v=json.loads(data); inv=json.loads((p/"hm37a-prep-seat-inventory.json").read_text()); assert len(v["principal_ids"])==len(set(v["principal_ids"]))==3 and set(v["principal_ids"])==set(s["principal_id"] for s in inv["seats"]), "FAIL resume-transfer/receipt-principals"; assert v["workspace_id"]=="c2ea0541-f56d-4c73-bf71-56c5405c4934" and v["revoked_readback"] is True and v["active_unexpired_token_count"]==0, "FAIL resume-transfer/receipt-state"; f=p/"hm37a-prep-cleanup.json"; assert not f.is_symlink(), "FAIL resume-transfer/symlink"; f.write_bytes(data); os.chown(f,0,0); os.chmod(f,0o600); assert f.read_bytes()==data and f.stat().st_uid==0 and f.stat().st_gid==0 and f.stat().st_mode & 0o777==0o600, "FAIL resume-transfer/destination"'\'''`;
+          const resumeWriter = block.step === "hm37a-close-resume-transfer" && path === "$FILE" && writer?.[1] === resume;
+          if ((writer?.[1] !== remote && !cleanupWriter && !failureWriter && !resumeWriter) || sshText.slice(end).trim() !== input[0].trim() ||
               /[\x60*?]|\$\(|\$\{[^}]*[@*]/.test(path)) unknown(line);
         }
         operations.push({ remote: { command: commandExpansion(command), ...(found ?? { stdinFile: expand(path)[0]! }), ...formatted, ...localOutputs, ...(capture ? { capture } : {}) } });

@@ -529,7 +529,7 @@ case "$name" in
           '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}')
             [ "$target" = dry-run-edge ] || unhandled_stub
             case "${BOX_DRY_RUN_EDGE_PUBLIC_ENABLED:?measured edge flag required}" in
-              0) ;;
+              0|unset) ;;
               1) printf '%s' enabled ;;
               *) unhandled_stub ;;
             esac

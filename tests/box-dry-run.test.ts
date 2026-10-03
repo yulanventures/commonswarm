@@ -2497,6 +2497,8 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       ...boxPromptEnvironment,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_PART: "box",
+      BOX_DRY_RUN_BOX_CLOCK: WINDOW_START,
+      BOX_DRY_RUN_USERLAND: USERLAND,
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
@@ -2515,7 +2517,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       ...(macSiteSource && macSiteDist ? {
         BOX_DRY_RUN_SOURCE_CLONE: macSiteSource,
         BOX_DRY_RUN_DIST_FIXTURE: macSiteDist,
-        BOX_DRY_RUN_USERLAND: USERLAND,
         BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: boxPromptEnvironment.OP_SERVICE_ACCOUNT_TOKEN_FILE,
       } : {}),
       BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
@@ -3080,11 +3081,17 @@ function macBoundaryInputs(block: Block, fixture: Fixture, operations: ReturnTyp
 
 function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined {
   assert.ok(guardedBoxFixtures.has(fixture), "cross-host products require a guarded box fixture");
+  // Direct boundary controls obey the same declaration as the whole-plan
+  // dispatcher. A live DB block cannot yield counts by executing fragments.
+  if (declaredNonSubstitutable(shortStep(block))?.scope === "whole-block") {
+    return executeWholeBlock(block, fixture);
+  }
   if (fixture.macSiteSequence && block.file === SITE) {
-    // SSH remains the same guarded login-user boundary. Only BSD's local mode
-    // probe is translated to GNU syntax; no argv, output, or assertion changes.
+    // Translate BSD's mode probe and the Mac temporary namespace for Linux.
+    // SSH retains its guarded login-user boundary and the plan's predicates.
     const execution = executeWholeBlock({ ...block,
-      source: block.source.replace(/stat -f (?:'%Lp'|%Lp)/g, "stat -c %a") }, fixture, {
+      source: block.source.replace(/stat -f (?:'%Lp'|%Lp)/g, "stat -c %a")
+        .replaceAll("/private/tmp/anvil-secret.", join(fixture.macLocalRoot!, "tmp/anvil-secret.")) }, fixture, {
       env: { HOME: fixture.home, TMPDIR: join(fixture.macLocalRoot!, "tmp") },
     });
     if (execution.result !== "passed") return execution;
@@ -3115,7 +3122,6 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
   const seeded: string[] = [];
   let index = 0;
   let stdout = "";
-  const captures: Record<string, string> = {};
   for (const [operationIndex, operation] of operations.entries()) {
     let source: string;
     if ("transfer" in operation) {
@@ -3144,7 +3150,15 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
     } else {
       const remote = operation.remote;
       source = remote.command.replaceAll("{sha}", RELEASE_SHA).replaceAll("{window}", WINDOW_ID);
-      if (remote.localArgvSource) source = remote.localArgvSource + "\n" + source;
+      if (remote.localArgvSource) {
+        const names = [...remote.localArgvSource.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)]
+          .map((match) => match[1] ?? match[2]!);
+        const values = Object.fromEntries(names.map((name) => {
+          assert.notEqual(resolved.inputs[name], undefined, `unresolved formatted SSH input: ${name}`);
+          return [name, resolved.inputs[name]!];
+        }));
+        source = shellAssignments(values) + remote.localArgvSource + "\n" + source;
+      }
       if (remote.stdinFile) {
         const symbolic = discovered[operationIndex]!;
         assert.ok("remote" in symbolic && symbolic.remote.stdinFile, "stdin file lost its producer dependency");
@@ -3156,19 +3170,6 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
           assert.equal(lstatSync(actual).isSymbolicLink(), false, "stdin source must not be a symlink");
           assert.equal(lstatSync(actual).mode & 0o777, 0o600, "stdin source must stay protected");
           writeFileSync(input, readFileSync(actual), { mode: 0o600 });
-        } else if (shortStep(block) === "hm37a-prep-seat-cleanup" &&
-            symbolic.remote.stdinFile === "/tmp/hm37a-prep-cleanup-{sha}.json") {
-          const start = block.source.indexOf('  test "$(printf \'%s\\n\' "$DB_COUNTS"');
-          const end = block.source.indexOf('  ssh -o BatchMode=yes ops@100.115.66.74 "sudo -n python3 -c');
-          assert.ok(start >= 0 && end > start && captures.DB_COUNTS, "cleanup stdin requires its earlier verified DB readback");
-          const names = ["SENDER_ID", "RECEIVER_ID", "THIRD_ID", "PREP_SEATS", "EVIDENCE_DIR"];
-          const locals = Object.fromEntries(names.map((name) => [name, resolved.inputs[name] ?? ""]));
-          const workspace = /^  WORKSPACE_ID="[^"\n]+"$/m.exec(block.source)?.[0];
-          assert.ok(workspace, "cleanup writer requires its own workspace assignment");
-          const written = macLocalExecution(block, fixture, shellAssignments({ ...locals, ...captures }) + workspace + "\n" +
-            block.source.slice(start, end) + '\ncat "$CLEANUP_RECEIPT"\n');
-          if (written.status !== 0) return written;
-          writeFileSync(input, written.stdout, { mode: 0o600 });
         } else {
           return { step: shortStep(block), result: "failed", status: 69, stdout, seeded,
             stderr: `UNPRODUCED Mac stdin file ${symbolic.remote.stdinFile}\n` };
@@ -3186,7 +3187,6 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
     const execution = executeWholeBlock({ ...block, source }, fixture);
     if (execution.result === "failed") return { ...execution, step: shortStep(block), seeded };
     stdout += execution.stdout;
-    if ("remote" in operation && operation.remote.capture) captures[operation.remote.capture.name] = execution.stdout.replace(/\n+$/, "");
     if ("remote" in operation && operation.remote.capture?.localStateSource) {
       const capture = operation.remote.capture;
       for (const path of capturedMacProductPaths(block)) macCapturedWriterContract(block, path);
@@ -8460,6 +8460,26 @@ cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s' <"$SCRIPT"; cat </tmp/later
     "ssh -o StrictHostKeyChecking=no ops@100.115.66.74 'sudo reboot' </tmp/x",
     "ssh -o BatchMode=yes ops@100.115.66.74 'sudo reboot' </tmp/x",
   ]) assert.throws(() => macBoundaryOperations({ ...data, source }), /unknown transfer form/, source);
+  for (const [step, protection, destination] of [
+    ["hm37a-prep-seat-cleanup", "os.chmod(dest, 0o600)", "hm37a-prep-cleanup.json"],
+    ["hm37a-failure-evidence-transfer", "chmod 0600", "$proof/$FILE"],
+    ["hm37a-close-resume-transfer", "os.chmod(f,0o600)", "hm37a-prep-cleanup.json"],
+  ]) {
+    const plan = planBlock(HM37, step!);
+    assert.ok(macBoundaryOperations(plan).some((operation) => "remote" in operation && operation.remote.stdinFile),
+      `${step}: the exact protected data writer was not discovered`);
+    for (const [before, after] of [
+      ["-o BatchMode=yes", "-o StrictHostKeyChecking=no"],
+      ["-o BatchMode=yes", "-o BatchMode=yes -t"],
+      [protection!, protection!.replace(/600/g, "644")],
+      [destination!, "foreign-cleanup.json"],
+    ]) {
+      assert.ok(plan.source.includes(before!), `${step}: mutation does not reach ${before}`);
+      const source = plan.source.replaceAll(before!, after!);
+      assert.notEqual(source, plan.source);
+      assert.throws(() => macBoundaryOperations({ ...plan, source }), /unknown transfer form/, `${step}: ${after}`);
+    }
+  }
   const missing = { ...block, source: "cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s'; cat </tmp/later" };
   assert.throws(() => macBoundaryOperations(missing), /unknown transfer form/);
   for (const source of [
@@ -8471,6 +8491,33 @@ cat </tmp/unrelated; ssh ops@100.115.66.74 'bash -s' <"$SCRIPT"; cat </tmp/later
     assert.ok("remote" in own[0]!);
     assert.equal(own[0].remote.script, undefined, "a neighboring command's stdin was sent to ssh");
   }
+});
+
+test("controls: the box clock supplies producer and consumer date arithmetic", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-clock-"));
+  try {
+    for (const start of ["2031-04-05T06:07:08Z", "2032-11-12T13:14:15Z"]) {
+      const env = explicitEnvironment({ BOX_DRY_RUN_PART: "box", BOX_DRY_RUN_BOX_CLOCK: start,
+        BOX_DRY_RUN_USERLAND: USERLAND, BOX_DRY_RUN_STUB_LOG: join(temporary, "clock.log") });
+      const epoch = Date.parse(start) / 1000;
+      const clock = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
+        `. ${shellWord(PRELUDE)}\ndate -u +%Y-%m-%dT%H:%M:%SZ\ndate -u +%s\n` });
+      assert.equal(clock.status, 0, clock.stderr);
+      assert.deepEqual(clock.stdout.trim().split("\n"), [start, String(epoch)]);
+      const run = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
+        `. ${shellWord(PRELUDE)}\nstart=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n` +
+        'date -u -d "$start" +%s\ndate -u +%s\ndate -u -d "$start + 4 hours" +%s\n' +
+        'day=$(date -u -d "$start" +%Y-%m-%d)\ndate -u -d "$day 00:00:00" +%s\n' });
+      assert.equal(run.status, 0, run.stderr);
+      assert.deepEqual(run.stdout.trim().split("\n").map(Number),
+        [epoch, epoch, epoch + 4 * 3600, Date.parse(start.slice(0, 10) + "T00:00:00Z") / 1000]);
+      const refused = spawnSync("/bin/bash", ["-eu"], { env, encoding: "utf8", input:
+        `. ${shellWord(PRELUDE)}\ndate -u -d yesterday +%s\nprintf reached\n` });
+      assert.equal(refused.status, 69);
+      assert.match(refused.stderr, /unhandled dry-run stub: date/);
+      assert.equal(refused.stdout, "");
+    }
+  } finally { removeOwnedTemporary(temporary, "commonswarm-box-dry-run-clock-"); }
 });
 
 test("controls: a quoted heredoc does not see Mac-local variables", () => {
@@ -8654,7 +8701,7 @@ test("controls: the OAuth database host line comes only from a measured fact", (
     BOX_DRY_RUN_OAUTH_IMAGE: OAUTH_IMAGE_EVIDENCE.local_image_id });
   try {
     const edgeFlagFormat = '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}';
-    for (const [value, output] of [["0", ""], ["1", "enabled"]]) {
+    for (const [value, output] of [["0", ""], ["1", "enabled"], [EDGE_PUBLIC_ENABLED, ""]]) {
       const flag = spawnSync(join(bin, "docker"), ["inspect", "--format", edgeFlagFormat, "commonswarm-edge-edge-runtime-1"],
         { encoding: "utf8", env: { ...env, BOX_DRY_RUN_EDGE_PUBLIC_ENABLED: value } });
       assert.equal(flag.status, 0, flag.stderr);
