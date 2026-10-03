@@ -40,7 +40,7 @@ const stepOf = (source: string) => /^# step: (ai-[a-z0-9-]+)$/.exec(source.split
 const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)?.[1];
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-human-revoke',
@@ -49,7 +49,7 @@ const EXPECTED_MAC_STEPS = [
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
 ];
@@ -110,7 +110,15 @@ function portable(source: string) {
 // ---- Fixtures (synthetic, nonsecret) -------------------------------------------------
 const releaseSha = 'a'.repeat(40), siteSha = 'f'.repeat(40), hex = 'b'.repeat(64);
 const windowId = 'Dry0R1';
-const archiveBytes = 'c1gui dry-run archive\n';
+// The release archive is a real tar carrying the producer: ai-live-controls (W5 opening
+// and close) reads the producer only from it, re-verified against archive_sha256.
+const producerFile = join(scratch, 'live-ordinary-controls.mjs');
+writeFileSync(producerFile, 'export const dryRunProducer = "live-ordinary-controls";\n');
+const archiveFile = join(scratch, 'release.tar');
+// It also carries the companion SITE-RELEASE.md: ai-w5-reference reads the site plan only from it.
+const madeArchive = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs"); t.add(sys.argv[3],arcname="docs/evidence/2026-10-02-site-release/SITE-RELEASE.md")', archiveFile, producerFile, sitePlanPath], { encoding: 'utf8' });
+assert.equal(madeArchive.status, 0, madeArchive.stderr);
+const archiveBytes = readFileSync(archiveFile);
 const evidenceRoot = join(scratch, 'evidence'); mkdirSync(evidenceRoot, { mode: 0o700 });
 const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as { gates: Record<string, string[]> };
 const receipt = { release_sha: releaseSha, evidence_root: evidenceRoot, gates: {} as Record<string, unknown> };
@@ -167,6 +175,27 @@ const siteEvidence = join(scratch, 'site-evidence'); mkdirSync(siteEvidence, { m
 writeFileSync(join(siteEvidence, 'index.html'), '<!doctype html>\n');
 writeFileSync(join(siteEvidence, 'manifest.json'), JSON.stringify([{ path: 'index.html', sha256: digest('<!doctype html>\n') }]));
 writeFileSync(join(siteEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteEvidence, 'manifest.json')))}\n`);
+// W5 forward close (Amendments A/B): a phase-after live receipt bound to the post-W5
+// consent receipt, so ai-w5-closed passes ai-live-controls and still reaches its network step.
+const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'post-W5',
+  measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
+  controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-post-w5'],
+  cleanup: { grants_revoked: true, dcr_clients_expiring: [{ client_id: 'dry-run-pre-w1', expires_after: new Date(Date.now() + 30 * 86400_000).toISOString() }] } });
+const liveControlsProof = join(scratch, 'live-controls-proof'); mkdirSync(liveControlsProof, { mode: 0o700 });
+const consentFile = join(scratch, 'consent-post-W5.json'); writeFileSync(consentFile, consentText);
+const liveControlsFile = join(scratch, 'live-W5-after.json');
+writeFileSync(liveControlsFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'after',
+  controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
+  consent_receipt_sha256: digest(consentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-after'] }));
+// W5 opening: a phase-before live receipt bound to the pre-W1 consent receipt (ai-w5-preflight).
+const preConsentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'pre-W1',
+  measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
+  controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-pre-w1'], cleanup: null });
+const preConsentFile = join(scratch, 'consent-pre-W1.json'); writeFileSync(preConsentFile, preConsentText);
+const liveBeforeFile = join(scratch, 'live-W5-before.json');
+writeFileSync(liveBeforeFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'before',
+  controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
+  consent_receipt_sha256: digest(preConsentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-before'] }));
 // C1 inputs: synthetic owner/workspace, fixture target file (no key) and state directory.
 const c1Dir = join(scratch, 'c1'); mkdirSync(join(c1Dir, 'state'), { recursive: true, mode: 0o700 });
 writeFileSync(join(c1Dir, 'target.json'), JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'dry-run-fixture-not-a-key' }) + '\n');
@@ -224,11 +253,12 @@ case "$name" in
     fi
     refuse;;
    merge-base) test "\${2:-}" = --is-ancestor && exit 0; refuse;;
-   archive) printf 'c1gui dry-run archive\\n'; exit 0;;  # fixed bytes; inputs carry their digest
+   archive) exec /bin/cat "$C1GUI_ARCHIVE";;  # fixed tar bytes; inputs carry their digest
    show)
     case "\${2:-}" in
      *:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md) exec /bin/cat "$C1GUI_PLAN";;
      *:docs/evidence/2026-10-02-site-release/SITE-RELEASE.md) exec /bin/cat "$C1GUI_SITE_PLAN";;
+     *:scripts/live-ordinary-controls.mjs) exec /bin/cat "$C1GUI_PRODUCER";;
     esac
     refuse;;
   esac
@@ -308,7 +338,7 @@ function profile(id: string) {
 const baseEnv = () => ({
   PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: process.env.HOME ?? realHome, LANG: 'en_US.UTF-8', TMPDIR: blockTmp + '/',
   C1GUI_SCRATCH: scratch, C1GUI_RELEASE_SHA: releaseSha, C1GUI_KNOWN_SHAS: `${releaseSha} ${siteSha}`,
-  C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_REAL_NODE: realNode,
+  C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_PRODUCER: producerFile, C1GUI_ARCHIVE: archiveFile, C1GUI_REAL_NODE: realNode,
   C1GUI_POSTGRES_IMAGE: `sha256:${hex}`, C1GUI_EDGE_OBSERVED: edgeObserved,
   C1GUI_REQUEST_PLAN: requestPlan, C1GUI_CLIENT_METADATA: clientMetadata, C1GUI_AGENT_RECEIPT: agentReceipt,
 });
@@ -381,7 +411,12 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
       SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo, SITE_EVIDENCE: siteEvidence,
+      LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
+      CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
+      // ai-live-controls also runs in the W5 Mac shell: validate the W5 after pair, producer
+      // read from the verified release tar, retained copies in a task-owned proof directory.
+      ...(step === 'ai-live-controls' ? { INPUTS_FILE: inputsFor('W5'), BOX_ARCHIVE_PATH: archiveFile, PROOF_DIR: liveControlsProof } : {}),
       // withdraw: the approve mode first requires the pointer that ai-w6-pointer publishes later.
       C1_INPUTS_FILE: c1InputsFile, C1_PROOF_DIR: c1ProofDir, C1_CLIENT_ACTION: 'withdraw',
       C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-client-check.txt',

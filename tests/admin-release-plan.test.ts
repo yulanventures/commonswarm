@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -18,11 +18,19 @@ const block = (id: string) => {
   assert.equal(matches.length, 1, `one complete ${id} block`);
   return matches[0]!;
 };
+// Inputs binding the in-repository plan bytes, for blocks that run ai_run.
+const releasedPlanInputs = (dir: string) => { const file = join(dir, 'released-plan-inputs.json'); writeFileSync(file, JSON.stringify({ plan_sha256: digest(plan) })); return file; };
 const run = (source: string, env: Record<string, string> = {}) => spawnSync('/bin/bash', [], {
   input: source, encoding: 'utf8', env: { ...process.env, ...env }, timeout: 10_000,
 });
 // Nonsecret fixtures are retained under the task's temporary root; no HOME change/deletion.
 const scratch = mkdtempSync(join(tmpdir(), 'admin-plan-contract-'));
+// Valid-looking substituted plans: the executed validators become no-ops (digest differs).
+const substitutedPlan = join(scratch, 'substituted-RELEASE.md');
+writeFileSync(substitutedPlan, plan.split('# step: ai-edge-receipt\n').join('# step: ai-edge-receipt\nexit 0\n')
+  .split('# step: ai-live-controls\n').join('# step: ai-live-controls\nexit 0\n').split('# step: ai-gates\n').join('# step: ai-gates\nexit 0\n'));
+const linkedPlan = join(scratch, 'linked-RELEASE.md'); symlinkSync(planPath, linkedPlan);
+const planRefusal = (step: string, label: string, got: string) => `FAIL ${step}: ${label} expected absolute-regular-file-with-input-plan_sha256 got ${got}; STOP`;
 const receiptFile = join(scratch, 'receipt.json');
 writeFileSync(receiptFile, '{}\n');
 const sha = 'a'.repeat(40), hex = 'b'.repeat(64);
@@ -337,7 +345,9 @@ urllib.request.build_opener=lambda *args: Opener()
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
   const harness = `export VERSION\nai_deadline() { :; }\nai_ro() { python3 '${root}/db.py' read "$@"; }\nai_db() { python3 '${root}/db.py' apply "$@"; }\nai_run() {\n${dispatcher}\n`;
-  const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha,
+  // ai_run extracts only from plan bytes whose sha256 equals INPUTS plan_sha256.
+  const planInputs = join(root, 'plan-inputs.json'); writeFileSync(planInputs, JSON.stringify({ plan_sha256: digest(readFileSync(planCopy)) }));
+  const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha, INPUTS_FILE: planInputs,
     PYTHONPATH: shims, PATH: '/Users/yulanbot/.local/bin:' + process.env.PATH };
   return { proof, stage, env, harness, migrations, old,
     clean: () => removeStage(stage) };
@@ -458,7 +468,7 @@ esac
     return run(harness + guard + '\nsystemctl stop "$EDGE_RECYCLE_TIMER"\n' + body, {
       PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer',
       TIMER_STATE: state, TIMER_CALLS: calls, TIMER_RECOVERY_FAIL: fail ? '1' : '0',
-      RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+      RELEASE_ROOT: resolve('.'), SECRET_STAGE: root, INPUTS_FILE: releasedPlanInputs(root),
     });
   };
   for (const [body, status] of [[':', 0], ['false', 1], ['exit 42', 42], ['kill -INT "$$"', 130], ['kill -TERM "$$"', 143]] as const) {
@@ -508,7 +518,7 @@ esac
       const result = run(harness + body, {
         PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer', EDGE_RECYCLE_SERVICE: 'fixture.service',
         TIMER_STATE: state, TIMER_CALLS: calls, FAIL_STOP: failStop ? '1' : '0',
-        RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+        RELEASE_ROOT: resolve('.'), SECRET_STAGE: root, INPUTS_FILE: releasedPlanInputs(root),
       });
       assert.notEqual(result.status, 0, result.stderr);
       assert.equal(readFileSync(state, 'utf8'), 'active', source.split('\n')[0]);
@@ -633,6 +643,14 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
   writeFileSync(calls,''); result=finish(true); assert.equal(result.status,0,result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
   assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-probes');
+  // Former `A && B` guard: each receipt now refuses on its own line before any probe.
+  for(const file of ['C1-fence.txt','client-withdraw.json']) {
+    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); writeFileSync(calls,''); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
+    result=finish(undefined); assert.notEqual(result.status,0);
+    assert.match(result.stderr,new RegExp(`FAIL ai-w6-finish: ${file.replace('.','\\.')} expected present got missing; STOP`));
+    assert.equal(readFileSync(calls,'utf8'),''); assert.ok(!existsSync(join(proof,'C1-finish.json')));
+    writeFileSync(join(proof,file),saved);
+  }
 });
 
 test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
@@ -713,14 +731,30 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
 
 test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
-  for(const file of ['ordinary-after.json','ordinary-recovery.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  // Valid retained receipts: ai-close re-runs ai-live-controls on them, producer from the verified archive.
+  const producerFile=join(scratch,'close-producer.mjs'), archive=join(scratch,'close-release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const consentFor=(phase:string)=>JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:phase,measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],
+    cleanup:phase==='pre-W1'?null:{grants_revoked:true,dcr_clients_expiring:[{client_id:'dcr-close-earlier',expires_after:new Date(Date.now()+30*86400_000).toISOString()}]}});
+  const liveFor=(window:string,phase:string,consentText:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,controls,
+    consent_receipt_sha256:digest(consentText),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const post=consentFor('post-W5');
+  writeFileSync(join(proof,'consent-post-W5.json'),post);
+  writeFileSync(join(proof,'ordinary-after.json'),liveFor('W6','after',post)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('W6','recovery',post));
+  for(const file of ['C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  const w6Inputs=join(scratch,'close-inputs-W6.json'); writeFileSync(w6Inputs,JSON.stringify({...base(),window:'W6',archive_sha256:archiveSha}));
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
     // Read-only database boundary starts CLOSED: opening-state checks must fail.
     const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
-    const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
+    const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:w6Inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 1\n',{mode:0o700});
     for(const outcome of ['success','recovered']) {
       const refused=run(harness+close,{...env,CLOSE_RESULT:outcome});
@@ -728,6 +762,50 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
       assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     }
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+    // The W6 close requires the retained post-W5 consent receipt copy.
+    rmSync(join(proof,'consent-post-W5.json'));
+    const unbound=run(harness+close,{...env,CLOSE_RESULT:'success'});
+    assert.notEqual(unbound.status,0); assert.match(unbound.stderr,/FAIL ai-close: retained consent receipt expected consent-post-W5\.json got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'consent-post-W5.json'),post);
+    // Finding 1: the retained close pair is re-validated in full, never only for presence.
+    for(const [bytes,inner] of [
+      ['{}','FAIL ai-live-controls: live receipt keys expected exact-schema-set got other-set; STOP'],
+      [liveFor('W6','before',post),'FAIL ai-live-controls: live phase expected after got before; STOP'],
+      [liveFor('W7','after',post),'FAIL ai-live-controls: live window expected input-window got mismatch; STOP'],
+      [liveFor('W6','after',consentFor('post-W5')+' '),'FAIL ai-live-controls: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP'],
+    ] as const) {
+      writeFileSync(join(proof,'ordinary-after.json'),bytes);
+      const invalid=run(harness+close,{...env,CLOSE_RESULT:'success'});
+      assert.notEqual(invalid.status,0); assert.ok(invalid.stderr.includes(inner),invalid.stderr);
+      assert.match(invalid.stderr,/FAIL ai-close: retained close receipts expected valid got refused; STOP/);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    }
+    writeFileSync(join(proof,'ordinary-after.json'),liveFor('W6','after',post));
+    // The producer is re-derived from the verified archive at close: replaced archive bytes refuse.
+    { const saved=readFileSync(archive); writeFileSync(archive,'not the verified archive');
+      const swapped=run(harness+close,{...env,CLOSE_RESULT:'success'});
+      assert.notEqual(swapped.status,0); assert.match(swapped.stderr,/FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP/);
+      assert.ok(!existsSync(join(proof,'closed.txt'))); writeFileSync(archive,saved); }
+    // Former `A && B` case-arm guards: each forward-close receipt refuses on its own.
+    rmSync(join(proof,'C1-cleanup.txt'));
+    const noCleanup=run(harness+close,{...env,CLOSE_RESULT:'success'});
+    assert.notEqual(noCleanup.status,0); assert.match(noCleanup.stderr,/FAIL ai-close: W6 C1-cleanup\.txt expected present got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
+    // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
+    const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
+    writeFileSync(join(proof2,'consent-pre-W1.json'),pre); writeFileSync(join(proof2,'ordinary-after.json'),liveFor('W2','after',pre));
+    writeFileSync(join(proof2,'schema-committed.txt'),'PASS'); writeFileSync(join(proof2,'issuer-credential.txt'),'PASS');
+    const w2Inputs=join(scratch,'close-inputs-W2.json'); writeFileSync(w2Inputs,JSON.stringify({...base(),window:'W2',archive_sha256:archiveSha}));
+    const w2=run(harness+close,{...env,WINDOW:'W2',PROOF_DIR:proof2,INPUTS_FILE:w2Inputs,CLOSE_RESULT:'success'});
+    assert.notEqual(w2.status,0); assert.match(w2.stderr,/FAIL ai-close: W2 W2-probes\.txt expected present got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    // A guarded rm that reports success but leaves the stage must not close the window.
+    const fakeRm=join(scratch,'close-fake-rm'); mkdirSync(fakeRm); writeFileSync(join(fakeRm,'rm'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+    const kept=run(harness+close,{...env,CLOSE_RESULT:'success',PATH:shim+':'+fakeRm+':'+process.env.PATH});
+    assert.notEqual(kept.status,0); assert.match(kept.stderr,/FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
   } finally {
@@ -875,7 +953,9 @@ subprocess.check_output = observe
   // Positive runs stop at the first operation after admission, through external
   // shell boundaries. They never create box paths or execute live operations.
   const stop = `printf 'ADMITTED\\n'; exit 0`;
-  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\n`;
+  // The W5 site path's first operation after admission is its verified site-plan extraction;
+  // the stub returns the stop as the extracted block, which the plan then evaluates.
+  const harness = `ai_run() { case "$1" in ai-w6-readiness) :;; *) ${stop};; esac; }\ntest() { case "$*" in *'/home/commonswarm/admin-issuance/release-proofs/'*) ${stop};; *) builtin test "$@";; esac; }\ngit() { printf 'ADMITTED\\n' >&2; exit 0; }\npython3() { case "$1:$2" in -c:*SITE-RELEASE.md*) printf '%s\\n' "${stop}";; *) command python3 "$@";; esac; }\n`;
   writeFileSync(readyFile, 'nonsecret readiness\n'); utimesSync(readyFile, new Date(), new Date());
   const admissions: Array<[string, string, string]> = [
     ['W5 common open', 'ai-open', 'W5'], ['W6 open', 'ai-open', 'W6'], ['later reopen', 'ai-open', 'W7'],
@@ -903,6 +983,15 @@ subprocess.check_output = observe
       assert.ok(negative.stderr.includes(field), `${name} must name ${field}: ${negative.stderr}`);
       assert.doesNotMatch(negative.stdout, /ADMITTED/, `${name} operated after refusal`);
       assert.ok(readFileSync(queries,'utf8').trim(), `${name} refusal must use a fresh observation`);
+    }
+    // The edge-receipt runner executes only verified plan bytes: a substituted or symlinked plan stops first.
+    writeFileSync(receipt, JSON.stringify(current));
+    for (const [planFile, got] of [[substitutedPlan, 'digest-mismatch'], [linkedPlan, 'missing-or-not-regular']] as const) {
+      writeFileSync(queries, '');
+      const refused = run(harness+block(step), { ...env, PLAN_FILE: planFile });
+      assert.notEqual(refused.status, 0, `${name} ran plan text from ${planFile}`);
+      assert.ok(refused.stderr.includes(planRefusal(step, 'PLAN_FILE', got)), `${name}: ${refused.stderr}`);
+      assert.doesNotMatch(refused.stdout + refused.stderr, /ADMITTED/); assert.equal(readFileSync(queries,'utf8'), '', `${name} read the box after refusal`);
     }
   }
   // A current-looking receipt is refused when the hook invalidated the box row.
@@ -961,4 +1050,146 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
     'hold the generation row lock from receipt comparison through activation UPDATE');
   assert.match(sql, /AND release_generation=15 AND measured_generation=release_generation AND invalidated_at IS NULL/,
     'a completed recycle after the receipt was read must refuse the final activation transaction');
+});
+
+test('admin release plan: ai-extract and ai_run extract only from plan bytes bound to INPUTS plan_sha256', () => {
+  const prep = mkdtempSync(join(scratch, 'extract-')), inputs = inputFile(base());
+  const extract = (planFile: string) => run(block('ai-extract'), { PLAN_FILE: planFile, STEP_ID: 'ai-gates', PREP_DIR: prep, INPUTS_FILE: inputs });
+  const good = extract(planPath); assert.equal(good.status, 0, good.stderr);
+  assert.equal(readFileSync(join(prep, 'step.sh'), 'utf8'), block('ai-gates')); rmSync(join(prep, 'step.sh'));
+  for (const [planFile, got] of [[substitutedPlan, 'digest-mismatch'], [linkedPlan, 'missing-or-not-regular']] as const) {
+    const refused = extract(planFile); assert.notEqual(refused.status, 0);
+    assert.ok(refused.stderr.includes(planRefusal('ai-extract', 'PLAN_FILE', got)), refused.stderr);
+    assert.ok(!existsSync(join(prep, 'step.sh')), 'no extracted step after refusal');
+  }
+  // ai_run (ai-db-session) reads the released plan copy; it must match the same digest.
+  const session = block('ai-db-session'), dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
+  const stage = mkdtempSync(join(scratch, 'airun-')), released = mkdtempSync(join(scratch, 'released-'));
+  const releasedPlan = join(released, 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
+  mkdirSync(dirname(releasedPlan), { recursive: true });
+  const callGates = () => run(dispatcher + 'ai_run ai-gates\n', { RELEASE_ROOT: released, SECRET_STAGE: stage, INPUTS_FILE: inputs });
+  writeFileSync(releasedPlan, readFileSync(substitutedPlan));
+  let r = callGates(); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'digest-mismatch')), r.stderr);
+  assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')), 'substituted step never written or sourced');
+  assert.doesNotMatch(r.stderr, /GATE_RECEIPT_FILE/, 'substituted plan text never evaluated');
+  rmSync(releasedPlan); symlinkSync(planPath, releasedPlan);
+  r = callGates(); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes(planRefusal('ai_run', 'released RELEASE.md', 'missing-or-not-regular')), r.stderr);
+  assert.ok(!existsSync(join(stage, 'step-ai-gates.sh')));
+  // Positive control: the verified ai-gates block is evaluated from memory (it then refuses
+  // on its own unset GATE_RECEIPT_FILE); no staged step file is written or reread.
+  rmSync(releasedPlan); writeFileSync(releasedPlan, plan);
+  r = callGates(); assert.notEqual(r.status, 0); assert.match(r.stderr, /GATE_RECEIPT_FILE/); assert.doesNotMatch(r.stderr, /FAIL ai_run/);
+  assert.deepEqual(readdirSync(stage), [], 'nothing staged');
+});
+
+test('admin release plan: ai-extract refuses a symlinked step target or a FIFO plan; reads by one non-following fd', () => {
+  const prep = mkdtempSync(join(scratch, 'extract-fd-')), inputs = inputFile(base());
+  const extract = (planFile: string) => run(block('ai-extract'), { PLAN_FILE: planFile, STEP_ID: 'ai-gates', PREP_DIR: prep, INPUTS_FILE: inputs });
+  const good = extract(planPath); assert.equal(good.status, 0, good.stderr);
+  assert.equal(readFileSync(join(prep, 'step.sh'), 'utf8'), block('ai-gates')); rmSync(join(prep, 'step.sh'));
+  // A symlink swapped in at the staged path is never followed or written through.
+  const victim = join(prep, 'victim.txt'); writeFileSync(victim, 'must survive\n'); symlinkSync(victim, join(prep, 'step.sh'));
+  let r = extract(planPath); assert.notEqual(r.status, 0);
+  assert.ok(r.stderr.includes('FAIL ai-extract: step.sh expected writable-regular-file got symlink-or-unwritable; STOP'), r.stderr);
+  assert.equal(readFileSync(victim, 'utf8'), 'must survive\n'); rmSync(join(prep, 'step.sh'));
+  // A FIFO plan is refused without blocking (O_NONBLOCK + fstat S_ISREG).
+  const fifo = join(prep, 'plan.fifo'); assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  r = extract(fifo); assert.notEqual(r.status, 0); assert.equal(r.signal, null);
+  assert.ok(r.stderr.includes(planRefusal('ai-extract', 'PLAN_FILE', 'missing-or-not-regular')), r.stderr);
+  assert.ok(!existsSync(join(prep, 'step.sh')));
+});
+
+test('admin release plan: W5 companion site plan comes only from the verified release archive and is evaluated from memory', () => {
+  const root = mkdtempSync(join(scratch, 'site-ref-')), prep = join(root, 'prep'), repoDir = join(root, 'site-repo');
+  mkdirSync(prep); const sitePath = 'docs/evidence/2026-10-02-site-release/SITE-RELEASE.md';
+  const fence = '```';
+  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
+  const staging = join(root, 'tree'); mkdirSync(dirname(join(staging, sitePath)), { recursive: true }); writeFileSync(join(staging, sitePath), sitePlan);
+  mkdirSync(dirname(join(repoDir, sitePath)), { recursive: true }); writeFileSync(join(repoDir, sitePath), sitePlan);
+  const tar = join(prep, 'release.tar');
+  const made = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname=sys.argv[3])', tar, join(staging, sitePath), sitePath], { encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify({ ...base(), window: 'W5', archive_sha256: digest(readFileSync(tar)) }));
+  const reference = (step: string) => run(block('ai-w5-reference') + '\nprintf "mark=%s\\n" "${W5_SITE_MARK:-unset}"\n',
+    { SITE_STEP: step, SITE_RELEASE_REPO: repoDir, PREP_DIR: prep, INPUTS_FILE: inputs, SITE_RELEASE_SHA: sha });
+  // Positive: the archive block is evaluated in this shell (its variable persists).
+  let r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
+  r = reference('site2-02'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /site2-02 ran/);
+  assert.deepEqual(readdirSync(prep).sort(), ['release.tar'], 'no staged site-plan.md or site-step.sh');
+  const refused = (out: ReturnType<typeof run>, text: string) => {
+    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(text), out.stderr);
+    assert.doesNotMatch(out.stdout, /mark=|site2-02 ran|substituted/);
+  };
+  // Substituted companion bytes in the archive: digest mismatch stops before any block runs.
+  const saved = readFileSync(tar);
+  writeFileSync(tar, saved.toString('latin1').replace('W5_SITE_MARK=from-archive', 'printf substituted;:     '), 'latin1');
+  refused(reference('site2-plan-inputs'), 'FAIL ai-w5-reference: PREP_DIR/release.tar bytes expected input-archive_sha256 got mismatch; STOP');
+  writeFileSync(tar, saved);
+  // A symlinked archive is never followed.
+  const moved = join(root, 'moved.tar'); writeFileSync(moved, saved); rmSync(tar); symlinkSync(moved, tar);
+  refused(reference('site2-plan-inputs'), 'FAIL ai-w5-reference: PREP_DIR/release.tar expected absolute-regular-file got missing-or-not-regular; STOP');
+  rmSync(tar); writeFileSync(tar, saved);
+  // After source checkout the repository copy must equal the archive bytes; a substituted or symlinked copy stops.
+  writeFileSync(join(repoDir, sitePath), sitePlan.replace("site2-02 ran", 'substituted'));
+  refused(reference('site2-02'), 'FAIL ai-w5-reference: SITE_RELEASE_REPO SITE-RELEASE.md expected archive-bytes got different-or-unreadable; STOP');
+  rmSync(join(repoDir, sitePath)); writeFileSync(join(root, 'real-site.md'), sitePlan); symlinkSync(join(root, 'real-site.md'), join(repoDir, sitePath));
+  refused(reference('site2-02'), 'FAIL ai-w5-reference: SITE_RELEASE_REPO SITE-RELEASE.md expected archive-bytes got different-or-unreadable; STOP');
+});
+
+// Deterministic pathname-replacement regression for the shared plan reader. The harness
+// swaps the path for a symlink to substituted bytes immediately after the reader's first
+// metadata check (os.fstat for the fd reader; Path.is_file for the old pathname reader).
+const READER_SWAP_HARNESS = String.raw`
+import json,os,pathlib,stat,sys
+helper,target,other,mode=sys.argv[1:5]
+state={'swapped':False}
+def swap():
+    if mode!='swap' or state['swapped']: return
+    state['swapped']=True
+    os.rename(target,target+'.orig')   # the original inode survives under another name
+    os.symlink(other,target)
+real_fstat=os.fstat
+def fstat(fd):
+    result=real_fstat(fd); swap(); return result
+os.fstat=fstat
+real_is_file=pathlib.Path.is_file
+def is_file(self):
+    result=real_is_file(self); swap(); return result
+pathlib.Path.is_file=is_file
+ns={'os':os,'stat':stat,'pathlib':pathlib}
+exec(open(helper).read(),ns)
+out=ns['read_regular'](target)
+print(json.dumps({'swapped':state['swapped'],'result':None if out is None else out.decode()}))
+`;
+// The pre-round-3 reader shape, kept only as the regression's negative control.
+const OLD_PATHNAME_READER = `def read_regular(name):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    return p.read_bytes() if ok else None
+`;
+test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
+  // Every site carries the same reader (quote style aside).
+  const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
+  assert.equal(readers.length, 15, 'one shared reader at all 15 sites');
+  assert.equal(new Set(readers).size, 1, 'all readers identical');
+  const dir = mkdtempSync(join(scratch, 'reader-swap-'));
+  const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
+  const old = join(dir, 'old-reader.py'); writeFileSync(old, OLD_PATHNAME_READER);
+  const harness = join(dir, 'harness.py'); writeFileSync(harness, READER_SWAP_HARNESS);
+  const attempt = (reader: string, mode: string) => {
+    const case_ = mkdtempSync(join(dir, 'case-')), target = join(case_, 'RELEASE.md'), other = join(case_, 'substituted.md');
+    writeFileSync(target, 'verified plan bytes\n'); writeFileSync(other, 'substituted plan bytes\n');
+    const r = spawnSync('python3', [harness, reader, target, other, mode], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout) as { swapped: boolean; result: string | null };
+  };
+  // Positive control: no swap, the shared reader returns the file's bytes.
+  assert.deepEqual(attempt(shared, 'none'), { swapped: false, result: 'verified plan bytes\n' });
+  // Swap after the metadata check: the single fd still reads the verified inode.
+  const swapped = attempt(shared, 'swap'); assert.equal(swapped.swapped, true, 'the hook fired');
+  assert.ok(swapped.result === 'verified plan bytes\n' || swapped.result === null, `shared reader followed the swap: ${JSON.stringify(swapped)}`);
+  // Negative control: the old is_symlink/is_file/read_bytes reader follows the swap, so this
+  // same assertion would fail if that sequence were restored.
+  const regressed = attempt(old, 'swap'); assert.equal(regressed.swapped, true);
+  assert.equal(regressed.result, 'substituted plan bytes\n', 'old pathname reader reads through the swapped-in symlink');
 });
