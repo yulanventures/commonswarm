@@ -1,0 +1,13 @@
+# Add ONLY for approved admin activation releases (lane 8 W2+).
+# Omit this overlay when admin issuance is OFF or rolled back.
+services:
+  oauth:
+    environment:
+      MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/admin-issuer-database-credentials
+    volumes:
+      - type: bind
+        source: /etc/commonswarm-oauth/admin-issuer-database-credentials
+        target: /run/commonswarm-oauth/admin-issuer-database-credentials
+        read_only: true
+        bind:
+          create_host_path: false

@@ -1,7 +1,8 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { createHash, randomUUID } from "node:crypto";
 import { decodeJwt, decodeProtectedHeader } from "jose";
 import { ADMIN_RESOURCE, adminScopes } from "./admin-policy.generated.js";
-import { ADMIN_AS_ISSUANCE_ENABLED, AdminConsentError } from "./admin-consent.js";
+import { AdminConsentError } from "./admin-consent.js";
 import { AdminAuthorityBridge } from "./admin-authority.js";
 import { adminTransactionContext, adminQuery, withAdminRole } from "./admin-transaction.js";
 
@@ -16,7 +17,7 @@ export async function requireMeasuredAdminRelease() {
     // acquire the gate row lock before any credential can commit (M3).
     const record = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_cutover_state
       WHERE singleton`)).rows[0];
-    if (!record?.admin_issuance_enabled || !record.legacy_closed || record.auth_contract_version !== 2 ||
+    if (record?.admin_issuance_enabled !== true || record.legacy_closed !== true || record.auth_contract_version !== 2 ||
         !record.lane8_evidence_digest || record.invalidated_at || !record.measurement_evidence_ref || !record.measured_at ||
         record.approved_edge_release_sha !== record.measured_edge_release_sha ||
         record.measured_edge_target !== `/home/commonswarm/edge/releases/${record.approved_edge_release_sha}` ||
@@ -200,7 +201,7 @@ export class AdminTokenLifecycle {
     await this.audit(binding,"revoked",decision.events);
   }
   async completeConsent(_tx, { parent, receipt, policy, createFreshGrant }) {
-    if (!ADMIN_AS_ISSUANCE_ENABLED) throw new AdminConsentError("admin_issuance_disabled", 503);
+    if (await effectiveAdminGate() !== "open") throw new AdminConsentError("admin_issuance_disabled", 503);
     await requireMeasuredAdminRelease();
     const scope = adminTransactionContext();
     if (scope.capability?.owner !== receipt.owner_user_id || scope.capability?.kind !== "human") fail("authentication_required");

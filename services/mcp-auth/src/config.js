@@ -197,16 +197,21 @@ export async function loadConfig(env = process.env) {
     }
     management = { databaseUrl: document.databaseUrl };
   }
+  const adminIssuanceEnabled = env.MCP_OAUTH_ADMIN_ISSUANCE_ENABLED === "1";
   let adminIssuer;
   if (env.MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE) {
-    const credential = JSON.parse(await configuredFileText(env, "issuerCredentials"));
-    if (credential.user !== "commonswarm_admin_issuer" || typeof credential.password !== "string" || !credential.password) {
+    let text;
+    try { text = await configuredFileText(env, "issuerCredentials"); }
+    catch { /* Optional issuer file: unavailable means issuance stays closed. */ }
+    const credential = text ? JSON.parse(text) : undefined;
+    if (credential && (credential.user !== "commonswarm_admin_issuer" || typeof credential.password !== "string" || !credential.password)) {
       throw new Error("admin issuer credential requires the dedicated login role");
     }
     adminIssuer = credential;
   }
   return {
     adminIssuer,
+    adminIssuanceEnabled,
     issuer,
     resource,
     publicOrigin,

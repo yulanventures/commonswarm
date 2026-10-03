@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { test } from "node:test";
-import { createAdminGateHandler, readAdminGate } from "../src/admin-gate.js";
+import { createAdminGateHandler, effectiveAdminGate } from "../src/admin-gate.js";
 import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 import { createHandler } from "../src/server.js";
 
@@ -15,21 +15,28 @@ const measured = {
   measured_generation: 1, release_generation: 1, measured_artifact_digest: "e".repeat(64),
   measured_image_digest: `sha256:${"f".repeat(64)}`,
 };
-function coordinator({ record = measured, mismatches = 0, failure = false, hang = false } = {}) {
+function coordinator({ record = measured, mismatches = 0, failure = false, hang = false, hangAt } = {}) {
   const statements = [];
-  return { statements, instance: new AdminTransactionCoordinator({ connect: async () => ({
+  const releases = []; let pendingReject, ended = 0, pending = 0;
+  const wait = () => {
+    pending++;
+    return new Promise((_, reject) => { pendingReject = reject; }).finally(() => { pending--; });
+  };
+  return { statements, releases, get ended() { return ended; }, get pending() { return pending; }, instance: new AdminTransactionCoordinator({ connect: async () => ({
     query: async sql => {
       statements.push(sql);
+      if (sql === hangAt) return wait();
       if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
       if (sql.includes("admin_cutover_state")) {
         if (failure) throw Object.assign(new Error("private diagnostic"), {code:"08006"});
-        if (hang) return new Promise(() => {});
+        if (hang) return wait();
         return {rows: record ? [record] : []};
       }
       if (sql.includes("migration_checksum_failures")) return {rowCount:mismatches};
       return {command:sql, rows:[]};
-    }, release() {},
-  }) }) };
+    }, async end() { ended++; pendingReject?.(new Error("connection terminated")); },
+    release(discard) { releases.push(discard); },
+  }) }, { adminIssuanceEnabled: true }) };
 }
 function response() {
   const headers = new Map();
@@ -42,22 +49,27 @@ function response() {
 }
 test("admin effective gate reuses measured release and ledger refusals with a valid open control", async () => {
   const good = coordinator();
-  assert.equal(await readAdminGate(true,good.instance),"open");
+  assert.equal(await effectiveAdminGate({ coordinator: good.instance }),"open");
   assert.ok(good.statements.some(sql=>sql.includes("statement_timeout")));
   assert.ok(!good.statements.some(sql=>/\b(?:INSERT|UPDATE|DELETE)\b/u.test(sql)));
   for (const options of [{record:null},{record:{...measured,admin_issuance_enabled:false}},
     {record:{...measured,invalidated_at:new Date()}},{record:{...measured,measured_mount:"wrong"}}, {mismatches:1}]) {
-    assert.equal(await readAdminGate(true,coordinator(options).instance),"closed");
+    assert.equal(await effectiveAdminGate({ coordinator: coordinator(options).instance }),"closed");
   }
-  assert.equal(await readAdminGate(false,good.instance),"closed");
-  assert.equal(await readAdminGate(true,null),"closed");
+  assert.equal(await effectiveAdminGate({ coordinator: new AdminTransactionCoordinator({ connect() { throw new Error("OFF must not connect"); } }) }),"closed");
+  assert.equal(await effectiveAdminGate(),"closed");
 });
 test("admin effective gate maps database failure, connection failure and bounded timeout to unavailable", async () => {
-  assert.equal(await readAdminGate(true,coordinator({failure:true}).instance),"unavailable");
-  const broken = new AdminTransactionCoordinator({connect:async()=>{throw new Error("private");}});
-  assert.equal(await readAdminGate(true,broken),"unavailable");
-  assert.equal(await readAdminGate(true,coordinator({hang:true}).instance,20),"unavailable");
-  assert.equal(await readAdminGate(true,coordinator().instance),"open");
+  assert.equal(await effectiveAdminGate({ coordinator: coordinator({failure:true}).instance }),"unavailable");
+  const broken = new AdminTransactionCoordinator({connect:async()=>{throw new Error("private");}}, { adminIssuanceEnabled: true });
+  assert.equal(await effectiveAdminGate({ coordinator: broken }),"unavailable");
+  const hung = coordinator({hang:true});
+  assert.equal(await effectiveAdminGate({coordinator: hung.instance, timeoutMs:20}),"unavailable");
+  assert.equal(hung.pending, 0, "no query may remain pending after the gate returns");
+  assert.equal(hung.ended, 1, "deadline must terminate the query connection");
+  assert.deepEqual(hung.releases, [true], "cancelled client must not return to the pool");
+  assert.ok(!hung.statements.includes("COMMIT"));
+  assert.equal(await effectiveAdminGate({ coordinator: coordinator().instance }),"open");
 });
 test("public admin gate is closed today, GET/HEAD only and exposes exactly a no-store state", async () => {
   const handler = createAdminGateHandler({issuerPool:{connect(){throw new Error("must not connect while OFF");}}});
@@ -81,4 +93,52 @@ test("server routes the gate while public authorization is disabled and preserve
   }
   const req=Readable.from([]);Object.assign(req,{url:"/register",method:"GET",headers:{}});
   const res=response();await make(true)(req,res);assert.equal(res.statusCode,204);assert.equal(calls,1);
+});
+
+
+test("public admin gate mirrors the effective predicate for open, closed and unavailable states", async () => {
+  for (const [options, enabled, expected] of [
+    [{}, true, "open"], [{}, false, "closed"], [{record: null}, true, "closed"],
+    [{record: {...measured, admin_issuance_enabled: false}}, true, "closed"],
+    [{record: {...measured, legacy_closed: false}}, true, "closed"],
+    [{record: {...measured, invalidated_at: new Date()}}, true, "closed"],
+    [{mismatches: 1}, true, "closed"], [{failure: true}, true, "unavailable"],
+  ]) {
+    const c = coordinator(options);
+    const handler = createAdminGateHandler({ issuerPool: c.instance.pool, adminIssuanceEnabled: enabled });
+    for (const method of ["GET", "HEAD"]) {
+      const res = response(); await handler({method}, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body, method === "HEAD" ? "" : JSON.stringify({state: expected}));
+      assert.equal(res.getHeader("cache-control"), "no-store");
+    }
+  }
+  const absent = response();
+  await createAdminGateHandler({adminIssuanceEnabled:true})({method:"GET"}, absent);
+  assert.equal(absent.body, '{"state":"closed"}');
+});
+
+test("admin gate cancellation releases a client acquired after its deadline without starting queries", async () => {
+  let resolve, queries = 0;
+  const releases = [];
+  const c = new AdminTransactionCoordinator({connect:() => new Promise(r => { resolve = r; })}, {adminIssuanceEnabled:true});
+  assert.equal(await effectiveAdminGate({coordinator:c, timeoutMs:20}), "unavailable");
+  resolve({query() { queries++; }, release(discard) { releases.push(discard); }});
+  await new Promise(r => setImmediate(r));
+  assert.equal(queries, 0);
+  assert.deepEqual(releases, [true]);
+  assert.equal(await effectiveAdminGate({coordinator:coordinator().instance}), "open");
+});
+
+
+test("admin gate deadline also terminates transaction setup and uncertain COMMIT", async () => {
+  for (const hangAt of ["BEGIN", "SELECT session_user AS principal", "SET LOCAL ROLE commonswarm_oauth_runtime", "COMMIT"]) {
+    const c = coordinator({hangAt});
+    assert.equal(await effectiveAdminGate({coordinator:c.instance, timeoutMs:20}), "unavailable");
+    assert.equal(c.ended, 1);
+    assert.equal(c.pending, 0);
+    assert.deepEqual(c.releases, [true]);
+    assert.equal(c.statements.includes("ROLLBACK"), false, "aborted connection cannot be reused for rollback");
+  }
+  assert.equal(await effectiveAdminGate({coordinator:coordinator().instance}), "open");
 });

@@ -153,7 +153,7 @@ test("admin-issuance-closed-before-cutover: admin authorization/code/refresh ref
     assert.equal((await response.json()).error,"admin_issuance_disabled");
   }
   assert.equal(f.lookups,lookupsBefore,"closed admin token ingress must refuse before any SQL");
-  assert.equal(connections,0,"a configured issuer pool must not bypass the literal closure");
+  assert.equal(connections,0,"a configured issuer pool must not bypass default-OFF activation");
   assert.equal(typeof (await f.tokens()).refresh_token,"string");
 });
 

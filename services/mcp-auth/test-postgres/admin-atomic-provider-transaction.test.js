@@ -18,10 +18,7 @@ import { verifyAdminProof, admitAdminProof } from "../src/admin-dpop.js";
 import { bindProviderAdminNonceStore } from "../src/provider-admin-pin.js";
 const ISSUER = "https://mcp.commonswarm.com", ADMIN = "https://api.commonswarm.com/admin";
 const require = createRequire(import.meta.url);
-function absoluteImports(source,url) {
-  return source.replace(/from "([^"]+)"/gu, (match,path) => path.startsWith("node:") || path.startsWith("data:") || path.startsWith("file:") ? match
-    : `from "${path.startsWith(".") ? new URL(path,url).href : pathToFileURL(require.resolve(path)).href}"`);
-}
+
 
 const redirectUri = "https://client.example/callback";
 const verifier = "atomic-provider-verifier-0123456789abcdef0123456789";
@@ -34,27 +31,10 @@ function failureCode(error) {
     ? code : "unclassified_failure";
 }
 
-// Force ONLY the imported test copy of lane 3a's gate. No source/file/env change,
-// no new production switch. Its policy, receipt checks and completion hook run.
+// Exercise the production configurable gate; no imported source is patched.
 async function testConsentModule() {
-  const url = new URL("../src/admin-consent.js", import.meta.url);
-  let source = await readFile(url, "utf8");
-  const gate = "export const ADMIN_AS_ISSUANCE_ENABLED = false;";
-  assert.equal(source.split(gate).length, 2);
-  source = source.replace(gate, "export const ADMIN_AS_ISSUANCE_ENABLED = true;")
-    .replace(/from "(\.\/[^"]+)"/gu, (_match, path) => `from "${new URL(path, url).href}"`);
-  const consentUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-  const lifecycleUrl = new URL("../src/admin-lifecycle.js", import.meta.url);
-  const lifecycle = (await readFile(lifecycleUrl, "utf8"))
-    .replace('from "./admin-consent.js"', `from "${consentUrl}"`)
-    .replace(/from "(\.\/[^"]+)"/gu, (_match, path) => `from "${new URL(path, lifecycleUrl).href}"`);
-  const lifecycleDataUrl = `data:text/javascript;base64,${Buffer.from(absoluteImports(lifecycle,lifecycleUrl)).toString("base64")}`;
-  const providerUrl = new URL("../src/provider.js", import.meta.url);
-  const providerSource = (await readFile(providerUrl,"utf8"))
-    .replace('from "./admin-consent.js"',`from "${consentUrl}"`)
-    .replace('from "./admin-lifecycle.js"',`from "${lifecycleDataUrl}"`);
-  return { ...await import(consentUrl), ...await import(lifecycleDataUrl),
-    ...await import(`data:text/javascript;base64,${Buffer.from(absoluteImports(providerSource,providerUrl)).toString("base64")}`) };
+  return { ...await import("../src/admin-consent.js"),
+    ...await import("../src/admin-lifecycle.js"), ...await import("../src/provider.js") };
 }
 
 async function fixture({ consentLifetimeMs=86400000 } = {}) {
@@ -216,7 +196,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       return result;
     } };
   } };
-  const coordinator = new AdminTransactionCoordinator(coordinatorPool);
+  const coordinator = new AdminTransactionCoordinator(coordinatorPool, { adminIssuanceEnabled: true });
   const server = createServer(async (request,response) => {
     const id=request.headers["x-spike-id"],owned={ id,...controls.get(id) };
     const path = new URL(request.url, ISSUER).pathname;
