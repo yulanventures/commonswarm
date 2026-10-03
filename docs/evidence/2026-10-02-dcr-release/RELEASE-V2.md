@@ -1,6 +1,15 @@
 # DCR v2: read-only schema preflight, ON OAuth release, MCP Caddy, public probes
 Mac blocks must not call setuid/setgid tools.
 
+Box image-build rule: `nice -n 15` plus a hard three-CPU cap, using
+`systemd-run --scope -p CPUQuota=300%` around the build workers or a supported
+builder quota. Build once per `RELEASE_SHA`, look up a persistent SHA tag,
+build only if absent, and verify the image's recorded source SHA before reuse;
+unsupported caps or mismatched SHA labels are STOP. See the shared preamble in
+[RELEASE-TO-BOX.md](../../../deploy/RELEASE-TO-BOX.md). This plan delegates its
+OAuth image build to `hm37-oauth-build` in the referenced OAuth plan, which
+uses `DOCKER_BUILDKIT=0 nice -n 15` and a three-CPU Docker quota with SHA reuse.
+
 Prepared, **not executed**. This supersedes the execution order in
 [RELEASE.md](RELEASE.md), which remains history. HezLead supplies the reviewed,
 landed main SHA containing this plan and separately authorizes execution.
