@@ -40,7 +40,7 @@ const stepOf = (source: string) => /^# step: (ai-[a-z0-9-]+)$/.exec(source.split
 const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)?.[1];
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-gates', 'ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-human-revoke',
@@ -49,7 +49,7 @@ const EXPECTED_MAC_STEPS = [
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-gates', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
 ];
@@ -121,6 +121,16 @@ for (const [name, controls] of Object.entries(contract.gates)) {
 }
 const gateReceiptFile = join(scratch, 'gate-receipt.json');
 writeFileSync(gateReceiptFile, JSON.stringify(receipt) + '\n');
+// The remote read-only query returns an independent, current box observation.
+const edgeTarget = '/home/commonswarm/edge/releases/' + releaseSha;
+const edgeMeasurement = { release_sha: releaseSha, target: edgeTarget, mount: edgeTarget,
+  image_digest: `sha256:${hex}`, artifact_digest: hex, generation: 8, invalidated_at: null };
+const edgeMeasurementFile = join(scratch, 'edge-measurement.json');
+writeFileSync(edgeMeasurementFile, JSON.stringify(edgeMeasurement) + '\n');
+const edgeObserved = JSON.stringify({ release_generation: 8, measured_generation: 8, invalidated_at: null,
+  approved_edge_release_sha: releaseSha, measured_edge_release_sha: releaseSha,
+  measured_edge_target: edgeTarget, measured_mount: edgeTarget, measured_image_digest: `sha256:${hex}`,
+  measured_artifact_digest: hex });
 const windowOf = (step: string) => /^ai-w5-/.test(step) ? 'W5' : /^ai-w6-/.test(step) ? 'W6' : /^ai-w7-/.test(step) ? 'W7' : 'W3';
 function inputsFor(window: string) {
   const d: Record<string, unknown> = {
@@ -189,6 +199,13 @@ refuse() { printf 'c1gui stub refused unmodelled %s\\n' "$name" >&2; exit 97; }
 case "$name" in
  ssh) # Remote commands are recorded only. 'sudo -n cat FILE' prints a fixture receipt line.
   last=\${@: -1}
+  if test "$last" = "sudo -n /bin/bash -s -- $C1GUI_RELEASE_SHA $C1GUI_POSTGRES_IMAGE"; then
+   # Consume the query, but never execute its box-only secret/Docker commands.
+   query=$(/bin/cat)
+   case "$query" in *'SET default_transaction_read_only=on;'*'release_generation,measured_generation,invalidated_at'*) ;;
+    *) refuse;; esac
+   printf '%s\\n' "$C1GUI_EDGE_OBSERVED"; exit 0
+  fi
   case "$last" in "sudo -n cat "*) printf 'PASS dry-run fixture receipt\\n';; esac
   exit 0;;
  scp|rsync) exit 0;;  # Recorded transfer; nothing leaves this host.
@@ -292,6 +309,7 @@ const baseEnv = () => ({
   PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: process.env.HOME ?? realHome, LANG: 'en_US.UTF-8', TMPDIR: blockTmp + '/',
   C1GUI_SCRATCH: scratch, C1GUI_RELEASE_SHA: releaseSha, C1GUI_KNOWN_SHAS: `${releaseSha} ${siteSha}`,
   C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_REAL_NODE: realNode,
+  C1GUI_POSTGRES_IMAGE: `sha256:${hex}`, C1GUI_EDGE_OBSERVED: edgeObserved,
   C1GUI_REQUEST_PLAN: requestPlan, C1GUI_CLIENT_METADATA: clientMetadata, C1GUI_AGENT_RECEIPT: agentReceipt,
 });
 // One argv log per block: a background child (the ai-w6-start runner) inherits its own
@@ -359,6 +377,7 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
     const step = stepOf(source)!;
     const env: Record<string, string> = {
       INPUTS_FILE: inputsFor(windowOf(step)), PLAN_FILE: planPath, GATE_RECEIPT_FILE: gateReceiptFile,
+      EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
       SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo, SITE_EVIDENCE: siteEvidence,
@@ -411,6 +430,9 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
   }
   const byStep = new Map(outcomes.map(o => [o.step, o]));
   for (const step of MUST_PASS) assert.equal(byStep.get(step)!.status, 0, `${step} must complete in the dry run: ${byStep.get(step)!.stderrTail}`);
+  assert.equal(byStep.get('ai-edge-receipt')!.stubCalls.length, 1);
+  assert.match(byStep.get('ai-edge-receipt')!.stubCalls[0]!, /^ssh .*sudo/,
+    'edge receipt must consume a modelled remote box observation');
   for (const step of NETWORK_DENIED) {
     const o = byStep.get(step)!;
     assert.notEqual(o.status, 0, `${step} reached the network`);
