@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 // plan changes, or one this reader cannot read exactly, stops the seed with a refusal instead of a guess.
 export const SUCCESS_RECEIPT_LABEL = "plan-documented success shape; no live evidence yet; replaced by the live window receipt";
 
-export type SuccessWriterKind = "printf-lines" | "python-literal-json" | "asserted-literal";
+export type SuccessWriterKind = "printf-lines" | "python-literal-json" | "python-literal-lines" | "asserted-literal";
 
 export interface SuccessReceipt {
   file: string;
@@ -94,6 +94,36 @@ function pythonLiteralJson(source: string, file: string): string {
   return rendered.stdout;
 }
 
+// Window B's close writer ends with top-level print("literal") calls. Read
+// only those constants through Python's AST; never run its live assertions or
+// evaluate expressions, f-strings, print options, or an earlier print call.
+// The preceding statements must be the exact B JSON-read/assertion form.
+function pythonLiteralLines(source: string, file: string): string {
+  const redirect = source.indexOf(`>"$PROOF_DIR/${file}" <<'PY'`);
+  assert.ok(redirect >= 0, `${file}: the producer has no Python heredoc writer for it`);
+  const bodyStart = source.indexOf("\n", redirect) + 1;
+  const bodyEnd = source.indexOf("\nPY\n", bodyStart);
+  assert.ok(bodyEnd > bodyStart, `${file}: its Python heredoc has no terminator`);
+  const rendered = spawnSync("/usr/bin/python3", ["-c", [
+    "import ast, sys",
+    "tree = ast.parse(sys.stdin.read())",
+    "def literal_print(node):",
+    "    return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)",
+    "        and isinstance(node.value.func, ast.Name) and node.value.func.id == 'print'",
+    "        and not node.value.keywords and len(node.value.args) == 1",
+    "        and isinstance(node.value.args[0], ast.Constant) and isinstance(node.value.args[0].value, str))",
+    "start = len(tree.body)",
+    "while start and literal_print(tree.body[start - 1]): start -= 1",
+    "assert start < len(tree.body), 'no terminal literal print calls'",
+    "prefix = ast.parse('import json, sys\\ncontrol, revoke = (json.load(open(path)) for path in sys.argv[1:])\\nassert control[\"ok\"] is True\\nassert revoke[\"pass\"] is True').body",
+    "assert [ast.dump(node) for node in tree.body[:start]] == [ast.dump(node) for node in prefix], 'unsupported JSON assertion prefix or print call'",
+    "for statement in tree.body[start:]: print(statement.value.args[0].value)",
+  ].join("\n")], { input: source.slice(bodyStart, bodyEnd), encoding: "utf8" });
+  assert.equal(rendered.status, 0,
+    `${file}: its Python writer does not print only terminal literal lines: ${rendered.error?.message ?? rendered.stderr.trim().split("\n").at(-1) ?? rendered.signal}`);
+  return rendered.stdout;
+}
+
 // A file the block fills from a database read and then pins with `test "$(cat "$PROOF_DIR/<file>")" = <literal>`.
 function assertedLiteral(source: string, file: string): string {
   assert.ok(source.includes(`>"$PROOF_DIR/${file}"`), `${file}: the producer does not write it`);
@@ -109,6 +139,7 @@ export function successReceiptBytes(receipt: SuccessReceipt, producerSource: str
   switch (receipt.writer.kind) {
     case "printf-lines": return Buffer.from(printfLines(producerSource, receipt.file));
     case "python-literal-json": return Buffer.from(pythonLiteralJson(producerSource, receipt.file));
+    case "python-literal-lines": return Buffer.from(pythonLiteralLines(producerSource, receipt.file));
     case "asserted-literal": return Buffer.from(assertedLiteral(producerSource, receipt.file));
   }
 }

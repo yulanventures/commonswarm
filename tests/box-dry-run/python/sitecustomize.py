@@ -15,10 +15,37 @@ import pathlib
 import pwd
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 _real_urlopen = urllib.request.urlopen
 _real_build_opener = urllib.request.build_opener
+
+# Fixture construction replaces this in a private copy for the site sequence.
+# This is harness state, never a value supplied by the plan's environment.
+_SITE_MCP = False  # fixture-site-mcp
+# Public commonswarm.com Content-Type model, baked into each fixture copy from
+# deploy/site/commonswarm-site.caddy header matchers (request path) and, for
+# file_server defaults, deploy/site/vercel-reference.json, which the box's
+# Caddy matched in strict live parity (docs/evidence/2026-09-16-n-site/LANDING.md:35-36).
+# The unbaked source has no model: a public byte response then fails closed.
+_SITE_CONTENT_TYPES = None  # fixture-site-content-types
+
+
+def _public_content_type(request_path, served):
+    if not _SITE_CONTENT_TYPES:
+        sys.stderr.write("UNPRODUCED public content type model\n")
+        raise SystemExit(69)
+    lowered = request_path.lower()
+    for rule in _SITE_CONTENT_TYPES["caddy"]:
+        pattern = rule["path"].lower()
+        if (pattern.startswith("*") and lowered.endswith(pattern[1:])) or lowered == pattern:
+            return rule["type"]
+    media = _SITE_CONTENT_TYPES["file_server"].get(served.suffix.lower())
+    if media is None:
+        sys.stderr.write("UNPRODUCED public content type for " + (served.suffix or "a file without extension") + "\n")
+        raise SystemExit(69)
+    return media
 
 
 class Response:
@@ -69,7 +96,27 @@ def _fixture(request):
 
     method = getattr(request, "method", None) or (request.get_method() if not isinstance(request, str) else "GET")
     data = getattr(request, "data", None)
-    if not explicit and any(host in url for host in (
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    if _SITE_MCP and (parsed.hostname == "mcp.commonswarm.com" or
+                      path.startswith("/.well-known/oauth-protected-resource/") or
+                      path == "/mcp" or path.startswith("/mcp/")):
+        # Source-derived site GO request/response shapes, not a live observation:
+        # docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:768-793
+        # requires these two public probes after MCP is
+        # enabled. Window A's historical dark-route responses stay below.
+        # The real plan Python still validates status, media type and resource.
+        expected_headers = {"user-agent": "commonswarm-release-probe/1.0", "accept": "application/json",
+                            "content-type": "application/json", "accept-encoding": "identity"}
+        resource = "https://mcp.commonswarm.com/mcp"
+        if headers == expected_headers and url == "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp" and method == "GET" and data is None:
+            status, body, content_type = 200, json.dumps({"resource": resource}).encode(), "application/json"
+        elif headers == expected_headers and url == resource and method == "POST" and data == b"{}":
+            status, body, content_type = 401, b"", "application/json"
+        else:
+            sys.stderr.write("UNPRODUCED site MCP request form\n")
+            raise SystemExit(69)
+    elif not explicit and any(host in url for host in (
         "api.commonswarm.com", "edge-staging.commonswarm.com", "commonswarm.com"
     )) and "mcp.commonswarm.com" not in url:
         status, body, content_type = 403, b"error code: 1010\n", "text/plain"
@@ -128,8 +175,7 @@ def _fixture(request):
         if path.is_dir():
             path = path / "index.html"
         if path.is_file():
-            content_type = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}.get(
-                path.suffix, "application/octet-stream")
+            content_type = _public_content_type(suffix, path)
             status, body = 200, path.read_bytes()
         else:
             status, body, content_type = 404, b"", "text/plain"

@@ -129,6 +129,7 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 
 ```sh
 # step: site2-plan-inputs
+# readonly: yes
 # host: Mac /bin/bash 3.2 before source checkout/open
 set -euo pipefail
 python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'

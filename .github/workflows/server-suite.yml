@@ -73,7 +73,7 @@ jobs:
           node-version: 22
           cache: npm
       - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2
-        if: matrix.suite == 'server' || matrix.suite == 'p1-cli'
+        if: matrix.suite == 'server' || matrix.suite == 'p1-cli' || matrix.suite == 'unit'
         with:
           deno-version: v2.x
       - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2
