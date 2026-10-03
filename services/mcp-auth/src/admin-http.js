@@ -1,7 +1,8 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { createHash } from "node:crypto";
 import { ADMIN_TOKEN_INGRESS } from "./provider-admin-pin.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
-import { ADMIN_AS_ISSUANCE_ENABLED, AdminConsentError } from "./admin-consent.js";
+import { AdminConsentError } from "./admin-consent.js";
 import { AdminTransactionCoordinator } from "./admin-transaction.js";
 import { admitAdminProof, verifyAdminProof, recordAdminSecurityFailure, AdminDpopError } from "./admin-dpop.js";
 import { AdminTokenLifecycle, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
@@ -16,8 +17,8 @@ function json(response, status, body, nonce) {
 
 // The sole public ingress into dormant AS lifecycle code. Candidate/consume
 // observations are server reads; a requested resource never relabels a family.
-export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid }) {
-  const coordinator = issuerPool ? new AdminTransactionCoordinator(issuerPool) : null;
+export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid, adminIssuanceEnabled = false }) {
+  const coordinator = issuerPool ? new AdminTransactionCoordinator(issuerPool, { adminIssuanceEnabled }) : null;
   const lifecycle = new AdminTokenLifecycle({ activeKid });
   const dispatch = async (original, response, tokenContext, tokenOperation) => {
     let request = original, params, candidate, ingress, continuationUid;
@@ -32,7 +33,7 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
         const resources = Array.isArray(params.resource) ? params.resource : [params.resource];
         if (!resources.includes(ADMIN_RESOURCE)) return tokenOperation();
         tokenContext.respond = false;
-        if (!ADMIN_AS_ISSUANCE_ENABLED || !coordinator) throw new AdminConsentError("admin_issuance_disabled", 503);
+        if (await effectiveAdminGate({ coordinator }) !== "open") throw new AdminConsentError("admin_issuance_disabled", 503);
         if (params.resource !== ADMIN_RESOURCE) throw new AdminConsentError("invalid_target", 400);
         const model = params.grant_type === "refresh_token" ? "RefreshToken" : "AuthorizationCode";
         const value = model === "RefreshToken" ? params.refresh_token : params.code;
@@ -62,9 +63,8 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
       } else params = Object.fromEntries(url.searchParams);
       const admin = candidate || params?.resource === ADMIN_RESOURCE;
       if (!admin) return handler(request, response);
-      // Literal closure cannot be enabled by config, a provider metadata hook,
-      // an injected cutover row, readiness or a caller-selected capability.
-      if (!ADMIN_AS_ISSUANCE_ENABLED || !coordinator) throw new AdminConsentError("admin_issuance_disabled", 503);
+      // Recheck the shared gate before accepting an admin request.
+      if (await effectiveAdminGate({ coordinator }) !== "open") throw new AdminConsentError("admin_issuance_disabled", 503);
       if (url.pathname === "/token" && (!ingress || params.resource !== ADMIN_RESOURCE)) {
         throw new AdminConsentError("invalid_target",400);
       }

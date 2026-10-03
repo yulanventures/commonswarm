@@ -1,3 +1,4 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { interactionRow } from "./interaction-store.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
@@ -9,9 +10,6 @@ import {
   adminAvailableCapabilities, adminConsentOptions, adminManifestValid, canonicalAdminJson,
 } from "./admin-policy.generated.js";
 
-// Lane 4 must replace this only after its transaction proof and lane-5 closure.
-// Neither configuration nor an injected database row can open lane 3 issuance.
-export const ADMIN_AS_ISSUANCE_ENABLED = false;
 export const ADMIN_AUTH_MAX_AGE_MS = 5 * 60 * 1000;
 const OIDC_SCOPES = new Set(["openid", "offline_access"]);
 const DPOP_ALGS = new Set(["ES256", "Ed25519", "EdDSA"]);
@@ -271,12 +269,12 @@ export function createAdminConsentService({ store, provider, fetchMetadata = cre
               !opaqueMatches(completion.second_token, r.second_confirmation_binding)))) {
           refuse("consent_receipt_invalid", 409);
         }
-        const cutover = await store.cutover(tx); // Fresh read even though this lane stays closed.
-        if (!ADMIN_AS_ISSUANCE_ENABLED || cutover?.admin_issuance_enabled !== true || cutover.legacy_closed !== true) {
+        await store.cutover(tx); // Retain the consent store's fresh cutover read; the shared gate decides.
+        if (await effectiveAdminGate() !== "open") {
           refuse("admin_issuance_disabled", 503);
         }
-        // Lane 4 owns the coordinator and commit-before-response. Never finish a
-        // provider interaction from this lane, even if configuration is wrong.
+        // Consent completion remains inside the issuer coordinator; its buffered
+        // provider response cannot be released before the transaction commits.
         if (typeof completeInTransaction !== "function") refuse("admin_issuance_disabled", 503);
         return completeInTransaction(tx, {
           parent, receipt: r, policy: current,

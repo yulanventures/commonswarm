@@ -1,5 +1,6 @@
+import { effectiveAdminGate } from "./admin-gate.js";
 import { ADMIN_RESOURCE, adminConsentOptions } from "./admin-policy.generated.js";
-import { ADMIN_AS_ISSUANCE_ENABLED, adminDigest } from "./admin-consent.js";
+import { adminDigest } from "./admin-consent.js";
 import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
 import { bindProviderAdminNonceStore } from "./provider-admin-pin.js";
@@ -117,7 +118,7 @@ export async function createMcpProvider({
         },
         getResourceServerInfo: async (ctx, resource, client) => {
           if (resource === ADMIN_RESOURCE) {
-            if (!ADMIN_AS_ISSUANCE_ENABLED) throw new errors.InvalidTarget("admin issuance closed");
+            if (await effectiveAdminGate() !== "open") throw new errors.InvalidTarget("admin issuance closed");
             await requireMeasuredAdminRelease();
             const policy = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_verified_clients
               WHERE client_id=$1 AND active AND withdrawn_at IS NULL`, [client.clientId])).rows[0];
@@ -229,9 +230,11 @@ export async function createMcpProvider({
   provider.use(async (ctx, next) => {
     // oidc-provider filters unknown authorization scopes. Refuse escalation
     // explicitly rather than silently turning it into a narrower request.
+    const adminOpen = ctx.path === "/authorize" && ctx.query.resource === ADMIN_RESOURCE
+      && await effectiveAdminGate() === "open";
     if (ctx.path === "/authorize" && typeof ctx.query.scope === "string" &&
         ctx.query.scope.split(" ").filter(Boolean).some((scope) => !CLIENT_SCOPES.includes(scope) &&
-          !(ctx.query.resource === ADMIN_RESOURCE && ADMIN_AS_ISSUANCE_ENABLED &&
+          !(adminOpen &&
             adminConsentOptions().some(o => o.available && o.scope === scope)))) {
       ctx.status = 400;
       ctx.body = { error: "invalid_scope" };

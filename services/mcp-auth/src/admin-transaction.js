@@ -123,21 +123,55 @@ export function bufferAdminResponse(response, maxBytes = 64 * 1024) {
   };
 }
 
+// pg 8 does not accept an AbortSignal for Pool.connect/query. Race acquisition
+// with cleanup of a late client, and end the acquired client on cancellation.
+// Client.end() destroys an active-query socket and rejects its queued queries.
+function abortable(work, signal) {
+  if (!signal) return work;
+  let listener;
+  const cancelled = new Promise((_, reject) => {
+    listener = () => reject(signal.reason);
+    signal.addEventListener("abort", listener, { once: true });
+    if (signal.aborted) listener();
+  });
+  return Promise.race([work, cancelled]).finally(() => signal.removeEventListener("abort", listener));
+}
+
 export class AdminTransactionCoordinator {
-  constructor(pool) { this.pool = pool; }
-  async run(response, callback, capability) {
+  constructor(pool, { adminIssuanceEnabled = false } = {}) {
+    this.pool = pool; this.adminIssuanceEnabled = adminIssuanceEnabled;
+  }
+  async run(response, callback, capability, { signal } = {}) {
     if (adminTransactionContext(false)) throw new AdminTransactionError("admin_nested_unit_forbidden");
-    const physical = await this.pool.connect();
+    signal?.throwIfAborted();
+    const acquisition = this.pool.connect();
+    let raw;
+    try { raw = await abortable(acquisition, signal); }
+    catch (error) {
+      acquisition.then(client => client.release(true), () => {});
+      throw error;
+    }
+    const physical = { query: (...args) => {
+      signal?.throwIfAborted();
+      return raw.query(...args);
+    }, processID: raw.processID };
     const held = bufferAdminResponse(response);
-    const scope = { physical, client: { query: adminQuery }, capability,
+    const scope = { coordinator: this, physical, client: { query: adminQuery }, capability,
       requestId: randomUUID(), closed: false, failure: null, tail: Promise.resolve(),
       pending: new Set(), savepointNumber: 0, savepoint: null, fenceCommittedOnError: false };
     let committing = false, committed = false, unknown = false;
+    const abort = () => {
+      scope.closed = true;
+      scope.failure ??= signal.reason;
+      void raw.end().catch(() => {});
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     try {
-      await physical.query("BEGIN");
-      const principal = (await physical.query("SELECT session_user AS principal")).rows[0]?.principal;
+      await abortable(physical.query("BEGIN"), signal);
+      const principal = (await abortable(physical.query("SELECT session_user AS principal"), signal)).rows[0]?.principal;
       if (principal !== "commonswarm_admin_issuer") throw new AdminTransactionError("admin_issuer_role_required");
-      await requests.run(scope, async () => {
+      await abortable(requests.run(scope, async () => {
         await callback(scope);
         await scope.tail;
         if (scope.pending.size) throw new AdminTransactionError("admin_unawaited_write");
@@ -146,9 +180,9 @@ export class AdminTransactionCoordinator {
         if (response.statusCode >= 400 && !scope.fenceCommittedOnError) {
           throw new AdminTransactionError("admin_provider_refused");
         }
-      });
+      }), signal);
       committing = true;
-      const result = await physical.query("COMMIT");
+      const result = await abortable(physical.query("COMMIT"), signal);
       if (result.command !== "COMMIT") throw new AdminTransactionError("admin_commit_rolled_back");
       committed = true; scope.closed = true;
       held.release();
@@ -159,7 +193,7 @@ export class AdminTransactionCoordinator {
       unknown = committed || (committing && error.code !== "admin_commit_rolled_back");
       await scope.tail;
       scope.closed = true;
-      if (!unknown) await physical.query("ROLLBACK").catch(() => {});
+      if (!unknown && !signal?.aborted) await physical.query("ROLLBACK").catch(() => {});
       held.discard();
       if (!response.destroyed) {
         response.statusCode = 503;
@@ -171,6 +205,10 @@ export class AdminTransactionCoordinator {
           request_id: scope.requestId }));
       }
       return { outcome: unknown ? "unknown" : "refused", requestId: scope.requestId };
-    } finally { scope.closed = true; physical.release(unknown); }
+    } finally {
+      scope.closed = true;
+      signal?.removeEventListener("abort", abort);
+      raw.release(unknown || signal?.aborted === true);
+    }
   }
 }

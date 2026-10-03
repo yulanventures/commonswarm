@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdtemp, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, lstat, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { promisify } from "node:util";
 
 import { exportJWK, generateKeyPair } from "jose";
@@ -13,13 +12,23 @@ import { loadConfig } from "../src/config.js";
 
 const root = new URL("../../../", import.meta.url);
 const execFileAsync = promisify(execFile);
+const fixtureDirectories = [];
+after(async () => {
+  for (const directory of fixtureDirectories) {
+    assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+    await execFileAsync("/Users/yulanbot/.local/bin/rm", ["-rf", directory]);
+  }
+});
 
 async function text(path) {
   return await readFile(new URL(path, root), "utf8");
 }
 
 async function configFixture() {
-  const directory = await mkdtemp(join(tmpdir(), "mcp-auth-config-"));
+  const { stdout } = await execFileAsync("mktemp", ["-d", "/private/tmp/anvil-secret.XXXXXX"]);
+  const directory = stdout.trim();
+  fixtureDirectories.push(directory);
+  await chmod(directory, 0o700);
   const paths = Object.fromEntries(["signing", "cookies", "database", "ca"].map(
     (name) => [name, join(directory, name)],
   ));
@@ -232,4 +241,28 @@ test("a FIFO file setting fails without waiting for a writer", async () => {
     /database TLS CA path must be a regular file/u,
   );
   assert.ok(performance.now() - startedAt < 1_000, "FIFO policy check did not fail fast");
+});
+
+
+test("admin activation config accepts only literal 1 and keeps missing or unreadable issuer files optional", async () => {
+  const { env, directory } = await configFixture();
+  const base = { ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts" };
+  for (const value of [undefined, "", "0", "true", "yes", "01", "1 ", " 1", "1\n", 1, true]) {
+    assert.equal((await loadConfig({ ...base, MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: value })).adminIssuanceEnabled, false);
+  }
+  const on = { ...base, MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: "1" };
+  assert.equal((await loadConfig(on)).adminIssuanceEnabled, true);
+  assert.equal((await loadConfig(on)).adminIssuer, undefined);
+  assert.equal((await loadConfig({ ...on, MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: join(directory, "missing") })).adminIssuer, undefined);
+  const path = join(directory, "issuer");
+  await writeFile(path, JSON.stringify({ user: "commonswarm_admin_issuer", password: "synthetic-test-only" }), { mode: 0o600 });
+  const configured = { ...on, MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: path };
+  assert.equal((await loadConfig(configured)).adminIssuer.user, "commonswarm_admin_issuer");
+  await chmod(path, 0o000);
+  assert.equal((await loadConfig(configured)).adminIssuer, undefined);
+  await chmod(path, 0o644);
+  assert.equal((await loadConfig(configured)).adminIssuer, undefined);
+  await chmod(path, 0o600);
+  await writeFile(path, JSON.stringify({ user: "commonswarm_oauth_runtime", password: "synthetic-test-only" }));
+  await assert.rejects(loadConfig(configured), /dedicated login role/u);
 });
