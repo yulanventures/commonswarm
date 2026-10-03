@@ -7,7 +7,7 @@ import {
   type HostedSeatCapability,
   type ProviderGrantStatus,
 } from "../_shared/hosted-seat-auth.ts";
-import type { CommandResult, HostedCommandInput } from "../command/index.ts";
+import type { CommandResult, HostedCommandInput } from "../command/contract.d.ts";
 import type { HostedReadInput, ReadResult } from "../read/index.ts";
 import {
   MCP_ISSUER,

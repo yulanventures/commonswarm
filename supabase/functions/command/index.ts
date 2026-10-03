@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
   adminTransaction, adminDigest, recordAdminFailure,
@@ -1270,15 +1271,7 @@ type CredentialKind = "user" | "agent" | "hosted_seat";
 type SignalCredentialKind = "user" | "agent";
 type Role = "owner" | "admin" | "member";
 
-interface RequestBody {
-  command_id?: unknown;
-  client_version?: unknown;
-  client_build?: unknown;
-  workspace_id?: unknown;
-  stream?: unknown;
-  command?: unknown;
-  [key: string]: unknown;
-}
+type RequestBody = HostedCommandInput;
 
 interface AuthContext {
   credentialKind: CredentialKind;
@@ -1349,11 +1342,7 @@ interface PreparedWorkspace {
   renewalFacts: RenewalFacts | null;
 }
 
-interface HttpResult {
-  status: number;
-  headers?: Record<string, string>;
-  body: Record<string, unknown>;
-}
+type HttpResult = CommandResult;
 
 interface Audit {
   auth: AuditAuthContext;
@@ -9515,8 +9504,7 @@ interface HostedSeatClaimInput extends RequestBody {
   command: { kind: "claim_hosted_seat"; name: string };
 }
 
-export type HostedCommandInput = RequestBody;
-export type CommandResult = HttpResult;
+export type { HostedCommandInput, CommandResult } from "./contract.d.ts";
 export interface HostedHumanManagementIdentity {
   userId: string;
   email: string | null;

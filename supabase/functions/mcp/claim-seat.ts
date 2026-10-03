@@ -1,7 +1,7 @@
 import type postgres from "npm:postgres@3.4.9";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
 import { authenticateHostedGrantCapability, type HostedGrantCapability, type ProviderGrantStatus } from "../_shared/hosted-seat-auth.ts";
-import type { CommandResult, HostedCommandInput } from "../command/index.ts";
+import type { CommandResult, HostedCommandInput } from "../command/contract.d.ts";
 import type { HostedToolCall } from "./tools.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
