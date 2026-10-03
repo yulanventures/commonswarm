@@ -205,9 +205,13 @@ test("ordinary /token delegates the original unread HTTP stream without an admin
 
 // SQL fixtures supply committed read rows; the real bridge/reducer, lifecycle,
 // provider exchange, signing and ledger validation execute without a service.
+const EXCHANGE_NOW = Date.UTC(2026, 9, 3, 12);
 async function adminExchange(t, seconds, { badExpiry = false, refusal, missingResourceServer = false,
-  production = false, adminIssuanceEnabled = true, ingressRefusal } = {}) {
-  const now = Math.floor(Date.now() / 1000) * 1000, owner = randomUUID(), grantId = randomUUID();
+  production = false, adminIssuanceEnabled = true, ingressRefusal,
+  sqlNow = EXCHANGE_NOW, appNow = EXCHANGE_NOW, signingNow = appNow } = {}) {
+  let appTime = appNow;
+  const clock = t.mock.method(Date, "now", () => appTime);
+  const now = sqlNow, owner = randomUUID(), grantId = randomUUID();
   const clientId = "https://client.example/metadata", redirectUri = "https://client.example/callback";
   const key = await generateKeyPair("ES256", { extractable: true });
   const jwk = await exportJWK(key.publicKey), jkt = await calculateJwkThumbprint(jwk);
@@ -270,6 +274,15 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
     registrationEnabled: false, registrationStore: { find: async () => metadata, markUsed: async () => {
       if (refusal) { refusalReached = true; throw refusal; }
     } } });
+  if (signingNow !== appNow) {
+    const expiresIn = provider.AccessToken.expiresIn;
+    provider.AccessToken.expiresIn = function (...args) {
+      const ttl = expiresIn.apply(this, args);
+      // Cross the boundary after TTL resolution, before the provider chooses iat.
+      appTime = signingNow;
+      return ttl;
+    };
+  }
   if (missingResourceServer) {
     const expiresIn = provider.AccessToken.expiresIn;
     provider.AccessToken.expiresIn = function (ctx, token, ...args) {
@@ -287,7 +300,12 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
     const { pathToFileURL } = await import("node:url");
     const require = createRequire(import.meta.url);
     const { default: instance } = await import(pathToFileURL(resolve(dirname(require.resolve("oidc-provider")), "helpers/weak_cache.js")).href);
-    instance(provider).configuration.formats.customizers.jwt = async (_ctx, _token, jwt) => { jwt.payload.exp += 600; };
+    const customizers = instance(provider).configuration.formats.customizers;
+    const customize = customizers.jwt;
+    customizers.jwt = async (ctx, token, jwt) => {
+      await customize(ctx, token, jwt);
+      jwt.payload.exp += badExpiry === true ? 600 : badExpiry;
+    };
   }
   const client = await provider.Client.find(clientId), family = new provider.Grant({ accountId: owner, clientId });
   verification.metadata_digest = adminDigest(client.metadata());
@@ -300,7 +318,7 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
     scope: "openid offline_access admin:read", resource: [ADMIN_RESOURCE], redirectUri,
     codeChallenge: createHash("sha256").update(verifier).digest("base64url"), codeChallengeMethod: "S256", dpopJkt: jkt }).save();
   artifact = { payload: { clientId, dpopJkt: jkt }, grant_id: familyId, consumed_at: null };
-  const dpop = await new SignJWT({ htm: "POST", htu: `${ISSUER}/token`, iat: now / 1000,
+  const dpop = await new SignJWT({ htm: "POST", htu: `${ISSUER}/token`, iat: Math.floor(appNow / 1000),
     jti: randomUUID(), nonce: "boundary-nonce" }).setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk }).sign(key.privateKey);
   const proof = production ? undefined
     : await admitAdminProof(pool, await verifyAdminProof({ method: "POST", headers: { dpop } }, jkt));
@@ -331,7 +349,9 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
   const response = await fetch(`http://127.0.0.1:${server.address().port}/token`, { method: "POST",
     headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host, "x-forwarded-proto": "https", dpop,
       "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params) });
-  return { status: response.status, body: await response.json(), nonce: response.headers.get("dpop-nonce"),
+  const body = await response.json();
+  clock.mock.restore();
+  return { status: response.status, body, nonce: response.headers.get("dpop-nonce"),
     grant, events, ledger, failures, serverErrors, queries, transactions, refusalReached, ingressReached,
     diagnostic: JSON.stringify({ refusal: outcome?.cause?.code,
       grantErrors: failures.map(error => error.error), serverErrors: serverErrors.map(error => error.code) }) };
@@ -345,11 +365,61 @@ test("admin first exchange uses the committed grant and clips the actual signed 
     const jwt = decodeJwt(result.body.access_token);
     assert.ok(jwt.exp * 1000 <= result.grant.expires_at);
     assert.ok(jwt.exp - jwt.iat <= Math.min(300, seconds));
+    assert.equal(jwt.iat, EXCHANGE_NOW / 1000);
+    assert.equal(jwt.exp - jwt.iat, Math.min(300, seconds));
+    assert.equal(result.body.expires_in, jwt.exp - jwt.iat);
     assert.equal(result.events.filter(e => e.type === "AdminCredentialIssued").length, 1);
     assert.equal(result.ledger.length, 1);
     assert.equal(result.failures.length + result.serverErrors.length, 0);
     assert.ok(result.queries.includes("COMMIT"));
   }
+});
+
+test("admin issuance uses the signed iat across a second boundary and app/SQL clock skew", async t => {
+  for (const [name, seconds, appNow, signingNow, expectedTtl] of [
+    ["second boundary", 120, EXCHANGE_NOW + 999, EXCHANGE_NOW + 1000, 119],
+    ["app clock ahead of SQL", 120, EXCHANGE_NOW + 10000, EXCHANGE_NOW + 10000, 110],
+    ["app clock behind SQL", 120, EXCHANGE_NOW - 10000, EXCHANGE_NOW - 10000, 130],
+    ["five-minute cap across a second boundary", 600, EXCHANGE_NOW + 999, EXCHANGE_NOW + 1000, 300],
+  ]) await t.test(name, async t => {
+    const result = await adminExchange(t, seconds, { production: true, sqlNow: EXCHANGE_NOW, appNow, signingNow });
+    assert.equal(result.ingressReached, true);
+    assert.equal(result.status, 200, result.diagnostic);
+    assert.equal(result.body.token_type, "DPoP");
+    const jwt = decodeJwt(result.body.access_token);
+    assert.equal(jwt.iat, Math.floor(signingNow / 1000));
+    assert.equal(jwt.exp, Math.min(jwt.iat + 300, EXCHANGE_NOW / 1000 + seconds));
+    assert.equal(jwt.exp - jwt.iat, expectedTtl);
+    assert.equal(result.body.expires_in, expectedTtl);
+    assert.ok(jwt.exp * 1000 <= result.grant.expires_at);
+    assert.ok(jwt.exp * 1000 <= result.grant.refresh_deadline);
+    assert.ok(jwt.exp - jwt.iat <= 300);
+    assert.equal(result.events.filter(e => e.type === "AdminCredentialIssued").length, 1);
+    assert.equal(result.ledger.length, 1);
+    assert.equal(result.ledger[0][12], jwt.iat);
+    assert.equal(result.ledger[0][13], jwt.exp);
+    assert.equal(result.failures.length + result.serverErrors.length, 0);
+    assert.equal(result.queries.at(-1), "COMMIT");
+  });
+});
+
+test("production admin issuance allows no grace beyond consent expiry", async t => {
+  for (const [name, options] of [
+    ["signed expiry one second past consent", { badExpiry: 1 }],
+    ["signed iat at consent expiry despite an earlier SQL clock", { appNow: EXCHANGE_NOW + 120000 }],
+  ]) await t.test(name, async t => {
+    const result = await adminExchange(t, 120, { production: true, ...options });
+    assert.equal(result.ingressReached, true);
+    assert.equal(result.status, 400, result.diagnostic);
+    assert.equal(result.body.error, "invalid_grant");
+    assert.ok(!("access_token" in result.body) && !("refresh_token" in result.body));
+    assert.equal(result.events.length, 0);
+    assert.equal(result.ledger.length, 0);
+    const issuance = result.transactions.find(sql => sql.some(statement => statement.includes("lock_admin_consent_policy")));
+    assert.ok(issuance);
+    assert.equal(issuance.at(-1), "ROLLBACK");
+    assert.ok(!issuance.includes("COMMIT"));
+  });
 });
 
 test("admin token validation refusal maps to OAuth invalid_grant 400 and rolls back without a ledger row", async t => {
@@ -489,6 +559,9 @@ test("production /token composition preserves admin and provider OAuth refusals"
     const jwt = decodeJwt(result.body.access_token);
     assert.ok(jwt.exp * 1000 <= result.grant.expires_at);
     assert.ok(jwt.exp - jwt.iat <= 120);
+    assert.equal(jwt.iat, EXCHANGE_NOW / 1000);
+    assert.equal(jwt.exp, EXCHANGE_NOW / 1000 + 120);
+    assert.equal(result.body.expires_in, 120);
     assert.equal(result.ledger.length, 1);
     assert.equal(result.queries.at(-1), "COMMIT");
   });

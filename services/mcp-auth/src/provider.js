@@ -144,9 +144,8 @@ export async function createMcpProvider({
             }
             const unit = adminTransactionContext().token;
             if (ctx.path === "/token" && !unit) throw new errors.InvalidGrant("admin transaction required");
-            const now = Number((await adminQuery("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint AS now")).rows[0].now);
             return { audience: ADMIN_RESOURCE, accessTokenFormat: "jwt", jwt: { sign: { alg: "ES256" } },
-              accessTokenTTL: unit ? adminTokenLifetime(unit.binding, now) : 300,
+              accessTokenTTL: ADMIN_ACCESS_TTL_SECONDS,
               scope: (unit?.binding.scope_names ?? adminConsentOptions().filter(o => o.available).map(o => o.scope)).join(" ") };
           }
           if (resource !== RESOURCE) {
@@ -176,6 +175,23 @@ export async function createMcpProvider({
       accountId,
       claims: async () => ({ sub: accountId }),
     })),
+    formats: {
+      customizers: {
+        jwt: (_ctx, token, jwt) => {
+          if (token.aud !== ADMIN_RESOURCE) return;
+          const unit = adminTransactionContext().token;
+          if (!unit || token.grantId !== unit.binding.provider_grant_id) {
+            throw new AdminConsentError("invalid_grant", 400);
+          }
+          // 9.12.2 has already chosen iat and preserves this payload at signing.
+          // Use that one instant for expiry and the response's expires_in; a
+          // separate SQL/app clock read could cross a second or skew the cap.
+          const ttl = adminTokenLifetime(unit.binding, jwt.payload.iat);
+          jwt.payload.exp = jwt.payload.iat + ttl;
+          token.expiresIn = ttl;
+        },
+      },
+    },
     grantTypes: ["authorization_code", "refresh_token"],
     loadExistingGrant: async ctx => {
       const explicit = ctx.oidc.result?.consent?.grantId;
@@ -209,8 +225,8 @@ export async function createMcpProvider({
       validator: (_ctx, _key, _value, metadata) => validateClientPolicy(metadata, nativeLoopbackEnabled),
     },
     ttl: {
-      // A numeric override bypasses the provider's resource TTL. Admin JWTs
-      // must use the consent-clipped TTL calculated under the issuer locks.
+      // A numeric override bypasses the provider's resource TTL. Validate the
+      // admin bound here; the JWT customizer clips it using the signed iat.
       AccessToken: (_ctx, token) => {
         if (token.aud !== ADMIN_RESOURCE) return accessTokenTtlSeconds;
         const ttl = token.resourceServer?.accessTokenTTL;

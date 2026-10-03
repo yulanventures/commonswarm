@@ -81,7 +81,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   // Inject only the failure, through the pinned provider's actual signing hook.
   // The production provider middleware owns claims, clipped TTL and ledgering.
   const { default: providerInstance } = await import(pathToFileURL(resolve(dirname(require.resolve("oidc-provider")),"helpers/weak_cache.js")).href);
-  providerInstance(provider).configuration.formats.customizers.jwt = async () => {
+  const customizers = providerInstance(provider).configuration.formats.customizers;
+  const customize = customizers.jwt;
+  customizers.jwt = async (ctx, token, jwt) => {
+    await customize(ctx, token, jwt);
     if (db.current().fault === "signing") throw new Error("test signing failure");
   };
   function subscribeDiagnostics(provider) {
