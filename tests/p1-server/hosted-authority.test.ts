@@ -10,6 +10,7 @@ import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { emptyApplicationSchema, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
+import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 
 const commandUrl = new URL("../../supabase/functions/command/index.ts", import.meta.url);
 const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
@@ -552,8 +553,8 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       rollback: await readFile(entry.rollbackUrl, "utf8"),
     }))),
   ]);
-  const catalogQuery = catalog.replace(/\\gset\s*$/u, "");
-  const rollbackCatalogQuery = rollbackCatalog.replace(/\\gset\s*$/u, "");
+  const catalogQuery = releaseCatalogQuery(catalog, 'catalog_ok');
+  const rollbackCatalogQuery = releaseCatalogQuery(rollbackCatalog, 'rollback_ok');
   const emptySchema = emptyApplicationSchema();
   const rollbackDrill = new Error("ROLLBACK_HM_PROOF_DRILL");
   await sql.begin(async (tx) => {
@@ -626,9 +627,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       await tx.unsafe(repoSql(`supabase/migrations/${name}`));
     }
     for (const version of adminVersions) {
-      const query = repoSql(`deploy/release-proofs/item-ai/${version}-catalog.sql`).replace(/\\gset\s*$/u, "");
-      const [restored] = await tx.unsafe<{ catalog_ok: boolean }[]>(query);
-      assert.equal(restored?.catalog_ok, true, `reapplied admin catalog ${version}`);
+      const query = releaseCatalogQuery(repoSql(`deploy/release-proofs/item-ai/${version}-catalog.sql`), 'catalog_ok');
+      const [restored] = await tx.unsafe<{ catalog_ok: boolean; catalog_ok_failed_checks: string }[]>(query);
+      assert.equal(restored?.catalog_ok, true, `reapplied admin catalog ${version}: ${restored?.catalog_ok_failed_checks}`);
     }
     throw rollbackDrill;
   }).catch((error) => {
