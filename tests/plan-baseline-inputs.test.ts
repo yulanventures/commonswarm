@@ -196,13 +196,13 @@ test("site input and measured-source comparison require the full resolved SHA", 
   }
 });
 
-// This owns the release safety contract: path/start-time ownership must work
-// without setuid process tools, and a stale receipt must never authorize a kill.
-test("site browser cleanup uses recorded PID/path/start time and never signals an unverified process", () => {
-  const sources = [...readFileSync(SITE, "utf8").matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1]!);
-  for (const source of sources) assert.doesNotMatch(source, /\b(?:ps|pgrep)\b|\/bin\/ps\b/);
-  // Inspect executable permissions rather than maintaining a setuid name list.
-  const permissionCheck = String.raw`
+// This owns the release safety contract: one controller process launches,
+// probes and closes the task browser; no block reads a process table, calls a
+// setuid tool, or signals a PID it cannot prove it owns.
+function siteSources() {
+  return [...readFileSync(SITE, "utf8").matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1]!);
+}
+const permissionCheck = String.raw`
 import os, pathlib, re, shutil, stat, sys
 text = sys.stdin.read()
 # Shell command positions (including substitutions), plus literal argv lists
@@ -215,144 +215,135 @@ for token in set(re.findall(shell, text, re.M) + re.findall(argv, text)):
     if executable and pathlib.Path(executable).is_file():
         assert not os.stat(executable).st_mode & stat.S_ISUID, "setuid tool forbidden: " + token
 `;
+const BROWSER_STEPS = ["site2-03-browser-session-preflight", "site2-05-browser-acceptance", "site2-06",
+  "site2-browser-close", "site2-07-pre-pin-manifest-close", "site2-07-manifest-close"];
+
+test("site browser lifecycle goes only through the task-browser controller, without ps/pgrep/setuid tools", () => {
+  const sources = siteSources();
+  for (const source of sources) {
+    assert.doesNotMatch(source, /\b(?:ps|pgrep|pkill|killall)\b|\/bin\/ps\b/);
+    // No PID-based ownership survives: no kill, libproc, setsid launch or PID window field.
+    assert.doesNotMatch(source, /\bkill\s+-|os\.kill|proc_pid|setsid|browser-process\.py|SITE_CHROME_PID/);
+  }
   const permissions = spawnSync("python3", ["-c", permissionCheck], { encoding: "utf8", input: sources.join("\n") });
   assert.equal(permissions.status, 0, `${permissions.stdout}\n${permissions.stderr}`);
-  const preflight = block(SITE, "site2-03-browser-session-preflight");
-  const source = preflight.match(/cat >"\$browser_root\/browser-process\.py" <<'PY'\n([\s\S]*?)\nPY\n/)?.[1];
-  assert.ok(source, "preflight must stage the browser ownership helper");
-  assert.doesNotMatch(source, /\blsof\b/, "lsof must never establish browser ownership");
+  // Controls only: use a host setuid executable without ever executing it.
+  const forbiddenTool = ["/usr/bin/top", "/usr/bin/su", "/usr/bin/passwd", "/bin/su"]
+    .find((path) => existsSync(path) && (statSync(path).mode & 0o4000) !== 0);
+  assert.ok(forbiddenTool, "host must supply a setuid file for the refusal control");
+  for (const invocation of [forbiddenTool, `FLAG=1 ${forbiddenTool}`, `subprocess.run(["${forbiddenTool}"])`]) {
+    const refused = spawnSync("python3", ["-c", permissionCheck], { encoding: "utf8", input: invocation });
+    assert.notEqual(refused.status, 0, invocation);
+    assert.match(refused.stderr, /setuid tool forbidden/);
+  }
+  // lsof remains only for site2-01's release-process query.
   assert.deepEqual(sources.filter((text) => /\blsof\b/.test(text)).map((text) => text.split("\n")[0]?.split(" —")[0]),
-    ["# step: site2-01", "# step: site2-03-browser-session-preflight"]);
-  assert.equal((block(SITE, "site2-01").match(/\blsof\b/g) ?? []).length, 1);
-  assert.match(block(SITE, "site2-01"), /subprocess\.run\(\["lsof", "-nP", "-F", "n"\]/);
-  assert.equal((preflight.match(/\blsof\b/g) ?? []).length, 1);
-  assert.match(preflight, /lsof -nP -iTCP:"\$chrome_port" -sTCP:LISTEN/);
-  assert.match(source, /proc_pidpath/);
-  assert.match(source, /ms-playwright/);
-  assert.match(source, /os\.kill\([^\n]+, 0\)/);
-  assert.match(preflight, /chrome_pid=\$!/);
-  assert.match(preflight, /browser-process\.py" record/);
+    ["# step: site2-01"]);
+  const preflight = block(SITE, "site2-03-browser-session-preflight");
+  assert.match(preflight, /git -C "\$SITE_RELEASE_REPO" cat-file -e HEAD:scripts\/site-task-browser\.mjs/);
+  assert.match(preflight, /git -C "\$SITE_RELEASE_REPO" diff --exit-code HEAD -- scripts\/site-task-browser\.mjs/);
+  assert.match(preflight, /install -m 0600 "\$SITE_RELEASE_REPO\/scripts\/site-task-browser\.mjs" "\$task_browser"/);
+  assert.match(preflight, /case "\$chrome" in "\$HOME\/Library\/Caches\/ms-playwright\/"\*\) ;; \*\) exit 1 ;; esac/);
+  // The block never launches Chromium itself: only the controller start does.
+  assert.doesNotMatch(preflight, /--headless|"\$chrome" --/);
+  assert.equal((preflight.match(/node "\$task_browser" start --state-dir "\$browser_root" --executable "\$chrome"/g) ?? []).length, 1);
+  assert.ok(preflight.indexOf('node "$task_browser" close --state-dir "$browser_root"') <
+    preflight.indexOf('rm -r -- "$browser_root"'), "failed preflight closes its own browser before removal");
   for (const step of ["site2-05-browser-acceptance", "site2-06"]) {
-    assert.match(block(SITE, step), /kill -0 "\$SITE_CHROME_PID"/);
-    assert.match(block(SITE, step), /browser-process\.py" check/);
+    assert.match(block(SITE, step), /node "\$SITE_TASK_BROWSER" probe --state-dir "\$SITE_BROWSER_ROOT" https:\/\/commonswarm\.com\/app/);
+    assert.doesNotMatch(block(SITE, step), /node "\$SITE_TASK_BROWSER" (?:start|close)/);
   }
-  for (const step of ["site2-07-pre-pin-manifest-close", "site2-07-manifest-close"]) {
+  for (const step of ["site2-browser-close", "site2-07-pre-pin-manifest-close", "site2-07-manifest-close"]) {
     const close = block(SITE, step);
-    assert.ok(close.indexOf('browser-process.py" stop') < close.indexOf('rm -r -- "$SITE_BROWSER_ROOT"'));
-    assert.match(close, /browser-process\.py" stop "\$SITE_BROWSER_ROOT" "\$SITE_CHROME_PID"/);
+    const at = close.indexOf('node "$SITE_TASK_BROWSER" close --state-dir "$SITE_BROWSER_ROOT"');
+    assert.ok(at >= 0, `${step} closes through the controller`);
+    if (close.includes('rm -r -- "$SITE_BROWSER_ROOT"')) assert.ok(at < close.indexOf('rm -r -- "$SITE_BROWSER_ROOT"'));
+    // A browser STOP happens before any box change, so the close stays resumable.
+    if (close.includes("ssh -o")) assert.ok(at < close.indexOf("ssh -o"), `${step} closes the browser before the box`);
   }
+  for (const step of BROWSER_STEPS) {
+    for (const line of block(SITE, step).split("\n").filter((text) => /node "\$(?:SITE_TASK_BROWSER|task_browser)"/.test(text))) {
+      assert.match(line, /--state-dir "\$(?:SITE_BROWSER_ROOT|browser_root)"/, `${step}: ${line}`);
+    }
+  }
+});
+
+function heredoc(source: string, opener: RegExp): string {
+  const match = source.match(opener);
+  assert.ok(match?.index !== undefined, `missing heredoc ${opener}`);
+  const body = source.slice(match.index + match[0].length);
+  return body.slice(0, body.indexOf("\nPY\n") + 1);
+}
+
+test("a browser NOT_PROVED never blocks, rolls back, or prevents a released close", () => {
+  const acceptance = block(SITE, "site2-05-browser-acceptance");
+  // No box contact at all: browser evidence can never restore the pin.
+  assert.doesNotMatch(acceptance, /\bssh\b|ln -s|mv -Tf|>"\$SITE_EVIDENCE\/rollback-auto\.txt"|blocking=yes/);
+  assert.doesNotMatch(block(SITE, "site2-06"), /blocking=yes/);
+  const receipts = [
+    ["site2-05-browser-acceptance", heredoc(acceptance, /python3 - "\$SITE_EVIDENCE" site2-05-browser-acceptance "\$branch" "\$browser_status" <<'PY'\n/)],
+    ["site2-06-browser", heredoc(block(SITE, "site2-06"), /python3 - "\$SITE_EVIDENCE" site2-06-browser "\$branch" "\$status" <<'PY'\n/)],
+  ] as const;
+  const released = heredoc(block(SITE, "site2-07-manifest-close"), /python3 - "\$SITE_EVIDENCE" <<'PY'\n(?=import json,pathlib,re,sys\nroot=pathlib\.Path\(sys\.argv\[1\]\); label="site2-05-browser-acceptance")/);
   const root = mkdtempSync("/private/tmp/plan-baselines-");
   try {
-    // Controls only: use a host setuid executable without ever executing it.
-    // macOS strips setuid from scripts created by an unprivileged test process.
-    const forbiddenTool = ["/usr/bin/top", "/usr/bin/su", "/usr/bin/passwd", "/bin/su"]
-      .find((path) => existsSync(path) && (statSync(path).mode & 0o4000) !== 0);
-    assert.ok(forbiddenTool, "host must supply a setuid file for the refusal control");
-    for (const invocation of [forbiddenTool, `FLAG=1 ${forbiddenTool}`, `subprocess.run(["${forbiddenTool}"])`]) {
-      const refused = spawnSync("python3", ["-c", permissionCheck], { encoding: "utf8", input: invocation });
-      assert.notEqual(refused.status, 0, invocation);
-      assert.match(refused.stderr, /setuid tool forbidden/);
+    for (const [label, program] of receipts) {
+      const step = label.slice(0, 8);
+      for (const [branch, started, code, expected] of [
+        ["FULL-CONTROL", true, "1", "NOT_PROVED"], ["FULL-CONTROL", false, "1", "NOT_PROVED"],
+        ["REDUCED-CONTROL", true, "7", "NOT_PROVED"], ["FULL-CONTROL", true, "0", "PASS"],
+      ] as const) {
+        const evidence = join(root, `${label}-${branch}-${started}-${code}`);
+        mkdirSync(evidence);
+        writeFileSync(join(evidence, `${label}-summary.txt`),
+          `${label}: STEP 0 (control setup); exit code pending\n` +
+          `STOP ${step}: task-owned Chromium is not running (probe controller-gone)\n`);
+        if (started) writeFileSync(join(evidence, `${label}-assertions-started.txt`), "ASSERTIONS_STARTED\n");
+        const run = spawnSync("python3", ["-", evidence, label, branch, code], { encoding: "utf8", input: program });
+        assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+        const rows = readFileSync(join(evidence, `${label}-receipt.txt`), "utf8").split("\n");
+        assert.ok(rows.includes("blocking=no"), `${label} ${branch} ${code}: never blocking`);
+        assert.ok(rows.some((row) => row.startsWith(`browser_acceptance=${expected} reason=`)));
+        if (code !== "0") {
+          assert.ok(rows.includes(`browser_acceptance=NOT_PROVED reason=STOP ${step}: task-owned Chromium is not running (probe controller-gone)`));
+        }
+        if (label !== "site2-05-browser-acceptance") continue;
+        // The released close accepts this receipt in either mode and phase.
+        writeFileSync(join(evidence, "site2-03-browser-preflight.json"), JSON.stringify({ branch }));
+        if (code === "0") writeFileSync(join(evidence, "site2-05-browser.json"), JSON.stringify({ branch }));
+        const close = spawnSync("python3", ["-", evidence], { encoding: "utf8", input: released });
+        assert.equal(close.status, 0, `${branch} started=${started}: ${close.stderr}`);
+        // Positive control: the same close still refuses a blocking receipt.
+        const receipt = join(evidence, `${label}-receipt.txt`);
+        writeFileSync(receipt, readFileSync(receipt, "utf8").replace("blocking=no", "blocking=yes"));
+        assert.notEqual(spawnSync("python3", ["-", evidence], { encoding: "utf8", input: released }).status, 0);
+      }
     }
-    const script = join(root, "browser-process.py");
-    writeFileSync(script, source, { mode: 0o600 });
-    // Mock only OS observations. Execute the exact staged helper and persist its
-    // real receipt; signal observations prove refusal, TERM and KILL ordering.
-    const result = spawnSync("python3", ["-", script, root], { encoding: "utf8", input: String.raw`
-import ctypes, errno, json, os, pathlib, runpy, signal, sys, time
-script, root = sys.argv[1:]
-root = pathlib.Path(root)
-binary = str(pathlib.Path.home() / "Library/Caches/ms-playwright/control/chrome")
-profile = str(root / "browser-profile")
-receipt = root / "browser-process.json"
-state = {}
-class PathReader:
-    def __call__(self, pid, buffer, size):
-        state["path_reads"] += 1
-        if state.get("path_unavailable"): return 0
-        if state.get("reuse_before_term") and state["path_reads"] >= 2: state["path"] = "/bin/sleep"
-        buffer.value = state["path"].encode()
-        return len(buffer.value)
-class StartReader:
-    def __call__(self, pid, flavor, arg, buffer, size):
-        assert (pid, flavor, arg, size) == (424242, 3, 0, 136)
-        state["start_reads"] += 1
-        if state.get("start_unavailable"): return 0
-        if state.get("start_truncated"): return size - 1
-        if state.get("same_binary_reuse_before_term") and state["start_reads"] >= 2:
-            state["start"] = [1000, 123457]
-        # Darwin proc_bsdinfo: the two uint64 start fields begin at byte 120.
-        fields = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint64))
-        fields[15], fields[16] = state["start"]
-        return size
-class Libproc:
-    proc_pidpath = PathReader()
-    proc_pidinfo = StartReader()
-ctypes.CDLL = lambda *args, **kwargs: Libproc()
-def kill(pid, sig):
-    assert pid == 424242
-    if sig == 0:
-        if state.get("denied"): raise PermissionError(errno.EPERM, "denied")
-        if not state["alive"]: raise ProcessLookupError(errno.ESRCH, "gone")
-    else:
-        state["signals"].append(sig)
-        state["signal_start_reads"].append(state["start_reads"])
-        if sig == signal.SIGKILL and not state.get("ignore_kill") or sig == signal.SIGTERM and not state.get("ignore_term"):
-            state["alive"] = False
-        if state.get("reuse_after_term"): state["path"] = "/bin/sleep"
-        if state.get("reuse_start_after_term"): state["start"] = [1000, 123457]
-        if state.get("start_unavailable_after_term"): state["start_unavailable"] = True
-os.kill = kill
-time.sleep = lambda seconds: None
-def reset(**changes):
-    state.clear()
-    state.update(alive=True, path=binary, start=[1000, 123456], signals=[], path_reads=0,
-                 start_reads=0, signal_start_reads=[])
-    state.update(changes)
-def run(mode, ok):
-    sys.argv = [script, mode, str(root), "424242", binary, profile]
-    try:
-        runpy.run_path(script, run_name="__main__")
-    except SystemExit as error:
-        assert not ok, str(error)
-        assert "STOP" in str(error) and "pid" in str(error).lower() and "executable_path" in str(error)
-    else:
-        assert ok, mode + " unexpectedly passed"
-reset()
-run("record", True)
-saved = receipt.read_text()
-assert receipt.stat().st_mode & 0o777 == 0o600
-assert json.loads(saved)["pid"] == 424242
-assert json.loads(saved)["executable_path"] == binary
-run("check", True)
-assert state["signals"] == []
-for changes in ({"alive": False}, {"path": "/bin/sleep"}, {"path": binary + "-reused"},
-                {"denied": True}, {"path_unavailable": True}, {"reuse_before_term": True},
-                {"start": [1000, 123457]}, {"same_binary_reuse_before_term": True},
-                {"start_unavailable": True}, {"start_truncated": True}):
-    reset(**changes)
-    run("stop", not state["alive"])
-    assert state["signals"] == []
-    if not state["alive"]: assert state["path_reads"] == state["start_reads"] == 0
-assert json.loads(saved)["start_time"] == [1000, 123456]
-for field, value in (("pid", 424243), ("executable_path", binary + "-reused"), ("start_time", [1000, 123457])):
-    wrong = json.loads(saved); wrong[field] = value
-    receipt.write_text(json.dumps(wrong))
-    reset(); run("stop", False)
-    assert state["signals"] == []
-receipt.write_text(saved)
-for changes, expected in (({}, [signal.SIGTERM]), ({"ignore_term": True}, [signal.SIGTERM, signal.SIGKILL])):
-    reset(**changes); run("stop", True)
-    assert state["signals"] == expected and not state["alive"]
-    assert state["signal_start_reads"] == list(range(2, 2 + len(expected))), "check start time before EVERY signal"
-for change in ("reuse_after_term", "reuse_start_after_term", "start_unavailable_after_term"):
-    reset(ignore_term=True, **{change: True})
-    run("stop", False)
-    assert state["signals"] == [signal.SIGTERM], "reused/unreadable PID must not receive SIGKILL"
-reset(ignore_term=True, ignore_kill=True)
-run("stop", False)
-assert state["alive"] and state["signals"] == [signal.SIGTERM, signal.SIGKILL], "cleanup must prove the PID gone"
-print("ownership lifecycle: PASS (gone, unverified, permission, PID/path/start-time reuse, TERM, KILL)")
-` });
-    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   } finally { cleanup(root); }
+});
+
+test("the plan's browser check turns a missing task browser into a named NOT_PROVED reason", () => {
+  const source = block(SITE, "site2-05-browser-acceptance");
+  const check = source.match(/ {2}check_task_browser\(\) \{\n[\s\S]*?\n {2}\}\n/)?.[0];
+  assert.ok(check, "acceptance defines check_task_browser");
+  // The controller insists on its own 0700 anvil-secret root; nothing runs or launches here.
+  const browserRoot = mkdtempSync("/private/tmp/anvil-secret.");
+  try {
+    assert.match(browserRoot, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/);
+    writeFileSync(join(browserRoot, "site-task-browser.mjs"), readFileSync("scripts/site-task-browser.mjs"), { mode: 0o600 });
+    const summary = join(browserRoot, "summary.txt");
+    const run = (env: Record<string, string>) => spawnSync("/bin/bash", ["-c", `set -euo pipefail\n${check}\ncheck_task_browser`],
+      { encoding: "utf8", env: { ...process.env, control_summary: summary, ...env } });
+    const missing = run({ SITE_BROWSER_ROOT: browserRoot, SITE_TASK_BROWSER: join(browserRoot, "site-task-browser.mjs"),
+      SITE_CHROME_ENDPOINT: "http://127.0.0.1:9" });
+    assert.equal(missing.status, 1, missing.stderr);
+    assert.equal(readFileSync(summary, "utf8"), "STOP site2-05: task-owned Chromium is not running (probe no-task-browser)\n");
+    const unrooted = run({ SITE_BROWSER_ROOT: "/private/tmp/elsewhere", SITE_TASK_BROWSER: "/private/tmp/elsewhere/site-task-browser.mjs" });
+    assert.equal(unrooted.status, 1);
+    assert.match(readFileSync(summary, "utf8"), /not running \(controller missing\)\n$/);
+  } finally {
+    assert.match(browserRoot, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]{6}$/);
+    const removed = spawnSync("rm", ["-rf", "--", browserRoot], { encoding: "utf8" });
+    assert.equal(removed.status, 0, removed.stderr);
+  }
 });

@@ -25,7 +25,10 @@ Every headless browser launch in this plan or any plan copied from it passes
 temporary profile: Chromium's macOS seatbelt cannot start inside the release
 worker's `sandbox-exec` profile (`~/.config/agent-sandbox/no-real-chrome.sb`),
 which supplies containment. Use only Playwright's bundled Chromium, never the
-installed Chrome. See the REDUCED-CONTROL rule under "Fresh headless Chromium session".
+installed Chrome. `scripts/site-task-browser.mjs` from the exact release checkout
+is the only thing that launches, probes, or closes that browser. Browser evidence
+is optional: a browser failure is `NOT_PROVED` and never rolls back public bytes
+that the independent public checks verified. See "Fresh headless Chromium session".
 
 Hosted MCP must be ON. `site2-00-a-close-ingest` now records the live
 protected-resource metadata and unauthenticated MCP POST checks that replace
@@ -102,15 +105,15 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 | 3 | `site2-00-a-close-ingest` | Current hosted MCP ON receipt; preserves the historical step name. |
 | 4 | `site2-00-build-env` | Validated build document through service-account token file; private staging removed. |
 | 5 | `site2-02` | Exact source, site inventory/count reconciliation and deletion guards. |
-| 6 | `site2-03-browser-session-preflight` | Task-owned bundled headless Chromium; automatic FULL-CONTROL / REDUCED-CONTROL branch. |
+| 6 | `site2-03-browser-session-preflight` | Task-browser controller starts bundled headless Chromium; automatic FULL-CONTROL / REDUCED-CONTROL branch. |
 | 7 | `site2-03` | Build environment and selected browser branch validated. |
 | 8 | `site2-03-pin-previous` | Measured baseline copied and inventory-proved; pin invocation marker retained even on failure. |
 | 9 | `site2-03-go-record` | Lead authorization, exact-SHA gates, MCP ON recheck and verified pin; bounded GO. |
 | 10 | `site2-04` | Build/upload/switch once; exact target and retained pin measured. |
 | 11 | `site2-05` | Public page/asset bytes and measured release version; automatic rollback on failure. |
-| 12 | `site2-05-browser-acceptance` | Branch/phase acceptance rule below; blocking failures automatically restore pin. |
-| 13 | `site2-06` | Rollback public bytes verified or not-needed recorded, then applicable browser recheck. |
-| 14 | `site2-07-manifest-close` | Receipts, manifest, box pin release and guarded input cleanup; CLOSED only after success. |
+| 12 | `site2-05-browser-acceptance` | Controller probe, then browser acceptance; any browser failure is a non-blocking `NOT_PROVED` receipt, never a rollback. |
+| 13 | `site2-06` | Rollback public bytes verified or not-needed recorded, then applicable non-blocking browser recheck. |
+| 14 | `site2-07-manifest-close` | Task-browser close, receipts, manifest, box pin release and guarded input cleanup; CLOSED only after success. |
 
 ### Failure paths
 
@@ -118,14 +121,15 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 |---|---|
 | `site2-00-source-checkout` fails | STOP before opening; report exact failure; no box mutation or close claim. |
 | `site2-01` fails before either window file exists | STOP; no release occurred. If either window file was created, retain it and report partial open to HezLead; do not invent cleanup commands. |
-| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` verifies baseline unchanged and closes without a pin. |
-| `site2-03-pin-previous` fails / disconnects | Retain invocation marker and any pin; HezLead reconciles partial state. Never use pre-pin close or replay the pin step. |
-| `site2-03-go-record` fails after a successful pin | Stop before deploy and report to HezLead; retain pin/window. The existing normal close requires a public acceptance or deployment-failure receipt, so do not fabricate either to close. |
+| `site2-00-a-close-ingest`, `site2-00-build-env`, `site2-02`, `site2-03-browser-session-preflight` or `site2-03` fails before pin invocation | Stop forward work; `site2-06`, then `site2-07-pre-pin-manifest-close` closes the task browser, verifies baseline unchanged and closes without a pin. A failed preflight already closed its own task browser. |
+| `site2-03-pin-previous` fails / disconnects | `site2-browser-close`; retain invocation marker and any pin; HezLead reconciles partial state. Never use pre-pin close or replay the pin step. |
+| `site2-03-go-record` fails after a successful pin | `site2-browser-close`; stop before deploy and report to HezLead; retain pin/window. The existing normal close requires a public acceptance or deployment-failure receipt, so do not fabricate either to close. |
 | `site2-04` fails / disconnects | `site2-04-reconcile-failure` exactly once: unchanged baseline records failed-before-switch; target current restores pin; a third state STOPs for incident handling. Then `site2-06`, `site2-07-manifest-close` if readbacks pass. |
-| `site2-05` or blocking `site2-05-browser-acceptance` fails | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |
-| Non-blocking browser acceptance fails | Retain explicit NOT_PROVED receipt plus independent public PASS; `site2-06`, then `site2-07-manifest-close` under the unchanged mode/phase rule. |
-| `site2-06` public verification or blocking browser recheck fails | STOP and retain pin/window/evidence for HezLead; no successful close. |
-| Either close fails | Retain state; guarded-rm refusal reports exact path/message and leaves it. `site2-07-manifest-close` may resume only the documented no-box-close-receipt state; partial box close needs HezLead reconciliation. |
+| `site2-05` public bytes fail | Automatic pin restore; `site2-06`, then `site2-07-manifest-close` only after required rollback receipts pass. |
+| Browser acceptance fails (any mode or phase, including controller probe) | Retain explicit NOT_PROVED receipt plus independent public PASS; no rollback; `site2-06`, then `site2-07-manifest-close`. |
+| `site2-06` public verification fails | `site2-browser-close`; STOP and retain pin/window/evidence for HezLead; no successful close. A browser recheck failure is NOT_PROVED, never blocking. |
+| `site2-04-reconcile-failure` stops on a third state | `site2-browser-close`; incident handling owns the rest. |
+| Either close fails | Retain state; guarded-rm refusal reports exact path/message and leaves it. Each close runs the idempotent task-browser close before any box change, so a browser STOP leaves it resumable. `site2-07-manifest-close` may resume only the documented no-box-close-receipt state; partial box close needs HezLead reconciliation. |
 
 ```sh
 # step: site2-plan-inputs
@@ -545,16 +549,40 @@ worker's sandbox. The worker's outer `sandbox-exec` profile
 of installed Chrome and reads of real Chrome profiles and the macOS keychain.
 Only Playwright's bundled Chromium may run; later CDP controls reuse that process.
 A keychain dialog is STOP, never a
-click-through or reduced-control fallback. Close stops only the task-owned
-headless process and removes its private profile through guarded rm.
+click-through or reduced-control fallback.
+
+**Task-browser controller.** `scripts/site-task-browser.mjs`, copied mode 0600
+from the clean exact-SHA checkout into the private root, is the only process
+that launches, probes, or closes the task browser:
+
+- `start` launches one detached controller. It creates a fresh mode-0700
+  `profile-XXXXXX` inside the private root, launches the bundled Chromium
+  (refusing anything outside the Playwright cache or under `/Applications`) as
+  its own child with `--headless --no-sandbox --password-store=basic
+  --use-mock-keychain` and a loopback DevTools port it reads from
+  `DevToolsActivePort`, and writes a mode-0600 state file (controller PID,
+  browser PID, start time, executable path, profile, random token). Its control
+  channel is a mode-0600 Unix socket in the private root, authenticated by that
+  token. The controller has a five-hour lifetime cap.
+- `probe` asks the controller to prove its own child is alive and its endpoint
+  answers as HeadlessChrome, then opens and closes `/app` in a new target. It
+  never launches a second browser. Any failure prints
+  `TASK_BROWSER_PROBE=NOT_PROVED reason=<category>`.
+- `close` is idempotent. A live controller stops its own child (TERM, then KILL,
+  only through its child handle), removes the exact profile it created, and
+  exits. If the controller and browser are already gone, close passes. If the
+  controller is gone and the recorded browser PID still exists, close STOPs
+  without signalling it. No block uses `ps`, `pgrep`, `lsof` for ownership, a
+  setuid tool, or a PID read from the window file.
 
 Each browser step uses a unique named harness daemon derived from the window ID,
 step, and private-root suffix, with its own private runtime directory. Its EXIT
-trap stops only that exact named daemon on success or failure. Later controls
-reuse the task-owned headless process/profile and leave removal to window close.
-Chromium starts in its own session/process group with stdin closed, so ending a
-marked block's process group does not stop it. The saved PID stays the same
-through setsid and exec; later controls reuse that process/profile on success.
+trap stops only that exact named daemon on success or failure. The harness only
+attaches to the controller's loopback endpoint; it never launches a browser.
+Later controls reuse the controller-owned browser and leave removal to
+`site2-07` close or `site2-browser-close`. The controller runs in its own
+session with stdin closed, so ending a marked block's process group does not
+stop it.
 Raw harness output and daemon logs stay under the private secret-staging root
 until failure cleanup or window close. Only a sanitized mode-0600 summary is
 retained in `SITE_EVIDENCE`: the last numbered STEP, exit code, and filtered
@@ -583,9 +611,10 @@ retaining raw browser output in the public evidence directory.
   test "$(command -v rm)" = "$HOME/.local/bin/rm"
   browser_root="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
   case "$browser_root" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
-  chrome_pid=
+  controller_started=0
   harness_started=0
   keep_browser=0
+  task_browser="$browser_root/site-task-browser.mjs"
   cleanup_browser_preflight() {
     status=$?
     trap - EXIT
@@ -602,12 +631,12 @@ retaining raw browser output in the public evidence directory.
       fi
     fi
     if [ "$keep_browser" -eq 1 ] && [ "$status" -eq 0 ]; then exit 0; fi
-    if [ -n "$chrome_pid" ]; then
-      if ! python3 "$browser_root/browser-process.py" stop "$browser_root" "$chrome_pid" "$chrome" "$profile"; then
-        printf 'STOP: preflight browser cleanup unproved; retain %s (recorded PID %s) and window state for HezLead reconciliation\n' "$browser_root" "$chrome_pid" >&2
+    if [ "$controller_started" -eq 1 ]; then
+      # Only the controller stops its own child browser and removes its profile.
+      if ! node "$task_browser" close --state-dir "$browser_root" >"$browser_root/controller-close.txt" 2>&1; then
+        printf 'STOP: preflight task-browser close unproved; retain %s and window state for HezLead reconciliation\n' "$browser_root" >&2
         exit 1
       fi
-      wait "$chrome_pid" 2>/dev/null || true
     fi
     if ! rm -r -- "$browser_root"; then
       printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
@@ -627,153 +656,11 @@ retaining raw browser output in the public evidence directory.
   harness_stderr="$private_evidence/harness.stderr"
   : >"$harness_stdout"; : >"$harness_stderr"
   chmod 0600 "$harness_stdout" "$harness_stderr"
-  profile="$browser_root/browser-profile"
-  mkdir -m 0700 "$profile"
-  # Ownership uses the saved PID, liveness, and libproc's path/start-time APIs.
-  # Start time guards same-binary PID reuse; no process-name/group kills.
-  cat >"$browser_root/browser-process.py" <<'PY'
-import ctypes, json, os, pathlib, signal, sys, time
-mode, root, pid_text, binary, profile = sys.argv[1:]
-root = pathlib.Path(root)
-receipt = root / "browser-process.json"
-field = "pid"
-
-def alive():
-    try:
-        os.kill(pid, 0)  # kill -0: only ESRCH means already gone; EPERM stops.
-        return True
-    except ProcessLookupError:
-        return False
-
-# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo (136 bytes).
-class BsdInfo(ctypes.Structure):
-    _fields_ = [("header", ctypes.c_uint32 * 12), ("names", ctypes.c_char * 48),
-                ("tail", ctypes.c_uint32 * 6), ("pbi_start_tvsec", ctypes.c_uint64),
-                ("pbi_start_tvusec", ctypes.c_uint64)]
-
-def start_time():
-    global field
-    field = "start_time"
-    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                                   ctypes.c_void_p, ctypes.c_int]
-    libproc.proc_pidinfo.restype = ctypes.c_int
-    info = BsdInfo()
-    size = ctypes.sizeof(info)
-    if size != 136 or libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
-        raise RuntimeError("process start time unavailable")
-    if info.pbi_start_tvsec == 0 or info.pbi_start_tvusec >= 1000000:
-        raise RuntimeError("invalid process start time")
-    return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)]
-
-def executable_path():
-    global field
-    field = "executable_path"
-    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    libproc.proc_pidpath.restype = ctypes.c_int
-    buffer = ctypes.create_string_buffer(4096)
-    if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
-        raise RuntimeError("executable path unavailable")
-    return str(pathlib.Path(os.fsdecode(buffer.value)).resolve())
-
-def verified():
-    global field
-    field = "pid"
-    if not alive():
-        return False
-    observed = executable_path()
-    pathlib.Path(observed).relative_to(cache)
-    field = "recorded_executable_path"
-    if observed != recorded["executable_path"] or observed != expected:
-        raise RuntimeError("PID reused or executable path changed")
-    observed_start = start_time()
-    field = "recorded_start_time"
-    if observed_start != recorded["start_time"]:
-        raise RuntimeError("PID reused or start time changed")
-    return True
-
-def signal_verified(signum):
-    if verified():
-        try:
-            os.kill(pid, signum)
-        except ProcessLookupError:
-            pass  # The verified process exited between the identity read and signal.
-
-try:
-    pid = int(pid_text)
-    if pid <= 1 or mode not in ("record", "check", "stop"):
-        raise ValueError("invalid PID or operation")
-    field = "profile"
-    if profile != str(root / "browser-profile"):
-        raise ValueError("invalid profile")
-    field = "executable_path"
-    cache = (pathlib.Path.home() / "Library/Caches/ms-playwright").resolve()
-    expected = str(pathlib.Path(binary).resolve())
-    if mode == "record":
-        pathlib.Path(expected).relative_to(cache)
-        # The launcher execs Chromium in place; wait for that executable transition.
-        for attempt in range(100):
-            if not alive():
-                raise RuntimeError("browser exited before recording")
-            launched_start = start_time()
-            observed = executable_path()
-            if observed == expected:
-                break
-            time.sleep(0.01)
-        else:
-            raise RuntimeError("launch executable not proved")
-        if start_time() != launched_start:
-            raise RuntimeError("PID reused during launch recording")
-        current = {"pid": pid, "executable_path": observed, "start_time": launched_start,
-                   "profile": profile}
-        field = "receipt"
-        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as output:
-            json.dump(current, output, sort_keys=True)
-        receipt.chmod(0o600)
-    else:
-        # Check liveness before reading a path: ESRCH is successful cleanup.
-        field = "pid"
-        if not alive():
-            if mode == "check":
-                raise RuntimeError("browser already gone")
-        else:
-            field = "executable_path"
-            pathlib.Path(expected).relative_to(cache)
-            field = "receipt"
-            if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
-                raise RuntimeError("recorded identity unavailable")
-            recorded = json.loads(receipt.read_text())
-            field = "recorded_pid"
-            if recorded["pid"] != pid or recorded["profile"] != profile:
-                raise RuntimeError("recorded PID/profile changed")
-            owned = verified()
-            if not owned and mode == "check":
-                raise RuntimeError("browser already gone")
-            if owned and mode == "stop":
-                # Recheck recorded path AND start time immediately before each signal.
-                signal_verified(signal.SIGTERM)
-                for attempt in range(100):
-                    if not alive():
-                        break
-                    time.sleep(0.1)
-                else:
-                    signal_verified(signal.SIGKILL)
-                    for attempt in range(50):
-                        if not alive():
-                            break
-                        time.sleep(0.1)
-                    else:
-                        field = "pid"
-                        raise RuntimeError("browser still alive")
-except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-    # Field names only; never print private paths or arbitrary exception details.
-    raise SystemExit("STOP: task browser ownership/cleanup not proved; fields=pid,executable_path," +
-                     field + "; no unverified PID signalled; retain private staging and window state "
-                     "for HezLead reconciliation") from None
-PY
-  chmod 0600 "$browser_root/browser-process.py"
+  # The controller comes only from the exact, clean release checkout.
+  test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
+  git -C "$SITE_RELEASE_REPO" cat-file -e HEAD:scripts/site-task-browser.mjs
+  git -C "$SITE_RELEASE_REPO" diff --exit-code HEAD -- scripts/site-task-browser.mjs
+  install -m 0600 "$SITE_RELEASE_REPO/scripts/site-task-browser.mjs" "$task_browser"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
   chrome="$(node -e 'console.log(require(process.argv[1]).chromium.executablePath())' \
     "$(npm root -g)/playwright")"
@@ -782,27 +669,18 @@ PY
   CLI_USER_ID="$(cswarm status \
     --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -er '.identity.user_id')"
   test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
-  chrome_port=9335
-  if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
-  # setsid detaches from the block executor's process group; exec preserves $!.
-  python3 -c 'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "$chrome" --headless --no-sandbox --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
-    --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
-    --no-first-run --no-default-browser-check about:blank \
-    </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
-  chrome_pid=$!
-  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
-  port_file="$profile/DevToolsActivePort"
-  tries=0
-  while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
-    tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
-  done
-  endpoint="http://127.0.0.1:$chrome_port"
+  # The detached controller holds Chromium as its own child with a fresh 0700
+  # profile, --no-sandbox, --password-store=basic and --use-mock-keychain, and
+  # serves a token-authenticated socket inside this private root.
+  controller_started=1
+  node "$task_browser" start --state-dir "$browser_root" --executable "$chrome" \
+    </dev/null >"$browser_root/controller-start.txt" 2>&1
+  endpoint="$(sed -n 's/^TASK_BROWSER_ENDPOINT=//p' "$browser_root/controller-start.txt")"
+  case "$endpoint" in http://127.0.0.1:[1-9]*) ;; *) exit 1 ;; esac
+  case "${endpoint#http://127.0.0.1:}" in *[!0-9]*) exit 1 ;; esac
   {
     printf 'SITE_BROWSER_ROOT=%q\n' "$browser_root"
-    printf 'SITE_CHROME_BINARY=%q\n' "$chrome"
-    printf 'SITE_CHROME_PROFILE=%q\n' "$profile"
-    printf 'SITE_CHROME_PID=%q\n' "$chrome_pid"
+    printf 'SITE_TASK_BROWSER=%q\n' "$task_browser"
     printf 'SITE_CHROME_ENDPOINT=%q\n' "$endpoint"
   } >>"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
@@ -1269,26 +1147,25 @@ Every scripted public request uses `User-Agent:
 commonswarm-release-probe/1.0`. A failed public control automatically restores
 the pin. Browser state cannot prevent these page/asset checks from running.
 
-HezLead's acceptance decision table uses the mode selected by `site2-03`.
-"Before assertions" means no `ASSERTIONS_STARTED` marker was written; attachment,
-navigation and app readiness are browser infrastructure checks. Once any product
-assertion starts, FULL-CONTROL failures remain blocking, including later cleanup.
-A non-blocking result requires the separate `site2-05-public.txt` PASS receipt;
+HezLead's acceptance decision table uses the mode selected by `site2-03` only to
+choose which browser assertions run. Browser evidence is optional: only
+deployment and public page/asset checks may roll back. The receipt still records
+whether product assertions started (`ASSERTIONS_STARTED` marker), so a
+FULL-CONTROL `NOT_PROVED` after assertions started is visible to HezLead. A
+`NOT_PROVED` result requires the separate `site2-05-public.txt` PASS receipt;
 it never converts a public-byte or deployment failure into a success.
 
 | Mode | Failure type | Blocking? | Automatic rollback? |
 |---|---|---|---|
 | Either | Deployment failure or public page/asset byte failure | Yes | Yes (site2-04 reconciliation restores the pin if switched) |
-| REDUCED-CONTROL | Any browser step: setup, harness, attachment, readiness, Chromium gone, assertion or daemon cleanup | No; `browser_acceptance=NOT_PROVED reason=<named STEP or STOP line>` | No |
-| FULL-CONTROL | Browser infrastructure failure before any product assertion ran | No; same `NOT_PROVED` receipt | No |
-| FULL-CONTROL | Browser failure after product assertions started | Yes | Yes |
+| Either | Any browser step: controller probe, setup, harness, attachment, readiness, assertion or daemon cleanup, before or after assertions started | No; `browser_acceptance=NOT_PROVED reason=<named STEP or STOP line>` | No |
 | Either | Browser acceptance passed | No | No |
 
 `site2-06` verifies rollback public bytes before attempting its browser re-check.
-Its browser failures use the same mode/phase rule, record `NOT_PROVED` when
-non-blocking, and do not perform another rollback. A public-byte verification
-failure remains blocking in both modes. No rollback marker means `not-needed`;
-that path does not require a running browser.
+Its browser failures record `NOT_PROVED`, are never blocking, and never perform
+another rollback. A public-byte verification failure remains blocking in both
+modes. No rollback marker means `not-needed`; that path does not require a
+running browser.
 
 ```sh
 # step: site2-05 — Mac mini /bin/bash 3.2; Anvil; public bytes with automatic rollback
@@ -1388,7 +1265,7 @@ shipped bundle has the surface and no creation action, and records the four
 signed-in claims as `NOT PROVED`. All actions are view-only: do not click a
 revoke control, create action, or Sign out. The full branch switches back to
 the recorded start workspace before it finishes. The decision table above governs
-failure. Every completed attempt writes a sanitized summary and mode-0600
+failure: this block never contacts the box and never rolls back. Every completed attempt writes a sanitized summary and mode-0600
 `site2-05-browser-acceptance-receipt.txt`, including a named STEP/STOP reason for `NOT_PROVED`.
 The receipt records the raw browser exit code separately from the step exit code;
 a non-blocking browser failure exits zero so the release continues to close.
@@ -1396,7 +1273,7 @@ a non-blocking browser failure exits zero so the release continues to close.
 ```sh
 # step: site2-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium acceptance
 # readonly: no
-# host: Mac mini /bin/bash 3.2 as Anvil; ssh child only for automatic rollback
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   set -E
@@ -1423,21 +1300,20 @@ a non-blocking browser failure exits zero so the release continues to close.
   test ! -e "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt"
   check_task_browser() {
     browser_reason=
-    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
-    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-      browser_reason='pid gone'
+    case "${SITE_BROWSER_ROOT:-}" in /private/tmp/anvil-secret.??????) ;; *) browser_reason='controller missing' ;; esac
+    if [ -z "$browser_reason" ] && [ "${SITE_TASK_BROWSER:-}" != "$SITE_BROWSER_ROOT/site-task-browser.mjs" ]; then
+      browser_reason='controller missing'
     fi
     if [ -z "$browser_reason" ]; then
-      if [ -z "${SITE_BROWSER_ROOT:-}" ] || [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ] ||
-        ! python3 "$SITE_BROWSER_ROOT/browser-process.py" check "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
-          "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE" 2>/dev/null; then
-        browser_reason='not ours'
-      fi
-    fi
-    if [ -z "$browser_reason" ]; then
-      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
-        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
-        browser_reason='endpoint down'
+      # The controller alone proves its own child browser and endpoint; no PID is read here.
+      probe_file="$SITE_BROWSER_ROOT/site2-05-probe.txt"
+      if ! node "$SITE_TASK_BROWSER" probe --state-dir "$SITE_BROWSER_ROOT" https://commonswarm.com/app \
+        </dev/null >"$probe_file" 2>&1; then
+        browser_reason="probe $(sed -n 's/^TASK_BROWSER_PROBE=NOT_PROVED reason=//p' "$probe_file" 2>/dev/null | head -n 1 || true)"
+        case "$browser_reason" in 'probe '[a-z]*) ;; *) browser_reason='probe failed' ;; esac
+        case "${browser_reason#probe }" in *[!a-z-]*) browser_reason='probe failed' ;; esac
+      elif ! grep -qFx "TASK_BROWSER_ENDPOINT=${SITE_CHROME_ENDPOINT:-}" "$probe_file"; then
+        browser_reason='endpoint changed'
       fi
     fi
     if [ -n "$browser_reason" ]; then
@@ -1458,7 +1334,6 @@ a non-blocking browser failure exits zero so the release continues to close.
     case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
     test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
     test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
-    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
     endpoint="$SITE_CHROME_ENDPOINT"
     private_evidence="$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence"
     harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-05"
@@ -1739,45 +1614,28 @@ reason="STEP 0 (control setup)"
 for line in lines:
     match=re.fullmatch(re.escape(label)+r": (STEP [0-9]{1,2} \([A-Za-z /-]+\)); exit code (?:pending|[0-9]+)",line)
     if match: reason=match[1]
-    if line in {"STOP site2-05: task-owned Chromium is not running (pid gone)",
-                "STOP site2-05: task-owned Chromium is not running (not ours)",
-                "STOP site2-05: task-owned Chromium is not running (endpoint down)",
-                "STOP site2-06: task-owned Chromium is not running (pid gone)",
-                "STOP site2-06: task-owned Chromium is not running (not ours)",
-                "STOP site2-06: task-owned Chromium is not running (endpoint down)",
-                "STOP: named site2-05-browser-acceptance daemon cleanup failed; details withheld",
+    if re.fullmatch(r"STOP site2-0[56]: task-owned Chromium is not running "
+                    r"\((?:controller missing|endpoint changed|probe [a-z][a-z-]*)\)",line):
+        reason=line
+    if line in {"STOP: named site2-05-browser-acceptance daemon cleanup failed; details withheld",
                 "STOP: named site2-06 daemon cleanup failed; details withheld",
                 "stderr: STOP: STEP 1 endpoint ownership",
                 "stderr: STOP: STEP 3 document load timeout",
                 "stderr: STOP: STEP 4 app readiness timeout"}:
         reason=line.removeprefix("stderr: ")
-nonblocking=branch=="REDUCED-CONTROL" or not started
-acceptance="PASS" if code==0 else "NOT_PROVED" if nonblocking else "FAIL"
+# Browser evidence is optional: any browser failure, in either mode or phase,
+# is NOT_PROVED and never blocking; only deployment/public checks roll back.
+acceptance="PASS" if code==0 else "NOT_PROVED"
 rows=["BROWSER_BRANCH="+branch,"browser_acceptance="+acceptance+" reason="+reason,
       "browser_control_exit="+str(code),"assertions_started="+("yes" if started else "no"),
-      "blocking="+("yes" if code and not nonblocking else "no")]
+      "blocking=no"]
 text="\n".join(rows)+"\n"
 receipt=root/(label+"-receipt.txt"); receipt.write_text(text,encoding="utf-8"); receipt.chmod(0o600)
 with summary.open("a",encoding="utf-8") as stream: stream.write(text)
 summary.chmod(0o600)
 PY
-  if test "$browser_status" -ne 0 &&
-    grep -qFx 'blocking=yes' "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt"; then
-    pin=$(cat "$SITE_EVIDENCE/previous.release"); after=$(cat "$SITE_EVIDENCE/after.release")
-    printf -v box_command '%q ' /bin/bash -s -- "$pin" "$after" "$SITE_WINDOW_ID"
-    ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
-      >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
-set -euo pipefail
-set -E
-trap 'printf "FAIL site2-05-browser-acceptance: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
-pin=$1; failed=$2; window_id=$3; root=/srv/commonswarm/site; next="$root/current.next.$window_id"
-test "$pin" = "$root/releases/.site-window-pin-$window_id"; test -f "$pin/app/index.html"
-test "$(readlink -f "$root/current")" = "$failed"; test ! -e "$next" && test ! -L "$next"
-ln -s "$pin" "$next"; mv -Tf "$next" "$root/current"; test "$(readlink -f "$root/current")" = "$pin"
-printf 'rollback_reason=browser-control-failure\nrestored_release=%s\n' "$pin"
-BOX
-    chmod 0600 "$SITE_EVIDENCE/rollback-auto.txt"; exit "$browser_status"
-  fi
+  # Never a rollback: public bytes already passed independently in site2-05.
+  grep -qFx 'blocking=no' "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt"
 )
 ```
 
@@ -1786,7 +1644,7 @@ BOX
 `site2-06` always runs before either close path. It records `not-needed`, or
 verifies pinned baseline bytes through the public boundary and rechecks the
 appropriate browser branch. Public-byte failure stays blocking. The browser
-summary and `site2-06-browser-receipt.txt` retain `NOT_PROVED` on a non-blocking
+summary and `site2-06-browser-receipt.txt` retain `NOT_PROVED` on any failed
 browser re-check, with the original browser exit code and a named STEP/STOP reason.
 
 ```sh
@@ -1818,23 +1676,21 @@ reason="STEP 0 (control setup)"
 for line in lines:
     match=re.fullmatch(re.escape(label)+r": (STEP [0-9]{1,2} \([A-Za-z /-]+\)); exit code (?:pending|[0-9]+)",line)
     if match: reason=match[1]
-    if line in {"STOP site2-05: task-owned Chromium is not running (pid gone)",
-                "STOP site2-05: task-owned Chromium is not running (not ours)",
-                "STOP site2-05: task-owned Chromium is not running (endpoint down)",
-                "STOP site2-06: task-owned Chromium is not running (pid gone)",
-                "STOP site2-06: task-owned Chromium is not running (not ours)",
-                "STOP site2-06: task-owned Chromium is not running (endpoint down)",
-                "STOP: named site2-05-browser-acceptance daemon cleanup failed; details withheld",
+    if re.fullmatch(r"STOP site2-0[56]: task-owned Chromium is not running "
+                    r"\((?:controller missing|endpoint changed|probe [a-z][a-z-]*)\)",line):
+        reason=line
+    if line in {"STOP: named site2-05-browser-acceptance daemon cleanup failed; details withheld",
                 "STOP: named site2-06 daemon cleanup failed; details withheld",
                 "stderr: STOP: STEP 1 endpoint ownership",
                 "stderr: STOP: STEP 3 document load timeout",
                 "stderr: STOP: STEP 4 app readiness timeout"}:
         reason=line.removeprefix("stderr: ")
-nonblocking=branch=="REDUCED-CONTROL" or not started
-acceptance="PASS" if code==0 else "NOT_PROVED" if nonblocking else "FAIL"
+# Browser evidence is optional: any browser failure, in either mode or phase,
+# is NOT_PROVED and never blocking; only deployment/public checks roll back.
+acceptance="PASS" if code==0 else "NOT_PROVED"
 rows=["BROWSER_BRANCH="+branch,"browser_acceptance="+acceptance+" reason="+reason,
       "browser_control_exit="+str(code),"assertions_started="+("yes" if started else "no"),
-      "blocking="+("yes" if code and not nonblocking else "no")]
+      "blocking=no"]
 text="\n".join(rows)+"\n"
 receipt=root/(label+"-receipt.txt"); receipt.write_text(text,encoding="utf-8"); receipt.chmod(0o600)
 with summary.open("a",encoding="utf-8") as stream: stream.write(text)
@@ -1850,21 +1706,20 @@ PY
   trap 'finish_rollback_control "$?"' EXIT
   check_task_browser() {
     browser_reason=
-    case "${SITE_CHROME_PID:-}" in ''|*[!0-9]*|0) browser_reason='pid gone' ;; esac
-    if [ -z "$browser_reason" ] && ! kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
-      browser_reason='pid gone'
+    case "${SITE_BROWSER_ROOT:-}" in /private/tmp/anvil-secret.??????) ;; *) browser_reason='controller missing' ;; esac
+    if [ -z "$browser_reason" ] && [ "${SITE_TASK_BROWSER:-}" != "$SITE_BROWSER_ROOT/site-task-browser.mjs" ]; then
+      browser_reason='controller missing'
     fi
     if [ -z "$browser_reason" ]; then
-      if [ -z "${SITE_BROWSER_ROOT:-}" ] || [ -z "${SITE_CHROME_BINARY:-}" ] || [ -z "${SITE_CHROME_PROFILE:-}" ] ||
-        ! python3 "$SITE_BROWSER_ROOT/browser-process.py" check "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
-          "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE" 2>/dev/null; then
-        browser_reason='not ours'
-      fi
-    fi
-    if [ -z "$browser_reason" ]; then
-      if [ "${SITE_CHROME_ENDPOINT:-}" != http://127.0.0.1:9335 ] ||
-        ! curl --noproxy '*' -fsS --max-time 5 "$SITE_CHROME_ENDPOINT/json/version" >/dev/null 2>&1; then
-        browser_reason='endpoint down'
+      # The controller alone proves its own child browser and endpoint; no PID is read here.
+      probe_file="$SITE_BROWSER_ROOT/site2-06-probe.txt"
+      if ! node "$SITE_TASK_BROWSER" probe --state-dir "$SITE_BROWSER_ROOT" https://commonswarm.com/app \
+        </dev/null >"$probe_file" 2>&1; then
+        browser_reason="probe $(sed -n 's/^TASK_BROWSER_PROBE=NOT_PROVED reason=//p' "$probe_file" 2>/dev/null | head -n 1 || true)"
+        case "$browser_reason" in 'probe '[a-z]*) ;; *) browser_reason='probe failed' ;; esac
+        case "${browser_reason#probe }" in *[!a-z-]*) browser_reason='probe failed' ;; esac
+      elif ! grep -qFx "TASK_BROWSER_ENDPOINT=${SITE_CHROME_ENDPOINT:-}" "$probe_file"; then
+        browser_reason='endpoint changed'
       fi
     fi
     if [ -n "$browser_reason" ]; then
@@ -1907,7 +1762,6 @@ BOX
   case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   test -d "$SITE_BROWSER_ROOT" && test ! -L "$SITE_BROWSER_ROOT"
   test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
-  test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
   endpoint="$SITE_CHROME_ENDPOINT"
   private_evidence="$SITE_BROWSER_ROOT/site2-06-evidence"
   harness_runtime="$SITE_BROWSER_ROOT/harness-runtime-06"
@@ -2097,7 +1951,8 @@ existing `NOT_PROVED` line on this path, even in FULL-CONTROL; closure never
 claims a workspace restore or signed-in assertion that the browser did not prove.
 On success the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
-The task-owned headless browser is stopped and its private profile is removed through guarded rm. The
+Each close first runs the idempotent task-browser controller close, before any box
+change, then removes the private root through guarded rm. The
 temporary build `site/.env` is removed at close.
 
 Choose the close by the pin invocation marker, `site2-03-pin.txt`: the pin step
@@ -2126,6 +1981,38 @@ to SSH. Bash on the box recovers each value as a positional argument; the BOX
 heredoc remains literal script text on stdin. Free acceptance text is never
 passed as unquoted remote command text. Static date/readlink/open calls use
 only fixed commands. The close additionally allowlists its values on the box.
+
+`site2-browser-close` is the standalone, idempotent task-browser close for any
+failure path that retains window state (see Failure paths). It stops only the
+controller-owned browser and removes its profile; the window file, pin, evidence
+and private root stay for the applicable close or HezLead. Rerunning it, or a
+later `site2-07` close, passes when the browser is already gone.
+
+```sh
+# step: site2-browser-close — Mac mini /bin/bash 3.2; Anvil; idempotent task-browser close for any failure path
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
+(
+  set -euo pipefail
+  set -E
+  trap 'printf "FAIL site2-browser-close: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+  test -f "$HOME/.commonswarm-site-window.env" && test ! -L "$HOME/.commonswarm-site-window.env"
+  test "$(stat -f '%Lp' "$HOME/.commonswarm-site-window.env")" = 600
+  . "$HOME/.commonswarm-site-window.env"
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    test "${SITE_TASK_BROWSER:-}" = "$SITE_BROWSER_ROOT/site-task-browser.mjs"
+    if ! node "$SITE_TASK_BROWSER" close --state-dir "$SITE_BROWSER_ROOT" </dev/null; then
+      printf '%s\n' 'STOP site2-browser-close: task-browser close unproved; nothing signalled; retain private staging and window state for HezLead reconciliation' >&2
+      exit 1
+    fi
+  else
+    printf '%s\n' 'TASK_BROWSER_CLOSE=PASS state=no-task-browser'
+  fi
+)
+```
 
 ```sh
 # step: site2-07-pre-pin-manifest-close — Mac mini /bin/bash 3.2; Anvil; close a failure before pin invocation
@@ -2176,6 +2063,24 @@ assert target.name==".env" and target.parent.resolve(strict=True)==repo/"site"
 assert not target.is_symlink()
 if target.exists(): assert target.is_file()
 PY
+  # Close the task browser before any box change, so a browser STOP leaves this
+  # close resumable. Only the controller stops its own child and removes its
+  # profile; close is idempotent and passes when both are already gone.
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    test "${SITE_TASK_BROWSER:-}" = "$SITE_BROWSER_ROOT/site-task-browser.mjs"
+    if ! node "$SITE_TASK_BROWSER" close --state-dir "$SITE_BROWSER_ROOT" </dev/null; then
+      printf '%s\n' 'STOP site2-07-pre-pin-manifest-close: task-browser close unproved; nothing signalled; retain private staging and window state for HezLead reconciliation' >&2
+      exit 1
+    fi
+    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SITE_BROWSER_ROOT"
+  fi
   printf -v box_command '%q ' /bin/bash -s -- "$SITE_WINDOW_ID" "$BASELINE_DIR"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
     >"$SITE_EVIDENCE/site2-07-pre-pin-close.txt" <<'BOX'
@@ -2213,22 +2118,6 @@ BOX
   rm -f -- "$SITE_RELEASE_REPO/site/.env"
   test ! -e "$SITE_RELEASE_REPO/site/.env"
   test ! -L "$SITE_RELEASE_REPO/site/.env"
-  # Same task-owned headless process/profile cleanup as the normal close.
-  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
-    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
-    test ! -L "$SITE_BROWSER_ROOT"
-    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    if ! python3 "$SITE_BROWSER_ROOT/browser-process.py" stop "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
-      "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE"; then
-      printf '%s\n' 'STOP site2-07-pre-pin-manifest-close: browser cleanup unproved; retain private staging and window state for HezLead reconciliation' >&2
-      exit 1
-    fi
-    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
-      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
-      exit 1
-    fi
-    test ! -e "$SITE_BROWSER_ROOT"
-  fi
   # Write the manifest after the box receipt and cleanup; CLOSE.txt stays outside it.
   python3 - "$SITE_EVIDENCE" <<'PY'
 import hashlib,json,pathlib,stat,sys
@@ -2309,8 +2198,8 @@ if acceptance[0].startswith("browser_acceptance=PASS reason="):
     assert "browser_control_exit=0" in rows
     assert json.loads((root/"site2-05-browser.json").read_text(encoding="utf-8"))["branch"]==branch
 else:
+    # Optional browser evidence: NOT_PROVED closes as released in either mode/phase.
     assert re.fullmatch(r"browser_acceptance=NOT_PROVED reason=(?:STEP [0-9]{1,2} \([A-Za-z /-]+\)|STOP[^\n]+)",acceptance[0])
-    assert branch=="REDUCED-CONTROL" or ("assertions_started=no" in rows and not (root/(label+"-assertions-started.txt")).exists())
 PY
     outcome=released
   fi
@@ -2376,6 +2265,24 @@ for row in rows:
     assert format(stat.S_IMODE(path.stat().st_mode),"04o")==row["mode"]
 PY
   }
+  # Close the task browser before any box change, so a browser STOP leaves this
+  # close resumable. Only the controller stops its own child and removes its
+  # profile; close is idempotent and passes when both are already gone.
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
+    test "${SITE_TASK_BROWSER:-}" = "$SITE_BROWSER_ROOT/site-task-browser.mjs"
+    if ! node "$SITE_TASK_BROWSER" close --state-dir "$SITE_BROWSER_ROOT" </dev/null; then
+      printf '%s\n' 'STOP site2-07-manifest-close: task-browser close unproved; nothing signalled; retain private staging and window state for HezLead reconciliation' >&2
+      exit 1
+    fi
+    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SITE_BROWSER_ROOT"
+  fi
   write_site_manifest
   printf -v box_command '%q ' /bin/bash -s -- "$pin" "$previous" "$SITE_WINDOW_ID" "$outcome" "$browser_acceptance_line" "$after" "$SITE_RELEASE_SHA" "$BASELINE_DIR"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "$box_command" \
@@ -2451,25 +2358,6 @@ if build_env.exists(): assert build_env.is_file() and not build_env.is_symlink()
 PY
   rm -f -- "$SITE_RELEASE_REPO/site/.env"
   test ! -e "$SITE_RELEASE_REPO/site/.env"
-  # Close only this block's fresh headless process and private profile.
-  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
-    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
-    test ! -L "$SITE_BROWSER_ROOT"
-    test "$(stat -f '%Lp' "$SITE_BROWSER_ROOT")" = 700
-    case "$SITE_CHROME_PID" in ''|*[!0-9]*) exit 1 ;; esac
-    test "$SITE_CHROME_PID" -gt 1
-    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
-    if ! python3 "$SITE_BROWSER_ROOT/browser-process.py" stop "$SITE_BROWSER_ROOT" "$SITE_CHROME_PID" \
-      "$SITE_CHROME_BINARY" "$SITE_CHROME_PROFILE"; then
-      printf '%s\n' 'STOP site2-07-manifest-close: browser cleanup unproved; retain private staging and window state for HezLead reconciliation' >&2
-      exit 1
-    fi
-    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
-      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
-      exit 1
-    fi
-    test ! -e "$SITE_BROWSER_ROOT"
-  fi
   rm -f -- "$SITE_WINDOW_FILE"
   test ! -e "$SITE_WINDOW_FILE" && test ! -L "$SITE_WINDOW_FILE"
   write_site_manifest
@@ -2514,7 +2402,7 @@ PY
 | P2-K2-07 | `site2-03-pin-previous` creates/proves the retention-proof copy; close releases it. |
 | P2-K2-08 | `site2-04-reconcile-failure` records state and forbids replay. |
 | P2-K2-09 | The marked browser steps use only Anvil's task-owned fresh headless profile and restore its starting workspace. |
-| P2-K2-10 | Deploy/public failures and blocking FULL-CONTROL browser failures auto-switch; `site2-06` requires public rollback bytes and records non-blocking browser failures as NOT_PROVED. |
+| P2-K2-10 | Deploy/public failures auto-switch; browser failures never do; `site2-06` requires public rollback bytes and records browser failures as NOT_PROVED. |
 | P2-K2-11 | `site2-07-manifest-close`, or `site2-07-pre-pin-manifest-close` before pin invocation, scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site2-01` produces the evidence directory. |
 | P2-K3-02 | `site2-00-source-checkout` produces the checkout. |
@@ -2534,7 +2422,7 @@ PY
 | P2-K5-04 | Static exact-SHA deletion-guard assertion in `site2-02`. |
 | P2-K5-05 | Static hold list consumed by GO; missing evidence stops. |
 | P2-K5-06 | Static exact SHA/base authorization consumed by `site2-04`. |
-| P2-K5-07 | Static rollback for deploy/public failures and blocking FULL-CONTROL browser failures; non-blocking browser failures record NOT_PROVED. |
+| P2-K5-07 | Static rollback for deploy/public failures only; every browser failure records NOT_PROVED. |
 | P2-K5-08 | Static mechanical close after required readbacks. |
 | P2-K6 | Empty by audit. |
 | Pre-seed: start/evidence | `site2-01` measures time and creates the named destination. |
@@ -2584,6 +2472,17 @@ parity rulings, service-account build document reference, secret rules, guarded 
 and scp -p / mode-0600 window handling are retained. The new failure table explicitly
 reports existing partial-open/pin/GO/close reconciliation limits rather than creating
 new release actions or claiming an unproved close.
+
+**Task-browser controller (2026-10-03, audit item 4).** After the hunk ledger
+below was written, the browser blocks moved to `scripts/site-task-browser.mjs`:
+the preflight starts the controller instead of a setsid launch and a staged
+`browser-process.py`; `site2-05-browser-acceptance` and `site2-06` probe through
+it instead of `kill -0`, libproc and a fixed port 9335; both `site2-07` closes
+run its idempotent close before any box change; `site2-browser-close` was added
+for retained-state failure paths. Browser failures in either mode or phase are
+now `NOT_PROVED` and never roll back; `site2-05-browser-acceptance` no longer
+contacts the box. Every other marked block is byte-identical. The ledger spans
+below describe the earlier generalization and are not updated for this change.
 
 | Hunk | Lane-8 → generalized body (unified-diff span) | Reason |
 |---|---|---|
