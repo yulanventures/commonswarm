@@ -17,7 +17,7 @@ import { AdminTransactionCoordinator, adminTransactionContext, adminQuery, withA
 import { verifyAdminProof, admitAdminProof } from "../src/admin-dpop.js";
 import { bindProviderAdminNonceStore } from "../src/provider-admin-pin.js";
 import { effectiveAdminGate } from "../src/admin-gate.js";
-import { atomicDiagnostic, eventDiagnostic, failureCode, responseDiagnostic, restoreCutoverState, safeRole }
+import { atomicDiagnostic, eventDiagnostic, failureCode, httpStepDiagnostic, responseDiagnostic, restoreCutoverState, safeRole }
   from "../test/fixtures/admin-atomic-diagnostics.js";
 const ISSUER = "https://mcp.commonswarm.com", ADMIN = "https://api.commonswarm.com/admin";
 const require = createRequire(import.meta.url);
@@ -329,6 +329,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         }
         } catch (error) {
           traces.get(id).failure = failureCode(error);
+          traces.get(id).events.push(eventDiagnostic("interaction.error", error));
           throw error;
         } finally {
           traces.get(id).providerResponse ??= responseDiagnostic(response.statusCode, undefined, response.getHeader("location"));
@@ -341,8 +342,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         trace.failureStatement ??= trace.commitStage ?? "coordinator_refusal";
       }
     } catch (error) {
-      const trace = traces.get(id);
-      if (trace) trace.failure ??= failureCode(error);
+      const trace = traces.get(id) ?? { phase: owned.phase, events: [] };
+      traces.set(id, trace);
+      trace.failure ??= failureCode(error);
+      trace.events.push(eventDiagnostic("ingress.error", error));
       response.statusCode=503; response.end('{"error":"temporarily_unavailable"}');
     }
   });
@@ -375,10 +378,10 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
     const trace = traces.get(id);
     if (trace) trace.httpResponse = responseDiagnostic(response.status,
       response.status >= 400 ? await response.clone().text() : undefined, response.headers.get("location"));
-    if (trace && ["authorize", "resume", "login", "consent-selection", "consent-confirmation"].includes(trace.phase)) {
-      responseHistory.push({ phase: trace.phase, provider_response: trace.providerResponse, http_response: trace.httpResponse });
-    }
-    if (trace) trace.authorizationResponses = responseHistory.slice();
+    const step = httpStepDiagnostic(responseHistory.length + 1, method, trace);
+    responseHistory.push(step);
+    trace.httpSteps = responseHistory.slice();
+    console.info(`admin atomic HTTP: ${JSON.stringify(step)}`);
     for (const cookie of response.headers.getSetCookie()) {
       const pair = cookie.split(";", 1)[0], at = pair.indexOf("=");
       cookies.set(pair.slice(0, at), pair.slice(at + 1));
@@ -488,7 +491,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         const result = await f.request(current);
         atomic(result.trace);
         if (result.response.status === 204) { consentUrl = current; break; }
-        assert.ok([302, 303].includes(result.response.status), "authorization/login redirect expected");
+        assert.ok([302, 303].includes(result.response.status), atomicDiagnostic(result.trace));
         current = new URL(result.response.headers.get("location"), ISSUER);
       }
       assert.ok(consentUrl, "real provider must reach lane-3a selection");
@@ -497,13 +500,13 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         const baseline = await f.snapshot();
         // First explore the real write count in a forced-rollback control.
         const probe = await f.request(url, { ...options, fault: "commit" });
-        assert.equal(probe.response.status, 503);
+        assert.equal(probe.response.status, 503, atomicDiagnostic(probe.trace));
         assert.equal(await f.snapshot(), baseline, "failed COMMIT must restore every owned row");
         assert.ok(probe.trace.writes.length > 0);
         const count = probe.trace.writes.length;
         for (let after = 1; after <= count; after++) await t.test(`${name}: rollback after write ${after}`, async () => {
           const failed = await f.request(url, { ...options, after });
-          assert.equal(failed.response.status, 503);
+          assert.equal(failed.response.status, 503, atomicDiagnostic(failed.trace));
           assert.equal(failed.trace.writes.length, after, "fault must reach the intended write");
           assert.equal(failed.trace.committed, false);
           assert.equal(await f.snapshot(), baseline, "no artifact/consume/authority/audit may survive alone");
@@ -513,7 +516,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
         });
         if (url === "/token") {
           const failed = await f.request(url, { ...options, fault: "signing" });
-          assert.equal(failed.response.status, 503);
+          assert.equal(failed.response.status, 503, atomicDiagnostic(failed.trace));
           assert.equal(await f.snapshot(), baseline, "signing failure rolls back consumed source and successor writes");
           const body = await failed.response.json();
           assert.ok(!("access_token" in body) && !("refresh_token" in body), "signing failure contains no token fields");
@@ -526,7 +529,9 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           entered(); await blocked;
         } }).then(result => { delivered = true; return result; });
         // Do not hang if the positive path fails before reaching COMMIT.
-        await Promise.race([atCommit, operation.then(() => { throw new Error("positive path missed commit barrier"); })]);
+        await Promise.race([atCommit, operation.then(result => {
+          throw new Error(`positive path missed commit barrier: ${atomicDiagnostic(result.trace)}`);
+        })]);
         let duplicate;
         try {
           if (concurrent) {
@@ -539,11 +544,11 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           assert.equal(await f.snapshot(), baseline, "independent backend sees no staged changes before COMMIT");
         } finally { unblock(); }
         const good = await operation;
-        assert.equal(good.response.status, expected); atomic(good.trace);
+        assert.equal(good.response.status, expected, atomicDiagnostic(good.trace)); atomic(good.trace);
         assert.equal(good.trace.writes.length, count);
         if (duplicate) {
           const loser=await duplicate;
-          assert.ok([400,503].includes(loser.response.status),"concurrent receipt/artifact has exactly one winner");
+          assert.ok([400,503].includes(loser.response.status),atomicDiagnostic(loser.trace));
           assert.equal(loser.trace.committed,false,"overlapping loser cannot commit a replay fence");
           const denied=await loser.response.json();
           assert.ok(!("access_token" in denied) && !("refresh_token" in denied));
@@ -594,7 +599,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           JOIN swarm.admin_accounts a ON a.owner_user_id=b.owner_user_id WHERE b.provider_grant_id=$1`,[f.family()])).rows[0];
         await f.restartProvider();
         const resumed=await f.request("/token",{method:"POST",body:refreshBody(f,successor.refresh_token)});
-        assert.equal(resumed.response.status,200);atomic(resumed.trace);
+        assert.equal(resumed.response.status,200,atomicDiagnostic(resumed.trace));atomic(resumed.trace);
         const fresh=await resumed.response.json(),claims=decodeJwt(fresh.access_token);
         assert.ok(claims.exp*1000<=new Date(prior.expires_at).getTime());
         const after=(await f.pool.query(`SELECT b.expires_at,b.refresh_deadline,g.issuance_limits,g.renewal_limits,a.projection->'routine' AS routine
@@ -638,11 +643,11 @@ async function freshCode(f) {
   for (let step=0;step<10;step++) {
     const {response,trace}=await f.request(current); atomic(trace);
     if (response.status === 204) {
-      const finished=await f.request(current,{method:"POST",body:{}}); assert.equal(finished.response.status,303);atomic(finished.trace);
-      const continued=await f.request(finished.response.headers.get("location"));assert.equal(continued.response.status,303);atomic(continued.trace);
+      const finished=await f.request(current,{method:"POST",body:{}}); assert.equal(finished.response.status,303,atomicDiagnostic(finished.trace));atomic(finished.trace);
+      const continued=await f.request(finished.response.headers.get("location"));assert.equal(continued.response.status,303,atomicDiagnostic(continued.trace));atomic(continued.trace);
       return new URL(continued.response.headers.get("location")).searchParams.get("code");
     }
-    assert.ok([302,303].includes(response.status)); current=new URL(response.headers.get("location"),ISSUER);
+    assert.ok([302,303].includes(response.status),atomicDiagnostic(trace)); current=new URL(response.headers.get("location"),ISSUER);
   }
   throw new Error("real provider did not reach consent");
 }
@@ -694,28 +699,28 @@ test("admin-atomic-provider-transaction: sequential replay commits its fence on 
   const f=await fixture({consentLifetimeMs:120000});
   try {
     const code=await freshCode(f);
-    const issued=await f.request("/token",{method:"POST",body:codeBody(f,code)});assert.equal(issued.response.status,200);atomic(issued.trace);
+    const issued=await f.request("/token",{method:"POST",body:codeBody(f,code)});assert.equal(issued.response.status,200,atomicDiagnostic(issued.trace));atomic(issued.trace);
     const initial=await issued.response.json();
     const initialClaims=decodeJwt(initial.access_token);
     assert.ok(initialClaims.exp-initialClaims.iat<=120,"production provider clips a short consent TTL");
     const expanded=await f.request("/token",{method:"POST",body:{...refreshBody(f,initial.refresh_token),scope:"admin:read workspaces:create"}});
-    assert.equal(expanded.response.status,400);assert.equal((await expanded.response.json()).error,"invalid_scope");
-    const rotated=await f.request("/token",{method:"POST",body:refreshBody(f,initial.refresh_token)});assert.equal(rotated.response.status,200);atomic(rotated.trace);
+    assert.equal(expanded.response.status,400,atomicDiagnostic(expanded.trace));assert.equal((await expanded.response.json()).error,"invalid_scope");
+    const rotated=await f.request("/token",{method:"POST",body:refreshBody(f,initial.refresh_token)});assert.equal(rotated.response.status,200,atomicDiagnostic(rotated.trace));atomic(rotated.trace);
     const successor=await rotated.response.json();
     assert.ok(decodeJwt(successor.access_token).exp<=initialClaims.exp,"refresh keeps the absolute consent expiry");
     const replay=await f.request("/token",{method:"POST",body:refreshBody(f,initial.refresh_token)});
-    assert.equal(replay.response.status,400);assert.equal((await replay.response.json()).error,"invalid_grant");atomic(replay.trace);
+    assert.equal(replay.response.status,400,atomicDiagnostic(replay.trace));assert.equal((await replay.response.json()).error,"invalid_grant");atomic(replay.trace);
     assert.equal((await f.pool.query(`SELECT state FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[f.family()])).rows[0].state,"revoked");
     assert.equal((await f.pool.query(`SELECT count(*)::int AS n FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id=$1`,[f.family()])).rows[0].n,1);
     assert.equal((await f.request("/token",{method:"POST",body:refreshBody(f,successor.refresh_token)})).response.status,400);
     const newCode=await freshCode(f);
     const before=(await f.pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.admin_access_issuances WHERE provider_grant_id=$1",[f.family()])).rows[0].n;
     const lost=await f.request("/token",{method:"POST",body:codeBody(f,newCode),fault:"commit-response-lost"});
-    assert.equal(lost.response.status,503);assert.equal(lost.trace.committed,true);
+    assert.equal(lost.response.status,503,atomicDiagnostic(lost.trace));assert.equal(lost.trace.committed,true);
     const denied=await lost.response.json();assert.equal(denied.error,"issuance_outcome_unknown");
     assert.ok(!("access_token" in denied) && !("refresh_token" in denied));
     assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.admin_access_issuances WHERE provider_grant_id=$1",[f.family()])).rows[0].n,before+1);
-    const retry=await f.request("/token",{method:"POST",body:codeBody(f,newCode)});assert.equal(retry.response.status,400);
+    const retry=await f.request("/token",{method:"POST",body:codeBody(f,newCode)});assert.equal(retry.response.status,400,atomicDiagnostic(retry.trace));
     assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM commonswarm_oauth.admin_access_issuances WHERE provider_grant_id=$1",[f.family()])).rows[0].n,before+1);
     // The real adapter cannot read or mutate this admin artifact without ALS.
     const outside=createPostgresAdapter(f.pool)("AuthorizationCode");

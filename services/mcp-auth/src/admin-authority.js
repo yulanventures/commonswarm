@@ -79,7 +79,11 @@ export class AdminAuthorityBridge {
     const now = (await adminQuery("SELECT floor(extract(epoch FROM clock_timestamp()))::bigint*1000 AS now")).rows[0].now;
     let seq = Number(account.seq);
     const grant = account.projection.grants[command.grant_id];
-    const manifest = command.consent?.manifest ?? grant;
+    // A new grant does not exist yet. Recheck the selected workspaces on its
+    // pending receipt, rather than treating the absent grant as absent rights.
+    const manifest = command.kind === "grant_admin_delegation"
+      ? account.projection.consents[command.consent_receipt_id]?.manifest
+      : command.consent?.manifest ?? grant;
     if (grant) await withAdminRole("swarm_command", async () => {
       const policies = adminRatePolicy(actor, grant, command.kind, null,
         command.credential_lineage_id ?? null, command.grant_id).sort((a, b) => a.key.localeCompare(b.key));

@@ -9,6 +9,64 @@ import { createAdminManifest } from "../src/admin-consent.js";
 import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount } from "../src/admin-authority.generated.js";
 import { AdminAuthorityBridge } from "../src/admin-authority.js";
 
+test("AS consent confirmation checks the pending receipt's current rights before creating a grant", async t => {
+  for (const condition of ["no workspaces", "current membership", "revoked membership", "missing membership", "missing receipt"]) {
+    await t.test(condition, async () => {
+      const now = Math.floor(Date.now() / 1000) * 1000, owner = randomUUID(), workspace = randomUUID();
+      const sessionHash = Buffer.alloc(32, 7), receiptId = randomUUID(), grantId = randomUUID();
+      const manifest = createAdminManifest({ mode: "granular", scope_names: ["admin:read"],
+        workspace_ids: condition === "no workspaces" ? [] : [workspace] },
+      { verification: { client_id: "https://client.example" }, resourceScopes: ["admin:read"] }, now);
+      const consent = { consent_receipt_id: receiptId, owner_user_id: owner, session_binding: sessionHash.toString("hex"),
+        manifest, manifest_digest: "a".repeat(64), full_account_selected: false, expires_at: now + 300000, consumed_at: null };
+      const account = { owner_user_id: owner, stream_id: randomUUID(), seq: 0, projection: emptyAdminAccount() };
+      const events = [], rightsReads = [];
+      let confirming = false, prepared, granted;
+      const pool = { connect: async () => ({ async query(sql, values) {
+        if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+        if (sql.includes("FROM commonswarm_oauth.browser_sessions")) return { rowCount: 1, rows: [{}] };
+        if (sql.includes(" AS now")) return { rows: [{ now: String(now) }] };
+        if (sql.includes("FROM swarm.memberships")) {
+          rightsReads.push(values);
+          const rows = confirming && condition === "missing membership" ? [] : [{ workspace_id: workspace,
+            role: "member", revoked_at: confirming && condition === "revoked membership" ? new Date(now) : null,
+            archived_at: null }];
+          return { rows };
+        }
+        if (sql.includes("INSERT INTO swarm.admin_events")) events.push(JSON.parse(values[4]));
+        return { rows: [], command: sql.split(" ")[0] };
+      }, release() {} }) };
+      const coordinator = new AdminTransactionCoordinator(pool), bridge = new AdminAuthorityBridge();
+      const actor = { kind: "human", user_id: owner, session_binding: consent.session_binding };
+      const server = createServer((_request, response) => coordinator.run(response, async () => {
+        prepared = await bridge.decide(account, { kind: "prepare_admin_consent", consent }, actor);
+        confirming = true;
+        if (condition === "missing receipt") delete account.projection.consents[receiptId];
+        granted = await bridge.decide(account, { kind: "grant_admin_delegation", grant_id: grantId,
+          consent_receipt_id: receiptId, replaces_grant_id: null }, actor);
+        response.statusCode = 204; response.end();
+      }, { kind: "human", owner, sessionHash }));
+      await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+      try {
+        assert.equal((await fetch(`http://127.0.0.1:${server.address().port}`)).status, 204);
+        assert.equal(prepared.ok, true);
+        const allowed = ["no workspaces", "current membership"].includes(condition);
+        assert.equal(granted.ok, allowed, granted.reason);
+        assert.equal(events.filter(event => event.type === "AdminDelegationGranted").length, allowed ? 1 : 0);
+        assert.equal(account.projection.grants[grantId] != null, allowed);
+        if (allowed) {
+          assert.equal(account.projection.consents[receiptId].consumed_at, now);
+          assert.deepEqual(account.projection.grants[grantId].workspace_ids, manifest.workspace_ids);
+        } else assert.equal(granted.reason, "consent_invalid");
+        if (condition === "no workspaces") assert.equal(rightsReads.length, 0);
+        else assert.equal(rightsReads.length, condition === "missing receipt" ? 1 : 2,
+          "confirmation re-reads membership for the receipt's exact workspace selection");
+        for (const values of rightsReads) assert.deepEqual(values, [owner, [workspace]]);
+      } finally { await new Promise(resolve => server.close(resolve)); }
+    });
+  }
+});
+
 test("AS account loading accepts a durable key fence without blocking an independent grant and refuses other drift", async t => {
   const now = Date.now(), owner = randomUUID(), denied = randomUUID(), independent = randomUUID();
   const grant = { ...createAdminManifest({ mode: 'granular', scope_names: ['admin:read'], workspace_ids: [] },

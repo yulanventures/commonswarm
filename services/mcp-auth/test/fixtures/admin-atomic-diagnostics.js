@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 const oauthCodes = new Set(["invalid_request", "invalid_scope", "invalid_grant", "invalid_target",
   "invalid_client", "invalid_client_metadata", "unauthorized_client", "access_denied",
   "login_required", "consent_required", "interaction_required", "server_error",
-  "temporarily_unavailable", "issuance_outcome_unknown", "consent_receipt_invalid", "ERR_ASSERTION", "ECONNRESET"]);
+  "temporarily_unavailable", "issuance_outcome_unknown", "consent_receipt_invalid", "invalid_dpop_proof",
+  "use_dpop_nonce", "ERR_ASSERTION", "ECONNRESET"]);
 const descriptions = new Set(["requested scope is not allowed", "scope contains invalid characters",
   "admin issuance closed", "verified hosted admin client required", "admin transaction required",
   "resource indicator is required", "exactly one resource indicator is required",
@@ -14,6 +15,8 @@ const descriptions = new Set(["requested scope is not allowed", "scope contains 
   "End-User authentication is required", "interaction is required from the end-user"]);
 const roles = new Set(["supabase_admin", "commonswarm_admin_issuer", "commonswarm_oauth_runtime",
   "swarm_command", "swarm_admin", "none"]);
+const phases = new Set(["authorize", "resume", "interaction", "login", "consent-selection",
+  "consent-confirmation", "token", "revoke"]);
 
 export async function restoreCutoverState(client, original) {
   const columns = Object.keys(original);
@@ -64,6 +67,14 @@ export function eventDiagnostic(event, error) {
   }
   return { event, causes };
 }
+export function httpStepDiagnostic(step, method, trace) {
+  return { step, method: ["GET", "POST"].includes(method) ? method : "[redacted]",
+    phase: phases.has(trace.phase) ? trace.phase : "[redacted]",
+    provider_response: trace.providerResponse ?? "not_reached",
+    http_response: trace.httpResponse ?? "not_recorded",
+    failure: trace.failure == null ? null : failureCode({ code: trace.failure }),
+    events: trace.events ?? [], outcome: trace.outcome ?? "not_recorded" };
+}
 export function atomicDiagnostic(trace) {
   // Only these already-redacted fields reach assertions / CI output.
   const identity = trace.failureIdentity ?? trace.lastStatementIdentity;
@@ -72,6 +83,6 @@ export function atomicDiagnostic(trace) {
     current_user: identity?.current_user ?? "not_recorded",
     selected_role: identity?.role ?? "not_recorded",
     provider_response: trace.providerResponse ?? "not_reached", http_response: trace.httpResponse ?? "not_recorded",
-    authorization_responses: trace.authorizationResponses,
+    http_steps: trace.httpSteps,
     events: trace.events, gate: trace.gate, gate_inputs: trace.gateInputs, outcome: trace.outcome });
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { atomicDiagnostic, eventDiagnostic, responseDiagnostic, restoreCutoverState, safeRole }
+import { atomicDiagnostic, eventDiagnostic, httpStepDiagnostic, responseDiagnostic, restoreCutoverState, safeRole }
   from "./fixtures/admin-atomic-diagnostics.js";
 
 test("atomic fixture restores the digit-bearing lane8 column with parameterized values and refuses unsafe identifiers", async () => {
@@ -48,4 +48,33 @@ test("atomic refusal diagnostics retain OAuth response/event causes while removi
     `https://${privateValue}.example/${privateValue}`]) {
     assert.equal(JSON.stringify(responseDiagnostic(303, { error: privateValue, error_description: privateValue }, location)).includes(privateValue), false);
   }
+});
+
+test("atomic HTTP history retains every step's status and refusal while redacting consent and token artifacts", () => {
+  const privateValue = "sensitive-artifact-value";
+  const phases = ["authorize", "login", "resume", "consent-selection", "consent-confirmation", "resume", "token", "token", "revoke"];
+  const history = phases.map((phase, index) => {
+    const status = [303, 303, 303, 204, 400, 303, 400, 503, 204][index];
+    const error = index === 4 ? "consent_receipt_invalid" : index === 6 ? "invalid_scope"
+      : index === 7 ? "temporarily_unavailable" : undefined;
+    const response = responseDiagnostic(status, { error, error_description: error ? privateValue : undefined,
+      access_token: privateValue, refresh_token: privateValue },
+    `https://mcp.commonswarm.com/authorize/${privateValue}?code=${privateValue}`);
+    return httpStepDiagnostic(index + 1, index >= 4 && index !== 5 ? "POST" : "GET",
+      { phase, providerResponse: response, httpResponse: response, failure: error,
+        events: error ? [eventDiagnostic("interaction.error", { code: error, error_description: privateValue })] : [],
+        cookies: privateValue, sql: privateValue, body: privateValue });
+  });
+  assert.deepEqual(history.map(step => [step.step, step.phase, step.http_response.status]),
+    phases.map((phase, index) => [index + 1, phase, [303, 303, 303, 204, 400, 303, 400, 503, 204][index]]));
+  assert.equal(history[4].http_response.error, "consent_receipt_invalid");
+  assert.equal(history[4].http_response.error_description, "[redacted]");
+  assert.equal(history[6].failure, "invalid_scope");
+  assert.equal(history[7].http_response.error, "temporarily_unavailable");
+  const printed = atomicDiagnostic({ phase: "revoke", httpSteps: history });
+  assert.equal(printed.includes(privateValue), false);
+  assert.deepEqual(JSON.parse(printed).http_steps, history);
+  assert.deepEqual(httpStepDiagnostic(10, privateValue, { phase: privateValue, failure: privateValue }),
+    { step: 10, method: "[redacted]", phase: "[redacted]", provider_response: "not_reached",
+      http_response: "not_recorded", failure: "unclassified_failure", events: [], outcome: "not_recorded" });
 });
