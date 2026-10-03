@@ -629,8 +629,8 @@ retaining raw browser output in the public evidence directory.
   chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
-  # Ownership uses only the saved PID, a liveness probe, and libproc's path API.
-  # The recorded executable path guards PID reuse; no process-name/group kills.
+  # Ownership uses the saved PID, liveness, and libproc's path/start-time APIs.
+  # Start time guards same-binary PID reuse; no process-name/group kills.
   cat >"$browser_root/browser-process.py" <<'PY'
 import ctypes, json, os, pathlib, signal, sys, time
 mode, root, pid_text, binary, profile = sys.argv[1:]
@@ -644,6 +644,27 @@ def alive():
         return True
     except ProcessLookupError:
         return False
+
+# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo (136 bytes).
+class BsdInfo(ctypes.Structure):
+    _fields_ = [("header", ctypes.c_uint32 * 12), ("names", ctypes.c_char * 48),
+                ("tail", ctypes.c_uint32 * 6), ("pbi_start_tvsec", ctypes.c_uint64),
+                ("pbi_start_tvusec", ctypes.c_uint64)]
+
+def start_time():
+    global field
+    field = "start_time"
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                   ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    info = BsdInfo()
+    size = ctypes.sizeof(info)
+    if size != 136 or libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
+        raise RuntimeError("process start time unavailable")
+    if info.pbi_start_tvsec == 0 or info.pbi_start_tvusec >= 1000000:
+        raise RuntimeError("invalid process start time")
+    return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)]
 
 def executable_path():
     global field
@@ -666,6 +687,10 @@ def verified():
     field = "recorded_executable_path"
     if observed != recorded["executable_path"] or observed != expected:
         raise RuntimeError("PID reused or executable path changed")
+    observed_start = start_time()
+    field = "recorded_start_time"
+    if observed_start != recorded["start_time"]:
+        raise RuntimeError("PID reused or start time changed")
     return True
 
 def signal_verified(signum):
@@ -673,7 +698,7 @@ def signal_verified(signum):
         try:
             os.kill(pid, signum)
         except ProcessLookupError:
-            pass  # The verified process exited between the path read and signal.
+            pass  # The verified process exited between the identity read and signal.
 
 try:
     pid = int(pid_text)
@@ -691,13 +716,17 @@ try:
         for attempt in range(100):
             if not alive():
                 raise RuntimeError("browser exited before recording")
+            launched_start = start_time()
             observed = executable_path()
             if observed == expected:
                 break
             time.sleep(0.01)
         else:
             raise RuntimeError("launch executable not proved")
-        current = {"pid": pid, "executable_path": observed, "profile": profile}
+        if start_time() != launched_start:
+            raise RuntimeError("PID reused during launch recording")
+        current = {"pid": pid, "executable_path": observed, "start_time": launched_start,
+                   "profile": profile}
         field = "receipt"
         fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as output:
@@ -723,7 +752,7 @@ try:
             if not owned and mode == "check":
                 raise RuntimeError("browser already gone")
             if owned and mode == "stop":
-                # Recheck the recorded path immediately before each signal.
+                # Recheck recorded path AND start time immediately before each signal.
                 signal_verified(signal.SIGTERM)
                 for attempt in range(100):
                     if not alive():

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -196,14 +196,37 @@ test("site input and measured-source comparison require the full resolved SHA", 
   }
 });
 
-// This owns the release safety contract: executable-path ownership must work
+// This owns the release safety contract: path/start-time ownership must work
 // without setuid process tools, and a stale receipt must never authorize a kill.
-test("site browser cleanup uses recorded PID/path and never signals an unverified process", () => {
+test("site browser cleanup uses recorded PID/path/start time and never signals an unverified process", () => {
   const sources = [...readFileSync(SITE, "utf8").matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map((m) => m[1]!);
-  for (const source of sources) assert.doesNotMatch(source, /\b(?:ps|pgrep)\b/);
+  for (const source of sources) assert.doesNotMatch(source, /\b(?:ps|pgrep)\b|\/bin\/ps\b/);
+  // Inspect executable permissions rather than maintaining a setuid name list.
+  const permissionCheck = String.raw`
+import os, pathlib, re, shutil, stat, sys
+text = sys.stdin.read()
+# Shell command positions (including substitutions), plus literal argv lists
+# used by embedded Python/JS; an identifier like const at = is not a tool.
+name = r"((?:/[\w.+-]+)+|[A-Za-z_][\w.+-]*)"
+shell = r"(?:^|[;|&\x60]|(?<![\w.])\(|\b(?:if|then|elif|do|exec|env|command)\s+|!\s+)\s*(?:[A-Za-z_]\w*=\S+\s+)*[\"']?" + name + r"(?=[\s\"'();|&]|$)"
+argv = r"(?<![\w])\[\s*[\"']" + name + r"[\"']"
+for token in set(re.findall(shell, text, re.M) + re.findall(argv, text)):
+    executable = token if token.startswith("/") else shutil.which(token)
+    if executable and pathlib.Path(executable).is_file():
+        assert not os.stat(executable).st_mode & stat.S_ISUID, "setuid tool forbidden: " + token
+`;
+  const permissions = spawnSync("python3", ["-c", permissionCheck], { encoding: "utf8", input: sources.join("\n") });
+  assert.equal(permissions.status, 0, `${permissions.stdout}\n${permissions.stderr}`);
   const preflight = block(SITE, "site2-03-browser-session-preflight");
   const source = preflight.match(/cat >"\$browser_root\/browser-process\.py" <<'PY'\n([\s\S]*?)\nPY\n/)?.[1];
   assert.ok(source, "preflight must stage the browser ownership helper");
+  assert.doesNotMatch(source, /\blsof\b/, "lsof must never establish browser ownership");
+  assert.deepEqual(sources.filter((text) => /\blsof\b/.test(text)).map((text) => text.split("\n")[0]?.split(" —")[0]),
+    ["# step: site2-01", "# step: site2-03-browser-session-preflight"]);
+  assert.equal((block(SITE, "site2-01").match(/\blsof\b/g) ?? []).length, 1);
+  assert.match(block(SITE, "site2-01"), /subprocess\.run\(\["lsof", "-nP", "-F", "n"\]/);
+  assert.equal((preflight.match(/\blsof\b/g) ?? []).length, 1);
+  assert.match(preflight, /lsof -nP -iTCP:"\$chrome_port" -sTCP:LISTEN/);
   assert.match(source, /proc_pidpath/);
   assert.match(source, /ms-playwright/);
   assert.match(source, /os\.kill\([^\n]+, 0\)/);
@@ -220,6 +243,16 @@ test("site browser cleanup uses recorded PID/path and never signals an unverifie
   }
   const root = mkdtempSync("/private/tmp/plan-baselines-");
   try {
+    // Controls only: use a host setuid executable without ever executing it.
+    // macOS strips setuid from scripts created by an unprivileged test process.
+    const forbiddenTool = ["/usr/bin/top", "/usr/bin/su", "/usr/bin/passwd", "/bin/su"]
+      .find((path) => existsSync(path) && (statSync(path).mode & 0o4000) !== 0);
+    assert.ok(forbiddenTool, "host must supply a setuid file for the refusal control");
+    for (const invocation of [forbiddenTool, `FLAG=1 ${forbiddenTool}`, `subprocess.run(["${forbiddenTool}"])`]) {
+      const refused = spawnSync("python3", ["-c", permissionCheck], { encoding: "utf8", input: invocation });
+      assert.notEqual(refused.status, 0, invocation);
+      assert.match(refused.stderr, /setuid tool forbidden/);
+    }
     const script = join(root, "browser-process.py");
     writeFileSync(script, source, { mode: 0o600 });
     // Mock only OS observations. Execute the exact staged helper and persist its
@@ -239,8 +272,21 @@ class PathReader:
         if state.get("reuse_before_term") and state["path_reads"] >= 2: state["path"] = "/bin/sleep"
         buffer.value = state["path"].encode()
         return len(buffer.value)
+class StartReader:
+    def __call__(self, pid, flavor, arg, buffer, size):
+        assert (pid, flavor, arg, size) == (424242, 3, 0, 136)
+        state["start_reads"] += 1
+        if state.get("start_unavailable"): return 0
+        if state.get("start_truncated"): return size - 1
+        if state.get("same_binary_reuse_before_term") and state["start_reads"] >= 2:
+            state["start"] = [1000, 123457]
+        # Darwin proc_bsdinfo: the two uint64 start fields begin at byte 120.
+        fields = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint64))
+        fields[15], fields[16] = state["start"]
+        return size
 class Libproc:
     proc_pidpath = PathReader()
+    proc_pidinfo = StartReader()
 ctypes.CDLL = lambda *args, **kwargs: Libproc()
 def kill(pid, sig):
     assert pid == 424242
@@ -249,14 +295,18 @@ def kill(pid, sig):
         if not state["alive"]: raise ProcessLookupError(errno.ESRCH, "gone")
     else:
         state["signals"].append(sig)
+        state["signal_start_reads"].append(state["start_reads"])
         if sig == signal.SIGKILL and not state.get("ignore_kill") or sig == signal.SIGTERM and not state.get("ignore_term"):
             state["alive"] = False
         if state.get("reuse_after_term"): state["path"] = "/bin/sleep"
+        if state.get("reuse_start_after_term"): state["start"] = [1000, 123457]
+        if state.get("start_unavailable_after_term"): state["start_unavailable"] = True
 os.kill = kill
 time.sleep = lambda seconds: None
 def reset(**changes):
     state.clear()
-    state.update(alive=True, path=binary, signals=[], path_reads=0)
+    state.update(alive=True, path=binary, start=[1000, 123456], signals=[], path_reads=0,
+                 start_reads=0, signal_start_reads=[])
     state.update(changes)
 def run(mode, ok):
     sys.argv = [script, mode, str(root), "424242", binary, profile]
@@ -276,12 +326,15 @@ assert json.loads(saved)["executable_path"] == binary
 run("check", True)
 assert state["signals"] == []
 for changes in ({"alive": False}, {"path": "/bin/sleep"}, {"path": binary + "-reused"},
-                {"denied": True}, {"path_unavailable": True}, {"reuse_before_term": True}):
+                {"denied": True}, {"path_unavailable": True}, {"reuse_before_term": True},
+                {"start": [1000, 123457]}, {"same_binary_reuse_before_term": True},
+                {"start_unavailable": True}, {"start_truncated": True}):
     reset(**changes)
     run("stop", not state["alive"])
     assert state["signals"] == []
-    if not state["alive"]: assert state["path_reads"] == 0
-for field, value in (("pid", 424243), ("executable_path", binary + "-reused")):
+    if not state["alive"]: assert state["path_reads"] == state["start_reads"] == 0
+assert json.loads(saved)["start_time"] == [1000, 123456]
+for field, value in (("pid", 424243), ("executable_path", binary + "-reused"), ("start_time", [1000, 123457])):
     wrong = json.loads(saved); wrong[field] = value
     receipt.write_text(json.dumps(wrong))
     reset(); run("stop", False)
@@ -290,13 +343,15 @@ receipt.write_text(saved)
 for changes, expected in (({}, [signal.SIGTERM]), ({"ignore_term": True}, [signal.SIGTERM, signal.SIGKILL])):
     reset(**changes); run("stop", True)
     assert state["signals"] == expected and not state["alive"]
-reset(ignore_term=True, reuse_after_term=True)
-run("stop", False)
-assert state["signals"] == [signal.SIGTERM], "reused PID must not receive SIGKILL"
+    assert state["signal_start_reads"] == list(range(2, 2 + len(expected))), "check start time before EVERY signal"
+for change in ("reuse_after_term", "reuse_start_after_term", "start_unavailable_after_term"):
+    reset(ignore_term=True, **{change: True})
+    run("stop", False)
+    assert state["signals"] == [signal.SIGTERM], "reused/unreadable PID must not receive SIGKILL"
 reset(ignore_term=True, ignore_kill=True)
 run("stop", False)
 assert state["alive"] and state["signals"] == [signal.SIGTERM, signal.SIGKILL], "cleanup must prove the PID gone"
-print("ownership lifecycle: PASS (gone, unverified, permission, PID/path reuse, TERM, KILL)")
+print("ownership lifecycle: PASS (gone, unverified, permission, PID/path/start-time reuse, TERM, KILL)")
 ` });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   } finally { cleanup(root); }
