@@ -26,7 +26,9 @@ CREATE TABLE swarm.household_content_connections (
  consent_receipt_id uuid NOT NULL,
  expires_at timestamptz NOT NULL,
  revoked_at timestamptz,
- hosted_grant_id uuid REFERENCES swarm.hosted_mcp_grants(grant_id),
+ -- The command path rechecks the live hosted grant, binding and seat. Keep
+ -- this identifier free of catalog dependencies so hosted MCP rolls back alone.
+ hosted_grant_id uuid,
  PRIMARY KEY (connection_id, grant_id, workspace_id, principal_id),
  FOREIGN KEY (principal_id, workspace_id, owner_user_id) REFERENCES swarm.agent_principals(principal_id, workspace_id, owner_user_id),
  FOREIGN KEY (workspace_id, owner_user_id) REFERENCES swarm.household_member_content_roles(workspace_id, user_id),
