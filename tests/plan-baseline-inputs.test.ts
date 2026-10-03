@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 const OAUTH = "docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md";
 const EDGE = "docs/evidence/2026-10-02-edge-mcp-release/RELEASE.md";
 const DCR = "docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md";
 const SITE = "docs/evidence/2026-10-02-site-release/SITE-RELEASE.md";
+const temporaryParent = realpathSync(tmpdir());
 const inputs = {
   EXPECTED_EDGE_SHA: "a".repeat(40),
   EXPECTED_OAUTH_SHA: "b".repeat(40),
@@ -32,7 +34,8 @@ function bash(source: string, env: Record<string, string> = {}) {
 }
 function output(result: ReturnType<typeof bash>) { return `${result.stdout}\n${result.stderr}`; }
 function cleanup(root: string) {
-  assert.match(root, /^\/private\/tmp\/plan-baselines-/);
+  assert.equal(dirname(resolve(root)), temporaryParent);
+  assert.match(basename(root), /^plan-baselines-[A-Za-z0-9]+$/);
   const result = spawnSync("rm", ["-rf", "--", root], { encoding: "utf8" });
   assert.equal(result.status, 0, `guarded cleanup refused ${root}: ${result.stderr}`);
 }
@@ -64,7 +67,7 @@ def check_output(command, **kwargs):
 subprocess.check_output = check_output
 `;
 function fixture() {
-  const root = mkdtempSync("/private/tmp/plan-baselines-");
+  const root = mkdtempSync(join(temporaryParent, "plan-baselines-"));
   for (const [surface, sha] of [["edge", inputs.EXPECTED_EDGE_SHA], ["oauth", inputs.EXPECTED_OAUTH_SHA], ["stack", inputs.EXPECTED_STACK_SHA]]) {
     const release = join(root, "home/commonswarm", surface, "releases", sha!);
     mkdirSync(release, { recursive: true });
@@ -134,7 +137,7 @@ for (const plan of plans) {
 }
 
 test("DCR checks the exact box migration set, permitting order changes only", () => {
-  const root = mkdtempSync("/private/tmp/plan-baselines-");
+  const root = mkdtempSync(join(temporaryParent, "plan-baselines-"));
   try {
     const source = block(DCR, "dcr-preflight");
     const start = source.indexOf("release_psql_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;'");
@@ -241,7 +244,7 @@ for token in set(re.findall(shell, text, re.M) + re.findall(argv, text)):
     assert.ok(close.indexOf('browser-process.py" stop') < close.indexOf('rm -r -- "$SITE_BROWSER_ROOT"'));
     assert.match(close, /browser-process\.py" stop "\$SITE_BROWSER_ROOT" "\$SITE_CHROME_PID"/);
   }
-  const root = mkdtempSync("/private/tmp/plan-baselines-");
+  const root = mkdtempSync(join(temporaryParent, "plan-baselines-"));
   try {
     // Controls only: use a host setuid executable without ever executing it.
     // macOS strips setuid from scripts created by an unprivileged test process.

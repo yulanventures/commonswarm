@@ -13,6 +13,9 @@ function blocks(markdown: string): string[] {
 
 function publicUaProblems(source: string): string[] {
   return blocks(source)
+    // Browser navigation carries Chromium's own UA. Inspect scripted HTTP
+    // probes outside that stdin body, including probes in the same block.
+    .map((block) => block.replace(/^[^\n]*\bbrowser-harness\b[^\n]*<<(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n[\s\S]*?^\2[ \t]*$/gm, ""))
     .filter((block) => /urllib\.request|urlopen\(|fetch\(/u.test(block))
     .filter((block) => /(?:api|edge-staging)\.commonswarm\.com|https:\/\/commonswarm\.com/u.test(block))
     .filter((block) => !block.includes("commonswarm-release-probe/1.0"))
@@ -72,6 +75,9 @@ test("box plans encode public UA, psql path, and standalone-variable reality", (
 test("reality checks have failing controls", () => {
   const noUa = "```sh\n# step: bad\n# readonly: yes\npython3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen('https://api.commonswarm.com/x')\nPY\n```";
   assert.notDeepEqual(publicUaProblems(noUa), []);
+  const browser = "browser-harness <<'BROWSER'\nimport urllib.request\nnew_tab('https://commonswarm.com/app')\nBROWSER\n";
+  assert.deepEqual(publicUaProblems("```sh\n" + browser + "```"), []);
+  assert.notDeepEqual(publicUaProblems(noUa.replace("python3 -", browser + "python3 -")), []);
   assert.notDeepEqual(psqlFileProblems("release_psql --file /run/host.sql"), []);
   assert.deepEqual(psqlFileProblems('release_psql --file "$APPLY_SQL"'), []);
   const unset = "```sh\n# step: bad-dir\n# readonly: yes\nprintf x >\"$PROOF_DIR/x\"\n```";

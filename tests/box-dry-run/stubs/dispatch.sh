@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
+# Replaced only in fixture-owned copies, before any plan shell runs. Values are
+# local readonly shell variables; they are never exported to a plan or uid child.
+# fixture-runtime-inputs
+
 name=${0##*/}
 original_argv=("$@")
-: "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
-printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
-printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
-printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
 
 fail_unproduced() {
   printf 'UNPRODUCED %s\n' "$1" >&2
@@ -21,8 +21,35 @@ unhandled_stub() {
   exit 69
 }
 
+require_private_log() {
+  /usr/bin/python3 - "$1" "$2" <<'PY' || fail_unproduced 'private stub log path'
+import os, pathlib, stat, sys
+root, path = map(pathlib.Path, sys.argv[1:])
+assert root.is_absolute() and path.is_absolute()
+assert str(root.resolve()) == str(root) and str(path.resolve()) == str(path)
+assert path.parent == root
+assert stat.S_ISDIR(root.lstat().st_mode) and stat.S_IMODE(root.lstat().st_mode) == 0o700
+assert stat.S_ISREG(path.lstat().st_mode) and stat.S_IMODE(path.lstat().st_mode) == 0o600
+PY
+}
+
+if [ -n "${fixture_root_log:-}" ]; then
+  if [ "$EUID" -eq 0 ]; then
+    BOX_DRY_RUN_STUB_LOG=$fixture_root_log
+    require_private_log "$fixture_root_private" "$BOX_DRY_RUN_STUB_LOG"
+  elif [ "$EUID" -eq "$(/usr/bin/id -u commonswarm)" ]; then
+    BOX_DRY_RUN_STUB_LOG=$fixture_service_log
+    require_private_log "$fixture_service_private" "$BOX_DRY_RUN_STUB_LOG"
+  fi
+fi
+: "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
+printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
+printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
+printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
+
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
 stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
+docker_state_dir="${fixture_docker_state:-$stub_state_dir/docker}"
 
 # The fixture box root is a directory under the dry run's own temporary directory. Every ssh, scp and rsync
 # operation lands there, and nothing else. The harness creates it; a stub never invents one.
@@ -71,11 +98,19 @@ run_in_box() {
     /usr/bin/id -u "$login_user" >/dev/null || fail_unproduced 'box ssh login user'
     remote_home=$(/usr/bin/getent passwd "$login_user" | /usr/bin/cut -d: -f6)
     case "$remote_home" in /*) ;; *) fail_unproduced 'box ssh login home' ;; esac
+    # An ops login may sudo into commonswarm too. The root SSH dispatcher owns
+    # collection, since ops cannot read the service user's private directory.
+    require_private_log "$fixture_service_private" "$fixture_service_log"
+    : >"$fixture_service_log"
     remote_support="${BOX_DRY_RUN_PYTHON_FIXTURE%/*}"
     remote_trap=$(mktemp "$remote_support/remote-trap.XXXXXX")
-    remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
-    /usr/bin/chown "$login_user:$login_user" "$remote_log"
-    chmod 0600 "$remote_log"
+    if [ "$login_user" = commonswarm ]; then
+      remote_log=${fixture_service_log:?fixed service log required}
+    else
+      remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
+      /usr/bin/chown "$login_user:$login_user" "$remote_log"
+      chmod 0600 "$remote_log"
+    fi
     printf 'source %q\n' "$remote_prelude" >"$remote_trap"
     printf '%s\n' 'set -E' \
       'trap '\''block_status=$?; case $- in *e*) printf "__FIRST_FAIL__:%s\n" "$BASH_COMMAND" >&2; exit "$block_status" ;; esac'\'' ERR' >>"$remote_trap"
@@ -87,14 +122,24 @@ run_in_box() {
         BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;;
       esac
     done
+    # sshd starts the remote command in the login user's home directory, never
+    # in the caller's working directory. The runner creates ops without a home
+    # (useradd --no-create-home); sshd then uses /. The real box has both homes.
+    remote_cwd=/
+    if [ -d "$remote_home" ] && [ ! -L "$remote_home" ]; then remote_cwd=$remote_home; fi
     status=0
-    /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
-      PATH="$PATH" HOME="$remote_home" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
-      BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
-      BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
-      ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
+    (
+      cd "$remote_cwd"
+      exec /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
+        PATH="$PATH" HOME="$remote_home" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+        BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
+        BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
+        ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command"
+    ) || status=$?
     cat "$remote_log" >>"$BOX_DRY_RUN_STUB_LOG"
-    rm -f -- "$remote_trap" "$remote_log"
+    if [ "$login_user" != commonswarm ]; then cat "$fixture_service_log" >>"$BOX_DRY_RUN_STUB_LOG"; fi
+    rm -f -- "$remote_trap"
+    if [ "$login_user" != commonswarm ]; then rm -f -- "$remote_log"; fi
     exit "$status"
   fi
   [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
@@ -161,6 +206,9 @@ run_in_box() {
 # plan-options: ssh BatchMode=yes ConnectTimeout=10
 
 case "$name" in
+  date)
+    userland date "$@"
+    ;;
   ssh)
     counter=${BOX_DRY_RUN_SSH_COUNTER_FILE:-}
     count=0
@@ -194,7 +242,12 @@ case "$name" in
     run_in_box "$ssh_user" "$*"
     ;;
   scp)
+    # The site window transfer preserves its protected source mode. Accept
+    # only this plan's flag; destinations still receive the fixture's 0600 mode.
+    preserve_times=0
+    if [ "${1:-}" = -p ]; then preserve_times=1; shift; fi
     [ "$#" -eq 2 ] || fail_unproduced 'scp flags'
+    case "$1" in -*) fail_unproduced 'scp flags' ;; esac
     source_path=$1
     destination=$2
     [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail_unproduced 'scp regular source file'
@@ -227,7 +280,11 @@ case "$name" in
     else
       source_sha256=$(sha256sum "$source_path" | awk '{print $1}')
     fi
-    /bin/cp "$source_path" "$target_path"
+    if [ "$preserve_times" -eq 1 ]; then
+      /bin/cp -p "$source_path" "$target_path"
+    else
+      /bin/cp "$source_path" "$target_path"
+    fi
     chmod 0600 "$target_path"
     if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
       /usr/bin/chown "$target_user:$target_user" "$target_path"
@@ -319,7 +376,25 @@ case "$name" in
       done
       case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
       root_log=$BOX_DRY_RUN_STUB_LOG
-      if [ "$sudo_user" = root ]; then root_log=${BOX_DRY_RUN_ROOT_STUB_LOG:-$BOX_DRY_RUN_STUB_LOG}; fi
+      if [ "$EUID" -eq 0 ] || [ "$sudo_user" = root ]; then
+        root_log=${fixture_root_log:?fixed root log required}
+        if [ "$EUID" -eq 0 ]; then require_private_log "$fixture_root_private" "$root_log"; fi
+      fi
+      if [ "$EUID" -eq 0 ] && [ "$sudo_user" = commonswarm ]; then
+        # A root-private log must stay private across the real uid transition.
+        # Append the service user's own log only after its command returns.
+        # Both paths were baked into the root-owned dispatcher at fixture build
+        # time. Refuse symlinks or any log outside its own private 0700 tree.
+        service_log=${fixture_service_log:?fixed service log required}
+        require_private_log "${fixture_service_private:?fixed service private tree required}" "$service_log"
+        : >"$service_log"
+        status=0
+        /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
+          PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
+          ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$service_log" "$@" || status=$?
+        cat "$service_log" >>"$root_log"
+        exit "$status"
+      fi
       exec /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
         PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
         ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$root_log" "$@"
@@ -327,10 +402,8 @@ case "$name" in
     exec "$@"
     ;;
   op)
-    # A real token is never part of the harness. The synthetic token reaches
-    # only this process from a protected file, matching the service-account
-    # boundary without putting it in the plan shell, argv, logs, or output.
-    [ -z "${OP_SERVICE_ACCOUNT_TOKEN+x}" ] || exit 69
+    # A real token is never part of the harness. Authenticate from its protected
+    # synthetic file, including the site's file-to-op-child handoff below.
     if /usr/bin/env | /usr/bin/grep -q '^OP_SESSION_'; then exit 69; fi
     [ -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}" ] || exit 69
     token_file=${BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE:-}
@@ -341,9 +414,6 @@ case "$name" in
       *) exit 69 ;;
     esac
     [ "$token_mode" = 600 ] || exit 69
-    OP_SERVICE_ACCOUNT_TOKEN=$(cat "$token_file")
-    export OP_SERVICE_ACCOUNT_TOKEN
-    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || exit 69
     [ "$#" -eq 4 ] && [ "$1" = read ] && [ "$3" = --out-file ] || exit 69
     reference=$2
     output=$4
@@ -351,6 +421,26 @@ case "$name" in
     output_parent=${output%/*}
     [ -n "$output" ] && [ "$output_parent" != "$output" ] && \
       [ -d "$output_parent" ] && [ ! -L "$output_parent" ] && [ ! -L "$output" ] || exit 69
+    if [ -n "${OP_SERVICE_ACCOUNT_TOKEN+x}" ]; then
+      # The site plan's Python loads the protected file into only the op child.
+      # Admit that handoff only for its pinned reference and fresh scratch file;
+      # arbitrary inherited tokens and every other output form stay refused.
+      [ -n "${fixture_build_reference:-}" ] && \
+        [ "$reference" = "$fixture_build_reference" ] || exit 69
+      case "$output" in
+        "${fixture_build_tmp:?build scratch root required}"/anvil-secret.??????/site-build.env) ;;
+        *) exit 69 ;;
+      esac
+      scratch_leaf=${output_parent#"$fixture_build_tmp"/}
+      case "$scratch_leaf" in */*) exit 69 ;; esac
+      [ ! -e "$output" ] && [ "$OP_SERVICE_ACCOUNT_TOKEN" = "$(cat "$token_file")" ] || exit 69
+      case "$(uname -s)" in
+        Darwin) scratch_mode=$(stat -f '%Lp' "$output_parent") ;;
+        Linux) scratch_mode=$(stat -c '%a' "$output_parent") ;;
+      esac
+      [ "$scratch_mode" = 700 ] || exit 69
+    fi
+    [ -n "$(cat "$token_file")" ] || exit 69
     umask 077
     printf '%s\n' \
       'PUBLIC_SUPABASE_URL=https://api.commonswarm.com' \
@@ -517,6 +607,14 @@ case "$name" in
           commonswarm-postgres) target=dry-run-postgres ;;
         esac
         case "$format" in
+          '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}')
+            [ "$target" = dry-run-edge ] || unhandled_stub
+            case "${BOX_DRY_RUN_EDGE_PUBLIC_ENABLED:?measured edge flag required}" in
+              0|unset) ;;
+              1) printf '%s' enabled ;;
+              *) unhandled_stub ;;
+            esac
+            ;;
           # M7 measured names only, and the production recheck measured no host
           # value (box-facts-measured.json:83-89, 383-386). Never infer it from extra_hosts.
           *'.Config.Env'*) fail_unproduced 'OAuth database host observation: no measured Config.Env host line' ;;
@@ -540,7 +638,7 @@ case "$name" in
         case "$target" in
           dry-run-oauth) path_readback "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
           *)
-            if [ -f "$stub_state_dir/docker/edge-runtime-up" ]; then
+            if [ -f "$docker_state_dir/edge-runtime-up" ]; then
               path_readback "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}/deploy/edge-runtime"
             else
               path_readback "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}"
@@ -592,8 +690,8 @@ case "$name" in
           config) [ "$#" -eq 1 ] && [ "$1" = -q ] || unhandled_stub ;;
           pull)
             [ "$#" -eq 1 ] || unhandled_stub
-            mkdir -p "$stub_state_dir/docker"
-            printf '%s\n' "$project:$1" >"$stub_state_dir/docker/last-pulled"
+            mkdir -p "$docker_state_dir"
+            printf '%s\n' "$project:$1" >"$docker_state_dir/last-pulled"
             ;;
           ps)
             if [ "${1:-}" = -q ]; then shift; fi
@@ -612,11 +710,11 @@ case "$name" in
             [ "$detached" -eq 1 ] && [ "$#" -eq 1 ] || unhandled_stub
             case "$project:$1" in
               commonswarm-edge:edge-runtime)
-                mkdir -p "$stub_state_dir/docker"
-                : >"$stub_state_dir/docker/edge-runtime-up" ;;
+                mkdir -p "$docker_state_dir"
+                : >"$docker_state_dir/edge-runtime-up" ;;
               commonswarm-supabase-stack:*)
-                mkdir -p "$stub_state_dir/docker"
-                printf '%s\n' "$1" >"$stub_state_dir/docker/stack-service-up" ;;
+                mkdir -p "$docker_state_dir"
+                printf '%s\n' "$1" >"$docker_state_dir/stack-service-up" ;;
               *) unhandled_stub ;;
             esac
             ;;
@@ -714,7 +812,7 @@ case "$name" in
     exit 69
     ;;
   python3)
-    exec /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 "$@"
+    exec /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${fixture_python:-${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}}" /usr/bin/python3 "$@"
     ;;
   tar)
     tar_arguments=()
