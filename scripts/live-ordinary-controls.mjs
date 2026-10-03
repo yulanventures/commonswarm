@@ -42,12 +42,12 @@ class Failure extends Error {
 const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new Failure(expected, got); };
 
 function options(args) {
-  const o = { command: args.shift(), requestMs: 10_000, consentMs: 600_000, totalMs: 1_300_000 };
+  const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
   demand(['consent', 'window', 'final-cleanup'].includes(o.command), 'consent, window or final-cleanup', 'invalid subcommand');
   const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['phase', 'workspace-id'])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
     o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
-  const timeouts = { 'request-timeout-ms': ['requestMs', 10_000], 'consent-timeout-ms': ['consentMs', 600_000], 'total-timeout-ms': ['totalMs', 1_300_000] };
+  const timeouts = { 'request-timeout-ms': ['requestMs', 10_000], 'consent-timeout-ms': ['consentMs', 1_500_000], 'total-timeout-ms': ['totalMs', 3_300_000] };
   const seen = new Set();
   for (let i = 0; i < args.length; i++) {
     const name = args[i].slice(2);
