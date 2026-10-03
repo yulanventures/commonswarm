@@ -41,7 +41,8 @@ export function adminRenewalDiff(grant: AdminGrantView, policy: AdminSitePolicy)
   const removed = grant.capability_names.filter(name => !current.includes(name));
   return {
     changed: grant.registry_version !== policy.version || grant.availability_digest !== policy.digest || added.length > 0 || removed.length > 0,
-    priorVersion: grant.registry_version, currentVersion: policy.version, added, removed,
+    priorVersion: grant.registry_version, currentVersion: policy.version,
+    added: labels(added, policy), removed: labels(removed, policy),
     prior: labels(grant.capability_names, policy), current: labels(current, policy),
   };
 }
@@ -77,10 +78,15 @@ export function adminGrantLines(grant: AdminGrantView, policy: AdminSitePolicy, 
   ];
 }
 /** Defense at the site boundary: never render a foreign account's private projection. */
-export function assertAdminPageOwner(page: AdminRecoveryPage, ownerId: string, workspaceId: string | null): void {
+export function assertAdminPageOwner(
+  page: AdminRecoveryPage, ownerId: string, workspaceId: string | null, parentGrants: AdminGrantView[] = page.grants,
+): void {
   const clients = [...page.clients, ...page.grants.flatMap(g => g.client ? [g.client] : [])];
+  const ownedParents = new Set(parentGrants.filter(g => g.owner_user_id === ownerId).map(g => g.grant_id));
   if (page.grants.some(g => g.owner_user_id !== ownerId) ||
       clients.some(c => c.approval && c.approval.owner_user_id !== ownerId) ||
+      [...page.workers, ...page.coverage].some(row => !ownedParents.has(row.grant_id) ||
+        (workspaceId !== null && row.workspace_id !== workspaceId)) ||
       page.actions.some(a => (workspaceId === null && a.owner_user_id !== ownerId) ||
         (a.owner_user_id !== null && a.owner_user_id !== ownerId) ||
         (workspaceId !== null && a.workspace_id !== workspaceId) ||

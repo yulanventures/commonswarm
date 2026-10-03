@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createContext, runInContext } from "node:vm";
+import { readFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { parseAdminRecoveryPage } from "../../src/cloud/admin-delegations-contract.js";
 import { readAdminIssuanceGate } from "../../src/cloud/admin-delegations-gate.js";
@@ -41,13 +42,14 @@ test("admin-site-lifecycle normal list includes plain capabilities, approval, de
 test("admin-site-lifecycle renewal version and capability diff is a read-only comparison", () => {
   const diff = adminRenewalDiff(grant, policy);
   assert.equal(diff.changed, true); assert.equal(diff.priorVersion, 1); assert.equal(diff.currentVersion, 2);
-  assert.ok(diff.added.includes("admin_create_workspace")); assert.ok(!diff.added.includes("admin_archive_workspace"));
+  assert.ok(diff.added.includes("Create workspaces")); assert.ok(!diff.added.includes("Archive workspaces"));
+  assert.equal(diff.added.filter(label => label === "Create seats").length, 1);
   assert.deepEqual(diff.removed, []);
   const granular = { ...grant, mode: "granular" as const, registry_version: policy.version,
     availability_digest: policy.digest, capability_names: ["admin_read_metadata"], scope_names: ["admin:read"] };
   assert.equal(adminRenewalDiff(granular, policy).changed, false);
   const changed = adminRenewalDiff({ ...granular, capability_names: ["admin_archive_workspace"], availability_digest: "b".repeat(64) }, policy);
-  assert.deepEqual(changed.added, ["admin_read_metadata"]); assert.deepEqual(changed.removed, ["admin_archive_workspace"]);
+  assert.deepEqual(changed.added, ["Read-only"]); assert.deepEqual(changed.removed, ["Archive workspaces"]);
   assert.equal(ADMIN_SITE_RENEWAL_GUIDANCE, "To renew, reconnect from your assistant; you will be asked to approve again.");
   assert.deepEqual(grant.capability_names, ["admin_read_metadata"]);
 });
@@ -73,10 +75,130 @@ test("admin-site-lifecycle foreign projection refusal protects account pages and
   await assert.rejects(api.loadAdminRecovery(session as never, "admin_grants"));
   assert.throws(() => assertAdminPageOwner({ ...fixture, clients: [{ ...client, approval: { ...client.approval!, owner_user_id: foreign } }] }, owner, null));
   assert.throws(() => assertAdminPageOwner({ ...fixture, actions: [{ ...fixture.actions[0]!, owner_user_id: foreign }] }, owner, null));
-  const permitted = { ...fixture, grants: [], clients: [], actions: [{ ...fixture.actions[0]!, workspace_id: owner, owner_user_id: null, provider_grant_id: null }] };
+  const permitted = { ...fixture, grants: [], clients: [], workers: [], coverage: [], actions: [{ ...fixture.actions[0]!, workspace_id: owner, owner_user_id: null, provider_grant_id: null }] };
   assert.doesNotThrow(() => assertAdminPageOwner(permitted, owner, owner));
   assert.throws(() => assertAdminPageOwner(permitted, owner, null));
   assert.throws(() => assertAdminPageOwner(permitted, owner, foreign));
+});
+
+test("admin-site-lifecycle dependencies require an owned parent, including later grant pages", async () => {
+  for (const collection of ["workers", "coverage"] as const) {
+    const page = { ...fixture, grants: [], clients: [], actions: [], workers: [], coverage: [], [collection]: fixture[collection] };
+    assert.doesNotThrow(() => assertAdminPageOwner(page, owner, null, [grant]));
+    assert.throws(() => assertAdminPageOwner(page, owner, null, [{ ...grant, owner_user_id: foreign }]));
+    assert.throws(() => assertAdminPageOwner(page, owner, null));
+    assert.throws(() => assertAdminPageOwner(page, owner, foreign, [grant]));
+    const cursor = `${at}|${foreign}`, calls: Record<string, any>[] = [];
+    const api = await transport(async (_url, options) => {
+      const body = JSON.parse(String(options?.body)); calls.push(body);
+      if (body.resource !== "admin_grants") return Response.json(page);
+      return Response.json({ ...page, [collection]: [], grants: body.before ? [grant] : [], next_before: body.before ? null : cursor });
+    });
+    const result = await api.loadAdminRecovery(session as never, collection === "workers" ? "admin_workers" : "admin_coverage", owner);
+    assert.equal(result[collection].length, 1);
+    assert.equal(calls[0]!.workspace_id, owner);
+    assert.ok(calls.slice(1).every(call => call.workspace_id === null));
+    assert.deepEqual(calls.map(call => [call.resource, call.before]), [
+      [collection === "workers" ? "admin_workers" : "admin_coverage", null], ["admin_grants", null], ["admin_grants", cursor],
+    ]);
+  }
+});
+
+/** Minimal DOM for the real component script; no browser launch or rendering mock. */
+class ViewElement {
+  children: ViewElement[] = [];
+  dataset: Record<string, string> = {};
+  hidden = false; disabled = false; open = false;
+  private content = "";
+  private listeners = new Map<string, () => void>();
+  get textContent(): string { return this.content + this.children.map(child => child.textContent).join(""); }
+  set textContent(value: string) { this.content = value; this.children = []; }
+  append(...children: ViewElement[]): void { this.children.push(...children); }
+  replaceChildren(): void { this.content = ""; this.children = []; }
+  setAttribute(): void {}
+  addEventListener(event: string, callback: () => void): void { this.listeners.set(event, callback); }
+  click(): void { this.listeners.get("click")?.(); }
+  showModal(): void { this.open = true; }
+  close(): void { this.open = false; }
+}
+
+async function componentView(fetcher: typeof fetch) {
+  const component = new URL("../src/components/app/AdminDelegations.astro", import.meta.url);
+  const script = (await readFile(component, "utf8")).split("<script>")[1]!.split("</script>")[0]!;
+  const bundle = await build({ stdin: { contents: script, loader: "ts", resolveDir: new URL(".", component).pathname },
+    bundle: true, write: false, format: "iife", platform: "browser", plugins: [{ name: "human-session", setup(builder) {
+      builder.onResolve({ filter: /\/commonswarm$/ }, () => ({ path: "session", namespace: "fixture" }));
+      builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: `
+        export class CommandOutcomeUnknown extends Error {}
+        export const deployment = () => ({ url: "https://api.test.invalid", anonKey: "synthetic-public-key" });
+        export const currentSession = async () => globalThis.humanSession;
+        export const client = () => ({ auth: { onAuthStateChange() {} } });
+        export const uuid = () => "unused";
+        export const postCommand = () => { throw new Error("Unexpected command"); };
+      ` }));
+    } }] });
+  const elements = new Map<string, ViewElement>();
+  const one = (selector: string): ViewElement => {
+    if (!elements.has(selector)) elements.set(selector, new ViewElement());
+    return elements.get(selector)!;
+  };
+  const root = Object.assign(new ViewElement(), {
+    querySelector: one,
+    querySelectorAll: (selectors: string) => selectors === "[data-admin-view]" ? [] : selectors.split(", ").map(one),
+  });
+  root.dataset.adminPolicy = JSON.stringify(policy);
+  const context = createContext({ humanSession: session, fetch: fetcher, Element: ViewElement, AbortSignal, AbortController,
+    setTimeout, clearTimeout, console, Error, URL, Headers, Request, Response, TextEncoder, TextDecoder,
+    document: { querySelector: (selector: string) => selector === "admin-delegations" ? root : null,
+      createElement: () => new ViewElement(), addEventListener() {} },
+    window: { addEventListener() {}, setTimeout, setInterval() {} },
+  });
+  runInContext(bundle.outputFiles[0]!.text, context);
+  // Wait for the actual read lifecycle; no delay or timeout is mocked in the loader.
+  const settle = async (predicate: () => boolean) => {
+    for (let attempt = 0; attempt < 100; ++attempt) {
+      if (predicate()) return;
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    assert.fail("Admin component did not finish its read");
+  };
+  await settle(() => one("[data-admin-indicator-title]").textContent.length > 0);
+  one("[data-admin-indicator]").click();
+  await settle(() => /Showing recorded|could not be verified/.test(one("[data-admin-status]").textContent));
+  return one;
+}
+
+test("admin-site-lifecycle renders owned dependencies and plain renewal labels, then clears foreign rows", async () => {
+  for (const collection of ["workers", "coverage"] as const) {
+    let foreignRow = false;
+    const one = await componentView(async (url, options) => {
+      if (String(url).endsWith("/admin/gate")) return Response.json({ state: "closed" });
+      const body = JSON.parse(String(options?.body));
+      const page: typeof fixture = { ...fixture, grants: [], clients: [], workers: [], coverage: [], actions: [] };
+      if (body.resource === "admin_grants") page.grants = [{ ...grant, capability_names: ["admin_archive_workspace"] }];
+      if (body.resource === "admin_workers") page.workers = fixture.workers.map(row => ({ ...row, grant_id: foreignRow && collection === "workers" ? foreign : owner }));
+      if (body.resource === "admin_coverage") page.coverage = fixture.coverage.map(row => ({ ...row, grant_id: foreignRow && collection === "coverage" ? foreign : owner }));
+      return Response.json(page);
+    });
+    const dependencies = one("[data-admin-dependencies]");
+    assert.ok(dependencies.textContent.includes(`Worker ${owner}`));
+    assert.ok(dependencies.textContent.includes(`Workspace ${owner}`));
+    const renewal = one("[data-admin-grants]").textContent;
+    assert.match(renewal, /Added operations: [^.]*Read-only/);
+    assert.match(renewal, /Added operations: [^.]*Create workspaces/);
+    assert.ok(renewal.includes("Removed or unavailable: Archive workspaces."));
+    assert.ok(!renewal.includes("admin_create_workspace"));
+    assert.ok(!renewal.includes("admin_archive_workspace"));
+    foreignRow = true;
+    one("[data-admin-refresh]").click();
+    for (let attempt = 0; attempt < 100 && !one("[data-admin-status]").textContent.includes("could not be verified"); ++attempt) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    assert.ok(one("[data-admin-status]").textContent.includes("could not be verified"));
+    assert.ok(!dependencies.textContent.includes(`Worker ${owner}`));
+    assert.ok(!dependencies.textContent.includes(`Workspace ${owner}`));
+    assert.ok(!dependencies.textContent.includes(foreign));
+  }
 });
 
 test("admin-site-lifecycle no-secret presentation selects safe nested fields", () => {

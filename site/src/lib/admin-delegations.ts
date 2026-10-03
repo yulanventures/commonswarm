@@ -3,7 +3,7 @@ import { CommandOutcomeUnknown, deployment, postCommand } from "./commonswarm";
 import { adminClientAction, assertAdminPageOwner } from "./admin-delegations-view";
 import {
   ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage,
-  type AdminReadRequest, type AdminRecoveryPage, type AdminClientView,
+  type AdminReadRequest, type AdminRecoveryPage, type AdminClientView, type AdminGrantView,
 } from "../../../src/cloud/admin-delegations-contract";
 export type { AdminGrantView, AdminActionView, AdminRecoveryPage, AdminClientView, AdminWorkerView, AdminCoverageView } from "../../../src/cloud/admin-delegations-contract";
 export { readAdminIssuanceGate } from "../../../src/cloud/admin-delegations-gate";
@@ -25,7 +25,22 @@ export async function loadAdminRecovery(
   });
   if (!response.ok) throw new AdminRecoveryReadError(response.status);
   const page = parseAdminRecoveryPage(await response.json());
-  assertAdminPageOwner(page, session.user.id, workspaceId);
+  const parents: AdminGrantView[] = [...page.grants];
+  const missing = new Set([...page.workers, ...page.coverage].map(row => row.grant_id));
+  for (const grant of parents) if (grant.owner_user_id === session.user.id) missing.delete(grant.grant_id);
+  // Dependency pages omit owners and parents. Resolve them through verified grant pages,
+  // independently of the grant page currently visible in the dialog.
+  let cursor: string | null = null;
+  const seen = new Set<string>();
+  while ((resource === "admin_workers" || resource === "admin_coverage") && missing.size > 0) {
+    const grants = await loadAdminRecovery(session, "admin_grants", null, cursor);
+    parents.push(...grants.grants);
+    for (const grant of grants.grants) missing.delete(grant.grant_id);
+    cursor = grants.next_before;
+    if (cursor === null || seen.has(cursor)) break;
+    seen.add(cursor);
+  }
+  assertAdminPageOwner(page, session.user.id, workspaceId, parents);
   return page;
 }
 async function accountCommand(session: Session, commandId: string, command: Record<string, unknown>): Promise<void> {
