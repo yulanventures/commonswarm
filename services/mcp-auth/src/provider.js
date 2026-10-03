@@ -253,7 +253,8 @@ export async function createMcpProvider({
             adminConsentOptions().some(o => o.available && o.scope === scope)))) {
       // This middleware precedes the provider's error handler. Preserve the
       // scope refusal while recording the gate cause through its normal logger.
-      if (gateRefusal) provider.emit("authorization.error", ctx, new AdminConsentError(gateRefusal, 503));
+      provider.emit("authorization.error", ctx, gateRefusal
+        ? new AdminConsentError(gateRefusal, 503) : new errors.InvalidScope("requested scope is not allowed"));
       ctx.status = 400;
       ctx.body = { error: "invalid_scope" };
       return;

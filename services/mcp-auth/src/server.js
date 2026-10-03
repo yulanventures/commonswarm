@@ -283,7 +283,7 @@ export async function startServer({
   const handler = createHandler({ provider, pool, logger, interactionHandler,
     adminGateHandler: createAdminGateHandler({ issuerPool, adminIssuanceEnabled: config.adminIssuanceEnabled }), ...config });
   const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool,
-    activeKid: config.activeSigningKid, adminIssuanceEnabled: config.adminIssuanceEnabled });
+    activeKid: config.activeSigningKid, adminIssuanceEnabled: config.adminIssuanceEnabled, logger });
   const server = createServer((request, response) =>
     request.url?.split("?", 1)[0] === "/admin/gate"
       ? handler(request, response) : ingress(request, response));

@@ -204,7 +204,9 @@ export class AdminTransactionCoordinator {
         response.end(JSON.stringify({ error: unknown ? "issuance_outcome_unknown" : clientCode ?? "temporarily_unavailable",
           request_id: scope.requestId }));
       }
-      return { outcome: unknown ? "unknown" : "refused", requestId: scope.requestId };
+      // Private result for ingress diagnostics. The public response above never
+      // exposes this error (including PostgreSQL messages or staged credentials).
+      return { outcome: unknown ? "unknown" : "refused", requestId: scope.requestId, cause: error };
     } finally {
       scope.closed = true;
       signal?.removeEventListener("abort", abort);

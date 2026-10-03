@@ -91,6 +91,30 @@ test("production coordinator reports uncertain COMMIT as unknown, destroys the c
   assert.equal(pool.clients[0].sql.includes("ROLLBACK"), false);
 });
 
+test("coordinator retains the private cause for setup and provider refusals without exposing it over HTTP", async t => {
+  for (const mode of ["setup", "provider"]) await t.test(mode, async t => {
+    const pool = database({ principal: mode === "setup" ? "supabase_admin" : undefined });
+    const coordinator = new AdminTransactionCoordinator(pool);
+    let outcome;
+    const server = createServer(async (_request, response) => {
+      outcome = await coordinator.run(response, () => {
+        response.statusCode = 400;
+        response.end('{"error":"invalid_scope","private":"staged-artifact"}');
+      });
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const response = await fetch(`http://127.0.0.1:${server.address().port}`);
+    assert.equal(response.status, 503);
+    assert.equal(outcome.outcome, "refused");
+    assert.equal(outcome.cause.code, mode === "setup" ? "admin_issuer_role_required" : "admin_provider_refused");
+    const body = await response.text();
+    assert.equal(body.includes(outcome.cause.code), false);
+    assert.equal(body.includes("staged-artifact"), false);
+    assert.equal(pool.clients[0].sql.includes("COMMIT"), false);
+  });
+});
+
 test("production coordinator uses savepoints for nested adapter work; intentional error fences COMMIT before invalid_grant", async t => {
   const pool = database();
   const origin = await serverFixture(t, pool, async (_request, response, scope) => {

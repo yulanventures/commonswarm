@@ -12,10 +12,13 @@ import { calculateJwkThumbprint, decodeJwt, exportJWK,
   generateKeyPair, SignJWT } from "jose";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { InteractionStore } from "../src/interaction-store.js";
-import { hashOpaque } from "../src/browser-security.js";
+import { hashOpaque, SESSION_COOKIE } from "../src/browser-security.js";
 import { AdminTransactionCoordinator, adminTransactionContext, adminQuery, withAdminRole, scopedAdminPool } from "../src/admin-transaction.js";
 import { verifyAdminProof, admitAdminProof } from "../src/admin-dpop.js";
 import { bindProviderAdminNonceStore } from "../src/provider-admin-pin.js";
+import { effectiveAdminGate } from "../src/admin-gate.js";
+import { atomicDiagnostic, eventDiagnostic, failureCode, responseDiagnostic, restoreCutoverState, safeRole }
+  from "../test/fixtures/admin-atomic-diagnostics.js";
 const ISSUER = "https://mcp.commonswarm.com", ADMIN = "https://api.commonswarm.com/admin";
 const require = createRequire(import.meta.url);
 
@@ -24,12 +27,6 @@ const redirectUri = "https://client.example/callback";
 const verifier = "atomic-provider-verifier-0123456789abcdef0123456789";
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 const digest = value => createHash("sha256").update(value).digest();
-// Preserve only stable error codes, never provider messages, SQL or artifacts.
-function failureCode(error) {
-  const code = error.code ?? error.error;
-  return typeof code === "string" && /^(?:[A-Z0-9]{5}|admin_[a-z_]+|invalid_grant|invalid_target|consent_receipt_invalid|unauthorized_client)$/u.test(code)
-    ? code : "unclassified_failure";
-}
 
 // Exercise the production configurable gate; no imported source is patched.
 async function testConsentModule() {
@@ -87,12 +84,25 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   providerInstance(provider).configuration.formats.customizers.jwt = async () => {
     if (db.current().fault === "signing") throw new Error("test signing failure");
   };
-  const providerFailure = (_ctx, error) => {
-    const trace = traces.get(testRequests.getStore()?.id);
-    if (trace) trace.failure = failureCode(error);
-  };
-  provider.on("server_error", providerFailure);
-  provider.on("authorization.error", providerFailure);
+  function subscribeDiagnostics(provider) {
+    for (const event of ["server_error", "authorization.error", "grant.error"]) {
+      provider.on(event, (_ctx, error) => {
+        const trace = traces.get(testRequests.getStore()?.id);
+        if (trace) {
+          trace.failure ??= failureCode(error);
+          trace.events.push(eventDiagnostic(event, error));
+        }
+      });
+    }
+    provider.use(async (ctx, next) => {
+      try { await next(); }
+      finally {
+        const trace = traces.get(testRequests.getStore()?.id);
+        if (trace) trace.providerResponse = responseDiagnostic(ctx.status, ctx.body, ctx.response.get("location"));
+      }
+    });
+  }
+  subscribeDiagnostics(provider);
   const store = new PostgresAdminConsentStore(db.pool);
   await bindProviderAdminNonceStore(provider);
   const service = createAdminConsentService({ store, provider, staticClientIds: new Set([clientId]),
@@ -117,10 +127,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   async function gate(client, original) {
     await client.query("SET LOCAL session_replication_role=replica");
     if (original) {
-      const columns = Object.keys(original);
-      assert.ok(columns.every(name => /^[a-z_]+$/u.test(name)));
-      await client.query(`UPDATE commonswarm_oauth.admin_cutover_state SET ${columns.map((name, i) => `${name}=$${i + 1}`).join(",")}`,
-        columns.map(name => original[name]));
+      await restoreCutoverState(client, original);
     } else {
       await client.query(`UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true,
         legacy_closed=true,legacy_closed_at=statement_timestamp(),legacy_fence_evidence_ref='CI SPIKE ONLY',
@@ -140,10 +147,45 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
   // Every application query runs under the D1 issuer session and local subrole;
   // production owns transaction control and never obtains setup privileges.
   const coordinatorPool = { connect: async () => {
-    const physical = await pool.connect(), owned = testRequests.getStore();
-    const trace = { calls: [], writes: [], committed: false, phase: owned.phase };
+    const owned = testRequests.getStore();
+    const trace = { calls: [], writes: [], committed: false, phase: owned.phase, events: [],
+      gate: { state: "not_reached", cause: null }, gateInputs: {
+        envValuePresent: activationEnv.MCP_OAUTH_ADMIN_ISSUANCE_ENABLED != null ? "yes" : "no",
+        coordinatorPresent: coordinator != null ? "yes" : "no", cutoverOpen: "no", measuredReleasePass: "no" } };
     traces.set(owned.id,trace);
-    const raw = physical.query.bind(physical);
+    const physical = await pool.connect();
+    const execute = physical.query.bind(physical);
+    let identity;
+    const raw = async (sql, values) => {
+      // Include fixture BEGIN staging and COMMIT restoration, which previously
+      // escaped the application-query catch. Read identity before failure can
+      // abort the transaction; never query an aborted transaction for identity.
+      if (sql === "BEGIN") identity = (await execute("SELECT current_user, current_setting('role') AS role")).rows[0];
+      if (sql !== "ROLLBACK" && identity) trace.lastStatementIdentity = {
+        current_user: safeRole(identity.current_user), role: safeRole(identity.role) };
+      try {
+        const result = await execute(sql, values);
+        if (/^(?:SET LOCAL (?:ROLE|SESSION AUTHORIZATION)|RESET (?:ROLE|SESSION AUTHORIZATION))/u.test(sql)) {
+          identity = (await execute("SELECT current_user, current_setting('role') AS role")).rows[0];
+        }
+        return result;
+      }
+      catch (error) {
+        trace.failure ??= failureCode(error);
+        trace.failureIdentity ??= trace.lastStatementIdentity;
+        trace.failureRole ??= safeRole(identity?.current_user);
+        trace.failureStatement ??= sql === "COMMIT" ? "physical_commit"
+          : sql.includes("UPDATE commonswarm_oauth.admin_cutover_state") ? "fixture_cutover_write"
+          : sql.includes("supabase_migrations.schema_migrations") ? "fixture_migration_ledger"
+          : sql.includes("commonswarm_ops.migration_checksums") ? "fixture_checksum_evidence"
+          : sql.includes("SESSION AUTHORIZATION") ? "fixture_session_principal"
+          : sql.includes("FROM commonswarm_oauth.admin_cutover_state") ? "measured_release_read"
+          : sql.includes("migration_checksum_failures()") ? "migration_checksum_read"
+          : sql.includes("INSERT INTO commonswarm_oauth.admin_oauth_audit") ? "lifecycle_audit_insert"
+          : sql.includes("record_admin_request_audit(") ? "authenticated_request_audit" : "other_statement";
+        throw error;
+      }
+    };
     let original,originalChecksums,stagedLedgerVersions,role = "commonswarm_admin_issuer";
     return { processID: physical.processID, release: bad => physical.release(bad), async query(sql,values) {
       if (sql === "BEGIN") {
@@ -151,6 +193,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         original = (await raw(`SELECT * FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE`)).rows[0];
         assert.equal(original.admin_issuance_enabled,false);
         await gate({ query: raw });
+        trace.gateInputs.cutoverOpen = "yes";
         // D2 checks the live ledger independently of checksum evidence. A
         // schema-only fixture has installed functions without ledger rows.
         // Add only absent reviewed versions, and remove only those before COMMIT.
@@ -166,16 +209,22 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       }
       if (sql === "COMMIT") {
         await raw("RESET SESSION AUTHORIZATION");
+        trace.commitStage = "fixture_cutover_restore";
         await gate({ query: raw },original);
+        trace.commitStage = "fixture_ledger_restore";
         await raw("DELETE FROM supabase_migrations.schema_migrations WHERE version=ANY($1::text[])", [stagedLedgerVersions]);
+        trace.commitStage = "fixture_checksum_restore";
         await raw("SET LOCAL ROLE swarm_admin");
         await raw("DELETE FROM commonswarm_ops.migration_checksums WHERE version=ANY($1::text[])",[versions]);
         for (const row of originalChecksums) await raw(`INSERT INTO commonswarm_ops.migration_checksums
           (version,sha256,applied_at,source,released_sha) VALUES($1,$2,$3,$4,$5)`,
           [row.version,row.sha256,row.applied_at,row.source,row.released_sha]);
         await raw("RESET ROLE");
+        trace.commitStage = "fixture_commit_fault";
         if (owned.fault === "commit") await raw("SELECT 1/0").catch(() => {});
+        trace.commitStage = "fixture_before_commit";
         if (owned.beforeCommit) await owned.beforeCommit();
+        trace.commitStage = "physical_commit";
         const result = await raw(sql); trace.committed=result.command === "COMMIT";
         if (owned.fault === "commit-response-lost") throw Object.assign(new Error("test lost COMMIT acknowledgement"),{ code:"ECONNRESET" });
         return result;
@@ -227,12 +276,17 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         if (owned.afterIngress) await owned.afterIngress();
         proof=await admitAdminProof(proofPool,await verifyAdminProof(request,jkt));
       }
-      await testRequests.run(owned,()=>coordinator.run(response,async scope=>{
+      const outcome = await testRequests.run(owned,()=>coordinator.run(response,async scope=>{
         try {
         scope.fault=owned.fault; traces.get(id).pending=scope.pending;
         // Prove the OPEN-path fixture's complete measurement/ledger predicate
         // before provider scope filtering can turn a gate failure into a 4xx.
-        await requireMeasuredAdminRelease();
+        const trace = traces.get(id);
+        trace.gate.state = await effectiveAdminGate({ onRefusal: code => { trace.gate.cause = code; } });
+        const measured = await requireMeasuredAdminRelease();
+        trace.gateInputs.cutoverOpen = measured.admin_issuance_enabled && measured.legacy_closed ? "yes" : "no";
+        trace.gateInputs.measuredReleasePass = "yes";
+        assert.equal(trace.gate.state, "open", "the atomic fixture must exercise the effective OPEN gate");
         if (request.url === "/test-revoke") {
           const binding=(await db.pool.query(`SELECT * FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[family])).rows[0];
           await lifecycle.revokeFamily(binding); response.statusCode=204; response.end();
@@ -276,14 +330,24 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         } catch (error) {
           traces.get(id).failure = failureCode(error);
           throw error;
+        } finally {
+          traces.get(id).providerResponse ??= responseDiagnostic(response.statusCode, undefined, response.getHeader("location"));
         }
       },{ kind:proof ? "token" : "human",owner,proof,sessionHash:hashOpaque(sessionId) }));
-    } catch {
+      const trace = traces.get(id);
+      trace.outcome = outcome.outcome;
+      if (outcome.cause) {
+        trace.failure ??= failureCode(outcome.cause);
+        trace.failureStatement ??= trace.commitStage ?? "coordinator_refusal";
+      }
+    } catch (error) {
+      const trace = traces.get(id);
+      if (trace) trace.failure ??= failureCode(error);
       response.statusCode=503; response.end('{"error":"temporarily_unavailable"}');
     }
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`, cookies = new Map();
+  const origin = `http://127.0.0.1:${server.address().port}`, cookies = new Map(), responseHistory = [];
   async function request(url, { method = "GET", body, after, fault, beforeCommit, afterIngress, proofOverride } = {}) {
     const external = new URL(url, ISSUER), id = randomUUID();
     controls.set(id, { beforeCommit, afterIngress, body, fault, after });
@@ -308,6 +372,13 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
     }
     const response = await fetch(new URL(external.pathname + external.search, origin),
       { method, headers, body: body ? new URLSearchParams(body) : undefined, redirect: "manual" });
+    const trace = traces.get(id);
+    if (trace) trace.httpResponse = responseDiagnostic(response.status,
+      response.status >= 400 ? await response.clone().text() : undefined, response.headers.get("location"));
+    if (trace && ["authorize", "resume", "login", "consent-selection", "consent-confirmation"].includes(trace.phase)) {
+      responseHistory.push({ phase: trace.phase, provider_response: trace.providerResponse, http_response: trace.httpResponse });
+    }
+    if (trace) trace.authorizationResponses = responseHistory.slice();
     for (const cookie of response.headers.getSetCookie()) {
       const pair = cookie.split(";", 1)[0], at = pair.indexOf("=");
       cookies.set(pair.slice(0, at), pair.slice(at + 1));
@@ -344,6 +415,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
       WHERE session_hash=$2`,[owner,hashOpaque(sessionId)]);
     await setup.query(`SELECT commonswarm_oauth.register_dpop_nonce($1,$2,'as')`,[digest(proofNonce),jkt]);
     await setup.query("COMMIT");
+    cookies.set(SESSION_COOKIE, sessionId);
   } catch (error) { await setup.query("ROLLBACK"); setupError = error; }
   finally { setup.release(); }
   if (setupError) {
@@ -384,14 +456,15 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         registrationEnabled:false,registrationStore:{find:async id=>id===clientId ? metadata:undefined,markUsed:async()=>{}},
         providerGrantResource:async id=>(await db.pool.query(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
           WHERE provider_grant_id=$1`,[id])).rows[0]?.resource});
-      provider.on("server_error",providerFailure);provider.on("authorization.error",providerFailure);callback=provider.callback();
+      subscribeDiagnostics(provider);callback=provider.callback();
     },
     consent: () => pendingConsent,
     async close() { await new Promise(resolve => server.close(resolve)); await proofPool.end(); await pool.end(); } };
 }
 
 function atomic(trace) {
-  assert.equal(trace.committed, true, `phase=${trace.phase}; failure=${trace.failure ?? "not_recorded"}; statement=${trace.failureStatement ?? "not_recorded"}; role=${trace.failureRole ?? "not_recorded"}`);
+  if (!trace.committed) console.error(`admin atomic refusal: ${atomicDiagnostic(trace)}`);
+  assert.equal(trace.committed, true, atomicDiagnostic(trace));
   assert.ok(trace.writes.length > 0);
   assert.equal(new Set(trace.calls.map(call => `${call.pid}:${call.xid}`)).size, 1,
     "ALL actual provider/status/authority calls must share a backend transaction");

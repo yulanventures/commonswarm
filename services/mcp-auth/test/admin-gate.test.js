@@ -189,9 +189,13 @@ test("admin authorization opens only with coordinator, measurement and ledger; g
     response_type: "code", scope: resource === ADMIN_RESOURCE ? "openid offline_access admin:read" : "openid offline_access mcp",
     resource, code_challenge: createHash("sha256").update("gate-verifier-0123456789abcdefghijklmnopqrstuvwxyz").digest("base64url"),
     code_challenge_method: "S256", dpop_jkt: "b".repeat(43) });
-  const request = resource => fetch(`http://127.0.0.1:${server.address().port}/authorize?${query(resource)}`, {
+  const request = resource => {
+    const params = query(resource);
+    if (options.unsupportedScope && resource === ADMIN_RESOURCE) params.set("scope", "openid offline_access admin:read unavailable:scope");
+    return fetch(`http://127.0.0.1:${server.address().port}/authorize?${params}`, {
     headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host,
       "x-forwarded-proto": "https", accept: "application/json" }, redirect: "manual" });
+  };
   for (const [name, settings, expected] of [
     ["open", { enabled: true, record: measured }, null],
     ["absent coordinator", { absent: true }, "admin_issuance_disabled"],
@@ -200,6 +204,7 @@ test("admin authorization opens only with coordinator, measurement and ledger; g
     ["measurement invalidated", { enabled: true, record: { ...measured, invalidated_at: new Date() } }, "admin_issuance_disabled"],
     ["ledger incomplete", { enabled: true, record: measured, mismatches: 1 }, "admin_migration_evidence_incomplete"],
     ["database unavailable", { enabled: true, failure: true }, "admin_gate_unavailable"],
+    ["open gate unsupported scope", { enabled: true, record: measured, unsupportedScope: true }, "invalid_scope"],
   ]) await t.test(name, async () => {
     options = settings; outcome = undefined; failure = undefined; sql.length = 0; logs.length = 0;
     const res = await request(ADMIN_RESOURCE);

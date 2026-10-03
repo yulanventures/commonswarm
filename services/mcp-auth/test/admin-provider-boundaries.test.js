@@ -7,6 +7,7 @@ import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
 import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
 import { createAdminHttpHandler } from "../src/admin-http.js";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
+import { createLogger } from "../src/logger.js";
 
 async function fixture(t, { issuerPool = null } = {}) {
   const clientId = "https://client.example/metadata", redirect = "https://client.example/callback";
@@ -26,7 +27,9 @@ async function fixture(t, { issuerPool = null } = {}) {
     } else await provider.callback()(request,response);
   };
   let lookups = 0;
-  const server=createServer(createAdminHttpHandler({ handler,runtimePool:{query:async()=>{ ++lookups; return {rows:[]}; }},issuerPool }));
+  const logs = [];
+  const server=createServer(createAdminHttpHandler({ handler,runtimePool:{query:async()=>{ ++lookups; return {rows:[]}; }},issuerPool,
+    logger: createLogger(line => logs.push(JSON.parse(line))) }));
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const origin=`http://127.0.0.1:${server.address().port}`,cookies=new Map();
@@ -56,7 +59,7 @@ async function fixture(t, { issuerPool = null } = {}) {
     }
     throw new Error("ordinary MCP positive did not reach code exchange");
   }
-  return { provider,request,tokens,clientId, get lookups() { return lookups; } };
+  return { provider,request,tokens,clientId,logs, get lookups() { return lookups; } };
 }
 
 for (const { name, grantType, detail, replay } of [
@@ -145,6 +148,8 @@ test("admin-issuance-closed-before-cutover: admin authorization/code/refresh ref
     scope:"openid offline_access admin:read",response_type:"code",redirect_uri:"https://client.example/callback"})}`);
   assert.equal(auth.status,503);
   assert.equal((await auth.json()).error,"admin_issuance_disabled");
+  assert.equal(f.logs.at(-1).event, "admin.ingress_error");
+  assert.equal(f.logs.at(-1).error_code, "admin_issuance_disabled");
   const lookupsBefore = f.lookups;
   for(const grant_type of ["authorization_code","refresh_token"]) {
     const response=await f.request("/token",{client_id:f.clientId,resource:ADMIN_RESOURCE,grant_type,

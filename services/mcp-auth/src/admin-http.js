@@ -7,6 +7,7 @@ import { AdminTransactionCoordinator } from "./admin-transaction.js";
 import { admitAdminProof, verifyAdminProof, recordAdminSecurityFailure, AdminDpopError } from "./admin-dpop.js";
 import { AdminTokenLifecycle, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { hashOpaque, parseCookies, SESSION_COOKIE } from "./browser-security.js";
+import { logProviderError } from "./logger.js";
 
 const hash = value => createHash("sha256").update(value).digest("base64url");
 function json(response, status, body, nonce) {
@@ -17,7 +18,7 @@ function json(response, status, body, nonce) {
 
 // The sole public ingress into dormant AS lifecycle code. Candidate/consume
 // observations are server reads; a requested resource never relabels a family.
-export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid, adminIssuanceEnabled = false }) {
+export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activeKid, adminIssuanceEnabled = false, logger }) {
   const coordinator = issuerPool ? new AdminTransactionCoordinator(issuerPool, { adminIssuanceEnabled }) : null;
   const lifecycle = new AdminTokenLifecycle({ activeKid });
   const dispatch = async (original, response, tokenContext, tokenOperation) => {
@@ -104,8 +105,12 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
         } else await handler(request, response);
         await lifecycle.finishContinuation();
       }, capability);
-      if (result.outcome !== "committed") await recordAdminSecurityFailure(issuerPool, "transaction_failed");
+      if (result.outcome !== "committed") {
+        if (logger) logProviderError(logger, "admin.transaction_error", result.requestId, result.cause);
+        await recordAdminSecurityFailure(issuerPool, "transaction_failed");
+      }
     } catch (error) {
+      if (logger) logProviderError(logger, "admin.ingress_error", response.getHeader("x-request-id"), error);
       if (!response.headersSent && !response.destroyed) {
         json(response, error.status ?? 503,
           { error: error instanceof AdminConsentError || error instanceof AdminDpopError ? error.code : "temporarily_unavailable" }, error.nonce);
