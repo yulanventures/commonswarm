@@ -6913,28 +6913,93 @@ BOX`;
   } finally { cleanupBoxFixture(fixture); }
 });
 
-test("controls: box mode resolves cleanup SSH arguments from the Mac receipt", {
+test("controls: cleanup receipt-to-SSH mapping is dynamic, live readback guards are static, and the block is NOT EXECUTED", {
   skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
 }, () => {
   const cleanup = planBlock(HM37, "hm37a-prep-seat-cleanup");
+  // This historical block needs the live DB. Parse its readback and transfer
+  // contracts; neither the SQL nor the cleanup receipt writer runs here.
+  const operations = macBoundaryOperations(cleanup);
+  const readback = operations.flatMap((operation) => "remote" in operation &&
+    operation.remote.capture?.name === "DB_COUNTS" ? [operation.remote] : []);
+  assert.equal(readback.length, 1);
+  const query = readback[0]!.script;
+  assert.ok(query, "cleanup has no visible readback script writer");
+  assert.match(query, /^set -euo pipefail\n/);
+  assert.match(query, /for value in "\$@"; do\n  case "\$value" in \?{8}-\?{4}-4\?{3}-\[89ab\]\?{3}-\?{12}\) ;; \*\) exit 1 ;; esac\ndone/);
+  assert.ok(query.includes(String.raw`WITH expected(principal_id) AS (VALUES ('$1'::uuid), ('$2'::uuid), ('$3'::uuid))`));
+  assert.match(query, /SQL="BEGIN READ ONLY;\n/);
+  assert.match(query, /SELECT expected\.principal_id::text \|\| '=' \|\| count\(tokens\.token_id\)::text\nFROM expected\nLEFT JOIN swarm\.agent_tokens AS tokens\n  ON tokens\.principal_id = expected\.principal_id\n AND tokens\.revoked_at IS NULL\n AND tokens\.expires_at > now\(\)\nGROUP BY expected\.principal_id\nORDER BY expected\.principal_id;\nCOMMIT;"/);
+  assert.match(query, /printf '%s\\n' "\$SQL" \| docker exec -i commonswarm-postgres sh -c/);
+  assert.match(query, /psql -X -v ON_ERROR_STOP=1 -Atq/);
+
+  const transfer = operations.flatMap((operation) => "remote" in operation &&
+    operation.remote.stdinFile === "/tmp/hm37a-prep-cleanup-{sha}.json" ? [operation.remote] : []);
+  assert.equal(transfer.length, 1);
+  assert.ok(transfer[0]!.command.includes(String.raw`print(\"hm37a-prep-cleanup-transfer: early abort; Mac receipt retained\")`));
+  const captureStart = cleanup.source.indexOf('  DB_COUNTS="$(ssh ');
+  const guardEnd = cleanup.source.indexOf('  PREP_DIR=');
+  const writerStart = cleanup.source.indexOf('  CLEANUP_RECEIPT=');
+  const transferStart = cleanup.source.indexOf('  ssh -o BatchMode=yes ops@100.115.66.74 "sudo -n python3');
+  assert.ok(captureStart >= 0 && captureStart < guardEnd && guardEnd < writerStart && writerStart < transferStart,
+    "live readback guards must precede the receipt writer and transfer");
+  // SSH failure aborts the assignment under errexit; missing, nonzero, extra,
+  // or wrong-principal rows fail these predicates before any receipt exists.
+  assert.match(cleanup.source.slice(0, captureStart), /\(\n  set -euo pipefail\n/);
+  assert.doesNotMatch(cleanup.source.slice(0, guardEnd), /\bset \+e\b|\bset \+o errexit\b|\|\| true/);
+  assert.ok(cleanup.source.slice(captureStart, guardEnd).endsWith([
+    String.raw`  test "$(printf '%s\n' "$DB_COUNTS" | grep -Ec '^[0-9a-f-]{36}=0$')" -eq 3`,
+    '  for PRINCIPAL_ID in "$SENDER_ID" "$RECEIVER_ID" "$THIRD_ID"; do',
+    '    test "$(printf \'%s\\n\' "$DB_COUNTS" | grep -c "^${PRINCIPAL_ID}=0$")" -eq 1',
+    '  done', '', '',
+  ].join("\n")));
   const fixture = prepareBoxFixture("s1", [cleanup]);
   try {
     const receipt = JSON.parse(readFileSync(fixture.env.PREP_RECEIPT_PATH!, "utf8")) as {
-      seats: Array<{ principal_id: string }>;
+      seats: Array<{ role: string; principal_id: string }>;
     };
     const before = checkoutSnapshot(process.cwd());
-    const accepted = modelMacProducer(cleanup, fixture)!;
-    assert.notEqual(accepted.result, "failed", accepted.stderr);
-    assert.deepEqual(accepted.stdout.trim().split("\n").sort(),
-      [...receipt.seats.map((seat) => `${seat.principal_id}=0`), "hm37a-prep-cleanup-transfer: early abort; Mac receipt retained"].sort());
-    assertCheckoutUnchanged(process.cwd(), before);
-    const bad = { ...cleanup, source: cleanup.source.replace(
+    const resolveReadback = (block: Block): string => {
+      const discovered = macBoundaryOperations(block);
+      const resolved = macBoundaryInputs(block, fixture, discovered);
+      assert.ok("inputs" in resolved, "Mac receipt inputs could not be resolved");
+      const remote = macBoundaryOperations(block, resolved.inputs).flatMap((operation) =>
+        "remote" in operation && operation.remote.capture?.name === "DB_COUNTS" ? [operation.remote] : []);
+      assert.equal(remote.length, 1);
+      return remote[0]!.command.replace(/\s+/g, " ");
+    };
+    const principals = ["sender", "receiver", "third"].map((role) => {
+      const seats = receipt.seats.filter((seat) => seat.role === role);
+      assert.equal(seats.length, 1);
+      return seats[0]!.principal_id;
+    });
+    const expectedCommand = (ids: string[]) => `ssh -o BatchMode=yes ops@100.115.66.74 "sudo -n -i /bin/bash -s -- ${ids.map((id) => `'${id}'`).join(" ")}"`;
+    assert.equal(resolveReadback(cleanup), expectedCommand(principals));
+    const bad = mutatedBlock(cleanup, [[
       `SENDER_ID="$(jq -er '.seats[] | select(.role == "sender") | .principal_id' "$PREP_SEATS")"`,
-      `SENDER_ID=invalid-principal`) };
-    assert.notEqual(bad.source, cleanup.source);
-    const refused = modelMacProducer(bad, fixture)!;
-    assert.equal(refused.result, "failed");
-    assert.doesNotMatch(refused.stderr, /unbound variable|Permission denied|CONTAINMENT UNAVAILABLE/);
+      `SENDER_ID=invalid-principal`,
+    ]]);
+    assert.equal(resolveReadback(bad), expectedCommand(["invalid-principal", ...principals.slice(1)]));
+
+    // The mapping above does not admit the live block or manufacture its rows.
+    const receipts = [
+      join(fixture.macLocalRoot!, "tmp", `hm37a-prep-cleanup-${RELEASE_SHA}.json`),
+      ...(fixture.env.EVIDENCE_DIR ? [join(fixture.env.EVIDENCE_DIR, "hm37a-prep-cleanup.json")] : []),
+      join(PROOF_DIR, "hm37a-prep-cleanup.json"),
+    ];
+    for (const path of receipts) assert.equal(pathExists(path), false, `cleanup receipt was preseeded: ${path}`);
+    const logBefore = readFileSync(fixture.log, "utf8");
+    for (const block of [cleanup, bad]) {
+      const declared = modelMacProducer(block, fixture)!;
+      assert.equal(declared.result, "not-executed", declared.stderr);
+      assert.equal(declared.status, null);
+      assert.equal(declared.stdout, "");
+      assert.deepEqual(declared.seeded, []);
+      assert.equal(declared.declared?.reason, "needs the live production database");
+      assert.equal(readFileSync(fixture.log, "utf8"), logBefore, "cleanup executed a stub command");
+      for (const path of receipts) assert.equal(pathExists(path), false, `cleanup wrote a receipt: ${path}`);
+    }
+    assertCheckoutUnchanged(process.cwd(), before);
   } finally {
     cleanupBoxFixture(fixture);
   }
