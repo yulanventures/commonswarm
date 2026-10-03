@@ -38,20 +38,26 @@ ALTER TABLE swarm.household_workspace_boundaries OWNER TO swarm_admin;
 ALTER TABLE swarm.household_workspace_boundaries ENABLE ROW LEVEL SECURITY;
 CREATE POLICY swarm_command_all ON swarm.household_workspace_boundaries FOR ALL TO swarm_command USING (true) WITH CHECK (true);
 REVOKE ALL ON swarm.household_workspace_boundaries FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT SELECT, INSERT, UPDATE ON swarm.household_workspace_boundaries TO swarm_command;
+GRANT SELECT ON swarm.household_workspace_boundaries TO swarm_command;
+-- PostgreSQL 17 FOR SHARE needs UPDATE on at least one column, not table UPDATE.
+-- https://www.postgresql.org/docs/17/sql-select.html
+GRANT UPDATE (workspace_id) ON swarm.household_workspace_boundaries TO swarm_command;
 ALTER TABLE swarm.household_member_content_roles OWNER TO swarm_admin;
 ALTER TABLE swarm.household_member_content_roles ENABLE ROW LEVEL SECURITY;
 CREATE POLICY swarm_command_all ON swarm.household_member_content_roles FOR ALL TO swarm_command USING (true) WITH CHECK (true);
 REVOKE ALL ON swarm.household_member_content_roles FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT SELECT, INSERT, UPDATE ON swarm.household_member_content_roles TO swarm_command;
+GRANT SELECT ON swarm.household_member_content_roles TO swarm_command;
+GRANT UPDATE (workspace_id) ON swarm.household_member_content_roles TO swarm_command;
 ALTER TABLE swarm.household_content_connections OWNER TO swarm_admin;
 ALTER TABLE swarm.household_content_connections ENABLE ROW LEVEL SECURITY;
 CREATE POLICY swarm_command_all ON swarm.household_content_connections FOR ALL TO swarm_command USING (true) WITH CHECK (true);
 REVOKE ALL ON swarm.household_content_connections FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
-GRANT SELECT, INSERT, UPDATE ON swarm.household_content_connections TO swarm_command;
+GRANT SELECT ON swarm.household_content_connections TO swarm_command;
+GRANT UPDATE (connection_id) ON swarm.household_content_connections TO swarm_command;
 
 -- Reserve rollback (verbatim in supabase/household-storage-reserve/ and
 -- deploy/release-proofs/household-storage/; approved release procedure only):
+-- -- Dropping these tables removes SELECT and the single-key-column UPDATE lock grants.
 -- DROP TABLE IF EXISTS swarm.household_content_connections;
 -- DROP TABLE IF EXISTS swarm.household_member_content_roles;
 -- DROP TABLE IF EXISTS swarm.household_workspace_boundaries;

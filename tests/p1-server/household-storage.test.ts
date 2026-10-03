@@ -304,6 +304,25 @@ test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane
   assert.equal(containers.length, 1, 'one local database required');
   let script = 'BEGIN;\n';
   for (const id of ids) script += proof(id,'catalog') + requireProof('catalog_ok',true);
+  // Permission tables are read/locked only in lane 2. Each widening and loss of
+  // the required key-column lock grant must independently fail the release proof.
+  for (const [table,key,nonkey] of [
+    ['household_workspace_boundaries','workspace_id','purpose'],
+    ['household_member_content_roles','workspace_id','content_role'],
+    ['household_content_connections','connection_id','purpose'],
+  ]) {
+    for (const mutation of [
+      `GRANT INSERT ON swarm.${table} TO swarm_command;`,
+      `GRANT INSERT (${key}) ON swarm.${table} TO swarm_command;`,
+      `GRANT UPDATE ON swarm.${table} TO swarm_command;`,
+      `GRANT UPDATE (${nonkey}) ON swarm.${table} TO swarm_command;`,
+      `GRANT UPDATE (${key}) ON swarm.${table} TO swarm_command WITH GRANT OPTION;`,
+      `REVOKE UPDATE (${key}) ON swarm.${table} FROM swarm_command;`,
+    ]) {
+      script += 'SAVEPOINT permission_mutation;\n' + mutation + '\n' + proof(ids[0],'catalog') + requireProof('catalog_ok',false);
+      script += 'ROLLBACK TO SAVEPOINT permission_mutation;\n' + proof(ids[0],'catalog') + requireProof('catalog_ok',true);
+    }
+  }
   script += 'GRANT UPDATE ON swarm.household_object_events TO swarm_command;\n' + proof(ids[1],'catalog') + requireProof('catalog_ok',false);
   script += 'REVOKE UPDATE ON swarm.household_object_events FROM swarm_command;\n' + proof(ids[1],'catalog') + requireProof('catalog_ok',true);
   // Command reads use the projection; widening either append-only ledger to SELECT must fail the proof.
