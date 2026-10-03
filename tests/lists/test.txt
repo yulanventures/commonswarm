@@ -61,6 +61,7 @@ tests/listener-engine.test.ts
 tests/listener-effect-store.test.ts
 tests/listener-grok-model.test.ts
 tests/listener-claude-canary-classify.test.ts
+tests/household-objects.test.ts
 tests/idle-poll.test.ts
 tests/idle-cost-retention.test.ts
 tests/listener-runtime.test.ts
