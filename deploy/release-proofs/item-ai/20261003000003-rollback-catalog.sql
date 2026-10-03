@@ -1,5 +1,12 @@
 -- Data-free reverse catalog for 20261003000003. History is retained.
 SELECT COALESCE((
+  to_regclass('commonswarm_oauth.admin_oauth_audit_daily') IS NULL
+  AND to_regtype('commonswarm_oauth.admin_security_reason') IS NULL
+  AND to_regprocedure('commonswarm_oauth.guard_audit_daily()') IS NULL
+  AND to_regprocedure('commonswarm_oauth.guard_admin_request_audit()') IS NULL
+  AND NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='commonswarm_oauth'
+    AND p.proname IN ('record_admin_request_audit','record_admin_security_failure'))
+  AND
   to_regclass('commonswarm_oauth.admin_oauth_audit') IS NULL
   AND to_regclass('commonswarm_oauth.admin_access_issuances') IS NULL
   AND to_regclass('commonswarm_oauth.admin_cutover_state') IS NULL

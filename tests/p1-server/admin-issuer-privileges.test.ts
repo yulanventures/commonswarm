@@ -1,0 +1,127 @@
+/** D1 effective application privileges: literal reviewed ACL inventory, CI/Docker only. */
+import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { catalog, dbAssert, refuses, runSql } from '../support/admin-schema-db.js';
+
+const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
+const literal = JSON.stringify(allowlist).replaceAll("'", "''");
+// Enumerate explicit ACLs across the whole database, not a selected set of known
+// tables. The saved schemas belong to runSql's rollback-only isolation fixture.
+// Default PUBLIC EXECUTE on system functions is the platform baseline. Explicit
+// grants to issuer/parents and PUBLIC grants beyond initial ACLs are inventoried.
+// PUBLIC grants on user
+// objects remain in the inventory; only pinned extension-member EXECUTE and
+// built-in language/database/schema privileges are allowed below. Extension
+// signatures are literal PostgreSQL 17 contrib definitions (REL_17_STABLE);
+// membership in an extension alone does not allow a new callable function.
+const inventory = `
+CREATE TEMP VIEW issuer_acl_inventory AS
+WITH objects(kind,name,owner,acl,object_id) AS (
+ SELECT CASE WHEN c.relkind='S' THEN 'SEQUENCE' ELSE 'TABLE' END,n.nspname||'.'||c.relname,c.relowner,c.relacl,c.oid
+ FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema'
+ UNION ALL SELECT 'COLUMN',n.nspname||'.'||c.relname||'.'||a.attname,c.relowner,a.attacl,c.oid
+ FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+ WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema' AND a.attnum>0 AND NOT a.attisdropped
+ UNION ALL SELECT 'SCHEMA',nspname,nspowner,nspacl,oid FROM pg_namespace WHERE nspname !~ '^(pg_|ai_saved_)' AND nspname<>'information_schema'
+ UNION ALL SELECT 'FUNCTION',n.nspname||'.'||p.proname||'('||regexp_replace(oidvectortypes(p.proargtypes),'\\s','','g')||')',p.proowner,coalesce(p.proacl,acldefault('f',p.proowner)),p.oid
+ FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^ai_saved_'
+ UNION ALL SELECT 'TYPE',n.nspname||'.'||t.typname,t.typowner,t.typacl,t.oid FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+ WHERE n.nspname !~ '^(pg_|ai_saved_)' AND n.nspname<>'information_schema'
+ UNION ALL SELECT 'DATABASE',datname,datdba,datacl,oid FROM pg_database
+ UNION ALL SELECT 'LANGUAGE',lanname,lanowner,lanacl,oid FROM pg_language
+ UNION ALL SELECT 'TABLESPACE',spcname,spcowner,spcacl,oid FROM pg_tablespace
+ UNION ALL SELECT 'FDW',fdwname,fdwowner,fdwacl,oid FROM pg_foreign_data_wrapper
+ UNION ALL SELECT 'SERVER',srvname,srvowner,srvacl,oid FROM pg_foreign_server
+ UNION ALL SELECT 'PARAMETER',parname,0,paracl,oid FROM pg_parameter_acl
+ UNION ALL SELECT 'DEFAULT',d.defaclobjtype::text||':'||coalesce(n.nspname,'global'),d.defaclrole,d.defaclacl,d.oid
+ FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace WHERE coalesce(n.nspname,'') !~ '^ai_saved_'
+)
+SELECT coalesce(r.rolname::text,'PUBLIC') AS grantee,
+ CASE WHEN a.grantee=0 AND ext.extname IS NOT NULL THEN 'EXTENSION_'||kind ELSE kind END AS kind,
+ CASE WHEN a.grantee=0 AND ext.extname IS NOT NULL THEN ext.extname||'.'||
+   regexp_replace(substring(o.name FROM position('.' in o.name)+1),'(extensions|public)[.]','','g') ELSE name END AS name,
+ a.privilege_type,a.is_grantable
+FROM objects o CROSS JOIN LATERAL aclexplode(o.acl) a LEFT JOIN pg_roles r ON r.oid=a.grantee
+LEFT JOIN LATERAL (SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
+ WHERE d.classid=CASE WHEN o.kind='FUNCTION' THEN 'pg_proc'::regclass ELSE 'pg_class'::regclass END
+   AND o.kind IN ('FUNCTION','TABLE','SEQUENCE') AND d.objid=o.object_id AND d.deptype='e'
+   AND e.extname IN ('pgcrypto','uuid-ossp','pg_stat_statements','pg_trgm')) ext ON true
+WHERE a.grantee<>o.owner
+ AND NOT (o.kind='FUNCTION' AND split_part(o.name,'.',1) IN ('pg_catalog','information_schema') AND a.grantee=0
+   AND EXISTS(SELECT 1 FROM aclexplode(coalesce((SELECT i.initprivs FROM pg_init_privs i
+     WHERE i.classoid='pg_proc'::regclass AND i.objoid=o.object_id AND i.objsubid=0 AND i.privtype='i'),acldefault('f',o.owner))) initial
+     WHERE initial.grantee=a.grantee AND initial.privilege_type=a.privilege_type AND initial.is_grantable=a.is_grantable))
+ AND (r.rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+ OR (a.grantee=0 AND (position('.' in o.name)=0
+   OR EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname=split_part(o.name,'.',1)
+     AND (has_schema_privilege('commonswarm_admin_issuer',n.oid,'USAGE')
+       OR has_schema_privilege('commonswarm_oauth_runtime',n.oid,'USAGE')
+       OR has_schema_privilege('swarm_command',n.oid,'USAGE'))))));
+CREATE TEMP VIEW issuer_widening AS
+SELECT jsonb_build_array(grantee,kind,name,privilege_type,is_grantable) AS privilege FROM issuer_acl_inventory
+WHERE NOT (grantee='commonswarm_oauth_runtime' AND kind='DATABASE' AND name=current_database() AND privilege_type='CONNECT' AND NOT is_grantable)
+EXCEPT SELECT value FROM jsonb_array_elements('${literal}'::jsonb);
+CREATE FUNCTION pg_temp.assert_issuer() RETURNS void LANGUAGE plpgsql AS $check$
+BEGIN
+ IF EXISTS(SELECT 1 FROM issuer_widening) THEN RAISE EXCEPTION 'issuer privilege widening' USING ERRCODE='ZX002'; END IF;
+ IF (SELECT array_agg(r.rolname::text ORDER BY r.rolname) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.roleid
+   WHERE m.member='commonswarm_admin_issuer'::regrole AND NOT m.admin_option AND NOT m.inherit_option AND m.set_option)
+   IS DISTINCT FROM ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]
+   OR (SELECT count(*) FROM pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)<>2
+   OR EXISTS(SELECT 1 FROM pg_auth_members WHERE member IN ('commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole))
+   OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command')
+     AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR NOT rolcanlogin))
+   OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_issuer','commonswarm_oauth_runtime') AND rolinherit)
+   OR EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass
+     AND refobjid IN ('commonswarm_admin_issuer'::regrole,'commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole) AND deptype='o') THEN
+   RAISE EXCEPTION 'issuer role widening' USING ERRCODE='ZX002';
+ END IF;
+END $check$;
+`;
+
+test('admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls', () => {
+  runSql(`${inventory}
+SELECT pg_temp.assert_issuer();
+${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
+${dbAssert("SELECT NOT pg_has_role('commonswarm_admin_issuer','swarm_command','USAGE') AND pg_has_role('commonswarm_admin_issuer','swarm_command','SET')", 'no inherited command authority')}
+SET LOCAL ROLE commonswarm_admin_issuer;
+${refuses('SELECT * FROM swarm.admin_accounts','42501')}
+SET LOCAL ROLE swarm_command;
+SELECT * FROM swarm.admin_accounts;
+RESET ROLE;
+${catalog('20261003000002')}
+GRANT SELECT ON swarm.admin_accounts TO commonswarm_admin_issuer;
+${catalog('20261003000002',false,false)}
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE SELECT ON swarm.admin_accounts FROM commonswarm_admin_issuer;
+GRANT DELETE ON swarm.admin_accounts TO swarm_command;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE DELETE ON swarm.admin_accounts FROM swarm_command;
+${['ADMIN TRUE','INHERIT TRUE','SET FALSE'].map(option => `GRANT swarm_command TO commonswarm_admin_issuer WITH ${option};
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+GRANT swarm_command TO commonswarm_admin_issuer WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;`).join('\n')}
+GRANT swarm_read TO swarm_command WITH INHERIT TRUE, SET TRUE;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE swarm_read FROM swarm_command;
+CREATE TABLE public.issuer_mutation_control(id integer);
+GRANT INSERT ON public.issuer_mutation_control TO commonswarm_oauth_runtime;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE INSERT ON public.issuer_mutation_control FROM commonswarm_oauth_runtime;
+GRANT SELECT ON public.issuer_mutation_control TO PUBLIC;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE SELECT ON public.issuer_mutation_control FROM PUBLIC;
+CREATE FUNCTION public.issuer_function_mutation() RETURNS boolean LANGUAGE sql AS 'SELECT true';
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE ALL ON FUNCTION public.issuer_function_mutation() FROM PUBLIC;
+GRANT USAGE ON TYPE commonswarm_oauth.admin_security_reason TO PUBLIC;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE USAGE ON TYPE commonswarm_oauth.admin_security_reason FROM PUBLIC;
+${['commonswarm_admin_issuer','commonswarm_oauth_runtime','swarm_command'].map(role => `GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) TO ${role};
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+REVOKE EXECUTE ON FUNCTION pg_catalog.pg_read_file(text) FROM ${role};`).join('\n')}
+ALTER ROLE commonswarm_admin_issuer INHERIT;
+${refuses('SELECT pg_temp.assert_issuer()','ZX002')}
+ALTER ROLE commonswarm_admin_issuer NOINHERIT;
+SELECT pg_temp.assert_issuer();
+`);
+});

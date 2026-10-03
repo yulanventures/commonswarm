@@ -21,6 +21,8 @@ ${dbAssert(`SELECT NOT EXISTS(SELECT 1 FROM pg_class WHERE relowner IN (SELECT o
   ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))
   AND NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspowner IN (SELECT oid FROM pg_roles WHERE rolname IN
   ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')))`, 'policy roles own no objects')}
+DROP OWNED BY commonswarm_admin_issuer;
+DROP ROLE commonswarm_admin_issuer;
 DROP OWNED BY commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 DROP ROLE commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
 INSERT INTO auth.users(id,aud,role,email) VALUES('${owner}','authenticated','authenticated','${owner}@example.test');
@@ -32,6 +34,7 @@ VALUES('${hosted}','${provider}','${owner}','${workspace}','ordinary-client','ht
   decode(repeat('ab',32),'hex'),'reviewed-hosted-interaction','active',statement_timestamp(),statement_timestamp());
 CREATE ROLE ${role} NOLOGIN INHERIT CREATEROLE;
 GRANT swarm_admin TO ${role};
+GRANT commonswarm_oauth_runtime,swarm_command TO ${role} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
 SET LOCAL ROLE ${role};
 ${dbAssert(`SELECT NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user`, 'migration role must be constrained')}
 ${migrationNames.map(name => repoSql(`supabase/migrations/${name}`)).join('\n')}
@@ -119,15 +122,32 @@ test('admin-schema-isolation: shared key/jti replay uniqueness, nonce domain, bo
   const proof = randomUUID(), key = 'K'.repeat(43), otherKey = 'L'.repeat(43), nonce = '12'.repeat(32);
   runSql(`
 SET LOCAL ROLE commonswarm_dpop_verifier;
+${refuses(`SELECT 'invalid'::commonswarm_oauth.dpop_admission_status`, '22P02')}
 ${dbAssert(`SELECT commonswarm_oauth.register_dpop_nonce(decode('${nonce}','hex'),'${key}','admin_resource')`, 'nonce admission positive')}
 ${dbAssert(`SELECT commonswarm_oauth.register_dpop_nonce(decode('${nonce}','hex'),'${key}','as')`, 'AS nonce positive')}
 ${dbAssert(`SELECT commonswarm_oauth.register_dpop_nonce(decode('${nonce}','hex'),'${otherKey}','admin_resource')`, 'other key nonce positive')}
-${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))`, 'fresh proof accepted')}
-${dbAssert(`SELECT NOT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','admin_command',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))`, 'command cross-entry replay refused')}
-${dbAssert(`SELECT NOT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','as',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))`, 'AS cross-domain replay refused')}
-${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${otherKey}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))`, 'jti with distinct key accepted')}
-${dbAssert(`SELECT NOT commonswarm_oauth.admit_dpop_proof('old-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint-61,decode('${nonce}','hex'))`, 'stale proof refused')}
-${dbAssert(`SELECT NOT commonswarm_oauth.admit_dpop_proof('wrong-nonce-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('ab',32),'hex'))`, 'wrong nonce refused')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))='accepted'`, 'fresh proof accepted')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','admin_command',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))='replay'`, 'command cross-entry replay refused')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','as',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))='replay'`, 'AS cross-domain replay refused')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${otherKey}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))='accepted'`, 'jti with distinct key accepted')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('old-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint-61,decode('${nonce}','hex'))='stale_proof'`, 'stale proof refused')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('wrong-nonce-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('ab',32),'hex'))='nonce_required'`, 'wrong nonce refused')}
+-- Nonce failure precedes replay, including a previously accepted jti. It
+-- must not consume a new jti: retry with a valid nonce remains admissible.
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,NULL)='nonce_required'`, 'missing nonce wins over replay')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('retry-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,NULL)='nonce_required'`, 'missing nonce needs challenge')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('retry-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('${nonce}','hex'))='accepted'`, 'nonce retry accepts same unconsumed jti')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('short-nonce-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode('ab','hex'))='nonce_required'`, 'malformed nonce needs challenge')}
+${[
+  ["NULL", `'${key}'`, "'admin_mcp'", 'floor(extract(epoch FROM clock_timestamp()))::bigint'],
+  ["repeat('é',101)", `'${key}'`, "'admin_mcp'", 'floor(extract(epoch FROM clock_timestamp()))::bigint'],
+  ["'bad-key'", "'invalid'", "'admin_mcp'", 'floor(extract(epoch FROM clock_timestamp()))::bigint'],
+  ["'bad-domain'", `'${key}'`, "'unknown'", 'floor(extract(epoch FROM clock_timestamp()))::bigint'],
+  ["'null-iat'", `'${key}'`, "'admin_mcp'", 'NULL'],
+  ["'future'", `'${key}'`, "'admin_mcp'", 'floor(extract(epoch FROM clock_timestamp()))::bigint+6'],
+].map(([jti, jkt, domain, iat], i) => dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof(${jti},${jkt},${domain},${iat},decode('${nonce}','hex'))='stale_proof'`, `invalid proof control ${i}`)).join('\n')}
+-- Freshness boundaries use integer seconds with margins inside both limits.
+${[-59, 4].map(offset => dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('boundary-${offset}-${proof}','${key}','admin_command',floor(extract(epoch FROM clock_timestamp()))::bigint+(${offset}),decode('${nonce}','hex'))='accepted'`, `freshness control ${offset}`)).join('\n')}
 ${refuses(`INSERT INTO commonswarm_oauth.dpop_proof_replays(jti,jkt,verifier_domain) VALUES('direct','${key}','admin_mcp')`, '42501')}
 ${refuses(`SELECT * FROM swarm.admin_events`, '42501')}
 ${refuses(`SELECT commonswarm_oauth.fence_admin_family('none',gen_random_uuid(),'revoked','unauthorized')`, '42501')}
@@ -136,6 +156,13 @@ INSERT INTO commonswarm_oauth.dpop_proof_replays(jti,jkt,verifier_domain,accepte
 VALUES('expired-${proof}','${key}','admin_mcp',statement_timestamp()-interval '6 minutes',statement_timestamp()-interval '1 minute');
 INSERT INTO commonswarm_oauth.dpop_nonces(nonce_digest,jkt,verifier_domain,issued_at,expires_at)
 VALUES(decode(repeat('34',32),'hex'),'${key}','admin_resource',statement_timestamp()-interval '2 minutes',statement_timestamp()-interval '1 minute');
+SET LOCAL ROLE commonswarm_dpop_verifier;
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('expired-nonce-${proof}','${key}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('34',32),'hex'))='nonce_required'`, 'expired nonce needs challenge')}
+${dbAssert(`SELECT commonswarm_oauth.register_dpop_nonce(decode(repeat('56',32),'hex'),'${otherKey}','as')`, 'wrong-domain-key nonce positive')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('wrong-key-${proof}','${key}','as',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('56',32),'hex'))='nonce_required'`, 'nonce from another key refused')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('wrong-domain-${proof}','${otherKey}','admin_mcp',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('56',32),'hex'))='nonce_required'`, 'AS nonce cannot enter resource')}
+${dbAssert(`SELECT commonswarm_oauth.admit_dpop_proof('as-control-${proof}','${otherKey}','as',floor(extract(epoch FROM clock_timestamp()))::bigint,decode(repeat('56',32),'hex'))='accepted'`, 'same nonce works in its own key and domain')}
+RESET ROLE;
 SET LOCAL ROLE commonswarm_oauth_maintenance;
 ${refuses('SELECT * FROM commonswarm_oauth.admin_grant_bindings', '42501')}
 ${refuses('SELECT * FROM commonswarm_oauth.purge_expired_dpop(0)', '22023')}

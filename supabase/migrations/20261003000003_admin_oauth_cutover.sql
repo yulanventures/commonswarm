@@ -9,7 +9,7 @@ CREATE TABLE commonswarm_oauth.admin_oauth_audit (
   connection_id uuid NOT NULL,
   provider_grant_id text NOT NULL REFERENCES commonswarm_oauth.admin_grant_bindings(provider_grant_id),
   manifest_digest text NOT NULL CHECK (manifest_digest ~ '^[0-9a-f]{64}$'),
-  event_kind text NOT NULL CHECK (event_kind IN ('issued','rotated','revoked','suspended','expired','refused','replay')),
+  event_kind text NOT NULL CHECK (event_kind IN ('issued','rotated','revoked','suspended','expired','refused','replay','init','list','read','action')),
   request_id text CHECK (request_id IS NULL OR octet_length(request_id) BETWEEN 1 AND 200),
   target_id text CHECK (target_id IS NULL OR octet_length(target_id) BETWEEN 1 AND 200),
   workspace_id uuid,
@@ -44,6 +44,145 @@ CREATE TABLE commonswarm_oauth.admin_access_issuances (
 CREATE INDEX admin_issuances_family ON commonswarm_oauth.admin_access_issuances(provider_grant_id,expires_at);
 CREATE TRIGGER admin_issuances_append_only BEFORE UPDATE OR DELETE ON commonswarm_oauth.admin_access_issuances
   FOR EACH ROW EXECUTE FUNCTION swarm.prevent_append_only_mutation();
+
+-- D3: read-like rows have a hard shared 1000-row UTC-day cap per grant.
+-- Suppressed rows remain counted; actions always retain a row. Callers cannot
+-- choose a day, owner, principal, grant, family, connection or manifest digest.
+CREATE TYPE commonswarm_oauth.admin_security_reason AS ENUM
+  ('unknown_admin_credential','invalid_token','invalid_dpop','replay','nonce_required','invalid_request','transaction_failed','rate_limited','forbidden','inactive');
+ALTER TYPE commonswarm_oauth.admin_security_reason OWNER TO swarm_admin;
+REVOKE ALL ON TYPE commonswarm_oauth.admin_security_reason FROM PUBLIC,anon,authenticated,swarm_read,commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
+GRANT USAGE ON TYPE commonswarm_oauth.admin_security_reason TO commonswarm_oauth_runtime,swarm_command;
+CREATE TABLE commonswarm_oauth.admin_oauth_audit_daily (
+  admin_grant_id uuid NOT NULL REFERENCES swarm.admin_grants(grant_id),
+  audit_day date NOT NULL,
+  read_requests bigint NOT NULL DEFAULT 0 CHECK (read_requests>=0),
+  read_rows bigint NOT NULL DEFAULT 0 CHECK (read_rows BETWEEN 0 AND 1000),
+  suppressed_read_rows bigint NOT NULL DEFAULT 0 CHECK (suppressed_read_rows>=0),
+  action_rows bigint NOT NULL DEFAULT 0 CHECK (action_rows>=0),
+  PRIMARY KEY(admin_grant_id,audit_day),
+  CHECK (read_requests=read_rows+suppressed_read_rows)
+);
+ALTER TABLE commonswarm_oauth.admin_oauth_audit_daily OWNER TO swarm_admin;
+ALTER TABLE commonswarm_oauth.admin_oauth_audit_daily ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON commonswarm_oauth.admin_oauth_audit_daily FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
+CREATE FUNCTION commonswarm_oauth.guard_audit_daily() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog AS $fn$
+BEGIN
+  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'audit counts are permanent' USING ERRCODE='55000'; END IF;
+  IF ROW(NEW.admin_grant_id,NEW.audit_day) IS DISTINCT FROM ROW(OLD.admin_grant_id,OLD.audit_day)
+    OR NEW.read_requests<OLD.read_requests OR NEW.read_rows<OLD.read_rows
+    OR NEW.suppressed_read_rows<OLD.suppressed_read_rows OR NEW.action_rows<OLD.action_rows THEN
+    RAISE EXCEPTION 'audit counts cannot decrease or rebind' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $fn$;
+CREATE TRIGGER admin_audit_daily_monotonic BEFORE UPDATE OR DELETE ON commonswarm_oauth.admin_oauth_audit_daily
+  FOR EACH ROW EXECUTE FUNCTION commonswarm_oauth.guard_audit_daily();
+
+-- Invoker trigger: only an owner-definer helper may insert the new request kinds.
+-- Existing lifecycle INSERT remains available to AS. A direct AS INSERT cannot
+-- bypass authentication, spoof metadata audit or bypass the daily counter.
+CREATE FUNCTION commonswarm_oauth.guard_admin_request_audit() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog AS $fn$
+DECLARE requests bigint; day date:=(clock_timestamp() AT TIME ZONE 'UTC')::date;
+BEGIN
+  IF current_user<>'swarm_admin' THEN
+    RAISE EXCEPTION 'request audit requires authenticated helper' USING ERRCODE='42501';
+  END IF;
+  IF NEW.event_kind='action' THEN
+    INSERT INTO commonswarm_oauth.admin_oauth_audit_daily(admin_grant_id,audit_day,action_rows)
+      VALUES(NEW.admin_grant_id,day,1)
+      ON CONFLICT(admin_grant_id,audit_day) DO UPDATE
+        SET action_rows=commonswarm_oauth.admin_oauth_audit_daily.action_rows+1;
+  ELSE
+    INSERT INTO commonswarm_oauth.admin_oauth_audit_daily(admin_grant_id,audit_day,read_requests,read_rows)
+      VALUES(NEW.admin_grant_id,day,1,1)
+      ON CONFLICT(admin_grant_id,audit_day) DO UPDATE SET
+        read_requests=commonswarm_oauth.admin_oauth_audit_daily.read_requests+1,
+        read_rows=least(1000,commonswarm_oauth.admin_oauth_audit_daily.read_rows+1),
+        suppressed_read_rows=commonswarm_oauth.admin_oauth_audit_daily.suppressed_read_rows
+          +CASE WHEN commonswarm_oauth.admin_oauth_audit_daily.read_rows>=1000 THEN 1 ELSE 0 END
+      RETURNING read_requests INTO requests;
+    IF requests>1000 THEN RETURN NULL; END IF;
+  END IF;
+  RETURN NEW;
+END $fn$;
+CREATE TRIGGER admin_oauth_request_audit BEFORE INSERT ON commonswarm_oauth.admin_oauth_audit
+  FOR EACH ROW WHEN (NEW.event_kind IN ('init','list','read','action'))
+  EXECUTE FUNCTION commonswarm_oauth.guard_admin_request_audit();
+
+-- Trusted edge/AS callers verify signature and DPoP first, then pass the exact
+-- committed JTI and SHA-256 token digest in their authority transaction. No raw
+-- token is accepted or stored. A known revoked token may record a refused row;
+-- committed outcomes require current liveness. NULL means counted at read cap,
+-- never permission to skip the authority checks or release an unaudited action.
+CREATE FUNCTION commonswarm_oauth.record_admin_request_audit(p_jti text,p_digest bytea,p_kind text,
+  p_request_id text,p_outcome text,p_reason commonswarm_oauth.admin_security_reason,
+  p_target_id text,p_workspace_id uuid,p_related_event_ids uuid[]) RETURNS uuid
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE i commonswarm_oauth.admin_access_issuances%ROWTYPE; b commonswarm_oauth.admin_grant_bindings%ROWTYPE; id uuid;
+BEGIN
+  IF p_kind IS NULL OR p_kind NOT IN ('init','list','read','action') OR p_outcome IS NULL OR p_outcome NOT IN ('committed','refused')
+    OR p_request_id IS NULL OR octet_length(p_request_id) NOT BETWEEN 1 AND 200
+    OR p_related_event_ids IS NULL OR cardinality(p_related_event_ids)>100 OR array_position(p_related_event_ids,NULL) IS NOT NULL
+    OR (p_outcome='refused' AND p_reason IS NULL) THEN
+    RAISE EXCEPTION 'invalid bounded request audit' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO i FROM commonswarm_oauth.admin_access_issuances WHERE access_jti=p_jti AND access_token_digest=p_digest;
+  IF NOT FOUND THEN RAISE EXCEPTION 'unknown authenticated issuance' USING ERRCODE='28000'; END IF;
+  SELECT * INTO b FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=i.provider_grant_id;
+  IF NOT FOUND OR ROW(i.admin_grant_id,i.client_id,i.resource,i.jkt,i.manifest_digest) IS DISTINCT FROM
+    ROW(b.admin_grant_id,b.client_id,b.resource,b.jkt,b.manifest_digest) THEN
+    RAISE EXCEPTION 'authenticated audit binding mismatch' USING ERRCODE='28000';
+  END IF;
+  IF p_outcome='committed' AND NOT commonswarm_oauth.admin_access_is_active(i.access_jti,i.access_token_digest,
+    i.provider_grant_id,i.admin_grant_id,b.owner_user_id,i.generation,i.client_id,i.resource,i.jkt,i.manifest_digest,
+    i.issued_at,i.expires_at,i.kid) THEN
+    RAISE EXCEPTION 'inactive authenticated issuance' USING ERRCODE='28000';
+  END IF;
+  IF EXISTS(SELECT 1 FROM unnest(p_related_event_ids) e WHERE NOT EXISTS(
+    SELECT 1 FROM swarm.admin_events a WHERE a.event_id=e AND a.owner_user_id=b.owner_user_id
+      AND a.event->>'grant_id'=b.admin_grant_id::text) AND NOT EXISTS(
+    SELECT 1 FROM swarm.events w WHERE w.event_id=e AND w.grant_id=b.admin_grant_id
+      AND (p_workspace_id IS NULL OR w.workspace_id=p_workspace_id))) THEN
+    RAISE EXCEPTION 'foreign audit event' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO commonswarm_oauth.admin_oauth_audit(owner_user_id,admin_identity_id,admin_grant_id,connection_id,
+    provider_grant_id,manifest_digest,event_kind,request_id,target_id,workspace_id,outcome,reason_code,related_event_ids)
+  VALUES(b.owner_user_id,b.admin_identity_id,b.admin_grant_id,b.connection_id,b.provider_grant_id,b.manifest_digest,
+    p_kind,p_request_id,p_target_id,p_workspace_id,p_outcome,p_reason::text,p_related_event_ids) RETURNING audit_id INTO id;
+  RETURN id;
+END $fn$;
+
+-- No victim identifiers or caller-selected bucket: shared with the existing
+-- unknown-credential path, database time, existing account limit 60/hour.
+-- Every failure is charged, but only the first 60/hour retain bounded rows.
+CREATE FUNCTION commonswarm_oauth.record_admin_security_failure(p_reason commonswarm_oauth.admin_security_reason) RETURNS boolean
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE attempts integer; hour bigint:=floor(extract(epoch FROM clock_timestamp())/3600)::bigint;
+BEGIN
+  IF p_reason IS NULL THEN RAISE EXCEPTION 'bounded security reason required' USING ERRCODE='22023'; END IF;
+  INSERT INTO swarm.admin_rate_buckets(bucket_key,hour_start,attempts)
+    VALUES('security:unknown_admin_credential',hour,1)
+    ON CONFLICT(bucket_key,hour_start) DO UPDATE SET attempts=swarm.admin_rate_buckets.attempts+1
+    RETURNING swarm.admin_rate_buckets.attempts INTO attempts;
+  IF attempts<=60 THEN
+    INSERT INTO swarm.admin_security_audit(audit_id,occurred_at,reason_code)
+      VALUES(gen_random_uuid(),statement_timestamp(),p_reason::text);
+  END IF;
+  RETURN attempts<=60;
+END $fn$;
+ALTER FUNCTION commonswarm_oauth.guard_audit_daily() OWNER TO swarm_admin;
+ALTER FUNCTION commonswarm_oauth.guard_admin_request_audit() OWNER TO swarm_admin;
+ALTER FUNCTION commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[]) OWNER TO swarm_admin;
+ALTER FUNCTION commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION commonswarm_oauth.guard_audit_daily(),commonswarm_oauth.guard_admin_request_audit(),
+  commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[]),
+  commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason)
+  FROM PUBLIC,anon,authenticated,swarm_read,swarm_command,commonswarm_oauth_runtime,commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance;
+GRANT EXECUTE ON FUNCTION commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[]),
+  commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason) TO commonswarm_oauth_runtime,swarm_command;
 
 CREATE FUNCTION commonswarm_oauth.valid_admin_migration_requirements(p_requirements jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $fn$
@@ -85,6 +224,7 @@ INSERT INTO commonswarm_oauth.admin_cutover_state(singleton) VALUES(true);
 
 CREATE FUNCTION commonswarm_oauth.guard_cutover_state() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $fn$
+DECLARE checksum_failed boolean;
 BEGIN
   IF TG_OP='DELETE' OR (TG_OP='UPDATE' AND OLD.legacy_closed AND
     ROW(NEW.legacy_closed,NEW.legacy_closed_at) IS DISTINCT FROM ROW(OLD.legacy_closed,OLD.legacy_closed_at)) THEN
@@ -104,6 +244,23 @@ BEGIN
     OR has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE')
     OR EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active')) THEN
     RAISE EXCEPTION 'legacy database fence must precede closure' USING ERRCODE='23514';
+  END IF;
+  IF NEW.admin_issuance_enabled THEN
+    -- M4 is applied in a later window. Resolve dynamically so M3 installs
+    -- without it, but cannot enable issuance until the real gate exists.
+    IF to_regprocedure('commonswarm_ops.migration_checksum_failures()') IS NULL THEN
+      RAISE EXCEPTION 'migration checksum gate unavailable' USING ERRCODE='23514';
+    END IF;
+    -- The predicate reads the persisted release measurement, not NEW or any
+    -- check-time caller argument. Record expected hashes in a closed update
+    -- before enabling; otherwise the predicate would see the previous row.
+    IF NEW.required_migrations IS DISTINCT FROM OLD.required_migrations THEN
+      RAISE EXCEPTION 'record migration requirements while issuance is closed' USING ERRCODE='23514';
+    END IF;
+    EXECUTE 'SELECT EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures())' INTO checksum_failed;
+    IF checksum_failed THEN
+      RAISE EXCEPTION 'migration checksum evidence incomplete or mismatched' USING ERRCODE='23514';
+    END IF;
   END IF;
   RETURN NEW;
 END $fn$;
@@ -350,7 +507,7 @@ GRANT EXECUTE ON FUNCTION swarm_read.admin_oauth_recovery_page(integer) TO swarm
 -- BEGIN
 --   FOREACH t IN ARRAY ARRAY['provider_grant_resources','admin_grant_bindings','admin_interactions','admin_consent_orchestration',
 --     'admin_verified_clients','admin_client_owner_approvals','dpop_proof_replays','dpop_nonces','issuer_key_denials',
---     'admin_access_issuances','admin_oauth_audit'] LOOP
+--     'admin_access_issuances','admin_oauth_audit','admin_oauth_audit_daily'] LOOP
 --     IF to_regclass('commonswarm_oauth.'||t) IS NOT NULL THEN
 --       EXECUTE format('SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.%I)',t) INTO occupied;
 --       IF occupied THEN RAISE EXCEPTION 'reserve rollback refused: durable artifacts in %',t USING ERRCODE='55000'; END IF;
@@ -378,6 +535,12 @@ GRANT EXECUTE ON FUNCTION swarm_read.admin_oauth_recovery_page(integer) TO swarm
 -- DROP TRIGGER issuer_denial_admin_fence ON commonswarm_oauth.issuer_key_denials;
 -- DROP TABLE commonswarm_oauth.admin_access_issuances;
 -- DROP TABLE commonswarm_oauth.admin_oauth_audit;
+-- DROP TABLE commonswarm_oauth.admin_oauth_audit_daily;
+-- DROP FUNCTION commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[]);
+-- DROP FUNCTION commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason);
+-- DROP FUNCTION commonswarm_oauth.guard_admin_request_audit();
+-- DROP FUNCTION commonswarm_oauth.guard_audit_daily();
+-- DROP TYPE commonswarm_oauth.admin_security_reason;
 -- DROP TABLE commonswarm_oauth.admin_cutover_state;
 -- DROP FUNCTION swarm_read.admin_oauth_recovery_page(integer);
 -- DROP FUNCTION commonswarm_oauth.apply_legacy_admin_fence(text);

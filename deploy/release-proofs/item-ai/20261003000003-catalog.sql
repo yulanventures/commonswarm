@@ -1,5 +1,72 @@
 -- Forward catalog (review input) for 20261003000003. Safe OID lookups fail closed.
 SELECT COALESCE((
+  EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_audit_daily()')
+    AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=false
+    AND p.prorettype='trigger'::regtype AND NOT p.proretset AND p.provolatile='v'
+    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='fe714b69a3744901fd01c7eea2016759'
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
+        SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND false)))
+    AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
+  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_admin_request_audit()')
+    AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=false
+    AND p.prorettype='trigger'::regtype AND NOT p.proretset AND p.provolatile='v'
+    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='67baa382dd91ae2e298535a5a34c5c79'
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
+        SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND false)))
+    AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)
+  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.record_admin_request_audit(text,bytea,text,text,text,commonswarm_oauth.admin_security_reason,text,uuid,uuid[])')
+    AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
+    AND p.prorettype='uuid'::regtype AND NOT p.proretset AND p.provolatile='v'
+    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='3f3bdb1cffd0d5bae81ba1f08e085272'
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
+        SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]))))
+    AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=2)
+  AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.record_admin_security_failure(commonswarm_oauth.admin_security_reason)')
+    AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
+    AND p.prorettype='boolean'::regtype AND NOT p.proretset AND p.provolatile='v'
+    AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='96037cbaf70e68d96efc6469d7b08b83'
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+      WHERE a.grantee<>p.proowner AND (a.privilege_type<>'EXECUTE' OR a.is_grantable OR NOT EXISTS(
+        SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY['commonswarm_oauth_runtime','swarm_command']::text[]))))
+    AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=2)
+  AND EXISTS(SELECT 1 FROM pg_type t WHERE t.oid=to_regtype('commonswarm_oauth.admin_security_reason')
+    AND t.typtype='e' AND t.typowner='swarm_admin'::regrole
+    AND (SELECT array_agg(enumlabel::text ORDER BY enumsortorder) FROM pg_enum WHERE enumtypid=t.oid)
+      =ARRAY['unknown_admin_credential','invalid_token','invalid_dpop','replay','nonce_required','invalid_request','transaction_failed','rate_limited','forbidden','inactive']::text[]
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(t.typacl,acldefault('T',t.typowner))) a WHERE a.grantee<>t.typowner
+      AND (a.grantee NOT IN ('commonswarm_oauth_runtime'::regrole,'swarm_command'::regrole) OR a.privilege_type<>'USAGE' OR a.is_grantable))
+    AND (SELECT count(*) FROM aclexplode(t.typacl) a WHERE a.grantee<>t.typowner)=2)
+  AND EXISTS(SELECT 1 FROM pg_class c WHERE c.oid=to_regclass('commonswarm_oauth.admin_oauth_audit_daily')
+    AND c.relkind='r' AND c.relowner='swarm_admin'::regrole AND c.relrowsecurity AND NOT c.relforcerowsecurity
+    AND (SELECT array_agg(a.attname::text ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped)
+      =ARRAY['admin_grant_id','audit_day','read_requests','read_rows','suppressed_read_rows','action_rows']::text[]
+    AND (SELECT array_agg(format_type(a.atttypid,a.atttypmod) ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped)
+      =ARRAY['uuid','date','bigint','bigint','bigint','bigint']::text[]
+    AND NOT EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND NOT a.attnotnull)
+    AND (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='p' AND convalidated)=1
+    AND (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='c' AND convalidated)=5
+    AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=c.oid AND contype='c'
+      AND regexp_replace(pg_get_expr(conbin,conrelid),'[[:space:]()]','','g')='read_rows>=0ANDread_rows<=1000')
+    AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=c.oid AND contype='c'
+      AND regexp_replace(pg_get_expr(conbin,conrelid),'[[:space:]()]','','g')='read_requests=read_rows+suppressed_read_rows')
+    AND (SELECT count(*) FROM pg_constraint WHERE conrelid=c.oid AND contype='f' AND confrelid=to_regclass('swarm.admin_grants') AND convalidated)=1
+    AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a WHERE a.grantee<>c.relowner)
+    AND NOT EXISTS(SELECT 1 FROM pg_policy WHERE polrelid=c.oid))
+  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('commonswarm_oauth.admin_oauth_audit_daily')
+    AND tgname='admin_audit_daily_monotonic' AND tgenabled='O' AND tgtype=27 AND NOT tgisinternal
+    AND tgfoid=to_regprocedure('commonswarm_oauth.guard_audit_daily()'))
+  AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('commonswarm_oauth.admin_oauth_audit')
+    AND tgname='admin_oauth_request_audit' AND tgenabled='O' AND tgtype=7 AND NOT tgisinternal
+    AND tgqual IS NOT NULL
+    AND position('init' in pg_get_triggerdef(oid))>0 AND position('list' in pg_get_triggerdef(oid))>0
+    AND position('read' in pg_get_triggerdef(oid))>0 AND position('action' in pg_get_triggerdef(oid))>0 AND tgfoid=to_regprocedure('commonswarm_oauth.guard_admin_request_audit()'))
+  AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('commonswarm_oauth.admin_oauth_audit')
+    AND contype='c' AND position('init' in pg_get_constraintdef(oid))>0 AND position('list' in pg_get_constraintdef(oid))>0
+    AND position('read' in pg_get_constraintdef(oid))>0 AND position('action' in pg_get_constraintdef(oid))>0)
+  AND
   EXISTS(SELECT 1 FROM pg_class c WHERE c.oid=to_regclass('commonswarm_oauth.admin_oauth_audit')
   AND c.relkind='r' AND pg_get_userbyid(c.relowner)='swarm_admin' AND c.relrowsecurity AND NOT c.relforcerowsecurity
   AND (SELECT array_agg(a.attname::text ORDER BY a.attnum) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped)=ARRAY['audit_id','occurred_at','owner_user_id','admin_identity_id','admin_grant_id','connection_id','provider_grant_id','manifest_digest','event_kind','request_id','target_id','workspace_id','outcome','reason_code','related_event_ids']::text[]
@@ -57,7 +124,7 @@ SELECT COALESCE((
   AND (SELECT count(*) FROM pg_constraint WHERE conrelid=to_regclass('commonswarm_oauth.admin_cutover_state') AND contype='c')=14
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('commonswarm_oauth.guard_cutover_state()')
   AND pg_get_userbyid(p.proowner)='swarm_admin' AND p.prosecdef=true
-  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='01d4fec1172784e8adb94f106aabbef6'
+  AND p.proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(p.prosrc)='edc692e62a814ac2fe4dd4962c6cd6f8'
   AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
     WHERE a.grantee<>p.proowner AND NOT EXISTS(SELECT 1 FROM pg_roles r WHERE r.oid=a.grantee AND r.rolname=ANY(ARRAY[]::text[])))
   AND (SELECT count(*) FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee<>p.proowner)=0)

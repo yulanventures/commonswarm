@@ -1,6 +1,6 @@
 /** Ledger admission at the real database boundary; Docker/CI only. */
 import { test } from 'node:test';
-import { dbAssert, fixture, issuance, openIssuanceForTest, refuses, runSql } from '../support/admin-schema-db.js';
+import { catalog, checksumVersions, dbAssert, enableIssuanceForTest, expectedMigrationHashes, fixture, issuance, measureIssuanceForTest, openIssuanceForTest, prepareIssuanceForTest, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 test('admin-issuance-closed-before-cutover: runtime audit/access inserts and admission require both flags', () => {
   const f = fixture(), token = issuance(f), rotated = issuance(f, 1);
@@ -62,5 +62,78 @@ ${enableWithoutClosure}
 SET LOCAL ROLE commonswarm_oauth_runtime;
 ${refuses(token.accessInsert, '23514')}
 RESET ROLE;
+`);
+});
+
+test('admin-activation-migration-ledger: enablement requires installed gate and full independently recorded checksum evidence', () => {
+  runSql(`${prepareIssuanceForTest}
+${dbAssert('SELECT NOT admin_issuance_enabled AND legacy_closed FROM commonswarm_oauth.admin_cutover_state', 'otherwise eligible measured closure stays closed')}
+${checksumVersions.map(v => `
+SAVEPOINT activation_evidence;
+SET LOCAL ROLE swarm_admin;
+DELETE FROM commonswarm_ops.migration_checksums WHERE version='${v}';
+RESET ROLE;
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+${dbAssert(`SELECT count(*)=1 FROM supabase_migrations.schema_migrations WHERE version='${v}'`, `${v} ledger-only probe retains ledger`)}
+ROLLBACK TO SAVEPOINT activation_evidence;
+DELETE FROM supabase_migrations.schema_migrations WHERE version='${v}';
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+${dbAssert(`SELECT count(*)=1 FROM commonswarm_ops.migration_checksums WHERE version='${v}'`, `${v} checksum-only probe retains checksum`)}
+ROLLBACK TO SAVEPOINT activation_evidence;
+SET LOCAL ROLE swarm_admin;
+UPDATE commonswarm_ops.migration_checksums SET sha256=repeat('0',64) WHERE version='${v}';
+RESET ROLE;
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+ROLLBACK TO SAVEPOINT activation_evidence;
+RELEASE SAVEPOINT activation_evidence;`).join('\n')}
+SAVEPOINT missing_expectations;
+SET LOCAL ROLE commonswarm_admin_release;
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations='{}'::jsonb;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+-- The previously accepted M1-M3-only subset cannot authorize activation.
+UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations=(
+ SELECT jsonb_object_agg(key,value) FROM jsonb_each('${expectedMigrationHashes}'::jsonb)
+ WHERE key IN ('20261003000001','20261003000002','20261003000003'));
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+ROLLBACK TO SAVEPOINT missing_expectations;
+SAVEPOINT missing_gate;
+DROP FUNCTION commonswarm_ops.migration_checksum_failures();
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+ROLLBACK TO SAVEPOINT missing_gate;
+${enableIssuanceForTest}
+${dbAssert('SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state', 'complete ledger and reviewed digests enable only rollback fixture')}
+-- Check OLD-vs-NEW visibility: expectations cannot be swapped in an enablement update.
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses("UPDATE commonswarm_oauth.admin_cutover_state SET required_migrations=jsonb_set(required_migrations,'{20261003000001}',to_jsonb(repeat('0',64)))",'23514')}
+UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false;
+${refuses("UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true,required_migrations=jsonb_set(required_migrations,'{20261003000001}',to_jsonb(repeat('0',64)))",'23514')}
+RESET ROLE;
+${catalog('20261003000003')}
+${catalog('20261003000004')}
+`);
+});
+
+test('admin-activation-migration-ledger: M3 remains closed across a data-free M4 reserve and forward application', () => {
+  runSql(`${repoSql('supabase/admin-delegation-reserve/20261003000004-rollback.sql')}
+${catalog('20261003000004',true)}
+${measureIssuanceForTest}
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+${repoSql('supabase/migrations/20261003000004_migration_checksums.sql')}
+${catalog('20261003000004')}
+SET LOCAL ROLE commonswarm_admin_release;
+${refuses('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=true','23514')}
+RESET ROLE;
+${dbAssert('SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state', 'installing M4 without evidence stays closed')}
 `);
 });

@@ -6,7 +6,7 @@ DECLARE t text; occupied boolean;
 BEGIN
   FOREACH t IN ARRAY ARRAY['provider_grant_resources','admin_grant_bindings','admin_interactions','admin_consent_orchestration',
     'admin_verified_clients','admin_client_owner_approvals','dpop_proof_replays','dpop_nonces','issuer_key_denials',
-    'admin_access_issuances','admin_oauth_audit'] LOOP
+    'admin_access_issuances','admin_oauth_audit','admin_oauth_audit_daily'] LOOP
     IF to_regclass('commonswarm_oauth.'||t) IS NOT NULL THEN
       EXECUTE format('SELECT EXISTS(SELECT 1 FROM commonswarm_oauth.%I)',t) INTO occupied;
       IF occupied THEN RAISE EXCEPTION 'reserve rollback refused: durable artifacts in %',t USING ERRCODE='55000'; END IF;
@@ -37,15 +37,19 @@ DROP FUNCTION commonswarm_oauth.guard_owner_approval();
 DROP FUNCTION commonswarm_oauth.guard_verified_client();
 DROP FUNCTION commonswarm_oauth.resolve_provider_grant_status(text,uuid,text);
 DROP FUNCTION commonswarm_oauth.lock_admin_client_verification(text,integer);
+DROP FUNCTION commonswarm_oauth.lock_admin_consent_policy(text,integer,uuid);
 DROP FUNCTION commonswarm_oauth.resolve_admin_grant_status(text,uuid,text);
 DROP FUNCTION commonswarm_oauth.fence_admin_family(text,uuid,text,text);
 DROP FUNCTION commonswarm_oauth.lock_issuer_key_denial();
 DROP FUNCTION commonswarm_oauth.issuer_key_allowed(text,text);
 DROP FUNCTION commonswarm_oauth.purge_expired_dpop(integer);
 DROP FUNCTION commonswarm_oauth.admit_dpop_proof(text,text,text,bigint,bytea);
+DROP TYPE commonswarm_oauth.dpop_admission_status;
 DROP FUNCTION commonswarm_oauth.register_dpop_nonce(bytea,text,text);
 DROP POLICY command_binding_read ON commonswarm_oauth.admin_grant_bindings;
 REVOKE SELECT(provider_grant_id,admin_grant_id,owner_user_id,client_id,verification_version) ON commonswarm_oauth.admin_grant_bindings FROM swarm_command;
 REVOKE USAGE ON SCHEMA commonswarm_oauth FROM commonswarm_admin_release,commonswarm_dpop_verifier,commonswarm_oauth_maintenance,swarm_command;
 -- Retain dormant NOLOGIN roles; never remove an operator-owned/pre-existing role.
 -- Retain safe admin-only creator memberships; rollback never grants SET/INHERIT.
+REVOKE commonswarm_oauth_runtime,swarm_command FROM commonswarm_admin_issuer;
+-- Retain the constrained issuer login; it has no direct privileges or SET memberships.
