@@ -106,6 +106,28 @@ try {
     check((await transact(readWire(grant),{kind:'oauth',admission:forgedFromImport})).result.status===401,'caller-instantiated verifier cannot confer authority through imports');
     check((await http(issueInput,oauth.access)).status === 403,'OAuth token cannot mint opaque admin access');
     check((await http(readWire(grant),oauth.access)).status === 200,'actual OAuth admin positive control');
+  } else if (scenario === 'cached_v1') {
+    // Retain the legacy grant and its exact idempotency result. A random opaque
+    // prefix alone cannot prove a cached success will not be replayed.
+    const legacy = config.legacy;
+    const cached = wire({ kind: 'admin_read_metadata', grant_id: legacy.grant, resource_kind: 'grant', workspace_id: null }, 'cached-v1-admin-read');
+    const digest = await adminDigest(cached);
+    const actorKey = `delegated_admin:${legacy.identity}`;
+    const [saved] = await db`SELECT g.registry_version,g.state,r.request_digest,r.response FROM swarm.admin_grants g
+      JOIN swarm.admin_command_results r ON r.owner_user_id=g.owner_user_id
+      WHERE g.grant_id=${legacy.grant}::uuid AND r.actor_key=${actorKey} AND r.command_id=${cached.command_id}`;
+    check(saved.registry_version === 1 && saved.state === 'revoked' && saved.request_digest === digest && saved.response.status === 200 && saved.response.body.cached_v1_success === true,
+      'exact v1 grant and cached success retained');
+    const before = await count(legacy.owner);
+    const oldAuth = { kind: 'access', credential: 'swm_adm_' + 'a'.repeat(43) };
+    const replay = await transact(cached, oldAuth);
+    check(replay.result.status === 401 && replay.result.body.error === 'unauthenticated' && !replay.result.body.cached_v1_success,
+      'cached v1 direct legacy command refused');
+    check(await count(legacy.owner) === before, 'cached legacy replay emits no authority events');
+    const opaque = await http(cached, 'swm_adm_' + 'a'.repeat(43));
+    check(opaque.status === 401 && !opaque.body.cached_v1_success, 'cached v1 public legacy command refused');
+    const oauth = await issue(grant);
+    check((await http(readWire(grant), oauth.access)).status === 200, 'current OAuth admin command remains usable');
   } else if (scenario === 'consent') {
     const defaults = manifest();
     delete defaults.mode; delete defaults.workspace_selector; delete defaults.scope_names;

@@ -10,6 +10,8 @@ import { exportJWK, generateKeyPair } from "jose";
 import { parse as parseYaml } from "yaml";
 
 import { loadConfig } from "../src/config.js";
+import { effectiveAdminGate } from "../src/admin-gate.js";
+import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 
 const root = new URL("../../../", import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -302,4 +304,39 @@ test("admin activation config accepts only literal 1 and keeps missing or unread
   await chmod(path, 0o600);
   await writeFile(path, JSON.stringify({ user: "commonswarm_oauth_runtime", password: "synthetic-test-only" }));
   await assert.rejects(loadConfig(configured), /dedicated login role/u);
+});
+
+
+test("activation-env-overlay-db-all-required: effective gate refuses each missing activation input", async () => {
+  const { env, directory } = await configFixture();
+  const overlay = parseYaml(await text("deploy/mcp-auth/compose.admin-issuer.yaml")).services.oauth;
+  const credentialName = "MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE";
+  const mount = overlay.volumes.find(v => v.target === overlay.environment[credentialName]);
+  assert.ok(mount && mount.read_only && mount.bind.create_host_path === false);
+  const issuerFile = join(directory, "issuer-all-required");
+  await writeFile(issuerFile, JSON.stringify({ user: "commonswarm_admin_issuer", password: "synthetic-test-only" }), { mode: 0o600 });
+  const sha = "a".repeat(40), target = `/home/commonswarm/edge/releases/${sha}`;
+  const measured = { admin_issuance_enabled: true, legacy_closed: true, auth_contract_version: 2,
+    lane8_evidence_digest: "b".repeat(64), measurement_evidence_ref: "W4/test/ai-w4-apply", measured_at: new Date(),
+    approved_edge_release_sha: sha, measured_edge_release_sha: sha, measured_edge_target: target, measured_mount: target,
+    measured_generation: 1, release_generation: 1, measured_artifact_digest: "c".repeat(64), measured_image_digest: `sha256:${"d".repeat(64)}` };
+  for (const [missing, expected] of [[null, "open"], ["env", "closed"], ["overlay", "closed"], ["db", "closed"]]) {
+    const config = await loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts",
+      ...(missing === "env" ? {} : { MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: "1" }),
+      ...(missing === "overlay" ? {} : { [credentialName]: issuerFile }) });
+    let connects = 0;
+    const pool = { connect: async () => {
+      connects++;
+      return { query: async sql => {
+        if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+        if (sql.includes("admin_cutover_state")) return { rows: [{ ...measured, admin_issuance_enabled: missing !== "db" }] };
+        return { command: sql, rows: [], rowCount: 0 };
+      }, release() {} };
+    } };
+    // Match production's optional dedicated issuer connection; ordinary runtime
+    // credentials cannot stand in for the absent activation overlay.
+    const coordinator = config.adminIssuer ? new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: config.adminIssuanceEnabled }) : undefined;
+    assert.equal(await effectiveAdminGate({ coordinator }), expected, `missing ${missing ?? "nothing"}`);
+    assert.equal(connects, missing === "env" || missing === "overlay" ? 0 : 1);
+  }
 });

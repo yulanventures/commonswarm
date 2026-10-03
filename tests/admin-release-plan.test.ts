@@ -734,3 +734,107 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     if(existsSync(stage)) removeStage(stage);
   }
 });
+
+
+test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {
+  const apply = block('ai-w6-activation-apply');
+  assert.match(apply, /rows\+\['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1'\]/, 'activation must explicitly opt in');
+  assert.match(apply, /install .*"\$SECRET_STAGE\/service\.active\.env" \/etc\/commonswarm-oauth\/service\.env/);
+  assert.match(apply, /docker compose[^;]*-f "\$OAUTH_TARGET\/deploy\/mcp-auth\/compose\.admin-issuer\.yaml"[^;]*up -d/, 'activation must mount the dedicated issuer credential');
+  assert.match(apply, /UPDATE commonswarm_oauth\.admin_cutover_state SET lane8_evidence_digest=.*admin_issuance_enabled=true WHERE singleton/);
+  assert.match(apply, /ai_db -q --file \/proof\/activate\.sql/, 'the generated DB cutover must actually be applied');
+});
+
+test('admin release plan: failed recycle restart remains closed; healthy restart remeasures before reopening', () => {
+  const root = join(realpathSync(scratch), 'recycle-execution'); mkdirSync(root);
+  const configDir = join(root, 'config'); mkdirSync(configDir);
+  const edgeRoot = join(root, 'edge'), target = join(edgeRoot, 'releases', sha);
+  mkdirSync(target, { recursive: true });
+  const releaseRoot = join(root, 'release', sha); mkdirSync(releaseRoot, { recursive: true });
+  const archive = join(root, `admin-issuance-${sha}-Abc123.tar`);
+  writeFileSync(join(target, 'tracked.txt'), 'reviewed edge bytes\n');
+  // Actual archive/byte verification still runs; only OS/daemon/DB boundaries are substituted.
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile; t=tarfile.open(sys.argv[1],"w"); t.add(sys.argv[2],arcname="tracked.txt"); t.close()', archive, join(target, 'tracked.txt')], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const current = join(edgeRoot, 'current');
+  const link = spawnSync('ln', ['-s', target, current], { encoding: 'utf8' }); assert.equal(link.status, 0, link.stderr);
+  const config = join(configDir, 'recycle.json'), stateFile = join(root, 'database.json');
+  writeFileSync(config, JSON.stringify({ release_sha: sha, target, image_digest: `sha256:${hex}`,
+    artifact_digest: digest(readFileSync(archive)), archive, postgres_image: `sha256:${hex}`, release_root: releaseRoot }), { mode: 0o600 });
+  const shim = join(root, 'bin'); mkdirSync(shim);
+  const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
+  const boundary = `
+from types import SimpleNamespace
+fixture_state = pathlib.Path(os.environ['RECYCLE_FIXTURE_STATE'])
+original_stat = pathlib.Path.stat
+def fixture_stat(p, *args, **kwargs):
+    value = original_stat(p, *args, **kwargs)
+    if str(p) == os.environ['RECYCLE_FIXTURE_CONFIG']:
+        return SimpleNamespace(st_uid=0, st_mode=value.st_mode)
+    return value
+pathlib.Path.stat = fixture_stat
+def fixture_run(args, **kwargs):
+    assert args[0] == 'node'
+    env = kwargs['env']
+    pathlib.Path(env['PG_SERVICE_OUTPUT']).write_text('synthetic service fixture')
+    pathlib.Path(env['PG_PASS_OUTPUT']).write_text('synthetic pass fixture')
+    return SimpleNamespace(returncode=0)
+def fixture_output(args, **kwargs):
+    if args[:2] == ['docker', 'inspect']:
+        if os.environ.get('RECYCLE_FIXTURE_FAILURE') == '1':
+            raise subprocess.CalledProcessError(1, ['docker', 'inspect'])
+        r = json.loads(pathlib.Path(os.environ['RECYCLE_FIXTURE_CONFIG']).read_text())
+        target = r['target']
+        return json.dumps([{'Image': r['image_digest'], 'State': {'Health': {'Status': 'healthy'}},
+          'Config': {'Labels': {'com.docker.compose.project.working_dir': target+'/deploy/edge-runtime'}},
+          'HostConfig': {'NetworkMode': 'commonswarm-net', 'Memory': 2147483648},
+          'Mounts': [{'Destination': dst, 'Source': target+'/'+rel, 'RW': False} for dst,rel in
+            [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]).encode()
+    assert args[:2] == ['docker', 'run'] and args[-1] == '-'
+    sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
+    if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
+    enable = re.search(r'admin_issuance_enabled=(true|false)', sql)
+    if enable: state['enabled'] = enable[1] == 'true'
+    if 'release_generation=release_generation+1' in sql:
+        state['generation'] += 1; state['invalidated'] = True
+    if 'measured_generation=release_generation' in sql:
+        state['measured_generation'] = state['generation']; state['invalidated'] = False
+    fixture_state.write_text(json.dumps(state))
+    return ('t' if prior else 'f')+'\\n'+str(state['generation']) if 'RETURNING release_generation' in sql else ''
+subprocess.run = fixture_run
+subprocess.check_output = fixture_output
+`;
+  writeFileSync(join(shim, 'python3'), `#!/bin/bash\nexec '${python}' "$@"\n`, { mode: 0o700 });
+  let source = portable(block('ai-recycle-hook'), { stage: 1, pointer: 0 });
+  // Remap the complete hook's paths to the owned fixture; no live path is used.
+  for (const [from, to] of [
+    ['/etc/commonswarm-admin-release', configDir], ['/home/commonswarm/edge', edgeRoot],
+    ['/home/commonswarm/admin-issuance/releases', join(root, 'release')],
+    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')],
+    ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
+  ]) source = source.split(from).join(to);
+  const imports = 'import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time\n';
+  assert.equal(source.split(imports).length - 1, 1);
+  source = source.replace(imports, imports + boundary);
+  const hook = (mode: string, failed = false) => run(`set -- ${mode}\n${source}`, {
+    PATH: `${shim}:${process.env.PATH}`, RECYCLE_FIXTURE_STATE: stateFile, RECYCLE_FIXTURE_CONFIG: config,
+    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0',
+  });
+  const state = () => JSON.parse(readFileSync(stateFile, 'utf8'));
+  const initial = { enabled: true, generation: 7, measured_generation: 7, invalidated: false };
+  for (const failed of [true, false]) {
+    writeFileSync(stateFile, JSON.stringify(initial));
+    const before = hook('before'); assert.equal(before.status, 0, before.stderr);
+    assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+    assert.deepEqual(JSON.parse(readFileSync(join(configDir, 'recycle-intent.json'), 'utf8')), { reopen: true, generation: 8 });
+    const after = hook('after', failed);
+    if (failed) {
+      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance stays closed/);
+      assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+    } else {
+      assert.equal(after.status, 0, after.stderr);
+      assert.deepEqual(state(), { enabled: true, generation: 8, measured_generation: 8, invalidated: false });
+    }
+    assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');
+  }
+});
