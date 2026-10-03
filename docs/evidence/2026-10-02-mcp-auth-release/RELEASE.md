@@ -36,14 +36,14 @@ those live checks:
 
 | Input | Repository / HezLead evidence |
 | --- | --- |
-| `BASELINE_OAUTH_SHA` | HezLead's latest measured live ON or OFF report; full 40 lowercase hex, independently checked against the running source |
-| `BASELINE_OAUTH_IMAGE` | Same measured report; full sha256 + 64 lowercase hex, independently checked against the running image; no registry tag |
+| `EXPECTED_OAUTH_SHA` | HezLead's latest measured live ON or OFF report; full 40 lowercase hex, independently checked against the running source |
+| `EXPECTED_OAUTH_IMAGE_DIGEST` | Same measured report; full sha256 + 64 lowercase hex, independently checked against the running image; no registry tag |
 | Historical OAuth baseline only | `826db6a34f235064a3a03c57377d8e32a35d2f05` / `sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a`; HM6, superseded by try 2 |
 | Latest task handoff | TASK-11 reports production ON at source `603a206e`, image prefix `sha256:67687a3f`, both flags 1, management override/mount present and Caddy active. Prefixes are evidence only; HezLead supplies the full measured inputs. |
 | OAuth project / service / container | `commonswarm-oauth` / `oauth` / `commonswarm-oauth-oauth-1` |
 | OAuth inputs | `/etc/commonswarm-oauth/compose.env`, `/etc/commonswarm-oauth/service.env` |
 | Port/network | HM6 recorded loopback `3490`; Compose allows `3490..3499`; `commonswarm-net` |
-| Edge release | `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`, `/home/commonswarm/edge/current` |
+| `EXPECTED_EDGE_SHA` | HezLead's latest measured edge release; full 40 lowercase hex, checked against the running container's Compose labels, `/home/commonswarm/edge/current` and `RELEASE_SHA` |
 | Edge project / service / container | `commonswarm-edge` / `edge-runtime` / `commonswarm-edge-edge-runtime-1` |
 | Edge env/override | `/home/commonswarm/.env`; deployed `deploy/edge-runtime/compose.override.yaml` must be retained |
 | Caddy | `/etc/caddy/Caddyfile`, `/etc/caddy/sites/20-commonswarm-mcp.caddy`; HM6 rendered OAuth ingress, resource routes dark |
@@ -90,7 +90,7 @@ Execute only the marked blocks, extracted by step ID. Mac blocks use Bash
 3.2 syntax. Box blocks run in HezLead's approved root release shell; **this
 preparation worker has not used sudo**. Each box block receives the same
 nonsecret `OAUTH_RELEASE_SHA`; preflight and open also receive the two
-baseline inputs and the checked MODE; later blocks reload a root-owned state file holding
+baseline inputs, `EXPECTED_EDGE_SHA` and the checked MODE; later blocks reload a root-owned state file holding
 only paths, SHA/image identity, and helper code. On any FAIL stop forward
 work and follow the failure-state table before cleanup/closing. Do not invent
 commands during the window. No Actions, HOME changes, Mac Docker or browser.
@@ -103,7 +103,7 @@ existing marked block by its step ID; no ad hoc recovery of the closed state.
 
 | Phase | Exact step IDs, in order |
 | --- | --- |
-| (0) | `hm37-mcp-baseline-state` (box, read-only; retain the same root shell for preflight/open) |
+| (0) | `hm37-oauth-plan-inputs`, then `hm37-mcp-baseline-state` (box, read-only; retain the same root shell for preflight/open) |
 | (a) | `hm37-oauth-archive` (Mac), `hm37-oauth-preflight` (box), then `hm37-oauth-open` (box) |
 | (a1), ON baseline only | `hm37-mcp-transition-off` immediately after open, then `hm37-mcp-route-probes` with `MCP_EXPECTED_MODE=off`. OFF baselines skip (a1). |
 | (b) | `hm37-oauth-build` |
@@ -123,8 +123,9 @@ The separately approved HM done-test follows successful activation.
 
 | Input | Source and use |
 | --- | --- |
-| `OAUTH_RELEASE_SHA` | HezLead supplies the exact reviewed merge SHA landed on main; archive verifies ancestry. Supply it to all box blocks; must differ from `BASELINE_OAUTH_SHA`. |
-| `BASELINE_OAUTH_SHA`, `BASELINE_OAUTH_IMAGE` | HezLead's latest measured live ON or OFF report, full immutable identities. Supply to preflight/open; open saves them with the measured release/Compose path in the new window state. |
+| `OAUTH_RELEASE_SHA` | HezLead supplies the exact reviewed merge SHA landed on main; archive verifies ancestry. Supply it to all box blocks; must differ from `EXPECTED_OAUTH_SHA`. |
+| `EXPECTED_OAUTH_SHA`, `EXPECTED_OAUTH_IMAGE_DIGEST` | HezLead's latest measured live ON or OFF report: SHA is 40 lowercase hex; image is sha256: plus 64 lowercase hex. Supply to preflight/open; open saves them with the measured release/Compose path in the new window state. |
+| `EXPECTED_EDGE_SHA` | HezLead supplies the full measured edge SHA, 40 lowercase hex. Export with the baseline inputs; preflight/open require the running Compose labels and canonical current target to match. A stale input stops the window. |
 | `OAUTH_ARCHIVE_SHA256` | Exact `shasum -a 256` result from `hm37-oauth-archive`; HezLead supplies it to open. |
 | `BOX_ARCHIVE_PATH` | Exact printed path from `hm37-oauth-archive`; HezLead supplies it to open. |
 | `TOM_ENABLE_APPROVAL` | HezLead's named prompt authorization `2026-09-29`; required for (f), never inferred from this document. |
@@ -134,6 +135,62 @@ The separately approved HM done-test follows successful activation.
 Open creates the new release/proof paths and secret stage; later box blocks
 load these and the captured baseline identities from the new state file.
 Never supply guessed rollback paths or reuse the baseline proof directory.
+
+Supply the three nonsecret identities from HezLead's latest measured report
+in the retained box shell. This block validates and exports them without defaults.
+
+```sh
+# step: hm37-oauth-plan-inputs
+set -euo pipefail
+: "${EXPECTED_OAUTH_SHA:?FAIL: measured OAuth baseline SHA missing}"
+: "${EXPECTED_OAUTH_IMAGE_DIGEST:?FAIL: measured OAuth baseline image missing}"
+: "${EXPECTED_EDGE_SHA:?FAIL: measured edge SHA missing}"
+oauth_expected_baselines() {
+python3 - "${1:-check}" "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "${EXPECTED_EDGE_SHA:-}" <<'PYBASELINE'
+import json,pathlib,re,subprocess,sys
+mode=sys.argv[1]
+assert mode in ('validate','check'), 'FAIL: baseline check mode; STOP'
+fields=['EXPECTED_OAUTH_SHA', 'EXPECTED_OAUTH_IMAGE_DIGEST', 'EXPECTED_EDGE_SHA']
+values=dict(zip(fields,sys.argv[2:]))
+for field,value in values.items():
+    pattern=r'sha256:[0-9a-f]{64}' if field.endswith('_IMAGE_DIGEST') else r'[0-9a-f]{40}'
+    if not re.fullmatch(pattern,value): raise SystemExit('FAIL: invalid '+field+'; STOP')
+if mode=='validate': raise SystemExit(0)
+def equal(field,observed):
+    expected=values[field]
+    if observed!=expected:
+        raise SystemExit(f'FAIL: {field} expected={expected} observed={observed}; STOP')
+def inspect(service):
+    return json.loads(subprocess.check_output(['docker','inspect',service],stderr=subprocess.DEVNULL))[0]
+def current(surface):
+    p=pathlib.Path('/home/commonswarm/'+surface+'/current')
+    field='EXPECTED_'+surface.upper()+'_SHA'
+    try: release=p.resolve(strict=True)
+    except OSError: equal(field,'missing current target')
+    if not p.is_symlink() or release.parent!=pathlib.Path('/home/commonswarm/'+surface+'/releases'):
+        equal(field,'invalid current release path')
+    return release.name
+if 'EXPECTED_EDGE_SHA' in values:
+    data=inspect('commonswarm-edge-edge-runtime-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/edge/releases/([0-9a-f]{40})/deploy/edge-runtime',work)
+    equal('EXPECTED_EDGE_SHA',match[1] if match else 'invalid edge source label')
+    equal('EXPECTED_EDGE_SHA',current('edge'))
+    equal('EXPECTED_EDGE_SHA',(pathlib.Path('/home/commonswarm/edge/releases')/values['EXPECTED_EDGE_SHA']/'RELEASE_SHA').read_text().strip())
+if 'EXPECTED_OAUTH_SHA' in values:
+    data=inspect('commonswarm-oauth-oauth-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/oauth/releases/([0-9a-f]{40})/deploy/mcp-auth',work)
+    equal('EXPECTED_OAUTH_SHA',match[1] if match else 'invalid OAuth source label')
+    equal('EXPECTED_OAUTH_SHA',current('oauth'))
+    equal('EXPECTED_OAUTH_SHA',(pathlib.Path('/home/commonswarm/oauth/releases')/values['EXPECTED_OAUTH_SHA']/'RELEASE_SHA').read_text().strip())
+    equal('EXPECTED_OAUTH_IMAGE_DIGEST',data['Image'])
+print('PASS: expected live baseline identities matched')
+PYBASELINE
+}
+oauth_expected_baselines validate
+export EXPECTED_OAUTH_SHA EXPECTED_OAUTH_IMAGE_DIGEST EXPECTED_EDGE_SHA
+```
 
 ## (0) Measure the MCP baseline before opening a window
 
@@ -257,7 +314,7 @@ printf 'MODE=%s baseline consistency and public probes PASS (read-only)\n' "$BAS
 ## (a) Archive and read-only preflight
 
 Mac input: reviewed landed `OAUTH_RELEASE_SHA`. Box preflight/open inputs:
-`BASELINE_OAUTH_SHA` and `BASELINE_OAUTH_IMAGE` from HezLead's measured live
+`EXPECTED_OAUTH_SHA`, `EXPECTED_OAUTH_IMAGE_DIGEST` and `EXPECTED_EDGE_SHA` from HezLead's measured live
 ON or OFF report. Run from a clean checkout.
 The public archive is copied as a mode-0600 file to the box's `/tmp` (1777),
 using a fresh suffix chosen by Mac `mktemp`. HezLead supplies its printed
@@ -299,6 +356,7 @@ the same check; no step rewrites `/etc/caddy/Caddyfile`.
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-preflight line $LINENO" >&2' ERR
 : "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+oauth_expected_baselines check
 MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-preflight REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
 MCP_EXPECTED_MODE=$MODE
@@ -309,18 +367,19 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$MODE" <<'PY'
+python3 - "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "$MODE" "${EXPECTED_EDGE_SHA:-}" <<'PY'
 import json, pathlib, posixpath, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-preflight REQ {number}: {description}; STOP")
-baseline_sha,baseline_image,mode=sys.argv[1:]
-require(re.fullmatch(r"[0-9a-f]{40}",baseline_sha),1,"BASELINE_OAUTH_SHA must be 40 lowercase hex")
-require(re.fullmatch(r"sha256:[0-9a-f]{64}",baseline_image),2,"BASELINE_OAUTH_IMAGE must be an immutable image ID")
+baseline_sha,baseline_image,mode,edge_sha=sys.argv[1:]
+require(re.fullmatch(r"[0-9a-f]{40}",baseline_sha),1,"EXPECTED_OAUTH_SHA must be 40 lowercase hex")
+require(re.fullmatch(r"sha256:[0-9a-f]{64}",baseline_image),2,"EXPECTED_OAUTH_IMAGE_DIGEST must be an immutable image ID")
+require(re.fullmatch(r"[0-9a-f]{40}",edge_sha),10,"EXPECTED_EDGE_SHA must be 40 lowercase hex")
 def inspect(name):
     return json.loads(subprocess.check_output(['docker','inspect',name], text=True))[0]
 for name, project, service, sha in [
     ('commonswarm-oauth-oauth-1','commonswarm-oauth','oauth',baseline_sha),
-    ('commonswarm-edge-edge-runtime-1','commonswarm-edge','edge-runtime','eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922')]:
+    ('commonswarm-edge-edge-runtime-1','commonswarm-edge','edge-runtime',edge_sha)]:
     data=inspect(name); labels=data['Config']['Labels']; env=dict(x.split('=',1) for x in data['Config']['Env'])
     ids=subprocess.check_output(['docker','ps','-q','--filter','label=com.docker.compose.project='+project,
         '--filter','label=com.docker.compose.service='+service], text=True).split()
@@ -333,13 +392,15 @@ for name, project, service, sha in [
         require(work.is_absolute() and work.parts[-2:]==('deploy','mcp-auth'),3,'baseline Compose working_dir is an OAuth release path')
         release=work.parent.parent
         require(release.parent==root/'releases' and release.is_dir() and release.resolve(strict=True)==release,4,'baseline release directory is canonical')
-        require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,5,'running OAuth source equals BASELINE_OAUTH_SHA')
+        require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,5,'running OAuth source equals EXPECTED_OAUTH_SHA')
         require((root/'current').is_symlink() and (root/'current').exists() and (root/'current').resolve(strict=True)==release,6,'OAuth current symlink equals measured release directory')
         require(labels.get('com.docker.compose.project.config_files')==str(work/'compose.yaml')+(','+str(work/'compose.management.yaml') if mode=='on' else '') and (work/'compose.yaml').is_file(),7,'baseline Compose label selects its existing base Compose file')
-        require(data['Image']==baseline_image,8,'running OAuth image equals BASELINE_OAUTH_IMAGE')
+        require(data['Image']==baseline_image,8,'running OAuth image equals EXPECTED_OAUTH_IMAGE_DIGEST')
     else:
-        release=(root/'current').resolve(strict=True)
-        assert release==root/'releases'/sha and (release/'RELEASE_SHA').read_text().strip()==sha
+        current=root/'current'
+        require(current.is_symlink() and current.exists(),11,'edge current must be a live symlink')
+        release=current.resolve(strict=True)
+        require(release==root/'releases'/sha and (release/'RELEASE_SHA').read_text().strip()==sha,12,'edge current and RELEASE_SHA equal EXPECTED_EDGE_SHA')
     assert data['State']['Health']['Status']=='healthy'
     assert 'commonswarm-net' in (data['NetworkSettings'].get('Networks') or {})
     flag='MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED' if service=='oauth' else 'SWARM_MCP_PUBLIC_ENABLED'
@@ -382,7 +443,7 @@ PY
 
 ## Open window and retain rollback inputs
 
-Additional prompt inputs: `BASELINE_OAUTH_SHA`, `BASELINE_OAUTH_IMAGE`,
+Additional prompt inputs: `EXPECTED_OAUTH_SHA`, `EXPECTED_OAUTH_IMAGE_DIGEST`, `EXPECTED_EDGE_SHA`,
 `OAUTH_ARCHIVE_SHA256` and `BOX_ARCHIVE_PATH`. Open remeasures the baseline
 before any write. Only the new `OAUTH_RELEASE_SHA` release/proof directories
 are checked for collision; the baseline proof directory is preserved.
@@ -402,6 +463,7 @@ old release/image and original files; report failed cleanup paths and errors.
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-open line $LINENO" >&2' ERR
 : "${BASELINE_MCP_MODE:?FAIL: run hm37-mcp-baseline-state first in this shell}"
+oauth_expected_baselines check
 MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 20: baseline MODE changed; STOP' >&2; exit 1; }
 MCP_EXPECTED_MODE=$MODE
@@ -417,14 +479,25 @@ test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm &&
   test ! -e /usr/local/sbin/rm && test ! -L /usr/local/sbin/rm || {
   echo 'FAIL: box-rm-preflight; expected root /usr/bin/rm and no local wrapper' >&2; exit 1;
 }
-python3 - "${BASELINE_OAUTH_SHA:-}" "${BASELINE_OAUTH_IMAGE:-}" "$OAUTH_RELEASE_SHA" "$MODE" <<'PY'
+python3 - "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "$OAUTH_RELEASE_SHA" "$MODE" "${EXPECTED_EDGE_SHA:-}" <<'PY'
 import json, pathlib, re, shlex, subprocess, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-open REQ {number}: {description}; STOP")
-sha,image,new_sha,mode=sys.argv[1:]
-require(re.fullmatch(r'[0-9a-f]{40}',sha),1,'BASELINE_OAUTH_SHA must be 40 lowercase hex')
-require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),2,'BASELINE_OAUTH_IMAGE must be an immutable image ID')
-require(new_sha!=sha,3,'OAUTH_RELEASE_SHA must differ from BASELINE_OAUTH_SHA; preserve baseline proofs')
+sha,image,new_sha,mode,edge_sha=sys.argv[1:]
+require(re.fullmatch(r'[0-9a-f]{40}',sha),1,'EXPECTED_OAUTH_SHA must be 40 lowercase hex')
+require(re.fullmatch(r'sha256:[0-9a-f]{64}',image),2,'EXPECTED_OAUTH_IMAGE_DIGEST must be an immutable image ID')
+require(new_sha!=sha,3,'OAUTH_RELEASE_SHA must differ from EXPECTED_OAUTH_SHA; preserve baseline proofs')
+require(re.fullmatch(r'[0-9a-f]{40}',edge_sha),12,'EXPECTED_EDGE_SHA must be 40 lowercase hex')
+edge=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],text=True))[0]
+edge_labels=edge['Config']['Labels']
+edge_current=pathlib.Path('/home/commonswarm/edge/current')
+edge_release=pathlib.Path('/home/commonswarm/edge/releases')/edge_sha
+require(edge_current.is_symlink() and edge_current.exists() and edge_current.resolve(strict=True)==edge_release
+    and (edge_release/'RELEASE_SHA').read_text().strip()==edge_sha,13,'edge current and RELEASE_SHA equal EXPECTED_EDGE_SHA')
+edge_work=edge_release/'deploy/edge-runtime'
+require(edge_labels.get('com.docker.compose.project')=='commonswarm-edge' and edge_labels.get('com.docker.compose.service')=='edge-runtime'
+    and edge_labels.get('com.docker.compose.project.working_dir')==str(edge_work)
+    and edge_labels.get('com.docker.compose.project.config_files')==str(edge_work/'compose.yaml')+','+str(edge_work/'compose.override.yaml'),14,'running edge Compose labels equal EXPECTED_EDGE_SHA')
 data=json.loads(subprocess.check_output(['docker','inspect','commonswarm-oauth-oauth-1'],text=True))[0]
 labels=data['Config']['Labels']
 require(labels.get('com.docker.compose.project')=='commonswarm-oauth' and labels.get('com.docker.compose.service')=='oauth',4,'running container is the OAuth Compose service')
@@ -432,12 +505,12 @@ work=pathlib.Path(labels.get('com.docker.compose.project.working_dir',''))
 require(work.is_absolute() and work.parts[-2:]==('deploy','mcp-auth'),5,'baseline Compose working_dir is an OAuth release path')
 release=work.parent.parent
 require(release.parent==pathlib.Path('/home/commonswarm/oauth/releases') and release.is_dir() and release.resolve(strict=True)==release,6,'baseline release directory is canonical')
-require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,7,'running OAuth source equals BASELINE_OAUTH_SHA')
+require(release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,7,'running OAuth source equals EXPECTED_OAUTH_SHA')
 current=pathlib.Path('/home/commonswarm/oauth/current')
 require(current.is_symlink() and current.exists() and current.resolve(strict=True)==release,8,'OAuth current symlink equals measured release directory')
 compose=work/'compose.yaml'
 require(labels.get('com.docker.compose.project.config_files')==str(compose)+(','+str(work/'compose.management.yaml') if mode=='on' else '') and compose.is_file(),9,'baseline Compose label selects its existing base Compose file')
-require(data['Image']==image,10,'running OAuth image equals BASELINE_OAUTH_IMAGE')
+require(data['Image']==image,10,'running OAuth image equals EXPECTED_OAUTH_IMAGE_DIGEST')
 env=dict(x.split('=',1) for x in data['Config']['Env'])
 require(data['State']['Health']['Status']=='healthy' and env.get('MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED','0')==('1' if mode=='on' else '0'),11,'baseline OAuth is healthy in checked MODE')
 PY
@@ -502,10 +575,11 @@ MODE=$(hm37_baseline_mode) || exit 1
 test "$MODE" = "$BASELINE_MCP_MODE" || { echo 'FAIL hm37-oauth-open REQ 23: MODE drift during snapshot; STOP' >&2; exit 1; }
 printf '%s\n' "$BASELINE_MCP_MODE" >"$PROOF_DIR/baseline-mcp-mode"
 EDGE_DIR=$(readlink -f /home/commonswarm/edge/current) || exit 1
+test "$EDGE_DIR" = "/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA" || { echo 'FAIL hm37-oauth-open: edge current changed during snapshot; STOP' >&2; exit 1; }
 STATE=$PROOF_DIR/hm37-window.sh
 umask 077
-printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%q\nBASELINE_OAUTH_SHA=%q\nBASELINE_OAUTH_IMAGE=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
-  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" \
+printf 'OAUTH_RELEASE_DIR=%q\nPROOF_DIR=%q\nSECRET_STAGE=%q\nBASELINE_MCP_MODE=%q\nEXPECTED_OAUTH_SHA=%q\nEXPECTED_OAUTH_IMAGE_DIGEST=%q\nBASELINE_OAUTH_DIR=%q\nBASELINE_OAUTH_COMPOSE=%q\nEDGE_DIR=%q\n' \
+  "$OAUTH_RELEASE_DIR" "$PROOF_DIR" "$SECRET_STAGE" "$BASELINE_MCP_MODE" "$EXPECTED_OAUTH_SHA" "$EXPECTED_OAUTH_IMAGE_DIGEST" \
   "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" "$EDGE_DIR" >"$STATE"
 cat >>"$STATE" <<'SH'
 prepare_off_inputs() {
@@ -625,18 +699,18 @@ rollback_to_off() {
 }
 baseline_rollback_off() {
   local OAUTH_RELEASE_DIR="$BASELINE_OAUTH_DIR"
-python3 - "$BASELINE_OAUTH_SHA" "$BASELINE_OAUTH_IMAGE" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY' || return 1
+python3 - "$EXPECTED_OAUTH_SHA" "$EXPECTED_OAUTH_IMAGE_DIGEST" "$BASELINE_OAUTH_DIR" "$BASELINE_OAUTH_COMPOSE" <<'PY' || return 1
 import pathlib, re, sys
 def require(ok, number, description):
     if not ok: raise SystemExit(f"FAIL hm37-oauth-rollback REQ {number}: {description}; STOP")
 sha,image,directory,compose=sys.argv[1:]; release=pathlib.Path(directory); file=pathlib.Path(compose)
 require(re.fullmatch(r'[0-9a-f]{40}',sha) and re.fullmatch(r'sha256:[0-9a-f]{64}',image),1,'saved baseline inputs have valid immutable identities')
-require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains BASELINE_OAUTH_SHA')
+require(release.is_dir() and release.resolve(strict=True)==release and release.name==sha and (release/'RELEASE_SHA').is_file() and (release/'RELEASE_SHA').read_text().strip()==sha,2,'saved measured release still contains EXPECTED_OAUTH_SHA')
 require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved measured baseline Compose file exists in that release')
 PY
-  docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" rollback_to_off compose.baseline.off.env || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" rollback_to_off compose.baseline.off.env || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   test -L /home/commonswarm/oauth/current || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
   MCP_EXPECTED_MODE=off mcp_route_probes || return 1
@@ -655,11 +729,11 @@ restore_baseline_on() {
     cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
     cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
   test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose config --quiet || return 1
-  MCP_OAUTH_IMAGE="$BASELINE_OAUTH_IMAGE" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose config --quiet || return 1
+  MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$BASELINE_OAUTH_IMAGE" || return 1
+  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
@@ -722,7 +796,7 @@ PY
 SH
 declare -f hm37_baseline_mode mcp_route_probes >>"$STATE"
 . "$STATE"
-prepare_off_inputs "$BASELINE_OAUTH_IMAGE" || { echo 'FAIL hm37-oauth-open REQ 24: OFF inputs could not be prepared; baseline unchanged; STOP' >&2; exit 1; }
+prepare_off_inputs "$EXPECTED_OAUTH_IMAGE_DIGEST" || { echo 'FAIL hm37-oauth-open REQ 24: OFF inputs could not be prepared; baseline unchanged; STOP' >&2; exit 1; }
 cp "$SECRET_STAGE/compose.env" "$SECRET_STAGE/compose.baseline.off.env" || exit 1
 caddy_sites_import || exit 1
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || { echo 'FAIL: Caddy snapshot changed; stop and report' >&2; exit 1; }
@@ -776,7 +850,18 @@ no app registry tag or Mac image build.
 set -euo pipefail
 trap 'echo "FAIL: hm37-oauth-build line $LINENO" >&2' ERR
 . "/home/commonswarm/oauth/release-proofs/${OAUTH_RELEASE_SHA:?}/hm37-window.sh"
-BASE_REFERENCE=node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+BASE_REFERENCES=$PROOF_DIR/oauth-base-references.txt
+python3 - "$OAUTH_RELEASE_DIR/services/mcp-auth/Dockerfile" >"$BASE_REFERENCES" <<'PY'
+import pathlib,re,sys
+references=[]
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith('FROM '):
+        reference=line.split()[1]
+        assert re.fullmatch(r'node:[0-9A-Za-z.+-]+@sha256:[0-9a-f]{64}',reference), 'FAIL: reviewed Dockerfile base must be immutable; STOP'
+        references.append(reference)
+assert references, 'FAIL: no reviewed Dockerfile bases; STOP'
+print('\n'.join(sorted(set(references))))
+PY
 IMAGE_TAG=commonswarm-oauth:release-$OAUTH_RELEASE_SHA
 CACHED_IMAGE=$(docker image ls --no-trunc --quiet --filter "reference=$IMAGE_TAG") || { echo 'FAIL: image lookup' >&2; exit 1; }
 if [ -n "$CACHED_IMAGE" ]; then
@@ -785,7 +870,9 @@ if [ -n "$CACHED_IMAGE" ]; then
   printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 else
   test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
-  docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
+  while IFS= read -r BASE_REFERENCE; do
+    docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
+  done <"$BASE_REFERENCES"
   DOCKER_BUILDKIT=0 nice -n 15 docker build --pull=false \
     --cpu-period=100000 --cpu-quota=300000 \
     --tag "$IMAGE_TAG" --label "org.opencontainers.image.revision=$OAUTH_RELEASE_SHA" \
@@ -797,7 +884,7 @@ IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || exit 1
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
 case "$IMAGE" in sha256:*) ;; *) echo 'FAIL: image must be immutable' >&2; exit 1;; esac
 test "${#IMAGE}" -eq 71 || exit 1
-docker image inspect "$BASELINE_OAUTH_IMAGE" >/dev/null || exit 1
+docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || exit 1
 docker run --rm --network none --entrypoint node "$IMAGE" --input-type=module -e \
   'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync("package.json")); if(p.dependencies["oidc-provider"]!=="9.12.2" || !fs.existsSync("src/management-command.generated.js")) process.exit(1)' || exit 1
 ```
@@ -911,7 +998,7 @@ recover_baseline || exit 1
 
 The baseline release/base Compose path is captured from running labels. The
 same Compose helpers are reused with that validated baseline release directory;
-the image is explicitly `BASELINE_OAUTH_IMAGE`. Original compose.env bytes are
+the image is explicitly `EXPECTED_OAUTH_IMAGE_DIGEST`. Original compose.env bytes are
 restored, and current returns to `BASELINE_OAUTH_DIR`. Existing source/proofs
 are preserved. No migration, stack, site, signing key or timer changes occur.
 

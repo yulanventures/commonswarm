@@ -10,7 +10,7 @@ static files on the Mac and contains no box image-build step.
 
 **Release:** validated `SITE_RELEASE_SHA`, reviewed and landed on `origin/main`.
 
-**Baseline source:** validated `SITE_BASE_SHA`, reconciled with the box measurement.
+**Baseline source:** validated `EXPECTED_SITE_SHA`, reconciled with the box measurement.
 
 **Baseline release:** `BASELINE_DIR`, measured from `/srv/commonswarm/site/current`.
 **Status:** executable plan; no operation recorded here has run.
@@ -46,7 +46,7 @@ by an absolute path and is read without printing it.
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | 40 lowercase hex; a commit on `origin/main`, descendant of base with a nonempty `site/` delta |
-| `SITE_BASE_SHA` | Anvil, expected full baseline source SHA | 40 lowercase hex; a commit and ancestor of release; must equal the uniquely resolved box-recorded source prefix |
+| `EXPECTED_SITE_SHA` | Anvil, expected full baseline source SHA | 40 lowercase hex; a commit and ancestor of release; must equal the uniquely resolved box-recorded source prefix |
 | `BASELINE_DIR` | Produced by window open, never supplied or trusted | canonical current release directory measured on the box and retained in the protected window file |
 | `SITE_RELEASE_VERSION` | Produced from the exact checkout | root `package.json` version, used for the `/download` version control |
 | `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
@@ -60,7 +60,7 @@ by an absolute path and is read without printing it.
 {"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for this site release."}
 {"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing this generalized plan."}
 {"name":"SITE_RELEASE_SHA","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
-{"name":"SITE_BASE_SHA","format":"sha40","supplier":"Anvil","meaning":"Expected full baseline source commit, checked against the measured source."}
+{"name":"EXPECTED_SITE_SHA","format":"sha40","supplier":"Anvil","meaning":"Expected full baseline source commit, checked against the measured source."}
 {"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
 {"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
 {"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
@@ -68,7 +68,7 @@ by an absolute path and is read without printing it.
 {"name":"OP_SERVICE_ACCOUNT_TOKEN_FILE","format":"abs-file:op-service-account-token","supplier":"Anvil","meaning":"Protected token file used by the noninteractive 1Password service-account workflow."}
 ```
 The gate receipt is parsed as complete lines, following `dcr-archive` in
-`docs/evidence/2026-10-02-dcr-release/RELEASE.md`. It is checked before any box
+`docs/evidence/2026-10-02-dcr-release/RELEASE-V2.md`. It is checked before any box
 contact and copied into the protected evidence set at open. It supplies proof
 of gates already run; this plan never dispatches Actions.
 
@@ -77,7 +77,7 @@ box's resolved `current` link. `deploy/site/deploy.sh` records the source as
 `git rev-parse --short=12 HEAD` inside that release directory name, rather than
 writing a full-SHA file into the static tree. Open measures that recorded prefix
 on the box, resolves it uniquely with Git in the exact checkout, and requires
-the full result to equal `SITE_BASE_SHA`. An absent, malformed, ambiguous or
+the full result to equal `EXPECTED_SITE_SHA`. An absent, malformed, ambiguous or
 mismatching source is STOP. `BASELINE_DIR` is derived from the measurement,
 never accepted from an old receipt or prompt; later pin/deploy/close paths
 compare against that retained measurement. The full source and directory are
@@ -96,6 +96,7 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 
 | Order | Step | Required result / next action |
 |---|---|---|
+| 0 | `site2-plan-inputs` | Required full expected site source validated and exported. |
 | 1 | `site2-00-source-checkout` | Exact landed commit, base ancestry, nonempty site delta and exact-SHA gates; no window yet. |
 | 2 | `site2-01` | Box clock, measured baseline directory/source, protected local and box window files, copied gate receipt. |
 | 3 | `site2-00-a-close-ingest` | Current hosted MCP ON receipt; preserves the historical step name. |
@@ -127,6 +128,17 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 | Either close fails | Retain state; guarded-rm refusal reports exact path/message and leaves it. `site2-07-manifest-close` may resume only the documented no-box-close-receipt state; partial box close needs HezLead reconciliation. |
 
 ```sh
+# step: site2-plan-inputs
+# host: Mac /bin/bash 3.2 before source checkout/open
+set -euo pipefail
+python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+export EXPECTED_SITE_SHA
+```
+
+```sh
 # step: site2-00-source-checkout — Mac mini /bin/bash 3.2; Anvil; create isolated exact-SHA checkout
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
@@ -136,13 +148,16 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
   trap 'printf "FAIL site2-00-source-checkout: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${SITE_RELEASE_REPO:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
-  : "${SITE_BASE_SHA:?named input missing}"
+  : "${EXPECTED_SITE_SHA:?named input missing}"
   : "${GATE_EVIDENCE_FILE:?named input missing}"
   case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+  export EXPECTED_SITE_SHA
   test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
   test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
   git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
@@ -153,9 +168,9 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
   test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   test "$(git -C "$SITE_RELEASE_REPO" remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
   test -z "$(git -C "$SITE_RELEASE_REPO" status --short --untracked-files=all)"
-  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${SITE_BASE_SHA}^{commit}")" = "$SITE_BASE_SHA"
-  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  test "$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${EXPECTED_SITE_SHA}^{commit}")" = "$EXPECTED_SITE_SHA"
+  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   python3 - "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_SHA" <<'PY'
 import pathlib,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
@@ -182,15 +197,18 @@ and derives the ID. Nobody types a time or ID.
   trap 'printf "FAIL site2-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
   : "${GATE_EVIDENCE_FILE:?named input missing}"
   : "${SITE_RELEASE_REPO:?named input missing}"
-  : "${SITE_BASE_SHA:?named input missing}"
+  : "${EXPECTED_SITE_SHA:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
   : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+import re,sys
+if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+PYINPUT
+  export EXPECTED_SITE_SHA
   for input_path in "$GATE_EVIDENCE_FILE" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
@@ -213,16 +231,23 @@ PY
   test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
   test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
-  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git -C "$SITE_RELEASE_REPO" diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   SITE_RELEASE_VERSION=$(node -p 'require(process.argv[1]).version' "$SITE_RELEASE_REPO/package.json")
   case "$SITE_RELEASE_VERSION" in ''|*[!0-9A-Za-z.+-]*) exit 1 ;; esac
-  if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
-    printf '%s\n' 'STOP: another local site release process exists' >&2
-    exit 1
-  fi
+  # Bash holds the executing script open; query open paths without setuid tools.
+  python3 - <<'PYLOCALRELEASE'
+import subprocess
+result = subprocess.run(["lsof", "-nP", "-F", "n"], capture_output=True)
+if result.returncode != 0:
+    raise SystemExit("STOP: local site release process query unavailable")
+if any(line.startswith(b"n") and line.endswith((b"/deploy/site/deploy.sh", b"/finalize-release.sh"))
+       for line in result.stdout.splitlines()):
+    raise SystemExit("STOP: another local site release process exists")
+PYLOCALRELEASE
 
-  box_open=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
+  box_open_file="$SITE_EVIDENCE/site2-01-box-open.txt"
+  ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s >"$box_open_file" <<'BOX'
 set -euo pipefail
 set -E
 trap 'printf "FAIL site2-01: line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
@@ -231,10 +256,19 @@ test "$(id -un)" = commonswarm
 test ! -e /tmp/commonswarm-site-window.env
 test -z "$(find "$root" -maxdepth 1 \( -type f -o -type l \) -name 'current.next*' -print)"
 test -z "$(find "$root/releases" -maxdepth 1 \( -type d -o -type l \) -name '.site-window-pin-*' -print)"
-if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
-  printf '%s\n' 'STOP: another box site release process exists' >&2
-  exit 1
-fi
+python3 - <<'PYBOXRELEASE'
+import pathlib
+# Linux exposes argv directly; inspect names without executing process tools.
+for path in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
+    try:
+        arguments = path.read_bytes().split(b"\0")
+    except FileNotFoundError:
+        continue
+    except PermissionError:
+        raise SystemExit("STOP: box site release process query unavailable")
+    if any(arg.endswith((b"deploy/site/deploy.sh", b"finalize-release.sh")) for arg in arguments):
+        raise SystemExit("STOP: another box site release process exists")
+PYBOXRELEASE
 test -w "$root" && test -w "$root/releases"
 previous=$(readlink -f "$root/current")
 test -L "$root/current"
@@ -269,7 +303,7 @@ for url, media in (
 print("BOX_EGRESS=PASS user_agent=" + UA)
 PY
 BOX
-  )
+  box_open=$(cat "$box_open_file")
   start=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_START_UTC=//p')
   end=$(printf '%s\n' "$box_open" | sed -n 's/^SITE_WINDOW_END_UTC=//p')
   previous=$(printf '%s\n' "$box_open" | sed -n 's/^PREVIOUS_RELEASE=//p')
@@ -290,7 +324,10 @@ PY
   test "${#source_prefix}" -eq 12
   case "$source_prefix" in *[!0-9a-f]*) exit 1 ;; esac
   measured_source=$(git -C "$SITE_RELEASE_REPO" rev-parse --verify "${source_prefix}^{commit}")
-  test "$measured_source" = "$SITE_BASE_SHA"
+  if test "$measured_source" != "$EXPECTED_SITE_SHA"; then
+    printf 'FAIL: EXPECTED_SITE_SHA expected=%s observed=%s; STOP\n' "$EXPECTED_SITE_SHA" "$measured_source" >&2
+    exit 1
+  fi
   BASELINE_DIR="$previous"
   git -C "$SITE_RELEASE_REPO" merge-base --is-ancestor "$measured_source" "$SITE_RELEASE_SHA"
   SITE_WINDOW_ID=$(printf '%s' "$start" | tr -d ':-')
@@ -307,7 +344,7 @@ PY
     printf 'SITE_EVIDENCE=%q\n' "$SITE_EVIDENCE"
     printf 'SITE_RELEASE_REPO=%q\n' "$SITE_RELEASE_REPO"
     printf 'SITE_RELEASE_SHA=%q\n' "$SITE_RELEASE_SHA"
-    printf 'SITE_BASE_SHA=%q\n' "$SITE_BASE_SHA"
+    printf 'EXPECTED_SITE_SHA=%q\n' "$EXPECTED_SITE_SHA"
     printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
     printf 'OP_SERVICE_ACCOUNT_TOKEN_FILE=%q\n' "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
     printf 'BASELINE_DIR=%q\n' "$BASELINE_DIR"
@@ -456,11 +493,11 @@ positive controls.
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  test "${#EXPECTED_SITE_SHA}" -eq 40
+  case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   git merge-base --is-ancestor "$SITE_RELEASE_SHA" origin/main
-  git merge-base --is-ancestor "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
-  test -n "$(git diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/)"
+  git merge-base --is-ancestor "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
+  test -n "$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/)"
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
   git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
   git show "$SITE_RELEASE_SHA:deploy/site/finalize-release.sh" | grep -q guarded_delete
@@ -469,20 +506,20 @@ positive controls.
   git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
     grep -q 'with a valid-delete control'
   umask 077
-  git log --format='%H %s' "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/ \
+  git log --format='%H %s' "$EXPECTED_SITE_SHA..$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-commits.txt"
-  git diff --name-status "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+  git diff --name-status "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-name-status.txt"
-  git diff --numstat "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ \
+  git diff --numstat "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site2-02-numstat.txt"
-  commit_count=$(git rev-list --count "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/)
+  commit_count=$(git rev-list --count "$EXPECTED_SITE_SHA..$SITE_RELEASE_SHA" -- site/)
   listed_commit_count=$(wc -l <"$SITE_EVIDENCE/site2-02-commits.txt" | tr -d ' ')
-  changed_count=$(git diff --name-only "$SITE_BASE_SHA" "$SITE_RELEASE_SHA" -- site/ | wc -l | tr -d ' ')
+  changed_count=$(git diff --name-only "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA" -- site/ | wc -l | tr -d ' ')
   listed_count=$(wc -l <"$SITE_EVIDENCE/site2-02-name-status.txt" | tr -d ' ')
   test "$commit_count" -eq "$listed_commit_count"
   test "$changed_count" -eq "$listed_count"
   {
-    printf 'base=%s\ntarget=%s\n' "$SITE_BASE_SHA" "$SITE_RELEASE_SHA"
+    printf 'base=%s\ntarget=%s\n' "$EXPECTED_SITE_SHA" "$SITE_RELEASE_SHA"
     printf 'site_commit_count=%s\nsite_changed_file_count=%s\n' "$commit_count" "$changed_count"
     printf '%s\n' 'DELETE_GUARDS=PASS' 'SOURCE_RECONCILIATION=PASS'
   } >"$SITE_EVIDENCE/site2-02-summary.txt"
@@ -592,104 +629,149 @@ retaining raw browser output in the public evidence directory.
   chmod 0600 "$harness_stdout" "$harness_stderr"
   profile="$browser_root/browser-profile"
   mkdir -m 0700 "$profile"
-  # Sandbox-safe ownership helper: proc_pidinfo reads the actual start time;
-  # pgrep matches only the exact recorded PID/command and enumerates its children.
+  # Ownership uses the saved PID, liveness, and libproc's path/start-time APIs.
+  # Start time guards same-binary PID reuse; no process-name/group kills.
   cat >"$browser_root/browser-process.py" <<'PY'
-import ctypes, json, os, pathlib, re, signal, subprocess, sys, time
+import ctypes, json, os, pathlib, signal, sys, time
 mode, root, pid_text, binary, profile = sys.argv[1:]
 root = pathlib.Path(root)
-pid = int(pid_text)
-if pid <= 1 or profile != str(root / "browser-profile"):
-    raise SystemExit("STOP: invalid task browser identity; leave state for HezLead reconciliation")
 receipt = root / "browser-process.json"
-# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo.
+field = "pid"
+
+def alive():
+    try:
+        os.kill(pid, 0)  # kill -0: only ESRCH means already gone; EPERM stops.
+        return True
+    except ProcessLookupError:
+        return False
+
+# Darwin sys/proc_info.h: PROC_PIDTBSDINFO=3, struct proc_bsdinfo (136 bytes).
 class BsdInfo(ctypes.Structure):
     _fields_ = [("header", ctypes.c_uint32 * 12), ("names", ctypes.c_char * 48),
-                ("tail", ctypes.c_uint32 * 6), ("start_sec", ctypes.c_uint64),
-                ("start_usec", ctypes.c_uint64)]
-libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
-                              ctypes.c_void_p, ctypes.c_int]
-libproc.proc_pidinfo.restype = ctypes.c_int
+                ("tail", ctypes.c_uint32 * 6), ("pbi_start_tvsec", ctypes.c_uint64),
+                ("pbi_start_tvusec", ctypes.c_uint64)]
 
-def identity(target):
-    os.kill(target, 0)
+def start_time():
+    global field
+    field = "start_time"
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                   ctypes.c_void_p, ctypes.c_int]
+    libproc.proc_pidinfo.restype = ctypes.c_int
     info = BsdInfo()
     size = ctypes.sizeof(info)
-    if size != 136 or libproc.proc_pidinfo(target, 3, 0, ctypes.byref(info), size) != size:
+    if size != 136 or libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size) != size:
         raise RuntimeError("process start time unavailable")
-    if info.header[3] != target or info.header[5] != os.getuid():
-        raise RuntimeError("process identity unavailable")
-    return {"pid": target, "ppid": int(info.header[4]), "pgid": int(info.tail[1]),
-            "start": [int(info.start_sec), int(info.start_usec)]}
+    if info.pbi_start_tvsec == 0 or info.pbi_start_tvusec >= 1000000:
+        raise RuntimeError("invalid process start time")
+    return [int(info.pbi_start_tvsec), int(info.pbi_start_tvusec)]
 
-def pgrep(*args):
-    result = subprocess.run(["/usr/bin/pgrep", *args], capture_output=True, text=True)
-    if result.returncode not in (0, 1):
-        raise RuntimeError("pgrep ownership query failed")
-    return result.stdout.splitlines()
+def executable_path():
+    global field
+    field = "executable_path"
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    libproc.proc_pidpath.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
+        raise RuntimeError("executable path unavailable")
+    return str(pathlib.Path(os.fsdecode(buffer.value)).resolve())
 
-def browser():
-    before = identity(pid)
-    pattern = re.escape(binary) + r" .* --user-data-dir=" + re.escape(profile) + r"( |$)"
-    matches = [line for line in pgrep("-lf", pattern) if line.startswith(str(pid) + " ")]
-    if len(matches) != 1 or identity(pid) != before or before["pgid"] != pid:
-        raise RuntimeError("task browser command/start time not proved")
-    return {"identity": before, "command": matches[0], "binary": binary, "profile": profile}
+def verified():
+    global field
+    field = "pid"
+    if not alive():
+        return False
+    observed = executable_path()
+    pathlib.Path(observed).relative_to(cache)
+    field = "recorded_executable_path"
+    if observed != recorded["executable_path"] or observed != expected:
+        raise RuntimeError("PID reused or executable path changed")
+    observed_start = start_time()
+    field = "recorded_start_time"
+    if observed_start != recorded["start_time"]:
+        raise RuntimeError("PID reused or start time changed")
+    return True
+
+def signal_verified(signum):
+    if verified():
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass  # The verified process exited between the identity read and signal.
 
 try:
-    current = browser()
+    pid = int(pid_text)
+    if pid <= 1 or mode not in ("record", "check", "stop"):
+        raise ValueError("invalid PID or operation")
+    field = "profile"
+    if profile != str(root / "browser-profile"):
+        raise ValueError("invalid profile")
+    field = "executable_path"
+    cache = (pathlib.Path.home() / "Library/Caches/ms-playwright").resolve()
+    expected = str(pathlib.Path(binary).resolve())
     if mode == "record":
-        with receipt.open("x", encoding="utf-8") as output:
+        pathlib.Path(expected).relative_to(cache)
+        # The launcher execs Chromium in place; wait for that executable transition.
+        for attempt in range(100):
+            if not alive():
+                raise RuntimeError("browser exited before recording")
+            launched_start = start_time()
+            observed = executable_path()
+            if observed == expected:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError("launch executable not proved")
+        if start_time() != launched_start:
+            raise RuntimeError("PID reused during launch recording")
+        current = {"pid": pid, "executable_path": observed, "start_time": launched_start,
+                   "profile": profile}
+        field = "receipt"
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(current, output, sort_keys=True)
         receipt.chmod(0o600)
     else:
-        if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
-            raise RuntimeError("recorded browser identity unavailable")
-        if json.loads(receipt.read_text()) != current:
-            raise RuntimeError("recorded PID/start time/command changed")
-        if mode == "stop":
-            # Snapshot only the exact verified PID tree, never a process-name/group kill.
-            tree = [current["identity"]]
-            for parent in tree:
-                if identity(parent["pid"]) != parent:
-                    raise RuntimeError("parent identity changed")
-                for child_text in pgrep("-P", str(parent["pid"])):
-                    child = identity(int(child_text))
-                    if child["ppid"] != parent["pid"] or child["pgid"] != pid:
-                        raise RuntimeError("child ownership not proved")
-                    if child["pid"] in {item["pid"] for item in tree}:
-                        raise RuntimeError("unexpected process tree")
-                    tree.append(child)
-                if identity(parent["pid"]) != parent:
-                    raise RuntimeError("parent identity changed")
-            # Retain identities before signalling, including if reconciliation is needed.
-            tree_file = root / "browser-process-tree.json"
-            tree_file.write_text(json.dumps(tree, sort_keys=True), encoding="utf-8")
-            tree_file.chmod(0o600)
-            if browser() != current:
-                raise RuntimeError("browser identity changed before stop")
-            # Root first prevents new descendants; each signal rechecks PID/start time.
-            for member in tree:
-                try:
-                    live = identity(member["pid"])
-                except ProcessLookupError:
-                    continue
-                if live["start"] != member["start"] or live["pgid"] != pid:
-                    raise RuntimeError("PID reused or ownership changed; not signalled")
-                os.kill(member["pid"], signal.SIGTERM)
-            for attempt in range(100):
-                if not pgrep("-g", str(pid)):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("task process tree still running after 10 seconds")
-        elif mode != "check":
-            raise RuntimeError("invalid ownership operation")
-except (OSError, ValueError, RuntimeError):
-    # Never print the command, private browser output, or arbitrary exception details.
-    raise SystemExit("STOP: task browser ownership/cleanup not proved; no unverified PID signalled; "
-                     "retain private staging and window state for HezLead reconciliation") from None
+        # Check liveness before reading a path: ESRCH is successful cleanup.
+        field = "pid"
+        if not alive():
+            if mode == "check":
+                raise RuntimeError("browser already gone")
+        else:
+            field = "executable_path"
+            pathlib.Path(expected).relative_to(cache)
+            field = "receipt"
+            if receipt.is_symlink() or receipt.stat().st_mode & 0o777 != 0o600:
+                raise RuntimeError("recorded identity unavailable")
+            recorded = json.loads(receipt.read_text())
+            field = "recorded_pid"
+            if recorded["pid"] != pid or recorded["profile"] != profile:
+                raise RuntimeError("recorded PID/profile changed")
+            owned = verified()
+            if not owned and mode == "check":
+                raise RuntimeError("browser already gone")
+            if owned and mode == "stop":
+                # Recheck recorded path AND start time immediately before each signal.
+                signal_verified(signal.SIGTERM)
+                for attempt in range(100):
+                    if not alive():
+                        break
+                    time.sleep(0.1)
+                else:
+                    signal_verified(signal.SIGKILL)
+                    for attempt in range(50):
+                        if not alive():
+                            break
+                        time.sleep(0.1)
+                    else:
+                        field = "pid"
+                        raise RuntimeError("browser still alive")
+except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+    # Field names only; never print private paths or arbitrary exception details.
+    raise SystemExit("STOP: task browser ownership/cleanup not proved; fields=pid,executable_path," +
+                     field + "; no unverified PID signalled; retain private staging and window state "
+                     "for HezLead reconciliation") from None
 PY
   chmod 0600 "$browser_root/browser-process.py"
   # Resolve Playwright's bundled Chromium without launching it or /Applications.
@@ -709,12 +791,12 @@ PY
     --no-first-run --no-default-browser-check about:blank \
     </dev/null >"$browser_root/chromium-launch.log" 2>&1 &
   chrome_pid=$!
+  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
   port_file="$profile/DevToolsActivePort"
   tries=0
   while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
     tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
   done
-  python3 "$browser_root/browser-process.py" record "$browser_root" "$chrome_pid" "$chrome" "$profile"
   endpoint="http://127.0.0.1:$chrome_port"
   {
     printf 'SITE_BROWSER_ROOT=%q\n' "$browser_root"
@@ -1019,8 +1101,8 @@ These are fixed assertions, not window decisions:
   case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
   test "${#SITE_RELEASE_SHA}" -eq 40
   case "$SITE_RELEASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
-  test "${#SITE_BASE_SHA}" -eq 40
-  case "$SITE_BASE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
+  test "${#EXPECTED_SITE_SHA}" -eq 40
+  case "$EXPECTED_SITE_SHA" in *[!0-9a-f]*) exit 1 ;; esac
   grep -qFx 'MCP_LIVE=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site2-00-mcp-live.txt"
   python3 - "$SITE_EVIDENCE/site2-00-gate-evidence.txt" "$SITE_RELEASE_SHA" <<'PY'
 import pathlib,sys
@@ -1064,7 +1146,7 @@ PY
   chmod 0600 "$SITE_EVIDENCE/site2-03-mcp-live.txt"
   {
     printf 'APPROVER=%s\nPLAN_COMMIT=%s\nSHA=%s\nBASE_SHA=%s\nPROMPT_NUMBER=%s\n' \
-      "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$SITE_BASE_SHA" "$SITE_PROMPT_NUMBER"
+      "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$EXPECTED_SITE_SHA" "$SITE_PROMPT_NUMBER"
     printf '%s\n' 'HOSTED_MCP_ON=yes' 'EXACT_SHA_SITE_GATES=PASS'
     printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-or-populated-view-only' 'LIVE_REVOKE_CONTROL=NOT_PROVED_BY_SITE_RELEASE'
     jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json"
@@ -1089,7 +1171,7 @@ PY
   test "$(git rev-parse HEAD)" = "$SITE_RELEASE_SHA"
   git diff --exit-code HEAD -- site deploy/site
   grep -qFx "SHA=$SITE_RELEASE_SHA" "$SITE_EVIDENCE/GO.txt"
-  grep -qFx "BASE_SHA=$SITE_BASE_SHA" "$SITE_EVIDENCE/GO.txt"
+  grep -qFx "BASE_SHA=$EXPECTED_SITE_SHA" "$SITE_EVIDENCE/GO.txt"
   grep -qFx 'All release holds resolved' "$SITE_EVIDENCE/GO.txt"
   box_now=$(ssh -o BatchMode=yes commonswarm@yulan-vps-1 date -u '+%Y-%m-%dT%H:%M:%SZ')
   python3 - "$box_now" "$SITE_WINDOW_END_UTC" <<'PY'
@@ -2494,7 +2576,7 @@ pre-pin closure, failure reconciliation, rollback (§6), and manifest close (§7
 remain. No account/workspace control fixture or acceptance assertion was dropped.
 
 The boxed source record is a 12-character prefix in the measured release name;
-this copy uniquely expands it to the full Git commit before matching SITE_BASE_SHA.
+this copy uniquely expands it to the full Git commit before matching EXPECTED_SITE_SHA.
 It does not invent a RELEASE_SHA file absent from the deployment helper. The fixed
 /download version becomes the selected source version so that control stays useful.
 The FULL-CONTROL / REDUCED-CONTROL acceptance table, independent public-byte gate,
@@ -2509,7 +2591,7 @@ new release actions or claiming an unproved close.
 | 2 | `@@ -27,110 +26,181 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Define generic SHA/gate inputs and measured baseline/version outputs; remove historical edge/DARK/prep-seat handoff requirements; document the actual recorded source prefix and add Run order / Failure paths; Validate full SHA commit identities, origin/main ancestry, site delta and exact-SHA receipt in source checkout and window open; Replace fixed target/base SHA tests with validated full lowercase SHA inputs. |
 | 3 | `@@ -139,7 +209,7 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic. |
 | 4 | `@@ -151,7 +221,15 @@` | Measure canonical current directory and its recorded source prefix on the box rather than trust a literal baseline. |
-| 5 | `@@ -192,7 +270,13 @@` | Uniquely resolve the measured prefix to a full commit, require equality to SITE_BASE_SHA and base ancestry, and derive BASELINE_DIR. |
+| 5 | `@@ -192,7 +270,13 @@` | Uniquely resolve the measured prefix to a full commit, require equality to EXPECTED_SITE_SHA and base ancestry, and derive BASELINE_DIR. |
 | 6 | `@@ -210,11 +294,15 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Retain measured baseline/version and generic gate path in window state; archive full-source baseline and protected gate receipt; preserve scp -p/0600. |
 | 7 | `@@ -225,30 +313,52 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic; Replace the historical handoff-copy step with the same current MCP metadata/unauthenticated POST ON probe used at GO; keep its stable step ID. |
 | 8 | `@@ -288,7 +398,7 @@` | Use the site2 step/evidence namespace consistently; keep the existing control logic. |

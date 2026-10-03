@@ -11,10 +11,11 @@ pinned runtime image and contains no image-build step.
 
 **Option (b): prepared, not executed.** HezLead supplies the reviewed, landed
 edge SHA and separately authorizes execution. This worker has made no live
-measurements. HezLead supplies `BASELINE_EDGE_SHA` as the full running edge
-identity. OAuth `00e89738`, app/stack `ad964ed1`, site `603a206e` and MCP ON
-remain the required handoff baseline; preflight captures the other running
-identities and refuses drift throughout the window.
+measurements. HezLead supplies `EXPECTED_EDGE_SHA` as the full running edge
+identity. Historical handoff sources were OAuth `00e89738`, app/stack
+`ad964ed1` and site `603a206e`; they are evidence only. HezLead supplies the
+current full expected OAuth source/image, stack and site inputs. Preflight
+requires those identities and MCP ON, then refuses drift throughout the window.
 
 The generic procedure is insufficient as an ON-state plan: its env gate checks
 `SWARM_SELF_SERVE` and reports optional names, but does not require effective
@@ -81,7 +82,11 @@ window; this preparation checks syntax only and is not a live rehearsal.
 | Input | Format | Source / use |
 | --- | --- | --- |
 | `RELEASE_SHA` | Full 40 lowercase hex; differs from baseline | HezLead's independently reviewed fix already landed on origin/main, with exact-SHA edge gates from §1 (`deploy/RELEASE-TO-BOX.md:149`). |
-| `BASELINE_EDGE_SHA` | Full 40 lowercase hex | HezLead's running edge identity; preflight checks current, RELEASE_SHA and container mounts. |
+| `EXPECTED_EDGE_SHA` | Full 40 lowercase hex | HezLead's running edge identity; preflight checks current, RELEASE_SHA and container mounts. |
+| `EXPECTED_OAUTH_SHA` | Full 40 lowercase hex | HezLead measured baseline; exact preflight comparison, no defaults. |
+| `EXPECTED_OAUTH_IMAGE_DIGEST` | sha256: plus 64 lowercase hex | HezLead measured baseline; exact preflight comparison, no defaults. |
+| `EXPECTED_SITE_SHA` | Full 40 lowercase hex | HezLead measured baseline; exact preflight comparison, no defaults. |
+| `EXPECTED_STACK_SHA` | Full 40 lowercase hex | HezLead measured baseline; exact preflight comparison, no defaults. |
 | `WINDOW_END_UTC` | `YYYY-MM-DDTHH:MM:SSZ`, future and at most 30 minutes away at preflight | HezLead's approved window end, checked on box clock. |
 | `MAX_MCP_OUTAGE_SECONDS` | Positive decimal, 1..600 | HezLead's approved maximum; checked in the final 503 receipt, including rollback. Exceeding it is FAIL even if ON was restored. |
 | `PLAN_FILE` | Absolute file containing this independently reviewed plan | Mac operator; transport extracts exactly one marked sh block. |
@@ -91,12 +96,15 @@ window; this preparation checks syntax only and is not a live rehearsal.
 | `BOX_STEP` | One box step ID in the order below | Operator chooses the exact block for transport; no prose-generated commands. |
 | `SECRET_STAGE` for open-abort only | Exact `/private/tmp/anvil-secret.XXXXXX` path reported by failed open | Pass as input 8 through transport; a path is nonsecret. If open failed before creation, there is no secret cleanup step. |
 | `PREVIOUS_EDGE`, `NEW_EDGE`, `PROOF_DIR`, `SECRET_STAGE` | Validated canonical paths | Box derives previous from current and full baseline SHA; new from RELEASE_SHA; proofs per SHA/window; secret stage from mktemp. Never guessed or taken from an old window. |
-| Network / flags / override / timer | `commonswarm-net`; both public flags `1`; 2147483648 bytes; six-hour timer active | Measured by preflight; no flag input can turn MCP OFF. |
+| Network / flags / override / timer | `commonswarm-net`; both public flags `1`; 2 GiB; six-hour timer active | Measured by preflight; no flag input can turn MCP OFF. |
 
-Normal order: `edge-mcp-archive`, `edge-mcp-preflight`, `edge-mcp-open`,
+Normal order: `edge-mcp-plan-inputs`, `edge-mcp-archive`, `edge-mcp-preflight`, `edge-mcp-open`,
 `edge-mcp-stage`, `edge-mcp-transition-503`, `edge-mcp-apply`,
 `edge-mcp-restore-on`, `edge-mcp-probes`, `edge-mcp-close`,
 `edge-mcp-mac-close`. Use `edge-mcp-transport` for each box block if needed.
+Use transport for preflight/open: it resolves the box site prefix to the unique
+full `MEASURED_SITE_SHA` (produced evidence, never a prompt input). The box
+preflight requires exact full equality and rechecks the current release name.
 The transport combines preflight/open and supplies positional inputs to each
 fresh root invocation. There is no release execution in this documentation task.
 
@@ -115,16 +123,78 @@ window is never reopened; archive creates a fresh window for a later attempt.
 Existing release directories are compared, never extracted over or repaired.
 
 ```sh
+# step: edge-mcp-plan-inputs
+# host: Mac /bin/bash 3.2; also extracted into box preflight/open
+set -euo pipefail
+edge_expected_baselines() {
+python3 - "${1:-check}" "${EXPECTED_EDGE_SHA:-}" "${EXPECTED_OAUTH_SHA:-}" "${EXPECTED_OAUTH_IMAGE_DIGEST:-}" "${EXPECTED_SITE_SHA:-}" "${EXPECTED_STACK_SHA:-}" "${MEASURED_SITE_SHA:-}" <<'PYBASELINE'
+import json,pathlib,re,subprocess,sys
+mode=sys.argv[1]
+assert mode in ('validate','check'), 'FAIL: baseline check mode; STOP'
+fields=['EXPECTED_EDGE_SHA', 'EXPECTED_OAUTH_SHA', 'EXPECTED_OAUTH_IMAGE_DIGEST', 'EXPECTED_SITE_SHA', 'EXPECTED_STACK_SHA']
+values=dict(zip(fields,sys.argv[2:2+len(fields)]))
+for field,value in values.items():
+    pattern=r'sha256:[0-9a-f]{64}' if field.endswith('_IMAGE_DIGEST') else r'[0-9a-f]{40}'
+    if not re.fullmatch(pattern,value): raise SystemExit('FAIL: invalid '+field+'; STOP')
+if mode=='validate': raise SystemExit(0)
+def equal(field,observed):
+    expected=values[field]
+    if observed!=expected:
+        raise SystemExit(f'FAIL: {field} expected={expected} observed={observed}; STOP')
+def inspect(service):
+    return json.loads(subprocess.check_output(['docker','inspect',service],stderr=subprocess.DEVNULL))[0]
+def current(surface):
+    p=pathlib.Path('/home/commonswarm/'+surface+'/current')
+    field='EXPECTED_'+surface.upper()+'_SHA'
+    try: release=p.resolve(strict=True)
+    except OSError: equal(field,'missing current target')
+    if not p.is_symlink() or release.parent!=pathlib.Path('/home/commonswarm/'+surface+'/releases'):
+        equal(field,'invalid current release path')
+    return release.name
+if 'EXPECTED_EDGE_SHA' in values:
+    data=inspect('commonswarm-edge-edge-runtime-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/edge/releases/([0-9a-f]{40})/deploy/edge-runtime',work)
+    equal('EXPECTED_EDGE_SHA',match[1] if match else 'invalid edge source label')
+    equal('EXPECTED_EDGE_SHA',current('edge'))
+    equal('EXPECTED_EDGE_SHA',(pathlib.Path('/home/commonswarm/edge/releases')/values['EXPECTED_EDGE_SHA']/'RELEASE_SHA').read_text().strip())
+if 'EXPECTED_OAUTH_SHA' in values:
+    data=inspect('commonswarm-oauth-oauth-1')
+    work=data['Config']['Labels'].get('com.docker.compose.project.working_dir','')
+    match=re.fullmatch(r'/home/commonswarm/oauth/releases/([0-9a-f]{40})/deploy/mcp-auth',work)
+    equal('EXPECTED_OAUTH_SHA',match[1] if match else 'invalid OAuth source label')
+    equal('EXPECTED_OAUTH_SHA',current('oauth'))
+    equal('EXPECTED_OAUTH_SHA',(pathlib.Path('/home/commonswarm/oauth/releases')/values['EXPECTED_OAUTH_SHA']/'RELEASE_SHA').read_text().strip())
+    equal('EXPECTED_OAUTH_IMAGE_DIGEST',data['Image'])
+if 'EXPECTED_STACK_SHA' in values: equal('EXPECTED_STACK_SHA',current('stack'))
+if 'EXPECTED_SITE_SHA' in values:
+    equal('EXPECTED_SITE_SHA',sys.argv[-1])
+    p=pathlib.Path('/srv/commonswarm/site/current'); release=p.resolve(strict=True)
+    assert p.is_symlink() and release.parent==pathlib.Path('/srv/commonswarm/site/releases'), 'FAIL: site current release path; STOP'
+    match=re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-([0-9a-f]{12})-[0-9a-f]{16}',release.name)
+    # deploy/site/deploy.sh records only 12 hex; resolve it uniquely against the
+    # Mac Git object database before box preflight (transport).
+    prefix=match[1] if match else 'invalid site release name'
+    if prefix!=values['EXPECTED_SITE_SHA'][:12]:
+        raise SystemExit(f"FAIL: EXPECTED_SITE_SHA expected={values['EXPECTED_SITE_SHA']} observed={prefix}; STOP")
+print('PASS: expected live baseline identities matched')
+PYBASELINE
+}
+edge_expected_baselines validate
+export EXPECTED_EDGE_SHA EXPECTED_OAUTH_SHA EXPECTED_OAUTH_IMAGE_DIGEST EXPECTED_SITE_SHA EXPECTED_STACK_SHA
+```
+
+```sh
 # step: edge-mcp-archive
 # host: Mac /bin/bash 3.2
 set -euo pipefail
 trap 'echo "FAIL edge-mcp-archive: line $LINENO; STOP" >&2' ERR
-: "${RELEASE_SHA:?}" "${BASELINE_EDGE_SHA:?}" "${PLAN_FILE:?}"
+: "${RELEASE_SHA:?}" "${EXPECTED_EDGE_SHA:?}" "${PLAN_FILE:?}"
 case "$RELEASE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#RELEASE_SHA}" = 40
-case "$BASELINE_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
-test "${#BASELINE_EDGE_SHA}" = 40
-test "$RELEASE_SHA" != "$BASELINE_EDGE_SHA"
+case "$EXPECTED_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
+test "${#EXPECTED_EDGE_SHA}" = 40
+test "$RELEASE_SHA" != "$EXPECTED_EDGE_SHA"
 test -z "$(git status --porcelain)"
 git fetch origin main
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
@@ -161,6 +231,25 @@ assert str(p).rsplit('.',1)[1]==sys.argv[2]
 assert not p.is_symlink() and p.resolve(strict=True)==p and p.is_dir()
 assert p.stat().st_mode & 0o777==0o700
 PY
+if test "$BOX_STEP" = edge-mcp-preflight-open; then
+  edge_expected_baselines validate
+  : "${EXPECTED_SITE_SHA:?FAIL: EXPECTED_SITE_SHA missing; STOP}"
+  MEASURED_SITE_RELEASE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 'readlink -f /srv/commonswarm/site/current')
+  python3 - "$MEASURED_SITE_RELEASE" >"$ARCHIVE_DIR/site-prefix.txt" <<'PYSITE'
+import pathlib,re,sys
+p=pathlib.PurePosixPath(sys.argv[1])
+assert p.parent==pathlib.PurePosixPath('/srv/commonswarm/site/releases'), 'FAIL: EXPECTED_SITE_SHA invalid release path; STOP'
+match=re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-([0-9a-f]{12})-[0-9a-f]{16}',p.name)
+assert match, 'FAIL: EXPECTED_SITE_SHA invalid release name; STOP'
+print(match[1])
+PYSITE
+  MEASURED_SITE_PREFIX=$(cat "$ARCHIVE_DIR/site-prefix.txt")
+  MEASURED_SITE_SHA=$(git rev-parse --verify "${MEASURED_SITE_PREFIX}^{commit}") || { echo 'FAIL: EXPECTED_SITE_SHA source missing/ambiguous; STOP' >&2; exit 1; }
+  if test "$MEASURED_SITE_SHA" != "$EXPECTED_SITE_SHA"; then
+    printf 'FAIL: EXPECTED_SITE_SHA expected=%s observed=%s; STOP\n' "$EXPECTED_SITE_SHA" "$MEASURED_SITE_SHA" >&2
+    exit 1
+  fi
+fi
 case "$BOX_STEP" in
   edge-mcp-preflight-open|edge-mcp-stage|edge-mcp-transition-503|edge-mcp-apply|edge-mcp-restore-on|edge-mcp-probes|edge-mcp-rollback|edge-mcp-close|edge-mcp-timer-recover|edge-mcp-open-abort) ;;
   *) echo 'FAIL edge-mcp-transport: unknown box step; STOP' >&2; exit 1;;
@@ -168,15 +257,18 @@ esac
 python3 - "$PLAN_FILE" "$BOX_STEP" >"$ARCHIVE_DIR/box-step.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
-steps=['edge-mcp-preflight','edge-mcp-open'] if sys.argv[2]=='edge-mcp-preflight-open' else [sys.argv[2]]
+steps=['edge-mcp-plan-inputs','edge-mcp-preflight','edge-mcp-open'] if sys.argv[2]=='edge-mcp-preflight-open' else [sys.argv[2]]
+if sys.argv[2]=='edge-mcp-preflight-open':
+    print('EXPECTED_EDGE_SHA=${3:?}; EXPECTED_OAUTH_SHA=${9:?}; EXPECTED_OAUTH_IMAGE_DIGEST=${10:?}; EXPECTED_SITE_SHA=${11:?}; EXPECTED_STACK_SHA=${12:?}; MEASURED_SITE_SHA=${13:?}')
 for step in steps:
     found=[b for b in blocks if re.search(r'^# step: '+re.escape(step)+r'$',b,re.M)]
     assert len(found)==1, 'FAIL edge-mcp-transport: step missing or duplicated'
     print(found[0])
 PY
-printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q %q %q %q' \
-  "$RELEASE_SHA" "$WINDOW_ID" "$BASELINE_EDGE_SHA" "$BOX_ARCHIVE_PATH" \
-  "$EDGE_ARCHIVE_SHA256" "$WINDOW_END_UTC" "$MAX_MCP_OUTAGE_SECONDS" "${SECRET_STAGE:-}"
+printf -v REMOTE_COMMAND 'sudo -n /bin/bash -s -- %q %q %q %q %q %q %q %q %q %q %q %q %q' \
+  "$RELEASE_SHA" "$WINDOW_ID" "$EXPECTED_EDGE_SHA" "$BOX_ARCHIVE_PATH" \
+  "$EDGE_ARCHIVE_SHA256" "$WINDOW_END_UTC" "$MAX_MCP_OUTAGE_SECONDS" "${SECRET_STAGE:-}" \
+  "$EXPECTED_OAUTH_SHA" "$EXPECTED_OAUTH_IMAGE_DIGEST" "$EXPECTED_SITE_SHA" "$EXPECTED_STACK_SHA" "${MEASURED_SITE_SHA:-}"
 ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$REMOTE_COMMAND" <"$ARCHIVE_DIR/box-step.sh"
 ```
 
@@ -190,11 +282,12 @@ restore it before close, including rollback. Preflight itself is read-only.
 # host: box root /bin/bash
 set -euo pipefail
 trap 'echo "FAIL edge-mcp-preflight: line $LINENO; STOP before mutation" >&2' ERR
-RELEASE_SHA=${1:?}; WINDOW_ID=${2:?}; BASELINE_EDGE_SHA=${3:?}
+RELEASE_SHA=${1:?}; WINDOW_ID=${2:?}; EXPECTED_EDGE_SHA=${3:?}
 BOX_ARCHIVE_PATH=${4:?}; EDGE_ARCHIVE_SHA256=${5:?}
 WINDOW_END_UTC=${6:?}; MAX_MCP_OUTAGE_SECONDS=${7:?}
 test "$(id -u)" = 0
-python3 - "$RELEASE_SHA" "$WINDOW_ID" "$BASELINE_EDGE_SHA" "$BOX_ARCHIVE_PATH" "$EDGE_ARCHIVE_SHA256" "$WINDOW_END_UTC" "$MAX_MCP_OUTAGE_SECONDS" <<'PY'
+edge_expected_baselines check
+python3 - "$RELEASE_SHA" "$WINDOW_ID" "$EXPECTED_EDGE_SHA" "$BOX_ARCHIVE_PATH" "$EDGE_ARCHIVE_SHA256" "$WINDOW_END_UTC" "$MAX_MCP_OUTAGE_SECONDS" <<'PY'
 import datetime,pathlib,re,sys
 s,w,b,a,h,end,budget=sys.argv[1:]
 assert re.fullmatch('[0-9a-f]{40}',s) and s!=b
@@ -207,11 +300,11 @@ until=datetime.datetime.strptime(end,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=dateti
 assert 0<(until-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800
 p=pathlib.Path(a); assert p.is_file() and not p.is_symlink() and p.stat().st_mode & 0o777==0o600
 PY
-PREVIOUS_EDGE=/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA
+PREVIOUS_EDGE=/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA
 NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
 PROOF_DIR=/home/commonswarm/edge/release-proofs/$RELEASE_SHA-$WINDOW_ID
 test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
-test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$BASELINE_EDGE_SHA"
+test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$EXPECTED_EDGE_SHA"
 test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$EDGE_ARCHIVE_SHA256"
 test "$(command -v rm)" = /usr/bin/rm
 test -x /usr/bin/rm && test ! -L /usr/bin/rm
@@ -380,7 +473,7 @@ try:
         baseline=render(previous); compare(baseline,live_facts(previous),compose=False)
         for key in ('SWARM_MCP_PUBLIC_ENABLED','SWARM_SELF_SERVE'):
             if baseline['env'].get(key)!=digest('1'): fail(['env.'+key])
-        if baseline['memory']!=2147483648: fail(['memory'])
+        if baseline['memory']!=2*1024**3: fail(['memory'])
         if baseline['networks']!=['commonswarm-net']: fail(['networks'])
         forbidden=[k for k in baseline['env'] if k.startswith('SWARM_CMD_TEST_')]
         if forbidden: fail(['env.'+k for k in forbidden])
@@ -416,7 +509,7 @@ env=pathlib.Path('/home/commonswarm/.env'); st=env.stat()
 need(not env.is_symlink() and st.st_mode & 0o777==0o600 and st.st_uid in (0,p.stat().st_uid))
 edge=inspect('commonswarm-edge-edge-runtime-1'); oauth=inspect('commonswarm-oauth-oauth-1')
 need(edge['State']['Health']['Status']=='healthy' and oauth['State']['Health']['Status']=='healthy')
-need(edge['HostConfig']['Memory']==2147483648 and edge['HostConfig']['NetworkMode']=='commonswarm-net')
+need(edge['HostConfig']['Memory']==2*1024**3 and edge['HostConfig']['NetworkMode']=='commonswarm-net')
 labels=edge['Config']['Labels']; work=str(p/'deploy/edge-runtime')
 need(labels.get('com.docker.compose.project.working_dir')==work)
 need(labels.get('com.docker.compose.project.config_files')==work+'/compose.yaml,'+work+'/compose.override.yaml')
@@ -472,6 +565,7 @@ for url,method,status in checks:
 PY
 }
 external_check() {
+if test "${1:-check}" = capture || test "${1:-check}" = preflight; then edge_expected_baselines check; fi
 python3 - "$PROOF_DIR/external.json" "${1:-check}" <<'PY'
 import hashlib,json,pathlib,posixpath,shlex,subprocess,sys
 def digest(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
@@ -493,7 +587,6 @@ for line in pathlib.Path('/etc/caddy/Caddyfile').read_text().splitlines():
     if len(fields)==2 and fields[0]=='import': imports.append(posixpath.normpath(posixpath.join('/etc/caddy',fields[1])))
 assert '/etc/caddy/sites/*.caddy' in imports, 'FAIL edge-mcp-external: main Caddy sites import differs; STOP'
 if sys.argv[2] in ('capture','preflight'):
-    assert oauth_release.name.startswith('00e89738') and pathlib.Path(facts['stack']).name.startswith('ad964ed1') and '603a206e' in pathlib.Path(facts['site']).name, 'FAIL edge-mcp-external: task handoff conflicts with live baseline; STOP'
     if sys.argv[2]=='capture': pathlib.Path(sys.argv[1]).write_text(json.dumps(facts,sort_keys=True)+'\n')
 elif facts!=json.loads(pathlib.Path(sys.argv[1]).read_text()): raise SystemExit('FAIL edge-mcp-external: OAuth/stack/site/main-Caddy drift; STOP')
 PY
@@ -564,10 +657,10 @@ assert dark and on.count(b'\t\timport mcp_resource_active')==1
 pathlib.Path(sys.argv[2]).write_bytes(on.replace(b'\t\timport mcp_resource_active',dark[0]))
 PY
 {
-  for name in RELEASE_SHA WINDOW_ID BASELINE_EDGE_SHA BOX_ARCHIVE_PATH EDGE_ARCHIVE_SHA256 WINDOW_END_UTC MAX_MCP_OUTAGE_SECONDS PREVIOUS_EDGE NEW_EDGE PROOF_DIR SECRET_STAGE EDGE_PROJECT EDGE_NETWORK EDGE_ENV_FILE EDGE_PROJECT_ENV_FILE EDGE_BASELINE_FACTS; do
+  for name in MEASURED_SITE_SHA EXPECTED_OAUTH_SHA EXPECTED_OAUTH_IMAGE_DIGEST EXPECTED_SITE_SHA EXPECTED_STACK_SHA RELEASE_SHA WINDOW_ID EXPECTED_EDGE_SHA BOX_ARCHIVE_PATH EDGE_ARCHIVE_SHA256 WINDOW_END_UTC MAX_MCP_OUTAGE_SECONDS PREVIOUS_EDGE NEW_EDGE PROOF_DIR SECRET_STAGE EDGE_PROJECT EDGE_NETWORK EDGE_ENV_FILE EDGE_PROJECT_ENV_FILE EDGE_BASELINE_FACTS; do
     printf '%s=%q\n' "$name" "${!name}"
   done
-  declare -f edge_compose edge_config_check edge_check edge_probes external_check window_check receipt
+  declare -f edge_expected_baselines edge_compose edge_config_check edge_check edge_probes external_check window_check receipt
 } >"$PROOF_DIR/state.sh"
 chmod 0600 "$PROOF_DIR/state.sh"
 printf 'open\n' >"$PROOF_DIR/open.txt"
@@ -753,10 +846,10 @@ set -euo pipefail
 trap 'echo "FAIL edge-mcp-rollback: line $LINENO; ON unverified, retain stage, run timer-recover, report ongoing outage; STOP" >&2' ERR
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 test ! -e "$PROOF_DIR/closed.txt"
-case "$BASELINE_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
-test "${#BASELINE_EDGE_SHA}" = 40
-test "$PREVIOUS_EDGE" = "/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA"
-test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$BASELINE_EDGE_SHA"
+case "$EXPECTED_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
+test "${#EXPECTED_EDGE_SHA}" = 40
+test "$PREVIOUS_EDGE" = "/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA"
+test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$EXPECTED_EDGE_SHA"
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"
 external_check
