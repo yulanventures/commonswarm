@@ -3424,6 +3424,22 @@
             "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
           }
         },
+        "src/cloud/admin-delegations-gate.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/admin/gate"
+          ],
+          "citation": "src/cloud/admin-delegations-gate.ts:7",
+          "detail": "Admin gate client owns the 2500 ms public AS gate read deadline, including the response body; no credentials are sent.",
+          "operation": {
+            "name": "admin-issuance-gate-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The client reads the separate AS origin; the worker-profile measurement runner targets only its configured API origin."
+          }
+        },
         "src/cloud/admin-delegations.ts:AbortSignal.timeout#2": {
           "class": "network-api",
           "scope": "per-request",

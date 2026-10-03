@@ -79,5 +79,5 @@
   {"kind":"command-output","name":"postgres image identity","source":"M17","evidence":"comparison=EQUAL"},
   {"kind":"command-output","name":"Deno checksum","source":"M19","evidence":"comparison=MATCH"}
   ,{"kind":"command-output","name":"browser account and starting workspace","source":"K4-8","evidence":"Ridgeio"}
-  ,{"kind":"command-output","name":"dedicated Chrome profile and sign-in method","source":"K4-9","evidence":"/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"}
+  ,{"kind":"command-output","name":"dedicated Chrome profile and sign-in method","source":"K4-9","evidence":"recorded_web_session"}
 ]

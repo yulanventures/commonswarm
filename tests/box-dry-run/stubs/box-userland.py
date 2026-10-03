@@ -246,6 +246,8 @@ def parse_date_operand(text: str) -> datetime.datetime:
         return datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     if re.fullmatch(r"@\d+", text):
         return datetime.datetime.fromtimestamp(int(text[1:]), datetime.timezone.utc)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2} 00:00:00", text):
+        return datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc)
     raise ValueError(text)
 
 
@@ -269,7 +271,9 @@ def cmd_date(argv: list[str]) -> None:
         else:
             refuse("date", argv)
         index += 1
-    if not utc:
+    # The runbook health deadlines use this exact timezone-independent form.
+    # Other non-UTC formats/operands remain outside the model.
+    if not utc and argv != ["+%s"]:
         refuse("date", argv)
     try:
         moment = parse_date_operand(operand) if operand is not None else fixture_clock()

@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 const root = resolve(import.meta.dirname, "..");
 const builder = join(root, "scripts/build-chatgpt-package.sh");
+const temporaryPrefix = join(tmpdir(), "chatgpt-package-test.");
 
 function fixture(run) {
-  const temporaryRoot = mkdtempSync("/private/tmp/chatgpt-package-test.");
+  const temporaryRoot = mkdtempSync(temporaryPrefix);
   try {
     const source = join(temporaryRoot, "package");
     cpSync(join(root, "distribution/chatgpt-apps"), source, { recursive: true });
@@ -22,7 +24,7 @@ function fixture(run) {
     run({ temporaryRoot, source, invoke, mutate });
   } finally {
     // Use the installed guarded rm, and only the absolute root created here.
-    assert.ok(temporaryRoot.startsWith("/private/tmp/chatgpt-package-test."));
+    assert.ok(temporaryRoot.startsWith(temporaryPrefix));
     const cleanup = spawnSync("rm", ["-rf", temporaryRoot], { encoding: "utf8" });
     assert.equal(cleanup.status, 0, `guarded cleanup refused ${temporaryRoot}: ${cleanup.stderr}`);
   }

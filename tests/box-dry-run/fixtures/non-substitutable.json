@@ -336,6 +336,13 @@
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2292-2293",
       "evidence": null,
       "reason": "Optional copy of the same missing cleanup receipt. The curated copy-back list names it, but naming it is not evidence."
+    },
+    {
+      "output": "hm37a-prep-cleanup.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37a-prep-cleanup.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2382-2407",
+      "evidence": null,
+      "reason": "The same unavailable cleanup receipt is streamed to the box by the producer's protected Python SSH stdin transfer. No database readback or current successful cleanup bytes exist in this dry run; the box destination is not seeded either."
     }
   ],
   "outputs": [],
@@ -791,21 +798,21 @@
       "path": "$EVIDENCE_DIR/hm37-loopback-reads.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1764-1766",
       "evidence": null,
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-public-reads.json",
       "path": "$EVIDENCE_DIR/hm37-public-reads.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1768-1771",
       "evidence": null,
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-mcp-hostname-reads.json",
       "path": "$EVIDENCE_DIR/hm37-mcp-hostname-reads.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1773-1774",
       "evidence": null,
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     }
   ],
   "outputs": [],
@@ -818,15 +825,15 @@
   "unproduced": [
     {
       "output": "hm37-loopback-reads.json",
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-public-reads.json",
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-mcp-hostname-reads.json",
-      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. No committed evidence holds this receipt: the aborted window never reached the read blocks' successful path, so its evidence has no *-reads.json. The writer prints the status, Server, CF-Ray and Content-Type of live responses, for which the plan documents no literal. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     }
   ]
 },
@@ -857,21 +864,21 @@
       "path": "$EVIDENCE_DIR/hm37-loopback-boundaries.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1943-1945",
       "evidence": null,
-      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-public-boundaries.json",
       "path": "$EVIDENCE_DIR/hm37-public-boundaries.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1947-1950",
       "evidence": null,
-      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-mcp-hostname-boundaries.json",
       "path": "$EVIDENCE_DIR/hm37-mcp-hostname-boundaries.json",
       "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1952-1953",
       "evidence": null,
-      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     }
   ],
   "outputs": [],
@@ -888,15 +895,15 @@
   "unproduced": [
     {
       "output": "hm37-loopback-boundaries.json",
-      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-loopback-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-loopback-boundaries.json) records per-request status and pass for 23 loopback requests from an earlier version of the probe. It has no top-level pass, assertion_map or bearer_ordering_proof, so it is not the receipt this writer prints (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:1923-1940); it is historical bytes, not proof that the present block ran. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-public-boundaries.json",
-      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-public-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-public-boundaries.json) is its failure receipt (the staging positive control answered 403; pass false), an abort and refusal control input and never a success. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     },
     {
       "output": "hm37-mcp-hostname-boundaries.json",
-      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. Nothing in the plan moves this Mac file to the box proof directory, where the copy-back manifest (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2628-2633) names it, so a seed would be the harness supplying a transfer the plan lacks. Reported by name."
+      "reason": "Not seeded. The aborted window's committed hm37-mcp-hostname-boundaries.json (docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-mcp-hostname-boundaries.json) is its not_run record (pass false), an abort and refusal control input and never a success. The plan moves this file through hm37a-local-evidence-transfer at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204, which is also NOT EXECUTED because its upstream bytes are unavailable. Reported by name."
     }
   ]
 },
@@ -1743,5 +1750,464 @@
     ]
   },
   {"step": "site-06", "surface": "browser-harness", "reason": "The block verifies rollback bytes over ssh and then re-checks the browser branch through browser-harness; on the success path it records rollback=not-needed before any browser code. The unit is the whole block, and a browser part cannot run.", "live_proof": "Anvil's live run of this block (docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1428-1710).", "unproduced": [{"output": "site-06-rollback-verify.txt", "reason": "no committed evidence holds this file; its not-needed line is written by the plan, which the harness does not run for this block"}]},
-  {"surface": "site build: npm ci and npm run build inside deploy/site/deploy.sh", "reason": "the dry run cannot prove a real site build; deploy.sh's own validation and Anvil's live readback prove it.", "live_proof": "Anvil's live site-04 run builds from the exact release SHA and deploy.sh validates the built /start page; site-05's public-byte and browser controls read the release back.", "shape_evidence": [{"file": "deploy/site/vercel-reference.json", "shape": "artifacts: the 25 stable files of a real build"}, {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the five real /_astro assets, and the app and download pages"}, {"file": "docs/evidence/2026-09-27-release-9b085c823523/run.log", "shape": "line 2: /guides/grok-bot answers 200"}, {"file": "site/src/layouts/Base.astro", "shape": "the commonswarm:url meta the build inlines from PUBLIC_SUPABASE_URL"}]}
+  {"surface": "site build: npm ci and npm run build inside deploy/site/deploy.sh", "reason": "the dry run cannot prove a real site build; deploy.sh's own validation and Anvil's live readback prove it.", "live_proof": "Anvil's live site-04 run builds from the exact release SHA and deploy.sh validates the built /start page; site-05's public-byte and browser controls read the release back.", "shape_evidence": [{"file": "deploy/site/vercel-reference.json", "shape": "artifacts: the 25 stable files of a real build"}, {"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M15: the five real /_astro assets, and the app and download pages"}, {"file": "docs/evidence/2026-09-27-release-9b085c823523/run.log", "shape": "line 2: /guides/grok-bot answers 200"}, {"file": "site/src/layouts/Base.astro", "shape": "the commonswarm:url meta the build inlines from PUBLIC_SUPABASE_URL"}]},
+{
+  "step": "hm37a-local-evidence-transfer",
+  "scope": "whole-block",
+  "surface": "transfer of unavailable Window A directed-control and HTTP evidence",
+  "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded.",
+  "live_proof": "The complete live block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2178-2204 must validate every source file and mode 600, transfer all nine files, install each destination root:root 0600, and remove each remote scratch file. Anvil must run it after the successful live producers; a dry run supplies none of those observations.",
+  "receipt_fields": [
+    "none: this transfer preserves the upstream receipts byte for byte; no new success receipt"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37a-prep-seat-inventory.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37a-prep-seat-inventory.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37a-local-control-old.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37a-local-control-old.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37a-local-control-new.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37a-local-control-new.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-loopback-reads.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-loopback-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-public-reads.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-public-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-mcp-hostname-reads.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-mcp-hostname-reads.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-loopback-boundaries.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-loopback-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-public-boundaries.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-public-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-mcp-hostname-boundaries.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-mcp-hostname-boundaries.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2194-2201",
+      "evidence": null,
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37a-prep-seat-inventory.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37a-local-control-old.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37a-local-control-new.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-loopback-reads.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-public-reads.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-mcp-hostname-reads.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-loopback-boundaries.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-public-boundaries.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    },
+    {
+      "output": "hm37-mcp-hostname-boundaries.json",
+      "reason": "The transfer requires the old/new directed-control receipts and the six HTTP receipts from whole-block NOT EXECUTED producers. Their live signal IDs and response observations have neither committed success bytes nor plan-documented literal values. The PREP inventory is also installed by the unavailable old-control block. A partial transfer would execute part of this declared block; no input or destination bytes are seeded."
+    }
+  ]
+},
+{
+  "step": "site-07-pre-pin-manifest-close",
+  "scope": "whole-block",
+  "surface": "site close with unavailable browser and rollback evidence",
+  "reason": "The whole close consumes site-06-rollback-verify.txt, whose producer is NOT EXECUTED and seeds no bytes, plus the task-owned browser PID/binary/profile written by the NOT EXECUTED browser preflight. Normal close also requires site-05-public.txt and sanitized browser acceptance text absent from the declared browser outputs. No committed current success evidence or literal writer supplies these inputs. Never invent them or run the process/profile cleanup as a fragment.",
+  "live_proof": "The live complete block at docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1768 must validate the public/browser/rollback receipts, construct and verify its manifest, close the box pin/window, verify process ownership before stopping the task-owned headless browser, remove its private profile with guarded rm, then write CLOSE.txt. This dry run does not prove those operations.",
+  "receipt_fields": [
+    "manifest array rows: path/sha256",
+    "CLOSE.txt: final outcome and browser acceptance"
+  ],
+  "written_outputs": [
+    {
+      "output": "manifest.json",
+      "path": "$SITE_EVIDENCE/manifest.json",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1768 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    },
+    {
+      "output": "CLOSE.txt",
+      "path": "$SITE_EVIDENCE/CLOSE.txt",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1768 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    },
+    {
+      "output": "site-07-pre-pin-close.txt",
+      "path": "$SITE_EVIDENCE/site-07-pre-pin-close.txt",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1768 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "manifest.json",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    },
+    {
+      "output": "CLOSE.txt",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    },
+    {
+      "output": "site-07-pre-pin-close.txt",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    }
+  ]
+},
+{
+  "step": "site-07-manifest-close",
+  "scope": "whole-block",
+  "surface": "site close with unavailable browser and rollback evidence",
+  "reason": "The whole close consumes site-06-rollback-verify.txt, whose producer is NOT EXECUTED and seeds no bytes, plus the task-owned browser PID/binary/profile written by the NOT EXECUTED browser preflight. Normal close also requires site-05-public.txt and sanitized browser acceptance text absent from the declared browser outputs. No committed current success evidence or literal writer supplies these inputs. Never invent them or run the process/profile cleanup as a fragment.",
+  "live_proof": "The live complete block at docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1905 must validate the public/browser/rollback receipts, construct and verify its manifest, close the box pin/window, verify process ownership before stopping the task-owned headless browser, remove its private profile with guarded rm, then write CLOSE.txt. This dry run does not prove those operations.",
+  "receipt_fields": [
+    "manifest array rows: path/sha256",
+    "CLOSE.txt: final outcome and browser acceptance"
+  ],
+  "written_outputs": [
+    {
+      "output": "manifest.json",
+      "path": "$SITE_EVIDENCE/manifest.json",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1905 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    },
+    {
+      "output": "CLOSE.txt",
+      "path": "$SITE_EVIDENCE/CLOSE.txt",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1905 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    },
+    {
+      "output": "site-07-pin-close.txt",
+      "path": "$SITE_EVIDENCE/site-07-pin-close.txt",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1905 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    },
+    {
+      "output": "site-07-outcome.txt",
+      "path": "$SITE_EVIDENCE/site-07-outcome.txt",
+      "producer_lines": "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md:1905 whole close block",
+      "evidence": null,
+      "reason": "No current committed successful close output; depends on unavailable upstream receipts and process state."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "manifest.json",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    },
+    {
+      "output": "CLOSE.txt",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    },
+    {
+      "output": "site-07-pin-close.txt",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    },
+    {
+      "output": "site-07-outcome.txt",
+      "reason": "Depends on unavailable upstream receipts and process state; no bytes seeded."
+    }
+  ]
+},
+{
+  "step": "hm37b-live-revoke-readback",
+  "scope": "whole-block",
+  "surface": "Window B consumer of unavailable live hosted evidence",
+  "reason": "Requires hm37-hosted-check-control.json from the whole-block NOT EXECUTED hosted control, whose live grant_id, seat_id and principal_id have no committed current success evidence or plan-documented literal values. No live identifiers or partial revocation checks are fabricated.",
+  "live_proof": "The complete live block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1255 must run against this window's actual upstream receipts. The dry run neither executes a fragment nor proves the live assertions.",
+  "receipt_fields": [
+    "pass",
+    "workspace_id",
+    "grant_id",
+    "seat_id",
+    "principal_id",
+    "assertion_ids",
+    "cleanup"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-revocation-readback.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-revocation-readback.json",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1265-1303",
+      "evidence": null,
+      "reason": "Requires hm37-hosted-check-control.json from the whole-block NOT EXECUTED hosted control, whose live grant_id, seat_id and principal_id have no committed current success evidence or plan-documented literal values. No live identifiers or partial revocation checks are fabricated."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37-revocation-readback.json",
+      "reason": "Requires hm37-hosted-check-control.json from the whole-block NOT EXECUTED hosted control, whose live grant_id, seat_id and principal_id have no committed current success evidence or plan-documented literal values. No live identifiers or partial revocation checks are fabricated."
+    }
+  ]
+},
+{
+  "step": "hm37b-failure-dispatch",
+  "scope": "whole-block",
+  "surface": "Window B consumer of unavailable live hosted evidence",
+  "reason": "Requires the hosted-control or cleanup-recovery JSON. Both live producers are whole-block NOT EXECUTED, with no receipt bytes seeded; no actual failed assertion_id exists on this dry-run path. Isolated dispatcher controls supply explicitly named failure INPUTS under a control step ID and still run the unchanged mapping.",
+  "live_proof": "The complete live block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1310 must run against this window's actual upstream receipts. The dry run neither executes a fragment nor proves the live assertions.",
+  "receipt_fields": [
+    "assertion_id",
+    "class",
+    "action"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37b-failure-action.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37b-failure-action.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1334-1367",
+      "evidence": null,
+      "reason": "Requires the hosted-control or cleanup-recovery JSON. Both live producers are whole-block NOT EXECUTED, with no receipt bytes seeded; no actual failed assertion_id exists on this dry-run path. Isolated dispatcher controls supply explicitly named failure INPUTS under a control step ID and still run the unchanged mapping."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37b-failure-action.txt",
+      "reason": "Requires the hosted-control or cleanup-recovery JSON. Both live producers are whole-block NOT EXECUTED, with no receipt bytes seeded; no actual failed assertion_id exists on this dry-run path. Isolated dispatcher controls supply explicitly named failure INPUTS under a control step ID and still run the unchanged mapping."
+    }
+  ]
+},
+{
+  "step": "hm37b-close-readback",
+  "scope": "whole-block",
+  "surface": "Window B consumer of unavailable live hosted evidence",
+  "reason": "Requires unavailable hosted-control and revocation JSON, plus the live edge health/DARK and runtime/staging cleanup assertions. The whole block is not executed. Its nine literal Python print lines are independently readable as the labeled success shape; this never supplies live control or revocation identifiers.",
+  "live_proof": "The complete live block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1455 must run against this window's actual upstream receipts. The dry run neither executes a fragment nor proves the live assertions.",
+  "receipt_fields": [
+    "release_sha",
+    "edge_live",
+    "edge_dark",
+    "hosted_controls",
+    "live_grant_and_seat_revoke",
+    "cleanup",
+    "deno_removed",
+    "protected_staging_removed",
+    "close"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-close-readback.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-close-readback.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1475-1489",
+      "evidence": null,
+      "reason": "plan-documented success shape; no live evidence yet; replaced by the live window receipt; bytes read only from this block's terminal literal print calls"
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [],
+  "success_receipts": [
+    {
+      "file": "hm37-close-readback.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-close-readback.txt",
+      "mode": "0600",
+      "owner": "root:root",
+      "label": "plan-documented success shape; no live evidence yet; replaced by the live window receipt",
+      "writer": {
+        "kind": "python-literal-lines",
+        "source_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1480-1488"
+      },
+      "consumer": {
+        "step": "hm37b-manifest-close",
+        "check": "content"
+      },
+      "abort_evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt"
+    }
+  ]
+},
+{
+  "step": "hm37b-copyback",
+  "scope": "whole-block",
+  "surface": "Window B consumer of unavailable live hosted evidence",
+  "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded.",
+  "live_proof": "The complete live block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1498 must run against this window's actual upstream receipts. The dry run neither executes a fragment nor proves the live assertions.",
+  "receipt_fields": [
+    "five unchanged upstream files",
+    "hm37b-copyback.sha256"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-worker-boundary.txt",
+      "path": "$EVIDENCE_DIR/hm37-worker-boundary.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-hosted-control-inputs.txt",
+      "path": "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-hosted-check-control.json",
+      "path": "$EVIDENCE_DIR/hm37-hosted-check-control.json",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-revocation-readback.json",
+      "path": "$EVIDENCE_DIR/hm37-revocation-readback.json",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-close-readback.txt",
+      "path": "$EVIDENCE_DIR/hm37-close-readback.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37b-copyback.sha256",
+      "path": "$EVIDENCE_DIR/hm37b-copyback.sha256",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1507-1544",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "evidence.tar",
+      "path": "$COPYBACK_TEMP/evidence.tar",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1513-1537",
+      "evidence": null,
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37-worker-boundary.txt",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-hosted-control-inputs.txt",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-hosted-check-control.json",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-revocation-readback.json",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37-close-readback.txt",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "hm37b-copyback.sha256",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    },
+    {
+      "output": "evidence.tar",
+      "reason": "The exact five-member archive requires the unproduced hosted-control and revocation JSON. Those records include live identifiers with neither current success evidence nor literal success values. A close success shape alone cannot provide the other members. No partial archive, copied member or digest is seeded."
+    }
+  ]
+},
+{
+  "step": "hm37a-failure-dispatch",
+  "scope": "whole-block",
+  "surface": "Window A actual-failure receipt selector and action map",
+  "reason": "The dispatcher requires an actual pass=false old/new or HTTP-boundary receipt. Every eligible receipt producer and its transfer is whole-block NOT EXECUTED and seeds no bytes on these paths; the unchanged selector correctly stops with no actual failed control receipt. Never invent an assertion_id or classify a fabricated failure.",
+  "live_proof": "The whole live block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2425 must select a real failed receipt and execute its action mapping. No fragment or fabricated failure input runs under this live plan ID.",
+  "receipt_fields": [
+    "assertion_id",
+    "class",
+    "action"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37a-failure-action.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37a-failure-action.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2451-2481",
+      "evidence": null,
+      "reason": "The dispatcher requires an actual pass=false old/new or HTTP-boundary receipt. Every eligible receipt producer and its transfer is whole-block NOT EXECUTED and seeds no bytes on these paths; the unchanged selector correctly stops with no actual failed control receipt. Never invent an assertion_id or classify a fabricated failure."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "hm37a-failure-action.txt",
+      "reason": "The dispatcher requires an actual pass=false old/new or HTTP-boundary receipt. Every eligible receipt producer and its transfer is whole-block NOT EXECUTED and seeds no bytes on these paths; the unchanged selector correctly stops with no actual failed control receipt. Never invent an assertion_id or classify a fabricated failure."
+    }
+  ]
+}
 ]

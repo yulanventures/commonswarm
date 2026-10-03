@@ -1,25 +1,43 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdtemp, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import { chmod, lstat, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { after, test } from "node:test";
 import { promisify } from "node:util";
 
 import { exportJWK, generateKeyPair } from "jose";
+import { parse as parseYaml } from "yaml";
 
 import { loadConfig } from "../src/config.js";
+import { effectiveAdminGate } from "../src/admin-gate.js";
+import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
 
 const root = new URL("../../../", import.meta.url);
 const execFileAsync = promisify(execFile);
+const fixtureDirectories = [];
+function assertFixtureDirectory(directory) {
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  assert.equal(resolve(directory), directory);
+  assert.ok(fixtureDirectories.includes(directory), "cleanup requires an owned fixture directory");
+}
+after(async () => {
+  for (const directory of fixtureDirectories) {
+    assertFixtureDirectory(directory);
+    await execFileAsync("rm", ["-rf", directory]);
+  }
+});
 
 async function text(path) {
   return await readFile(new URL(path, root), "utf8");
 }
 
 async function configFixture() {
-  const directory = await mkdtemp(join(tmpdir(), "mcp-auth-config-"));
+  const { stdout } = await execFileAsync("mktemp", ["-d", "/private/tmp/anvil-secret.XXXXXX"]);
+  const directory = stdout.trim();
+  assert.match(directory, /^\/private\/tmp\/anvil-secret\.[A-Za-z0-9]+$/u);
+  fixtureDirectories.push(directory);
+  await chmod(directory, 0o700);
   const paths = Object.fromEntries(["signing", "cookies", "database", "ca"].map(
     (name) => [name, join(directory, name)],
   ));
@@ -55,6 +73,14 @@ async function configFixture() {
   };
 }
 
+test("cleanup accepts only the exact fixture directories it created", async () => {
+  const { directory } = await configFixture();
+  assert.doesNotThrow(() => assertFixtureDirectory(directory));
+  for (const unsafe of ["", "/", process.env.HOME, `${directory}/child`, `${directory}/../other`, `${directory}unowned`]) {
+    assert.throws(() => assertFixtureDirectory(unsafe));
+  }
+});
+
 test("container is pinned, unprivileged, and starts the production server", async () => {
   const dockerfile = await text("services/mcp-auth/Dockerfile");
   assert.match(dockerfile, /^FROM node:22\.[^@\s]+-bookworm-slim@sha256:[0-9a-f]{64}$/mu);
@@ -87,6 +113,28 @@ test("OAuth Compose requires the database hostname mapping and verify-full TLS",
   assert.match(example, /^MCP_OAUTH_DATABASE_ADDRESS=$/mu);
   assert.match(example, /db\.commonswarm\.internal/u);
   assert.match(example, /172\.31\.0\.10/u);
+});
+
+test("admin issuer Compose overlay is activation-only with a matching read-only credential mount", async () => {
+  const [baseText, overlayText] = await Promise.all([
+    text("deploy/mcp-auth/compose.yaml"),
+    text("deploy/mcp-auth/compose.admin-issuer.yaml"),
+  ]);
+  const base = parseYaml(baseText);
+  const overlay = parseYaml(overlayText);
+  assert.ok(base.services.oauth, "base Compose parses and retains the OAuth service");
+  assert.doesNotMatch(baseText, /admin-issuer-database-credentials|MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE/u);
+  const path = "/run/commonswarm-oauth/admin-issuer-database-credentials";
+  assert.deepEqual(overlay.services.oauth.environment, {
+    MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: path,
+  });
+  assert.deepEqual(overlay.services.oauth.volumes, [{
+    type: "bind",
+    source: "/etc/commonswarm-oauth/admin-issuer-database-credentials",
+    target: path,
+    read_only: true,
+    bind: { create_host_path: false },
+  }]);
 });
 
 test("migration has no transaction control and proofs have the required safe shape", async () => {
@@ -232,4 +280,63 @@ test("a FIFO file setting fails without waiting for a writer", async () => {
     /database TLS CA path must be a regular file/u,
   );
   assert.ok(performance.now() - startedAt < 1_000, "FIFO policy check did not fail fast");
+});
+
+
+test("admin activation config accepts only literal 1 and keeps missing or unreadable issuer files optional", async () => {
+  const { env, directory } = await configFixture();
+  const base = { ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts" };
+  for (const value of [undefined, "", "0", "true", "yes", "01", "1 ", " 1", "1\n", 1, true]) {
+    assert.equal((await loadConfig({ ...base, MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: value })).adminIssuanceEnabled, false);
+  }
+  const on = { ...base, MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: "1" };
+  assert.equal((await loadConfig(on)).adminIssuanceEnabled, true);
+  assert.equal((await loadConfig(on)).adminIssuer, undefined);
+  assert.equal((await loadConfig({ ...on, MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: join(directory, "missing") })).adminIssuer, undefined);
+  const path = join(directory, "issuer");
+  await writeFile(path, JSON.stringify({ user: "commonswarm_admin_issuer", password: "synthetic-test-only" }), { mode: 0o600 });
+  const configured = { ...on, MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE: path };
+  assert.equal((await loadConfig(configured)).adminIssuer.user, "commonswarm_admin_issuer");
+  await chmod(path, 0o000);
+  assert.equal((await loadConfig(configured)).adminIssuer, undefined);
+  await chmod(path, 0o644);
+  assert.equal((await loadConfig(configured)).adminIssuer, undefined);
+  await chmod(path, 0o600);
+  await writeFile(path, JSON.stringify({ user: "commonswarm_oauth_runtime", password: "synthetic-test-only" }));
+  await assert.rejects(loadConfig(configured), /dedicated login role/u);
+});
+
+
+test("activation-env-overlay-db-all-required: effective gate refuses each missing activation input", async () => {
+  const { env, directory } = await configFixture();
+  const overlay = parseYaml(await text("deploy/mcp-auth/compose.admin-issuer.yaml")).services.oauth;
+  const credentialName = "MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE";
+  const mount = overlay.volumes.find(v => v.target === overlay.environment[credentialName]);
+  assert.ok(mount && mount.read_only && mount.bind.create_host_path === false);
+  const issuerFile = join(directory, "issuer-all-required");
+  await writeFile(issuerFile, JSON.stringify({ user: "commonswarm_admin_issuer", password: "synthetic-test-only" }), { mode: 0o600 });
+  const sha = "a".repeat(40), target = `/home/commonswarm/edge/releases/${sha}`;
+  const measured = { admin_issuance_enabled: true, legacy_closed: true, auth_contract_version: 2,
+    lane8_evidence_digest: "b".repeat(64), measurement_evidence_ref: "W4/test/ai-w4-apply", measured_at: new Date(),
+    approved_edge_release_sha: sha, measured_edge_release_sha: sha, measured_edge_target: target, measured_mount: target,
+    measured_generation: 1, release_generation: 1, measured_artifact_digest: "c".repeat(64), measured_image_digest: `sha256:${"d".repeat(64)}` };
+  for (const [missing, expected] of [[null, "open"], ["env", "closed"], ["overlay", "closed"], ["db", "closed"]]) {
+    const config = await loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts",
+      ...(missing === "env" ? {} : { MCP_OAUTH_ADMIN_ISSUANCE_ENABLED: "1" }),
+      ...(missing === "overlay" ? {} : { [credentialName]: issuerFile }) });
+    let connects = 0;
+    const pool = { connect: async () => {
+      connects++;
+      return { query: async sql => {
+        if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
+        if (sql.includes("admin_cutover_state")) return { rows: [{ ...measured, admin_issuance_enabled: missing !== "db" }] };
+        return { command: sql, rows: [], rowCount: 0 };
+      }, release() {} };
+    } };
+    // Match production's optional dedicated issuer connection; ordinary runtime
+    // credentials cannot stand in for the absent activation overlay.
+    const coordinator = config.adminIssuer ? new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: config.adminIssuanceEnabled }) : undefined;
+    assert.equal(await effectiveAdminGate({ coordinator }), expected, `missing ${missing ?? "nothing"}`);
+    assert.equal(connects, missing === "env" || missing === "overlay" ? 0 : 1);
+  }
 });

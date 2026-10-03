@@ -240,6 +240,7 @@ test("edge runtime router maps every runnable function and defaults MCP dark", (
     "activity",
     "h0",
     "mcp",
+    "admin",
   ]);
   for (const functionName of FUNCTION_NAMES) {
     const mcpEnabled = functionName === "mcp";

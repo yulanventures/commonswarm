@@ -1,3 +1,4 @@
+import { oauthFixture } from './admin-edge-oauth-fixture.mjs';
 // Real adapters/database; diagnostics select counts/statuses, never raw bodies.
 import { AdminServerDiagnostics } from './admin-server-diagnostics.ts';
 const config = JSON.parse(await Deno.readTextFile(Deno.args[0]));
@@ -23,10 +24,15 @@ const jwk = {
   use: "sig",
 };
 const upstream = globalThis.fetch;
-globalThis.fetch = async (...args) =>
-  String(args[0]) === "https://mcp.commonswarm.com/jwks"
-    ? new Response(JSON.stringify({ keys: [jwk] }))
-    : upstream(...args);
+globalThis.fetch = async (...args) => {
+  const url = String(args[0]);
+  if (url === "https://mcp.commonswarm.com/jwks") {
+    const response = new Response(JSON.stringify({ keys: [jwk] }));
+    Object.defineProperty(response, "url", { value: url });
+    return response;
+  }
+  return upstream(...args);
+};
 const id = () => crypto.randomUUID();
 const b64 = (bytes) =>
   btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_")
@@ -41,16 +47,12 @@ function check(ok, label, observed) {
 const {
   db,
   handleRequest,
-  handleAdminRuntimeCommand: adminRuntime,
-  handleAdminWorkerRuntimeCommand: workerRuntime,
+  handleAdminWorkerCommand: workerCommand,
 } = await import("../../supabase/functions/command/index.ts");
-async function handleAdminRuntimeCommand(input, ...args) {
-  const result = await adminRuntime(input, ...args);
-  diagnostics.response(input.command.kind, result.status, result.body);
-  return result;
-}
-async function handleAdminWorkerRuntimeCommand(input, ...args) {
-  const result = await workerRuntime(input, ...args);
+let oauth;
+async function workerDelivery(input, access, _retiredProof, deliver) {
+  check(access === oauth.access, 'worker delivery access binding');
+  const result = await workerCommand(input, await oauth.request(input), deliver);
   diagnostics.response(input.command.kind, result.status, result.body);
   return result;
 }
@@ -104,29 +106,25 @@ const transact = async (input, auth) => {
   return outcome;
 };
 async function http(input, token) {
-  const response = await handleRequest(
-    new Request("http://127.0.0.1/functions/v1/command", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(input),
-    }),
-  );
+  const response = await handleRequest(token === oauth?.access ? await oauth.request(input) : new Request('http://127.0.0.1/functions/v1/command', {
+    method:'POST', headers:{Authorization:`Bearer ${token}`, 'content-type':'application/json'}, body:JSON.stringify(input),
+  }));
   const result = { status: response.status, body: await response.json() };
   diagnostics.response(input.command.kind, result.status, result.body);
   return result;
 }
 try {
   const scenario = Deno.args[1], now = Date.now(), connection = id();
+  const scope_names = policy.adminConsentOptions().filter(option => option.available).map(option => option.scope);
   const manifest = {
     connection_id: connection,
     client_id: "lane-c-runtime",
     resource: policy.ADMIN_RESOURCE,
     mode: "granular",
     registry_version: policy.ADMIN_REGISTRY_VERSION,
-    scope_names: [...policy.ADMIN_SCOPE_NAMES],
+    scope_names,
+    capability_names: policy.adminAvailableCapabilities(scope_names),
+    availability_digest: policy.adminAvailabilityDigest(policy.ADMIN_REGISTRY_VERSION),
     workspace_selector: "selected",
     workspace_ids: [config.workspace],
     created_workspace_policy: { scope_names: ["seats:create", "seats:revoke"] },
@@ -173,38 +171,8 @@ try {
     )).result.status === 200,
     "activation positive control",
   );
-  const jwtHead = encode({ alg: "ES256", typ: "at+jwt", kid: jwk.kid }),
-    jwtBody = encode({
-      iss: "https://mcp.commonswarm.com",
-      aud: policy.ADMIN_RESOURCE,
-      sub: config.owner,
-      grant_id: grant,
-      connection_id: connection,
-      client_id: manifest.client_id,
-      iat: Math.floor(now / 1000),
-      exp: Math.floor(now / 1000) + 300,
-    });
-  const signature = await crypto.subtle.sign(
-    { name: "ECDSA", hash: "SHA-256" },
-    signing.privateKey,
-    new TextEncoder().encode(`${jwtHead}.${jwtBody}`),
-  );
-  const proof = `${jwtHead}.${jwtBody}.${b64(new Uint8Array(signature))}`;
-  let admin;
-  check(
-    (await handleAdminRuntimeCommand(
-          wire({
-            kind: "issue_admin_credential",
-            grant_id: grant,
-            credential_lineage_id: id(),
-          }),
-          proof,
-          async (value) => {
-            admin = value;
-          },
-        )).status === 200 && admin,
-    "admin runtime positive control",
-  );
+  oauth = await oauthFixture(db, grant, signing, jwk.kid);
+  const admin = { access_credential: oauth.access }, proof = null;
   const call = (command) =>
     http(
       wire({ grant_id: grant, workspace_id: config.workspace, ...command }),
@@ -396,7 +364,7 @@ try {
       "public provisioning cannot deliver bearer",
     );
     let worker;
-    const result = await handleAdminWorkerRuntimeCommand(
+    const result = await workerDelivery(
       wire(provision.command),
       admin.access_credential,
       proof,
@@ -424,7 +392,23 @@ try {
       return true;
     };
     check(await auth(worker.credential), "worker authenticates positive");
-    if (scenario === "history") {
+    if (scenario === "delivery") {
+      const input=wire({kind:'admin_renew_seat',grant_id:grant,workspace_id:config.workspace,principal_id:principal,predecessor_credential_id:worker.credential_id,recipient_connection_id:connection,worker_scope_names:['post_signal'],bearer_seconds:3600});
+      const [before]=await db`SELECT count(*)::integer AS n FROM swarm.agent_tokens WHERE principal_id=${principal}::uuid`;
+      const abort=new AbortController(), raw=await oauth.request(input);
+      const request=new Request(raw,{signal:abort.signal}), retry=request.clone();
+      let entered=false;
+      const result=await workerCommand(input,request,async (_credential,signal)=>{
+        entered=true;check(!signal.aborted,'delivery begins inside live request');abort.abort();
+        await new Promise(()=>{});
+      });
+      check(entered && result.status===503,'cancelled worker delivery rolls back transaction');
+      const [after]=await db`SELECT count(*)::integer AS n FROM swarm.agent_tokens WHERE principal_id=${principal}::uuid`;
+      check(after.n===before.n,'cancelled delivery publishes no successor');
+      check((await handleRequest(retry)).status===401,'cancelled delivery cannot unconsume proof');
+      check(await auth(worker.credential),'committed worker remains live after cancelled successor');
+      check((await call({kind:'admin_read_metadata',resource_kind:'grant',workspace_id:null})).status===200,'fresh admin proof remains usable after cancellation');
+    } else if (scenario === "history") {
       check((await call({ kind: "admin_revoke_seat_credential", principal_id: principal,
         credential_id: worker.credential_id, reason_code: "human_requested" })).status === 200,
         "routine credential revoke accepted");
@@ -443,7 +427,7 @@ try {
         bearer_seconds: 3600,
       });
       let successor;
-      const renewed = await handleAdminWorkerRuntimeCommand(
+      const renewed = await workerDelivery(
         input,
         admin.access_credential,
         proof,
@@ -455,7 +439,7 @@ try {
       const before = await events();
       let delivered = false;
       check(
-        (await handleAdminWorkerRuntimeCommand(
+        (await workerDelivery(
               input,
               admin.access_credential,
               proof,
@@ -475,7 +459,7 @@ try {
       });
       let replaced;
       check(
-        (await handleAdminWorkerRuntimeCommand(
+        (await workerDelivery(
               replacement,
               admin.access_credential,
               proof,
@@ -622,8 +606,7 @@ try {
         await tx`SELECT set_config('role','swarm_command',true)`;
         check(
           (await adminTransaction(tx, input, {
-            kind: "access",
-            credential: admin.access_credential,
+            kind: 'oauth', admission: await oauth.admission(),
           })).result.status === 200,
           "rollback reaches write",
         );

@@ -7,10 +7,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { planShellWords } from "./support/plan-shell-words.js";
 
 const REDACTION_MARKERS = ["[REDACTED]", "<redacted>", "REDACTED]", "***"];
 const SHELL_BLOCK = /^```sh[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm;
-const PYTHON_C = /\bpython3\s+-c(?:\s*\\\r?\n)?\s*'([^']*)'/g;
 const PYTHON_HEREDOC =
   /^[^\n]*\bpython3\s+(?!-c(?:\s|\\|$))[^\n]*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\r?\n([\s\S]*?)^\2[ \t]*\r?$/gm;
 
@@ -50,10 +50,25 @@ function shellBlocks(file: string): ShellBlock[] {
 }
 
 function pythonPrograms(source: string): string[] {
-  const commandPrograms = [...source.matchAll(PYTHON_C)]
-    .map((match) => match[1] ?? "");
   const heredocPrograms = [...source.matchAll(PYTHON_HEREDOC)]
     .map((match) => match[3] ?? "");
+  // Heredoc bodies are stdin, not shell words. Decode each SSH command argv
+  // before inspecting its next quoting layer; raw regexes see escaped quotes
+  // or stop at the first segment of a concatenated single-quoted word.
+  const outer = source.replace(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n[\s\S]*?^\2[ \t]*$/gm, "");
+  const commandPrograms: string[] = [];
+  const inspect = (text: string, depth = 0): void => {
+    assert.ok(depth < 8, "too many nested shell quoting layers");
+    const words = planShellWords(text);
+    for (let index = 0; index < words.length; index++) {
+      if (words[index] === "python3" && words[index + 1] === "-c") {
+        assert.ok(words[index + 2], "python3 -c has no program");
+        commandPrograms.push(words[index + 2]!);
+        index += 2;
+      } else if (/\bpython3\s+-c\b/.test(words[index]!)) inspect(words[index]!, depth + 1);
+    }
+  };
+  inspect(outer);
   return [...commandPrograms, ...heredocPrograms];
 }
 
@@ -138,4 +153,14 @@ PY
 `,
   };
   assert.match(checkBlock(invalid).join("\n"), /Python program 1: compile failed/);
+  for (const command of [
+    String.raw`ssh ops@example.invalid "python3 -c 'raise RuntimeError(\"compile only\")'"`,
+    String.raw`ssh ops@example.invalid 'python3 -c '\''raise RuntimeError("compile only")'\'''`,
+  ]) {
+    const safe = { ...invalid, source: command };
+    assert.equal(pythonPrograms(command).length, 1, "nested SSH program must be inspected");
+    assert.deepEqual(checkBlock(safe), [], "inspection must compile without executing Python or SSH");
+    const broken = { ...invalid, source: command.replace("raise RuntimeError", "if True print") };
+    assert.match(checkBlock(broken).join("\n"), /Python program 1: compile failed/);
+  }
 });

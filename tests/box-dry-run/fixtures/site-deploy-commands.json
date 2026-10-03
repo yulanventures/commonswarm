@@ -54,6 +54,13 @@
       "used_at": ["deploy/site/deploy.sh:30", "deploy/site/finalize-release.sh:15", "deploy/site/finalize-release.sh:133"],
       "effect": "-f resolves every symlink, as GNU readlink -f does on the box (M4: GNU coreutils 9.4). A single operand reads the link. Any other shape exits 69.",
       "evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M4: the box runs GNU coreutils 9.4 and bash 5.2"}]
+    },
+    "date": {
+      "shapes": ["-u +%Y%m%dT%H%M%SZ"],
+      "flags": ["-u"],
+      "used_at": ["deploy/site/deploy.sh:199"],
+      "effect": "The stub prints the fixture box clock (BOX_DRY_RUN_BOX_CLOCK) through box-userland.py, the one clock every Mac writer and box consumer reads. Any form outside that model exits 69.",
+      "evidence": [{"file": "tests/box-dry-run/stubs/box-userland.py", "shape": "cmd_date: one fixture clock; unsupported forms are refused"}]
     }
   },
   "box_userland": {
@@ -75,7 +82,6 @@
     "grep": ["-Eq"],
     "od": ["-An -N8 -tx1"],
     "tr": ["-d"],
-    "date": ["-u +%Y%m%dT%H%M%SZ"],
     "git": ["-C <repo> archive --format=tar HEAD", "-C <repo> rev-parse --short=12 HEAD"],
     "node": ["<repo>/deploy/site/validate-site-env.mjs <file>"],
     "find": ["-type d -exec chmod 755 {} +", "-type f -exec chmod 644 {} +", "-prune -type d -mmin +60 -print"],

@@ -29,16 +29,16 @@ const IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.147";
 const PASSWORD = `admin-${randomUUID()}`;
 const IMAGE_PULL_ATTEMPTS = 3;
 const ECR_RATE_LIMIT_SKIP =
-  `public ECR data limit persisted after ${IMAGE_PULL_ATTEMPTS} bounded image-pull attempts`;
+  `public ECR rate limit persisted after ${IMAGE_PULL_ATTEMPTS} bounded image-pull attempts`;
 
 function run(command: string, args: string[], input?: string): SpawnSyncReturns<string> {
   return spawnSync(command, args, { encoding: "utf8", input: input ?? "", stdio: ["pipe", "pipe", "pipe"], timeout: 120_000 });
 }
 
-function isOnlyEcrDataLimit(result: SpawnSyncReturns<string>): boolean {
+function isOnlyEcrRateLimit(result: SpawnSyncReturns<string>): boolean {
   const lines = result.stderr.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   return result.status !== 0 && lines.length > 0 && lines.every(line =>
-    /^(?:docker:\s*)?(?:Error response from daemon:\s*)?toomanyrequests:\s*Data limit exceeded$/i.test(line));
+    /^(?:docker:\s*)?(?:Error response from daemon:\s*)?toomanyrequests:\s*(?:Data limit exceeded|Rate exceeded)$/i.test(line));
 }
 
 async function pullBoxImage(
@@ -49,7 +49,7 @@ async function pullBoxImage(
   for (let attempt = 1; attempt <= IMAGE_PULL_ATTEMPTS; attempt += 1) {
     const pulled = dockerRun("docker", ["pull", IMAGE]);
     if (pulled.status === 0) return { ready: true };
-    if (!isOnlyEcrDataLimit(pulled)) {
+    if (!isOnlyEcrRateLimit(pulled)) {
       throw new Error(`docker pull failed with a non-rate-limit error:\n${pulled.stderr || pulled.stdout}`);
     }
     if (attempt < IMAGE_PULL_ATTEMPTS) await wait(attempt * 1_000);
@@ -57,34 +57,50 @@ async function pullBoxImage(
   return { ready: false, reason: ECR_RATE_LIMIT_SKIP };
 }
 
-test("box image pull retries the ECR data limit with bounded backoff", async () => {
+for (const diagnostic of ["Error response from daemon: toomanyrequests: Data limit exceeded", "toomanyrequests: Rate exceeded"]) {
+  test(`box image pull retries the ECR limit with bounded backoff: ${diagnostic}`, async () => {
+    let calls = 0;
+    const waits: number[] = [];
+    const rateLimited = (() => {
+      calls += 1;
+      return {
+        status: 1,
+        stdout: "",
+        stderr: `${diagnostic}\n`,
+      } as SpawnSyncReturns<string>;
+    }) as typeof run;
+    const result = await pullBoxImage(rateLimited, async milliseconds => { waits.push(milliseconds); });
+    assert.deepEqual(result, { ready: false, reason: ECR_RATE_LIMIT_SKIP });
+    assert.equal(calls, IMAGE_PULL_ATTEMPTS);
+    assert.deepEqual(waits, [1_000, 2_000]);
+  });
+}
+
+test("box image pull succeeds after a rate-limit retry", async () => {
   let calls = 0;
   const waits: number[] = [];
-  const rateLimited = (() => {
+  const recovering = (() => {
     calls += 1;
-    return {
-      status: 1,
-      stdout: "",
-      stderr: "Error response from daemon: toomanyrequests: Data limit exceeded\n",
-    } as SpawnSyncReturns<string>;
+    return { status: calls === 1 ? 1 : 0, stdout: "", stderr: calls === 1 ? "toomanyrequests: Rate exceeded\n" : "" } as SpawnSyncReturns<string>;
   }) as typeof run;
-  const result = await pullBoxImage(rateLimited, async milliseconds => { waits.push(milliseconds); });
-  assert.deepEqual(result, { ready: false, reason: ECR_RATE_LIMIT_SKIP });
-  assert.equal(calls, IMAGE_PULL_ATTEMPTS);
-  assert.deepEqual(waits, [1_000, 2_000]);
+  assert.deepEqual(await pullBoxImage(recovering, async milliseconds => { waits.push(milliseconds); }), { ready: true });
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [1_000]);
 });
 
-test("box image pull does not hide a non-rate-limit Docker failure", async () => {
-  let calls = 0;
-  const failed = ((command: string, args: string[]) => {
-    calls += 1;
-    assert.equal(command, "docker");
-    assert.deepEqual(args, ["pull", IMAGE]);
-    return { status: 1, stdout: "", stderr: "permission denied\n" } as SpawnSyncReturns<string>;
-  }) as typeof run;
-  await assert.rejects(() => pullBoxImage(failed, async () => undefined), /non-rate-limit error.*permission denied/s);
-  assert.equal(calls, 1, "a non-rate-limit failure was retried or skipped");
-});
+for (const diagnostic of ["permission denied", "toomanyrequests: Rate exceeded\npermission denied"]) {
+  test(`box image pull does not hide a non-rate-limit Docker failure: ${diagnostic}`, async () => {
+    let calls = 0;
+    const failed = ((command: string, args: string[]) => {
+      calls += 1;
+      assert.equal(command, "docker");
+      assert.deepEqual(args, ["pull", IMAGE]);
+      return { status: 1, stdout: "", stderr: `${diagnostic}\n` } as SpawnSyncReturns<string>;
+    }) as typeof run;
+    await assert.rejects(() => pullBoxImage(failed, async () => undefined), /non-rate-limit error.*permission denied/s);
+    assert.equal(calls, 1, "a non-rate-limit failure was retried or skipped");
+  });
+}
 
 test("pg_cron schedules are exported from the source and recreated on the box", { timeout: 300_000 }, async (context) => {
   if (run("docker", ["version", "--format", "{{.Server.Version}}"]).status !== 0) {

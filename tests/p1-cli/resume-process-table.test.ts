@@ -29,7 +29,7 @@ import {
 } from "../../src/resume.js";
 
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const CREDENTIAL = "/Users/agent/.config/cswarm/agent-8d10fe67.json";
+const CREDENTIAL = resolve(tmpdir(), "cswarm-process-table-fixture", "agent-8d10fe67.json");
 
 /**
  * The cap this reader used to carry. The fixture must exceed it, or the test

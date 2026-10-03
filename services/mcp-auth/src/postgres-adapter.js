@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { errors } from "oidc-provider";
+import { adminTransactionContext, adminQuery, joinAdminTransaction, AdminTransactionError } from "./admin-transaction.js";
 
 const GRANTABLE_MODELS = new Set([
   "AccessToken",
@@ -33,6 +34,7 @@ function storedPayload(row, recoveredJti) {
 }
 
 async function transaction(pool, callback) {
+  if (adminTransactionContext(false)) return joinAdminTransaction(callback);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -62,9 +64,36 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
   const qualifiedSchema = assertIdentifier(schema);
   const artifacts = `${qualifiedSchema}.provider_artifacts`;
   const tombstones = `${qualifiedSchema}.refresh_family_tombstones`;
+  const database = pool;
+  pool = { query: (...args) => adminTransactionContext(false) ? adminQuery(...args) : database.query(...args),
+    connect: () => adminTransactionContext(false)
+      ? Promise.resolve({ query: adminQuery, release() {} }) : database.connect() };
+  function adminPayload(payload) {
+    const admin="https://api.commonswarm.com/admin";
+    return payload?.resource === admin || (Array.isArray(payload?.resource) && payload.resource.includes(admin)) ||
+      payload?.params?.resource === admin || payload?.aud === admin || payload?.grant_class === "delegated_admin" ||
+      Object.hasOwn(payload?.resources ?? {},admin);
+  }
+  async function requireBoundContext(modelName, id, payload) {
+    if (adminTransactionContext(false)) return;
+    if (adminPayload(payload)) throw new AdminTransactionError("admin_transaction_required");
+    // Family identity comes from the pre-M1 artifact payload, never an admin
+    // table. An unlabelled successor still checks its existing Grant/family.
+    const family = payload?.grantId ?? (modelName === "Grant" ? id : null);
+    const rows = (await database.query(`WITH target AS (
+        SELECT grant_id FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2
+      ) SELECT payload FROM ${artifacts}
+      WHERE (model=$1 AND artifact_id_hash=$2)
+        OR grant_id=coalesce($3,(SELECT grant_id FROM target))
+        OR (model='Grant' AND (artifact_id_hash=$4
+          OR payload->>'jti'=coalesce($3,(SELECT grant_id FROM target))))`,
+      [modelName, lookupHash(id), family, family ? lookupHash(family) : null])).rows;
+    if (rows.some(row => adminPayload(row.payload))) throw new AdminTransactionError("admin_transaction_required");
+  }
 
   return (model) => ({
     async consume(id) {
+      await requireBoundContext(model, id);
       const client = beforeConsume && model === "RefreshToken" ? await pool.connect() : null;
       try {
         await beforeConsume?.({ model, id, processId: client?.processID ?? null });
@@ -94,6 +123,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async destroy(id) {
+      await requireBoundContext(model, id);
       await pool.query(
         `DELETE FROM ${artifacts} WHERE model = $1 AND artifact_id_hash = $2`,
         [model, lookupHash(id)],
@@ -101,6 +131,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async find(id) {
+      await requireBoundContext(model, id);
       const result = await pool.query(
         `SELECT payload, consumed_at
            FROM ${artifacts} AS artifact
@@ -114,6 +145,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, lookupHash(id)],
       );
+      if (result.rows[0] && adminPayload(result.rows[0].payload)) await requireBoundContext(model,id,result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0], id) : undefined;
     },
 
@@ -132,6 +164,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, uid],
       );
+      if (result.rows[0]) await requireBoundContext(model, result.rows[0].payload.jti ?? "", result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0]) : undefined;
     },
 
@@ -150,10 +183,12 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           LIMIT 1`,
         [model, lookupHash(userCode)],
       );
+      if (result.rows[0]) await requireBoundContext(model, result.rows[0].payload.jti ?? "", result.rows[0].payload);
       return result.rows[0] ? storedPayload(result.rows[0]) : undefined;
     },
 
     async revokeByGrantId(grantId) {
+      await requireBoundContext("Grant", grantId, { grantId });
       await transaction(pool, async (client) => {
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))",
@@ -170,6 +205,13 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async upsert(id, payload, expiresIn) {
+      const nativeMcpResource = Array.isArray(payload.resource) && payload.resource.length === 1 &&
+        payload.resource[0] === "https://mcp.commonswarm.com/mcp";
+      if ((Array.isArray(payload.resource) && !nativeMcpResource) ||
+          (payload.resources && Object.keys(payload.resources).length !== 1)) {
+        throw new errors.InvalidTarget("exactly one bound resource is required");
+      }
+      await requireBoundContext(model, id, payload);
       const grantId = GRANTABLE_MODELS.has(model) && typeof payload.grantId === "string"
         ? payload.grantId
         : null;

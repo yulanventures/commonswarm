@@ -109,15 +109,10 @@ date() {
     esac
   fi
   if [ "${BOX_DRY_RUN_PART:-}" = box ]; then
-    case " $* " in
-      *' -d 2026-09-28T01:02:03Z '*'+%s'*) printf '%s\n' 1790557323; return 0 ;;
-      *' -d 2026-09-28T05:02:03Z '*'+%s'*) printf '%s\n' 1790571723; return 0 ;;
-      *' -d 2026-09-28T01:02:03Z '*'+%Y%m%dT%H%M%SZ'*) printf '%s\n' 20260928T010203Z; return 0 ;;
-      *' -d 2026-09-28T01:02:03Z '*'+%H%M%S'*) printf '%s\n' 010203; return 0 ;;
-      *' -d @1790557323 '*'+%Y-%m-%d'*) printf '%s\n' 2026-09-28; return 0 ;;
-      *' -d 2026-09-28\ 00:00:00 '*'+%s'*) printf '%s\n' 1790553600; return 0 ;;
-      ' -u +%s ') printf '%s\n' 1790560923; return 0 ;;
-    esac
+    # The Mac producer and every box consumer share one fixture clock. GNU
+    # date on the host would observe a different time from the local writer.
+    /usr/bin/python3 "${BOX_DRY_RUN_USERLAND:?box userland required}" date "$@"
+    return $?
   fi
   command date "$@"
 }
