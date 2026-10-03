@@ -74,7 +74,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
     }
   }
   // A known multi-heredoc block must remain intact through its final receipt.
-  assert.match(block('ai-w4-apply'), /PASS W4 switched and measured/);
+  assert.match(block('ai-w4-apply'), /W4 switched and measured/);
   assert.match(block('ai-db-session'), /PASS ai-db-session/);
 });
 
@@ -204,6 +204,98 @@ test('admin release plan: checker receipt validates exact build, controls and re
   gate.sha256 = 'c'.repeat(64); assert.match(check().stderr, /evidence digest/);
 });
 
+
+test('admin release plan: W2 refuses open and apply before mutation until the checksum bootstrap is redesigned', () => {
+  const calls = join(scratch, 'blocked-schema-calls');
+  const harness = `ai_db() { printf 'mutation\\n' >>'${calls}'; }; ai_ro() { printf 'query\\n' >>'${calls}'; };\n`;
+  for (const id of ['ai-open', 'ai-w2-apply']) {
+    const result = run(harness + block(id), { INPUTS_FILE: inputFile({ ...base(), window: 'W2' }) });
+    assert.notEqual(result.status, 0, `${id} opened the blocked schema window`);
+    assert.match(result.stderr, /per-migration D2 checksum bootstrap unavailable/);
+    assert.ok(!existsSync(calls), `${id} reached the database before refusal`);
+  }
+});
+
+test('admin release plan: timer guard restores and verifies on success, failure, explicit exit, INT and TERM; failed recovery refuses', () => {
+  const root = mkdtempSync(join(scratch, 'timer-guard-'));
+  const state = join(root, 'timer-state'), calls = join(root, 'calls');
+  writeFileSync(join(root, 'systemctl'), `#!/bin/bash
+printf '%s\\n' "$1" >>"$TIMER_CALLS"
+case "$1" in
+ stop) printf inactive >"$TIMER_STATE";;
+ start) test "\${TIMER_RECOVERY_FAIL:-0}" != 1 || exit 1; printf active >"$TIMER_STATE";;
+ is-active) test "$(cat "$TIMER_STATE")" = active;;
+ *) exit 64;;
+esac
+`, { mode: 0o700 });
+  const session = block('ai-db-session');
+  const harness = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
+  const execute = (body: string, guard = block('ai-timer-guard'), fail = false) => {
+    writeFileSync(state, 'active'); writeFileSync(calls, '');
+    return run(harness + guard + '\nsystemctl stop "$EDGE_RECYCLE_TIMER"\n' + body, {
+      PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer',
+      TIMER_STATE: state, TIMER_CALLS: calls, TIMER_RECOVERY_FAIL: fail ? '1' : '0',
+      RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+    });
+  };
+  for (const [body, status] of [[':', 0], ['false', 1], ['exit 42', 42], ['kill -INT "$$"', 130], ['kill -TERM "$$"', 143]] as const) {
+    const result = execute(body);
+    assert.equal(result.status, status, result.stderr);
+    assert.equal(readFileSync(state, 'utf8'), 'active');
+    assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), ['stop', 'start', 'is-active']);
+  }
+  const failed = execute(':', undefined, true);
+  assert.equal(failed.status, 1); assert.match(failed.stderr, /FAIL timer recovery; window remains open/);
+  assert.equal(readFileSync(state, 'utf8'), 'inactive');
+  // Remove the real EXIT trap: the same failure must leave the timer inactive.
+  const unguarded = block('ai-timer-guard').replace(/^trap .* EXIT\n/m, '');
+  assert.notEqual(unguarded, block('ai-timer-guard'));
+  const mutation = execute('false', unguarded);
+  assert.equal(mutation.status, 1); assert.equal(readFileSync(state, 'utf8'), 'inactive');
+});
+
+test('admin release plan: every timer-owning body recovers after stop failure or its first subsequent failure', () => {
+  // Exercise the actual stop-to-exit region; preflight paths are covered elsewhere.
+  // The only external commands that can run are the fixture systemctl and marked recovery.
+  const root = mkdtempSync(join(scratch, 'timer-bodies-'));
+  const state = join(root, 'state'), calls = join(root, 'calls');
+  writeFileSync(join(root, 'systemctl'), `#!/bin/bash
+printf '%s\\n' "$1" >>"$TIMER_CALLS"
+case "$1" in
+ stop) printf inactive >"$TIMER_STATE"; test "$FAIL_STOP" != 1;;
+ start) printf active >"$TIMER_STATE";;
+ is-active) test "$(cat "$TIMER_STATE")" = active;;
+ show) printf 'active\\n';;
+ *) exit 64;;
+esac
+`, { mode: 0o700 });
+  const session = block('ai-db-session');
+  const dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
+  // A failed database call in the real nested rollback stops before touching files/services.
+  const harness = 'ai_db() { return 42; }\n' + dispatcher;
+  const owners = blocks.filter(source => /systemctl stop /.test(source));
+  assert.equal(owners.length, 3, 'unexpected unguarded stop owner');
+  for (const source of owners) {
+    assert.match(source, /^\(\nset -euo pipefail/m, 'guard lifetime must be a subshell');
+    const start = source.indexOf('ai_run ai-timer-guard\n');
+    assert.ok(start >= 0 && start < source.indexOf('systemctl stop '), source.split('\n')[0]);
+    const body = '(\nset -euo pipefail\n' + source.slice(start);
+    for (const failStop of [false, true]) {
+      writeFileSync(state, 'active'); writeFileSync(calls, '');
+      const result = run(harness + body, {
+        PATH: root + ':' + process.env.PATH, EDGE_RECYCLE_TIMER: 'fixture.timer', EDGE_RECYCLE_SERVICE: 'fixture.service',
+        TIMER_STATE: state, TIMER_CALLS: calls, FAIL_STOP: failStop ? '1' : '0',
+        RELEASE_ROOT: resolve('.'), SECRET_STAGE: root,
+      });
+      assert.notEqual(result.status, 0, result.stderr);
+      assert.equal(readFileSync(state, 'utf8'), 'active', source.split('\n')[0]);
+      const trace = readFileSync(calls, 'utf8').trim().split('\n');
+      assert.equal(trace[0], 'stop'); assert.deepEqual(trace.slice(-2), ['start', 'is-active']);
+      assert.equal(trace.filter(call => call === 'start').length, 1, 'recovery must run once');
+    }
+  }
+  assert.doesNotMatch(block('ai-recycle-rollback'), /systemctl stop /, 'nested rollback cannot own a second stop');
+});
 
 test('admin release plan: C1 owner inputs and exact workspace name refuse when absent', () => {
   const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile' };
@@ -392,14 +484,22 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
 test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
   const made=spawnSync('mktemp',['-d','/private/tmp/anvil-secret.XXXXXX'],{encoding:'utf8'});
   assert.equal(made.status,0); const stage=made.stdout.trim(), proof=join(scratch,'close'); mkdirSync(proof);
-  for(const file of ['ordinary-after.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  for(const file of ['ordinary-after.json','ordinary-recovery.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
     // Read-only database boundary starts CLOSED: opening-state checks must fail.
     const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
-    const result=run(harness+block('ai-close'),{WINDOW:'W6',CLOSE_RESULT:'success',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH});
+    const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
+    writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 1\n',{mode:0o700});
+    for(const outcome of ['success','recovered']) {
+      const refused=run(harness+block('ai-close'),{...env,CLOSE_RESULT:outcome});
+      assert.notEqual(refused.status,0,`inactive timer allowed ${outcome} W6 close`);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    }
+    writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+    const result=run(harness+block('ai-close'),{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
   } finally {
     if(existsSync(stage)) { const removed=spawnSync('/Users/yulanbot/.local/bin/rm',['-r','--',stage],{encoding:'utf8'}); assert.equal(removed.status,0,removed.stderr); }

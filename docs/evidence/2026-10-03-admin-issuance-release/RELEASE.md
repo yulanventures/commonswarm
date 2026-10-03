@@ -76,11 +76,11 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
 | W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
-| W2 SCHEMA | common preflight/open/session; ai-w2-preflight, ai-w2-apply, ai-w2-reconcile, ai-w2-probes, ai-w2-issuer-credential (HezLead), ordinary controls, ai-close. M1–M5 (including 20261003000005) and checksum backfill share one transaction. Retain additive schema after COMMIT. |
+| W2 SCHEMA — BLOCKED | ai-open and ai-w2-apply refuse before mutation. Unchanged M4 creates the D2 checksum table after M1–M3; unchanged M2 creates its writer role after M1. One transaction per migration with its own ledger/checksum pair needs a separately reviewed migration redesign. Do not open W2 or proceed to W3–W7 on this preparation plan. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
-| W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. |
+| W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
-| W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
+| W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
 | W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
 
 After any failure STOP forward work and record the step and fixed failure code in
@@ -284,6 +284,10 @@ PY
 # readonly: no
 # host: box root; after repeated inputs/baseline preflight
 set -euo pipefail
+if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W2; then
+ printf 'FAIL W2 per-migration D2 checksum bootstrap unavailable in unchanged migrations; STOP before open\n' >&2
+ exit 1
+fi
 umask 077
 if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W6; then
  : "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
@@ -403,7 +407,7 @@ ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations 
 test "$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-w6-activation-rollback|ai-emergency-close) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close) ;; *) return 1;; esac
  python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
@@ -543,24 +547,59 @@ PY
 
 ## W2: one schema window before any code release
 
-All five migrations share **one outer transaction**. This solves the ordering
-constraint: the checksum table first exists after 04, so record the 01–05
-ledger/checksum pairs after 05, before the same COMMIT. Do not preapply 04,
-autocommit 01–03, or claim a ledger-only prefix is a successful D2 release.
-The applying principal is the runbook's verified non-superuser `supabase_admin`
-with CREATEROLE and narrow ledger access. Checksum inserts explicitly use
-`SET LOCAL ROLE commonswarm_admin_release`, then RESET ROLE. No runtime writes.
+**BLOCKED before open.** HezLead requires one transaction per migration,
+each containing its unchanged migration, ledger insert and D2 checksum row.
+M4 (`20261003000004_migration_checksums.sql`) creates the checksum relation
+with unconditional CREATE TABLE; M2 creates commonswarm_admin_release and
+requires M1's binding tables. M4 also uses the M3 cutover state. There is no
+approved checksum bootstrap. Reordering, copying part of M4 into a new
+operator bootstrap, preapplying M2's roles, or silently backfilling M1–M3 after
+they commit would invent a schema procedure or violate D2. This task forbids
+migration edits. ai-open and ai-w2-apply therefore STOP before any mutation;
+the former five-migration transaction is removed.
 
-Reserve files are the five exact `supabase/admin-delegation-reserve/*` siblings,
-copied verbatim into this plan's `reserve/` directory. `ai-w2-preflight` checks
-them against the source archive and requires independently executed empty
-reverse/reapply catalog controls. They are data-free inverses, **not a production
-post-COMMIT rollback**. 04 refuses any checksum evidence; 01 refuses existing
-ordinary provider artifacts/bindings. This live box already hosts ordinary
-OAuth, so deleting its rows to make a reserve pass is forbidden. On apply
-failure PostgreSQL rolls back all DDL/ledger/checksums. On uncertain COMMIT use
-ai-w2-reconcile. After a successful COMMIT retain additive schema, leave gates
-closed, and stop code rollout if probes fail. No historical data is dropped.
+The replacement release requires a separately reviewed migration redesign:
+create D2's table and release-role prerequisites before M1, then one
+transaction per migration with `SET LOCAL lock_timeout='3s'` and a short
+statement_timeout sized from fresh box preflight measurements. That preflight
+must count rows and measure bytes/validation duration for every locked live
+table, refuse each stated bound, and retain expected hold evidence. No box
+measurement has been made by this preparation worker; no expected hold or
+executable timeout is asserted here. The redesign remains a release blocker.
+M1's ADD CHECK validates existing rows inline, without NOT VALID; splitting
+validation would require editing its bytes, which this task forbids.
+
+Known live-table locks that the redesign must measure (new admin tables are
+also locked but have no ordinary traffic before activation):
+
+| Migration | Live table | Strongest table lock / ordinary-path impact |
+| --- | --- | --- |
+| M1 | swarm.admin_grants | ACCESS EXCLUSIVE for DROP/ADD CHECK; reads and writes wait through M1 COMMIT |
+| M1 | commonswarm_oauth.interactions | ACCESS EXCLUSIVE for DROP/ADD CHECK (also trigger/FK); reads and writes wait through M1 COMMIT |
+| M1 | swarm.hosted_mcp_grants | SHARE ROW EXCLUSIVE for trigger/FK; ordinary writes wait, SELECT unaffected |
+| M1 | commonswarm_oauth.provider_artifacts | SHARE ROW EXCLUSIVE for trigger; ordinary writes wait, SELECT unaffected |
+| M1 | swarm.users, swarm.admin_accounts, swarm.admin_consents | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
+| M2 | swarm.admin_accounts, swarm.admin_events | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
+| M3 | swarm.admin_accounts, swarm.admin_events | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
+| M3 | swarm.admin_grants, swarm.admin_credentials, commonswarm_oauth.refresh_family_tombstones | SHARE ROW EXCLUSIVE for trigger/FK; writes wait, SELECT unaffected |
+| M4 | supabase_migrations.schema_migrations | ACCESS SHARE for the SQL ledger reader; SELECT/writes unaffected by this reader |
+| M5 | none | Replaces a PL/pgSQL read function; referenced tables are read when the function is called, not during CREATE |
+| Each apply | supabase_migrations.schema_migrations | The redesign must serialize ledger insert (EXCLUSIVE); other migration writers wait, ordinary SELECT unaffected |
+
+ACCESS EXCLUSIVE also blocks reads; the requested blanket “reads unaffected”
+claim cannot describe unchanged M1. Lock acquisition timeout does not bound
+lock hold, and statement_timeout is per statement, not per transaction. The
+replacement needs a measured/bounded total transaction hold as well as short
+statements, with ordinary probes **between** every committed migration.
+
+Mid-sequence failure path is decided now: STOP forward work; already committed
+migration/ledger/checksum pairs stay committed, issuance stays closed, and
+re-run is refused. Read-only reconciliation must enumerate the exact committed
+prefix, including uncertain COMMIT. Keep the five verbatim per-migration
+reserves; use one only in a separately approved data-free context whose refusal
+checks pass. M4 refuses any checksum evidence; M1 refuses live provider
+artifacts/bindings. Never delete ordinary or historical rows to make a reserve
+pass. No production post-COMMIT schema rollback is authorized.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
 `<released_sha>.tar` archives from the historical release inputs. The W2
@@ -643,42 +682,11 @@ printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs; backup fresh
 
 ```sh
 # step: ai-w2-apply
-# readonly: no
-# host: box root; one transaction; no code or gate change
+# readonly: yes
+# host: box root; hard refusal, no schema/ledger/checksum mutation
 set -euo pipefail
-test "$WINDOW" = W2
-ai_deadline
-test -f "$PROOF_DIR/new-migrations.json" && test ! -e "$PROOF_DIR/schema-attempted.txt"
-ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/ledger-now.txt"
-cmp -s "$PROOF_DIR/ledger-before.txt" "$PROOF_DIR/ledger-now.txt"
-python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
-import json,pathlib,sys
-p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
-new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
-sql=["BEGIN;", "SET LOCAL lock_timeout='5s';", "SET LOCAL statement_timeout='10min';",
- "LOCK TABLE supabase_migrations.schema_migrations IN EXCLUSIVE MODE;",
- "DO $shape$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='supabase_migrations' AND table_name='schema_migrations' AND column_name<>'version' AND is_nullable='NO' AND column_default IS NULL) THEN RAISE EXCEPTION 'ledger requires more than version'; END IF; END $shape$;"]
-# Transaction starts before 01. The D2 table exists after 04. No ledger/checksum is committed early.
-for r in new:
-    sql.append('\\i /release/supabase/migrations/'+r['file'])
-for r in new:
-    sql+= ["INSERT INTO supabase_migrations.schema_migrations(version) VALUES ('"+r['version']+"');",
-        'SET LOCAL ROLE commonswarm_admin_release;',
-        "INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES ('"+r['version']+"','"+r['sha256']+"','release','"+sha+"');", 'RESET ROLE;']
-for r in old:
-    sql+=['SET LOCAL ROLE commonswarm_admin_release;',
-        "INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES ('"+r['version']+"','"+r['sha256']+"','backfill','"+r['released_sha']+"');", 'RESET ROLE;']
-for r in new:
-    sql+=['\\i /release/deploy/release-proofs/item-ai/'+r['version']+'-catalog.sql',
-      "SELECT :'catalog_ok'::boolean AS ai_catalog_pass \\gset", '\\if :ai_catalog_pass', '\\else',
-      "DO $$ BEGIN RAISE EXCEPTION 'admin catalog failed'; END $$;", '\\endif']
-sql+= ["DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE admin_issuance_enabled OR legacy_closed OR measured_at IS NOT NULL) THEN RAISE EXCEPTION 'schema must remain dormant'; END IF; END $$;", 'COMMIT;']
-(p/'apply.sql').write_text('\n'.join(sql)+'\n')
-PY
-date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/schema-attempted.txt"
-# No ERR trap retries this. Disconnect at COMMIT means unknown outcome.
-ai_db -q --file /proof/apply.sql >"$SECRET_STAGE/apply.out"
-printf 'PASS W2 transaction returned COMMIT; require independent readback\n'
+printf 'FAIL W2 per-migration D2 checksum bootstrap unavailable in unchanged migrations; STOP before mutation\n' >&2
+exit 1
 ```
 
 ```sh
@@ -1090,6 +1098,7 @@ printf 'PASS W4 both Caddy candidate routes validated; CORS preserved\n'
 # step: ai-w4-apply
 # readonly: no
 # host: box root; issuance close/invalidate precedes every source change
+(
 set -euo pipefail
 test "$WINDOW" = W4
 ai_deadline
@@ -1100,6 +1109,7 @@ test -f "$SECRET_STAGE/mcp.new.caddy" && test -f "$SECRET_STAGE/api.new.caddy"
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
+ai_run ai-timer-guard
 systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
@@ -1151,9 +1161,8 @@ install -o root -g root -m 0644 "$SECRET_STAGE/api.new.caddy" /etc/caddy/sites/1
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-live-validate.log" 2>&1
 systemctl reload caddy
 ai_run ai-recycle-install
-systemctl start "$EDGE_RECYCLE_TIMER"
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W4 switched and measured; legacy permanently fenced; issuance OFF\n'
+printf 'Apply body completed; timer recovery still required: W4 switched and measured; legacy permanently fenced; issuance OFF\n'
+)
 ```
 
 ```sh
@@ -1197,8 +1206,10 @@ cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.new.caddy"
 # step: ai-w4-rollback
 # readonly: no
 # host: box root; leave legacy closure permanent and issuance closed
+(
 set -euo pipefail
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+ai_run ai-timer-guard
 systemctl stop "$EDGE_RECYCLE_TIMER"
 ai_run ai-recycle-rollback
 install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
@@ -1214,9 +1225,31 @@ COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name comm
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
 test "$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")"
 test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE"
-systemctl start "$EDGE_RECYCLE_TIMER"
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W4 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
+printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
+)
+```
+
+```sh
+# step: ai-timer-guard
+# readonly: no
+# host: box root; source only inside the timer-owning step's subshell
+set -euo pipefail
+ai_timer_restore_on_exit() {
+ local STEP_STATUS=$1 TIMER_STATUS
+ # Recovery runs once, even on stop failure, exit, INT or TERM. Do not retry it.
+ trap - EXIT INT TERM
+ set +e
+ ( set -euo pipefail; ai_run ai-w4-timer-recovery )
+ TIMER_STATUS=$?
+ if test "$TIMER_STATUS" -ne 0; then
+  printf 'FAIL timer recovery; window remains open; incident requires HezLead; STOP\n' >&2
+  exit 1
+ fi
+ exit "$STEP_STATUS"
+}
+trap 'ai_timer_restore_on_exit "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 ```
 
 ```sh
@@ -1228,6 +1261,18 @@ systemctl start "$EDGE_RECYCLE_TIMER"
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 printf 'Timer restored; window remains open until service recovery is verified\n'
 ```
+
+The only timer-stopping blocks are ai-w4-apply, ai-w4-rollback and
+ai-w6-activation-apply. Each installs ai-timer-guard **before** the stop in its
+own subshell, so nested sourced blocks cannot remove the caller's EXIT trap.
+On success, command failure, explicit exit, INT or TERM the trap invokes the
+complete ai-w4-timer-recovery block and preserves the failure status. Recovery
+failure is an open incident, never a close receipt. SIGKILL or loss of the host
+cannot run a shell trap: HezLead must run ai-w4-timer-recovery after reconnect.
+ai-recycle-rollback requires the caller's stopped timer and never stops it
+itself. No other marked block stops a timer or service. ai-close independently
+requires the measured recycle timer active for success **and** recovered close,
+including W6; a failed body can close only after the existing recovery probes.
 
 ## HezLead box block: measured six-hour recycle
 
@@ -1354,10 +1399,10 @@ printf 'PASS recycle pre-invalidation/post-measurement hooks installed; no resta
 ```sh
 # step: ai-recycle-rollback
 # readonly: no
-# host: HezLead ONLY, box root; close issuance before removing hook
+# host: HezLead ONLY, box root; called inside guarded W4 rollback
 set -euo pipefail
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
-systemctl stop "$EDGE_RECYCLE_TIMER"
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_TIMER")" = inactive
 RECYCLE_DROPIN=/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
 test ! -L "$RECYCLE_DROPIN"
 if test -e "$RECYCLE_DROPIN"; then
@@ -1365,7 +1410,7 @@ if test -e "$RECYCLE_DROPIN"; then
 fi
 systemctl daemon-reload
 test ! -e "$RECYCLE_DROPIN"
-printf 'PASS recycle drop-in removed; issuance closed; reenable timer only after recovery\n'
+printf 'PASS recycle drop-in removed; issuance closed; caller EXIT guard restores/verifies timer\n'
 ```
 
 ## W5: /app site release
@@ -1591,6 +1636,7 @@ printf 'PASS W6 DB release identity/checksum/legacy controls; activation prerequ
 # step: ai-w6-activation-apply
 # readonly: no
 # host: HezLead, box root; approved activation only
+(
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
@@ -1612,6 +1658,7 @@ test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_TARGET"
 test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
 test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
 # Both hooks are marked complete blocks installed in W4; no generated operator script.
+ai_run ai-timer-guard
 systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 /usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
@@ -1652,9 +1699,8 @@ sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY
 ai_db -q --file /proof/activate.sql >/dev/null
-systemctl start "$EDGE_RECYCLE_TIMER"
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
-printf 'PASS W6 overlay/env/cutover active; require outside gate probe before close\n'
+printf 'Apply body completed; timer recovery still required: W6 overlay/env/cutover active; require outside gate probe before close\n'
+)
 ```
 
 ```sh

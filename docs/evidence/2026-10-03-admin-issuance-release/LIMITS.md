@@ -8,9 +8,15 @@ read a keychain, or fetched credentials. Test secrets stayed in fresh 0700
 HOME was not changed. Reserve SQL remains verbatim.
 
 W1 verifies a fresh database/object backup and completed isolated restore
-receipt. W2 applies M1–M5, including 20261003000005, the ledger/checksum pairs
-and historical checksum backfills in one transaction, then provisions the issuer
-credential on the box. The credential is 0440 root:986, readable by the AS group;
+receipt. W2 is BLOCKED before open/apply: M4 creates the D2 checksum table and M2
+creates its writer role after M1. Unchanged migrations cannot supply M1's
+checksum in its own transaction. The unsafe five-migration transaction was
+removed. HezLead must assign a migration redesign before a replacement W2 can
+supply measured holds, bounds, short statements, lock_timeout=3s and probes
+between committed migrations. No live row/size/hold measurements were made.
+M1 ACCESS EXCLUSIVE blocks both reads and writes, so the requested blanket
+reads-unaffected claim is also impossible with these unchanged migrations.
+Future successful W2 provisions the issuer credential on the box. The credential is 0440 root:986, readable by the AS group;
 it is never printed or copied off the box. Initial provisioning refuses an
 existing credential. Rotation needs a separately reviewed window.
 
@@ -62,3 +68,11 @@ HezLead must supply exact landed archives, baseline measurements, historical
 migration archives/backfill evidence, backup/restore status and independent
 same-build/live ordinary-control receipts. RESULT-3.md lists every W1–W5 input.
 No live-run PASS or deployment claim is made by these local tests.
+
+Every timer-stopping block (W4 apply/rollback and W6 activation) now runs in a
+subshell with an EXIT/INT/TERM guard installed before stop. The EXIT handler
+runs ai-w4-timer-recovery once and verifies active on success or failure;
+recovery failure keeps an incident open. The recycle rollback helper requires
+its guarded caller to own the stopped timer. ai-close independently checks
+active for every outcome. A shell trap cannot handle SIGKILL/host loss; after
+reconnect HezLead runs the complete timer recovery block before closure.
