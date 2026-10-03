@@ -108,8 +108,8 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
       await html({ ...result, version: result.parent.selection_version });
       return true;
     }
-    await service.confirm(input, body);
-    // Only lane 4 may install commit-before-response continuation.
-    throw new AdminConsentError("admin_issuance_disabled", 503);
+    const grantId = await service.confirm(input, body);
+    await provider.interactionFinished(request, response, { consent: { grantId } });
+    return true;
   };
 }

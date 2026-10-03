@@ -21,6 +21,10 @@ const FILE_SETTINGS = Object.freeze({
     name: "database credential",
     policy: "secret",
   }),
+  issuerCredentials: Object.freeze({
+    envName: "MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE",
+    name: "admin issuer database credential", policy: "secret",
+  }),
   managementCredentials: Object.freeze({
     envName: "MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE",
     name: "management database credential",
@@ -193,7 +197,16 @@ export async function loadConfig(env = process.env) {
     }
     management = { databaseUrl: document.databaseUrl };
   }
+  let adminIssuer;
+  if (env.MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE) {
+    const credential = JSON.parse(await configuredFileText(env, "issuerCredentials"));
+    if (credential.user !== "commonswarm_admin_issuer" || typeof credential.password !== "string" || !credential.password) {
+      throw new Error("admin issuer credential requires the dedicated login role");
+    }
+    adminIssuer = credential;
+  }
   return {
+    adminIssuer,
     issuer,
     resource,
     publicOrigin,

@@ -22,6 +22,7 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
 COPY --chown=10001:10001 services/mcp-auth/src ./src
 COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/management-command.generated.js ./src/management-command.generated.js
 COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/admin-policy.generated.js ./src/admin-policy.generated.js
+COPY --chown=10001:10001 --from=management-build /build/services/mcp-auth/src/admin-authority.generated.js ./src/admin-authority.generated.js
 
 USER 10001:10001
 EXPOSE 3490

@@ -1,3 +1,4 @@
+import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { hashOpaque, opaqueMatches } from "./browser-security.js";
 import { metadataUrlAllowed, createPinnedMetadataFetch } from "./metadata-fetch.js";
@@ -141,6 +142,7 @@ export function adminSummary({ uid, sessionId, ownerUserId, params, policy, mani
 export class PostgresAdminConsentStore {
   constructor(pool) { this.pool = pool; }
   async transaction(callback) {
+    if (adminTransactionContext(false)) return joinAdminTransaction(callback);
     const tx = await this.pool.connect();
     try {
       await tx.query("BEGIN");

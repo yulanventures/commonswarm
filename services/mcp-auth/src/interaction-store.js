@@ -1,9 +1,11 @@
+import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { createHash } from "node:crypto";
 
 import { hashOpaque, opaqueMatches, randomOpaque } from "./browser-security.js";
 import { InteractionStateError } from "./client-error.js";
 
 async function transaction(pool, callback) {
+  if (adminTransactionContext(false)) return joinAdminTransaction(callback);
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
