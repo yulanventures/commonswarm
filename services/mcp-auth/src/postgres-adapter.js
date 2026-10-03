@@ -77,13 +77,18 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
   async function requireBoundContext(modelName, id, payload) {
     if (adminTransactionContext(false)) return;
     if (adminPayload(payload)) throw new AdminTransactionError("admin_transaction_required");
-    if (qualifiedSchema !== "commonswarm_oauth") return;
-    const row = (await database.query(`SELECT 1 FROM ${qualifiedSchema}.provider_grant_resources r
-      WHERE r.grant_class='delegated_admin' AND (r.provider_grant_id=$3 OR EXISTS(
-        SELECT 1 FROM ${artifacts} a WHERE a.model=$1 AND a.artifact_id_hash=$2
-          AND r.provider_grant_id=coalesce(a.grant_id,a.payload->>'jti'))) LIMIT 1`,
-      [modelName, lookupHash(id), payload?.grantId ?? (modelName === "Grant" ? id : null)])).rows[0];
-    if (row) throw new AdminTransactionError("admin_transaction_required");
+    // Family identity comes from the pre-M1 artifact payload, never an admin
+    // table. An unlabelled successor still checks its existing Grant/family.
+    const family = payload?.grantId ?? (modelName === "Grant" ? id : null);
+    const rows = (await database.query(`WITH target AS (
+        SELECT grant_id FROM ${artifacts} WHERE model=$1 AND artifact_id_hash=$2
+      ) SELECT payload FROM ${artifacts}
+      WHERE (model=$1 AND artifact_id_hash=$2)
+        OR grant_id=coalesce($3,(SELECT grant_id FROM target))
+        OR (model='Grant' AND (artifact_id_hash=$4
+          OR payload->>'jti'=coalesce($3,(SELECT grant_id FROM target))))`,
+      [modelName, lookupHash(id), family, family ? lookupHash(family) : null])).rows;
+    if (rows.some(row => adminPayload(row.payload))) throw new AdminTransactionError("admin_transaction_required");
   }
 
   return (model) => ({
@@ -183,11 +188,7 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async revokeByGrantId(grantId) {
-      if (!adminTransactionContext(false) && qualifiedSchema === "commonswarm_oauth") {
-        const binding = (await database.query(`SELECT grant_class FROM ${qualifiedSchema}.provider_grant_resources
-          WHERE provider_grant_id=$1`, [grantId])).rows[0];
-        if (binding?.grant_class === "delegated_admin") throw new AdminTransactionError("admin_transaction_required");
-      }
+      await requireBoundContext("Grant", grantId, { grantId });
       await transaction(pool, async (client) => {
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtextextended($1, 484650))",
@@ -204,7 +205,10 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
     },
 
     async upsert(id, payload, expiresIn) {
-      if (Array.isArray(payload.resource) || (payload.resources && Object.keys(payload.resources).length !== 1)) {
+      const nativeMcpResource = Array.isArray(payload.resource) && payload.resource.length === 1 &&
+        payload.resource[0] === "https://mcp.commonswarm.com/mcp";
+      if ((Array.isArray(payload.resource) && !nativeMcpResource) ||
+          (payload.resources && Object.keys(payload.resources).length !== 1)) {
         throw new errors.InvalidTarget("exactly one bound resource is required");
       }
       await requireBoundContext(model, id, payload);
@@ -233,15 +237,6 @@ export function createPostgresAdapter(pool, { schema = "commonswarm_oauth", befo
           );
           if (revoked.rowCount !== 0) {
             throw new errors.InvalidGrant("grant family revoked");
-          }
-          if (qualifiedSchema === "commonswarm_oauth" && payload.resource === "https://mcp.commonswarm.com/mcp") {
-            const hosted = (await client.query("SELECT * FROM commonswarm_oauth.resolve_hosted_grant_status($1)", [grantId])).rows[0];
-            if (!hosted?.active || hosted.client_id !== payload.clientId || hosted.owner_user_id !== payload.accountId ||
-                hosted.resource !== payload.resource) throw new errors.InvalidGrant("hosted grant binding unavailable");
-            await client.query(`INSERT INTO commonswarm_oauth.provider_grant_resources
-              (provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,hosted_grant_id)
-              VALUES($1,$2,'hosted_mcp',$3,$4,$5,$5) ON CONFLICT(provider_grant_id) DO NOTHING`,
-              [grantId,hosted.resource,hosted.owner_user_id,hosted.client_id,hosted.grant_id]);
           }
         }
 

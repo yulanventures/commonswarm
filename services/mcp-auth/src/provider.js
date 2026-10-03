@@ -218,7 +218,14 @@ export async function createMcpProvider({
   // Production terminates TLS before this app. Tests exercise the same trusted
   // proxy shape over an ephemeral loopback HTTP server.
   provider.proxy = true;
-  await bindProviderAdminNonceStore(provider);
+  await bindProviderAdminNonceStore(provider, async ctx => {
+    if (ctx.status < 400 && adminTransactionContext(false)?.token) {
+      await adminLifecycle.recordToken(ctx.body);
+    }
+    if (ctx.status < 400 && ctx.oidc.entities.AccessToken) {
+      await registrationStore.markUsed(ctx.oidc.entities.Client.clientId);
+    }
+  });
   provider.use(async (ctx, next) => {
     // oidc-provider filters unknown authorization scopes. Refuse escalation
     // explicitly rather than silently turning it into a narrower request.
@@ -231,12 +238,9 @@ export async function createMcpProvider({
       return;
     }
     await next();
-    if (ctx.path === "/token" && ctx.status < 400 && adminTransactionContext(false)?.token) {
-      await adminLifecycle.recordToken(ctx.body);
-    }
     const entities = ctx.oidc?.entities;
     if ((entities?.AuthorizationCode || entities?.AccessToken) && ctx.status < 400 &&
-        (ctx.path.startsWith("/authorize") || ctx.path === "/token")) {
+        ctx.path.startsWith("/authorize")) {
       await registrationStore.markUsed(entities.Client.clientId);
     }
   });

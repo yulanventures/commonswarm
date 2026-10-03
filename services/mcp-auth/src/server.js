@@ -202,9 +202,10 @@ export async function startServer({
     nativeLoopbackEnabled: config.nativeLoopbackEnabled,
     metadataFetch,
     providerGrantResource: async grantId => {
-      const binding = (await pool.query(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
-        WHERE provider_grant_id=$1`,[grantId])).rows[0];
-      if (binding) return binding.resource;
+      if (adminTransactionContext(false)) {
+        return (await adminQuery(`SELECT resource FROM commonswarm_oauth.provider_grant_resources
+          WHERE provider_grant_id=$1`, [grantId])).rows[0]?.resource;
+      }
       return (await pool.query(`SELECT resource FROM commonswarm_oauth.resolve_hosted_grant_status($1)`,[grantId])).rows[0]?.resource;
     },
     providerGrantActive: async (grantId) => {
@@ -279,7 +280,7 @@ export async function startServer({
   }) : undefined;
   const handler = createHandler({ provider, pool, logger, interactionHandler, ...config });
   const server = createServer(createAdminHttpHandler({ handler, runtimePool, issuerPool,
-    activeKid: config.activeSigningKid, maxBodyBytes: config.maxBodyBytes, requestTimeoutMs: config.requestTimeoutMs }));
+    activeKid: config.activeSigningKid }));
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);
   server.maxHeadersCount = 64;
