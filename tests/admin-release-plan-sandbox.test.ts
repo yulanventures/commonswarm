@@ -110,7 +110,14 @@ function portable(source: string) {
 // ---- Fixtures (synthetic, nonsecret) -------------------------------------------------
 const releaseSha = 'a'.repeat(40), siteSha = 'f'.repeat(40), hex = 'b'.repeat(64);
 const windowId = 'Dry0R1';
-const archiveBytes = 'c1gui dry-run archive\n';
+// The release archive is a real tar carrying the producer: ai-live-controls (W5 opening
+// and close) reads the producer only from it, re-verified against archive_sha256.
+const producerFile = join(scratch, 'live-ordinary-controls.mjs');
+writeFileSync(producerFile, 'export const dryRunProducer = "live-ordinary-controls";\n');
+const archiveFile = join(scratch, 'release.tar');
+const madeArchive = spawnSync('/usr/bin/python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archiveFile, producerFile], { encoding: 'utf8' });
+assert.equal(madeArchive.status, 0, madeArchive.stderr);
+const archiveBytes = readFileSync(archiveFile);
 const evidenceRoot = join(scratch, 'evidence'); mkdirSync(evidenceRoot, { mode: 0o700 });
 const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as { gates: Record<string, string[]> };
 const receipt = { release_sha: releaseSha, evidence_root: evidenceRoot, gates: {} as Record<string, unknown> };
@@ -169,8 +176,6 @@ writeFileSync(join(siteEvidence, 'manifest.json'), JSON.stringify([{ path: 'inde
 writeFileSync(join(siteEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteEvidence, 'manifest.json')))}\n`);
 // W5 forward close (Amendments A/B): a phase-after live receipt bound to the post-W5
 // consent receipt, so ai-w5-closed passes ai-live-controls and still reaches its network step.
-const producerFile = join(scratch, 'live-ordinary-controls.mjs');
-writeFileSync(producerFile, 'export const dryRunProducer = "live-ordinary-controls";\n');
 const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'post-W5',
   measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
   controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-post-w5'],
@@ -246,7 +251,7 @@ case "$name" in
     fi
     refuse;;
    merge-base) test "\${2:-}" = --is-ancestor && exit 0; refuse;;
-   archive) printf 'c1gui dry-run archive\\n'; exit 0;;  # fixed bytes; inputs carry their digest
+   archive) exec /bin/cat "$C1GUI_ARCHIVE";;  # fixed tar bytes; inputs carry their digest
    show)
     case "\${2:-}" in
      *:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md) exec /bin/cat "$C1GUI_PLAN";;
@@ -331,7 +336,7 @@ function profile(id: string) {
 const baseEnv = () => ({
   PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: process.env.HOME ?? realHome, LANG: 'en_US.UTF-8', TMPDIR: blockTmp + '/',
   C1GUI_SCRATCH: scratch, C1GUI_RELEASE_SHA: releaseSha, C1GUI_KNOWN_SHAS: `${releaseSha} ${siteSha}`,
-  C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_PRODUCER: producerFile, C1GUI_REAL_NODE: realNode,
+  C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_PRODUCER: producerFile, C1GUI_ARCHIVE: archiveFile, C1GUI_REAL_NODE: realNode,
   C1GUI_POSTGRES_IMAGE: `sha256:${hex}`, C1GUI_EDGE_OBSERVED: edgeObserved,
   C1GUI_REQUEST_PLAN: requestPlan, C1GUI_CLIENT_METADATA: clientMetadata, C1GUI_AGENT_RECEIPT: agentReceipt,
 });

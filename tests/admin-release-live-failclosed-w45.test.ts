@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -101,7 +101,7 @@ if name=='python3':
     urllib.request.urlopen=observe; urllib.request.build_opener=opener
     real_popen=subprocess.Popen
     def popen(argv,**kw):
-        allowed=[['node','scripts/admin-smoke.mjs','--print-client-metadata'],['docker','inspect','commonswarm-edge-edge-runtime-1']]
+        allowed=[['node','scripts/admin-smoke.mjs','--print-client-metadata'],['docker','inspect','commonswarm-edge-edge-runtime-1'],['/bin/bash']] # /bin/bash: the plan's extract-and-run of ai-live-controls
         if argv not in allowed or kw.get('shell'): refuse()
         return real_popen(argv,**kw)
     subprocess.Popen=popen
@@ -112,7 +112,9 @@ elif name=='node':
 elif name=='git':
     if args==['show',cfg['sha']+':scripts/live-ordinary-controls.mjs']: sys.stdout.write(cfg.get('producer',''))
     elif args==['rev-parse','HEAD']: print(cfg.get('head',cfg['sha']))
-    elif args==['status','--porcelain']: sys.stdout.write(cfg.get('dirty',''))
+    elif args==['status','--porcelain']:
+        if cfg.get('status_fail'): raise SystemExit(128) # git failed with empty stdout
+        sys.stdout.write(cfg.get('dirty',''))
     elif args!=['merge-base','--is-ancestor',cfg['sha'],'origin/main']: refuse()
 elif name=='ssh':
     # Positive-control boundary: every local guard admitted before the first remote operation.
@@ -243,9 +245,12 @@ function fixture(config: Record<string, unknown> = {}) {
   const edgeFile = `edge/releases/${sha}/src/reviewed.txt`; put(edgeFile, 'reviewed tracked bytes\n');
   const archive = join(root, `archive/admin-issuance-${sha}-${data.window_id}.tar`);
   mkdirSync(dirname(archive));
+  // The release archive also carries the producer; W5 reads it from PREP_DIR/release.tar.
+  const producerFile = `edge/releases/${sha}/scripts/live-ordinary-controls.mjs`; put(producerFile, producerSource);
   const archived = spawnSync('/usr/bin/python3', ['-c',
-    'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="src/reviewed.txt")', archive, join(root, edgeFile)], { encoding: 'utf8' });
+    'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    t.add(sys.argv[2],arcname="src/reviewed.txt"); t.add(sys.argv[3],arcname="scripts/live-ordinary-controls.mjs")', archive, join(root, edgeFile), join(root, producerFile)], { encoding: 'utf8' });
   assert.equal(archived.status, 0, archived.stderr); data.archive_sha256 = hash(readFileSync(archive));
+  for (const prep of ['prep', 'prep-open']) { copyFileSync(archive, join(root, prep, 'release.tar')); chmodSync(join(root, prep, 'release.tar'), 0o600); }
   for (const version of ['20261001000001','20261001000002','20261001000003','20261001000004','20261001000005',
     '20260928000003','20261002000001','20261003000001','20261003000002','20261003000003','20261003000004','20261003000005'])
     put(`release/supabase/migrations/${version}_fixture.sql`, '-- reviewed migration fixture\n');
@@ -269,7 +274,7 @@ function fixture(config: Record<string, unknown> = {}) {
         EDGE_RECYCLE_TIMER: 'fixture-recycle.timer', EDGE_RECYCLE_SERVICE: 'fixture-recycle.service',
         LIVE_CONTROLS_FILE: join(root, opening ? 'live-before.json' : 'live.json'),
         CONSENT_RECEIPT_FILE: join(root, opening ? 'consent-pre.json' : 'consent.json'), PLAN_FILE: planPath,
-        PREP_DIR: join(root, opening ? 'prep-open' : 'prep'), ...env },
+        PREP_DIR: join(root, opening ? 'prep-open' : 'prep'), BOX_ARCHIVE_PATH: archive, ...env },
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
@@ -363,7 +368,7 @@ test('edge-caddy-route / outside-origin-probe: fails closed on wrong CORS with t
 
 test('site-build-qa / exact-source-build-ci: fails closed on a site SHA different from the release input', () => {
   const good = fixture(); const r = good.run(['ai-w5-preflight']); pass(good, r);
-  assert.deepEqual(r.calls.filter(c => c[0] === 'git'), [['git', 'merge-base', '--is-ancestor', sha, 'origin/main'], ['git', 'show', sha + ':scripts/live-ordinary-controls.mjs']]);
+  assert.deepEqual(r.calls.filter(c => c[0] === 'git'), [['git', 'merge-base', '--is-ancestor', sha, 'origin/main']]);
   const bad = fixture(); const refused = bad.run(['ai-w5-preflight'], { SITE_RELEASE_SHA: 'c'.repeat(40) });
   stopped(bad, refused, 'FAIL ai-w5-preflight: SITE_RELEASE_SHA expected input-release-sha got mismatch; STOP');
   assert.ok(!refused.calls.some(c => c[0] === 'git'));
@@ -433,11 +438,11 @@ test('ordinary-paths-unchanged / w5-forward-close-live-controls: ai-w5-closed re
     w5Refused(f, f.run(), `FAIL ai-w5-closed: W5 opening receipt expected ${name} got missing; STOP`);
   }
   assert.deepEqual(JSON.parse(readFileSync(join(good.closedRoot, 'ordinary-after.json'), 'utf8')), JSON.parse(readFileSync(join(good.root, 'live.json'), 'utf8')));
-  assert.ok(r.calls.some(c => c[0] === 'git' && c[1] === 'show' && c[2] === sha + ':scripts/live-ordinary-controls.mjs'));
+  assert.ok(!r.calls.some(c => c[0] === 'git'), 'producer comes from the verified archive, never git show');
   const expiring = (entries: unknown[]) => consentReceipt('post-W5', { cleanup: { grants_revoked: true, dcr_clients_expiring: entries } });
   const cases: Array<[Record<string, unknown>, string, Record<string, unknown>, string]> = [
     [consentReceipt('pre-W1'), 'after', {}, 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'],
-    [consentReceipt('pre-W1'), 'before', {}, 'FAIL ai-w5-closed: W5 forward-close live controls phase expected after got other; STOP'],
+    [consentReceipt('pre-W1'), 'before', {}, 'FAIL ai-live-controls: live phase expected after got before; STOP'],
     [consentReceipt('post-W5', { cleanup: null }), 'after', {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
     [expiring([{ client_id: 'dcr-pre-w1-1', expires_after: inDays(-1) }]), 'after', {}, 'FAIL ai-live-controls: post-W5 cleanup expires_after expected future got past-or-invalid; STOP'],
     [expiring([{ client_id: 'dcr-pre-w1-1', expires_after: inDays(30), note: 'x' }]), 'after', {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_expiring entry expected exact-client_id-and-expires_after got other; STOP'],
@@ -445,8 +450,19 @@ test('ordinary-paths-unchanged / w5-forward-close-live-controls: ai-w5-closed re
     [consentReceipt('post-W5'), 'after', { controls: { ...Object.fromEntries(ordinaryKeys.map(k => [k, true])), human_recovery: false } }, 'FAIL ai-live-controls: live control human_recovery expected true got false; STOP'],
   ];
   for (const [consent, phase, change, message] of cases) { const f = fixture(); w5Pair(f, consent, phase, change); w5Refused(f, f.run(), message); }
-  { const f = fixture({ producer: 'export const other = 1;\n' });
+  { const f = fixture(); w5Pair(f, consentReceipt('post-W5'), 'after', { producer_sha256: 'f'.repeat(64) });
     w5Refused(f, f.run(), 'FAIL ai-live-controls: live producer_sha256 expected sha256-of-released-script got mismatch; STOP'); }
+  // The prepared archive is re-verified: replaced bytes refuse, even with matching receipts.
+  { const f = fixture(); f.put('prep/release.tar', 'not the verified archive');
+    w5Refused(f, f.run(), 'FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP'); }
+  // The retained opening pair is re-validated in full, not only for presence.
+  { const f = fixture(); f.put('prep/w5-live-before/ordinary-before.json', '{}'); const out = f.run();
+    w5Refused(f, out, 'FAIL ai-w5-closed: retained W5 opening receipts expected valid got refused; STOP');
+    assert.ok(out.stderr.includes('FAIL ai-live-controls: live receipt keys expected exact-schema-set got other-set; STOP'));
+    assert.ok(!existsSync(join(f.root, 'prep/w5-live-controls'))); }
+  // Only W5 inputs reach W5's close.
+  { const f = fixture(); f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W2' }); const out = f.run();
+    w5Refused(f, out, 'FAIL ai-w5-closed: INPUTS window expected W5 got other; STOP'); assert.ok(!existsSync(join(f.root, 'prep/w5-live-controls'))); }
   for (const name of ['LIVE_CONTROLS_FILE', 'CONSENT_RECEIPT_FILE', 'PLAN_FILE']) {
     const f = fixture(); const refused = f.run(['ai-w5-closed'], { [name]: '' });
     w5Refused(f, refused, `FAIL ai-w5-closed: ${name} expected absolute-regular-file got unset; STOP`);
@@ -474,7 +490,10 @@ test('release-plan-contract / w4-apply-candidate-guards: refuses a missing MCP o
 });
 test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses a missing or symlinked override and an existing or symlinked new edge release', () => {
   const ready = (f: Fixture, override = true) => {
-    f.put('proof/ordinary-before.json', '{}'); f.put('proof/consent-pre-W1.json', '{}');
+    // W4 inputs and a valid retained opening pair: W4 preflight re-validates it in full.
+    f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4' });
+    const pre = JSON.stringify(consentReceipt('pre-W1'));
+    f.put('proof/consent-pre-W1.json', pre); f.put('proof/ordinary-before.json', liveReceipt('before', pre, { window: 'W4' }));
     if (override) f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
     renameSync(join(f.root, 'edge/releases', sha), join(f.root, 'moved-new-edge'));
   };
@@ -508,6 +527,10 @@ test('release-plan-contract / w6-prepare-checkout-and-proof-guards: refuses a wr
   guardRefused(wrong, wrong.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: checkout HEAD expected release-sha got mismatch; STOP');
   const dirty = fixture({ dirty: ' M site/index.html\n' });
   guardRefused(dirty, dirty.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: worktree expected clean got dirty; STOP');
+  // A failing git status (empty stdout, exit 128) must not read as a clean tree.
+  const broken = fixture({ status_fail: true }); const failed = broken.run(['ai-w6-prepare'], env);
+  assert.equal(failed.status, 128, failed.stderr); assert.doesNotMatch(failed.stdout, /ADMITTED/); assert.ok(!existsSync(broken.later));
+  assert.ok(!failed.calls.some(c => c[0] === 'mkdir'));
   const c1 = (f: Fixture) => join(f.root, 'receipts', `c1-${sha}-Fix123`);
   const present = fixture(); mkdirSync(c1(present), { recursive: true });
   guardRefused(present, present.run(['ai-w6-prepare'], env), 'FAIL ai-w6-prepare: C1_PROOF_DIR expected absent got present; STOP');
@@ -558,15 +581,24 @@ test('ordinary-paths-unchanged / w5-opening-live-controls: ai-w5-preflight refus
   { const f = fixture(), post = JSON.stringify(consentReceipt('post-W5')); f.put('consent-pre.json', post); f.put('live-before.json', liveReceipt('before', post));
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 before expected pre-W1 got post-W5; STOP'); }
   { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8'); f.put('live-before.json', liveReceipt('after', pre));
-    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'); }
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: live phase expected before got after; STOP'); }
   { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8'); f.put('live-before.json', liveReceipt('after', pre, { phase: 'recovery' }));
-    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: consent_phase for W5 recovery expected post-W5 got pre-W1; STOP'); }
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: live phase expected before got recovery; STOP'); }
   { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8');
     f.put('live-before.json', liveReceipt('before', pre, { controls: { ...Object.fromEntries(ordinaryKeys.map(k => [k, true])), cimd_consent: false } }));
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: live control cimd_consent expected true got false; STOP'); }
   // A valid W5 phase-after pair presented at the opening passes ai-live-controls but not the opening phase check.
   { const f = fixture(); f.put('consent-pre.json', readFileSync(join(f.root, 'consent.json'), 'utf8')); f.put('live-before.json', readFileSync(join(f.root, 'live.json'), 'utf8'));
-    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: W5 opening live controls phase expected before got other; STOP'); }
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: live phase expected before got after; STOP'); }
+  // Finding 4: a matching W2 before pair (W2 inputs) is refused before any staging.
+  { const f = fixture(), pre = readFileSync(join(f.root, 'consent-pre.json'), 'utf8');
+    f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W2' });
+    f.put('live-before.json', { ...liveReceipt('before', pre), window: 'W2' });
+    const out = f.run(['ai-w5-preflight']); refusedOpen(f, out, 'FAIL ai-w5-preflight: INPUTS window expected W5 got other; STOP');
+    assert.ok(!existsSync(join(f.root, 'prep-open/w5-live-before')), 'no staging for a non-W5 receipt'); }
+  // The prepared archive is re-verified at the opening too.
+  { const f = fixture(); f.put('prep-open/release.tar', 'not the verified archive');
+    refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP'); }
   { const f = fixture(); mkdirSync(join(f.root, 'prep-open/w5-live-before'));
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP'); }
 });

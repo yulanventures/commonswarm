@@ -721,14 +721,30 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
 
 test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
-  for(const file of ['ordinary-after.json','ordinary-recovery.json','consent-post-W5.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  // Valid retained receipts: ai-close re-runs ai-live-controls on them, producer from the verified archive.
+  const producerFile=join(scratch,'close-producer.mjs'), archive=join(scratch,'close-release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const consentFor=(phase:string)=>JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:phase,measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],
+    cleanup:phase==='pre-W1'?null:{grants_revoked:true,dcr_clients_expiring:[{client_id:'dcr-close-earlier',expires_after:new Date(Date.now()+30*86400_000).toISOString()}]}});
+  const liveFor=(window:string,phase:string,consentText:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,controls,
+    consent_receipt_sha256:digest(consentText),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const post=consentFor('post-W5');
+  writeFileSync(join(proof,'consent-post-W5.json'),post);
+  writeFileSync(join(proof,'ordinary-after.json'),liveFor('W6','after',post)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('W6','recovery',post));
+  for(const file of ['C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  const w6Inputs=join(scratch,'close-inputs-W6.json'); writeFileSync(w6Inputs,JSON.stringify({...base(),window:'W6',archive_sha256:archiveSha}));
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
     // Read-only database boundary starts CLOSED: opening-state checks must fail.
     const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
-    const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile(base()),PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
+    const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:w6Inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 1\n',{mode:0o700});
     for(const outcome of ['success','recovered']) {
       const refused=run(harness+close,{...env,CLOSE_RESULT:outcome});
@@ -741,15 +757,38 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     const unbound=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.notEqual(unbound.status,0); assert.match(unbound.stderr,/FAIL ai-close: retained consent receipt expected consent-post-W5\.json got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
-    writeFileSync(join(proof,'consent-post-W5.json'),'{}');
+    writeFileSync(join(proof,'consent-post-W5.json'),post);
+    // Finding 1: the retained close pair is re-validated in full, never only for presence.
+    for(const [bytes,inner] of [
+      ['{}','FAIL ai-live-controls: live receipt keys expected exact-schema-set got other-set; STOP'],
+      [liveFor('W6','before',post),'FAIL ai-live-controls: live phase expected after got before; STOP'],
+      [liveFor('W7','after',post),'FAIL ai-live-controls: live window expected input-window got mismatch; STOP'],
+      [liveFor('W6','after',consentFor('post-W5')+' '),'FAIL ai-live-controls: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP'],
+    ] as const) {
+      writeFileSync(join(proof,'ordinary-after.json'),bytes);
+      const invalid=run(harness+close,{...env,CLOSE_RESULT:'success'});
+      assert.notEqual(invalid.status,0); assert.ok(invalid.stderr.includes(inner),invalid.stderr);
+      assert.match(invalid.stderr,/FAIL ai-close: retained close receipts expected valid got refused; STOP/);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    }
+    writeFileSync(join(proof,'ordinary-after.json'),liveFor('W6','after',post));
+    // The producer is re-derived from the verified archive at close: replaced archive bytes refuse.
+    { const saved=readFileSync(archive); writeFileSync(archive,'not the verified archive');
+      const swapped=run(harness+close,{...env,CLOSE_RESULT:'success'});
+      assert.notEqual(swapped.status,0); assert.match(swapped.stderr,/FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP/);
+      assert.ok(!existsSync(join(proof,'closed.txt'))); writeFileSync(archive,saved); }
     // Former `A && B` case-arm guards: each forward-close receipt refuses on its own.
     rmSync(join(proof,'C1-cleanup.txt'));
     const noCleanup=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.notEqual(noCleanup.status,0); assert.match(noCleanup.stderr,/FAIL ai-close: W6 C1-cleanup\.txt expected present got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
-    writeFileSync(join(proof,'consent-pre-W1.json'),'{}'); writeFileSync(join(proof,'schema-committed.txt'),'PASS'); writeFileSync(join(proof,'issuer-credential.txt'),'PASS');
-    const w2=run(harness+close,{...env,WINDOW:'W2',CLOSE_RESULT:'success'});
+    // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
+    const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
+    writeFileSync(join(proof2,'consent-pre-W1.json'),pre); writeFileSync(join(proof2,'ordinary-after.json'),liveFor('W2','after',pre));
+    writeFileSync(join(proof2,'schema-committed.txt'),'PASS'); writeFileSync(join(proof2,'issuer-credential.txt'),'PASS');
+    const w2Inputs=join(scratch,'close-inputs-W2.json'); writeFileSync(w2Inputs,JSON.stringify({...base(),window:'W2',archive_sha256:archiveSha}));
+    const w2=run(harness+close,{...env,WINDOW:'W2',PROOF_DIR:proof2,INPUTS_FILE:w2Inputs,CLOSE_RESULT:'success'});
     assert.notEqual(w2.status,0); assert.match(w2.stderr,/FAIL ai-close: W2 W2-probes\.txt expected present got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     // A guarded rm that reports success but leaves the stage must not close the window.

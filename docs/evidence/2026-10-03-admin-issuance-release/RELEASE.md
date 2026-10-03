@@ -170,7 +170,8 @@ set -euo pipefail
 # Run ai-inputs first. This step creates nonsecret archive/transport files only.
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
-test -z "$(git status --porcelain)"
+PREP_GIT_STATUS=$(git status --porcelain)
+test -z "$PREP_GIT_STATUS"
 git fetch origin main
 test "$(git rev-parse --verify "${RELEASE_SHA}^{commit}")" = "$RELEASE_SHA"
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
@@ -386,7 +387,9 @@ test ! -L "$PROOF_DIR" || { printf 'FAIL ai-open: PROOF_DIR expected not-symlink
 test -f "$BOX_ARCHIVE_PATH" || { printf 'FAIL ai-open: BOX_ARCHIVE_PATH expected regular-file got missing; STOP\n' >&2; exit 1; }
 test ! -L "$BOX_ARCHIVE_PATH" || { printf 'FAIL ai-open: BOX_ARCHIVE_PATH expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 test "$(stat -c %a "$BOX_ARCHIVE_PATH")" = 600
-test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")"
+OPEN_ARCHIVE_SHA256=$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')
+OPEN_EXPECTED_ARCHIVE_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")
+test "$OPEN_ARCHIVE_SHA256" = "$OPEN_EXPECTED_ARCHIVE_SHA256"
 # Live before receipt and its release-bound consent receipt (SCHEMA section 3);
 # producer bytes come from the checksum-verified uploaded archive.
 python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$BOX_ARCHIVE_PATH" <<'PY'
@@ -492,7 +495,9 @@ with tarfile.open(sys.argv[1]) as archive:
         elif m.issym(): assert p.is_symlink() and p.readlink().as_posix()==m.linkname
         else: assert m.isdir() and p.is_dir()
 PY
-test "$(sha256sum "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' "$INPUTS_FILE")"
+OPEN_PLAN_SHA256=$(sha256sum "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" | awk '{print $1}')
+OPEN_EXPECTED_PLAN_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' "$INPUTS_FILE")
+test "$OPEN_PLAN_SHA256" = "$OPEN_EXPECTED_PLAN_SHA256"
 cp /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env"
 cp /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
 cp /home/commonswarm/.env "$SECRET_STAGE/edge.env"
@@ -540,7 +545,9 @@ pathlib.Path(sys.argv[2]).write_text(sql+'\n')
 PY
 ai_ro -q --file /proof/identity.sql >/dev/null
 ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/ledger-before.txt"
-test "$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")"
+LEDGER_SHA256=$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')
+EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")
+test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
  case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile) ;; *) return 1;; esac
@@ -647,21 +654,28 @@ After W7 (or the last window run), HezLead's chain runs the producer's final
 cleanup, which revokes the post-W5 grant family and writes a 0600 report of
 every remaining DCR client and its expiry; it is not a plan receipt.
 ai-open and ai-live-controls bind every live receipt to its consent receipt and
-both to the producer bytes released in this archive. Without both receipts,
-STOP before the window opens.
+both to the producer bytes released in this archive. Both read the producer
+from the release archive after checking its archive_sha256, never from an
+extracted tree. ai-live-controls is the single validator: W2–W4 preflight and
+ai-close re-run it on the retained copies (schema, binding, digests, producer,
+phase and cleanup), and W5 runs it on the Mac against `$PREP_DIR/release.tar`.
+Without both receipts, STOP before the window opens.
 
 ```sh
 # step: ai-live-controls
 # readonly: yes
-# host: box; read independently produced, nonsecret window probes
+# host: box (or the W5 Mac shell); read independently produced, nonsecret window probes
 set -euo pipefail
 : "${LIVE_CONTROLS_FILE:?FAIL ai-live-controls: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
 : "${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
-: "${RELEASE_ROOT:?FAIL ai-live-controls: RELEASE_ROOT expected open-shell-variable got unset; STOP}"
+: "${BOX_ARCHIVE_PATH:?FAIL ai-live-controls: BOX_ARCHIVE_PATH expected open-shell-variable got unset; STOP}"
 : "${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}"
-# Producer bytes come from RELEASE_ROOT, reconciled byte-for-byte with the archive at open.
-python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$RELEASE_ROOT" "$PROOF_DIR" <<'PY'
-import datetime,hashlib,json,pathlib,re,sys
+# The single receipt validator. ai-open's later consumers and W5 run this exact
+# block on retained copies (LIVE_CONTROLS_EXPECT_PHASE set, LIVE_CONTROLS_RETAIN=no).
+# Producer bytes come from the release archive, re-verified against archive_sha256
+# here, never from an extracted tree.
+python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "${LIVE_CONTROLS_EXPECT_PHASE:-}" "${LIVE_CONTROLS_RETAIN:-yes}" <<'PY'
+import datetime,hashlib,io,json,pathlib,re,sys,tarfile
 def need(ok,what,expected,got):
     if not ok: raise SystemExit('FAIL ai-live-controls: '+what+' expected '+expected+' got '+got+'; STOP')
 def receipt(name,label):
@@ -676,12 +690,22 @@ def strings(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
 d=json.load(open(sys.argv[1]))
 live_raw,r=receipt(sys.argv[2],'LIVE_CONTROLS_FILE')
 consent_raw,c=receipt(sys.argv[3],'CONSENT_RECEIPT_FILE')
-script=pathlib.Path(sys.argv[4],'scripts','live-ordinary-controls.mjs')
-need(script.is_file() and not script.is_symlink(),'scripts/live-ordinary-controls.mjs in RELEASE_ROOT','regular-file','missing')
-producer=hashlib.sha256(script.read_bytes()).hexdigest()
+expect,retain=sys.argv[6],sys.argv[7]
+need(expect in ('','before','after','recovery') and retain in ('yes','no'),'LIVE_CONTROLS_EXPECT_PHASE/LIVE_CONTROLS_RETAIN','phase-or-empty/yes-or-no','other')
+archive=pathlib.Path(sys.argv[4])
+need(archive.is_absolute() and archive.is_file() and not archive.is_symlink(),'BOX_ARCHIVE_PATH','absolute-regular-file','missing-or-not-regular')
+archive_raw=archive.read_bytes()
+need(hashlib.sha256(archive_raw).hexdigest()==d.get('archive_sha256'),'BOX_ARCHIVE_PATH bytes','input-archive_sha256','mismatch')
+try:
+    with tarfile.open(fileobj=io.BytesIO(archive_raw)) as tar:
+        m=tar.getmember('scripts/live-ordinary-controls.mjs')
+        producer=hashlib.sha256(tar.extractfile(m).read()).hexdigest() if m.isfile() else None
+except (KeyError,OSError,tarfile.TarError): producer=None
+need(producer is not None,'scripts/live-ordinary-controls.mjs in BOX_ARCHIVE_PATH','regular-file','missing')
 need(set(r)=={'release_sha','window_id','window','phase','controls','consent_receipt_sha256','producer_sha256','dcr_client_ids'},'live receipt keys','exact-schema-set','other-set')
 for k in ('release_sha','window_id','window'): need(r[k]==d[k],'live '+k,'input-'+k.replace('_','-'),'mismatch')
 need(r['phase'] in ('before','after','recovery'),'live phase','before-after-or-recovery','other')
+if expect: need(r['phase']==expect,'live phase',expect,r['phase'])
 controls=('hosted_mcp_consent_refresh','dcr_registration_consent','cimd_consent','human_recovery','worker_command_read')
 need(isinstance(r['controls'],dict) and set(r['controls'])==set(controls),'live control names','five-ordinary-controls','other-set')
 for k in controls: need(r['controls'][k] is True,'live control '+k,'true','false' if r['controls'][k] is False else 'non-true')
@@ -716,10 +740,11 @@ else:
         try: until=datetime.datetime.fromisoformat(x['expires_after'].replace('Z','+00:00'))
         except ValueError: until=None
         need(until is not None and until>datetime.datetime.now(datetime.timezone.utc),'post-W5 cleanup expires_after','future','past-or-invalid')
-proof=pathlib.Path(sys.argv[5]); copy=proof/('consent-'+phase+'.json')
-need(not copy.exists() or copy.read_bytes()==consent_raw,'retained '+copy.name,'absent-or-identical','different-bytes')
-copy.write_bytes(consent_raw)
-pathlib.Path(proof,'ordinary-'+r['phase']+'.json').write_text(json.dumps(r,sort_keys=True)+'\n')
+if retain=='yes':
+    proof=pathlib.Path(sys.argv[5])
+    copies=[(proof/('consent-'+phase+'.json'),consent_raw),(proof/('ordinary-'+r['phase']+'.json'),live_raw)]
+    for copy,raw in copies: need(not copy.exists() or copy.read_bytes()==raw,'retained '+copy.name,'absent-or-identical','different-bytes')
+    for copy,raw in copies: copy.write_bytes(raw)
 print('PASS live authenticated ordinary controls bound to consent '+phase+' and released producer')
 PY
 ```
@@ -853,6 +878,15 @@ assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromis
 PY
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
 python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA" <<'PY'
 import hashlib,json,pathlib,re,sys,tarfile
 root,proof,backfill,archives=map(pathlib.Path,sys.argv[1:5]); sha=sys.argv[5]
@@ -1240,6 +1274,15 @@ test "$WINDOW" = W3
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w3-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
 BASELINE_OAUTH_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_sha"])' "$INPUTS_FILE")
 OLD_OAUTH=/home/commonswarm/oauth/releases/$BASELINE_OAUTH_SHA
 NEW_OAUTH=/home/commonswarm/oauth/releases/$RELEASE_SHA
@@ -1313,7 +1356,9 @@ docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oaut
 ln -s "$NEW_OAUTH" /home/commonswarm/oauth/current.admin-issuance
 mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")"
+W3_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)
+W3_EXPECTED_IMAGE=$(cat "$PROOF_DIR/oauth-image.id")
+test "$W3_RUNNING_IMAGE" = "$W3_EXPECTED_IMAGE"
 cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
 printf 'PASS W3 applied; require all probes before close\n'
 ```
@@ -1375,7 +1420,9 @@ docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oaut
 ln -s "$OLD_OAUTH" /home/commonswarm/oauth/current.admin-issuance
 mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")"
+W3_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)
+W3_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")
+test "$W3_RUNNING_IMAGE" = "$W3_BASELINE_IMAGE"
 printf 'PASS W3 baseline image restored; verify ordinary controls before close\n'
 ```
 
@@ -1405,6 +1452,15 @@ test "$WINDOW" = W4
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
 BASELINE_EDGE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_sha"])' "$INPUTS_FILE")
 OLD_EDGE=/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA
 NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
@@ -1589,7 +1645,9 @@ m.update(generation=int(sys.argv[2]),invalidated_at=None); p.write_text(json.dum
 PY
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy"
 cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.caddy"
-test "$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_caddyfile_sha256"])' "$INPUTS_FILE")"
+W4_CADDYFILE_SHA256=$(sha256sum /etc/caddy/Caddyfile | awk '{print $1}')
+W4_EXPECTED_CADDYFILE_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_caddyfile_sha256"])' "$INPUTS_FILE")
+test "$W4_CADDYFILE_SHA256" = "$W4_EXPECTED_CADDYFILE_SHA256"
 install -o root -g root -m 0644 "$SECRET_STAGE/mcp.new.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
 install -o root -g root -m 0644 "$SECRET_STAGE/api.new.caddy" /etc/caddy/sites/10-commonswarm-api.caddy
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-live-validate.log" 2>&1 || { printf 'FAIL ai-w4-apply: Caddy validation exit status expected 0 got %s; STOP\n' "$?" >&2; exit 1; }
@@ -1668,7 +1726,9 @@ COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name comm
  -f "$OLD_EDGE/deploy/edge-runtime/compose.yaml" -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" \
  up -d --no-build --pull never --force-recreate edge-runtime >"$SECRET_STAGE/edge-rollback.log" 2>&1
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
-test "$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")"
+W4_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)
+W4_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")
+test "$W4_RUNNING_IMAGE" = "$W4_BASELINE_IMAGE"
 test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE"
 printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
 )
@@ -1894,28 +1954,26 @@ except AssertionError:
 PY
 # W5 opening: the complete ai-live-controls block, phase before, bound to the
 # pre-W1 consent receipt, before any site build, upload or other side effect.
+# Producer bytes come from the prepared release archive, re-verified there.
 : "${LIVE_CONTROLS_FILE:?FAIL ai-w5-preflight: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
 : "${CONSENT_RECEIPT_FILE:?FAIL ai-w5-preflight: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
 : "${PLAN_FILE:?FAIL ai-w5-preflight: PLAN_FILE expected absolute-regular-file got unset; STOP}"
 : "${PREP_DIR:?FAIL ai-w5-preflight: PREP_DIR expected prep-directory got unset; STOP}"
+W5_WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")
+test "$W5_WINDOW" = W5 || { printf 'FAIL ai-w5-preflight: INPUTS window expected W5 got other; STOP\n' >&2; exit 1; }
 W5_BEFORE=$PREP_DIR/w5-live-before
 test ! -e "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$W5_BEFORE" || { printf 'FAIL ai-w5-preflight: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_BEFORE"
-mkdir "$W5_BEFORE/release"
-mkdir "$W5_BEFORE/release/scripts"
-git show "${RELEASE_SHA}:scripts/live-ordinary-controls.mjs" >"$W5_BEFORE/release/scripts/live-ordinary-controls.mjs"
-python3 - "$PLAN_FILE" "$W5_BEFORE/live-controls.sh" <<'PY'
-import pathlib,re,sys
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" before yes <<'PY' || { printf 'FAIL ai-w5-preflight: W5 opening live controls expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-w5-preflight: ai-live-controls block expected one got '+str(len(found))+'; STOP')
-pathlib.Path(sys.argv[2]).write_text(found[0])
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
-/bin/bash -n "$W5_BEFORE/live-controls.sh"
-INPUTS_FILE="$INPUTS_FILE" LIVE_CONTROLS_FILE="$LIVE_CONTROLS_FILE" CONSENT_RECEIPT_FILE="$CONSENT_RECEIPT_FILE" \
- RELEASE_ROOT="$W5_BEFORE/release" PROOF_DIR="$W5_BEFORE" /bin/bash "$W5_BEFORE/live-controls.sh"
-test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-preflight: W5 opening live controls phase expected before got other; STOP\n' >&2; exit 1; }
 ```
 
 ```sh
@@ -1962,14 +2020,16 @@ protected build env recovery uses the service-account token file. Any rm refusal
 STOPs cleanup, with the exact path/message retained. The caller does not execute
 the next W window until that referenced site's window is verified closed.
 W5 checks the non-consent legs before and after, like every other window.
-ai-w5-preflight runs the complete ai-live-controls block with phase before and
-the pre-W1 CONSENT_RECEIPT_FILE before any site build, upload or other side
-effect, and stages the result under `PREP_DIR/w5-live-before`. ai-w5-closed is
-W5's forward close: it requires those opening receipts, runs the complete
-ai-live-controls block with phase after and the post-W5 CONSENT_RECEIPT_FILE
-before any outside probe, and retains ordinary-before.json, consent-pre-W1.json,
-ordinary-after.json and consent-post-W5.json beside W5-closed.json. Both read
-the producer from the exact RELEASE_SHA commit.
+ai-w5-preflight refuses inputs for any window but W5, then runs the complete
+ai-live-controls block with phase before and the pre-W1 CONSENT_RECEIPT_FILE
+before any site build, upload or other side effect, and stages the result under
+`PREP_DIR/w5-live-before`. ai-w5-closed is W5's forward close: it re-validates
+those opening receipts, runs the complete ai-live-controls block with phase
+after and the post-W5 CONSENT_RECEIPT_FILE before any outside probe, and retains
+ordinary-before.json, consent-pre-W1.json, ordinary-after.json and
+consent-post-W5.json beside W5-closed.json. Both read the producer from
+`$PREP_DIR/release.tar` (the ai-prepare archive), re-verified against
+archive_sha256.
 
 ```sh
 # step: ai-w5-closed
@@ -1981,30 +2041,36 @@ set -euo pipefail
 : "${CONSENT_RECEIPT_FILE:?FAIL ai-w5-closed: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
 : "${PLAN_FILE:?FAIL ai-w5-closed: PLAN_FILE expected absolute-regular-file got unset; STOP}"
 : "${PREP_DIR:?FAIL ai-w5-closed: PREP_DIR expected prep-directory got unset; STOP}"
-# W5 forward close: the complete ai-live-controls block, phase after, bound to the
-# post-W5 consent receipt; producer bytes come from the exact RELEASE_SHA commit.
-W5_RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+# W5 forward close: re-validate the retained opening pair, then the complete
+# ai-live-controls block, phase after, bound to the post-W5 consent receipt.
+# Producer bytes come from the prepared release archive, re-verified there.
+W5_WINDOW=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")
+test "$W5_WINDOW" = W5 || { printf 'FAIL ai-w5-closed: INPUTS window expected W5 got other; STOP\n' >&2; exit 1; }
 W5_BEFORE=$PREP_DIR/w5-live-before
 test -f "$W5_BEFORE/ordinary-before.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected ordinary-before.json got missing; STOP\n' >&2; exit 1; }
 test -f "$W5_BEFORE/consent-pre-W1.json" || { printf 'FAIL ai-w5-closed: W5 opening receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_BEFORE" "$W5_BEFORE/ordinary-before.json" "$W5_BEFORE/consent-pre-W1.json" before no <<'PY' || { printf 'FAIL ai-w5-closed: retained W5 opening receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
 W5_LIVE=$PREP_DIR/w5-live-controls
 test ! -e "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$W5_LIVE" || { printf 'FAIL ai-w5-closed: live-controls staging expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir "$W5_LIVE"
-mkdir "$W5_LIVE/release"
-mkdir "$W5_LIVE/release/scripts"
-git show "${W5_RELEASE_SHA}:scripts/live-ordinary-controls.mjs" >"$W5_LIVE/release/scripts/live-ordinary-controls.mjs"
-python3 - "$PLAN_FILE" "$W5_LIVE/live-controls.sh" <<'PY'
-import pathlib,re,sys
-blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PREP_DIR/release.tar" "$W5_LIVE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" after yes <<'PY' || { printf 'FAIL ai-w5-closed: W5 forward-close live controls expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
 found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-w5-closed: ai-live-controls block expected one got '+str(len(found))+'; STOP')
-pathlib.Path(sys.argv[2]).write_text(found[0])
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
-/bin/bash -n "$W5_LIVE/live-controls.sh"
-INPUTS_FILE="$INPUTS_FILE" LIVE_CONTROLS_FILE="$LIVE_CONTROLS_FILE" CONSENT_RECEIPT_FILE="$CONSENT_RECEIPT_FILE" \
- RELEASE_ROOT="$W5_LIVE/release" PROOF_DIR="$W5_LIVE" /bin/bash "$W5_LIVE/live-controls.sh"
-test -f "$W5_LIVE/ordinary-after.json" || { printf 'FAIL ai-w5-closed: W5 forward-close live controls phase expected after got other; STOP\n' >&2; exit 1; }
 python3 - "$INPUTS_FILE" "$SITE_EVIDENCE" "$W5_LIVE" "$W5_BEFORE" <<'PY'
 import datetime,hashlib,json,pathlib,subprocess,urllib.request,sys
 d=json.load(open(sys.argv[1])); site=pathlib.Path(sys.argv[2])
@@ -2418,7 +2484,8 @@ set -euo pipefail
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
 test "$(git rev-parse HEAD)" = "$RELEASE_SHA" || { printf 'FAIL ai-w6-prepare: checkout HEAD expected release-sha got mismatch; STOP\n' >&2; exit 1; }
-test -z "$(git status --porcelain)" || { printf 'FAIL ai-w6-prepare: worktree expected clean got dirty; STOP\n' >&2; exit 1; }
+C1_GIT_STATUS=$(git status --porcelain)
+test -z "$C1_GIT_STATUS" || { printf 'FAIL ai-w6-prepare: worktree expected clean got dirty; STOP\n' >&2; exit 1; }
 C1_PROOF_DIR=/Users/yulanbot/work/hm37-live-release/c1-${RELEASE_SHA}-${WINDOW_ID}
 test ! -e "$C1_PROOF_DIR" || { printf 'FAIL ai-w6-prepare: C1_PROOF_DIR expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$C1_PROOF_DIR" || { printf 'FAIL ai-w6-prepare: C1_PROOF_DIR expected not-symlink got symlink; STOP\n' >&2; exit 1; }
@@ -2883,8 +2950,18 @@ Recovered close requires emergency env/overlay/DB close and ordinary controls.
 set -euo pipefail
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
+case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
 case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
 test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import os,pathlib,re,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain=sys.argv[1:9]
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(plan).read_text(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL ai-live-controls: block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
   W1) test -f "$PROOF_DIR/backup-gate.json";;
@@ -2907,7 +2984,9 @@ if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6 && test "$(python3 -c '
  ai_run ai-inputs
  test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 elif test "$WINDOW" = W7; then
- test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = "$(cat "$PROOF_DIR/retirement-gate-state.txt")"
+ W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')
+ W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt")
+ test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE"
 elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 fi
