@@ -216,7 +216,12 @@
       "w1-w5-closed-preparation-no-consent-approval",
       "w6-missing-stale-browser-readiness-refuses-before-open",
       "d8-pointer-no-secret-shaped-values",
-      "w6-default-finish-and-forward-close-CLOSED"
+      "w6-default-finish-and-forward-close-CLOSED",
+      "w2-five-transactions-ledger-prefix-checksum-m4-backfill",
+      "w2-live-table-row-size-bounds-refuse-before-m1",
+      "w2-lock-statement-total-timeouts-measurement-sized",
+      "w2-between-migration-discovery-token-health-human-read",
+      "w2-stop-no-rerun-uncertain-commit-prefix-reconcile"
     ],
     "oauth-build-route": [
       "cpu-capped-build-once-source-label",

@@ -76,7 +76,7 @@ hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
 | W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
-| W2 SCHEMA — BLOCKED | ai-open and ai-w2-apply refuse before mutation. Unchanged M4 creates the D2 checksum table after M1–M3; unchanged M2 creates its writer role after M1. One transaction per migration with its own ledger/checksum pair needs a separately reviewed migration redesign. Do not open W2 or proceed to W3–W7 on this preparation plan. |
+| W2 SCHEMA | common preflight/open/session; ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (five separate transactions, probes after each), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
 | W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight, ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
@@ -284,10 +284,6 @@ PY
 # readonly: no
 # host: box root; after repeated inputs/baseline preflight
 set -euo pipefail
-if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W2; then
- printf 'FAIL W2 per-migration D2 checksum bootstrap unavailable in unchanged migrations; STOP before open\n' >&2
- exit 1
-fi
 umask 077
 if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W6; then
  : "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
@@ -407,7 +403,7 @@ ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations 
 test "$(sha256sum "$PROOF_DIR/ledger-before.txt" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_ledger_sha256"])' "$INPUTS_FILE")"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile) ;; *) return 1;; esac
  python3 - "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$SECRET_STAGE/step-$STEP_NAME.sh" <<'PY'
 import pathlib,re,sys
 blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',pathlib.Path(sys.argv[1]).read_text(),re.M|re.S)
@@ -547,59 +543,74 @@ PY
 
 ## W2: one schema window before any code release
 
-**BLOCKED before open.** HezLead requires one transaction per migration,
-each containing its unchanged migration, ledger insert and D2 checksum row.
-M4 (`20261003000004_migration_checksums.sql`) creates the checksum relation
-with unconditional CREATE TABLE; M2 creates commonswarm_admin_release and
-requires M1's binding tables. M4 also uses the M3 cutover state. There is no
-approved checksum bootstrap. Reordering, copying part of M4 into a new
-operator bootstrap, preapplying M2's roles, or silently backfilling M1–M3 after
-they commit would invent a schema procedure or violate D2. This task forbids
-migration edits. ai-open and ai-w2-apply therefore STOP before any mutation;
-the former five-migration transaction is removed.
+HezLead's lane 8 W2 split ruling authorizes unchanged M1, M2 and M3 in
+separate transactions, each with its ledger row. M4 creates the checksum table
+in its own transaction, inserts its ledger/checksum and backfills M1–M3 plus
+EVERY previously applied ledger version. M5 commits its ledger and checksum in
+its own transaction. M1–M3 checksums are source=backfill at RELEASE_SHA;
+historical backfills retain their actual released_sha after byte equality with
+RELEASE_SHA is verified. No migration or reserve SQL is edited.
 
-The replacement release requires a separately reviewed migration redesign:
-create D2's table and release-role prerequisites before M1, then one
-transaction per migration with `SET LOCAL lock_timeout='3s'` and a short
-statement_timeout sized from fresh box preflight measurements. That preflight
-must count rows and measure bytes/validation duration for every locked live
-table, refuse each stated bound, and retain expected hold evidence. No box
-measurement has been made by this preparation worker; no expected hold or
-executable timeout is asserted here. The redesign remains a release blocker.
-M1's ADD CHECK validates existing rows inline, without NOT VALID; splitting
-validation would require editing its bytes, which this task forbids.
+Before M1, ai-w2-measure counts rows and pg_total_relation_size (including
+indexes/TOAST) of every live table locked by M1–M5 and the release ledger.
+Missing tables, slow counts, rows OR bytes above a bound refuse before apply.
+Bounds (MiB = 1024² bytes) are conservative admission limits, not live measurements:
 
-Known live-table locks that the redesign must measure (new admin tables are
-also locked but have no ordinary traffic before activation):
+| Table | Refuse above rows | Refuse above MiB | Used by |
+| --- | ---: | ---: | --- |
+| commonswarm_oauth.interactions | 100000 | 256 | M1 |
+| swarm.admin_grants | 100000 | 128 | M1, M3 |
+| swarm.hosted_mcp_grants | 100000 | 256 | M1 |
+| commonswarm_oauth.provider_artifacts | 1000000 | 1024 | M1 |
+| swarm.users | 100000 | 128 | M1 |
+| swarm.admin_accounts | 100000 | 128 | M1, M2, M3 |
+| swarm.admin_consents | 200000 | 256 | M1 |
+| swarm.admin_events | 1000000 | 1024 | M2, M3 |
+| swarm.admin_credentials | 100000 | 128 | M3 |
+| commonswarm_oauth.refresh_family_tombstones | 1000000 | 256 | M3 |
+| supabase_migrations.schema_migrations | 10000 | 16 | every ledger insert; M4 reader |
 
-| Migration | Live table | Strongest table lock / ordinary-path impact |
-| --- | --- | --- |
-| M1 | swarm.admin_grants | ACCESS EXCLUSIVE for DROP/ADD CHECK; reads and writes wait through M1 COMMIT |
-| M1 | commonswarm_oauth.interactions | ACCESS EXCLUSIVE for DROP/ADD CHECK (also trigger/FK); reads and writes wait through M1 COMMIT |
-| M1 | swarm.hosted_mcp_grants | SHARE ROW EXCLUSIVE for trigger/FK; ordinary writes wait, SELECT unaffected |
-| M1 | commonswarm_oauth.provider_artifacts | SHARE ROW EXCLUSIVE for trigger; ordinary writes wait, SELECT unaffected |
-| M1 | swarm.users, swarm.admin_accounts, swarm.admin_consents | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
-| M2 | swarm.admin_accounts, swarm.admin_events | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
-| M3 | swarm.admin_accounts, swarm.admin_events | SHARE ROW EXCLUSIVE for FK references; writes wait, SELECT unaffected |
-| M3 | swarm.admin_grants, swarm.admin_credentials, commonswarm_oauth.refresh_family_tombstones | SHARE ROW EXCLUSIVE for trigger/FK; writes wait, SELECT unaffected |
-| M4 | supabase_migrations.schema_migrations | ACCESS SHARE for the SQL ledger reader; SELECT/writes unaffected by this reader |
-| M5 | none | Replaces a PL/pgSQL read function; referenced tables are read when the function is called, not during CREATE |
-| Each apply | supabase_migrations.schema_migrations | The redesign must serialize ledger insert (EXCLUSIVE); other migration writers wait, ordinary SELECT unaffected |
+M1 takes ACCESS EXCLUSIVE on admin_grants/interactions for CHECK validation:
+reads AND writes wait until commit. Trigger/FK targets take SHARE ROW EXCLUSIVE:
+writes wait; SELECT proceeds. M2/M3 additionally lock the new, not-yet-live
+M1/M2 admin tables. M4 locks its new checksum table. M5 replaces a read function;
+its body does not execute during CREATE. The ledger is locked EXCLUSIVE to
+serialize migration writers; SELECT proceeds. Inline CHECK validation stays
+unchanged and is not split out of M1.
 
-ACCESS EXCLUSIVE also blocks reads; the requested blanket “reads unaffected”
-claim cannot describe unchanged M1. Lock acquisition timeout does not bound
-lock hold, and statement_timeout is per statement, not per transaction. The
-replacement needs a measured/bounded total transaction hold as well as short
-statements, with ordinary probes **between** every committed migration.
+Expected lock hold, conditional on the above limits: M1 <=30s, M2/M3 <=15s,
+M4/M5 <=10s (planning estimates; no measured validation duration is claimed).
+Each transaction uses lock_timeout='3s'. statement_timeout is calculated from
+measured rows/bytes/count duration: max(expected hold, 15 + ceil(rows/10000)
++ ceil(bytes/32MiB) + ceil(count_seconds)), capped at 60s. PG17
+transaction_timeout uses the same cap for the WHOLE transaction, including
+lock acquisition and COMMIT: statement_timeout alone is per statement.
+Actual apply wall durations are retained. If a measured hold exceeds the
+estimate, STOP before the next migration; retain the commit and reconcile.
+Under the transaction locks, sizes/counts are checked again against the same
+bounds to refuse growth between preflight and apply. Probes run after every
+commit, before any following transaction: public ordinary MCP discovery and
+health, authenticated ordinary MCP initialize (token health), and human
+pending_access read. Failure stops immediately, with no later migration.
 
-Mid-sequence failure path is decided now: STOP forward work; already committed
-migration/ledger/checksum pairs stay committed, issuance stays closed, and
-re-run is refused. Read-only reconciliation must enumerate the exact committed
-prefix, including uncertain COMMIT. Keep the five verbatim per-migration
-reserves; use one only in a separately approved data-free context whose refusal
-checks pass. M4 refuses any checksum evidence; M1 refuses live provider
-artifacts/bindings. Never delete ordinary or historical rows to make a reserve
-pass. No production post-COMMIT schema rollback is authorized.
+Mid-sequence failure: STOP; committed migrations and ledger rows stay. After
+M4 their exact checksum/backfill rows stay too. Issuance remains OFF. A durable
+apply-started marker refuses ALL reruns, including a failure before M1. The
+read-only ai-w2-reconcile works even when M4/table is absent and reports the
+exact prefix from the ledger, not the client exit status. An uncertain COMMIT
+is reconciled there; inconsistent ledger/checksums refuse. Completion receipts
+are written only for all five. Keep every verbatim per-migration reserve;
+use one only in a separately approved data-free context whose refusal checks
+pass. M4 refuses checksum evidence; M1 refuses provider artifacts/bindings.
+Never erase ordinary or historical data to pass a reserve. No automatic or
+post-COMMIT production schema rollback is authorized.
+
+Between-probe credentials: HezLead stages ordinary-probes.json ONLY in
+SECRET_STAGE (0700 /private/tmp/anvil-secret.XXXXXX, file 0600), containing
+mcp_access_token, human_access_token and workspace_id for his authorized
+ordinary smoke workspace. Values never enter argv/env/proof or output. Missing,
+expired or refused credentials STOP. Refresh through the reviewed ordinary
+client procedure before W2; this plan does not invent issuance or refresh.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
 `<released_sha>.tar` archives from the historical release inputs. The W2
@@ -677,40 +688,216 @@ done
 ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,pg_get_userbyid(p.proowner),p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2,p.oid;" >"$PROOF_DIR/functions-before.txt"
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-before.txt"
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-before.txt"
-printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs; backup fresh\n'
+ai_run ai-w2-measure
+printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs/bounds; backup fresh\n'
+```
+
+```sh
+# step: ai-w2-measure
+# readonly: no
+# host: box root; read-only SQL, nonsecret measurements/limits only
+set -euo pipefail
+test "$WINDOW" = W2
+ai_deadline
+python3 - "$PROOF_DIR" <<'PY'
+import json,pathlib
+p=pathlib.Path(__import__('sys').argv[1]); MiB=1024**2
+# One live-table inventory owns measurement, bounds and under-lock recheck.
+tables=[
+ ('commonswarm_oauth.interactions',100000,256,[1],'ACCESS EXCLUSIVE'),
+ ('swarm.admin_grants',100000,128,[1,3],'ACCESS EXCLUSIVE'),
+ ('swarm.hosted_mcp_grants',100000,256,[1],'SHARE ROW EXCLUSIVE'),
+ ('commonswarm_oauth.provider_artifacts',1000000,1024,[1],'SHARE ROW EXCLUSIVE'),
+ ('swarm.users',100000,128,[1],'SHARE ROW EXCLUSIVE'),
+ ('swarm.admin_accounts',100000,128,[1,2,3],'SHARE ROW EXCLUSIVE'),
+ ('swarm.admin_consents',200000,256,[1],'SHARE ROW EXCLUSIVE'),
+ ('swarm.admin_events',1000000,1024,[2,3],'SHARE ROW EXCLUSIVE'),
+ ('swarm.admin_credentials',100000,128,[3],'SHARE ROW EXCLUSIVE'),
+ ('commonswarm_oauth.refresh_family_tombstones',1000000,256,[3],'SHARE ROW EXCLUSIVE'),
+ ('supabase_migrations.schema_migrations',10000,16,[1,2,3,4,5],'EXCLUSIVE')]
+(p/'lock-limits.json').write_text(json.dumps([dict(table=t,max_rows=r,max_bytes=b*MiB,migrations=m,mode=l) for t,r,b,m,l in tables])+'\n')
+(p/'measure-tables.txt').write_text('\n'.join(t[0] for t in tables)+'\n')
+PY
+: >"$PROOF_DIR/table-measurements.txt"
+while IFS= read -r TABLE; do
+ ai_deadline
+ START_SECONDS=$SECONDS
+ OBSERVED=$(ai_ro -Atq --command "SET lock_timeout='3s'; SET statement_timeout='60s'; SET transaction_timeout='60s'; SELECT count(*),pg_total_relation_size('$TABLE'::regclass) FROM $TABLE;")
+ printf '%s|%s|%s\n' "$TABLE" "$OBSERVED" "$((SECONDS-START_SECONDS))" >>"$PROOF_DIR/table-measurements.txt"
+done <"$PROOF_DIR/measure-tables.txt"
+python3 - "$PROOF_DIR" <<'PY'
+import datetime,json,math,pathlib,sys
+p=pathlib.Path(sys.argv[1]); limits=json.loads((p/'lock-limits.json').read_text())
+rows=[r.split('|') for r in (p/'table-measurements.txt').read_text().splitlines()]
+assert len(rows)==len(limits) and [r[0] for r in rows]==[r['table'] for r in limits], 'FAIL complete measurement inventory; STOP'
+for l,r in zip(limits,rows):
+    assert len(r)==4
+    l.update(rows=int(r[1]),bytes=int(r[2]),count_seconds=int(r[3]))
+    assert 0<=l['rows']<=l['max_rows'] and 0<=l['bytes']<=l['max_bytes'], 'FAIL live table refuse bounds: '+l['table']+'; STOP'
+    assert 0<=l['count_seconds']<60, 'FAIL slow measurement; STOP'
+expected=[30,15,15,10,10]; budgets=[]
+for i,hold in enumerate(expected,1):
+    live=[l for l in limits if i in l['migrations']]
+    sized=15+math.ceil(sum(l['rows'] for l in live)/10000)+math.ceil(sum(l['bytes'] for l in live)/(32*1024**2))+sum(l['count_seconds'] for l in live)
+    budgets.append(dict(migration=i,expected_hold_seconds=hold,timeout_seconds=min(60,max(hold,sized))))
+(p/'lock-measurements.json').write_text(json.dumps(dict(measured_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),tables=limits,budgets=budgets),sort_keys=True)+'\n')
+PY
+printf 'PASS W2 measured every locked live table within row/size bounds\n'
+```
+
+```sh
+# step: ai-w2-between-probes
+# readonly: probe
+# host: box root; public ingress read-only probes; secrets never output
+set -euo pipefail
+ai_deadline
+python3 - "$SECRET_STAGE" "$PROOF_DIR" "$VERSION" "$RELEASE_SHA" <<'PY'
+import datetime,json,pathlib,re,stat,sys,urllib.request
+try:
+    stage,proof=map(pathlib.Path,sys.argv[1:3]); version,sha=sys.argv[3:]
+    assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink()
+    assert stat.S_IMODE(stage.stat().st_mode)==0o700
+    f=stage/'ordinary-probes.json'; assert f.is_file() and not f.is_symlink() and stat.S_IMODE(f.stat().st_mode)==0o600
+    c=json.loads(f.read_text()); assert set(c)=={'mcp_access_token','human_access_token','workspace_id'}
+    assert re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',c['workspace_id'])
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,*args,**kwargs): return None
+    opener=urllib.request.build_opener(NoRedirect())
+    def call(url,body=None,token=None):
+        headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
+        if token: headers['Authorization']='Bearer '+token
+        req=urllib.request.Request(url,data=None if body is None else json.dumps(body).encode(),headers=headers)
+        with opener.open(req,timeout=15) as response:
+            raw=response.read(1048577); assert response.status==200 and len(raw)<=1048576
+            return json.loads(raw)
+    call('https://mcp.commonswarm.com/health')
+    discovery=call('https://mcp.commonswarm.com/.well-known/oauth-authorization-server')
+    assert discovery['issuer']=='https://mcp.commonswarm.com'
+    resource=call('https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp')
+    assert resource['resource']=='https://mcp.commonswarm.com/mcp'
+    # Authenticated ordinary initialize checks the live token/grant/family path.
+    mcp=call('https://mcp.commonswarm.com/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},c['mcp_access_token'])
+    assert mcp.get('id')==1 and 'error' not in mcp and 'serverInfo' in mcp['result']
+    human=call('https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
+    assert isinstance(human['pending'],list) and 'error' not in human
+    (proof/('between-'+version+'.json')).write_text(json.dumps(dict(release_sha=sha,version=version,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,token_health=True,human_read=True))+'\n')
+except Exception:
+    raise SystemExit('FAIL W2 ordinary discovery/token health/human read; STOP before next migration') from None
+PY
 ```
 
 ```sh
 # step: ai-w2-apply
-# readonly: yes
-# host: box root; hard refusal, no schema/ledger/checksum mutation
+# readonly: no
+# host: box root; one transaction per unchanged migration, no retries
 set -euo pipefail
-printf 'FAIL W2 per-migration D2 checksum bootstrap unavailable in unchanged migrations; STOP before mutation\n' >&2
-exit 1
+test "$WINDOW" = W2
+ai_deadline
+test -f "$PROOF_DIR/lock-measurements.json"
+test -f "$SECRET_STAGE/ordinary-probes.json"
+# Durable no-rerun fence BEFORE the first attempt (including unknown COMMIT).
+( set -C; date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/apply-started.txt" )
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ ai_deadline
+ python3 - "$PROOF_DIR" "$RELEASE_ROOT" "$RELEASE_SHA" "$VERSION" <<'PY'
+import datetime,hashlib,json,pathlib,re,sys
+p,root=map(pathlib.Path,sys.argv[1:3]); sha,version=sys.argv[3:]
+assert re.fullmatch('[0-9a-f]{40}',sha)
+new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
+i=int(version[-1]); assert version=='2026100300000'+str(i) and new[i-1]['version']==version
+measure=json.loads((p/'lock-measurements.json').read_text()); budget=measure['budgets'][i-1]
+assert budget['migration']==i and 0<budget['expected_hold_seconds']<=budget['timeout_seconds']<=60
+if i==1:
+    age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(measure['measured_at'])).total_seconds()
+    assert 0<=age<=300, 'FAIL stale measurements; STOP'
+    assert not (p/('between-'+version+'.json')).exists()
+else:
+    previous=json.loads((p/('between-'+new[i-2]['version']+'.json')).read_text())
+    assert previous['release_sha']==sha and previous['version']==new[i-2]['version'] and all(previous[k] is True for k in ('discovery','token_health','human_read'))
+    age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(previous['at'])).total_seconds()
+    assert 0<=age<=120, 'FAIL stale between-migration probes; STOP'
+for r in new+old:
+    file=root/('supabase/migrations/'+r['file'] if r in new else r['file'])
+    assert hashlib.sha256(file.read_bytes()).hexdigest()==r['sha256'], 'FAIL migration bytes changed; STOP'
+def lit(v): return "'"+v.replace("'","''")+"'"
+def array(values): return 'ARRAY['+','.join(map(lit,values))+']::text[]'
+timeout=str(budget['timeout_seconds'])+'s'
+sql=["SET transaction_timeout="+lit(timeout)+";",'BEGIN;',"SET LOCAL lock_timeout='3s';","SET LOCAL statement_timeout="+lit(timeout)+";",'LOCK TABLE supabase_migrations.schema_migrations IN EXCLUSIVE MODE;']
+expected=sorted([r['version'] for r in old]+[r['version'] for r in new[:i-1]])
+sql.append("DO $ledger$ BEGIN IF (SELECT array_agg(version ORDER BY version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM "+array(expected)+" THEN RAISE EXCEPTION 'unexpected ledger prefix'; END IF; END $ledger$;")
+for l in measure['tables']:
+    if i not in l['migrations']: continue
+    t=l['table']; assert re.fullmatch('[a-z_]+\.[a-z_]+',t)
+    mode='SHARE ROW EXCLUSIVE' if i==3 and t=='swarm.admin_grants' else l['mode']; assert mode in ('ACCESS EXCLUSIVE','SHARE ROW EXCLUSIVE','EXCLUSIVE')
+    if t!='supabase_migrations.schema_migrations': sql.append('LOCK TABLE '+t+' IN '+mode+' MODE;')
+    # Repeat the same bound under locks; no unbounded preflight/apply gap.
+    sql.append("DO $bounds$ BEGIN IF (SELECT count(*) FROM "+t+")>"+str(l['max_rows'])+" OR pg_total_relation_size("+lit(t)+"::regclass)>"+str(l['max_bytes'])+" THEN RAISE EXCEPTION 'live table exceeded bounds'; END IF; END $bounds$;")
+sql+=['\\i /release/supabase/migrations/'+new[i-1]['file'],"INSERT INTO supabase_migrations.schema_migrations(version) VALUES ("+lit(version)+");"]
+if i>=4:
+    # M2 creator membership is ADMIN-only. Temporarily permit SET in this
+    # transaction, restore SET FALSE before commit; no persistent widening.
+    sql += ['GRANT commonswarm_admin_release TO supabase_admin WITH ADMIN TRUE, INHERIT FALSE, SET TRUE;','SET LOCAL ROLE commonswarm_admin_release;']
+    records=[dict(version=version,sha256=new[i-1]['sha256'],source='release',released_sha=sha)]
+    if i==4:
+        records += [dict(version=r['version'],sha256=r['sha256'],source='backfill',released_sha=r['released_sha']) for r in old]
+        records += [dict(version=r['version'],sha256=r['sha256'],source='backfill',released_sha=sha) for r in new[:3]]
+    for r in records:
+        sql.append('INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES ('+','.join(lit(r[k]) for k in ('version','sha256','source','released_sha'))+');')
+    sql += ['RESET ROLE;','GRANT commonswarm_admin_release TO supabase_admin WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;']
+sql += ['COMMIT;']
+(p/('apply-'+version+'.sql')).write_text('\n'.join(sql)+'\n')
+(p/'current-budget.json').write_text(json.dumps(budget)+'\n')
+PY
+ START_SECONDS=$SECONDS
+ if ! ai_db -q --file "/proof/apply-$VERSION.sql" >"$PROOF_DIR/apply-$VERSION.log"; then
+  printf 'FAIL W2 apply/unknown COMMIT; STOP, retain prefix, run ai-w2-reconcile; no re-run\n' >&2
+  exit 1
+ fi
+ APPLY_SECONDS=$((SECONDS-START_SECONDS))
+ printf '%s|%s\n' "$VERSION" "$APPLY_SECONDS" >>"$PROOF_DIR/apply-durations.txt"
+ python3 - "$PROOF_DIR/current-budget.json" "$APPLY_SECONDS" <<'PY'
+import json,sys
+assert int(sys.argv[2])<=json.load(open(sys.argv[1]))['expected_hold_seconds'], 'FAIL apply wall duration exceeded expected hold; STOP, retain commit and reconcile'
+PY
+ ai_run ai-w2-between-probes
+done
+ai_run ai-w2-reconcile
 ```
 
 ```sh
 # step: ai-w2-reconcile
 # readonly: no
-# host: box root; database read-only, available after timeout/unknown COMMIT
+# host: box root; database read-only even after failure/unknown COMMIT
 set -euo pipefail
+test "$WINDOW" = W2
 ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/ledger-after.txt"
-ai_ro -Atq --command 'SELECT version,sha256,source,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version;' >"$PROOF_DIR/checksums-after.txt"
+CHECKSUM_PRESENT=$(ai_ro -Atq --command "SELECT to_regclass('commonswarm_ops.migration_checksums') IS NOT NULL;")
+case "$CHECKSUM_PRESENT" in t|f) ;; *) exit 1;; esac
+printf '%s\n' "$CHECKSUM_PRESENT" >"$PROOF_DIR/checksums-present.txt"
+if test "$CHECKSUM_PRESENT" = t; then
+ ai_ro -Atq --command 'SELECT version,sha256,source,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version;' >"$PROOF_DIR/checksums-after.txt"
+else
+ : >"$PROOF_DIR/checksums-after.txt"
+fi
 python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import json,pathlib,sys
-p=pathlib.Path(sys.argv[1]); new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
-expected=['|'.join([r['version'],r['sha256'],'release',sys.argv[2]]) for r in new]
-expected+=['|'.join([r['version'],r['sha256'],'backfill',r['released_sha']]) for r in old]
-assert (p/'ledger-after.txt').read_text().splitlines()==sorted(r['version'] for r in new+old)
-assert (p/'checksums-after.txt').read_text().splitlines()==sorted(expected), 'FAIL D2 readback; STOP'
-(p/'schema-committed.txt').write_text('all five ledger/checksum pairs and backfills exact\n')
+p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
+new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
+ledger=(p/'ledger-after.txt').read_text().splitlines(); baseline=sorted(r['version'] for r in old)
+prefix=[r for r in new if r['version'] in ledger]; n=len(prefix)
+assert prefix==new[:n] and ledger==sorted(baseline+[r['version'] for r in prefix]), 'FAIL non-prefix ledger; STOP'
+assert ((p/'checksums-present.txt').read_text().strip()=='t')==(n>=4), 'FAIL checksum relation/ledger prefix conflict; STOP'
+expected=[]
+if n>=4:
+    expected=['|'.join([r['version'],r['sha256'],'backfill',r['released_sha']]) for r in old]
+    expected+=['|'.join([r['version'],r['sha256'],'backfill',sha]) for r in new[:3]]
+    expected+=['|'.join([r['version'],r['sha256'],'release',sha]) for r in new[3:n]]
+assert (p/'checksums-after.txt').read_text().splitlines()==sorted(expected), 'FAIL D2 prefix checksum readback; STOP'
+(p/'schema-prefix.json').write_text(json.dumps(dict(committed=[r['version'] for r in prefix],complete=n==5,rerun_allowed=False))+'\n')
+if n==5: (p/'schema-committed.txt').write_text('all five ledger rows, M4/M5 checksums and complete backfills exact\n')
+else: raise SystemExit('STOP W2 incomplete committed prefix reconciled; retain it, no re-run')
 PY
 ```
-
-If the checksum relation is absent after an unknown COMMIT, reconciliation
-STOPs; the window is not retried. HezLead compares the entire ledger and reverse
-catalogs with the before receipt in a separate read-only diagnosis. No command
-in this plan erases partially observed state.
 
 ```sh
 # step: ai-w2-probes
@@ -719,6 +906,16 @@ in this plan erases partially observed state.
 set -euo pipefail
 test "$WINDOW" = W2
 test -f "$PROOF_DIR/schema-committed.txt"
+python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
+import datetime,json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
+for i in range(1,6):
+    v='2026100300000'+str(i); r=json.loads((p/('between-'+v+'.json')).read_text())
+    assert r['version']==v and r['release_sha']==sha and all(r[k] is True for k in ('discovery','token_health','human_read')), 'FAIL missing between-migration controls; STOP'
+    if i==5:
+        age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r['at'])).total_seconds()
+        assert 0<=age<=120, 'FAIL final W2 probes stale; STOP'
+PY
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
  printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
  test "$(ai_ro -Atq --file /proof/catalog.sql)" = t

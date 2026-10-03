@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -205,14 +205,185 @@ test('admin release plan: checker receipt validates exact build, controls and re
 });
 
 
-test('admin release plan: W2 refuses open and apply before mutation until the checksum bootstrap is redesigned', () => {
-  const calls = join(scratch, 'blocked-schema-calls');
-  const harness = `ai_db() { printf 'mutation\\n' >>'${calls}'; }; ai_ro() { printf 'query\\n' >>'${calls}'; };\n`;
-  for (const id of ['ai-open', 'ai-w2-apply']) {
-    const result = run(harness + block(id), { INPUTS_FILE: inputFile({ ...base(), window: 'W2' }) });
-    assert.notEqual(result.status, 0, `${id} opened the blocked schema window`);
-    assert.match(result.stderr, /per-migration D2 checksum bootstrap unavailable/);
-    assert.ok(!existsSync(calls), `${id} reached the database before refusal`);
+// W2 owns transaction admission/ordering at the executable plan boundary. Old
+// refusal coverage cannot prove the new split. Fake transport/database sinks
+// retain emitted SQL and derive ledger/checksum state from those INSERTs; no
+// product export or test-only plan flag is needed.
+const w2Versions = [1, 2, 3, 4, 5].map(i => `2026100300000${i}`);
+const w2Tables = ['commonswarm_oauth.interactions', 'swarm.admin_grants', 'swarm.hosted_mcp_grants',
+  'commonswarm_oauth.provider_artifacts', 'swarm.users', 'swarm.admin_accounts', 'swarm.admin_consents',
+  'swarm.admin_events', 'swarm.admin_credentials', 'commonswarm_oauth.refresh_family_tombstones',
+  'supabase_migrations.schema_migrations'];
+function w2Fixture() {
+  const root = mkdtempSync(join(scratch, 'w2-'));
+  const proof = join(root, 'proof'), shims = join(root, 'shims'); mkdirSync(proof); mkdirSync(shims);
+  const made = spawnSync('mktemp', ['-d', '/private/tmp/anvil-secret.XXXXXX'], { encoding: 'utf8' });
+  assert.equal(made.status, 0); const stage = made.stdout.trim();
+  // Synthetic credential-shaped values still obey the secret-window rules.
+  writeFileSync(join(stage, 'ordinary-probes.json'), JSON.stringify({
+    mcp_access_token: 'synthetic-mcp', human_access_token: 'synthetic-human', workspace_id: '11111111-1111-1111-1111-111111111111',
+  }), { mode: 0o600 });
+  const migrations = w2Versions.map(version => {
+    const filename = readdirSync('supabase/migrations').find(name => name.startsWith(version + '_'))!;
+    return { version, file: filename, sha256: digest(readFileSync(join('supabase/migrations', filename))) };
+  });
+  const old = ['20260928000003', '20261001000001'].map(version => {
+    const file = 'supabase/migrations/' + readdirSync('supabase/migrations').find(name => name.startsWith(version + '_'))!;
+    return { version, released_sha: 'c'.repeat(40), file, sha256: digest(readFileSync(file)) };
+  });
+  writeFileSync(join(proof, 'new-migrations.json'), JSON.stringify(migrations));
+  writeFileSync(join(proof, 'backfill.json'), JSON.stringify(old));
+  writeFileSync(join(proof, 'db-ledger'), old.map(r => r.version).sort().join('\n') + '\n');
+  writeFileSync(join(proof, 'db-checksums'), '');
+  // The SQL sink models COMMIT atomicity/response loss, not migration semantics.
+  writeFileSync(join(root, 'db.py'), `import os,pathlib,re,sys
+p=pathlib.Path(os.environ['PROOF_DIR']); args=' '.join(sys.argv[1:])
+if sys.argv[1]=='read':
+    if 'SELECT version FROM' in args: print((p/'db-ledger').read_text(),end='')
+    elif 'to_regclass' in args: print('t' if '20261003000004' in (p/'db-ledger').read_text() else 'f')
+    elif 'SELECT version,sha256' in args: print((p/'db-checksums').read_text(),end='')
+    else:
+        assert "SET lock_timeout='3s';" in args and "SET statement_timeout='60s';" in args and "SET transaction_timeout='60s';" in args, 'measurement timeout missing'
+        table=re.search(r'FROM ([a-z_]+\\.[a-z_]+);',args).group(1)
+        print(os.environ.get('OBSERVED_ROWS','1')+'|'+os.environ.get('OBSERVED_BYTES','1024'))
+else:
+    v=os.environ['VERSION']; sql=(p/('apply-'+v+'.sql')).read_text()
+    with (p/'submitted.sql').open('a') as f: f.write(sql)
+    if os.environ.get('FAIL_VERSION')==v: sys.exit(1)
+    versions=re.findall(r"INSERT INTO supabase_migrations.schema_migrations\\(version\\) VALUES \\('([0-9]+)'\\);",sql)
+    ledger=(p/'db-ledger').read_text().splitlines()+versions
+    (p/'db-ledger').write_text('\\n'.join(sorted(ledger))+'\\n')
+    rows=re.findall(r"INSERT INTO commonswarm_ops.migration_checksums\\(version,sha256,source,released_sha\\) VALUES \\('([^']+)','([^']+)','([^']+)','([^']+)'\\);",sql)
+    existing=(p/'db-checksums').read_text().splitlines()+['|'.join(r) for r in rows]
+    (p/'db-checksums').write_text('\\n'.join(sorted(existing))+('\\n' if existing else ''))
+    if os.environ.get('LOST_COMMIT_VERSION')==v: sys.exit(1)
+`);
+  // Intercept only HTTP at the external boundary; execute the real probe code.
+  writeFileSync(join(shims, 'sitecustomize.py'), `import json,os,pathlib,urllib.request
+class Response:
+    status=200
+    def __init__(self,data): self.data=data
+    def __enter__(self): return self
+    def __exit__(self,*args): pass
+    def read(self,n): return json.dumps(self.data).encode()
+class Opener:
+    def open(self,req,timeout):
+        with open(pathlib.Path(os.environ['PROOF_DIR'])/'http-calls','a') as f: f.write(req.full_url+'\\n')
+        if os.environ.get('FAIL_PROBE_VERSION')==os.environ.get('VERSION'): raise OSError('synthetic ingress failure')
+        if req.full_url.endswith('oauth-authorization-server'): return Response({'issuer':'https://mcp.commonswarm.com'})
+        if req.full_url.endswith('oauth-protected-resource/mcp'): return Response({'resource':'https://mcp.commonswarm.com/mcp'})
+        if req.data:
+            assert req.get_header('Authorization') is not None
+            body=json.loads(req.data)
+            if body.get('method')=='initialize': return Response({'id':1,'result':{'serverInfo':{'name':'ordinary'}}})
+            assert body['resource']=='pending_access'; return Response({'pending':[]})
+        return Response({'ok':True})
+urllib.request.build_opener=lambda *args: Opener()
+`);
+  const dispatcher = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
+  const harness = `export VERSION\nai_deadline() { :; }\nai_ro() { python3 '${root}/db.py' read "$@"; }\nai_db() { python3 '${root}/db.py' apply "$@"; }\nai_run() {\n${dispatcher}\n`;
+  const env = { WINDOW: 'W2', PROOF_DIR: proof, SECRET_STAGE: stage, RELEASE_ROOT: resolve('.'), RELEASE_SHA: sha,
+    PYTHONPATH: shims, PATH: '/Users/yulanbot/.local/bin:' + process.env.PATH };
+  return { proof, stage, env, harness, migrations, old,
+    clean: () => {
+      const result = spawnSync('/Users/yulanbot/.local/bin/rm', ['-r', '--', stage], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `guard refused ${stage}: ${result.stderr}`);
+    } };
+}
+
+test('admin release plan: W2 measures every live lock target; row/size limits refuse and measurements size capped timeouts', () => {
+  const f = w2Fixture();
+  try {
+    const positive = run(f.harness + block('ai-w2-measure'), f.env);
+    assert.equal(positive.status, 0, positive.stderr);
+    const measured = JSON.parse(readFileSync(join(f.proof, 'lock-measurements.json'), 'utf8'));
+    assert.deepEqual(measured.tables.map((t: { table: string }) => t.table), w2Tables);
+    const interactions = measured.tables.find((t: { table: string }) => t.table === w2Tables[0]);
+    assert.equal(interactions.max_rows, 100000); assert.equal(interactions.max_bytes, 256 * 1024 ** 2);
+    const small = measured.budgets.map((b: { timeout_seconds: number }) => b.timeout_seconds);
+    for (const l of measured.tables) {
+      // Independent admission controls: above EITHER bound refuses, at equality passes.
+      const text = block('ai-w2-measure');
+      const measuring = text.split('python3 - "$PROOF_DIR" <<\'PY\'')[2]!;
+      const validator = measuring.split('\nPY')[0]!;
+      const baseline = readFileSync(join(f.proof, 'table-measurements.txt'), 'utf8');
+      for (const [rows, bytes, pass] of [[l.max_rows, l.max_bytes, true], [l.max_rows + 1, 1024, false], [1, l.max_bytes + 1, false]] as const) {
+        const values = baseline.split('\n').map(line => line.startsWith(l.table + '|') ? `${l.table}|${rows}|${bytes}|0` : line).join('\n');
+        writeFileSync(join(f.proof, 'table-measurements.txt'), values);
+        const result = spawnSync('python3', ['-c', validator, f.proof], { encoding: 'utf8' });
+        assert.equal(result.status === 0, pass, `${l.table}: ${result.stderr}`);
+        if (!pass) assert.match(result.stderr, /live table refuse bounds/);
+      }
+      writeFileSync(join(f.proof, 'table-measurements.txt'), baseline);
+    }
+    assert.equal(run(f.harness + block('ai-w2-measure'), { ...f.env, OBSERVED_ROWS: '10000', OBSERVED_BYTES: String(16 * 1024 ** 2) }).status, 0);
+    const large = JSON.parse(readFileSync(join(f.proof, 'lock-measurements.json'), 'utf8'));
+    assert.ok(large.budgets.some((b: { timeout_seconds: number }, i: number) => b.timeout_seconds > small[i]!));
+    assert.ok(large.budgets.every((b: { timeout_seconds: number }) => b.timeout_seconds <= 60));
+  } finally { f.clean(); }
+});
+
+test('admin release plan: W2 commits five independent ledger transactions; M4 backfills all earlier bytes; probes separate commits and rerun refuses', () => {
+  const f = w2Fixture();
+  try {
+    assert.equal(run(f.harness + block('ai-w2-measure'), f.env).status, 0);
+    const result = run(f.harness + block('ai-w2-apply'), f.env);
+    assert.equal(result.status, 0, result.stderr);
+    for (const [index, version] of w2Versions.entries()) {
+      const sql = readFileSync(join(f.proof, `apply-${version}.sql`), 'utf8');
+      assert.equal((sql.match(/^BEGIN;$/gm) ?? []).length, 1);
+      assert.equal((sql.match(/^COMMIT;$/gm) ?? []).length, 1);
+      assert.equal((sql.match(/^\\i \/release\/supabase\/migrations\//gm) ?? []).length, 1);
+      assert.equal((sql.match(/INSERT INTO supabase_migrations.schema_migrations\(version\)/g) ?? []).length, 1);
+      assert.match(sql, /SET LOCAL lock_timeout='3s';/);
+      assert.match(sql, /SET LOCAL statement_timeout='(?:[1-5][0-9]|60)s';/);
+      assert.match(sql, /SET transaction_timeout='(?:[1-5][0-9]|60)s';\nBEGIN;/);
+      assert.match(sql, /unexpected ledger prefix/);
+      const measured = JSON.parse(readFileSync(join(f.proof, 'lock-measurements.json'), 'utf8'));
+      for (const table of measured.tables.filter((t: { migrations: number[] }) => t.migrations.includes(index + 1))) {
+        assert.ok(sql.includes(`(SELECT count(*) FROM ${table.table})>${table.max_rows} OR pg_total_relation_size('${table.table}'::regclass)>${table.max_bytes}`), `${version}: under-lock row/size bound for ${table.table}`);
+      }
+      const rows = [...sql.matchAll(/INSERT INTO commonswarm_ops.migration_checksums\(version,sha256,source,released_sha\) VALUES \('([^']+)','([^']+)','([^']+)','([^']+)'\);/g)].map(r => r.slice(1));
+      const expected = index < 3 ? [] : [[version, f.migrations[index]!.sha256, 'release', sha]];
+      if (index === 3) {
+        expected.push(...f.old.map(r => [r.version, r.sha256, 'backfill', r.released_sha]));
+        expected.push(...f.migrations.slice(0, 3).map(r => [r.version, r.sha256, 'backfill', sha]));
+      }
+      assert.deepEqual(rows, expected, `${version} checksum source/version/hash/sha contract`);
+      assert.ok(sql.indexOf('INSERT INTO supabase_migrations') < sql.indexOf('COMMIT;'));
+      if (index >= 3) {
+        assert.match(sql, /SET LOCAL ROLE commonswarm_admin_release;/);
+        assert.match(sql, /RESET ROLE;\nGRANT commonswarm_admin_release TO supabase_admin WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;\nCOMMIT;/);
+      }
+      assert.ok(existsSync(join(f.proof, `between-${version}.json`)));
+    }
+    const prefix = JSON.parse(readFileSync(join(f.proof, 'schema-prefix.json'), 'utf8'));
+    assert.deepEqual(prefix.committed, w2Versions); assert.equal(prefix.complete, true);
+    assert.ok(existsSync(join(f.proof, 'schema-committed.txt')));
+    assert.equal(readFileSync(join(f.proof, 'http-calls'), 'utf8').trim().split('\n').length, 25);
+    const submitted = readFileSync(join(f.proof, 'submitted.sql'), 'utf8');
+    assert.notEqual(run(f.harness + block('ai-w2-apply'), f.env).status, 0);
+    assert.equal(readFileSync(join(f.proof, 'submitted.sql'), 'utf8'), submitted, 'rerun reached database');
+  } finally { f.clean(); }
+});
+
+test('admin release plan: W2 query/probe failures stop before next migration; uncertain COMMIT reconciles the ledger with or without M4', () => {
+  const faults: Array<Record<string, string>> = [{ FAIL_VERSION: w2Versions[1]! }, { FAIL_PROBE_VERSION: w2Versions[1]! },
+    { LOST_COMMIT_VERSION: w2Versions[1]! }, { LOST_COMMIT_VERSION: w2Versions[3]! }];
+  for (const fault of faults) {
+    const f = w2Fixture();
+    try {
+      assert.equal(run(f.harness + block('ai-w2-measure'), f.env).status, 0);
+      const result = run(f.harness + block('ai-w2-apply'), { ...f.env, ...fault });
+      assert.notEqual(result.status, 0);
+      assert.ok(!existsSync(join(f.proof, 'schema-committed.txt')));
+      const committed = 'FAIL_VERSION' in fault ? 1 : 'LOST_COMMIT_VERSION' in fault && fault.LOST_COMMIT_VERSION === w2Versions[3] ? 4 : 2;
+      const reconcile = run(f.harness + block('ai-w2-reconcile'), f.env);
+      assert.notEqual(reconcile.status, 0); assert.match(reconcile.stderr, /incomplete committed prefix reconciled/);
+      const prefix = JSON.parse(readFileSync(join(f.proof, 'schema-prefix.json'), 'utf8'));
+      assert.deepEqual(prefix.committed, w2Versions.slice(0, committed)); assert.equal(prefix.rerun_allowed, false);
+      assert.ok(!existsSync(join(f.proof, `apply-${w2Versions[committed + ('FAIL_VERSION' in fault ? 1 : 0)]}.sql`)));
+    } finally { f.clean(); }
   }
 });
 

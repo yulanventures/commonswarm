@@ -8,15 +8,21 @@ read a keychain, or fetched credentials. Test secrets stayed in fresh 0700
 HOME was not changed. Reserve SQL remains verbatim.
 
 W1 verifies a fresh database/object backup and completed isolated restore
-receipt. W2 is BLOCKED before open/apply: M4 creates the D2 checksum table and M2
-creates its writer role after M1. Unchanged migrations cannot supply M1's
-checksum in its own transaction. The unsafe five-migration transaction was
-removed. HezLead must assign a migration redesign before a replacement W2 can
-supply measured holds, bounds, short statements, lock_timeout=3s and probes
-between committed migrations. No live row/size/hold measurements were made.
-M1 ACCESS EXCLUSIVE blocks both reads and writes, so the requested blanket
-reads-unaffected claim is also impossible with these unchanged migrations.
-Future successful W2 provisions the issuer credential on the box. The credential is 0440 root:986, readable by the AS group;
+receipt. W2 now implements HezLead's split ruling: M1–M3 ledger-only
+transactions, M4 table + ledger/own checksum + complete historical/M1–M3
+backfill, M5 ledger/checksum transaction. Executable live row/total-size
+measurements refuse every stated bound before M1, and repeat under locks.
+Interactions refuse above 100000 rows OR 256 MiB. Other bounds and expected
+holds (M1 30s; M2/M3 15s; M4/M5 10s) are in RELEASE.md. Measurement-sized
+statement and total PG17 transaction timeouts cap at 60s; lock timeout is 3s.
+M1 ACCESS EXCLUSIVE blocks reads and writes. After each commit the plan probes
+ordinary discovery, authenticated MCP token health and human pending_access.
+Failure stops; committed prefixes stay; a durable marker refuses rerun;
+reconciliation handles absent M4 and uncertain commits using the ledger.
+Reserves remain verbatim and require separate data-free authorization.
+No live row/size/hold measurement was made; estimates require the box preflight
+and actual apply timing. HezLead supplies staged ordinary probe credentials.
+W2 provisions the issuer credential on the box. The credential is 0440 root:986, readable by the AS group;
 it is never printed or copied off the box. Initial provisioning refuses an
 existing credential. Rotation needs a separately reviewed window.
 
