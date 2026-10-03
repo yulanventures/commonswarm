@@ -16,6 +16,7 @@ import { hashOpaque, SESSION_COOKIE } from '../src/browser-security.js';
 import { InteractionStore } from '../src/interaction-store.js';
 import { ISSUER, RESOURCE } from '../src/provider.js';
 import { startServer } from '../src/server.js';
+import { localClusterAdminUrl } from '../../../tests/support/admin-schema-db.js';
 
 const exec = promisify(execFile);
 const clientHost = 'metadata.oauth-contract.example';
@@ -122,7 +123,7 @@ async function startEdge(directory, config) {
 test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE tokens and edge MCP',
   { timeout: 180_000 }, async t => {
     assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(new URL(databaseUrl).hostname), 'local CI database required');
-    const pool = new Pool({ connectionString: databaseUrl, max: 2, connectionTimeoutMillis: 3_000 });
+    const pool = new Pool({ connectionString: localClusterAdminUrl(databaseUrl), max: 2, connectionTimeoutMillis: 3_000 });
     t.after(() => pool.end());
     const catalog = await pool.query("SELECT to_regclass('commonswarm_oauth.registered_clients') IS NOT NULL AS ready");
     assert.equal(catalog.rows[0]?.ready, true, 'reset the CI stack through the real migrations before this test');
@@ -132,7 +133,16 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
     await chmod(directory, 0o700);
     const sessions = new Set(), clients = new Set();
     let running, edge, metadataServer, gotrue;
+    let runtimePasswordConfigured = false;
     try {
+      // Match the adapter fixture and production's dedicated runtime login.
+      // The migration creator's ADMIN-only membership cannot SET ROLE; a
+      // postgres login with a startup role override is not that product path.
+      const runtimeDatabaseUrl = new URL(databaseUrl);
+      runtimeDatabaseUrl.username = 'commonswarm_oauth_runtime';
+      runtimeDatabaseUrl.password = randomBytes(32).toString('hex');
+      await pool.query(`ALTER ROLE commonswarm_oauth_runtime PASSWORD '${runtimeDatabaseUrl.password}'`);
+      runtimePasswordConfigured = true;
       const owner = randomUUID(), other = randomUUID();
       const workspaces = [randomUUID(), randomUUID()].sort();
       // Synthetic identities replace only external interactive sign-in. All
@@ -205,7 +215,7 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
       running = await startServer({
         config: {
           issuer: ISSUER, resource: RESOURCE, publicAuthorizationEnabled: true, port: 0,
-          database: { connectionString: databaseUrl, max: 2, options: '-c role=commonswarm_oauth_runtime' },
+          database: { connectionString: runtimeDatabaseUrl.toString(), max: 2 },
           jwks: { keys: [{ ...await exportJWK(privateKey), kid: 'oauth-contract', alg: 'ES256', use: 'sig' }] },
           cookieKeys: [randomBytes(32).toString('base64url'), randomBytes(32).toString('base64url')],
           allowedOrigins: new Set([ISSUER]), gotrueUrl, gotrueProvider: 'github',
@@ -222,6 +232,10 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
           return await bridge('/management', { input, identity });
         },
       });
+      const principal = await running.pool.query('SELECT session_user AS principal, current_user AS role');
+      assert.deepEqual(principal.rows[0], {
+        principal: 'commonswarm_oauth_runtime', role: 'commonswarm_oauth_runtime',
+      }, 'OAuth storage uses the dedicated runtime login and its migrated privileges');
       const authOrigin = `http://127.0.0.1:${running.server.address().port}`;
       bridgeReady = startEdge(directory, { databaseUrl, gotrueUrl, authOrigin, bridgeKey: randomBytes(32).toString('base64url') });
       edge = await bridgeReady;
@@ -442,8 +456,12 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         for (const session of sessions) await pool.query('DELETE FROM commonswarm_oauth.browser_sessions WHERE session_hash = $1', [hashOpaque(session)]);
         assert.ok(stopped.every(result => result.status === 'fulfilled'), 'all task-owned fixture services stopped');
       } finally {
-        assert.equal(resolve(directory), directory);
-        await exec('rm', ['-rf', directory]);
+        try {
+          if (runtimePasswordConfigured) await pool.query('ALTER ROLE commonswarm_oauth_runtime PASSWORD NULL');
+        } finally {
+          assert.equal(resolve(directory), directory);
+          await exec('rm', ['-rf', directory]);
+        }
       }
     }
   });
