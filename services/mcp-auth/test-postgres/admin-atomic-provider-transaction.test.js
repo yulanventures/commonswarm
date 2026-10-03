@@ -554,7 +554,7 @@ test("admin-atomic-provider-transaction: pinned real HTTP consent, continuation,
           assert.ok(!("access_token" in denied) && !("refresh_token" in denied));
           assert.equal(loser.response.headers.get("location"), null, "loser cannot reveal a code or continuation");
           if (name === "consent finish") {
-            assert.equal(denied.error, "consent_receipt_invalid");
+            assert.equal(denied.error, "invalid_request");
             assert.deepEqual(Object.keys(denied).sort(), ["error", "request_id"], "no grant or receipt data leaks");
           }
           assert.equal((await f.pool.query(`SELECT state FROM commonswarm_oauth.admin_grant_bindings WHERE provider_grant_id=$1`,[f.family()])).rows[0].state,"active");

@@ -1,5 +1,5 @@
 import { effectiveAdminGate } from "./admin-gate.js";
-import { ADMIN_RESOURCE, adminConsentOptions } from "./admin-policy.generated.js";
+import { ADMIN_RESOURCE, ADMIN_ACCESS_TTL_SECONDS, adminConsentOptions } from "./admin-policy.generated.js";
 import { AdminConsentError, adminDigest, resolveAdminClientMetadata } from "./admin-consent.js";
 import { AdminTokenLifecycle, adminTokenLifetime, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { adminTransactionContext, adminQuery } from "./admin-transaction.js";
@@ -211,8 +211,14 @@ export async function createMcpProvider({
     ttl: {
       // A numeric override bypasses the provider's resource TTL. Admin JWTs
       // must use the consent-clipped TTL calculated under the issuer locks.
-      AccessToken: (_ctx, token) => token.aud === ADMIN_RESOURCE
-        ? token.resourceServer.accessTokenTTL : accessTokenTtlSeconds,
+      AccessToken: (_ctx, token) => {
+        if (token.aud !== ADMIN_RESOURCE) return accessTokenTtlSeconds;
+        const ttl = token.resourceServer?.accessTokenTTL;
+        if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > ADMIN_ACCESS_TTL_SECONDS) {
+          throw new AdminConsentError("invalid_grant", 400);
+        }
+        return ttl;
+      },
       AuthorizationCode: authorizationCodeTtlSeconds,
       Grant: refreshTokenTtlSeconds,
       Interaction: 10 * 60,

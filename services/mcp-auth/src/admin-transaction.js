@@ -1,13 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { AdminOAuthError } from "./admin-oauth-error.js";
 
 const requests = new AsyncLocalStorage();
 const roles = new AsyncLocalStorage();
 const savepoints = new AsyncLocalStorage();
 const ALLOWED_ROLES = new Set(["commonswarm_oauth_runtime", "swarm_command"]);
 
-export class AdminTransactionError extends Error {
-  constructor(code) { super(code); this.code = code; }
+export class AdminTransactionError extends AdminOAuthError {
+  constructor(code) { super(code, 503); }
 }
 export function adminTransactionContext(required = true) {
   const scope = requests.getStore();
@@ -199,9 +200,9 @@ export class AdminTransactionCoordinator {
         response.statusCode = 503;
         response.setHeader("content-type", "application/json");
         response.setHeader("cache-control", "no-store");
-        const clientCode = ["invalid_grant","invalid_scope","unauthorized_client","consent_receipt_invalid"].includes(error.code) ? error.code : null;
-        if (!unknown && clientCode) response.statusCode = error.status ?? 400;
-        response.end(JSON.stringify({ error: unknown ? "issuance_outcome_unknown" : clientCode ?? "temporarily_unavailable",
+        const refusal = error instanceof AdminOAuthError ? error : null;
+        if (!unknown && refusal) response.statusCode = refusal.statusCode;
+        response.end(JSON.stringify({ error: unknown ? "issuance_outcome_unknown" : refusal?.error ?? "temporarily_unavailable",
           request_id: scope.requestId }));
       }
       // Private result for ingress diagnostics. The public response above never

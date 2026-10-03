@@ -1,4 +1,5 @@
 import { effectiveAdminGate } from "./admin-gate.js";
+import { AdminOAuthError } from "./admin-oauth-error.js";
 import { adminTransactionContext, joinAdminTransaction } from "./admin-transaction.js";
 import { interactionRow } from "./interaction-store.js";
 import { createHash, createHmac, randomUUID } from "node:crypto";
@@ -14,12 +15,10 @@ export const ADMIN_AUTH_MAX_AGE_MS = 5 * 60 * 1000;
 const OIDC_SCOPES = new Set(["openid", "offline_access"]);
 const DPOP_ALGS = new Set(["ES256", "Ed25519", "EdDSA"]);
 
-export class AdminConsentError extends Error {
+export class AdminConsentError extends AdminOAuthError {
   constructor(code, status = 403) {
-    super(code);
+    super(code, status);
     this.name = "AdminConsentError";
-    this.code = code;
-    this.status = status;
   }
 }
 function refuse(code = "unauthorized_client", status) { throw new AdminConsentError(code, status); }

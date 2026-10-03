@@ -10,9 +10,9 @@ import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { createLogger } from "../src/logger.js";
 import { calculateJwkThumbprint, decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
 import { AdminTokenLifecycle } from "../src/admin-lifecycle.js";
-import { adminDigest, createAdminManifest } from "../src/admin-consent.js";
+import { AdminConsentError, adminDigest, createAdminManifest } from "../src/admin-consent.js";
 import { emptyAdminAccount } from "../src/admin-authority.generated.js";
-import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
+import { AdminTransactionCoordinator, AdminTransactionError } from "../src/admin-transaction.js";
 import { admitAdminProof, verifyAdminProof } from "../src/admin-dpop.js";
 
 async function fixture(t, { issuerPool = null } = {}) {
@@ -198,7 +198,7 @@ test("ordinary /token delegates the original unread HTTP stream without an admin
 
 // SQL fixtures supply committed read rows; the real bridge/reducer, lifecycle,
 // provider exchange, signing and ledger validation execute without a service.
-async function adminExchange(t, seconds, { badExpiry = false } = {}) {
+async function adminExchange(t, seconds, { badExpiry = false, refusal, missingResourceServer = false } = {}) {
   const now = Math.floor(Date.now() / 1000) * 1000, owner = randomUUID(), grantId = randomUUID();
   const clientId = "https://client.example/metadata", redirectUri = "https://client.example/callback";
   const key = await generateKeyPair("ES256", { extractable: true });
@@ -252,8 +252,19 @@ async function adminExchange(t, seconds, { badExpiry = false } = {}) {
     if (sql.includes("INSERT INTO commonswarm_oauth.admin_access_issuances")) ledger.push(values);
     return { rows: [], rowCount: 0, command: sql.split(" ")[0] };
   }, release() {} }) };
+  let refusalReached = false;
   const provider = await createMcpProvider({ jwks: { keys: [signingJwk] }, activeSigningKid: signingJwk.kid,
-    registrationEnabled: false, registrationStore: { find: async () => metadata, markUsed: async () => {} } });
+    registrationEnabled: false, registrationStore: { find: async () => metadata, markUsed: async () => {
+      if (refusal) { refusalReached = true; throw refusal; }
+    } } });
+  if (missingResourceServer) {
+    const expiresIn = provider.AccessToken.expiresIn;
+    provider.AccessToken.expiresIn = function (ctx, token, ...args) {
+      refusalReached = true;
+      Object.defineProperty(token, "resourceServer", { value: undefined, configurable: true });
+      return expiresIn.call(this, ctx, token, ...args);
+    };
+  }
   provider.on("grant.error", (_ctx, error) => failures.push(error));
   provider.on("server_error", (_ctx, error) => serverErrors.push(error));
   if (badExpiry) {
@@ -279,6 +290,7 @@ async function adminExchange(t, seconds, { badExpiry = false } = {}) {
   const dpop = await new SignJWT({ htm: "POST", htu: `${ISSUER}/token`, iat: now / 1000,
     jti: randomUUID(), nonce: "boundary-nonce" }).setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk }).sign(key.privateKey);
   const proof = await admitAdminProof(pool, await verifyAdminProof({ method: "POST", headers: { dpop } }, jkt));
+  queries.length = 0; // Observe the issuance unit separately from proof admission.
   const params = { client_id: clientId, grant_type: "authorization_code", code, code_verifier: verifier,
     redirect_uri: redirectUri, resource: ADMIN_RESOURCE };
   const coordinator = new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: true });
@@ -293,7 +305,7 @@ async function adminExchange(t, seconds, { badExpiry = false } = {}) {
   const response = await fetch(`http://127.0.0.1:${server.address().port}/token`, { method: "POST",
     headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host, "x-forwarded-proto": "https", dpop,
       "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params) });
-  return { status: response.status, body: await response.json(), grant, events, ledger, failures, serverErrors, queries,
+  return { status: response.status, body: await response.json(), grant, events, ledger, failures, serverErrors, queries, refusalReached,
     diagnostic: JSON.stringify({ refusal: outcome?.cause?.code,
       grantErrors: failures.map(error => error.error), serverErrors: serverErrors.map(error => error.code) }) };
 }
@@ -326,4 +338,73 @@ test("admin token validation refusal maps to OAuth invalid_grant 400 and rolls b
   const control = await adminExchange(t, 600);
   assert.equal(control.status, 200);
   assert.equal(control.ledger.length, 1);
+});
+
+test("all admin consent and coordinator refusals remain exposed OAuth errors through the real provider and rollback", async t => {
+  const cases = [
+    ["invalid_grant", 400, "invalid_grant"],
+    ["invalid_scope", 400, "invalid_scope"],
+    ["unauthorized_client", 403, "unauthorized_client"],
+    ["invalid_target", 400, "invalid_target"],
+    ["invalid_request", 400, "invalid_request"],
+    ["invalid_manifest", 400, "invalid_request"],
+    ["consent_receipt_invalid", 400, "invalid_request"],
+    ["authentication_required", 403, "access_denied"],
+    ["fresh_authentication_required", 403, "access_denied"],
+    ["origin_forbidden", 403, "access_denied"],
+    ["workspace_forbidden", 403, "access_denied"],
+    ["dpop_required", 403, "invalid_dpop_proof"],
+    ["admin_issuance_disabled", 503, "temporarily_unavailable"],
+    ["admin_migration_evidence_incomplete", 503, "temporarily_unavailable"],
+    ["future_consent_refusal", 400, "invalid_request"],
+    ["future_consent_outage", 503, "temporarily_unavailable"],
+  ];
+  for (const [code, status, oauth] of cases) await t.test(code, async t => {
+    const result = await adminExchange(t, 600, { refusal: new AdminConsentError(code, status) });
+    assert.equal(result.refusalReached, true);
+    assert.equal(result.status, status, result.diagnostic);
+    assert.equal(result.body.error, oauth);
+    assert.equal(result.serverErrors.length, 0);
+    assert.equal(result.failures.length, 1);
+    assert.equal(result.failures[0].error, oauth);
+    assert.equal(result.failures[0].statusCode, status);
+    assert.equal(result.failures[0].expose, true);
+    assert.ok(!("access_token" in result.body) && !("refresh_token" in result.body));
+    assert.ok(result.queries.includes("ROLLBACK"));
+    assert.ok(!result.queries.includes("COMMIT"));
+  });
+  await t.test("coordinator refusal inside provider", async t => {
+    const result = await adminExchange(t, 600, { refusal: new AdminTransactionError("admin_transaction_required") });
+    assert.equal(result.refusalReached, true);
+    assert.equal(result.status, 503, result.diagnostic);
+    assert.equal(result.body.error, "temporarily_unavailable");
+    assert.equal(result.serverErrors.length, 0);
+    assert.equal(result.failures.length, 1);
+    assert.equal(result.failures[0].error, "temporarily_unavailable");
+    assert.equal(result.failures[0].statusCode, 503);
+    assert.equal(result.failures[0].expose, true);
+    assert.ok(!("access_token" in result.body) && !("refresh_token" in result.body));
+    assert.ok(result.queries.includes("ROLLBACK"));
+    assert.ok(!result.queries.includes("COMMIT"));
+  });
+  const control = await adminExchange(t, 600);
+  assert.equal(control.status, 200, control.diagnostic);
+  assert.equal(typeof control.body.access_token, "string");
+});
+
+test("admin access token without resourceServer refuses cleanly without issuing a token", async t => {
+  const result = await adminExchange(t, 600, { missingResourceServer: true });
+  assert.equal(result.refusalReached, true);
+  assert.equal(result.status, 400, result.diagnostic);
+  assert.equal(result.body.error, "invalid_grant");
+  assert.equal(result.serverErrors.length, 0);
+  assert.equal(result.failures.length, 1);
+  assert.ok(result.failures[0] instanceof errors.InvalidGrant);
+  assert.equal(result.ledger.length, 0);
+  assert.ok(!("access_token" in result.body) && !("refresh_token" in result.body));
+  assert.ok(result.queries.includes("ROLLBACK"));
+  assert.ok(!result.queries.includes("COMMIT"));
+  const control = await adminExchange(t, 120);
+  assert.equal(control.status, 200, control.diagnostic);
+  assert.ok(decodeJwt(control.body.access_token).exp * 1000 <= control.grant.expires_at);
 });

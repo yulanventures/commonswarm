@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { AdminTransactionCoordinator, adminQuery, adminTransactionContext, withAdminRole, joinAdminTransaction,
+import { AdminTransactionCoordinator, AdminTransactionError, adminQuery, adminTransactionContext, withAdminRole, joinAdminTransaction,
   scopedAdminPool } from "../src/admin-transaction.js";
 
 const latch = () => { let release; return { promise: new Promise(r => { release = r; }), release: () => release() }; };
@@ -131,4 +131,38 @@ test("production coordinator uses savepoints for nested adapter work; intentiona
   assert.equal(commands.filter(sql => sql === "COMMIT").length, 1);
   assert.equal(commands.filter(sql => sql.startsWith("SAVEPOINT ")).length, 2);
   assert.equal(commands.filter(sql => sql.startsWith("RELEASE SAVEPOINT ")).length, 2);
+});
+
+test("every coordinator refusal rolls back to a safe OAuth 503 without releasing staged credentials", async t => {
+  const codes = [
+    "admin_transaction_required", "admin_transaction_control_forbidden", "admin_role_forbidden",
+    "admin_parallel_nested_transaction_forbidden", "admin_response_already_ended",
+    "admin_response_too_large", "admin_response_flush_forbidden", "admin_response_incomplete",
+    "admin_nested_unit_forbidden", "admin_issuer_role_required", "admin_unawaited_write",
+    "admin_provider_refused", "admin_commit_rolled_back", "admin_proof_admission_must_be_separate",
+    "admin_failure_audit_must_be_separate", "admin_projection_inconsistent",
+    "admin_lifecycle_capability_required", "admin_verified_proof_required", "admin_fresh_human_required",
+    "issuance_outcome_unknown", "future_coordinator_refusal",
+  ];
+  for (const code of codes) await t.test(code, async t => {
+    const pool = database(), refusal = new AdminTransactionError(code);
+    const origin = await serverFixture(t, pool, async (_request, response) => {
+      response.end("staged-credential");
+      throw refusal;
+    });
+    const response = await fetch(origin), body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.error, "temporarily_unavailable");
+    assert.equal(typeof body.request_id, "string");
+    assert.ok(!JSON.stringify(body).includes("staged-credential"));
+    assert.ok(pool.clients[0].sql.includes("ROLLBACK"));
+    assert.ok(!pool.clients[0].sql.includes("COMMIT"));
+    assert.deepEqual(pool.clients[0].releases, [false]);
+  });
+  const pool = database();
+  const origin = await serverFixture(t, pool, async (_request, response) => response.end("healthy"));
+  const control = await fetch(origin);
+  assert.equal(control.status, 200);
+  assert.equal(await control.text(), "healthy");
+  assert.ok(pool.clients[0].sql.includes("COMMIT"));
 });

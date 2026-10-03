@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { adminTransactionContext } from "./admin-transaction.js";
 import { adminProofAdmitted } from "./admin-dpop.js";
-import { AdminConsentError } from "./admin-consent.js";
+import { AdminOAuthError } from "./admin-oauth-error.js";
 import { errors } from "oidc-provider";
 
 export const ADMIN_TOKEN_INGRESS = Symbol("admin-token-ingress");
@@ -27,17 +27,24 @@ export async function bindProviderAdminNonceStore(provider, finishToken) {
       const operation = async () => {
         try { await handler(ctx); await finishToken(ctx); }
         catch (error) {
-          const ErrorType = error instanceof AdminConsentError ? {
+          if (!(error instanceof AdminOAuthError)) throw error;
+          const ErrorType = {
             invalid_grant: errors.InvalidGrant,
             invalid_scope: errors.InvalidScope,
             unauthorized_client: errors.UnauthorizedClient,
-          }[error.code] : undefined;
-          if (!ErrorType) throw error;
+          }[error.error];
           // The provider catches OAuth errors. Retain the refusal for the
-          // coordinator so it rolls back and preserves the public 400 mapping.
+          // coordinator so it rolls back and preserves the intended status.
           const scope = adminTransactionContext(false);
           if (scope) scope.failure ??= error;
-          throw new ErrorType({ cause: error });
+          if (!ErrorType) throw error;
+          const mapped = ErrorType === errors.InvalidScope
+            ? new ErrorType("requested scope is not allowed", undefined, { cause: error })
+            : ErrorType === errors.UnauthorizedClient
+              ? new ErrorType(undefined, { cause: error }) : new ErrorType({ cause: error });
+          mapped.status = mapped.statusCode = error.statusCode;
+          mapped.expose = true;
+          throw mapped;
         }
       };
       const ingress = ctx.req[ADMIN_TOKEN_INGRESS];
