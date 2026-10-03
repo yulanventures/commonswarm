@@ -361,7 +361,8 @@ test('ordinary-paths-unchanged / consent-receipt-binding: ai-open refuses a miss
   }
   { const o = openFixture('W1'), { live } = openPair('W1', 'pre-W1');
     openRefused(o, o.open(null, live, { CONSENT_RECEIPT_FILE: join(o.f.root, 'absent-consent.json') }), 'FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got missing-or-not-regular; STOP');
-    openRefused(o, o.open(null, live, { CONSENT_RECEIPT_FILE: undefined }), 'FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP'); }
+    openRefused(o, o.open(null, live, { CONSENT_RECEIPT_FILE: undefined }), 'FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP');
+    openRefused(o, o.open(null, live, { LIVE_CONTROLS_FILE: undefined }), 'FAIL ai-open: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP'); }
   { const o = openFixture('W1'), { live } = openPair('W1', 'pre-W1');
     openRefused(o, o.open('not json', live), 'FAIL ai-open: CONSENT_RECEIPT_FILE JSON expected object got non-object; STOP'); }
 });
@@ -412,6 +413,12 @@ test('ordinary-paths-unchanged / per-window-consent-phase: ai-live-controls bind
     const result = f.run(['ai-live-controls'], 'W3', { CONSENT_RECEIPT_FILE: join(f.root, 'absent-consent.json') });
     stopped(result, 'FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got missing-or-not-regular; STOP');
     assert.ok(!existsSync(join(f.proof, 'ordinary-after.json'))); }
+  for (const name of ['LIVE_CONTROLS_FILE', 'CONSENT_RECEIPT_FILE', 'RELEASE_ROOT', 'PROOF_DIR']) {
+    const f = fixture(), text = JSON.stringify(consentReceipt('pre-W1')); f.put('consent.json', text); f.put('controls.json', liveReceipt('W3', 'fixture', 'after', text));
+    const result = f.run(['ai-live-controls'], 'W3', { [name]: undefined });
+    stopped(result, `FAIL ai-live-controls: ${name} expected ${name.endsWith('_FILE') ? 'absolute-regular-file' : 'open-shell-variable'} got unset; STOP`);
+    assert.ok(!result.calls.some(c => c[0] === 'python3')); assert.ok(!existsSync(join(f.proof, 'ordinary-after.json')));
+  }
 });
 test('ordinary-paths-unchanged / open-receipts-retained: W3 preflight refuses without the retained pre-W1 consent copy', () => {
   const good = fixture(); pass(good.run(['ai-w3-preflight']));

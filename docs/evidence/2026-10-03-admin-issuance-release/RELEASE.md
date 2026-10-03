@@ -380,7 +380,7 @@ subprocess.run(['/bin/bash'],input=found[0],text=True,check=True)
 PY
 ;; esac
 test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
-: "${LIVE_CONTROLS_FILE:?reviewed live authenticated before controls required}"
+: "${LIVE_CONTROLS_FILE:?FAIL ai-open: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
 : "${CONSENT_RECEIPT_FILE:?FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
 test -f "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH"
 test "$(stat -c %a "$BOX_ARCHIVE_PATH")" = 600
@@ -636,7 +636,10 @@ STOP before the window opens.
 # readonly: yes
 # host: box; read independently produced, nonsecret window probes
 set -euo pipefail
-: "${LIVE_CONTROLS_FILE:?}" "${CONSENT_RECEIPT_FILE:?}" "${RELEASE_ROOT:?}" "${PROOF_DIR:?}"
+: "${LIVE_CONTROLS_FILE:?FAIL ai-live-controls: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
+: "${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
+: "${RELEASE_ROOT:?FAIL ai-live-controls: RELEASE_ROOT expected open-shell-variable got unset; STOP}"
+: "${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}"
 # Producer bytes come from RELEASE_ROOT, reconciled byte-for-byte with the archive at open.
 python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$RELEASE_ROOT" "$PROOF_DIR" <<'PY'
 import datetime,hashlib,json,pathlib,re,sys
