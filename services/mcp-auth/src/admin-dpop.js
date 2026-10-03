@@ -1,13 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import { calculateJwkThumbprint, compactVerify, decodeProtectedHeader, importJWK } from "jose";
 import { adminTransactionContext, AdminTransactionError } from "./admin-transaction.js";
+import { AdminOAuthError } from "./admin-oauth-error.js";
 
 const verified = new WeakSet(), admitted = new WeakSet();
 export const adminProofAdmitted = proof => proof != null && admitted.has(proof);
 const TOKEN_URI = "https://mcp.commonswarm.com/token";
 const digest = value => createHash("sha256").update(value).digest();
-export class AdminDpopError extends Error {
-  constructor(code, nonce) { super(code); this.code = code; this.nonce = nonce; this.status = 400; }
+export class AdminDpopError extends AdminOAuthError {
+  constructor(code, nonce) { super(code, 400); this.nonce = nonce; }
 }
 
 // Header/URI/signature checks precede nonce challenges. Forwarded headers never

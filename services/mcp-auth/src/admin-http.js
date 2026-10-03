@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { ADMIN_TOKEN_INGRESS } from "./provider-admin-pin.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError } from "./admin-consent.js";
+import { oauthErrorResponse } from "./admin-oauth-error.js";
 import { AdminTransactionCoordinator } from "./admin-transaction.js";
-import { admitAdminProof, verifyAdminProof, recordAdminSecurityFailure, AdminDpopError } from "./admin-dpop.js";
+import { admitAdminProof, verifyAdminProof, recordAdminSecurityFailure } from "./admin-dpop.js";
 import { AdminTokenLifecycle, requireMeasuredAdminRelease } from "./admin-lifecycle.js";
 import { hashOpaque, parseCookies, SESSION_COOKIE } from "./browser-security.js";
 import { logProviderError } from "./logger.js";
@@ -112,8 +113,8 @@ export function createAdminHttpHandler({ handler, runtimePool, issuerPool, activ
     } catch (error) {
       if (logger) logProviderError(logger, "admin.ingress_error", response.getHeader("x-request-id"), error);
       if (!response.headersSent && !response.destroyed) {
-        json(response, error.status ?? 503,
-          { error: error instanceof AdminConsentError || error instanceof AdminDpopError ? error.code : "temporarily_unavailable" }, error.nonce);
+        const refusal = oauthErrorResponse(error);
+        json(response, refusal?.status ?? 503, refusal?.body ?? { error: "temporarily_unavailable" }, error.nonce);
       }
     }
   };

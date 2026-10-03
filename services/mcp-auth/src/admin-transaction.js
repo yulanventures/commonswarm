@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { AdminOAuthError } from "./admin-oauth-error.js";
+import { AdminOAuthError, oauthErrorResponse } from "./admin-oauth-error.js";
 
 const requests = new AsyncLocalStorage();
 const roles = new AsyncLocalStorage();
@@ -197,12 +197,12 @@ export class AdminTransactionCoordinator {
       if (!unknown && !signal?.aborted) await physical.query("ROLLBACK").catch(() => {});
       held.discard();
       if (!response.destroyed) {
-        response.statusCode = 503;
+        const refusal = unknown ? null : oauthErrorResponse(error);
+        response.statusCode = refusal?.status ?? 503;
         response.setHeader("content-type", "application/json");
         response.setHeader("cache-control", "no-store");
-        const refusal = error instanceof AdminOAuthError ? error : null;
-        if (!unknown && refusal) response.statusCode = refusal.statusCode;
-        response.end(JSON.stringify({ error: unknown ? "issuance_outcome_unknown" : refusal?.error ?? "temporarily_unavailable",
+        response.end(JSON.stringify({ ...(unknown ? { error: "issuance_outcome_unknown" }
+          : refusal?.body ?? { error: "temporarily_unavailable" }),
           request_id: scope.requestId }));
       }
       // Private result for ingress diagnostics. The public response above never

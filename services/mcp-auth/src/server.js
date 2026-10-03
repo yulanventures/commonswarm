@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { adminQuery, adminTransactionContext, withAdminRole } from "./admin-transaction.js";
 import { createAdminHttpHandler } from "./admin-http.js";
+import { oauthErrorResponse } from "./admin-oauth-error.js";
 import { createAdminGateHandler } from "./admin-gate.js";
 import { AdminTokenLifecycle } from "./admin-lifecycle.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { createConsentOrchestrator, createPostgresConsentProgress } from "./cons
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
 import { createInteractionHandler } from "./interactions.js";
-import { AdminConsentError, createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
+import { createAdminConsentService, PostgresAdminConsentStore } from "./admin-consent.js";
 import { createAdminInteractionHandler, createResourceInteractionHandler } from "./admin-interactions.js";
 import { createLogger, logProviderError, subscribeProviderErrors } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
@@ -48,8 +49,9 @@ function rejectOversizedRequest(request, response) {
 }
 
 function clientErrorResponse(error) {
-  if (!(error instanceof ClientError) && !(error instanceof InteractionStateError) &&
-      !(error instanceof AdminConsentError)) return null;
+  const oauth = oauthErrorResponse(error);
+  if (oauth) return oauth;
+  if (!(error instanceof ClientError) && !(error instanceof InteractionStateError)) return null;
   return {
     status: error.status,
     body: { error: error.code },

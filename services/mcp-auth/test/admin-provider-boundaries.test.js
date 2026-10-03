@@ -6,6 +6,7 @@ import { errors } from "oidc-provider";
 import { createMcpProvider, ISSUER, RESOURCE } from "../src/provider.js";
 import { ADMIN_RESOURCE } from "../src/admin-policy.generated.js";
 import { createAdminHttpHandler } from "../src/admin-http.js";
+import { createHandler } from "../src/server.js";
 import { createPostgresAdapter } from "../src/postgres-adapter.js";
 import { createLogger } from "../src/logger.js";
 import { calculateJwkThumbprint, decodeJwt, exportJWK, generateKeyPair, SignJWT } from "jose";
@@ -13,14 +14,15 @@ import { AdminTokenLifecycle } from "../src/admin-lifecycle.js";
 import { AdminConsentError, adminDigest, createAdminManifest } from "../src/admin-consent.js";
 import { emptyAdminAccount } from "../src/admin-authority.generated.js";
 import { AdminTransactionCoordinator, AdminTransactionError } from "../src/admin-transaction.js";
-import { admitAdminProof, verifyAdminProof } from "../src/admin-dpop.js";
+import { AdminDpopError, admitAdminProof, verifyAdminProof } from "../src/admin-dpop.js";
 
-async function fixture(t, { issuerPool = null } = {}) {
+async function fixture(t, { issuerPool = null, interactionRefusal } = {}) {
   const clientId = "https://client.example/metadata", redirect = "https://client.example/callback";
   const provider = await createMcpProvider({ fetch: async () => new Response(JSON.stringify({ client_id: clientId,
     redirect_uris: [redirect], grant_types: ["authorization_code","refresh_token"], response_types:["code"],
     token_endpoint_auth_method:"none", application_type:"web" }),{ headers:{"content-type":"application/json"} }) });
-  const handler=async (request,response)=>{
+  const interactionHandler=async (request,response)=>{
+    if (request.url === "/oauth/callback/gotrue" && interactionRefusal) throw interactionRefusal;
     if (request.url.startsWith("/interaction/")) {
       const details=await provider.interactionDetails(request,response);
       if (details.prompt.name === "login") await provider.interactionFinished(request,response,{login:{accountId:"test-owner"}});
@@ -30,12 +32,17 @@ async function fixture(t, { issuerPool = null } = {}) {
         if (details.prompt.details.missingOIDCClaims) grant.addOIDCClaims(details.prompt.details.missingOIDCClaims);
         await provider.interactionFinished(request,response,{consent:{grantId:await grant.save()}});
       }
-    } else await provider.callback()(request,response);
+      return true;
+    }
+    return false;
   };
   let lookups = 0;
   const logs = [];
-  const server=createServer(createAdminHttpHandler({ handler,runtimePool:{query:async()=>{ ++lookups; return {rows:[]}; }},issuerPool,
-    logger: createLogger(line => logs.push(JSON.parse(line))) }));
+  const logger = createLogger(line => logs.push(JSON.parse(line)));
+  const runtimePool = {query:async()=>{ ++lookups; return {rows:[]}; }};
+  const handler = createHandler({ provider, pool: runtimePool, publicAuthorizationEnabled: true,
+    maxBodyBytes: 64 * 1024, logger, interactionHandler });
+  const server=createServer(createAdminHttpHandler({ handler,runtimePool,issuerPool,logger }));
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const origin=`http://127.0.0.1:${server.address().port}`,cookies=new Map();
@@ -119,7 +126,7 @@ test("mcp-refresh-never-admin: real MCP refresh cannot change resource; the same
   const f=await fixture(t),tokens=await f.tokens();
   const escalated=await f.request("/token",{client_id:f.clientId,grant_type:"refresh_token",refresh_token:tokens.refresh_token,resource:ADMIN_RESOURCE});
   assert.equal(escalated.status,503);
-  assert.equal((await escalated.json()).error,"admin_issuance_disabled");
+  assert.equal((await escalated.json()).error,"temporarily_unavailable");
   const good=await f.request("/token",{client_id:f.clientId,grant_type:"refresh_token",refresh_token:tokens.refresh_token,resource:RESOURCE});
   assert.equal(good.status,200); assert.equal(typeof (await good.json()).access_token,"string");
 });
@@ -153,7 +160,7 @@ test("admin-issuance-closed-before-cutover: admin authorization/code/refresh ref
   const auth=await f.request(`/authorize?${new URLSearchParams({client_id:f.clientId,resource:ADMIN_RESOURCE,
     scope:"openid offline_access admin:read",response_type:"code",redirect_uri:"https://client.example/callback"})}`);
   assert.equal(auth.status,503);
-  assert.equal((await auth.json()).error,"admin_issuance_disabled");
+  assert.equal((await auth.json()).error,"temporarily_unavailable");
   assert.equal(f.logs.at(-1).event, "admin.ingress_error");
   assert.equal(f.logs.at(-1).error_code, "admin_issuance_disabled");
   const lookupsBefore = f.lookups;
@@ -161,7 +168,7 @@ test("admin-issuance-closed-before-cutover: admin authorization/code/refresh ref
     const response=await f.request("/token",{client_id:f.clientId,resource:ADMIN_RESOURCE,grant_type,
       code:"not-an-issued-admin-code",refresh_token:"not-an-issued-admin-refresh"});
     assert.equal(response.status,503);
-    assert.equal((await response.json()).error,"admin_issuance_disabled");
+    assert.equal((await response.json()).error,"temporarily_unavailable");
   }
   assert.equal(f.lookups,lookupsBefore,"closed admin token ingress must refuse before any SQL");
   assert.equal(connections,0,"a configured issuer pool must not bypass default-OFF activation");
@@ -198,7 +205,8 @@ test("ordinary /token delegates the original unread HTTP stream without an admin
 
 // SQL fixtures supply committed read rows; the real bridge/reducer, lifecycle,
 // provider exchange, signing and ledger validation execute without a service.
-async function adminExchange(t, seconds, { badExpiry = false, refusal, missingResourceServer = false } = {}) {
+async function adminExchange(t, seconds, { badExpiry = false, refusal, missingResourceServer = false,
+  production = false, adminIssuanceEnabled = true, ingressRefusal } = {}) {
   const now = Math.floor(Date.now() / 1000) * 1000, owner = randomUUID(), grantId = randomUUID();
   const clientId = "https://client.example/metadata", redirectUri = "https://client.example/callback";
   const key = await generateKeyPair("ES256", { extractable: true });
@@ -227,9 +235,14 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
     measured_mount: target, measured_generation: "1", release_generation: "1",
     measured_artifact_digest: "c".repeat(64), measured_image_digest: `sha256:${"d".repeat(64)}` };
   let binding, artifact;
-  const queries = [], events = [], ledger = [], failures = [], serverErrors = [];
-  const pool = { connect: async () => ({ async query(sql, values) {
+  const queries = [], transactions = [], events = [], ledger = [], failures = [], serverErrors = [];
+  const pool = { connect: async () => {
+    const statements = [], pendingEvents = [], pendingLedger = [];
+    transactions.push(statements);
+    return { async query(sql, values) {
     queries.push(sql);
+    statements.push(sql);
+    if (sql === "COMMIT") { events.push(...pendingEvents); ledger.push(...pendingLedger); }
     if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
     if (sql.includes("admit_dpop_proof")) return { rows: [{ status: "accepted" }] };
     if (sql.includes("admin_cutover_state")) return { rows: [measurement] };
@@ -245,13 +258,13 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
     if (sql.includes("resolve_admin_grant_status")) return { rows: [{ active: true }] };
     if (sql.includes(" AS now")) return { rows: [{ now: sql.includes("*1000") ? now : now / 1000 }] };
     if (sql.includes("admin_rate_buckets")) return { rows: [{ attempts: 1 }] };
-    if (sql.includes("INSERT INTO swarm.admin_events")) events.push(JSON.parse(values[4]));
+    if (sql.includes("INSERT INTO swarm.admin_events")) pendingEvents.push(JSON.parse(values[4]));
     if (sql.includes("UPDATE commonswarm_oauth.admin_grant_bindings")) {
       binding = { ...binding, generation: values[1], scope_names: values[2] }; return { rows: [binding] };
     }
-    if (sql.includes("INSERT INTO commonswarm_oauth.admin_access_issuances")) ledger.push(values);
+    if (sql.includes("INSERT INTO commonswarm_oauth.admin_access_issuances")) pendingLedger.push(values);
     return { rows: [], rowCount: 0, command: sql.split(" ")[0] };
-  }, release() {} }) };
+  }, release() {} }; } };
   let refusalReached = false;
   const provider = await createMcpProvider({ jwks: { keys: [signingJwk] }, activeSigningKid: signingJwk.kid,
     registrationEnabled: false, registrationStore: { find: async () => metadata, markUsed: async () => {
@@ -289,14 +302,27 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
   artifact = { payload: { clientId, dpopJkt: jkt }, grant_id: familyId, consumed_at: null };
   const dpop = await new SignJWT({ htm: "POST", htu: `${ISSUER}/token`, iat: now / 1000,
     jti: randomUUID(), nonce: "boundary-nonce" }).setProtectedHeader({ typ: "dpop+jwt", alg: "ES256", jwk }).sign(key.privateKey);
-  const proof = await admitAdminProof(pool, await verifyAdminProof({ method: "POST", headers: { dpop } }, jkt));
+  const proof = production ? undefined
+    : await admitAdminProof(pool, await verifyAdminProof({ method: "POST", headers: { dpop } }, jkt));
   queries.length = 0; // Observe the issuance unit separately from proof admission.
   const params = { client_id: clientId, grant_type: "authorization_code", code, code_verifier: verifier,
     redirect_uri: redirectUri, resource: ADMIN_RESOURCE };
   const coordinator = new AdminTransactionCoordinator(pool, { adminIssuanceEnabled: true });
   const lifecycle = new AdminTokenLifecycle({ activeKid: signingJwk.kid }), callback = provider.callback();
   let outcome;
-  const server = createServer(async (request, response) => { outcome = await coordinator.run(response, async () => {
+  const logger = createLogger(() => {});
+  let ingressReached = false;
+  const runtimePool = { query: async (_sql, values) => {
+    ingressReached = true;
+    assert.deepEqual(values, ["AuthorizationCode", createHash("sha256").update(code).digest("base64url")]);
+    if (ingressRefusal) throw ingressRefusal;
+    return { rows: [{ ...artifact, binding }] };
+  } };
+  const handler = createHandler({ provider, pool: runtimePool, publicAuthorizationEnabled: true,
+    maxBodyBytes: 64 * 1024, logger });
+  const ingress = createAdminHttpHandler({ handler, runtimePool, issuerPool: pool,
+    activeKid: signingJwk.kid, adminIssuanceEnabled, logger });
+  const server = createServer(production ? ingress : async (request, response) => { outcome = await coordinator.run(response, async () => {
     await lifecycle.prepareToken({ binding, model: "AuthorizationCode", hash: "fixture-code-digest", consumed_at: null }, params);
     await callback(request, response);
   }, { kind: "token", owner, proof }); });
@@ -305,7 +331,8 @@ async function adminExchange(t, seconds, { badExpiry = false, refusal, missingRe
   const response = await fetch(`http://127.0.0.1:${server.address().port}/token`, { method: "POST",
     headers: { host: new URL(ISSUER).host, "x-forwarded-host": new URL(ISSUER).host, "x-forwarded-proto": "https", dpop,
       "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params) });
-  return { status: response.status, body: await response.json(), grant, events, ledger, failures, serverErrors, queries, refusalReached,
+  return { status: response.status, body: await response.json(), nonce: response.headers.get("dpop-nonce"),
+    grant, events, ledger, failures, serverErrors, queries, transactions, refusalReached, ingressReached,
     diagnostic: JSON.stringify({ refusal: outcome?.cause?.code,
       grantErrors: failures.map(error => error.error), serverErrors: serverErrors.map(error => error.code) }) };
 }
@@ -407,4 +434,100 @@ test("admin access token without resourceServer refuses cleanly without issuing 
   const control = await adminExchange(t, 120);
   assert.equal(control.status, 200, control.diagnostic);
   assert.ok(decodeJwt(control.body.access_token).exp * 1000 <= control.grant.expires_at);
+});
+
+test("production /token composition preserves admin and provider OAuth refusals", async t => {
+  const cases = [
+    ["admin invalid_grant", new AdminConsentError("invalid_grant", 400), 400, { error: "invalid_grant", error_description: "grant request is invalid" }],
+    ["admin invalid_scope", new AdminConsentError("invalid_scope", 400), 400, { error: "invalid_scope", error_description: "requested scope is not allowed" }],
+    ["admin unauthorized_client", new AdminConsentError("unauthorized_client", 403), 403, { error: "unauthorized_client" }],
+    ["admin disabled", new AdminConsentError("admin_issuance_disabled", 503), 503, { error: "temporarily_unavailable" }],
+    ["admin consent receipt", new AdminConsentError("consent_receipt_invalid", 400), 400, { error: "invalid_request" }],
+    ["provider invalid_grant", new errors.InvalidGrant({ detail: "private database detail" }), 400, { error: "invalid_grant", error_description: "grant request is invalid" }],
+    ["provider invalid_scope", new errors.InvalidScope("requested scope is not allowed", "admin:read"), 400,
+      { error: "invalid_scope", error_description: "requested scope is not allowed", scope: "admin:read" }],
+    ["provider unauthorized_client", new errors.UnauthorizedClient(), 400, { error: "unauthorized_client" }],
+    ["unexposed provider error", new errors.OIDCProviderError(500, "private provider fault"), 500,
+      { error: "server_error", error_description: "oops! something went wrong" }],
+    ["untrusted error shape", Object.assign(new Error("private database fault"),
+      { statusCode: 400, error: "private_internal_code", error_description: "private detail", expose: true }), 503,
+      { error: "temporarily_unavailable" }],
+  ];
+  for (const [name, refusal, status, expected] of cases) await t.test(name, async t => {
+    const result = await adminExchange(t, 600, { production: true, refusal });
+    assert.equal(result.ingressReached, true, "the real ingress must resolve the admin artifact");
+    assert.equal(result.refusalReached, true, "the refusal must occur inside the pinned grant operation");
+    assert.equal(result.status, status, result.diagnostic);
+    const { request_id, ...body } = result.body;
+    assert.equal(typeof request_id, "string");
+    assert.deepEqual(body, expected);
+    assert.equal(result.ledger.length, 0);
+    assert.equal(result.failures.length + result.serverErrors.length, 0, "ingress handles the rollback response before Koa catches it");
+    assert.ok(result.queries.includes("ROLLBACK"));
+    // Gate checks and failure auditing commit separate units; issuance rolls back.
+    const units = result.transactions.filter(sql => sql.some(statement => statement.includes("lock_admin_consent_policy")));
+    assert.equal(units.length, 1);
+    assert.equal(units[0].at(-1), "ROLLBACK");
+    assert.ok(!units[0].includes("COMMIT"));
+  });
+  await t.test("missing resourceServer TTL", async t => {
+    const result = await adminExchange(t, 600, { production: true, missingResourceServer: true });
+    assert.equal(result.ingressReached, true);
+    assert.equal(result.refusalReached, true);
+    assert.equal(result.status, 400);
+    const { request_id, ...body } = result.body;
+    assert.equal(typeof request_id, "string");
+    assert.deepEqual(body, { error: "invalid_grant", error_description: "grant request is invalid" });
+    assert.equal(result.ledger.length, 0);
+    assert.ok(result.queries.includes("ROLLBACK"));
+  });
+  await t.test("committed positive control", async t => {
+    const result = await adminExchange(t, 120, { production: true });
+    assert.equal(result.ingressReached, true);
+    assert.equal(result.status, 200, result.diagnostic);
+    assert.equal(result.body.token_type, "DPoP");
+    const jwt = decodeJwt(result.body.access_token);
+    assert.ok(jwt.exp * 1000 <= result.grant.expires_at);
+    assert.ok(jwt.exp - jwt.iat <= 120);
+    assert.equal(result.ledger.length, 1);
+    assert.equal(result.queries.at(-1), "COMMIT");
+  });
+});
+
+test("production /token ingress applies the same OAuth mapping before an issuance transaction", async t => {
+  const disabled = await adminExchange(t, 600, { production: true, adminIssuanceEnabled: false });
+  assert.equal(disabled.status, 503);
+  assert.deepEqual(disabled.body, { error: "temporarily_unavailable" });
+  assert.equal(disabled.ingressReached, false);
+  assert.equal(disabled.queries.length, 0);
+  for (const [refusal, status, body, nonce = null] of [
+    [new AdminConsentError("consent_receipt_invalid", 400), 400, { error: "invalid_request" }],
+    [new errors.InvalidGrant({ detail: "private ingress detail" }), 400,
+      { error: "invalid_grant", error_description: "grant request is invalid" }],
+    [new AdminDpopError("invalid_dpop_proof"), 400, { error: "invalid_dpop_proof" }],
+    [new AdminDpopError("use_dpop_nonce", "public-test-nonce"), 400, { error: "use_dpop_nonce" }, "public-test-nonce"],
+  ]) {
+    const result = await adminExchange(t, 600, { production: true, ingressRefusal: refusal });
+    assert.equal(result.ingressReached, true);
+    assert.equal(result.refusalReached, false);
+    assert.equal(result.status, status);
+    assert.deepEqual(result.body, body);
+    assert.equal(result.nonce, nonce);
+    assert.equal(result.ledger.length, 0);
+  }
+});
+
+test("server interaction catch uses the shared OAuth mapper without exposing admin codes", async t => {
+  for (const [refusal, status, body] of [
+    [new AdminConsentError("consent_receipt_invalid", 400), 400, { error: "invalid_request" }],
+    [new AdminConsentError("admin_issuance_disabled", 503), 503, { error: "temporarily_unavailable" }],
+    [new errors.InvalidGrant({ detail: "private callback detail" }), 400,
+      { error: "invalid_grant", error_description: "grant request is invalid" }],
+  ]) {
+    const f = await fixture(t, { interactionRefusal: refusal });
+    const response = await f.request("/oauth/callback/gotrue");
+    assert.equal(response.status, status);
+    assert.deepEqual(await response.json(), body);
+    assert.equal(f.logs.some(log => log.event === "interaction.error"), true);
+  }
 });
