@@ -160,7 +160,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
     const trace = { calls: [], writes: [], committed: false, phase: owned.phase };
     traces.set(owned.id,trace);
     const raw = physical.query.bind(physical);
-    let original,originalChecksums;
+    let original,originalChecksums,role = "commonswarm_admin_issuer";
     return { processID: physical.processID, release: bad => physical.release(bad), async query(sql,values) {
       if (sql === "BEGIN") {
         const result = await raw(sql);
@@ -190,7 +190,21 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
         if (owned.fault === "commit-response-lost") throw Object.assign(new Error("test lost COMMIT acknowledgement"),{ code:"ECONNRESET" });
         return result;
       }
-      const result = await raw(sql,values);
+      let result;
+      try {
+        result = await raw(sql,values);
+        const selected = /^SET LOCAL ROLE (commonswarm_oauth_runtime|swarm_command)$/u.exec(sql);
+        if (selected) role = selected[1];
+      } catch (error) {
+        // Fixed labels only: never retain PostgreSQL messages, SQL or values.
+        trace.failureStatement ??= sql.includes("FROM commonswarm_oauth.admin_cutover_state") ? "measured_release_read"
+          : sql.includes("migration_checksum_failures()") ? "migration_checksum_read"
+          : sql.includes("INSERT INTO commonswarm_oauth.admin_oauth_audit") ? "lifecycle_audit_insert"
+          : sql.includes("record_admin_request_audit(") ? "authenticated_request_audit"
+          : "other_statement";
+        trace.failureRole ??= role;
+        throw error;
+      }
       if (!["ROLLBACK"].includes(sql) && !/^\s*(?:SET|SAVEPOINT|RELEASE)/iu.test(sql)) {
         const stamp=(await raw("SELECT txid_current()::text AS xid,pg_backend_pid() AS pid")).rows[0];
         trace.calls.push({ ...stamp,sql:sql.trim().split(/\s+/u).slice(0,3).join(" ") });
@@ -379,7 +393,7 @@ async function fixture({ consentLifetimeMs=86400000 } = {}) {
 }
 
 function atomic(trace) {
-  assert.equal(trace.committed, true, `phase=${trace.phase}; failure=${trace.failure ?? "not_recorded"}`);
+  assert.equal(trace.committed, true, `phase=${trace.phase}; failure=${trace.failure ?? "not_recorded"}; statement=${trace.failureStatement ?? "not_recorded"}; role=${trace.failureRole ?? "not_recorded"}`);
   assert.ok(trace.writes.length > 0);
   assert.equal(new Set(trace.calls.map(call => `${call.pid}:${call.xid}`)).size, 1,
     "ALL actual provider/status/authority calls must share a backend transaction");
@@ -575,6 +589,7 @@ test("admin-atomic-provider-transaction: genuine D1 login isolates two overlappi
     seen.push({...stamp,id:scope.requestId}); if(seen.length===2) entered();
     await barrier;
     await withAdminRole("swarm_command",()=>adminQuery("SELECT 1 FROM swarm.admin_accounts WHERE owner_user_id=$1",[f.owner]));
+    if (_request.url === "/rollback") throw new Error("test rollback after authority role");
     response.statusCode=204;response.end();
   }));
   await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
@@ -586,6 +601,21 @@ test("admin-atomic-provider-transaction: genuine D1 login isolates two overlappi
     assert.equal(new Set(seen.map(x=>x.id)).size,2);
     assert.ok(seen.every(x=>x.principal==="commonswarm_admin_issuer" && x.role==="commonswarm_oauth_runtime"));
     unblock(); assert.deepEqual((await Promise.all(operations)).map(x=>x.status),[204,204]);
+    async function assertIssuerRestored() {
+      const clients=[];
+      try {
+        // Hold both so the pool cannot hand us the same idle connection twice.
+        for (let i=0;i<2;i++) clients.push(await f.proofPool.connect());
+        for (const client of clients) {
+          const {rows}=await client.query("SELECT session_user AS principal,current_user AS role");
+          assert.equal(rows[0].principal,"commonswarm_admin_issuer");
+          assert.equal(rows[0].role,"commonswarm_admin_issuer","transaction-local authority role must not leak into the pool");
+        }
+      } finally {for (const client of clients) client.release();}
+    }
+    await assertIssuerRestored();
+    assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/rollback`)).status,503);
+    await assertIssuerRestored();
   } finally {unblock();await new Promise(resolve=>server.close(resolve));await f.close();}
 });
 

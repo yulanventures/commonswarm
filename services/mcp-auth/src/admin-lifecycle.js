@@ -10,21 +10,26 @@ const sha = value => createHash("sha256").update(value).digest();
 const fail = code => { throw new AdminConsentError(code, 400); };
 
 export async function requireMeasuredAdminRelease() {
-  const record = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_cutover_state
-    WHERE singleton FOR SHARE`)).rows[0];
-  if (!record?.admin_issuance_enabled || !record.legacy_closed || record.auth_contract_version !== 2 ||
-      !record.lane8_evidence_digest || record.invalidated_at || !record.measurement_evidence_ref || !record.measured_at ||
-      record.approved_edge_release_sha !== record.measured_edge_release_sha ||
-      record.measured_edge_target !== `/home/commonswarm/edge/releases/${record.approved_edge_release_sha}` ||
-      record.measured_mount !== record.measured_edge_target || record.measured_generation !== record.release_generation ||
-      !/^[0-9a-f]{64}$/u.test(record.measured_artifact_digest ?? "") ||
-      !/^sha256:[0-9a-f]{64}$/u.test(record.measured_image_digest ?? "")) {
-    throw new AdminConsentError("admin_issuance_disabled", 503);
-  }
-  if ((await adminQuery("SELECT * FROM commonswarm_ops.migration_checksum_failures()")).rowCount !== 0) {
-    throw new AdminConsentError("admin_migration_evidence_incomplete", 503);
-  }
-  return record;
+  return withAdminRole("commonswarm_oauth_runtime", async () => {
+    // D1 grants this role SELECT only. FOR SHARE also requires UPDATE, which
+    // belongs to the release role. Issuance's owner-definer audit/ledger guards
+    // acquire the gate row lock before any credential can commit (M3).
+    const record = (await adminQuery(`SELECT * FROM commonswarm_oauth.admin_cutover_state
+      WHERE singleton`)).rows[0];
+    if (!record?.admin_issuance_enabled || !record.legacy_closed || record.auth_contract_version !== 2 ||
+        !record.lane8_evidence_digest || record.invalidated_at || !record.measurement_evidence_ref || !record.measured_at ||
+        record.approved_edge_release_sha !== record.measured_edge_release_sha ||
+        record.measured_edge_target !== `/home/commonswarm/edge/releases/${record.approved_edge_release_sha}` ||
+        record.measured_mount !== record.measured_edge_target || record.measured_generation !== record.release_generation ||
+        !/^[0-9a-f]{64}$/u.test(record.measured_artifact_digest ?? "") ||
+        !/^sha256:[0-9a-f]{64}$/u.test(record.measured_image_digest ?? "")) {
+      throw new AdminConsentError("admin_issuance_disabled", 503);
+    }
+    if ((await adminQuery("SELECT * FROM commonswarm_ops.migration_checksum_failures()")).rowCount !== 0) {
+      throw new AdminConsentError("admin_migration_evidence_incomplete", 503);
+    }
+    return record;
+  });
 }
 
 export function adminTokenLifetime(binding, nowSeconds) {

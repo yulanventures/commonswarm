@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { AdminTransactionCoordinator } from "../src/admin-transaction.js";
+import { AdminTransactionCoordinator, adminQuery, withAdminRole } from "../src/admin-transaction.js";
 import { requireMeasuredAdminRelease, adminTokenLifetime } from "../src/admin-lifecycle.js";
 import { createAdminManifest } from "../src/admin-consent.js";
 import { decideAdminAuthority, reduceAdminAuthority, emptyAdminAccount } from "../src/admin-authority.generated.js";
@@ -49,29 +50,47 @@ function measurement() {
     measured_edge_target: target, measured_mount: target, measured_generation: "1", release_generation: "1",
     measured_artifact_digest: "c".repeat(64), measured_image_digest: `sha256:${"d".repeat(64)}` };
 }
-async function probe(t, record, missing = []) {
+const issuerPrivileges = JSON.parse(readFileSync(new URL("../../../tests/support/admin-issuer-privileges.json", import.meta.url), "utf8"));
+async function probe(t, record, missing = [], outerRole = "commonswarm_oauth_runtime") {
   let code, ledgerReads = 0;
+  let role = "commonswarm_admin_issuer";
+  const allowed = privilege => issuerPrivileges.some(([grantee, kind, target, permission]) =>
+    grantee === role && kind === "TABLE" && target === "commonswarm_oauth.admin_cutover_state" && permission === privilege);
   const pool = { connect: async () => ({
     async query(sql) {
       if (sql.includes("session_user")) return { rows: [{ principal: "commonswarm_admin_issuer" }] };
-      if (sql.includes("admin_cutover_state")) return { rows: record ? [record] : [] };
+      if (sql.startsWith("SET LOCAL ROLE ")) role = sql.slice("SET LOCAL ROLE ".length);
+      if (sql.includes("admin_cutover_state")) {
+        // PostgreSQL locking SELECTs also require UPDATE. Enforce the independently
+        // reviewed D1 ACL contract here; real catalog/HTTP proof remains in CI.
+        if (!allowed("SELECT") || (/\bFOR\s+(?:KEY\s+SHARE|SHARE|NO\s+KEY\s+UPDATE|UPDATE)\b/iu.test(sql) && !allowed("UPDATE"))) {
+          throw Object.assign(new Error("read privilege required"), { code: "42501" });
+        }
+        return { rows: record ? [record] : [] };
+      }
       if (sql.includes("migration_checksum_failures")) { ++ledgerReads; return { rows: missing, rowCount: missing.length }; }
+      if (sql === "SELECT 1") assert.equal(role, outerRole, "gate read must restore the enclosing authority role");
       return { rows: [], command: sql.split(" ")[0] };
     }, release() {},
   }) };
   const coordinator = new AdminTransactionCoordinator(pool);
   const server = createServer((_request, response) => coordinator.run(response, async () => {
-    try { await requireMeasuredAdminRelease(); } catch (error) { code = error.code; }
+    await withAdminRole(outerRole, async () => {
+      try { await requireMeasuredAdminRelease(); } catch (error) { code = error.code; }
+      if (!code) await adminQuery("SELECT 1");
+    });
     response.statusCode = 204; response.end();
   }));
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
-  await fetch(`http://127.0.0.1:${server.address().port}`);
+  const response = await fetch(`http://127.0.0.1:${server.address().port}`);
+  assert.equal(response.status, 204, "read-only activation checks must complete without poisoning the issuer transaction");
   return { code, ledgerReads };
 }
 
 test("admin-activation-measured-release: operator measurement succeeds; readiness lies, targets, digests, generations and invalidation refuse", async t => {
   assert.deepEqual(await probe(t, measurement()), { code: undefined, ledgerReads: 1 });
+  assert.deepEqual(await probe(t, measurement(), [], "swarm_command"), { code: undefined, ledgerReads: 1 });
   for (const change of [
     { legacy_closed: false }, { admin_issuance_enabled: false }, { auth_contract_version: 1 },
     { measured_edge_release_sha: "f".repeat(40), readiness_sha: "a".repeat(40) },
