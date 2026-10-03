@@ -1,9 +1,9 @@
 -- Exact owned relation set, column order, constraints, RLS and least privilege.
 -- Missing objects yield catalog_ok=f, rather than a regclass cast failure.
-WITH expected(name,columns,can_update,fks,checks,uniques) AS (VALUES
-('household_workspace_boundaries',ARRAY['workspace_id','purpose','owner_user_id']::text[],true,2,2,0),
-('household_member_content_roles',ARRAY['workspace_id','user_id','content_role','content_consent_id','confirmed_at','revoked_at']::text[],true,1,1,0),
-('household_content_connections',ARRAY['connection_id','grant_id','workspace_id','principal_id','owner_user_id','purpose','operations','consent_receipt_id','expires_at','revoked_at','hosted_grant_id']::text[],true,3,3,0)
+WITH expected(name,columns,lock_column,fks,checks,uniques) AS (VALUES
+('household_workspace_boundaries',ARRAY['workspace_id','purpose','owner_user_id']::text[],'workspace_id',2,2,0),
+('household_member_content_roles',ARRAY['workspace_id','user_id','content_role','content_consent_id','confirmed_at','revoked_at']::text[],'workspace_id',1,1,0),
+('household_content_connections',ARRAY['connection_id','grant_id','workspace_id','principal_id','owner_user_id','purpose','operations','consent_receipt_id','expires_at','revoked_at','hosted_grant_id']::text[],'connection_id',3,3,0)
 ), actual AS (
  SELECT e.*,c.oid,c.relowner,c.relkind,c.relrowsecurity,c.relforcerowsecurity
  FROM expected e LEFT JOIN pg_class c ON c.oid=to_regclass('swarm.'||e.name)
@@ -22,14 +22,23 @@ SELECT coalesce((SELECT count(*)=3 AND bool_and(
  AND EXISTS (SELECT 1 FROM pg_policy WHERE polrelid=t.oid AND polname='swarm_command_all' AND polpermissive AND polcmd='*'
    AND polroles=ARRAY[(SELECT oid FROM pg_roles WHERE rolname='swarm_command')]
    AND pg_get_expr(polqual,polrelid)='true' AND pg_get_expr(polwithcheck,polrelid)='true')
- AND has_table_privilege('swarm_command',oid,'SELECT') AND has_table_privilege('swarm_command',oid,'INSERT')
- AND has_table_privilege('swarm_command',oid,'UPDATE')=can_update
+ AND has_table_privilege('swarm_command',oid,'SELECT') AND NOT has_table_privilege('swarm_command',oid,'INSERT')
+ AND NOT has_table_privilege('swarm_command',oid,'UPDATE')
  AND NOT EXISTS (SELECT 1 FROM (VALUES ('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) p(privilege) WHERE has_table_privilege('swarm_command',oid,p.privilege))
  AND NOT EXISTS (SELECT 1 FROM (VALUES ('swarm_read'),('anon'),('authenticated')) r(name)
    CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) p(privilege)
    WHERE has_table_privilege(r.name,oid,p.privilege))
  AND NOT EXISTS (SELECT 1 FROM aclexplode(coalesce((SELECT relacl FROM pg_class WHERE oid=t.oid),acldefault('r',relowner))) a WHERE a.grantee=0)
- AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=t.oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
+ -- FOR SHARE accepts one column's UPDATE. Pin exactly that nongrantable ACL,
+ -- and reject column-level INSERT/UPDATE widening as well as table grants.
+ AND (SELECT count(*) FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) acl
+   WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped)=1
+ AND EXISTS (SELECT 1 FROM pg_attribute a CROSS JOIN LATERAL aclexplode(a.attacl) acl
+   WHERE a.attrelid=t.oid AND a.attname=lock_column AND NOT a.attisdropped
+   AND acl.grantee=(SELECT oid FROM pg_roles WHERE rolname='swarm_command')
+   AND acl.privilege_type='UPDATE' AND NOT acl.is_grantable)
+ AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=t.oid AND a.attnum>0 AND NOT a.attisdropped
+   AND has_column_privilege('swarm_command',t.oid,a.attnum,'UPDATE')<>(a.attname=lock_column))
  ) FROM actual t),false)
  AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('swarm.household_workspace_boundaries') AND attname='workspace_id' AND NOT attisdropped AND atttypid='uuid'::regtype AND attnotnull=true)
  AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('swarm.household_workspace_boundaries') AND attname='purpose' AND NOT attisdropped AND atttypid='text'::regtype AND attnotnull=true)
