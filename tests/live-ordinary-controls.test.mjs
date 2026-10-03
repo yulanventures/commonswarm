@@ -1,25 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, lstat, symlink, link, rm, unlink } from 'node:fs/promises';
-import { join, dirname, sep } from 'node:path';
+import { join, dirname, sep, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
-const preload = fileURLToPath(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url));
+const preload = 'data:text/javascript;base64,' + Buffer.from((await readFile(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url), 'utf8'))
+  .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
-const client = 'https://commonswarm.com/oauth/c1-controls/client.json';
-const redirect = 'https://commonswarm.com/oauth/c1-controls/callback', resource = `${issuer}/mcp`;
+const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
+const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
 const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
-const uid = '11111111-1111-4111-8111-111111111111', wid = '22222222-2222-4222-8222-222222222222';
+const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
 const pid = '33333333-3333-4333-8333-333333333333';
 const keys = (v, names) => assert.deepEqual(Object.keys(v).sort(), [...names].sort());
 const privateWrite = (p, b) => writeFile(p, typeof b === 'string' ? b : JSON.stringify(b), { mode: 0o600 });
@@ -35,7 +36,9 @@ async function fixture(t, config = {}) {
   const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
   const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
   const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
-  const clientMetadata = JSON.parse(await readFile(new URL('../site/public/oauth/c1-controls/client.json', import.meta.url)));
+  const clientMetadata = { client_id: client, client_name: 'CommonSwarm C1 ordinary controls', client_uri: 'https://yulanventures.com',
+    application_type: 'web', redirect_uris: [redirect], token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope };
   const emit = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(body === null ? undefined : JSON.stringify(body));
   };
@@ -110,6 +113,15 @@ async function fixture(t, config = {}) {
         let result;
         if (body.method === 'initialize') {
           assert.equal(body.params.clientInfo.name, 'c1-live-controls'); result = { protocolVersion: '2025-06-18', serverInfo: { name: 'commonswarm' } };
+        } else if (body.method === 'tools/call') {
+          assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
+          assert.equal(body.params.name, 'claim_seat');
+          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner',
+            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}` });
+          event.claim = body.params.arguments;
+          result = { ...(config.claimError ? { isError: true } : {}),
+            content: [{ type: 'text', text: JSON.stringify({ workspace_id: config.wrongClaimWorkspace ? randomUUID() : wid, name: 'c1-controls-runner',
+              seat_id: '44444444-4444-4444-8444-444444444444', handle: config.badClaimHandle ? 'unsafe' : 'seat_' + 'a'.repeat(32) }) }] };
         } else {
           assert.equal(body.method, 'tools/list'); assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           result = { tools: (config.badTools ? tools.slice(1) : tools).map(name => ({ name })) };
@@ -117,6 +129,7 @@ async function fixture(t, config = {}) {
         return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
       }
       if (url.pathname === '/auth/v1/token') {
+        if (config.holdHuman) await config.holdHuman;
         assert.equal(url.searchParams.get('grant_type'), 'refresh_token'); assert.equal(body.refresh_token, humanRefresh); assert.equal(req.headers.apikey, anon);
         const now = new Date().toISOString(); humanRefresh = secret(); return emit(res, 200, { access_token: secret(), refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
           user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
@@ -124,13 +137,13 @@ async function fixture(t, config = {}) {
       if (url.pathname === '/rest/v1/workspaces') {
         assert.equal(req.headers.apikey, anon); assert.equal(req.headers['accept-profile'], 'swarm_read');
         assert.equal(url.searchParams.get('workspace_id'), `eq.${wid}`);
-        return emit(res, 200, [{ workspace_id: wid, name: config.wrongWorkspace ? 'Customer workspace' : 'c1-controls (test)' }]);
+        return emit(res, 200, [{ workspace_id: config.wrongWorkspace ? randomUUID() : wid, name: 'Cold Agent Test 0.1.12' }]);
       }
       if (url.pathname === '/functions/v1/read') {
         assert.equal(req.headers.authorization, `Bearer ${seatToken}`); assert.equal(req.headers.apikey, anon); assert.equal(body.workspace_id, wid);
         if (body.resource === 'members') return emit(res, 200, { members: [], agents: [], identity: {
-          credential_valid: true, workspace_id: wid, principal_id: pid, owner_user_id: uid,
-          workspace_name: config.wrongSeat ? 'Customer workspace' : 'c1-controls (test)',
+          credential_valid: true, workspace_id: config.wrongSeat ? randomUUID() : wid, principal_id: pid, owner_user_id: uid,
+          workspace_name: 'Cold Agent Test 0.1.12',
         } });
         assert.equal(body.resource, 'signals'); assert.ok(signal, 'write precedes read');
         return emit(res, 200, { signals: config.noReadback ? [] : [signal] });
@@ -161,7 +174,7 @@ async function fixture(t, config = {}) {
   await privateWrite(join(seat, 'credential.json'), { message: 'Agent credential minted. It is bound to this run, so the agent\'s work is attributable to it.',
     status: 'accepted', principal_id: pid, token_id: randomUUID(), run_id: randomUUID(), agent_token: seatToken });
   let sequence = 0;
-  async function run(command, extra = [], { handoff = true, outName } = {}) {
+  async function run(command, extra = [], { handoff = true, outName, workspaceId = wid, credDir = creds, env = {} } = {}) {
     const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
     const out = outName ?? join(root, `receipt${sequence}.json`);
     const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
@@ -170,8 +183,8 @@ async function fixture(t, config = {}) {
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
       args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]); }
-    const child = spawn(process.execPath, ['--import', preload, script, ...args, '--release-sha', release, '--cred-dir', creds, '--out', out,
-      '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], { env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--import', preload, script, ...args, ...(command === 'final-cleanup' || workspaceId === null ? [] : ['--workspace-id', workspaceId]), '--release-sha', release, '--cred-dir', credDir, '--out', out,
+      '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], { env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', done = false, handoffError;
     child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
     const completed = new Promise((r, j) => { child.once('error', j); child.once('exit', code => { done = true; r(code); }); });
@@ -199,7 +212,11 @@ async function fixture(t, config = {}) {
     let receipt, bytes;
     try { bytes = await readFile(out); receipt = JSON.parse(bytes); for (const value of secrets) assert.ok(!bytes.includes(Buffer.from(value)), 'no secret in receipt'); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
-    return { exit, output, receipt, bytes, out, pointer };
+    let report;
+    try { const reportBytes = await readFile(`${out}.report.json`); report = JSON.parse(reportBytes);
+      for (const value of secrets) assert.ok(!reportBytes.includes(Buffer.from(value)), 'no secret in run report'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    return { exit, output, receipt, bytes, out, pointer, report };
   }
   const f = { root, creds, human, seat, clients, clientTimes, families, config, events, run, consent: undefined };
   return f;
@@ -238,11 +255,19 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
     assert.equal(r.receipt.consent_receipt_sha256, hash(p.bytes)); assert.equal(r.receipt.producer_sha256, producer);
     assert.equal(r.receipt.dcr_client_ids.length, 1); assert.equal((await stat(r.out)).mode & 0o777, 0o600);
     assert.equal(r.bytes.toString(), JSON.stringify(r.receipt, null, 2) + '\n');
+    assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
+    assert.equal(r.report.workspace_id, wid);
+    assert.deepEqual(r.report.seat, { name: 'c1-controls-runner',
+      request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}`,
+      seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) });
     for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) assert.equal((await stat(join(f.creds, name))).mode & 0o777, 0o600);
     const record = JSON.parse(await readFile(join(f.human, `${hash(api).slice(0, 24)}.json`))); assert.equal(record.generation, ++generation);
     const ids = JSON.parse(await readFile(join(f.creds, 'dcr-client-ids.json'))); assert.deepEqual(ids.ids.map(c => c.client_id), [...f.clients]);
   }
   assert.equal(f.events.filter(e => e.command === 'post_signal').length, 3);
+  assert.equal(f.events.filter(e => e.claim).length, 3);
+  assert.equal(new Set(f.events.filter(e => e.claim).map(e => e.claim.request_id)).size, 1, 'claim replay uses the same request id across windows');
+  await missing(join(f.human, 'live-controls.lock'));
 });
 
 test('dry-run of all subcommands makes zero requests and writes no files', async t => {
@@ -252,6 +277,72 @@ test('dry-run of all subcommands makes zero requests and writes no files', async
     const plan = JSON.parse(r.output); assert.equal(plan.dry_run, true); assert.equal(plan.user_agent, 'curl/8.7.1'); assert.ok(plan.requests.length >= 4);
   }
   assert.equal(f.events.length, 0);
+});
+
+test('consent and window require a valid workspace UUID even for dry-run', async t => {
+  const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
+  for (const command of ['consent', 'window']) {
+    const positive = await f.run(command, ['--dry-run']); assert.equal(positive.exit, 0, positive.output);
+    for (const workspaceId of [null, 'bad', '00000000-0000-0000-0000-000000000000', '00000000-0000-4000-8000-000000000000']) {
+      const r = await f.run(command, ['--dry-run'], { workspaceId });
+      assert.equal(r.exit, 1, r.output); await missing(r.out);
+      assert.match(r.output, workspaceId === null ? /FAIL options:.*missing option/ : /FAIL options:.*invalid --workspace-id/);
+    }
+  }
+  assert.equal(f.events.length, 0);
+});
+
+test('selected workspace must match both supplied CLI profiles before any writes', async t => {
+  const f = await fixture(t); await pre(f); const start = f.events.length;
+  const r = await f.run('window', [], { workspaceId: randomUUID() });
+  assert.equal(r.exit, 1, r.output); assert.match(r.output, /FAIL profiles:/); await missing(r.out);
+  assert.ok(f.events.slice(start).every(e => e.method === 'GET' && e.path.includes('.well-known')));
+});
+
+test('seat claim failures withhold receipts and a later failure retains the private setup report', async t => {
+  for (const config of [{ claimError: true }, { wrongClaimWorkspace: true }, { badClaimHandle: true }, { noReadback: true }]) {
+    const f = await fixture(t); await pre(f); Object.assign(f.config, config);
+    const r = await f.run('window'); assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.match(r.output, config.noReadback ? /FAIL worker_command_read:/ : /FAIL seat_setup:/);
+    if (config.noReadback) {
+      assert.equal(r.report.seat.name, 'c1-controls-runner'); assert.equal(r.report.workspace_id, wid);
+      assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
+    } else { await missing(`${r.out}.report.json`); assert.ok(!f.events.some(e => e.command === 'post_signal')); }
+  }
+});
+
+test('human profile runs serialize across credential directories and retain the caller PATH', async t => {
+  const f = await fixture(t); await pre(f);
+  const otherCreds = join(f.root, 'other-credentials'), bin = join(f.root, 'bin'), log = join(f.root, 'path.jsonl');
+  for (const dir of [otherCreds, bin]) await mkdir(dir, { mode: 0o700 });
+  for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) await privateWrite(join(otherCreds, name), await readFile(join(f.creds, name), 'utf8'));
+  const located = spawnSync('which', ['rm'], { encoding: 'utf8' }); assert.equal(located.status, 0);
+  const guardedRm = located.stdout.trim(); assert.ok(guardedRm.startsWith('/'));
+  await writeFile(join(bin, 'rm'), `#!${process.execPath}\n` +
+    `const {appendFileSync}=require('node:fs'); const {execFileSync}=require('node:child_process');\n` +
+    `appendFileSync(${JSON.stringify(log)},JSON.stringify({args:process.argv.slice(2),path:process.env.PATH})+'\\n',{mode:0o600});\n` +
+    `execFileSync(${JSON.stringify(guardedRm)},process.argv.slice(2),{stdio:'inherit'});\n`, { mode: 0o700 });
+  const callerPath = `${bin}${delimiter}${process.env.PATH}`, env = { PATH: callerPath };
+  let releaseHuman; f.config.holdHuman = new Promise(r => { releaseHuman = r; });
+  const firstRun = f.run('window', [], { env });
+  let first;
+  try {
+    const end = Date.now() + 3000;
+    while (!f.events.some(e => e.path === '/auth/v1/token') && Date.now() < end) await sleep(10);
+    assert.ok(f.events.some(e => e.path === '/auth/v1/token'), 'first run entered human refresh');
+    const start = f.events.length;
+    const refused = await f.run('window', [], { credDir: otherCreds, env });
+    assert.equal(refused.exit, 1, refused.output); assert.match(refused.output, /FAIL files:.*existing path/);
+    await missing(refused.out); assert.equal(f.events.length, start, 'overlap refuses before HTTP');
+    assert.equal((await stat(join(f.human, 'live-controls.lock'))).mode & 0o777, 0o600, 'first run still owns profile lock');
+  } finally { releaseHuman(); first = await firstRun; }
+  assert.equal(first.exit, 0, first.output);
+  assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1);
+  const calls = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(calls.length >= 3); assert.ok(calls.every(c => c.path === callerPath));
+  assert.ok(calls.some(c => c.args[0] === join(f.human, 'live-controls.lock')));
+  for (const dir of [f.human, f.creds, otherCreds]) await missing(join(dir, 'live-controls.lock'));
+  const next = await f.run('window', [], { env }); assert.equal(next.exit, 0, next.output);
 });
 
 test('every failed window leg withholds the entire receipt and redacts remote failures', async t => {

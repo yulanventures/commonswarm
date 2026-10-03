@@ -17,7 +17,8 @@ import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'nod
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
-const preload = join(repo, 'tests/support/live-ordinary-controls-transport.mjs');
+const preload = 'data:text/javascript;base64,' + Buffer.from(readFileSync(join(repo, 'tests/support/live-ordinary-controls-transport.mjs'), 'utf8')
+  .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
 const planPath = join(repo, 'docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
 const plan = readFileSync(planPath, 'utf8');
 const blocks = [...plan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]);
@@ -31,14 +32,14 @@ const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim
 assert.ok(python.startsWith('/'), 'absolute Python runtime');
 
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
-const client = 'https://commonswarm.com/oauth/c1-controls/client.json';
-const redirect = 'https://commonswarm.com/oauth/c1-controls/callback', resource = `${issuer}/mcp`;
+const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
+const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
 const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
 const windowId = 'ABC123';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
-const uid = '11111111-1111-4111-8111-111111111111', wid = '22222222-2222-4222-8222-222222222222';
+const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
 const pid = '33333333-3333-4333-8333-333333333333';
 const privateWrite = (p, b) => writeFile(p, typeof b === 'string' ? b : JSON.stringify(b), { mode: 0o600 });
 const scriptBytes = readFileSync(script);
@@ -54,7 +55,9 @@ async function liveFixture(t) {
   const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
   const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
   const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
-  const clientMetadata = JSON.parse(await readFile(new URL('../site/public/oauth/c1-controls/client.json', import.meta.url)));
+  const clientMetadata = { client_id: client, client_name: 'CommonSwarm C1 ordinary controls', client_uri: 'https://yulanventures.com',
+    application_type: 'web', redirect_uris: [redirect], token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope };
   const emit = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(body === null ? undefined : JSON.stringify(body));
   };
@@ -112,7 +115,14 @@ async function liveFixture(t) {
         if (body.method === 'notifications/initialized') return emit(res, 202, null);
         let result;
         if (body.method === 'initialize') result = { protocolVersion: '2025-06-18', serverInfo: { name: 'commonswarm' } };
-        else {
+        else if (body.method === 'tools/call') {
+          assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
+          assert.equal(body.params.name, 'claim_seat');
+          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner',
+            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}` });
+          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: 'c1-controls-runner',
+            seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) }) }] };
+        } else {
           assert.equal(body.method, 'tools/list');
           result = { tools: tools.map(name => ({ name })) };
         }
@@ -124,11 +134,11 @@ async function liveFixture(t) {
           user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
       }
       if (url.pathname === '/rest/v1/workspaces') {
-        return emit(res, 200, [{ workspace_id: wid, name: 'c1-controls (test)' }]);
+        return emit(res, 200, [{ workspace_id: wid, name: 'Cold Agent Test 0.1.12' }]);
       }
       if (url.pathname === '/functions/v1/read') {
         if (body.resource === 'members') return emit(res, 200, { members: [], agents: [], identity: {
-          credential_valid: true, workspace_id: wid, principal_id: pid, owner_user_id: uid, workspace_name: 'c1-controls (test)',
+          credential_valid: true, workspace_id: wid, principal_id: pid, owner_user_id: uid, workspace_name: 'Cold Agent Test 0.1.12',
         } });
         return emit(res, 200, { signals: signal ? [signal] : [] });
       }
@@ -169,7 +179,7 @@ async function liveFixture(t) {
       if (n >= 0) args.splice(n, 2);
       args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]);
     }
-    const child = spawn(process.execPath, ['--import', preload, script, ...args, '--release-sha', release, '--cred-dir', creds, '--out', out,
+    const child = spawn(process.execPath, ['--import', preload, script, ...args, ...(command === 'final-cleanup' ? [] : ['--workspace-id', wid]), '--release-sha', release, '--cred-dir', creds, '--out', out,
       '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], {
       cwd: repo, env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin }, stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -318,14 +328,13 @@ function planFixture(config = {}) {
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
       ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
       ['/home/commonswarm/.env', join(root, 'home.env')],
-      ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
       ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
       ['/etc/caddy/sites', join(root, 'caddy')],
     ]) {
       assert.ok(to.startsWith(`${root}${sep}`), 'plan path maps inside the test-owned mkdtemp root');
       source = source.split(from).join(to);
     }
-    return source;
+    return source.replace(/\/(?:private\/)?tmp\/anvil-secret/g, join(root, 'tmp/anvil-secret'));
   }
   function run(steps, window, extra = {}) {
     const source = remap(steps.map(block).join('\n'));

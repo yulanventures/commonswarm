@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 // Live controls only: no browser, environment credentials or test-pass switches.
 // Build src/ with `npm run build` before using the CLI library legs.
+// --workspace-id is required for consent/window; use the connector-test UUID.
+// The operator supplies PATH (including any cswarm shim); never prepend a CLI path.
+// Human CLI library calls are awaited one at a time under the run/profile locks.
+// Do not run external cswarm commands against --human-profile concurrently.
+// A window writes <out>.report.json (0600) with its claimed seat, even if a later
+// leg fails. The report is setup evidence; only <out> is the binding receipt.
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,14 +18,17 @@ import { setTimeout as sleep } from 'node:timers/promises';
 const ISSUER = 'https://mcp.commonswarm.com';
 const API = 'https://api.commonswarm.com';
 const RESOURCE = `${ISSUER}/mcp`;
-const CLIENT = 'https://commonswarm.com/oauth/c1-controls/client.json';
-const REDIRECT = 'https://commonswarm.com/oauth/c1-controls/callback';
+const CLIENT = 'https://yulanventures.com/oauth/c1-controls/client.json';
+const REDIRECT = 'https://c1-controls.invalid/callback';
 const SCOPE = 'openid offline_access mcp';
 const UA = 'curl/8.7.1';
 const VERSION = '2025-06-18';
 const TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
-const WORKSPACE = 'c1-controls (test)';
+const SEAT_NAME = 'c1-controls-runner';
+const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
+  id !== '00000000-0000-4000-8000-000000000000';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const seatRequestId = (release, workspace) => `c1_controls_claim_${sha256(`${release}:${workspace}:${SEAT_NAME}`).slice(0, 40)}`;
 const challenge = verifier => createHash('sha256').update(verifier).digest('base64url');
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const exact = (v, keys) => object(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
@@ -35,7 +44,7 @@ const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 600_000, totalMs: 1_300_000 };
   demand(['consent', 'window', 'final-cleanup'].includes(o.command), 'consent, window or final-cleanup', 'invalid subcommand');
-  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['phase'])];
+  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['phase', 'workspace-id'])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
     o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
   const timeouts = { 'request-timeout-ms': ['requestMs', 10_000], 'consent-timeout-ms': ['consentMs', 600_000], 'total-timeout-ms': ['totalMs', 1_300_000] };
@@ -57,6 +66,10 @@ function options(args) {
   const required = [...common, ...(o.command === 'consent' ? ['pointer-dir', ...(o.phase === 'post-W5' ? ['prior-consent'] : [])] :
     o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
   demand(required.every(k => typeof o[k] === 'string' && o[k].length > 0), 'all required options', 'missing option');
+  if (o.command !== 'final-cleanup') {
+    demand(uuidOK(o['workspace-id']), 'valid workspace UUID', 'invalid --workspace-id');
+    o['workspace-id'] = o['workspace-id'].toLowerCase();
+  }
   if (o.command === 'window') demand(/^W[1-7]$/.test(o.window) && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W1..W7 and 6 alnum window ID');
   for (const k of allowed.filter(k => k.endsWith('-dir') || k.endsWith('-profile') || ['out', 'prior-consent', 'consent-receipt'].includes(k))) {
     if (o[k]) { demand(o[k].startsWith('/'), 'absolute file paths', 'relative path'); o[k] = resolve(o[k]); }
@@ -173,6 +186,9 @@ function plan(o) {
   else requests.push(
     { method: 'POST', url: '<token endpoint>', body: 'refresh retained CIMD grant' },
     { method: 'POST', url: RESOURCE, rpc: 'initialize, notifications/initialized, tools/list' },
+    { method: 'POST', url: RESOURCE, rpc: 'tools/call claim_seat', name: SEAT_NAME, workspace_id: o['workspace-id'],
+      request_id: seatRequestId(o['release-sha'], o['workspace-id']),
+      report: `${o.out}.report.json` },
     { method: 'POST', url: '<registration endpoint>', body: 'fresh public client; journal id immediately' },
     { method: 'GET', url: CLIENT }, { method: 'GET', url: '<authorize endpoint>', expected: '303 /interaction/, no consent click' },
     { method: 'POST', url: `${API}/auth/v1/token?grant_type=refresh_token`, via: 'CLI refreshedCredential + forced file store' },
@@ -191,11 +207,11 @@ async function run(o) {
   const timer = setTimeout(() => { process.stderr.write(`FAIL ${leg}: completion expected bounded run got total timeout; STOP\n`); process.exit(1); }, o.totalMs);
   const producer = sha256(await readFile(new URL(import.meta.url)));
   const release = o['release-sha'], cred = o['cred-dir'];
-  let lock, receiptBytes; const rawFetch = globalThis.fetch;
+  const locks = []; let receiptBytes; const rawFetch = globalThis.fetch;
   // Libraries use the identical transport policy. No URL, token or exception is logged.
   const transport = async (input, init = {}) => {
     const u = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
-    demand([ISSUER, API, 'https://commonswarm.com'].includes(u.origin) && !u.username && !u.password, 'pinned public origins', 'unexpected request origin');
+    demand([ISSUER, API, new URL(CLIENT).origin].includes(u.origin) && !u.username && !u.password, 'pinned public origins', 'unexpected request origin');
     demand(Date.now() < deadline, 'bounded run', 'total timeout');
     const headers = new Headers(init.headers); headers.set('User-Agent', UA);
     const signal = AbortSignal.any([AbortSignal.timeout(Math.min(o.requestMs, deadline - Date.now())), ...(init.signal ? [init.signal] : [])]);
@@ -210,12 +226,20 @@ async function run(o) {
     if (o.command === 'consent') for (const name of ['cimd', 'dcr']) for (const suffix of ['authorize-url', 'callback-url']) {
       reserved.push(join(o['pointer-dir'], `${name}-${suffix}.txt`));
     }
+    if (o.command === 'window') reserved.push(join(o['human-profile'], 'live-controls.lock'));
     demand(!reserved.includes(o.out), 'receipt distinct from credentials and handoffs', 'file path collision');
     await absent(o.out);
-    const lockPath = join(cred, 'live-controls.lock');
-    await absent(lockPath); lock = await open(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    // Exclusive lock serializes refresh rotation and client-id journal updates.
-    await lock.writeFile('running\n');
+    if (o.command === 'window') {
+      demand(!reserved.includes(`${o.out}.report.json`), 'report distinct from credentials', 'file path collision');
+      await absent(`${o.out}.report.json`);
+    }
+    // Credential lock serializes grants/journals; profile lock also excludes runs
+    // using the same human profile with a different credential directory.
+    for (const dir of new Set([cred, ...(o.command === 'window' ? [o['human-profile']] : [])])) {
+      await directory(dir); const path = join(dir, 'live-controls.lock');
+      await absent(path); const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      locks.push({ path, fd }); await fd.writeFile('running\n');
+    }
     const journalPath = join(cred, 'live-controls-state.json'), idsPath = join(cred, 'dcr-client-ids.json');
     let journalBytes = await privateRead(journalPath, true), idsBytes = await privateRead(idsPath, true);
     let journal = journalBytes ? json(journalBytes) : { release_sha: release, grants: [] };
@@ -268,7 +292,7 @@ async function run(o) {
         c.grant_types?.includes('refresh_token') && c.response_types?.length === 1 && c.response_types[0] === 'code' &&
         c.scope === SCOPE && !c.dpop_bound_access_tokens && !c.client_secret, 'ordinary public CIMD metadata');
     };
-    const mcp = async t => {
+    const mcp = async (t, claimSeat = false) => {
       const headers = { Authorization: `Bearer ${t.access_token}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
       const rpc = (id, method, params) => request(RESOURCE, { method: 'POST', headers,
         ...(id === null ? { status: [202, 204] } : {}), body: JSON.stringify({ jsonrpc: '2.0', ...(id === null ? {} : { id }), method, ...(params ? { params } : {}) }) });
@@ -280,6 +304,22 @@ async function run(o) {
       const names = list.result?.tools?.map(t => t.name);
       demand(list.jsonrpc === '2.0' && list.id === 2 && !list.error && !list.result?.nextCursor && Array.isArray(names) &&
         names.length === TOOLS.length && new Set(names).size === TOOLS.length && TOOLS.every(n => names.includes(n)), 'exact ordinary MCP tool set');
+      if (claimSeat) {
+        leg = 'seat_setup';
+        const requestId = seatRequestId(release, o['workspace-id']);
+        const claim = await rpc(3, 'tools/call', { name: 'claim_seat', arguments: {
+          workspace_id: o['workspace-id'], name: SEAT_NAME, request_id: requestId,
+        } });
+        demand(claim.jsonrpc === '2.0' && claim.id === 3 && !claim.error && !claim.result?.isError &&
+          claim.result?.content?.length === 1 && claim.result.content[0].type === 'text' && typeof claim.result.content[0].text === 'string',
+        'successful MCP seat claim', 'claim rejected');
+        const seat = json(Buffer.from(claim.result.content[0].text));
+        demand(seat.workspace_id === o['workspace-id'] && seat.name === SEAT_NAME && uuidOK(seat.seat_id) &&
+          typeof seat.handle === 'string' && /^seat_[A-Za-z0-9_-]{22,64}$/.test(seat.handle), 'claimed test seat identity');
+        await writePrivate(`${o.out}.report.json`, JSON.stringify({ kind: 'c1-controls-run', release_sha: release,
+          window_id: o['window-id'], window: o.window, phase: o.phase, measured_at: new Date().toISOString(), producer_sha256: producer,
+          workspace_id: o['workspace-id'], seat: { name: SEAT_NAME, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
+      }
     };
     const refresh = async g => tokenContract(await request(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
       refresh_token: g.refresh_token, resource: RESOURCE })));
@@ -408,12 +448,12 @@ async function run(o) {
       await privateRead(store.location); await privateRead(join(o['human-profile'], `${target.profileId}.profile.json`));
       const humanProfile = await store.readProfile();
       const seat = await readAgentProfile(join(o['seat-profile'], 'profile.json'));
-      demand(seat.url === API && seat.workspace_id === humanProfile.workspaceId, 'same test workspace and hosted target');
+      demand(seat.url === API && seat.workspace_id === o['workspace-id'] && humanProfile.workspaceId === o['workspace-id'], 'same test workspace and hosted target');
       await privateRead(seat.credential_file); const agent = await readProfileCredential(seat);
       receipt = { release_sha: release, window_id: o['window-id'], window: o.window, phase: o.phase,
         controls: { hosted_mcp_consent_refresh: false, dcr_registration_consent: false, cimd_consent: false, human_recovery: false, worker_command_read: false },
         consent_receipt_sha256: consentHash, producer_sha256: producer, dcr_client_ids: [] };
-      leg = 'hosted_mcp_consent_refresh'; const t = await refresh(grant); grant.refresh_token = t.refresh_token; await saveGrants(); await mcp(t); receipt.controls[leg] = true;
+      leg = 'hosted_mcp_consent_refresh'; const t = await refresh(grant); grant.refresh_token = t.refresh_token; await saveGrants(); await mcp(t, true); receipt.controls.hosted_mcp_consent_refresh = true;
       leg = 'dcr_registration_consent'; receipt.dcr_client_ids.push(await register()); receipt.controls[leg] = true;
       leg = 'cimd_consent'; await cimd();
       const r = await transport(authorization(authorize, CLIENT).url); await boundedBody(r);
@@ -425,11 +465,11 @@ async function run(o) {
       const w = new URL(`${API}/rest/v1/workspaces`); w.search = new URLSearchParams({ select: 'workspace_id,name', workspace_id: `eq.${seat.workspace_id}`, limit: '1' });
       const hr = await transport(w, { headers: { Authorization: `Bearer ${human.accessToken}`, apikey: target.anonKey, 'Accept-Profile': 'swarm_read', Accept: 'application/json' } });
       demand(hr.status === 200, 'successful human read', `HTTP ${hr.status}`); const rows = json(await boundedBody(hr));
-      demand(Array.isArray(rows) && rows.length === 1 && rows[0].workspace_id === seat.workspace_id && rows[0].name === WORKSPACE, 'live human read of test workspace'); receipt.controls[leg] = true;
+      demand(Array.isArray(rows) && rows.length === 1 && rows[0].workspace_id === o['workspace-id'] && typeof rows[0].name === 'string', 'live human read of test workspace'); receipt.controls[leg] = true;
       leg = 'worker_command_read'; const seatTarget = cloudTarget(seat.url, seat.anon_key);
       const directoryResult = await readAgentSignalDirectory(seatTarget, agent.token, seat.workspace_id, transport);
-      demand(directoryResult.identity?.credential_valid === true && directoryResult.identity.workspace_id === seat.workspace_id &&
-        directoryResult.identity.principal_id === seat.principal_id && directoryResult.identity.workspace_name === WORKSPACE, 'live test seat and workspace identity');
+      demand(directoryResult.identity?.credential_valid === true && directoryResult.identity.workspace_id === o['workspace-id'] &&
+        directoryResult.identity.principal_id === seat.principal_id && typeof directoryResult.identity.workspace_name === 'string', 'live test seat and workspace identity');
       const body = `C1 ordinary control ${o.window}/${o['window-id']}/${o.phase} ${randomBytes(12).toString('hex')}`;
       const result = await new ThinCommandClient(seatTarget, transport, { signalRequestTimeoutMs: o.requestMs }).sendSignal({ workspaceId: seat.workspace_id, credential: agent.token,
         commandId: `c1_controls_${randomBytes(12).toString('hex')}`, command: { kind: 'post_signal', signal_kind: 'note', body,
@@ -446,10 +486,10 @@ async function run(o) {
     process.exitCode = 1;
   } finally {
     globalThis.fetch = rawFetch; clearTimeout(timer);
-    if (lock) {
-      await lock.close();
+    for (const { path, fd } of locks.reverse()) {
+      await fd.close();
       // Use the machine's deletion guard, never unlink/rm around it.
-      try { await promisify(execFile)('rm', [join(cred, 'live-controls.lock')], { timeout: 5000 }); }
+      try { await promisify(execFile)('rm', [path], { timeout: 5000 }); }
       catch { process.stderr.write('FAIL lock_cleanup: removal expected guarded rm success got refusal; live-controls.lock retained; STOP\n'); process.exitCode = 1; }
     }
   }
