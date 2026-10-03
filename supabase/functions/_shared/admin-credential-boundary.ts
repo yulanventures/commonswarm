@@ -1,15 +1,15 @@
 import { ADMIN_RESOURCE } from './protocol.js';
 
 /** Denial-only classification. Unverified claims can refuse a credential, never
- * authenticate it or route it into an admin operation. All other credentials
+ * authenticate it or confer admin authority. All other credentials
  * still pass through the endpoint's existing authentication. */
 export function isAdminCredential(value: string | null): boolean {
   if (value === null) return false;
   if (value.startsWith('swm_adm_') || value.startsWith('swm_adr_')) return true;
   const parts = value.split('.');
   if (parts.length !== 3) return false;
-  // Bound denial parsing; oversized JWT-shaped input is also foreign input.
-  if (value.length > 16 * 1024) return true;
+  // Bound denial parsing without reclassifying ordinary oversized Bearer input.
+  if (value.length > 16 * 1024) return false;
   const payload = parts[1]!;
   if (!/^[A-Za-z0-9_-]+$/u.test(payload)) return false;
   try {

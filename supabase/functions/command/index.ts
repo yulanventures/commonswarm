@@ -1112,7 +1112,7 @@ const WORKSPACE_COMMAND_KINDS = [
   ...FILE_COMMAND_KINDS,
 ] as const;
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
-import { ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
+import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
 /* Worker scopes are shared by ordinary minting and delegated provisioning.
  * Their extraction preserves the existing ordinary worker permission set.
  * The two rolling-day ceilings come from the consent/enforcement registry.
@@ -12921,7 +12921,7 @@ async function insertCommandFailure(
   `;
 }
 
-import { isAdminCredential, presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { createAdminHttpHandler } from '../_shared/admin-http.ts';
 import { adminDbRole, adminSecurityFailure, type AdminAuditKind } from '../_shared/admin-oauth-db.ts';
 import { admitAdminRequest } from './admin-admission.ts';
@@ -12966,14 +12966,21 @@ async function runAdminOAuthCommand(input: AdminInput, admission: AdminAdmission
 
 async function handlePostRequest(request: Request): Promise<Response> {
   const credential = bearer(request);
-  if (/^DPoP(?:\s|$)/iu.test(request.headers.get('authorization') ?? '') ||
-      presentsAdminCredential(request) || isAdminCredential(credential)) {
+  if (presentsAdminCredential(request)) {
     return await handleAdminCommandRequest(request);
   }
   if (request.method !== 'POST') return json(405, { error: 'method_not_allowed' });
   const parsed = await readBody(request);
   if (!parsed.ok) return parsed.response;
   const body = parsed.body;
+
+  // Ordinary DPoP remains on ordinary authentication. An explicit admin-resource
+  // request may enter the verifier even when its token is malformed or foreign.
+  // Fresh human account commands also name this resource and keep their own path.
+  if (/^DPoP(?:\s|$)/iu.test(request.headers.get('authorization') ?? '') &&
+      body.resource === ADMIN_RESOURCE) {
+    return await handleAdminCommandRequest(new Request(request, { body: JSON.stringify(body) }));
+  }
 
   const kind = commandKind(body);
   const publicHostedClaim = publicHostedCommandForbidden(kind);

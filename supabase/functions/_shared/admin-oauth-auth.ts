@@ -173,7 +173,7 @@ export class AdminJwtVerifier {
           redirect: "error",
           signal: linked.signal,
         });
-        if (!response.ok || response.url !== "" && response.url !== this.jwksUrl) {
+        if (!response.ok || response.url !== this.jwksUrl) {
           throw new AdminTokenError("jwks_unavailable");
         }
         const bytes = await boundedBytes(response, JWKS_MAX_BYTES);

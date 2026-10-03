@@ -54,7 +54,7 @@ for (const [scenario, label] of Object.entries(scenarios)) {
       writeFileSync(configPath, JSON.stringify({ local, owner, workspace, jwt: signed.data.session.access_token,
         ...(scenario === 'storage' ? { rollbackSchema: emptyApplicationSchema() } : {}) }), { mode: 0o600 });
       const run = spawnSync('deno', ['run', '--no-lock', '--config', 'supabase/functions/command/deno.json',
-        '--allow-read', '--allow-env', '--allow-net', 'tests/support/admin-server-harness.mjs', configPath, scenario], {
+        '--allow-read', '--allow-env', '--allow-net', ...(scenario === 'replay' ? ['--allow-run=deno'] : []), 'tests/support/admin-server-harness.mjs', configPath, scenario], {
         encoding: 'utf8', timeout: 150000, env: process.env,
       });
       // The harness emits only fixed assertion labels, never raw errors or secrets.
