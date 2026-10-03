@@ -1,5 +1,7 @@
 // Shell-text inventory for the documented host boundary, independent of fixture coverage.
 // Paths stay symbolic here: the boundary adapter resolves them for its particular fixture.
+import { planShellWords } from "../support/plan-shell-words.js";
+import { readFileSync } from "node:fs";
 export interface HandoffBlock { file: string; step: string; host: string; source: string; line: number }
 export interface Handoff {
   producer: HandoffBlock;
@@ -117,10 +119,27 @@ export interface RemoteOperation {
   script?: string;
   delimiter?: string;
   stdinProducer?: { path: string; writers: string[] };
+  stdinFile?: string;
+  localArgvSource?: string;
   // A Mac command substitution owns this output, not the remote environment.
   capture?: { name: string; localStateSource?: string };
   // These sinks belong to the Mac SSH executable, never to the remote shell.
   localOutputPaths?: string[];
+}
+
+function selectedPlanScript(block: HandoffBlock, command: string, program: string): string {
+  const file = /\$[A-Z0-9_]+\/(docs\/[A-Za-z0-9_./-]+\.md)/.exec(command)?.[1];
+  const step = /^matches=\[b for b in blocks if b\.splitlines\(\)\[0\]=='# step: ([a-z0-9-]+)'\]$/m.exec(program)?.[1];
+  const lines = program.trim().split("\n");
+  if (!file || file.split("/").includes("..") || !step || lines.length !== 5 || lines[0] !== "import pathlib,re,sys" ||
+      lines[1] !== "blocks=re.findall(r'```sh\\n(.*?)\\n```',pathlib.Path(sys.argv[1]).read_text(),re.S)" ||
+      !/^assert len\(matches\)==1, '[^']+'$/.test(lines[3]!) || lines[4] !== "print(matches[0])") {
+    throw new Error(`${block.file}:${block.line}: unknown transfer form: opaque plan selector`);
+  }
+  const selected = [...readFileSync(file, "utf8").matchAll(/^```sh\n([\s\S]*?)^```$/gm)]
+    .map((match) => match[1]!).filter((source) => source.split("\n")[0] === `# step: ${step}`);
+  if (selected.length !== 1) throw new Error(`${block.file}:${block.line}: plan selector requires one ${step}`);
+  return selected[0]!;
 }
 export type BoundaryOperation = { transfer: TransferProduct; transport: "scp" | "rsync"; flags: string[] } | { remote: RemoteOperation };
 
@@ -355,6 +374,11 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
       }
     }
     command = command.slice(0, end).trim();
+    const commandVariable = /\s"\$([A-Za-z_][A-Za-z0-9_]*)"$/.exec(command)?.[1];
+    const formatter = commandVariable && new RegExp(`^\\s*printf -v ${commandVariable} '%q ' ([^\\n]+)$`, "m")
+      .exec(lines.slice(0, i).join("\n"));
+    if (formatter && /\$\(|`/.test(formatter[1]!)) unknown(line);
+    const formatted = formatter ? { localArgvSource: formatter[0]!.trim() } : {};
     const localOutputPaths = outputPaths(sshText.slice(end), expand).flatMap(expand)
       .filter((path) => path !== "/dev/null");
     const localOutputs = localOutputPaths.length ? { localOutputPaths } : {};
@@ -362,14 +386,23 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
     if (!sshHere) {
       const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(sshText.slice(end));
       if (input) {
-        const found = scripts.get(tokens(input[1]!)[0]!);
-        if (!found) unknown(line);
-        operations.push({ remote: { command: commandExpansion(command), ...found!, ...localOutputs, ...(capture ? { capture } : {}) } });
+        const path = tokens(input[1]!)[0]!;
+        const found = scripts.get(path);
+        // Data-file stdin must remain a dependency. Executable bash stdin
+        // still needs its visible writer; no opaque script is admitted here.
+        if (!found && (/\bbash\s+-s\b/.test(command) || /[\x60*?]|\$\(|\$\{[^}]*[@*]/.test(path))) unknown(line);
+        operations.push({ remote: { command: commandExpansion(command), ...(found ?? { stdinFile: expand(path)[0]! }), ...formatted, ...localOutputs, ...(capture ? { capture } : {}) } });
         continue;
       }
-      if (/\bbash\s+-s\b/.test(command)) unknown(line);
+      if (/\bbash\s+-s\b/.test(command)) {
+        const prefix = line.slice(0, ssh.index);
+        if (!here || script === undefined || !/^\s*python3\s+-\s+"[^"\n]+"\s+<<'[^']+'\s*\|\s*$/.test(prefix)) unknown(line);
+        operations.push({ remote: { command: commandExpansion(command), script: selectedPlanScript(block, prefix, script!),
+          delimiter: "'PLAN_SELECTED'", ...localOutputs } });
+        continue;
+      }
     }
-    operations.push({ remote: { command: commandExpansion(command), ...localOutputs, ...(capture ? { capture } : {}), ...(sshHere && script !== undefined
+    operations.push({ remote: { command: commandExpansion(command), ...formatted, ...localOutputs, ...(capture ? { capture } : {}), ...(sshHere && script !== undefined
       ? { script, delimiter: `${sshHere[1]}${sshHere[2]}${sshHere[3]}${sshHere[2]}` } : {}) } });
   }
   return operations;
@@ -613,7 +646,12 @@ function writerCommands(line: string, depth = 0, expand?: (value: string) => str
         }
       }
     }
-    const words = executableWords(command);
+    let words: string[];
+    try { words = executableWords(command); }
+    catch (cause) {
+      if (depth > 0) throw new Error(`unknown writer shell form: ${command.trim()}`, { cause });
+      throw cause;
+    }
     if (words[0] === "eval") throw new Error(`unknown writer executable form: ${command.trim()}`);
     if (depth > 0 && ["ssh", "scp"].includes(words[0] ?? "")) {
       throw new Error(`unknown transfer form: nested transport ${command.trim()}`);
@@ -629,11 +667,15 @@ function writerCommands(line: string, depth = 0, expand?: (value: string) => str
     const at = words.findIndex((word, index) => index > 0 && (/^-[^-]*c/.test(word) || word === "--command"));
     if (at < 0) return [command];
     const option = words[at]!;
-    if (at !== 1 || !/^-[eluc]+$/.test(option) || words.length !== 3 || /[$`]/.test(words[2]!)) {
+    const literalScript = /(?:-[eluc]*c[eluc]*|--command)\s+'/.test(command);
+    if (at !== 1 || !/^-[eluc]+$/.test(option) || words.length !== 3 || (/[$`]/.test(words[2]!) && !literalScript)) {
       throw new Error(`unknown writer shell form: ${command.trim()}`);
     }
+    const scriptExpand = expansions({ file: "literal-shell", step: "literal-shell", host: "box ", line: 0,
+      source: words[2]!.replace(/;\s*/g, "\n") });
     return writerSourceLines(words[2]!)
-      .flatMap((body) => writerCommands(body, depth + 1, expand));
+      .flatMap((body) => writerCommands(body, depth + 1, expand))
+      .flatMap((body) => scriptExpand(body));
   })];
 }
 
@@ -823,10 +865,15 @@ export function transferProducts(block: HandoffBlock): TransferProduct[] {
     const remote = operation.remote;
     const host = /\b(?:ops|commonswarm)@[^\s'";]+/.exec(remote.command)!;
     let command = remote.command.slice(host.index + host[0].length).trim();
-    // SSH joins its command argv. Remove the enclosing Mac quote, preserving
-    // the quotes that the remote shell receives inside that argument.
-    const enclosingQuote = /^(['"])([\s\S]*)\1$/.exec(command);
-    if (enclosingQuote) command = enclosingQuote[2]!;
+    if (remote.localArgvSource) {
+      const formatter = /^printf -v ([A-Za-z_][A-Za-z0-9_]*) '%q ' (.+)$/.exec(remote.localArgvSource)!;
+      if (command !== `"$${formatter[1]}"`) throw new Error(`${block.file}:${block.line}: unknown formatted SSH argv`);
+      command = formatter[2]!;
+    } else {
+      // SSH joins its command argv. Remove the enclosing Mac quote, preserving
+      // the quotes that the remote shell receives inside that argument.
+      command = planShellWords(command).join(" ");
+    }
     // Outer assignments resolve argv such as STAGING_ROOT. Do not treat the Mac's
     // local writes as remote; only this SSH command and its stdin are inspected.
     const outer = expansions({ ...block, source: outsideHeredocs(block.source) });
@@ -844,6 +891,7 @@ export function transferProducts(block: HandoffBlock): TransferProduct[] {
         (original, braced: string | undefined, plain: string | undefined) => {
           const argument = args[Number(braced ?? plain) - 1];
           if (argument && /[$`]/.test(argument) && outer(argument).some((value) => value !== argument)) {
+            if (remote.localArgvSource && outer(argument).length === 1) return outer(argument)[0]!;
             throw new Error(`${block.file}:${block.line}: unknown transfer form: unresolved SSH positional argv ${argument}`);
           }
           return argument ?? original;

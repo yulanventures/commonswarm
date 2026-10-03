@@ -194,7 +194,12 @@ case "$name" in
     run_in_box "$ssh_user" "$*"
     ;;
   scp)
+    # The site window transfer preserves its protected source mode. Accept
+    # only this plan's flag; destinations still receive the fixture's 0600 mode.
+    preserve_times=0
+    if [ "${1:-}" = -p ]; then preserve_times=1; shift; fi
     [ "$#" -eq 2 ] || fail_unproduced 'scp flags'
+    case "$1" in -*) fail_unproduced 'scp flags' ;; esac
     source_path=$1
     destination=$2
     [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail_unproduced 'scp regular source file'
@@ -227,7 +232,11 @@ case "$name" in
     else
       source_sha256=$(sha256sum "$source_path" | awk '{print $1}')
     fi
-    /bin/cp "$source_path" "$target_path"
+    if [ "$preserve_times" -eq 1 ]; then
+      /bin/cp -p "$source_path" "$target_path"
+    else
+      /bin/cp "$source_path" "$target_path"
+    fi
     chmod 0600 "$target_path"
     if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
       /usr/bin/chown "$target_user:$target_user" "$target_path"
@@ -517,6 +526,14 @@ case "$name" in
           commonswarm-postgres) target=dry-run-postgres ;;
         esac
         case "$format" in
+          '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}')
+            [ "$target" = dry-run-edge ] || unhandled_stub
+            case "${BOX_DRY_RUN_EDGE_PUBLIC_ENABLED:?measured edge flag required}" in
+              0) ;;
+              1) printf '%s' enabled ;;
+              *) unhandled_stub ;;
+            esac
+            ;;
           # M7 measured names only, and the production recheck measured no host
           # value (box-facts-measured.json:83-89, 383-386). Never infer it from extra_hosts.
           *'.Config.Env'*) fail_unproduced 'OAuth database host observation: no measured Config.Env host line' ;;
