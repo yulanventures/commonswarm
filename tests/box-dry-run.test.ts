@@ -2201,6 +2201,8 @@ function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions)
     BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
     BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"]!,
   });
+  env.BOX_DRY_RUN_OP_BUILD_REFERENCE = env.SITE_BUILD_ENV_OP_REFERENCE;
+  env.BOX_DRY_RUN_OP_BUILD_TMP = macTmp;
   // The PREP receipt's seats are not marked valid here. Whether a seat's credential is valid is a live observation of
   // the hosted workspace, and the one executed program that asks (hm37a-directed-check-old/new) is declared NOT
   // EXECUTED, so no principal table is written for it and no profile is materialized at the receipt's paths.
@@ -2310,6 +2312,8 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   const supportRoot = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-box-support-"));
   const bin = join(supportRoot, "bin");
   const log = join(temporary, "stub.log");
+  const commonswarmLog = join(supportRoot, "commonswarm-stub.log");
+  const dockerState = join(supportRoot, "docker-state");
   const macLocalRoot = join(temporary, "mac-local");
   for (const path of [macLocalRoot, join(macLocalRoot, "home"), join(macLocalRoot, "tmp")]) {
     makeRootDirectory(path, 0o700);
@@ -2332,6 +2336,8 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   const pythonFixture = join(supportRoot, "python");
   const sourceRoot = join(supportRoot, "source");
   makeRootDirectory(supportRoot, 0o755);
+  writeRootMode(commonswarmLog, "", 0o600);
+  makeRootDirectory(dockerState, 0o700);
   copyRootFixture(PRELUDE, prelude, 0o644);
   copyRootFixture(USERLAND, userland, 0o644);
   makeRootDirectory(pythonFixture, 0o755);
@@ -2436,6 +2442,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
     chmodSync(targetStack, 0o755);
   }
   chownTree("root:root", supportRoot);
+  chownPaths("commonswarm:commonswarm", commonswarmLog, dockerState);
   for (const path of [
     log,
     "/home/commonswarm/.env",
@@ -2503,6 +2510,8 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       BOX_DRY_RUN_USERLAND: userland,
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
+      BOX_DRY_RUN_COMMONSWARM_STUB_LOG: commonswarmLog,
+      BOX_DRY_RUN_DOCKER_STATE_DIR: dockerState,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
@@ -2520,6 +2529,8 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
         BOX_DRY_RUN_SOURCE_CLONE: macSiteSource,
         BOX_DRY_RUN_DIST_FIXTURE: macSiteDist,
         BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: boxPromptEnvironment.OP_SERVICE_ACCOUNT_TOKEN_FILE,
+        BOX_DRY_RUN_OP_BUILD_REFERENCE: boxPromptEnvironment.SITE_BUILD_ENV_OP_REFERENCE,
+        BOX_DRY_RUN_OP_BUILD_TMP: join(macLocalRoot, "tmp"),
       } : {}),
       BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
       BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health!,
@@ -4268,6 +4279,113 @@ test("scp and op stubs enforce transfer and protected-output boundaries", { skip
   } finally {
     if (process.env.BOX_DRY_RUN_PART === "box") rmSync(target, { force: true });
     cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: the site Python wrapper admits only the protected build-env op handoff", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  const bin = join(temporary, "bin");
+  const log = join(temporary, "stub.log");
+  const tokenFile = join(temporary, "synthetic-token");
+  const scratch = join(temporary, "anvil-secret.ABC123");
+  const output = join(scratch, "site-build.env");
+  const reference = "op://Yulan Ventures Infra/CommonSwarm Site/public-build-env";
+  const syntheticToken = "synthetic-build-env-token";
+  const block = planBlock(SITE, "site-00-build-env");
+  const writer = /python3 - "\$OP_SERVICE_ACCOUNT_TOKEN_FILE" "\$SITE_BUILD_ENV_OP_REFERENCE" "\$SITE_BUILD_ENV_SOURCE" <<'PY'\n([\s\S]*?)\nPY/.exec(block.source)?.[1];
+  assert.ok(writer, "site plan must supply its actual service-account Python writer");
+  makeStubBin(bin);
+  writeMode(tokenFile, syntheticToken, 0o600);
+  mkdirSync(scratch, { mode: 0o700 });
+  const env = explicitEnvironment({ PATH: `${bin}:/usr/bin:/bin`, BOX_DRY_RUN_STUB_LOG: log,
+    BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
+    BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: tokenFile,
+    BOX_DRY_RUN_OP_BUILD_REFERENCE: reference, BOX_DRY_RUN_OP_BUILD_TMP: temporary });
+  const run = (source = writer, ref = reference, target = output, overrides: NodeJS.ProcessEnv = {}) =>
+    spawnSync("/bin/bash", ["-c", 'source "$1"; python3 - "$2" "$3" "$4"', "site-op-control", PRELUDE, tokenFile, ref, target],
+      { encoding: "utf8", env: { ...env, ...overrides }, input: `${source}\n` });
+  const refused = (source = writer, ref = reference, target = output, overrides: NodeJS.ProcessEnv = {}) => {
+    const result = run(source, ref, target, overrides);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /STOP: service-account build-env read failed/);
+    assert.equal(result.stdout, "");
+    assert.equal(pathExists(output), false);
+  };
+  try {
+    refused(writer.replace("pathlib.Path(token_file).read_text().strip()", "'wrong-synthetic-token'"));
+    refused(writer, "op://Yulan Ventures Infra/Other/public-build-env");
+    refused(writer, reference, join(scratch, "other.env"));
+    const desktopSession = run(writer, reference, output, { OP_SESSION_DRY_RUN: "forbidden-session" });
+    assert.equal(desktopSession.status, 1);
+    assert.match(desktopSession.stderr, /AssertionError/);
+    assert.equal(pathExists(output), false);
+    refused(writer, reference, output, { OP_BIOMETRIC_UNLOCK_ENABLED: "1" });
+    chmodSync(tokenFile, 0o644);
+    refused();
+    chmodSync(tokenFile, 0o600);
+    chmodSync(scratch, 0o755);
+    refused();
+    chmodSync(scratch, 0o700);
+    const otherScratch = join(temporary, "other-scratch");
+    mkdirSync(otherScratch, { mode: 0o700 });
+    refused(writer, reference, join(otherScratch, "site-build.env"));
+    const linkScratch = join(temporary, "anvil-secret.DEF456");
+    symlinkSync(otherScratch, linkScratch);
+    refused(writer, reference, join(linkScratch, "site-build.env"));
+    assert.equal(readdirSync(otherScratch).length, 0);
+    const positive = run();
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.equal(positive.stdout, "");
+    assert.equal(positive.stderr, "");
+    assert.equal(lstatSync(output).mode & 0o777, 0o600);
+    assert.match(readFileSync(output, "utf8"), /^PUBLIC_SUPABASE_URL=https:\/\/api\.commonswarm\.com$/m);
+    const overwrite = run();
+    assert.equal(overwrite.status, 1, overwrite.stderr);
+    assert.match(overwrite.stderr, /STOP: service-account build-env read failed/);
+    for (const bytes of [readFileSync(log, "utf8"), positive.stdout, positive.stderr, readFileSync(output, "utf8")]) {
+      assert.equal(bytes.includes(syntheticToken), false, "synthetic token leaked through the op boundary");
+    }
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
+  }
+});
+
+test("controls: box sudo keeps logs private and Docker state visible across the service uid", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const fixture = prepareBoxFixture("s1");
+  const run = (args: string[]) => spawnSync("sudo", ["-u", "commonswarm", "env",
+    "COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net", "COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env",
+    "docker", "compose", "-p", "commonswarm-edge", ...args], { encoding: "utf8", env: fixture.env });
+  try {
+    for (const args of [["config", "--unreviewed"], ["up", "-d", "--unreviewed", "edge-runtime"]]) {
+      const rejected = run(args);
+      assert.equal(rejected.status, 69, rejected.stderr);
+      assert.match(rejected.stderr, /unhandled dry-run stub: docker/);
+    }
+    const config = run(["config", "-q"]);
+    assert.equal(config.status, 0, config.stderr);
+    const up = run(["up", "-d", "edge-runtime"]);
+    assert.equal(up.status, 0, up.stderr);
+    const inspect = spawnSync("docker", ["inspect", "--format",
+      '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}', "dry-run-edge"],
+      { encoding: "utf8", env: fixture.env });
+    assert.equal(inspect.status, 0, inspect.stderr);
+    assert.equal(inspect.stdout, `${CANDIDATE_EDGE}/deploy/edge-runtime\n`);
+    assert.equal(lstatSync(fixture.log).uid, 0);
+    assert.equal(lstatSync(fixture.log).mode & 0o777, 0o600);
+    assert.equal(lstatSync(fixture.temporary!).mode & 0o777, 0o700);
+    const denied = spawnSync("/usr/bin/sudo", ["-n", "-u", "commonswarm", "/usr/bin/cat", fixture.log], { encoding: "utf8" });
+    assert.equal(denied.status, 1);
+    assert.equal(denied.stdout, "");
+    assert.match(denied.stderr, /Permission denied/);
+    const log = readFileSync(fixture.log, "utf8");
+    assert.match(log, /^docker compose -p commonswarm-edge config -q$/m);
+    assert.match(log, /^docker compose -p commonswarm-edge up -d edge-runtime$/m);
+    assert.doesNotMatch(log, /__FIRST_FAIL__/);
+    assert.equal(readdirSync(fixture.env.BOX_DRY_RUN_DOCKER_STATE_DIR!).includes("edge-runtime-up"), true);
+  } finally {
+    cleanupBoxFixture(fixture);
   }
 });
 

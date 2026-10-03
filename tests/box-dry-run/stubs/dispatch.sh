@@ -23,6 +23,7 @@ unhandled_stub() {
 
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
 stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
+docker_state_dir="${BOX_DRY_RUN_DOCKER_STATE_DIR:-$stub_state_dir/docker}"
 
 # The fixture box root is a directory under the dry run's own temporary directory. Every ssh, scp and rsync
 # operation lands there, and nothing else. The harness creates it; a stub never invents one.
@@ -329,6 +330,18 @@ case "$name" in
       case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
       root_log=$BOX_DRY_RUN_STUB_LOG
       if [ "$sudo_user" = root ]; then root_log=${BOX_DRY_RUN_ROOT_STUB_LOG:-$BOX_DRY_RUN_STUB_LOG}; fi
+      if [ "$EUID" -eq 0 ] && [ "$sudo_user" = commonswarm ]; then
+        # A root-private log must stay private across the real uid transition.
+        # Append the service user's own log only after its command returns.
+        service_log=${BOX_DRY_RUN_COMMONSWARM_STUB_LOG:?service stub log required}
+        : >"$service_log"
+        status=0
+        /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
+          PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
+          ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$service_log" "$@" || status=$?
+        cat "$service_log" >>"$root_log"
+        exit "$status"
+      fi
       exec /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
         PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
         ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$root_log" "$@"
@@ -336,10 +349,8 @@ case "$name" in
     exec "$@"
     ;;
   op)
-    # A real token is never part of the harness. The synthetic token reaches
-    # only this process from a protected file, matching the service-account
-    # boundary without putting it in the plan shell, argv, logs, or output.
-    [ -z "${OP_SERVICE_ACCOUNT_TOKEN+x}" ] || exit 69
+    # A real token is never part of the harness. Authenticate from its protected
+    # synthetic file, including the site's file-to-op-child handoff below.
     if /usr/bin/env | /usr/bin/grep -q '^OP_SESSION_'; then exit 69; fi
     [ -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}" ] || exit 69
     token_file=${BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE:-}
@@ -350,9 +361,6 @@ case "$name" in
       *) exit 69 ;;
     esac
     [ "$token_mode" = 600 ] || exit 69
-    OP_SERVICE_ACCOUNT_TOKEN=$(cat "$token_file")
-    export OP_SERVICE_ACCOUNT_TOKEN
-    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || exit 69
     [ "$#" -eq 4 ] && [ "$1" = read ] && [ "$3" = --out-file ] || exit 69
     reference=$2
     output=$4
@@ -360,6 +368,26 @@ case "$name" in
     output_parent=${output%/*}
     [ -n "$output" ] && [ "$output_parent" != "$output" ] && \
       [ -d "$output_parent" ] && [ ! -L "$output_parent" ] && [ ! -L "$output" ] || exit 69
+    if [ -n "${OP_SERVICE_ACCOUNT_TOKEN+x}" ]; then
+      # The site plan's Python loads the protected file into only the op child.
+      # Admit that handoff only for its pinned reference and fresh scratch file;
+      # arbitrary inherited tokens and every other output form stay refused.
+      [ -n "${BOX_DRY_RUN_OP_BUILD_REFERENCE:-}" ] && \
+        [ "$reference" = "$BOX_DRY_RUN_OP_BUILD_REFERENCE" ] || exit 69
+      case "$output" in
+        "${BOX_DRY_RUN_OP_BUILD_TMP:?build scratch root required}"/anvil-secret.??????/site-build.env) ;;
+        *) exit 69 ;;
+      esac
+      scratch_leaf=${output_parent#"$BOX_DRY_RUN_OP_BUILD_TMP"/}
+      case "$scratch_leaf" in */*) exit 69 ;; esac
+      [ ! -e "$output" ] && [ "$OP_SERVICE_ACCOUNT_TOKEN" = "$(cat "$token_file")" ] || exit 69
+      case "$(uname -s)" in
+        Darwin) scratch_mode=$(stat -f '%Lp' "$output_parent") ;;
+        Linux) scratch_mode=$(stat -c '%a' "$output_parent") ;;
+      esac
+      [ "$scratch_mode" = 700 ] || exit 69
+    fi
+    [ -n "$(cat "$token_file")" ] || exit 69
     umask 077
     printf '%s\n' \
       'PUBLIC_SUPABASE_URL=https://api.commonswarm.com' \
@@ -557,7 +585,7 @@ case "$name" in
         case "$target" in
           dry-run-oauth) path_readback "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
           *)
-            if [ -f "$stub_state_dir/docker/edge-runtime-up" ]; then
+            if [ -f "$docker_state_dir/edge-runtime-up" ]; then
               path_readback "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}/deploy/edge-runtime"
             else
               path_readback "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}"
@@ -609,8 +637,8 @@ case "$name" in
           config) [ "$#" -eq 1 ] && [ "$1" = -q ] || unhandled_stub ;;
           pull)
             [ "$#" -eq 1 ] || unhandled_stub
-            mkdir -p "$stub_state_dir/docker"
-            printf '%s\n' "$project:$1" >"$stub_state_dir/docker/last-pulled"
+            mkdir -p "$docker_state_dir"
+            printf '%s\n' "$project:$1" >"$docker_state_dir/last-pulled"
             ;;
           ps)
             if [ "${1:-}" = -q ]; then shift; fi
@@ -629,11 +657,11 @@ case "$name" in
             [ "$detached" -eq 1 ] && [ "$#" -eq 1 ] || unhandled_stub
             case "$project:$1" in
               commonswarm-edge:edge-runtime)
-                mkdir -p "$stub_state_dir/docker"
-                : >"$stub_state_dir/docker/edge-runtime-up" ;;
+                mkdir -p "$docker_state_dir"
+                : >"$docker_state_dir/edge-runtime-up" ;;
               commonswarm-supabase-stack:*)
-                mkdir -p "$stub_state_dir/docker"
-                printf '%s\n' "$1" >"$stub_state_dir/docker/stack-service-up" ;;
+                mkdir -p "$docker_state_dir"
+                printf '%s\n' "$1" >"$docker_state_dir/stack-service-up" ;;
               *) unhandled_stub ;;
             esac
             ;;
