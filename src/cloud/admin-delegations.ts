@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { withClientBuild } from "./client-build.js";
 import { commandEndpoint, readEndpoint, CLIENT_PROTOCOL_VERSION, type CloudTarget } from "./config.js";
-import { ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminRecoveryPage, type AdminReadRequest, type AdminRecoveryPage } from "./admin-delegations-contract.js";
+import { ADMIN_GATE_URL, ADMIN_PAGE_DEFAULT, ADMIN_RECOVERY_RESOURCE, adminReadRequest, parseAdminGate, parseAdminRecoveryPage, type AdminReadRequest, type AdminRecoveryPage } from "./admin-delegations-contract.js";
+
+/** Public AS-owned read, independent of account recovery and human credentials. */
+export async function readAdminIssuanceGate(fetcher: typeof fetch = fetch): Promise<ReturnType<typeof parseAdminGate>> {
+  try {
+    const response = await fetcher(ADMIN_GATE_URL, {
+      method: "GET", credentials: "omit", cache: "no-store", signal: AbortSignal.timeout(2500),
+    });
+    if (!response.ok) return { state: "unavailable" };
+    return parseAdminGate(await response.json());
+  } catch { return { state: "unavailable" }; }
+}
 
 export class AdminRecoveryError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "AdminRecoveryError"; }

@@ -2,6 +2,7 @@ import type postgres from "npm:postgres@3.4.9";
 import { adminReadRequest, parseAdminRecoveryPage, type AdminReadRequest } from "./admin-recovery-contract.ts";
 
 export { adminReadRequest };
+export { isAdminReadResource, isAdminRecoveryRequest } from "./admin-recovery-contract.ts";
 export type { AdminReadRequest };
 
 /** Narrow SECURITY DEFINER read; never assume swarm_command or read private tables. */
