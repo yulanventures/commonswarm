@@ -713,7 +713,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
 
 test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
-  for(const file of ['ordinary-after.json','ordinary-recovery.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  for(const file of ['ordinary-after.json','ordinary-recovery.json','consent-post-W5.json','C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
@@ -728,6 +728,12 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
       assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     }
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+    // The W6 close requires the retained post-W5 consent receipt copy.
+    rmSync(join(proof,'consent-post-W5.json'));
+    const unbound=run(harness+close,{...env,CLOSE_RESULT:'success'});
+    assert.notEqual(unbound.status,0); assert.match(unbound.stderr,/FAIL ai-close: retained consent receipt expected consent-post-W5\.json got missing; STOP/);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'consent-post-W5.json'),'{}');
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
   } finally {

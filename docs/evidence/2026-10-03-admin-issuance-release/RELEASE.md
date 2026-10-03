@@ -55,7 +55,11 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files;
 `BOX_ARCHIVE_PATH=/tmp/admin-issuance-<release_sha>-<window_id>.tar` is an
 uploaded 0600 tar, exact checksum, never overwritten. `RELEASE_ROOT` and
-`PROOF_DIR` are derived at open, not caller-selected. `GATE_RECEIPT_FILE`
+`PROOF_DIR` are derived at open, not caller-selected. `LIVE_CONTROLS_FILE`
+(per window and phase) and `CONSENT_RECEIPT_FILE` (per release: `pre-W1` or
+`post-W5`) are absolute regular nonsecret JSON files from the dedicated
+controls worker; ai-open and ai-live-controls enforce their exact schema,
+release/window binding, consent digest and producer digest. `GATE_RECEIPT_FILE`
 contains release_sha, gates, and evidence_root; each gate names a relative
 evidence file, its SHA-256, PASS and the exact control set in GATES.json.
 The checker supplies the receipt and retained evidence files. This plan checks
@@ -377,20 +381,73 @@ PY
 ;; esac
 test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
 : "${LIVE_CONTROLS_FILE:?reviewed live authenticated before controls required}"
-python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" <<'PY'
-import json,pathlib,sys
-p=pathlib.Path(sys.argv[2]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-d=json.load(open(sys.argv[1])); r=json.loads(p.read_text())
-assert set(r)=={'release_sha','window_id','window','phase','controls'} and r['phase']=='before'
-assert all(r[k]==d[k] for k in ('release_sha','window_id','window'))
-assert set(r['controls'])=={'hosted_mcp_consent_refresh','dcr_registration_consent','cimd_consent','human_recovery','worker_command_read'} and all(v is True for v in r['controls'].values()), 'FAIL live before controls; STOP before open'
-PY
+: "${CONSENT_RECEIPT_FILE:?FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}"
 test -f "$BOX_ARCHIVE_PATH" && test ! -L "$BOX_ARCHIVE_PATH"
 test "$(stat -c %a "$BOX_ARCHIVE_PATH")" = 600
 test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_sha256"])' "$INPUTS_FILE")"
+# Live before receipt and its release-bound consent receipt (SCHEMA section 3);
+# producer bytes come from the checksum-verified uploaded archive.
+python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$BOX_ARCHIVE_PATH" <<'PY'
+import datetime,hashlib,json,pathlib,re,sys,tarfile
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-open: '+what+' expected '+expected+' got '+got+'; STOP')
+def receipt(name,label):
+    p=pathlib.Path(name)
+    need(p.is_absolute() and p.is_file() and not p.is_symlink(),label,'absolute-regular-file','missing-or-not-regular')
+    raw=p.read_bytes()
+    try: value=json.loads(raw)
+    except ValueError: value=None
+    need(isinstance(value,dict),label+' JSON','object','non-object')
+    return raw,value
+def strings(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
+d=json.load(open(sys.argv[1]))
+live_raw,r=receipt(sys.argv[2],'LIVE_CONTROLS_FILE')
+consent_raw,c=receipt(sys.argv[3],'CONSENT_RECEIPT_FILE')
+try:
+    with tarfile.open(sys.argv[4]) as archive:
+        m=archive.getmember('scripts/live-ordinary-controls.mjs')
+        producer=hashlib.sha256(archive.extractfile(m).read()).hexdigest() if m.isfile() else None
+except (KeyError,OSError,tarfile.TarError): producer=None
+need(producer is not None,'scripts/live-ordinary-controls.mjs in BOX_ARCHIVE_PATH','regular-file','missing')
+need(set(r)=={'release_sha','window_id','window','phase','controls','consent_receipt_sha256','producer_sha256','dcr_client_ids'},'live receipt keys','exact-schema-set','other-set')
+for k in ('release_sha','window_id','window'): need(r[k]==d[k],'live '+k,'input-'+k.replace('_','-'),'mismatch')
+need(r['phase']=='before','live phase','before',r['phase'] if r['phase'] in ('after','recovery') else 'other')
+controls=('hosted_mcp_consent_refresh','dcr_registration_consent','cimd_consent','human_recovery','worker_command_read')
+need(isinstance(r['controls'],dict) and set(r['controls'])==set(controls),'live control names','five-ordinary-controls','other-set')
+for k in controls: need(r['controls'][k] is True,'live control '+k,'true','false' if r['controls'][k] is False else 'non-true')
+need(r['consent_receipt_sha256']==hashlib.sha256(consent_raw).hexdigest(),'live consent_receipt_sha256','sha256-of-CONSENT_RECEIPT_FILE','mismatch')
+need(r['producer_sha256']==producer,'live producer_sha256','sha256-of-released-script','mismatch')
+need(strings(r['dcr_client_ids']),'live dcr_client_ids','list-of-strings','other')
+need(set(c)=={'kind','release_sha','consent_phase','measured_at','producer_sha256','controls','dcr_client_ids','cleanup'},'consent receipt keys','exact-schema-set','other-set')
+need(c['kind']=='c1-consent','consent kind','c1-consent','other')
+need(c['release_sha']==d['release_sha'],'consent release_sha','input-release-sha','mismatch')
+need(isinstance(c['controls'],dict) and set(c['controls'])=={'cimd_consent','dcr_registration_consent'},'consent control names','cimd-and-dcr-consent','other-set')
+for k in ('cimd_consent','dcr_registration_consent'): need(c['controls'][k] is True,'consent control '+k,'true','false' if c['controls'][k] is False else 'non-true')
+need(c['producer_sha256']==producer,'consent producer_sha256','sha256-of-released-script','mismatch')
+need(strings(c['dcr_client_ids']),'consent dcr_client_ids','list-of-strings','other')
+need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',c['measured_at']) is not None,'consent measured_at','UTC-ISO-8601-Z','other')
+try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
+except ValueError: measured=None
+need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
+phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
+if phase=='pre-W1':
+    need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
+else:
+    k=c['cleanup']
+    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_removed'},'post-W5 consent cleanup','object','null-or-other')
+    need(k['grants_revoked'] is True,'post-W5 cleanup grants_revoked','true','non-true')
+    need(strings(k['dcr_clients_removed']) and set(k['dcr_clients_removed'])>=set(c['dcr_client_ids']),'post-W5 cleanup dcr_clients_removed','superset-of-consent-dcr_client_ids','missing-ids')
+if d['window']=='W1':
+    age=(datetime.datetime.now(datetime.timezone.utc)-measured).total_seconds()
+    need(age>=0,'pre-W1 consent measured_at','not-future','future')
+    need(age<=21600,'pre-W1 consent measured_at age','at-most-6h','older')
+PY
+case "$WINDOW" in W6|W7) CONSENT_PHASE=post-W5;; *) CONSENT_PHASE=pre-W1;; esac
 mkdir -p "$PROOF_DIR"
 chmod 0700 "$PROOF_DIR"
 install -m 0600 "$LIVE_CONTROLS_FILE" "$PROOF_DIR/ordinary-before.json"
+install -m 0600 "$CONSENT_RECEIPT_FILE" "$PROOF_DIR/consent-$CONSENT_PHASE.json"
 SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$SECRET_STAGE"
 # Retain nonsecret cleanup pointer immediately; never guess it after failed open.
@@ -556,34 +613,93 @@ Authenticated ordinary hosted MCP consent/refresh, DCR registration/consent,
 CIMD metadata/consent, fresh human recovery and worker command/read probes are
 required in `ordinary-paths-unchanged` (GATES.json). Anonymous 401 alone proves
 no authenticated behavior. W1/W2/W3/W4 forward close refuses without a fresh
-window-bound live ordinary receipt via ai-live-controls. The worker uses the
-already reviewed hosted ordinary client procedure, with only its explicitly
-authorized browser seat performing consent, and retains redacted receipts.
-If that procedure/credentials are not supplied, STOP before the window opens.
+window-bound live ordinary receipt via ai-live-controls.
+
+The producer is `scripts/live-ordinary-controls.mjs` from this RELEASE_SHA. A
+dedicated controls worker started by HezLead's chain runs it; that worker reads
+credentials only from 0600 files and is never the read-only preparation worker.
+Its consent legs run twice per release: once before W1 opens (`pre-W1`) and
+once after W5 closes (`post-W5`). Each consent click goes only through the
+pointer-file handoff to HezLead's consent worker; the script writes the
+authorize URL to a 0600 pointer file, waits for the callback file and never
+opens a browser. Its non-consent legs run before and after every window and
+produce LIVE_CONTROLS_FILE. Its only writes are recorded DCR registrations, a
+refresh of its own test grant and one note per run to workspace
+"c1-controls (test)". The post-W5 run's cleanup revokes the test grant family
+and removes every recorded DCR client of both consent runs of this release.
+ai-open and ai-live-controls bind every live receipt to its consent receipt and
+both to the producer bytes released in this archive. Without both receipts,
+STOP before the window opens.
 
 ```sh
 # step: ai-live-controls
 # readonly: yes
 # host: box; read independently produced, nonsecret window probes
 set -euo pipefail
-: "${LIVE_CONTROLS_FILE:?}"
-python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$PROOF_DIR" <<'PY'
-import json,pathlib,sys
-d=json.load(open(sys.argv[1])); p=pathlib.Path(sys.argv[2]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-r=json.loads(p.read_text())
-assert set(r)=={'release_sha','window_id','window','phase','controls'}
-assert all(r[k]==d[k] for k in ('release_sha','window_id','window'))
-assert r['phase'] in ('before','after','recovery')
-expected={'hosted_mcp_consent_refresh','dcr_registration_consent','cimd_consent','human_recovery','worker_command_read'}
-assert set(r['controls'])==expected and all(r['controls'][k] is True for k in expected), 'FAIL live controls; STOP'
-pathlib.Path(sys.argv[3],'ordinary-'+r['phase']+'.json').write_text(json.dumps(r,sort_keys=True)+'\n')
-print('PASS live authenticated ordinary controls')
+: "${LIVE_CONTROLS_FILE:?}" "${CONSENT_RECEIPT_FILE:?}" "${RELEASE_ROOT:?}" "${PROOF_DIR:?}"
+# Producer bytes come from RELEASE_ROOT, reconciled byte-for-byte with the archive at open.
+python3 - "$INPUTS_FILE" "$LIVE_CONTROLS_FILE" "$CONSENT_RECEIPT_FILE" "$RELEASE_ROOT" "$PROOF_DIR" <<'PY'
+import datetime,hashlib,json,pathlib,re,sys
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-live-controls: '+what+' expected '+expected+' got '+got+'; STOP')
+def receipt(name,label):
+    p=pathlib.Path(name)
+    need(p.is_absolute() and p.is_file() and not p.is_symlink(),label,'absolute-regular-file','missing-or-not-regular')
+    raw=p.read_bytes()
+    try: value=json.loads(raw)
+    except ValueError: value=None
+    need(isinstance(value,dict),label+' JSON','object','non-object')
+    return raw,value
+def strings(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
+d=json.load(open(sys.argv[1]))
+live_raw,r=receipt(sys.argv[2],'LIVE_CONTROLS_FILE')
+consent_raw,c=receipt(sys.argv[3],'CONSENT_RECEIPT_FILE')
+script=pathlib.Path(sys.argv[4],'scripts','live-ordinary-controls.mjs')
+need(script.is_file() and not script.is_symlink(),'scripts/live-ordinary-controls.mjs in RELEASE_ROOT','regular-file','missing')
+producer=hashlib.sha256(script.read_bytes()).hexdigest()
+need(set(r)=={'release_sha','window_id','window','phase','controls','consent_receipt_sha256','producer_sha256','dcr_client_ids'},'live receipt keys','exact-schema-set','other-set')
+for k in ('release_sha','window_id','window'): need(r[k]==d[k],'live '+k,'input-'+k.replace('_','-'),'mismatch')
+need(r['phase'] in ('before','after','recovery'),'live phase','before-after-or-recovery','other')
+controls=('hosted_mcp_consent_refresh','dcr_registration_consent','cimd_consent','human_recovery','worker_command_read')
+need(isinstance(r['controls'],dict) and set(r['controls'])==set(controls),'live control names','five-ordinary-controls','other-set')
+for k in controls: need(r['controls'][k] is True,'live control '+k,'true','false' if r['controls'][k] is False else 'non-true')
+need(r['consent_receipt_sha256']==hashlib.sha256(consent_raw).hexdigest(),'live consent_receipt_sha256','sha256-of-CONSENT_RECEIPT_FILE','mismatch')
+need(r['producer_sha256']==producer,'live producer_sha256','sha256-of-released-script','mismatch')
+need(strings(r['dcr_client_ids']),'live dcr_client_ids','list-of-strings','other')
+need(set(c)=={'kind','release_sha','consent_phase','measured_at','producer_sha256','controls','dcr_client_ids','cleanup'},'consent receipt keys','exact-schema-set','other-set')
+need(c['kind']=='c1-consent','consent kind','c1-consent','other')
+need(c['release_sha']==d['release_sha'],'consent release_sha','input-release-sha','mismatch')
+need(isinstance(c['controls'],dict) and set(c['controls'])=={'cimd_consent','dcr_registration_consent'},'consent control names','cimd-and-dcr-consent','other-set')
+for k in ('cimd_consent','dcr_registration_consent'): need(c['controls'][k] is True,'consent control '+k,'true','false' if c['controls'][k] is False else 'non-true')
+need(c['producer_sha256']==producer,'consent producer_sha256','sha256-of-released-script','mismatch')
+need(strings(c['dcr_client_ids']),'consent dcr_client_ids','list-of-strings','other')
+need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',c['measured_at']) is not None,'consent measured_at','UTC-ISO-8601-Z','other')
+try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
+except ValueError: measured=None
+need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
+phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
+if phase=='pre-W1':
+    need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
+else:
+    k=c['cleanup']
+    need(isinstance(k,dict) and set(k)=={'grants_revoked','dcr_clients_removed'},'post-W5 consent cleanup','object','null-or-other')
+    need(k['grants_revoked'] is True,'post-W5 cleanup grants_revoked','true','non-true')
+    need(strings(k['dcr_clients_removed']) and set(k['dcr_clients_removed'])>=set(c['dcr_client_ids']),'post-W5 cleanup dcr_clients_removed','superset-of-consent-dcr_client_ids','missing-ids')
+proof=pathlib.Path(sys.argv[5]); copy=proof/('consent-'+phase+'.json')
+need(not copy.exists() or copy.read_bytes()==consent_raw,'retained '+copy.name,'absent-or-identical','different-bytes')
+copy.write_bytes(consent_raw)
+pathlib.Path(proof,'ordinary-'+r['phase']+'.json').write_text(json.dumps(r,sort_keys=True)+'\n')
+print('PASS live authenticated ordinary controls bound to consent '+phase+' and released producer')
 PY
 ```
 
-HezLead supplies the independently generated live-controls receipt before
-open and after each window. This plan only validates that external input; no
-operator-authored probe is permitted during the release window.
+HezLead supplies the controls worker's LIVE_CONTROLS_FILE before open and after
+each window, together with the CONSENT_RECEIPT_FILE it is bound to: `pre-W1`
+for W1–W4 and W5 before, `post-W5` for W5 after/recovery, W6 and W7. This plan
+only validates that external input and retains `ordinary-<phase>.json` and
+`consent-<consent_phase>.json` in PROOF_DIR; no operator-authored probe is
+permitted during the release window.
 
 ## W1: fresh backup gate
 
@@ -706,6 +822,7 @@ assert json.load(open(p.parent/"backup-gate.json"))["status"]=="PASS"
 assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(p.read_text().strip().replace("Z","+00:00"))).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
 PY
 test -f "$PROOF_DIR/ordinary-before.json"
+test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA" <<'PY'
 import hashlib,json,pathlib,re,sys,tarfile
 root,proof,backfill,archives=map(pathlib.Path,sys.argv[1:5]); sha=sys.argv[5]
@@ -1092,6 +1209,7 @@ set -euo pipefail
 test "$WINDOW" = W3
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
+test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 BASELINE_OAUTH_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_sha"])' "$INPUTS_FILE")
 OLD_OAUTH=/home/commonswarm/oauth/releases/$BASELINE_OAUTH_SHA
 NEW_OAUTH=/home/commonswarm/oauth/releases/$RELEASE_SHA
@@ -1255,6 +1373,7 @@ set -euo pipefail
 test "$WINDOW" = W4
 ai_deadline
 test -f "$PROOF_DIR/ordinary-before.json"
+test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 BASELINE_EDGE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_sha"])' "$INPUTS_FILE")
 OLD_EDGE=/home/commonswarm/edge/releases/$BASELINE_EDGE_SHA
 NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
@@ -2648,7 +2767,8 @@ removes a tracked file inside an immutable release or rebuilds an old SHA.
 ## Close and abort cleanup
 
 Before forward close run ai-ordinary-probes, the window's specific probes and
-ai-live-controls phase after. Before recovered close use phase recovery. Supply
+ai-live-controls phase after, with its bound CONSENT_RECEIPT_FILE. Before
+recovered close use phase recovery. Supply
 `CLOSE_RESULT=success|recovered` only after those proofs; it is an outcome input,
 not permission to skip probes. Failed recovery cannot close. W6 refuses opening while browser readiness or activation/consent approval is absent.
 Recovered close requires emergency env/overlay/DB close and ordinary controls.
@@ -2660,6 +2780,8 @@ Recovered close requires emergency env/overlay/DB close and ordinary controls.
 set -euo pipefail
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
+case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
+test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
   W1) test -f "$PROOF_DIR/backup-gate.json";;

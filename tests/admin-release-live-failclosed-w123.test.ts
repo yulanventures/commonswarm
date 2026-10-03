@@ -1,7 +1,8 @@
 /** Execute complete marked release blocks; substitute only box paths and command observations. */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -17,11 +18,14 @@ const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim
 assert.ok(python.startsWith('/'), 'absolute Python runtime');
 const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64);
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'admin-live-w123-')));
+const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
+// Test-data stand-in for the released producer; it is never written under repo scripts/.
+const producerSource = 'export const fixtureProducer = "live-ordinary-controls";\n';
 
 // Each command records argv before returning independent fixture observations.
 // PATH contains only these stubs; unmodelled invocations fail, never reach a daemon.
 const dispatcher = String.raw`
-import builtins,io,json,os,pathlib,shutil,subprocess,sys,urllib.request
+import builtins,hashlib,io,json,os,pathlib,random,shutil,string,subprocess,sys,urllib.request
 root=pathlib.Path(os.environ['FIXTURE_ROOT']); cfg=json.loads((root/'commands.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'argv.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
@@ -62,13 +66,27 @@ elif name=='openssl':
     if args!=['rand','-hex','32']: refuse()
     output('d'*64) # Synthetic fixture, never a generated/live credential.
 elif name=='chmod':
-    if len(args)!=2 or args[0]!='0600': refuse()
-    owned(args[1]).chmod(0o600)
+    if len(args)<2 or args[0] not in ('0600','0700'): refuse()
+    for value in args[1:]: owned(value).chmod(int(args[0],8))
+elif name=='install' and len(args)==4 and args[:2]==['-m','0600']:
+    target=owned(args[3]); shutil.copyfile(owned(args[2]),target); target.chmod(0o600)
 elif name=='install':
     if len(args)!=8 or args[:2]!=['-o','root'] or args[2]!='-g' or args[4]!='-m': refuse()
     if (args[3],args[5]) not in [('986','0440'),('root','0600')]: refuse()
     target=owned(args[7]); target.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(owned(args[6]),target); target.chmod(int(args[5],8))
+elif name=='stat' and len(args)==3 and args[:2]==['-c','%a']:
+    output(format(owned(args[2]).stat().st_mode & 0o777,'o'))
+elif name=='sha256sum':
+    if len(args)!=1: refuse()
+    output(hashlib.sha256(owned(args[0]).read_bytes()).hexdigest()+'  '+args[0])
+elif name=='awk':
+    if args!=['{print $1}']: refuse()
+    for line in sys.stdin: output(line.split()[0])
+elif name=='mktemp':
+    if len(args)!=2 or args[0]!='-d' or not args[1].endswith('.XXXXXX'): refuse()
+    created=owned(args[1][:-6]+''.join(random.choice(string.ascii_letters+string.digits) for _ in range(6)))
+    created.mkdir(mode=0o700); output(created)
 elif name=='stat':
     if args!=['-c','%a %u %g',str(root/'etc/commonswarm-oauth/admin-issuer-database-credentials')]: refuse()
     if not owned(args[2]).is_file(): refuse()
@@ -82,6 +100,8 @@ elif name=='cmp':
 elif name=='mkdir':
     if len(args)!=2 or args[0]!='-p': refuse()
     owned(args[1]).mkdir(parents=True,exist_ok=True)
+elif name=='cp' and len(args)==2:
+    shutil.copyfile(owned(args[0]),owned(args[1]))
 elif name=='cp':
     if len(args)!=3 or args[0]!='-a' or not args[1].endswith('/.'): refuse()
     shutil.copytree(owned(args[1]),owned(args[2]),dirs_exist_ok=True)
@@ -136,11 +156,11 @@ else: refuse()
 function fixture(config: Record<string, unknown> = {}) {
   const root = mkdtempSync(join(scratch, 'case-'));
   const bin = join(root, 'bin'), proof = join(root, 'proof'), stage = join(root, 'stage');
-  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'release/scripts'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth'), join(root, 'archive'), join(root, 'tmp'), join(root, 'caddy')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const put = (path: string, value: unknown) => writeFileSync(join(root, path), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
   put('commands.json', { sha, baseline, image, ...config }); put('argv.jsonl', '');
   put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline });
-  put('proof/ordinary-before.json', '{}'); put('proof/schema-committed.txt', 'PASS');
+  put('proof/ordinary-before.json', '{}'); put('proof/consent-pre-W1.json', '{}'); put('proof/schema-committed.txt', 'PASS');
   put('etc/commonswarm-oauth/service.env', 'MCP_OAUTH_ENABLED=1\n'); put('stage/service.env', 'MCP_OAUTH_ENABLED=1\n');
   put('etc/commonswarm-oauth/compose.env', 'MCP_OAUTH_IMAGE=baseline\n'); put('stage/compose.env', 'MCP_OAUTH_IMAGE=baseline\n');
   put('stage/service.conf', '[target]\nhost=db.commonswarm.internal\nsslmode=verify-full\nsslrootcert=/etc/ssl/yulan-internal-ca.pem\nuser=fixture\n');
@@ -150,21 +170,29 @@ function fixture(config: Record<string, unknown> = {}) {
     put('release/deploy/mcp-auth/' + file, 'reviewed '+file);
     put('oauth/releases/'+baseline+'/deploy/mcp-auth/'+file, 'reviewed '+file);
   }
-  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker']) {
+  put('release/scripts/live-ordinary-controls.mjs', producerSource);
+  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp']) {
     writeFileSync(join(bin, name), '#!'+python+'\n'+dispatcher, { mode: 0o700 });
   }
   const env = { ...process.env, PATH: bin, FIXTURE_ROOT: root, WINDOW: 'W3', PROOF_DIR: proof, SECRET_STAGE: stage,
-    INPUTS_FILE: join(root, 'inputs.json'), LIVE_CONTROLS_FILE: join(root, 'controls.json'), RELEASE_SHA: sha,
+    INPUTS_FILE: join(root, 'inputs.json'), LIVE_CONTROLS_FILE: join(root, 'controls.json'), CONSENT_RECEIPT_FILE: join(root, 'consent.json'), RELEASE_SHA: sha,
     RELEASE_ROOT: join(root, 'release'), NEW_OAUTH: join(root, 'oauth/releases', sha), PSQL_IMAGE: 'fixture-postgres' };
-  function run(steps: string[], window = 'W3') {
+  function run(steps: string[], window = 'W3', extra: Record<string, string | undefined> = {}) {
     let source = steps.map(block).join('\n');
     // Remap filesystem boundaries only. SQL, shell guards and Python assertions stay verbatim.
     for (const [from, to] of [
+      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
+      ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
+      ['/home/commonswarm/.env', join(root, 'home.env')],
+      ['/etc/caddy/sites', join(root, 'caddy')],
+      ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
       ['/var/backups/commonswarm-postgres', join(root, 'backup')],
       ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
       ['/home/commonswarm/oauth', join(root, 'oauth')],
     ]) source = source.split(from!).join(to!);
-    const result = spawnSync('/bin/bash', [], { input: source, env: { ...env, WINDOW: window }, encoding: 'utf8', timeout: 10_000 });
+    const runEnv: Record<string, string | undefined> = { ...env, WINDOW: window, ...extra };
+    for (const key of Object.keys(runEnv)) if (runEnv[key] === undefined) delete runEnv[key];
+    const result = spawnSync('/bin/bash', [], { input: source, env: runEnv as NodeJS.ProcessEnv, encoding: 'utf8', timeout: 10_000 });
     assert.ifError(result.error); assert.equal(result.signal, null);
     const calls = readFileSync(join(root, 'argv.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]);
     // Hidden daemon/build logs must not disguise an unsupported fixture command.
@@ -212,20 +240,186 @@ test('backup-restore-gate / stale-or-failed-status-refused: fails closed on stal
   backupBad({ ...backup(), ok: false }, restore(), 'FAIL verified backup; STOP');
   backupBad(backup(), { ...restore(), ok: false }, 'FAIL complete restore drill; STOP');
 });
+// C1 live ordinary controls (SCHEMA section 3): every ordinary-paths-unchanged
+// receipt is bound to a release consent receipt and the released producer bytes.
 const ordinaryKeys = ['hosted_mcp_consent_refresh', 'dcr_registration_consent', 'cimd_consent', 'human_recovery', 'worker_command_read'];
+const producerSha = digest(producerSource);
+type Json = Record<string, unknown>;
+function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Json = {}): Json {
+  return { kind: 'c1-consent', release_sha: sha, consent_phase: phase,
+    measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: producerSha,
+    controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-fixture-1', 'dcr-fixture-2'],
+    cleanup: phase === 'pre-W1' ? null : { grants_revoked: true, dcr_clients_removed: ['dcr-fixture-0', 'dcr-fixture-1', 'dcr-fixture-2'] },
+    ...change };
+}
+function liveReceipt(window: string, windowId: string, phase: string, consentText: string, change: Json = {}): Json {
+  return { release_sha: sha, window_id: windowId, window, phase,
+    controls: Object.fromEntries(ordinaryKeys.map(k => [k, true])),
+    consent_receipt_sha256: digest(consentText), producer_sha256: producerSha, dcr_client_ids: ['dcr-fixture-3'], ...change };
+}
+// One complete ai-open run on a W1-W4 window through the existing-RELEASE_ROOT
+// branch (Mac Python 3.9 lacks extractall(filter=)); every byte is still reconciled.
+const openId = 'Abc123';
+function openFixture(window: string, producer = producerSource, includeProducer = true) {
+  const f = fixture();
+  const planText = 'fixture release plan\n';
+  const files: Array<[string, string]> = [['docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md', planText]];
+  if (includeProducer) files.push(['scripts/live-ordinary-controls.mjs', producer]);
+  const releaseRoot = join(f.root, 'admin-issuance/releases', sha);
+  for (const [name, text] of files) { mkdirSync(dirname(join(releaseRoot, name)), { recursive: true }); f.put('admin-issuance/releases/'+sha+'/'+name, text); }
+  f.put('admin-issuance/releases/'+sha+'/RELEASE_SHA', sha+'\n');
+  mkdirSync(join(f.root, 'admin-issuance/release-proofs'), { recursive: true });
+  const archive = join(f.root, 'archive', `admin-issuance-${sha}-${openId}.tar`);
+  const made = spawnSync(python, ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[i+1],arcname=sys.argv[i]) for i in range(2,len(sys.argv),2)]',
+    archive, ...files.flatMap(([name]) => [name, join(releaseRoot, name)])], { encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  chmodSync(archive, 0o600);
+  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText) });
+  f.put('gates.json', '{}'); f.put('home.env', 'EDGE=fixture\n');
+  for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/'+name, 'fixture '+name);
+  const proof = join(f.root, 'admin-issuance/release-proofs', `${sha}-${window}-${openId}`);
+  function open(consent: Json | string | null, live: Json, extra: Record<string, string | undefined> = {}) {
+    if (consent !== null) f.put('consent.json', typeof consent === 'string' ? consent : JSON.stringify(consent));
+    f.put('controls.json', live);
+    return f.run(['ai-open'], window, { INPUTS_FILE: join(f.root, 'open-inputs.json'), GATE_RECEIPT_FILE: join(f.root, 'gates.json'), PLAN_FILE: join(f.root, 'unused-plan'), ...extra });
+  }
+  return { f, proof, open };
+}
+function openPair(window: string, phase: 'pre-W1' | 'post-W5', consentChange: Json = {}, liveChange: Json = {}) {
+  const text = JSON.stringify(consentReceipt(phase, consentChange));
+  return { text, live: liveReceipt(window, openId, 'before', text, liveChange) };
+}
+function openRefused(o: ReturnType<typeof openFixture>, result: ReturnType<ReturnType<typeof fixture>['run']>, message: string) {
+  stopped(result, message);
+  assert.doesNotMatch(result.stderr, /Traceback/);
+  assert.ok(!existsSync(o.proof), 'no proof directory after refusal');
+  assert.ok(!result.calls.some(c => ['mkdir', 'install', 'mktemp', 'cp', 'date'].includes(c[0]!)), 'no later open side effect');
+}
+function openGood(window: string, phase: 'pre-W1' | 'post-W5') {
+  const o = openFixture(window), { text, live } = openPair(window, phase);
+  const result = o.open(text, live); pass(result);
+  assert.equal(readFileSync(join(o.proof, `consent-${phase}.json`), 'utf8'), text, 'exact consent bytes retained');
+  assert.deepEqual(JSON.parse(readFileSync(join(o.proof, 'ordinary-before.json'), 'utf8')), live);
+  assert.match(result.stdout, /PASS ai-open/);
+}
+// ai-live-controls reads the producer from RELEASE_ROOT (reconciled at open).
+function liveRun(window: string, phase: string, consent: Json | string, change: Json = {}, retained?: string) {
+  const f = fixture(), text = typeof consent === 'string' ? consent : JSON.stringify(consent);
+  f.put('consent.json', text); f.put('inputs.json', { release_sha: sha, window_id: 'fixture', window });
+  f.put('controls.json', liveReceipt(window, 'fixture', phase, text, change));
+  for (const name of ['ordinary-before.json', 'consent-pre-W1.json']) unlinkSync(join(f.proof, name));
+  if (retained !== undefined) f.put('proof/'+retained.split('\n')[0], retained.split('\n').slice(1).join('\n'));
+  return { f, text, result: f.run(['ai-live-controls'], window) };
+}
+function liveRefused(run: ReturnType<typeof liveRun>, phase: string, message: string) {
+  stopped(run.result, message); assert.doesNotMatch(run.result.stderr, /Traceback/);
+  assert.ok(!existsSync(join(run.f.proof, `ordinary-${phase}.json`)), 'no ordinary receipt after refusal');
+  for (const name of ['consent-pre-W1.json', 'consent-post-W5.json']) assert.ok(!existsSync(join(run.f.proof, name)), 'no consent copy after refusal');
+}
+
 for (const key of ordinaryKeys) {
   test(`ordinary-paths-unchanged / ${key.replaceAll('_', '-')}: fails closed on false or missing measurement`, () => {
     for (const mode of ['good', 'false', 'missing']) {
-      const f = fixture(), controls: Record<string, boolean> = Object.fromEntries(ordinaryKeys.map(k => [k, true]));
+      const controls: Record<string, boolean> = Object.fromEntries(ordinaryKeys.map(k => [k, true]));
       if (mode === 'false') controls[key] = false;
       if (mode === 'missing') delete controls[key];
-      f.put('controls.json', { release_sha: sha, window_id: 'fixture', window: 'W3', phase: 'after', controls });
-      const result = f.run(['ai-live-controls']);
-      if (mode === 'good') { pass(result); assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'ordinary-after.json'), 'utf8')).controls, controls); }
-      else { assert.ok(!existsSync(join(f.proof, 'ordinary-after.json'))); stopped(result, 'FAIL live controls; STOP'); }
+      const run = liveRun('W3', 'after', consentReceipt('pre-W1'), { controls });
+      if (mode === 'good') {
+        pass(run.result); assert.deepEqual(JSON.parse(readFileSync(join(run.f.proof, 'ordinary-after.json'), 'utf8')).controls, controls);
+        assert.equal(readFileSync(join(run.f.proof, 'consent-pre-W1.json'), 'utf8'), run.text);
+      } else liveRefused(run, 'after', mode === 'false' ? `FAIL ai-live-controls: live control ${key} expected true got false; STOP` : 'FAIL ai-live-controls: live control names expected five-ordinary-controls got other-set; STOP');
+      // The same control is refused at open, before any proof directory exists.
+      const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1', {}, { controls });
+      const opened = o.open(text, live);
+      if (mode === 'good') pass(opened);
+      else openRefused(o, opened, mode === 'false' ? `FAIL ai-open: live control ${key} expected true got false; STOP` : 'FAIL ai-open: live control names expected five-ordinary-controls got other-set; STOP');
     }
   });
 }
+test('ordinary-paths-unchanged / consent-receipt-binding: ai-open refuses a missing, foreign, unbound or stale consent receipt', () => {
+  openGood('W1', 'pre-W1'); openGood('W2', 'pre-W1');
+  // Positive control for the freshness scope: a 7 h old pre-W1 receipt is accepted at W2 open.
+  { const o = openFixture('W2'), { text, live } = openPair('W2', 'pre-W1', { measured_at: new Date(Date.now() - 7 * 3600_000).toISOString() }); pass(o.open(text, live)); }
+  const cases: Array<[string, string, Json, Json, string]> = [
+    ['W1', 'pre-W1', { release_sha: 'e'.repeat(40) }, {}, 'FAIL ai-open: consent release_sha expected input-release-sha got mismatch; STOP'],
+    ['W2', 'post-W5', {}, {}, 'FAIL ai-open: consent_phase for W2 before expected pre-W1 got post-W5; STOP'],
+    ['W1', 'pre-W1', { measured_at: new Date(Date.now() - 7 * 3600_000).toISOString() }, {}, 'FAIL ai-open: pre-W1 consent measured_at age expected at-most-6h got older; STOP'],
+    ['W1', 'pre-W1', { measured_at: new Date(Date.now() + 3600_000).toISOString() }, {}, 'FAIL ai-open: pre-W1 consent measured_at expected not-future got future; STOP'],
+    ['W1', 'pre-W1', { measured_at: '2026-10-03 12:00:00' }, {}, 'FAIL ai-open: consent measured_at expected UTC-ISO-8601-Z got other; STOP'],
+    ['W1', 'pre-W1', { cleanup: { grants_revoked: true, dcr_clients_removed: [] } }, {}, 'FAIL ai-open: pre-W1 consent cleanup expected null got non-null; STOP'],
+    ['W1', 'pre-W1', { kind: 'c1-other' }, {}, 'FAIL ai-open: consent kind expected c1-consent got other; STOP'],
+    ['W1', 'pre-W1', { controls: { cimd_consent: true, dcr_registration_consent: false } }, {}, 'FAIL ai-open: consent control dcr_registration_consent expected true got false; STOP'],
+    ['W1', 'pre-W1', { extra: 1 }, {}, 'FAIL ai-open: consent receipt keys expected exact-schema-set got other-set; STOP'],
+    ['W1', 'pre-W1', {}, { consent_receipt_sha256: 'f'.repeat(64) }, 'FAIL ai-open: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP'],
+    ['W1', 'pre-W1', {}, { phase: 'after' }, 'FAIL ai-open: live phase expected before got after; STOP'],
+    ['W1', 'pre-W1', {}, { window_id: 'Zzz999' }, 'FAIL ai-open: live window_id expected input-window-id got mismatch; STOP'],
+    ['W1', 'pre-W1', {}, { dcr_client_ids: 'dcr-fixture-3' }, 'FAIL ai-open: live dcr_client_ids expected list-of-strings got other; STOP'],
+  ];
+  for (const [window, phase, consentChange, liveChange, message] of cases) {
+    const o = openFixture(window), { text, live } = openPair(window, phase as 'pre-W1' | 'post-W5', consentChange, liveChange);
+    openRefused(o, o.open(text, live), message);
+  }
+  { const o = openFixture('W1'), { live } = openPair('W1', 'pre-W1');
+    openRefused(o, o.open(null, live, { CONSENT_RECEIPT_FILE: join(o.f.root, 'absent-consent.json') }), 'FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got missing-or-not-regular; STOP');
+    openRefused(o, o.open(null, live, { CONSENT_RECEIPT_FILE: undefined }), 'FAIL ai-open: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP'); }
+  { const o = openFixture('W1'), { live } = openPair('W1', 'pre-W1');
+    openRefused(o, o.open('not json', live), 'FAIL ai-open: CONSENT_RECEIPT_FILE JSON expected object got non-object; STOP'); }
+});
+test('ordinary-paths-unchanged / producer-binding: ai-open refuses receipts not produced by the archive script bytes', () => {
+  openGood('W3', 'pre-W1');
+  // The uploaded archive carries different script bytes than the ones that ran.
+  { const o = openFixture('W1', 'export const other = 1;\n'), { text, live } = openPair('W1', 'pre-W1');
+    openRefused(o, o.open(text, live), 'FAIL ai-open: live producer_sha256 expected sha256-of-released-script got mismatch; STOP'); }
+  { const o = openFixture('W1'), { text, live } = openPair('W1', 'pre-W1', { producer_sha256: 'f'.repeat(64) });
+    openRefused(o, o.open(text, live), 'FAIL ai-open: consent producer_sha256 expected sha256-of-released-script got mismatch; STOP'); }
+  { const o = openFixture('W1', producerSource, false), { text, live } = openPair('W1', 'pre-W1');
+    openRefused(o, o.open(text, live), 'FAIL ai-open: scripts/live-ordinary-controls.mjs in BOX_ARCHIVE_PATH expected regular-file got missing; STOP'); }
+});
+test('ordinary-paths-unchanged / per-window-consent-phase: ai-live-controls binds W1-W4 and W5 before to pre-W1, W5 after/recovery and W6/W7 to cleaned post-W5', () => {
+  for (const [window, phase, consentPhase] of [['W1', 'after', 'pre-W1'], ['W4', 'recovery', 'pre-W1'], ['W5', 'before', 'pre-W1'], ['W5', 'after', 'post-W5'], ['W5', 'recovery', 'post-W5'], ['W6', 'before', 'post-W5'], ['W7', 'after', 'post-W5']] as const) {
+    const run = liveRun(window, phase, consentReceipt(consentPhase)); pass(run.result);
+    assert.equal(readFileSync(join(run.f.proof, `consent-${consentPhase}.json`), 'utf8'), run.text);
+    assert.ok(existsSync(join(run.f.proof, `ordinary-${phase}.json`)));
+  }
+  const removed = (ids: string[]) => ({ cleanup: { grants_revoked: true, dcr_clients_removed: ids } });
+  const cases: Array<[string, string, Json | string, Json, string]> = [
+    ['W5', 'after', consentReceipt('pre-W1'), {}, 'FAIL ai-live-controls: consent_phase for W5 after expected post-W5 got pre-W1; STOP'],
+    ['W6', 'after', consentReceipt('pre-W1'), {}, 'FAIL ai-live-controls: consent_phase for W6 after expected post-W5 got pre-W1; STOP'],
+    ['W2', 'after', consentReceipt('post-W5'), {}, 'FAIL ai-live-controls: consent_phase for W2 after expected pre-W1 got post-W5; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', { cleanup: null }), {}, 'FAIL ai-live-controls: post-W5 consent cleanup expected object got null-or-other; STOP'],
+    ['W5', 'after', consentReceipt('post-W5', removed(['dcr-fixture-1'])), {}, 'FAIL ai-live-controls: post-W5 cleanup dcr_clients_removed expected superset-of-consent-dcr_client_ids got missing-ids; STOP'],
+    ['W5', 'recovery', consentReceipt('post-W5', { cleanup: { grants_revoked: false, dcr_clients_removed: ['dcr-fixture-1', 'dcr-fixture-2'] } }), {}, 'FAIL ai-live-controls: post-W5 cleanup grants_revoked expected true got non-true; STOP'],
+    ['W3', 'after', consentReceipt('pre-W1', { release_sha: 'e'.repeat(40) }), {}, 'FAIL ai-live-controls: consent release_sha expected input-release-sha got mismatch; STOP'],
+    ['W3', 'after', consentReceipt('pre-W1'), { consent_receipt_sha256: 'f'.repeat(64) }, 'FAIL ai-live-controls: live consent_receipt_sha256 expected sha256-of-CONSENT_RECEIPT_FILE got mismatch; STOP'],
+    ['W3', 'after', consentReceipt('pre-W1'), { producer_sha256: 'f'.repeat(64) }, 'FAIL ai-live-controls: live producer_sha256 expected sha256-of-released-script got mismatch; STOP'],
+    ['W3', 'after', consentReceipt('pre-W1'), { phase: 'during' }, 'FAIL ai-live-controls: live phase expected before-after-or-recovery got other; STOP'],
+    ['W3', 'after', consentReceipt('pre-W1'), { window: 'W4' }, 'FAIL ai-live-controls: live window expected input-window got mismatch; STOP'],
+  ];
+  for (const [window, phase, consent, change, message] of cases) liveRefused(liveRun(window, phase, consent, change), phase, message);
+  // Producer bytes in RELEASE_ROOT differ from the bytes that ran.
+  { const f = fixture(); f.put('release/scripts/live-ordinary-controls.mjs', 'export const other = 1;\n');
+    const text = JSON.stringify(consentReceipt('pre-W1')); f.put('consent.json', text);
+    f.put('controls.json', liveReceipt('W3', 'fixture', 'after', text)); unlinkSync(join(f.proof, 'consent-pre-W1.json'));
+    const result = f.run(['ai-live-controls']); stopped(result, 'FAIL ai-live-controls: live producer_sha256 expected sha256-of-released-script got mismatch; STOP');
+    assert.ok(!existsSync(join(f.proof, 'ordinary-after.json')) && !existsSync(join(f.proof, 'consent-pre-W1.json'))); }
+  // A retained consent copy from open cannot be replaced by different bytes.
+  { const run = liveRun('W3', 'after', consentReceipt('pre-W1'), {}, 'consent-pre-W1.json\n{"other":true}');
+    stopped(run.result, 'FAIL ai-live-controls: retained consent-pre-W1.json expected absent-or-identical got different-bytes; STOP');
+    assert.equal(readFileSync(join(run.f.proof, 'consent-pre-W1.json'), 'utf8'), '{"other":true}', 'retained copy unchanged');
+    assert.ok(!existsSync(join(run.f.proof, 'ordinary-after.json'))); }
+  // Missing consent input.
+  { const f = fixture(); f.put('controls.json', liveReceipt('W3', 'fixture', 'after', '{}'));
+    const result = f.run(['ai-live-controls'], 'W3', { CONSENT_RECEIPT_FILE: join(f.root, 'absent-consent.json') });
+    stopped(result, 'FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got missing-or-not-regular; STOP');
+    assert.ok(!existsSync(join(f.proof, 'ordinary-after.json'))); }
+});
+test('ordinary-paths-unchanged / open-receipts-retained: W3 preflight refuses without the retained pre-W1 consent copy', () => {
+  const good = fixture(); pass(good.run(['ai-w3-preflight']));
+  const f = fixture(); unlinkSync(join(f.proof, 'consent-pre-W1.json'));
+  const result = f.run(['ai-w3-preflight']);
+  stopped(result, 'FAIL ai-w3-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP');
+  assert.ok(!result.calls.some(c => c[0] === 'cp' || c[0] === 'docker')); assert.ok(!existsSync(join(f.root, 'oauth/releases', sha)));
+});
 test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-password-guarded-file-removal: fails closed when guarded cleanup refuses', () => {
   for (const refused of [false, true]) {
     const f = fixture({ cleanup_refused: refused }); f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', 'synthetic fixture');
