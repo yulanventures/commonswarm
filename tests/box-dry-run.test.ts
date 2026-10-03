@@ -9383,10 +9383,19 @@ test("controls: box-mode ssh runs the remote command in the login home, not the 
     const ops = probe("ops", "pwd");
     assert.equal(ops.result, "passed", ops.stderr);
     assert.equal(ops.stdout, existsSync("/home/ops") ? "/home/ops\n" : "/\n");
-    // The private caller directory stays unreadable to the login user.
+    // The private caller directory stays unreadable to the login user: the exact cd refusal, nothing else.
     const denied = probe("commonswarm", `cd ${shellWord(fixture.temporary!)}`);
     assert.equal(denied.result, "failed");
-    // An unknown login user is still refused.
+    assert.match(denied.stderr, new RegExp(`cd: ${escapeRegExp(fixture.temporary!)}: Permission denied`));
+    // Old-stub behavior, reproduced in the same invocation: runuser started from the
+    // caller's private directory makes GNU find fail to restore it (CI 125 deploy.log).
+    const old = spawnSync("/bin/bash", ["-c", 'cd "$1" && exec /usr/sbin/runuser -u commonswarm -- /usr/bin/find /srv/commonswarm/site -maxdepth 0 -type d -exec true {} +',
+      "old-ssh-cwd", fixture.temporary!], { encoding: "utf8", env: explicitEnvironment() });
+    assert.notEqual(old.status, 0);
+    assert.match(old.stderr, /Failed to restore initial working directory/);
+    // The ssh host case admits only ops@ and commonswarm@ hosts, so it is the gate an
+    // unknown user meets. run_in_box's own login_user case (dispatch.sh) has no other
+    // caller and is unreachable defense in depth; it is not claimed as tested here.
     const unknown = probe("nobody", "pwd");
     assert.equal(unknown.result, "failed");
     assert.match(unknown.stderr, /UNPRODUCED ssh host/);
