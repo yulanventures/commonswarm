@@ -2328,10 +2328,12 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
   const policyCheck = spawnSync("/usr/sbin/visudo", ["-cf", sudoPolicy], { encoding: "utf8" });
   assert.equal(policyCheck.status, 0, policyCheck.stderr);
   const prelude = join(supportRoot, "prelude.sh");
+  const userland = join(supportRoot, "box-userland.py");
   const pythonFixture = join(supportRoot, "python");
   const sourceRoot = join(supportRoot, "source");
   makeRootDirectory(supportRoot, 0o755);
   copyRootFixture(PRELUDE, prelude, 0o644);
+  copyRootFixture(USERLAND, userland, 0o644);
   makeRootDirectory(pythonFixture, 0o755);
   copyRootFixture(join(PYTHON_FIXTURE, "sitecustomize.py"), join(pythonFixture, "sitecustomize.py"), 0o644);
   makeRootDirectory(sourceRoot, 0o755);
@@ -2498,7 +2500,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA:
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_PART: "box",
       BOX_DRY_RUN_BOX_CLOCK: WINDOW_START,
-      BOX_DRY_RUN_USERLAND: USERLAND,
+      BOX_DRY_RUN_USERLAND: userland,
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
