@@ -252,7 +252,8 @@ drift, a mismatched Caddy site or failed public probes refuse the window.
 # step: hm37-mcp-baseline-state
 set -euo pipefail
 trap 'echo "FAIL hm37-mcp-baseline-state REQ 99: unexpected check failure; STOP" >&2' ERR
-test "$(id -u)" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+PLAN_GUARD_VALUE_1="$(id -u)" || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
+test "${PLAN_GUARD_VALUE_1}" = 0 || { echo 'FAIL hm37-mcp-baseline-state REQ 1: root required; STOP' >&2; exit 1; }
 hm37_baseline_mode() {
 python3 - <<'PY' || return 1
 import json, pathlib, re, subprocess
@@ -376,7 +377,8 @@ trap 'echo "FAIL: hm37-oauth-archive line $LINENO" >&2' ERR
 : "${OAUTH_RELEASE_SHA:?FAIL: HezLead must supply the landed SHA}"
 case "$OAUTH_RELEASE_SHA" in ''|*[!0-9a-f]*) echo 'FAIL: SHA format' >&2; exit 1;; esac
 test "${#OAUTH_RELEASE_SHA}" -eq 40 || exit 1
-test -z "$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
+PLAN_GUARD_VALUE_2="$(git status --porcelain)" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
+test -z "${PLAN_GUARD_VALUE_2}" || { echo 'FAIL: dirty checkout' >&2; exit 1; }
 git merge-base --is-ancestor "$OAUTH_RELEASE_SHA" origin/main || exit 1
 ARCHIVE_DIR=$(mktemp -d /private/tmp/hm37-oauth-archive.XXXXXX) || exit 1
 git archive --format=tar "$OAUTH_RELEASE_SHA" >"$ARCHIVE_DIR/release.tar" || exit 1
@@ -758,7 +760,8 @@ require(file==release/'deploy/mcp-auth/compose.yaml' and file.is_file(),3,'saved
 PY
   docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" rollback_to_off compose.baseline.off.env || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_3="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_3}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   test -L /home/commonswarm/oauth/current || return 1
   ln -sfn "$BASELINE_OAUTH_DIR" /home/commonswarm/oauth/current || return 1
   MCP_EXPECTED_MODE=off mcp_route_probes || return 1
@@ -776,12 +779,14 @@ restore_baseline_on() {
     cmp -s /etc/commonswarm-oauth/compose.env "$SECRET_STAGE/compose.env" &&
     cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" &&
     cmp -s /etc/commonswarm-oauth/management-database-credentials "$SECRET_STAGE/management.baseline" || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_4="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_4}" = 0:986:440 || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose config --quiet || return 1
   MCP_OAUTH_IMAGE="$EXPECTED_OAUTH_IMAGE_DIGEST" oauth_management_compose up -d --no-deps --force-recreate --pull never oauth || return 1
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime || return 1
   healthy commonswarm-oauth-oauth-1 && healthy commonswarm-edge-edge-runtime-1 || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
+  PLAN_GUARD_VALUE_5="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_5}" = "$EXPECTED_OAUTH_IMAGE_DIGEST" || return 1
   install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || return 1
   cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$SECRET_STAGE/mcp.caddy" || return 1
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile || return 1
@@ -917,7 +922,8 @@ if [ -n "$CACHED_IMAGE" ]; then
   test "$IMAGE" = "$CACHED_IMAGE" || { echo 'FAIL: image lookup changed' >&2; exit 1; }
   printf '%s\n' "$IMAGE" >"$PROOF_DIR/oauth-image.id"
 else
-  test "$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
+  PLAN_GUARD_VALUE_6="$(docker info --format '{{.CPUCfsPeriod}} {{.CPUCfsQuota}}')" || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
+  test "${PLAN_GUARD_VALUE_6}" = 'true true' || { echo 'FAIL: Docker CPU quota unavailable' >&2; exit 1; }
   while IFS= read -r BASE_REFERENCE; do
     docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
   done <"$BASE_REFERENCES"
@@ -929,7 +935,8 @@ else
     "$OAUTH_RELEASE_DIR" || { echo 'FAIL: capped OAuth image build' >&2; exit 1; }
 fi
 IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || exit 1
-test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
+PLAN_GUARD_VALUE_7="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
+test "${PLAN_GUARD_VALUE_7}" = "$OAUTH_RELEASE_SHA" || { echo 'FAIL: image source SHA mismatch' >&2; exit 1; }
 case "$IMAGE" in sha256:*) ;; *) echo 'FAIL: image must be immutable' >&2; exit 1;; esac
 test "${#IMAGE}" -eq 71 || exit 1
 docker image inspect "$EXPECTED_OAUTH_IMAGE_DIGEST" >/dev/null || exit 1
@@ -972,7 +979,9 @@ trap 'echo "FAIL: hm37-oauth-release-off line $LINENO" >&2' ERR
 oauth_compose config --quiet || exit 1
 oauth_compose up -d --no-deps --force-recreate --pull never oauth || exit 1
 healthy commonswarm-oauth-oauth-1 || exit 1
-test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$(cat "$PROOF_DIR/oauth-image.id")" || exit 1
+PLAN_GUARD_VALUE_8="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || exit 1
+PLAN_GUARD_VALUE_9="$(cat "$PROOF_DIR/oauth-image.id")" || exit 1
+test "${PLAN_GUARD_VALUE_8}" = "${PLAN_GUARD_VALUE_9}" || exit 1
 docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import fs from "node:fs";
 import {loadConfig} from "./src/config.js";
@@ -1123,7 +1132,8 @@ switch_on() {
   OAUTH_USER=$(docker inspect --format '{{.Config.User}}' commonswarm-oauth-oauth-1) || return 1
   test "$OAUTH_USER" = 996:986 || { echo 'FAIL: OAuth runtime must be UID:GID 996:986; stop on drift' >&2; return 1; }
   IMAGE=$(cat "$PROOF_DIR/oauth-image.id") || return 1
-  test "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" = "$IMAGE" || return 1
+  PLAN_GUARD_VALUE_10="$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)" || return 1
+  test "${PLAN_GUARD_VALUE_10}" = "$IMAGE" || return 1
   docker exec commonswarm-oauth-oauth-1 node --input-type=module -e '
 import dns from "node:dns/promises";
 if(process.getuid()!==996 || process.getgid()!==986 ||
@@ -1274,7 +1284,8 @@ PY
   # Compose overrides the image default; measured Config.User is 996:986.
   # Read only for root and that runtime group; root retains ownership and nobody has write bits.
   install -o root -g 986 -m 0440 "$SECRET_STAGE/management-database-credentials" /etc/commonswarm-oauth/management-database-credentials || return 1
-  test "$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" = 0:986:440 || return 1
+  PLAN_GUARD_VALUE_11="$(stat -c '%u:%g:%a' /etc/commonswarm-oauth/management-database-credentials)" || return 1
+  test "${PLAN_GUARD_VALUE_11}" = 0:986:440 || return 1
   install -o root -g root -m 0600 "$SECRET_STAGE/service.on.env" /etc/commonswarm-oauth/service.env || return 1
   cat "$SECRET_STAGE/edge.on.env" >/home/commonswarm/.env || return 1
   oauth_management_compose config --quiet || return 1
@@ -1420,7 +1431,8 @@ RELEASE_LIVE_STATE="last-verified-ON; see retained verification receipt"
 
 : "${ARCHIVE_DIR:?FAIL: original public archive directory missing}"
 case "$ARCHIVE_DIR" in /private/tmp/hm37-oauth-archive.*) ;; *) echo 'FAIL: archive cleanup boundary' >&2; exit 1;; esac
-test "$(cd "$ARCHIVE_DIR" && pwd -P)" = "$ARCHIVE_DIR" || exit 1
+PLAN_GUARD_VALUE_12="$(cd "$ARCHIVE_DIR" && pwd -P)" || exit 1
+test "${PLAN_GUARD_VALUE_12}" = "$ARCHIVE_DIR" || exit 1
 rm -rf "$ARCHIVE_DIR" || { echo "FAIL: guarded cleanup refused $ARCHIVE_DIR" >&2; exit 1; }
 ```
 

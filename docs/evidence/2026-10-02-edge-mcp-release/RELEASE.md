@@ -242,7 +242,8 @@ test "${#RELEASE_SHA}" = 40
 case "$EXPECTED_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#EXPECTED_EDGE_SHA}" = 40
 test "$RELEASE_SHA" != "$EXPECTED_EDGE_SHA"
-test -z "$(git status --porcelain)"
+PLAN_GUARD_VALUE_1="$(git status --porcelain)"
+test -z "${PLAN_GUARD_VALUE_1}"
 git fetch origin main
 git merge-base --is-ancestor "$RELEASE_SHA" origin/main
 git remote get-url origin | python3 -c 'import sys; s=sys.stdin.read().strip(); assert s in ("git@github.com:yulanventures/commonswarm.git", "https://github.com/yulanventures/commonswarm.git")'
@@ -332,7 +333,8 @@ trap 'echo "FAIL edge-mcp-preflight: line $LINENO; STOP before mutation" >&2' ER
 RELEASE_SHA=${1:?}; WINDOW_ID=${2:?}; EXPECTED_EDGE_SHA=${3:?}
 BOX_ARCHIVE_PATH=${4:?}; EDGE_ARCHIVE_SHA256=${5:?}
 WINDOW_END_UTC=${6:?}; MAX_MCP_OUTAGE_SECONDS=${7:?}
-test "$(id -u)" = 0
+PLAN_GUARD_VALUE_2="$(id -u)"
+test "${PLAN_GUARD_VALUE_2}" = 0
 edge_expected_baselines check
 python3 - "$RELEASE_SHA" "$WINDOW_ID" "$EXPECTED_EDGE_SHA" "$BOX_ARCHIVE_PATH" "$EDGE_ARCHIVE_SHA256" "$WINDOW_END_UTC" "$MAX_MCP_OUTAGE_SECONDS" <<'PY'
 import datetime,pathlib,re,sys
@@ -350,14 +352,20 @@ PY
 PREVIOUS_EDGE=/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA
 NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
 PROOF_DIR=/home/commonswarm/edge/release-proofs/$RELEASE_SHA-$WINDOW_ID
-test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
-test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$EXPECTED_EDGE_SHA"
-test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$EDGE_ARCHIVE_SHA256"
-test "$(command -v rm)" = /usr/bin/rm
-test -x /usr/bin/rm && test ! -L /usr/bin/rm
+PLAN_GUARD_VALUE_3="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_3}" = "$PREVIOUS_EDGE"
+PLAN_GUARD_VALUE_4="$(cat "$PREVIOUS_EDGE/RELEASE_SHA")"
+test "${PLAN_GUARD_VALUE_4}" = "$EXPECTED_EDGE_SHA"
+PLAN_GUARD_VALUE_5="$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')"
+test "${PLAN_GUARD_VALUE_5}" = "$EDGE_ARCHIVE_SHA256"
+PLAN_GUARD_VALUE_6="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_6}" = /usr/bin/rm
+test -x /usr/bin/rm
+test ! -L /usr/bin/rm
 systemctl is-active --quiet caddy
 systemctl is-active --quiet commonswarm-edge-recycle.timer
-test "$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)" = inactive
+PLAN_GUARD_VALUE_7="$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)"
+test "${PLAN_GUARD_VALUE_7}" = inactive
 systemctl cat commonswarm-edge-recycle.timer | python3 -c 'import sys; s=sys.stdin.read(); assert "OnCalendar=*-*-* 03,09,15,21:30:00 UTC" in s and "Persistent=false" in s'
 systemctl cat commonswarm-edge-recycle.service | python3 -c 'import sys; s=sys.stdin.read(); assert "docker restart --time 30 commonswarm-edge-edge-runtime-1" in s'
 edge_context() {
@@ -640,7 +648,9 @@ PY
 }
 window_check() {
   test ! -e "$PROOF_DIR/closed.txt"
-  test "$(date -u +%s)" -le "$(date -u -d "$WINDOW_END_UTC" +%s)"
+  PLAN_GUARD_VALUE_8="$(date -u +%s)"
+  PLAN_GUARD_VALUE_9="$(date -u -d "$WINDOW_END_UTC" +%s)"
+  test "${PLAN_GUARD_VALUE_8}" -le "${PLAN_GUARD_VALUE_9}"
   cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
   external_check
 }
@@ -680,10 +690,12 @@ printf 'PASS edge-mcp-preflight: baseline ON; no production mutation\n'
 set -euo pipefail
 trap 'printf "FAIL edge-mcp-open: line %s; no service mutation; run edge-mcp-open-abort with SECRET_STAGE=%s\n" "$LINENO" "${SECRET_STAGE:-not-created}" >&2' ERR
 umask 077
-test ! -e "$PROOF_DIR" && test ! -L "$PROOF_DIR"
+test ! -e "$PROOF_DIR"
+test ! -L "$PROOF_DIR"
 install -d -o root -g root -m 0700 "$PROOF_DIR"
 # Match the existing OAuth window's protected Linux /private/tmp staging.
-test -d /private/tmp && test ! -L /private/tmp
+test -d /private/tmp
+test ! -L /private/tmp
 SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$SECRET_STAGE"
 install -m 0600 /home/commonswarm/.env "$SECRET_STAGE/edge.env"
@@ -731,8 +743,10 @@ set -euo pipefail
 trap 'echo "FAIL edge-mcp-stage: line $LINENO; run rollback; STOP" >&2' ERR
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 window_check
-test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
-test "$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')" = "$EDGE_ARCHIVE_SHA256"
+PLAN_GUARD_VALUE_10="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_10}" = "$PREVIOUS_EDGE"
+PLAN_GUARD_VALUE_11="$(sha256sum "$BOX_ARCHIVE_PATH" | awk '{print $1}')"
+test "${PLAN_GUARD_VALUE_11}" = "$EDGE_ARCHIVE_SHA256"
 python3 - "$BOX_ARCHIVE_PATH" "$PROOF_DIR/source" "$NEW_EDGE" "$RELEASE_SHA" "$PROOF_DIR/compose.override.yaml" <<'PY'
 import hashlib,os,pathlib,pwd,shutil,stat,sys,tarfile
 archive,source,new,sha,override=sys.argv[1:]; source=pathlib.Path(source); new=pathlib.Path(new)
@@ -814,7 +828,8 @@ cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 systemctl is-active --quiet commonswarm-edge-recycle.timer
 touch "$PROOF_DIR/timer-restore-required.txt"
 systemctl stop commonswarm-edge-recycle.timer
-test "$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)" = inactive
+PLAN_GUARD_VALUE_12="$(systemctl show -p ActiveState --value commonswarm-edge-recycle.service)"
+test "${PLAN_GUARD_VALUE_12}" = inactive
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/mcp-503-start.utc"
 date -u +%s >"$PROOF_DIR/mcp-503-start.epoch"
 install -o root -g root -m 0644 "$PROOF_DIR/mcp.off.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
@@ -844,9 +859,12 @@ EDGE_DIR=$NEW_EDGE
 edge_config_check
 edge_compose up -d --no-deps --force-recreate --pull never edge-runtime
 deadline=$(( $(date -u +%s) + 180 ))
-until test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy; do
-  test "$(date -u +%s)" -lt "$deadline"
+PLAN_GUARD_VALUE_23="$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)"
+until test "${PLAN_GUARD_VALUE_23}" = healthy; do
+  PLAN_GUARD_VALUE_13="$(date -u +%s)"
+  test "${PLAN_GUARD_VALUE_13}" -lt "$deadline"
   sleep 2
+  PLAN_GUARD_VALUE_23="$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)"
 done
 # Verify the live container before switching current; ingress remains dark.
 edge_check dark "$PREVIOUS_EDGE"
@@ -862,7 +880,8 @@ trap 'echo "FAIL edge-mcp-restore-on: line $LINENO; run rollback immediately; ST
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 window_check
 test -f "$PROOF_DIR/applied.txt"
-test "$(readlink -f /home/commonswarm/edge/current)" = "$NEW_EDGE"
+PLAN_GUARD_VALUE_14="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_14}" = "$NEW_EDGE"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.off.caddy"
 EDGE_DIR=$NEW_EDGE
 edge_check dark
@@ -899,7 +918,8 @@ test ! -e "$PROOF_DIR/closed.txt"
 case "$EXPECTED_EDGE_SHA" in ''|*[!0-9a-f]*) exit 1;; esac
 test "${#EXPECTED_EDGE_SHA}" = 40
 test "$PREVIOUS_EDGE" = "/home/commonswarm/edge/releases/$EXPECTED_EDGE_SHA"
-test "$(cat "$PREVIOUS_EDGE/RELEASE_SHA")" = "$EXPECTED_EDGE_SHA"
+PLAN_GUARD_VALUE_15="$(cat "$PREVIOUS_EDGE/RELEASE_SHA")"
+test "${PLAN_GUARD_VALUE_15}" = "$EXPECTED_EDGE_SHA"
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" "$PROOF_DIR/compose.override.yaml"
 external_check
@@ -914,9 +934,12 @@ if test -f "$PROOF_DIR/mcp-503-start.epoch"; then
   systemctl reload caddy
   edge_compose up -d --no-deps --force-recreate --pull never edge-runtime
   deadline=$(( $(date -u +%s) + 180 ))
-  until test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy; do
-    test "$(date -u +%s)" -lt "$deadline"
+  PLAN_GUARD_VALUE_24="$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)"
+  until test "${PLAN_GUARD_VALUE_24}" = healthy; do
+    PLAN_GUARD_VALUE_16="$(date -u +%s)"
+    test "${PLAN_GUARD_VALUE_16}" -lt "$deadline"
     sleep 2
+    PLAN_GUARD_VALUE_24="$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)"
   done
   ln -sfn "$PREVIOUS_EDGE" /home/commonswarm/edge/current
   edge_check dark
@@ -925,7 +948,8 @@ if test -f "$PROOF_DIR/mcp-503-start.epoch"; then
   runuser -u caddy -- caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1
   systemctl reload caddy
 fi
-test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
+PLAN_GUARD_VALUE_17="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_17}" = "$PREVIOUS_EDGE"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 edge_check
 edge_probes >"$PROOF_DIR/rollback-probes.txt"
@@ -951,7 +975,8 @@ trap 'echo "FAIL edge-mcp-probes: line $LINENO; run rollback; STOP" >&2' ERR
 . "/home/commonswarm/edge/release-proofs/${1:?}-${2:?}/state.sh"
 test ! -e "$PROOF_DIR/closed.txt"
 if test -f "$PROOF_DIR/rollback.txt"; then EDGE_DIR=$PREVIOUS_EDGE; else EDGE_DIR=$NEW_EDGE; fi
-test "$(readlink -f /home/commonswarm/edge/current)" = "$EDGE_DIR"
+PLAN_GUARD_VALUE_18="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_18}" = "$EDGE_DIR"
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
 cmp -s /etc/caddy/sites/20-commonswarm-mcp.caddy "$PROOF_DIR/mcp.on.caddy"
 external_check
@@ -1014,7 +1039,8 @@ if test -f "$PROOF_DIR/closed.txt"; then
   exit 0
 fi
 if test -f "$PROOF_DIR/rollback.txt"; then EDGE_DIR=$PREVIOUS_EDGE; else EDGE_DIR=$NEW_EDGE; fi
-test "$(readlink -f /home/commonswarm/edge/current)" = "$EDGE_DIR"
+PLAN_GUARD_VALUE_19="$(readlink -f /home/commonswarm/edge/current)"
+test "${PLAN_GUARD_VALUE_19}" = "$EDGE_DIR"
 edge_check
 edge_probes >"$PROOF_DIR/close-probes.txt"
 external_check
@@ -1025,7 +1051,10 @@ test -s "$PROOF_DIR/mcp-503-receipt.txt"
 if test -f "$PROOF_DIR/timer-restore-required.txt"; then systemctl start commonswarm-edge-recycle.timer; fi
 systemctl is-active --quiet commonswarm-edge-recycle.timer
 RELEASE_LIVE_STATE="ON source=${EDGE_DIR##*/}; timer=active; verified-at-close"
-test "$(command -v rm)" = /usr/bin/rm && test -x /usr/bin/rm && test ! -L /usr/bin/rm
+PLAN_GUARD_VALUE_20="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_20}" = /usr/bin/rm
+test -x /usr/bin/rm
+test ! -L /usr/bin/rm
 if test -d "$SECRET_STAGE"; then
   cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
   python3 - "$SECRET_STAGE" "$PROOF_DIR/state.sh" <<'PY'
@@ -1041,7 +1070,8 @@ assert p not in (pathlib.Path('/'),pathlib.Path.home()) and state.stat().st_uid=
 PY
   /usr/bin/rm -rf -- "$SECRET_STAGE" || { printf 'FAIL edge-mcp-close: cleanup refused %s; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 fi
-test ! -e "$SECRET_STAGE" && test ! -L "$SECRET_STAGE"
+test ! -e "$SECRET_STAGE"
+test ! -L "$SECRET_STAGE"
 test "$BOX_ARCHIVE_PATH" = /tmp/hm37-edge-${RELEASE_SHA}-${WINDOW_ID}.tar
 test ! -L "$BOX_ARCHIVE_PATH"
 /usr/bin/rm -f -- "$BOX_ARCHIVE_PATH" || { printf 'FAIL edge-mcp-close: cleanup refused %s; STOP\n' "$BOX_ARCHIVE_PATH" >&2; exit 1; }
@@ -1062,7 +1092,11 @@ It does not guess a secret path from a glob, delete a release, or touch services
 set -euo pipefail
 trap 'echo "FAIL edge-mcp-open-abort: retain exact path and report; STOP" >&2' ERR
 SECRET_STAGE=${8:?exact failed-open path required}
-test "$(id -u)" = 0 && test "$(command -v rm)" = /usr/bin/rm && test ! -L /usr/bin/rm
+PLAN_GUARD_VALUE_21="$(id -u)"
+test "${PLAN_GUARD_VALUE_21}" = 0
+PLAN_GUARD_VALUE_22="$(command -v rm)"
+test "${PLAN_GUARD_VALUE_22}" = /usr/bin/rm
+test ! -L /usr/bin/rm
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); pattern=r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}'
