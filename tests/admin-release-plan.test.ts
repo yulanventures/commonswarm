@@ -1137,3 +1137,59 @@ test('admin release plan: W5 companion site plan comes only from the verified re
   rmSync(join(repoDir, sitePath)); writeFileSync(join(root, 'real-site.md'), sitePlan); symlinkSync(join(root, 'real-site.md'), join(repoDir, sitePath));
   refused(reference('site2-02'), 'FAIL ai-w5-reference: SITE_RELEASE_REPO SITE-RELEASE.md expected archive-bytes got different-or-unreadable; STOP');
 });
+
+// Deterministic pathname-replacement regression for the shared plan reader. The harness
+// swaps the path for a symlink to substituted bytes immediately after the reader's first
+// metadata check (os.fstat for the fd reader; Path.is_file for the old pathname reader).
+const READER_SWAP_HARNESS = String.raw`
+import json,os,pathlib,stat,sys
+helper,target,other,mode=sys.argv[1:5]
+state={'swapped':False}
+def swap():
+    if mode!='swap' or state['swapped']: return
+    state['swapped']=True
+    os.rename(target,target+'.orig')   # the original inode survives under another name
+    os.symlink(other,target)
+real_fstat=os.fstat
+def fstat(fd):
+    result=real_fstat(fd); swap(); return result
+os.fstat=fstat
+real_is_file=pathlib.Path.is_file
+def is_file(self):
+    result=real_is_file(self); swap(); return result
+pathlib.Path.is_file=is_file
+ns={'os':os,'stat':stat,'pathlib':pathlib}
+exec(open(helper).read(),ns)
+out=ns['read_regular'](target)
+print(json.dumps({'swapped':state['swapped'],'result':None if out is None else out.decode()}))
+`;
+// The pre-round-3 reader shape, kept only as the regression's negative control.
+const OLD_PATHNAME_READER = `def read_regular(name):
+    p=pathlib.Path(name); ok=p.is_absolute() and not p.is_symlink() and p.is_file()
+    return p.read_bytes() if ok else None
+`;
+test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
+  // Every site carries the same reader (quote style aside).
+  const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
+  assert.equal(readers.length, 15, 'one shared reader at all 15 sites');
+  assert.equal(new Set(readers).size, 1, 'all readers identical');
+  const dir = mkdtempSync(join(scratch, 'reader-swap-'));
+  const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
+  const old = join(dir, 'old-reader.py'); writeFileSync(old, OLD_PATHNAME_READER);
+  const harness = join(dir, 'harness.py'); writeFileSync(harness, READER_SWAP_HARNESS);
+  const attempt = (reader: string, mode: string) => {
+    const case_ = mkdtempSync(join(dir, 'case-')), target = join(case_, 'RELEASE.md'), other = join(case_, 'substituted.md');
+    writeFileSync(target, 'verified plan bytes\n'); writeFileSync(other, 'substituted plan bytes\n');
+    const r = spawnSync('python3', [harness, reader, target, other, mode], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout) as { swapped: boolean; result: string | null };
+  };
+  // Positive control: no swap, the shared reader returns the file's bytes.
+  assert.deepEqual(attempt(shared, 'none'), { swapped: false, result: 'verified plan bytes\n' });
+  // Swap after the metadata check: the single fd still reads the verified inode.
+  const swapped = attempt(shared, 'swap'); assert.equal(swapped.swapped, true, 'the hook fired');
+  assert.ok(swapped.result === 'verified plan bytes\n' || swapped.result === null, `shared reader followed the swap: ${JSON.stringify(swapped)}`);
+  // Negative control: the old is_symlink/is_file/read_bytes reader follows the swap, so this
+  // same assertion would fail if that sequence were restored.
+  const regressed = attempt(old, 'swap'); assert.equal(regressed.swapped, true);
+  assert.equal(regressed.result, 'substituted plan bytes\n', 'old pathname reader reads through the swapped-in symlink');
+});

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -101,10 +101,21 @@ if name=='python3':
     urllib.request.urlopen=observe; urllib.request.build_opener=opener
     real_popen=subprocess.Popen
     def popen(argv,**kw):
-        allowed=[['node','scripts/admin-smoke.mjs','--print-client-metadata'],['docker','inspect','commonswarm-edge-edge-runtime-1'],['/bin/bash']] # /bin/bash: the plan's extract-and-run of ai-live-controls
+        allowed=[['node','scripts/admin-smoke.mjs','--print-client-metadata'],['docker','inspect','commonswarm-edge-edge-runtime-1'],['/bin/bash'],['/bin/bash','-n']] # /bin/bash: the plan's extract-and-run of ai-live-controls; -n: in-memory syntax checks
         if argv not in allowed or kw.get('shell'): refuse()
         return real_popen(argv,**kw)
     subprocess.Popen=popen
+    if cfg.get('install_root'):
+        # Ownership boundary: a non-root test cannot chown to 0:0; record the request instead.
+        def fchown(fd,uid,gid):
+            with (root/'fchown.jsonl').open('a') as log: log.write(json.dumps([uid,gid])+'\n')
+        os.fchown=fchown
+        if cfg.get('corrupt_install'):
+            # Corrupt the installed hook immediately after the plan's single write.
+            real_write=os.write
+            def write(fd,data):
+                n=real_write(fd,data); real_write(fd,b'# tampered after write\n'); return n
+            os.write=write
     exec(compile(source,'<complete-plan-block>','exec'))
 elif name=='node':
     if args!=['scripts/admin-smoke.mjs','--print-client-metadata']: refuse()
@@ -119,6 +130,11 @@ elif name=='git':
 elif name=='ssh':
     # Positive-control boundary: every local guard admitted before the first remote operation.
     print('ADMITTED ssh'); raise SystemExit(97)
+elif name=='dirname':
+    if len(args)!=1: refuse()
+    print(os.path.dirname(args[0]))
+elif name=='mkdir' and args and args[0]=='-p' and cfg.get('install_root'):
+    for value in args[1:]: owned(value).mkdir(parents=True,exist_ok=True)
 elif name=='mkdir' and args and args[0]=='-p':
     # Positive-control boundary: every guard admitted before the first directory creation.
     print('ADMITTED mkdir -p'); raise SystemExit(97)
@@ -130,6 +146,8 @@ elif name=='cp':
         shutil.copytree(owned(args[1]),owned(args[2]),dirs_exist_ok=True)
     elif len(args)==2: shutil.copyfile(owned(args[0]),owned(args[1]))
     else: refuse()
+elif name=='chmod' and len(args)==2 and args[0] in ('0700','0644') and cfg.get('install_root'):
+    owned(args[1]).chmod(int(args[0],8))
 elif name=='chmod':
     if args!=['-R','go-rwx',str(root/'stage')]: refuse()
     for p in [root/'stage']+list((root/'stage').rglob('*')): p.chmod(p.stat().st_mode & ~0o077)
@@ -158,6 +176,10 @@ elif name=='systemctl' and args==['is-active','--quiet','fixture-recycle.timer']
 elif name=='systemctl':
     if args==['stop','fixture-recycle.timer'] or args==['reload','caddy']: pass
     elif args==['show','-p','ActiveState','--value','fixture-recycle.service']: print('inactive')
+    elif args==['daemon-reload'] and cfg.get('install_root'): pass
+    elif args==['cat','fixture-recycle.service'] and cfg.get('install_root'):
+        dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
+        print('# fixture-recycle.service\n[Service]\nExecStart=/bin/true\n# '+str(dropin)+'\n'+dropin.read_text())
     else: refuse()
 elif name=='cmp':
     if len(args)!=3 or args[0]!='-s': refuse()
@@ -209,7 +231,7 @@ function fixture(config: Record<string, unknown> = {}) {
   put('site/manifest.json', manifest);
   const goodClose = `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${hash(manifest)}\n`;
   put('site/CLOSE.txt', goodClose);
-  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: baseline, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
+  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: baseline, baseline_postgres_image: image, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
     baseline_caddyfile_sha256: '', archive_sha256: '', plan_sha256: hash(readFileSync(planPath)) };
   put('authorization.json', { approver: 'HezLead', release_sha: sha, task_ref: 'fixture-qa', browser: 'headless-bundled-chromium' });
   put('fixture.json', { sha, baseline, image, client, producer: producerSource, ...config });
@@ -227,7 +249,7 @@ function fixture(config: Record<string, unknown> = {}) {
   chmodSync(join(bin, '_dispatch'), 0o700);
   for (const name of ['python3', 'node', 'ssh', 'psql', 'docker', 'curl', 'caddy', 'systemctl', 'sudo', 'git',
     'npm', 'npx', 'open', 'osascript', 'wget', 'op', 'mkdir', 'cp', 'chmod', 'ai_deadline', 'ai_run', 'ai_db',
-    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install']) symlinkSync('_dispatch', join(bin, name));
+    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install', 'dirname']) symlinkSync('_dispatch', join(bin, name));
   // Synthetic active box baseline, as in the original diagnostic fixtures.
   // Repository templates are historical OAuth-only files, not this block's box input.
   for (const [file, bytes] of [
@@ -264,6 +286,7 @@ function fixture(config: Record<string, unknown> = {}) {
       ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
       ['/etc/systemd/system', join(root, 'systemd')],
+      ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
     ] as const) source = source.split(from).join(to);
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
@@ -608,4 +631,30 @@ test('ordinary-paths-unchanged / w5-opening-live-controls: ai-w5-preflight refus
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-live-controls: BOX_ARCHIVE_PATH bytes expected input-archive_sha256 got mismatch; STOP'); }
   { const f = fixture(); mkdirSync(join(f.root, 'prep-open/w5-live-before'));
     refusedOpen(f, f.run(['ai-w5-preflight']), 'FAIL ai-w5-preflight: live-controls staging expected absent got present; STOP'); }
+});
+
+// ai-recycle-install's single write + post-install comparison, executed in a temporary root.
+test('release-plan-contract / recycle-install-verified-write: installs exactly the verified hook bytes and refuses a corrupted install before registering the drop-in', () => {
+  const hookBlock = blocks.filter(b => b.startsWith('# step: ai-recycle-hook\n'));
+  assert.equal(hookBlock.length, 1);
+  const dropin = 'systemd/fixture-recycle.service.d/50-admin-measurement.conf', installed = 'libexec/commonswarm-admin-edge-recycle';
+  const good = fixture({ install_root: true }); const r = good.run(['ai-recycle-install']); pass(good, r);
+  assert.equal(readFileSync(join(good.root, installed), 'utf8'), '#!/bin/bash\n' + hookBlock[0], 'installed bytes are the verified extraction');
+  assert.equal(statSync(join(good.root, installed)).mode & 0o777, 0o700);
+  assert.equal(readFileSync(join(good.root, 'fchown.jsonl'), 'utf8').trim(), '[0, 0]');
+  assert.match(readFileSync(join(good.root, dropin), 'utf8'), /ExecStartPre=.*commonswarm-admin-edge-recycle before/);
+  assert.ok(r.calls.some(c => c[0] === 'systemctl' && c[1] === 'daemon-reload'), 'drop-in registered');
+  assert.ok(existsSync(join(good.proof, 'recycle-unit-after.txt')));
+  assert.match(r.stdout, /PASS recycle pre-invalidation\/post-measurement hooks installed/);
+  // Negative: the installed file is corrupted after the single write.
+  const bad = fixture({ install_root: true, corrupt_install: true }); const refused = bad.run(['ai-recycle-install']);
+  stopped(bad, refused, 'FAIL ai-recycle-install: installed hook expected verified-bytes got changed; STOP');
+  assert.ok(!existsSync(join(bad.root, dropin)), 'drop-in not written'); assert.ok(!refused.calls.some(c => c[0] === 'systemctl' && c[1] === 'daemon-reload'), 'no daemon-reload');
+  assert.ok(!existsSync(join(bad.proof, 'recycle-unit-after.txt')));
+  // Negative: a symlink planted at the install path is never written through.
+  const planted = fixture({ install_root: true }); planted.put('victim.txt', 'must survive\n');
+  mkdirSync(join(planted.root, 'libexec'), { recursive: true }); symlinkSync(join(planted.root, 'victim.txt'), join(planted.root, installed));
+  const blocked = planted.run(['ai-recycle-install']);
+  stopped(planted, blocked, 'FAIL ai-recycle-install: installed hook expected writable-regular-file got symlink-or-unwritable; STOP');
+  assert.equal(readFileSync(join(planted.root, 'victim.txt'), 'utf8'), 'must survive\n'); assert.ok(!existsSync(join(planted.root, dropin)));
 });
