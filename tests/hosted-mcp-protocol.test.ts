@@ -9,6 +9,9 @@ import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_ME
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
 
+// @ts-expect-error TS5097: this service-free test imports the Deno source directly.
+import { HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
+
 const verified = {
   providerGrantId: "provider-grant",
   subject: "11111111-1111-4111-8111-111111111111",
@@ -198,7 +201,7 @@ test("tools/list snapshots eight hosted titles, safety annotations and OAuth sec
 test("tool auth errors carry safe WWW-Authenticate metadata while ordinary errors and success do not", async (t) => {
   let outcome = "ok";
   const serve = handler({ executeTool: async () => {
-    if (outcome !== "ok") throw new Error(outcome);
+    if (outcome !== "ok") throw new HostedToolFailure(outcome);
     return { ok: true };
   } });
   t.mock.method(console, "error", () => undefined);
@@ -217,9 +220,9 @@ test("tool auth errors carry safe WWW-Authenticate metadata while ordinary error
     CallToolResultSchema.parse(result);
     const needsAuth = ["hosted_grant_forbidden", "hosted_seat_forbidden", "hosted_seat_revoked"].includes(code);
     assert.deepEqual(result._meta, needsAuth ? { "mcp/www_authenticate": [challenge] } : undefined);
-    assert.deepEqual(JSON.parse(result.content[0].text), code === "ok" ? { ok: true } : {
-      error: code === "private-error-must-not-leak" ? "tool_failed" : code,
-    });
+    const output = JSON.parse(result.content[0].text);
+    if (code === "ok") assert.deepEqual(output, { ok: true });
+    else assert.equal(output.error, ["private-error-must-not-leak", "hosted_command_failed"].includes(code) ? "tool_failed" : code);
     assert.equal(result.isError, code === "ok" ? undefined : true);
   }
 });
@@ -442,7 +445,7 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
     const output = JSON.parse(result.content[0].text);
     if (expected === "hosted_grant_forbidden") {
       assert.equal(result.isError, true);
-      assert.deepEqual(output, { error: expected });
+      assert.deepEqual(output, { error: expected, message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace." });
     } else {
       assert.equal(result.isError, undefined);
       assert.deepEqual(output, { workspace_id: expected });
@@ -459,7 +462,7 @@ test("claim_seat routes through the grant home and preserves explicit consent ch
     params: { name: "claim_seat", arguments: base },
   }));
   const revokedResult = (await revoked.json()).result;
-  assert.deepEqual(JSON.parse(revokedResult.content[0].text), { error: "hosted_grant_forbidden" });
+  assert.deepEqual(JSON.parse(revokedResult.content[0].text), { error: "hosted_grant_forbidden", message: "Workspace access is missing or no longer authorized. Ask a workspace admin to restore your membership, then reconnect and approve this workspace." });
   assert.equal(revokedResult.isError, true);
   CallToolResultSchema.parse(revokedResult);
   assert.deepEqual(revokedResult._meta, {
@@ -505,7 +508,7 @@ test("signal bodies accept multiline whitespace and refuse other control charact
         ...base,
         body: `before${control}after`,
       }),
-      /Invalid tool argument/u,
+      /Invalid body: provide 1 to 8000 characters/u,
     );
   }
 });
@@ -602,8 +605,13 @@ test("body, response, duration, and concurrency limits deny beside a small posit
   mode = "wait";
   const waiting = serve(call());
   await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal((await serve(call())).status, 429);
-  assert.equal((await waiting).status, 504);
+  const throttled = await serve(call());
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.headers.get("retry-after"), "1");
+  assert.deepEqual(await throttled.json(), { error: "too_many_requests", message: "Too many concurrent requests. Retry in 1 second." });
+  const timedOut = await waiting;
+  assert.equal(timedOut.status, 504);
+  assert.deepEqual(await timedOut.json(), { error: "request_timeout", message: "The request timed out. Retry with the same request_id; if it repeats, contact support@commonswarm.com." });
   assert.equal((await serve(call())).status, 429, "timed-out work keeps its slot until settled");
   release!();
   await gate;
