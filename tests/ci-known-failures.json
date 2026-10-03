@@ -1,0 +1,11 @@
+{
+  "_comment": "Triaged, currently-known failing test names per suite. Each entry: name (exact test name as printed by node:test), lane (owner), reason. Start empty; never add an entry to hide a failure. Reporting tool only: scripts/ci-compare-failures.mjs.",
+  "suites": {
+    "server": [],
+    "p1-cli": [],
+    "site": [],
+    "unit": [],
+    "box-dry-run": [],
+    "mcp-auth": []
+  }
+}
