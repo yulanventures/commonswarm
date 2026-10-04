@@ -1,4 +1,4 @@
--- Restore the exact migration 005 prosrc; nullable approvals and audit records remain.
+-- Prove the exact migration 005 prosrc and restored non-null expiry definition.
 SELECT
  has_table_privilege('swarm_command','swarm.household_workspace_boundaries','INSERT')=true
  AND NOT has_table_privilege('swarm_command','swarm.household_workspace_boundaries','DELETE')
@@ -45,7 +45,8 @@ SELECT
  AND NOT has_function_privilege('swarm_read','swarm.audit_household_permission()','EXECUTE')
  AND NOT has_function_privilege('swarm_command','swarm.audit_household_permission()','EXECUTE')
  AND NOT EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a WHERE p.oid='swarm.audit_household_permission()'::regprocedure AND a.grantee=0)
- AND (SELECT NOT attnotnull FROM pg_attribute WHERE attrelid='swarm.household_content_connections'::regclass AND attname='expires_at' AND NOT attisdropped)
+ AND (SELECT attnotnull AND col_description(attrelid,attnum) IS NULL FROM pg_attribute WHERE attrelid='swarm.household_content_connections'::regclass AND attname='expires_at' AND NOT attisdropped)
+ AND NOT EXISTS (SELECT 1 FROM swarm.household_content_connections WHERE expires_at IS NULL)
  -- No new table/column grantees, grant options, or table-level command privileges.
  AND NOT EXISTS (SELECT 1 FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
    WHERE c.oid IN ('swarm.household_workspace_boundaries'::regclass,'swarm.household_member_content_roles'::regclass,'swarm.household_content_connections'::regclass)

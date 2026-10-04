@@ -1,4 +1,4 @@
--- Restore the migration 005 function verbatim; preserve nullable expiry, consent and audit rows.
+-- Restore migration 005 verbatim, end NULL-expiry approvals, and restore the old column definition.
 CREATE OR REPLACE FUNCTION swarm.audit_household_permission() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog AS $$
 DECLARE
@@ -42,3 +42,11 @@ BEGIN
  RETURN NEW;
 END;
 $$;
+
+-- The old edge already refuses NULL approvals. Keep their rows but end them
+-- before restoring the NOT NULL constraint; consent and audit rows are unchanged.
+UPDATE swarm.household_content_connections
+SET expires_at = clock_timestamp()
+WHERE expires_at IS NULL;
+ALTER TABLE swarm.household_content_connections ALTER COLUMN expires_at SET NOT NULL;
+COMMENT ON COLUMN swarm.household_content_connections.expires_at IS NULL;
