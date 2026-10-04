@@ -286,7 +286,7 @@ function w2Fixture() {
   });
   const old = ['20260928000003', '20261001000001'].map(version => {
     const file = 'supabase/migrations/' + readdirSync('supabase/migrations').find(name => name.startsWith(version + '_'))!;
-    return { version, released_sha: 'c'.repeat(40), file, sha256: digest(readFileSync(file)) };
+    return { version, evidence_kind: 'release-record', released_sha: 'c'.repeat(40), file, sha256: digest(readFileSync(file)) };
   });
   writeFileSync(join(proof, 'new-migrations.json'), JSON.stringify(migrations));
   writeFileSync(join(proof, 'backfill.json'), JSON.stringify(old));
@@ -1171,7 +1171,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 15, 'one shared reader at all 15 sites');
+  assert.equal(readers.length, 16, 'one shared reader at all 16 sites (15 plan-text sites and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
@@ -1192,4 +1192,221 @@ test('admin release plan: shared plan reader survives a path swap after its meta
   // same assertion would fail if that sequence were restored.
   const regressed = attempt(old, 'swap'); assert.equal(regressed.swapped, true);
   assert.equal(regressed.result, 'substituted plan bytes\n', 'old pathname reader reads through the swapped-in symlink');
+});
+
+// ---- W2 backfill evidence kinds (ai-w2-backfill) ----
+// Real production ledger statement arrays (read-only measurement, public migration SQL)
+// with the file text at the commit the matcher selected.
+type LedgerFixture = { version: string; matched_sha: string; file: string; file_at_matched_sha: string; statements: string[] };
+const ledgerFixtures = (JSON.parse(readFileSync(resolve('tests/fixtures/c1-ledger-statements.json'), 'utf8')) as { rows: LedgerFixture[] }).rows;
+const ATTESTATION = 'HezLead fixture attestation: no release record and no recorded ledger statements; file bytes at RELEASE_SHA adopted as the UNVERIFIED drift baseline; does not claim the applied SQL equals the file.';
+const MEANING = 'attested-baseline: no release record and no recorded statements; file bytes at RELEASE_SHA adopted as UNVERIFIED drift baseline';
+function backfillPython() {
+  const source = block('ai-w2-backfill'); return source.split("<<'PY'\n")[1]!.split('\nPY\n')[0]!;
+}
+function coverFunction() {
+  const py = backfillPython();
+  return py.slice(py.indexOf('def verbatim_cover('), py.indexOf('def tar_member('));
+}
+function covers(cases: Array<[string, string[]]>) {
+  const r = spawnSync('python3', ['-c', 'import json,sys\nexec(sys.argv[1])\nprint(json.dumps([verbatim_cover(t.encode(),s) for t,s in json.loads(sys.stdin.read())]))', coverFunction()],
+    { input: JSON.stringify(cases), encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr); return JSON.parse(r.stdout) as boolean[];
+}
+test('admin release plan: W2 ledger-statements match is an ordered verbatim cover, proven on real recorded arrays', () => {
+  // Positive: real production arrays are covered by their files (identical to RELEASE_SHA's).
+  assert.deepEqual(covers(ledgerFixtures.map(r => [r.file_at_matched_sha, r.statements] as [string, string[]])), ledgerFixtures.map(() => true));
+  for (const r of ledgerFixtures) assert.equal(readFileSync(r.file, 'utf8'), r.file_at_matched_sha, `${r.version} file at this checkout equals the covered bytes`);
+  const multi = ledgerFixtures.find(r => r.statements.length >= 3)!;
+  const [s0, s1, ...rest] = multi.statements as [string, string, ...string[]];
+  const file = multi.file_at_matched_sha;
+  const results = covers([
+    [file, [s1, s0, ...rest]],                                      // a statement reordered
+    [file, [s0.slice(0, -1) + (s0.endsWith('x') ? 'y' : 'x'), s1, ...rest]], // one byte changed
+    [file.replace(s1, '-- injected comment\n' + s1), multi.statements], // a comment in a gap
+    [file.replace(s1, 'SELECT 1;\n' + s1), multi.statements],           // other text in a gap
+    [file, [s0, ...rest]],                                           // a stored statement missing (its text left uncovered)
+    [file, [...multi.statements, 'SELECT 1']],                       // an extra stored statement
+    [file, [s0, '', s1, ...rest]],                                   // an empty stored statement
+    ['\n;  ' + file + '\n;;\n', multi.statements],                   // only whitespace/semicolons around: still a cover
+  ]);
+  assert.deepEqual(results, [false, false, false, false, false, false, false, true]);
+});
+
+function backfillFixture() {
+  const root = mkdtempSync(join(scratch, 'backfill-')), proof = join(root, 'proof'), archives = join(root, 'historical'), tree = join(root, 'tree');
+  mkdirSync(proof); mkdirSync(archives); mkdirSync(join(tree, 'supabase/migrations'), { recursive: true });
+  const repoFile = (v: string) => 'supabase/migrations/' + readdirSync('supabase/migrations').find(n => n.startsWith(v + '_'))!;
+  const tar = (out: string, files: Record<string, string | Buffer>) => {
+    const dir = mkdtempSync(join(root, 'tar-'));
+    for (const [name, bytes] of Object.entries(files)) { mkdirSync(dirname(join(dir, name)), { recursive: true }); writeFileSync(join(dir, name), bytes); }
+    const made = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[2]+"/"+m,arcname=m) for m in sys.argv[3:]]', out, dir, ...Object.keys(files)], { encoding: 'utf8' });
+    assert.equal(made.status, 0, made.stderr);
+  };
+  const [loop, queue, bucket] = ledgerFixtures as [LedgerFixture, LedgerFixture, LedgerFixture];
+  const historicalSha = 'c'.repeat(40);
+  const relRelease = repoFile('20261001000001'), relAttested = repoFile('20260928000003');
+  // Release archive (RELEASE_SHA): files read for matched_sha==RELEASE_SHA and attested rows.
+  const releaseArchive = join(root, 'release.tar');
+  const releaseFiles: Record<string, string | Buffer> = { [loop.file]: loop.file_at_matched_sha, [queue.file]: queue.file_at_matched_sha, [bucket.file]: bucket.file_at_matched_sha, [relAttested]: readFileSync(relAttested) };
+  tar(releaseArchive, releaseFiles);
+  tar(join(archives, historicalSha + '.tar'), { [relRelease]: readFileSync(relRelease) });
+  const rows: Record<string, unknown>[] = [
+    { version: '20261001000001', evidence_kind: 'release-record', released_sha: historicalSha, sha256: digest(readFileSync(relRelease)), file: relRelease },
+    { version: loop.version, evidence_kind: 'ledger-statements', file: loop.file, matched_sha: sha, sha256: digest(loop.file_at_matched_sha) },
+    { version: queue.version, evidence_kind: 'ledger-statements', file: queue.file, matched_sha: sha, sha256: digest(queue.file_at_matched_sha) },
+    { version: bucket.version, evidence_kind: 'ledger-statements', file: bucket.file, matched_sha: sha, sha256: digest(bucket.file_at_matched_sha) },
+    { version: '20260928000003', evidence_kind: 'attested-baseline', file: relAttested, sha256: digest(readFileSync(relAttested)), attested_by: 'HezLead', attested_at: '2026-10-03T20:00:00Z', reason: ATTESTATION },
+  ];
+  const statements: Record<string, string[] | null> = { '20261001000001': null, [loop.version]: loop.statements, [queue.version]: queue.statements, [bucket.version]: bucket.statements, '20260928000003': null };
+  const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify({ archive_sha256: digest(readFileSync(releaseArchive)) }));
+  function run_(change: { rows?: Record<string, unknown>[]; statements?: Record<string, string[] | null> } = {}) {
+    const useRows = change.rows ?? rows, useStatements = change.statements ?? statements;
+    for (const name of ['backfill.json', 'backfill-evidence.json']) if (existsSync(join(proof, name))) rmSync(join(proof, name));
+    writeFileSync(join(root, 'backfill.json'), JSON.stringify(useRows));
+    const versions = Object.keys(useStatements).sort();
+    writeFileSync(join(proof, 'ledger-before.txt'), versions.join('\n') + '\n');
+    writeFileSync(join(root, 'ledger.jsonl'), versions.map(v => JSON.stringify({ version: v, statements: useStatements[v] })).join('\n') + '\n');
+    // Read-only database boundary: the stub answers only the statements query.
+    const harness = `ai_ro() { case "$*" in *"json_build_object('version',version,'statements',statements)"*) cat '${join(root, 'ledger.jsonl')}';; *) return 1;; esac; }\n`;
+    return run(harness + block('ai-w2-backfill'), { WINDOW: 'W2', PROOF_DIR: proof, BACKFILL_FILE: join(root, 'backfill.json'), HISTORICAL_ARCHIVES_DIR: archives,
+      RELEASE_SHA: sha, BOX_ARCHIVE_PATH: releaseArchive, INPUTS_FILE: inputs, RELEASE_ROOT: resolve('.') });
+  }
+  // Rebuild the verified release archive (and its input digest) with replaced files.
+  const releaseWith = (files: Record<string, string | Buffer>) => { tar(releaseArchive, { ...releaseFiles, ...files }); writeFileSync(inputs, JSON.stringify({ archive_sha256: digest(readFileSync(releaseArchive)) })); };
+  return { root, proof, archives, rows, statements, run: run_, tar, queue, releaseWith, releaseFiles };
+}
+test('admin release plan: W2 backfill validates release-record, ledger-statements and attested-baseline rows; refuses bad evidence', () => {
+  const f = backfillFixture();
+  // Positive (all three kinds): every row validates; per-version provenance and per-kind counts
+  // are retained in backfill-evidence.json and its digest is printed in the PASS line.
+  const mixed = f.run();
+  assert.equal(mixed.status, 0, mixed.stderr);
+  const evidenceBytes = readFileSync(join(f.proof, 'backfill-evidence.json'));
+  const evidence = JSON.parse(evidenceBytes.toString());
+  assert.deepEqual(evidence.counts, { 'release-record': 1, 'ledger-statements': 3, 'attested-baseline': 1 });
+  assert.equal(evidence.versions['20260928000003'].reason, ATTESTATION, 'the row reason is retained verbatim');
+  assert.equal(evidence.versions[f.queue.version].match, 'ordered-verbatim-cover');
+  assert.equal(evidence.attested_meaning, MEANING);
+  assert.ok(mixed.stdout.includes('20260928000003 ' + MEANING), 'the plan prints its own fixed meaning line');
+  assert.ok(mixed.stdout.includes('PASS ai-w2-backfill: release-record=1, ledger-statements=3, attested-baseline=1; backfill-evidence.json sha256=' + digest(evidenceBytes)));
+  // Positive (release-record only): unchanged rule passes.
+  const only = f.run({ rows: [f.rows[0]!], statements: { '20261001000001': null } });
+  assert.equal(only.status, 0, only.stderr); assert.match(only.stdout, /PASS ai-w2-backfill/);
+  assert.equal(JSON.parse(readFileSync(join(f.proof, 'backfill.json'), 'utf8')).length, 1);
+  const refused = (out: ReturnType<typeof run>, text: string) => {
+    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(text), `${text}\n${out.stderr}`); assert.doesNotMatch(out.stderr, /Traceback/);
+    assert.ok(!existsSync(join(f.proof, 'backfill.json')) && !existsSync(join(f.proof, 'backfill-evidence.json')), 'no proof after refusal');
+  };
+  const withRow = (i: number, change: Record<string, unknown>) => f.rows.map((r, j) => j === i ? { ...r, ...change } : r);
+  // Wrong bytes at matched_sha: the verified release archive's file no longer covers the ledger.
+  const wrongText = f.queue.file_at_matched_sha.replace(/;\s*$/, ';\nSELECT 1;\n');
+  f.releaseWith({ [f.queue.file]: wrongText });
+  refused(f.run({ rows: withRow(2, { sha256: digest(wrongText) }) }), `FAIL ai-w2-backfill: ledger statements for ${f.queue.version} expected ordered-verbatim-cover-by-file-at-RELEASE_SHA got mismatch; STOP`);
+  f.releaseWith({});
+  refused(f.run({ rows: withRow(2, { sha256: 'f'.repeat(64) }) }), `FAIL ai-w2-backfill: sha256 of ${f.queue.file} at matched_sha expected row-sha256 got mismatch; STOP`);
+  refused(f.run({ rows: withRow(2, { matched_sha: '9'.repeat(40) }) }), `FAIL ai-w2-backfill: matched_sha for ${f.queue.version} expected RELEASE_SHA got other; STOP`);
+  refused(f.run({ statements: { ...f.statements, [f.queue.version]: null } }), `FAIL ai-w2-backfill: ledger statements for ${f.queue.version} expected non-empty got null-or-empty; STOP`);
+  // Kind (c) with non-empty recorded statements must be kind (b).
+  refused(f.run({ statements: { ...f.statements, '20260928000003': ['SELECT 1'] } }), 'FAIL ai-w2-backfill: ledger statements for attested-baseline 20260928000003 expected null-or-empty got non-empty; the row must be ledger-statements; STOP');
+  refused(f.run({ rows: withRow(4, { attested_by: 'Tom' }) }), 'FAIL ai-w2-backfill: attested_by for 20260928000003 expected HezLead got other; STOP');
+  for (const reason of ['', '   ', 'two\nlines', 'tab\there', 'x'.repeat(2001), 7])
+    refused(f.run({ rows: withRow(4, { reason }) }), 'FAIL ai-w2-backfill: reason for 20260928000003 expected non-empty-single-line-at-most-2000-chars got other; STOP');
+  for (const attested_at of [new Date(Date.now() + 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z'), '2026-10-03T20:00:00.000Z', '2026-13-40T99:00:00Z', null])
+    refused(f.run({ rows: withRow(4, { attested_at }) }), 'FAIL ai-w2-backfill: attested_at for 20260928000003 expected UTC-Z-not-future got other; STOP');
+  refused(f.run({ rows: withRow(4, { sha256: 'f'.repeat(64) }) }), 'FAIL ai-w2-backfill: sha256 of ' + (f.rows[4] as { file: string }).file + ' at RELEASE_SHA expected row-sha256 got mismatch; STOP');
+  // Set-level refusals.
+  refused(f.run({ statements: { ...f.statements, '20261002000001': null } }), 'FAIL ai-w2-backfill: backfill rows expected every-ledger-version got missing-1; STOP');
+  refused(f.run({ rows: [...f.rows, f.rows[1]!] }), `FAIL ai-w2-backfill: backfill row ${f.queue.version === (f.rows[1] as { version: string }).version ? f.queue.version : (f.rows[1] as { version: string }).version} expected one-row got duplicate; STOP`);
+  refused(f.run({ rows: withRow(0, { evidence_kind: 'guess' }) }), 'FAIL ai-w2-backfill: evidence_kind for 20261001000001 expected release-record|ledger-statements|attested-baseline got unknown; STOP');
+  refused(f.run({ rows: withRow(0, { matched_sha: 'c'.repeat(40) }) }), 'FAIL ai-w2-backfill: release-record row keys for 20261001000001 expected exact-kind-keys got other-set; STOP');
+  refused(f.run({ rows: [...f.rows, { ...f.rows[0]!, version: '20260101000001' }] }), 'FAIL ai-w2-backfill: backfill row 20260101000001 expected ledger-version got not-in-ledger; STOP');
+  // Kind (a) drift STOP is kept: the historical bytes must equal the current file.
+  f.tar(join(f.archives, 'c'.repeat(40) + '.tar'), { [(f.rows[0] as { file: string }).file]: 'drifted\n' });
+  refused(f.run({ rows: withRow(0, { sha256: digest('drifted\n') }) }), 'FAIL historical/current migration drift; STOP');
+});
+
+test('admin release plan: W2 M4 records ledger-statements/attested-baseline backfills at RELEASE_SHA and refuses unknown kinds', () => {
+  const f = w2Fixture();
+  try {
+    assert.equal(run(f.harness + block('ai-w2-measure'), f.env).status, 0);
+    const [first, second] = f.old as [Record<string, string>, Record<string, string>];
+    const statementRow = { version: first.version, evidence_kind: 'ledger-statements', file: first.file, matched_sha: sha, sha256: first.sha256 };
+    writeFileSync(join(f.proof, 'backfill.json'), JSON.stringify([statementRow, second]));
+    const result = run(f.harness + block('ai-w2-apply'), f.env);
+    assert.equal(result.status, 0, result.stderr);
+    const rows = readFileSync(join(f.proof, 'db-checksums'), 'utf8').trim().split('\n');
+    assert.ok(rows.includes([first.version, first.sha256, 'backfill', sha].join('|')), 'ledger-statements row recorded at RELEASE_SHA');
+    assert.ok(rows.includes([second.version, second.sha256, 'backfill', second.released_sha].join('|')), 'release-record row keeps its released_sha');
+    assert.ok(existsSync(join(f.proof, 'schema-committed.txt')), 'reconcile accepts the recorded convention');
+  } finally { f.clean(); }
+  const g = w2Fixture();
+  try {
+    assert.equal(run(g.harness + block('ai-w2-measure'), g.env).status, 0);
+    writeFileSync(join(g.proof, 'backfill.json'), JSON.stringify([{ ...g.old[0], evidence_kind: 'guess' }, g.old[1]]));
+    const refused = run(g.harness + block('ai-w2-apply'), g.env);
+    assert.notEqual(refused.status, 0); assert.match(refused.stderr, /FAIL ai-w2-apply: backfill evidence_kind expected known-kind got other; STOP/);
+    assert.ok(!existsSync(join(g.proof, 'submitted.sql')), 'no SQL submitted');
+  } finally { g.clean(); }
+});
+
+
+// End to end with the final W2 evidence picture: 68 ledger versions = 20 release-record,
+// 46 ledger-statements (real recorded statements as byte spans of the file at RELEASE_SHA)
+// and 2 attested-baseline rows (HezLead's real attestations).
+test('admin release plan: W2 backfill end to end on the real 68-version ledger (20/46/2)', () => {
+  type Ledger = { version: string; file: string; file_sha256: string; statement_spans: Array<[number, number]> | null };
+  const picture = JSON.parse(readFileSync(resolve('tests/fixtures/c1-backfill-w2.json'), 'utf8')) as {
+    release_sha: string; release_records: Record<string, string>; attested_baseline: string[];
+    attestations: Array<{ version: string; attested_by: string; attested_at: string; reason: string }>; ledger: Ledger[] };
+  const root = mkdtempSync(join(scratch, 'backfill-e2e-')), proof = join(root, 'proof'), archives = join(root, 'historical');
+  mkdirSync(proof); mkdirSync(archives);
+  const bytes = (file: string) => readFileSync(file);
+  for (const l of picture.ledger) assert.equal(digest(bytes(l.file)), l.file_sha256, `${l.file} equals the file at RELEASE_SHA`);
+  const tarFiles = (out: string, files: string[]) => {
+    const made = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(m,arcname=m) for m in sys.argv[2:]]', out, ...files], { encoding: 'utf8' });
+    assert.equal(made.status, 0, made.stderr);
+  };
+  const releaseArchive = join(root, 'release.tar'); tarFiles(releaseArchive, picture.ledger.map(l => l.file));
+  const bySha: Record<string, string[]> = {};
+  for (const l of picture.ledger) { const r = picture.release_records[l.version]; if (r) (bySha[r] ??= []).push(l.file); }
+  for (const [commit, files] of Object.entries(bySha)) tarFiles(join(archives, commit + '.tar'), files);
+  const attestation = Object.fromEntries(picture.attestations.map(a => [a.version, a]));
+  const rows = picture.ledger.map(l => {
+    if (picture.release_records[l.version]) return { version: l.version, evidence_kind: 'release-record', released_sha: picture.release_records[l.version], sha256: l.file_sha256, file: l.file };
+    if (l.statement_spans) return { version: l.version, evidence_kind: 'ledger-statements', file: l.file, matched_sha: picture.release_sha, sha256: l.file_sha256 };
+    const a = attestation[l.version]!; return { version: l.version, evidence_kind: 'attested-baseline', file: l.file, sha256: l.file_sha256, attested_by: a.attested_by, attested_at: a.attested_at, reason: a.reason };
+  });
+  const statements = Object.fromEntries(picture.ledger.map(l => [l.version, l.statement_spans ? l.statement_spans.map(([a, b]) => bytes(l.file).subarray(a, b).toString('utf8')) : null]));
+  const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify({ archive_sha256: digest(readFileSync(releaseArchive)) }));
+  const go = (useRows: Record<string, unknown>[], useStatements: Record<string, string[] | null> = statements) => {
+    for (const name of ['backfill.json', 'backfill-evidence.json']) if (existsSync(join(proof, name))) rmSync(join(proof, name));
+    writeFileSync(join(root, 'backfill.json'), JSON.stringify(useRows));
+    const versions = Object.keys(useStatements).sort();
+    writeFileSync(join(proof, 'ledger-before.txt'), versions.join('\n') + '\n');
+    writeFileSync(join(root, 'ledger.jsonl'), versions.map(v => JSON.stringify({ version: v, statements: useStatements[v] })).join('\n') + '\n');
+    const harness = `ai_ro() { case "$*" in *"json_build_object('version',version,'statements',statements)"*) cat '${join(root, 'ledger.jsonl')}';; *) return 1;; esac; }\n`;
+    return run(harness + block('ai-w2-backfill'), { WINDOW: 'W2', PROOF_DIR: proof, BACKFILL_FILE: join(root, 'backfill.json'), HISTORICAL_ARCHIVES_DIR: archives,
+      RELEASE_SHA: picture.release_sha, BOX_ARCHIVE_PATH: releaseArchive, INPUTS_FILE: inputs, RELEASE_ROOT: resolve('.') });
+  };
+  assert.equal(picture.ledger.length, 68);
+  const result = go(rows);
+  assert.equal(result.status, 0, result.stderr);
+  const record = readFileSync(join(proof, 'backfill-evidence.json'));
+  const evidence = JSON.parse(record.toString());
+  assert.deepEqual(evidence.counts, { 'release-record': 20, 'ledger-statements': 46, 'attested-baseline': 2 });
+  assert.deepEqual(Object.keys(evidence.versions).sort(), picture.ledger.map(l => l.version).sort());
+  assert.equal(evidence.versions['20260928000003'].evidence_kind, 'release-record', 'the W6-required 20260928000003 has a release record');
+  for (const v of picture.attested_baseline) { assert.ok(result.stdout.includes(v + ' ' + MEANING)); assert.equal(evidence.versions[v].reason, attestation[v]!.reason); }
+  assert.ok(result.stdout.includes('PASS ai-w2-backfill: release-record=20, ledger-statements=46, attested-baseline=2; backfill-evidence.json sha256=' + digest(record)));
+  // The real mix still refuses set-level and per-kind defects.
+  const bad = (out: ReturnType<typeof run>, text: string) => { assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(text), out.stderr); assert.ok(!existsSync(join(proof, 'backfill-evidence.json'))); };
+  bad(go(rows.slice(1)), 'FAIL ai-w2-backfill: backfill rows expected every-ledger-version got missing-1; STOP');
+  const ls = rows.find(r => r.evidence_kind === 'ledger-statements')!;
+  bad(go([...rows, ls]), `FAIL ai-w2-backfill: backfill row ${ls.version} expected one-row got duplicate; STOP`);
+  const firstStatement = picture.ledger.find(l => l.version === ls.version)!;
+  bad(go(rows, { ...statements, [ls.version]: [...statements[ls.version]!].reverse() }), `FAIL ai-w2-backfill: ledger statements for ${ls.version} expected ordered-verbatim-cover-by-file-at-RELEASE_SHA got mismatch; STOP`);
+  const att = picture.attested_baseline[0]!;
+  bad(go(rows, { ...statements, [att]: ['SELECT 1'] }), `FAIL ai-w2-backfill: ledger statements for attested-baseline ${att} expected null-or-empty got non-empty; the row must be ledger-statements; STOP`);
+  assert.ok(firstStatement.statement_spans!.length >= 1);
 });
