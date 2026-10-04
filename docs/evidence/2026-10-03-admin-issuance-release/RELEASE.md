@@ -965,18 +965,37 @@ fsync, rename, 0600) BEFORE it uses the new access token for MCP initialize,
 then reads pending_access with human_access_token. Discovery, initialize and the
 human read may retry ONCE on a transport timeout or connection error, never on
 an HTTP status; the refresh grant is NEVER retried. Any failure STOPs before the
-next migration. The same probe runs once immediately BEFORE ai-w2-apply writes
-apply-started.txt (`between-prefence.json`); it also requires an advertised
-revocation_endpoint, so a failure there applies nothing. After the loop, and on
-every W2 exit path that reached the stage (ai-w2-apply's EXIT guard and
-ai-close), ai-w2-revoke-probes revokes the DCR grant family (RFC 7009,
-token_type_hint=refresh_token) and proves a refresh with the current token is
-rejected with invalid_grant (`dcr-probe-revoked.json`). A lost refresh response needs no
-retry: the issuer (oidc-provider `consumeGrantSource`) revokes the WHOLE grant
-when a consumed refresh token is presented again, so the single rejected refresh
-proves the family revoked whether the RFC 7009 call or that reuse revoked it.
+next migration. Every probe also requires rotation: a 200 refresh must return a
+NEW refresh token. The same probe runs once immediately BEFORE ai-w2-apply
+writes apply-started.txt (`between-prefence.json`), and so proves the revoke
+PRECONDITIONS before the fence: a refresh_token grant with the staged token
+returns 200 with a new refresh token (rotation is on, which the replay
+revocation depends on), persisted atomically before use, and MCP initialize
+succeeds with the new access token. A failure there applies nothing. The replay
+itself cannot be exercised before the fence without revoking the grant the
+between-probes need, so it runs after the loop and on every exit and is proven
+there.
+
+The live issuer advertises no revocation_endpoint (the oidc-provider revocation
+feature is off), so the plan revokes WITHOUT RFC 7009, by oidc-provider 9.12.2
+replay revocation (`lib/actions/grants/refresh_token.js`: a refresh with an
+already consumed refresh token destroys it, revokes the whole grant and returns
+invalid_grant). After the loop, and on every W2 exit path that reached the
+stage (the EXIT guards and ai-close), ai-w2-revoke-probes makes three refresh
+requests at the issuer-origin token_endpoint, each exactly once: (1) with the
+current token, which must return 200 with a new refresh token (persisted
+atomically, never retried); (2) with the old, now consumed token, which must
+return 400 invalid_grant (this is the revocation); (3) with the new token, which
+must return 400 invalid_grant, the PROOF that the family is revoked
+(`dcr-probe-revoked.json`). If step (1) already returns invalid_grant (the held
+token was consumed, for example after a lost refresh response), the same
+mechanism has already revoked the grant: the plan goes straight to the proof
+with the token it holds. A lost refresh response needs no retry for the same
+reason. Discovery need not advertise a revocation_endpoint anywhere; the
+token_endpoint must be on the issuer origin. An unproven revoke is
+REVOKE-UNPROVEN with a STOP report, never a partial apply.
 If ai-w2-stage-probes fails anywhere after the local file validated, it
-revokes the grant the same way (from the local copy, or from the box copy when
+revokes the grant the same way by replay (from the local copy, or from the box copy when
 the local one is gone), deletes the local file with the guarded rm, proves
 absence and STOPs; a retry needs a new DCR grant (a new consent run). The upload
 writes `probe-staged.txt` in PROOF_DIR, a durable revoke obligation: the EXIT
@@ -985,7 +1004,11 @@ ai-w2-revoke-probes while it exists without `dcr-probe-revoked.json`, and
 ai-open-abort refuses. Each revoke is ONE attempt: `dcr-probe-revoke-attempted.txt`
 is written before the first grant request, a started revoke is never re-run, and
 an unproven one is recorded as REVOKE-UNPROVEN (`dcr-probe-revoke-unproven.json`)
-and STOPs for HezLead.
+and STOPs for HezLead. ai-close then refuses to close (naming the client_id) until
+HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<approval id>`, which it records in
+`dcr-probe-revoke-accepted.json`, so a window is never stuck open. A W2 that
+stopped before its fence (no apply-started.txt) closes by proving the ledger
+holds no 20261003 version; admin_cutover_state does not exist before W2 applies.
 This plan does not invent issuance; the producer's final cleanup relies on this
 revoke proof.
 
@@ -1044,7 +1067,7 @@ W2_PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/$W2_RELEASE_SHA-W2-
 # One ssh call: the box resolves the window's retained secret-stage pointer, installs stdin as 0600 and reports mode and digest only.
 W2_REMOTE_SCRIPT='set -euo pipefail; stage=$(cat "$1/secret-stage.path"); case "$stage" in /private/tmp/anvil-secret.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) exit 65;; esac; test -d "$stage"; test ! -L "$stage"; test "$(stat -c %a "$stage")" = 700; f=$stage/ordinary-probes.json; test ! -e "$f"; test ! -L "$f"; install -o root -g root -m 600 /dev/stdin "$f"; date -u +%Y-%m-%dT%H:%M:%SZ >"$1/probe-staged.txt"; mode=$(stat -c %a "$f"); digest=$(sha256sum "$f" | cut -d " " -f 1); printf "%s %s\n" "$mode" "$digest"'
 printf -v W2_REMOTE 'sudo -n /bin/bash -c %q _ %q' "$W2_REMOTE_SCRIPT" "$W2_PROOF_DIR"
-# After validation, EVERY failure revokes the grant (one attempt): from the local copy when it is
+# After validation, EVERY failure revokes the grant by replay (one attempt): from the local copy when it is
 # still there, otherwise from the box copy through the verified plan's ai-w2-revoke-probes; then the
 # local copy is removed with the guarded rm and its absence proven, and the block STOPs.
 W2_SSH_ATTEMPTED=0
@@ -1080,24 +1103,34 @@ status,body=reply
 try: d=json.loads(body) if status==200 else None
 except ValueError: d=None
 if not isinstance(d,dict) or d.get("issuer")!=I: fail("discovery expected HTTP-200-issuer-metadata got other")
-token,revocation=d.get("token_endpoint"),d.get("revocation_endpoint")
-if not all(isinstance(u,str) and u.startswith(I+"/") for u in (token,revocation)): fail("discovery expected issuer-origin token and revocation endpoints")
+token=d.get("token_endpoint")
+if not (isinstance(token,str) and token.startswith(I+"/")): fail("discovery expected issuer-origin token endpoint")
 mfd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
 os.close(mfd)
-try: send(revocation,{"token":c["mcp_refresh_token"],"token_type_hint":"refresh_token","client_id":c["mcp_client_id"]})
-except TRANSPORT: pass
-try: status,body=send(token,{"grant_type":"refresh_token","client_id":c["mcp_client_id"],"refresh_token":c["mcp_refresh_token"],"resource":c["mcp_resource"]})
-except TRANSPORT: unproven("refresh proof got transport-error-not-retried")
-try: t=json.loads(body)
-except ValueError: t=None
-if status!=400 or not isinstance(t,dict) or t.get("error")!="invalid_grant":
+# Replay revocation (no RFC 7009): rotate, replay the consumed token, prove the new token is rejected; each once.
+def grant(rt,step):
+    try: status,body=send(token,{"grant_type":"refresh_token","client_id":c["mcp_client_id"],"refresh_token":rt,"resource":c["mcp_resource"]})
+    except TRANSPORT: unproven(step+" got transport-error-not-retried")
+    try: return status,json.loads(body)
+    except ValueError: return status,None
+def rejected(status,t): return status==400 and isinstance(t,dict) and t.get("error")=="invalid_grant"
+def keep(t):
     if isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384:
         c["mcp_refresh_token"]=t["refresh_token"]; tmp=name+"."+secrets.token_hex(6)+".tmp"
         fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
         try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
         finally: os.close(fd)
         os.rename(tmp,name)
-    unproven("refresh proof expected HTTP-400-invalid_grant got HTTP-"+str(status))
+status,t=grant(c["mcp_refresh_token"],"step 1 rotation refresh")
+if rejected(status,t): pass
+elif status==200 and isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384 and t["refresh_token"]!=c["mcp_refresh_token"]:
+    old=c["mcp_refresh_token"]; keep(t)
+    status,t=grant(old,"step 2 consumed-token replay")
+    if not rejected(status,t): keep(t); unproven("step 2 consumed-token replay expected HTTP-400-invalid_grant got HTTP-"+str(status))
+else:
+    keep(t); unproven("step 1 rotation refresh expected HTTP-200-new-token-or-400-invalid_grant got HTTP-"+str(status))
+status,t=grant(c["mcp_refresh_token"],"step 3 proof refresh")
+if not rejected(status,t): keep(t); unproven("step 3 proof refresh expected HTTP-400-invalid_grant got HTTP-"+str(status))
 print(json.dumps({"client_id":c["mcp_client_id"],"revoked":True,"proof":"refresh rejected"},sort_keys=True))
 ' "$PROBE_CREDENTIALS_FILE"
 }
@@ -1237,10 +1270,26 @@ assert all(r.get(k) is True for k in ('ok','database_bytes_verified','object_byt
 age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r['verified_at'].replace('Z','+00:00'))).total_seconds()
 assert -300<=age<86400 and r['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL backup gate; STOP'
 PY
-# Before proofs: all reverse catalogs must be true, without invoking a reserve.
+# Before proofs: all reverse catalogs must be true, without invoking a reserve. The reviewed
+# 20261003000002 reverse catalog also asserts the roles its reserve KEEPS (the issuer role,
+# casts to it); before apply those roles do not exist yet, so for that version the plan derives
+# a before-apply absence catalog: the reviewed rows 001-025 verbatim plus issuer-role absence
+# (to_regrole IS NULL, no cast). The full reverse catalogs remain the post-reserve proof.
+python3 - "$RELEASE_ROOT/deploy/release-proofs/item-ai/20261003000002-rollback-catalog.sql" "$PROOF_DIR/before-20261003000002.sql" <<'PY'
+import pathlib,sys
+src=pathlib.Path(sys.argv[1]).read_text()
+head,rest=src.split('WITH checks(label,ok) AS (VALUES\n',1)
+rows,tail=rest.split('\n)\nSELECT COALESCE',1)
+kept=rows[:rows.index("  ('20261003000002-rollback-026-")].rstrip().rstrip(',')
+if kept.count("('20261003000002-rollback-0")!=25 or '::regrole' in kept: raise SystemExit('FAIL ai-w2-preflight: before-apply 20261003000002 rows expected 25-role-free got other; STOP')
+issuer="  ('20261003000002-before-026-commonswarm_admin_issuer-absent', COALESCE((\n    to_regrole('commonswarm_admin_issuer') IS NULL\n  ),false))"
+pathlib.Path(sys.argv[2]).write_text('-- Before-apply absence catalog derived from the reviewed reverse catalog (rows 001-025) plus issuer-role absence.\nWITH checks(label,ok) AS (VALUES\n'+kept+',\n'+issuer+'\n)\nSELECT COALESCE'+tail)
+PY
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
- printf '\\i /release/deploy/release-proofs/item-ai/%s-rollback-catalog.sql\nSELECT :\x27rollback_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
- test "$(ai_ro -Atq --file /proof/catalog.sql)" = t
+ if test "$VERSION" = 20261003000002; then BEFORE_CATALOG=/proof/before-20261003000002.sql; else BEFORE_CATALOG=/release/deploy/release-proofs/item-ai/$VERSION-rollback-catalog.sql; fi
+ printf '\\i %s\nSELECT :\x27rollback_ok\x27::boolean;\n' "$BEFORE_CATALOG" >"$PROOF_DIR/catalog.sql"
+ BEFORE_OK=$(ai_ro -Atq --file /proof/catalog.sql)
+ test "$BEFORE_OK" = t || { printf 'FAIL ai-w2-preflight: before-apply catalog for %s expected t got other; STOP\n' "$VERSION" >&2; exit 1; }
 done
 ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,pg_get_userbyid(p.proowner),p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2,p.oid;" >"$PROOF_DIR/functions-before.txt"
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-before.txt"
@@ -1502,7 +1551,7 @@ def discover():
     if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
     r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
     if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
-    return endpoint(d.get('token_endpoint'),'token_endpoint'),d.get('revocation_endpoint')
+    return endpoint(d.get('token_endpoint'),'token_endpoint')
 def refresh(c,token_url):
     # The refresh grant is NEVER retried: a lost response may already have rotated the family.
     try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
@@ -1510,23 +1559,24 @@ def refresh(c,token_url):
     return status,t
 c=credentials()
 if not (type(c['human_token_exp']) is int and c['human_token_exp']>=datetime.datetime.now(datetime.timezone.utc).timestamp()+60): fail('human_token_exp','at-least-60s-left','expired')
-token_url,revocation=discover()
-endpoint(revocation,'revocation_endpoint')
+token_url=discover()
 status,t=refresh(c,token_url)
 if status!=200 or not (isinstance(t,dict) and str(t.get('token_type','')).lower()=='bearer' and all(isinstance(t.get(k),str) and 0<len(t[k])<=16384 for k in ('access_token','refresh_token'))): fail('refresh grant','HTTP-200-Bearer-rotation','HTTP-'+str(status))
+# Rotation is the precondition of the replay revocation: the 200 must carry a NEW refresh token.
+if t['refresh_token']==c['mcp_refresh_token']: fail('refresh rotation','new-refresh-token','same-refresh-token')
 c['mcp_refresh_token']=t['refresh_token']; persist(c)
 mcp=idempotent('MCP initialize',ISSUER+'/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},t['access_token'])
 if mcp.get('id')!=1 or 'error' in mcp or 'serverInfo' not in mcp.get('result',{}): fail('MCP initialize','serverInfo','error')
 human=idempotent('human pending_access read','https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
 if not isinstance(human.get('pending'),list) or 'error' in human: fail('human pending_access read','pending-list','error')
-(proof/('between-'+label+'.json')).write_text(json.dumps(dict(release_sha=sha,version=label,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,revocation_endpoint=True,refreshed=True,token_health=True,human_read=True))+'\n')
+(proof/('between-'+label+'.json')).write_text(json.dumps(dict(release_sha=sha,version=label,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,rotation=True,refreshed=True,token_health=True,human_read=True))+'\n')
 PY
 ```
 
 ```sh
 # step: ai-w2-revoke-probes
 # readonly: no
-# host: box root; RFC 7009 revoke of the W2 probe DCR grant family with a rejected-refresh proof; secrets never output
+# host: box root; replay revocation of the W2 probe DCR grant family (no RFC 7009) with a rejected-refresh proof; secrets never output
 set -euo pipefail
 test "$WINDOW" = W2
 python3 - "$SECRET_STAGE" "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
@@ -1613,29 +1663,40 @@ def discover():
     if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
     r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
     if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
-    return endpoint(d.get('token_endpoint'),'token_endpoint'),d.get('revocation_endpoint')
+    return endpoint(d.get('token_endpoint'),'token_endpoint')
 def refresh(c,token_url):
     # The refresh grant is NEVER retried: a lost response may already have rotated the family.
     try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
     except Transport: fail('refresh grant','HTTP-200','transport-error-not-retried')
     return status,t
 c=credentials()
-token_url,revocation=discover()
-revocation=endpoint(revocation,'revocation_endpoint')
+token_url=discover()
 # Durable single-attempt marker BEFORE the first grant request: no guard or close re-runs a started revoke.
 fd=os.open(str(proof/'dcr-probe-revoke-attempted.txt'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
 try: os.write(fd,b'started\n'); os.fsync(fd)
 finally: os.close(fd)
-# RFC 7009 first; its own outcome is not the proof. The single rejected refresh below is: after a
-# lost rotation the held token is already consumed, and presenting it revokes the whole grant.
-try: send(revocation,form={'token':c['mcp_refresh_token'],'token_type_hint':'refresh_token','client_id':c['mcp_client_id']})
-except Transport: pass
-try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
-except Transport: unproven('refresh proof got transport-error-not-retried',c['mcp_client_id'])
-if status!=400 or not isinstance(t,dict) or t.get('error')!='invalid_grant':
+# Replay revocation (oidc-provider 9.12.2): each request exactly once, never retried.
+def grant(token,step):
+    try: return send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':token,'resource':c['mcp_resource']})
+    except Transport: unproven(step+' got transport-error-not-retried',c['mcp_client_id'])
+def rejected(status,t): return status==400 and isinstance(t,dict) and t.get('error')=='invalid_grant'
+def keep(t):
+    # Any token the server still issues is persisted atomically for HezLead before reporting.
     if isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384:
         c['mcp_refresh_token']=t['refresh_token']; persist(c)
-    unproven('refresh proof expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+status,t=grant(c['mcp_refresh_token'],'step 1 rotation refresh')
+if rejected(status,t):
+    pass  # the held token was already consumed: its replay revoked the grant; prove it below
+elif status==200 and isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384 and t['refresh_token']!=c['mcp_refresh_token']:
+    old=c['mcp_refresh_token']; keep(t)
+    status,t=grant(old,'step 2 consumed-token replay')
+    if not rejected(status,t):
+        keep(t); unproven('step 2 consumed-token replay expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+else:
+    keep(t); unproven('step 1 rotation refresh expected HTTP-200-new-token-or-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+status,t=grant(c['mcp_refresh_token'],'step 3 proof refresh')
+if not rejected(status,t):
+    keep(t); unproven('step 3 proof refresh expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
 (proof/'dcr-probe-revoked.json').write_text(json.dumps({'client_id':c['mcp_client_id'],'revoked':True,'proof':'refresh rejected'},sort_keys=True)+'\n')
 print('PASS ai-w2-revoke-probes: DCR probe grant family revoked; refresh rejected')
 PY
@@ -1786,7 +1847,7 @@ python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import datetime,json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
 pre=json.loads((p/'between-prefence.json').read_text())
-assert pre['version']=='prefence' and pre['release_sha']==sha and all(pre[k] is True for k in ('discovery','revocation_endpoint','refreshed','token_health','human_read')), 'FAIL missing pre-fence probe; STOP'
+assert pre['version']=='prefence' and pre['release_sha']==sha and all(pre[k] is True for k in ('discovery','rotation','refreshed','token_health','human_read')), 'FAIL missing pre-fence probe; STOP'
 revoked=json.loads((p/'dcr-probe-revoked.json').read_text())
 assert set(revoked)=={'client_id','revoked','proof'} and revoked['revoked'] is True and revoked['proof']=='refresh rejected', 'FAIL missing DCR probe revoke proof; STOP'
 for i in range(1,6):
@@ -3757,7 +3818,23 @@ set -euo pipefail
 # CLOSE_RESULT or any receipt is checked (a withheld CLOSE_RESULT still revokes); an unproven
 # revoke STOPs the close.
 if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$PROOF_DIR/dcr-probe-revoked.json"; then
- ai_run ai-w2-revoke-probes
+ if test -f "$PROOF_DIR/dcr-probe-revoke-attempted.txt"; then
+  # A started revoke is never re-run. The close reports REVOKE-UNPROVEN and continues only with an
+  # explicit HezLead ruling input, which it records; the window is never stuck open.
+  python3 - "$PROOF_DIR" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" <<'PY'
+import datetime,json,pathlib,re,sys
+proof=pathlib.Path(sys.argv[1]); ruling=sys.argv[2]
+record=proof/'dcr-probe-revoke-unproven.json'
+client=json.loads(record.read_text()).get('client_id') if record.exists() else None
+if not record.exists(): record.write_text(json.dumps({'client_id':None,'revoked':False,'status':'REVOKE-UNPROVEN','reason':'a started revoke was not proven'},sort_keys=True)+'\n')
+if not re.fullmatch(r'[A-Za-z0-9/_.:-]{1,200}',ruling):
+    raise SystemExit('REVOKE-UNPROVEN ai-close: DCR probe grant client_id '+str(client)+' is not proven revoked; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<approval id> to close; STOP')
+(proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'client_id':client,'status':'REVOKE-UNPROVEN-ACCEPTED','approval_ref':ruling,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()},sort_keys=True)+'\n')
+print('REVOKE-UNPROVEN accepted by ruling '+ruling+' for DCR probe grant client_id '+str(client)+'; close continues')
+PY
+ else
+  ai_run ai-w2-revoke-probes
+ fi
 fi
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
@@ -3815,6 +3892,10 @@ elif test "$WINDOW" = W7; then
  W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')
  W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt")
  test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE"
+elif test "$WINDOW" = W2 && test ! -e "$PROOF_DIR/apply-started.txt"; then
+ # W2 stopped before its fence: admin_cutover_state does not exist yet; prove nothing was applied.
+ W2_APPLIED=$(ai_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '20261003%';")
+ test "$W2_APPLIED" = 0 || { printf 'FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 fi

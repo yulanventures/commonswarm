@@ -283,7 +283,7 @@ if name=='python3':
                 with statepath.open('w') as f: json.dump(state,f)
                 if url==issuer+'/health': return Response({'ok':True})
                 if url==issuer+'/.well-known/oauth-authorization-server':
-                    return Response({'issuer':issuer,'token_endpoint':issuer+'/token','revocation_endpoint':issuer+'/revoke'})
+                    return Response({'issuer':issuer,'token_endpoint':issuer+'/token'})  # like the live issuer: no revocation_endpoint
                 if url==issuer+'/.well-known/oauth-protected-resource/mcp': return Response({'resource':issuer+'/mcp'})
                 if url==issuer+'/token':
                     form=dict(urllib.parse.parse_qsl(req.data.decode()))
@@ -652,7 +652,7 @@ test('cross-live-controls / real probe-credentials through W2 stage and between-
     const proof = readFileSync(join(f.proof, 'between-20261003000001.json'), 'utf8');
     const receipt = JSON.parse(proof);
     assert.equal(receipt.release_sha, release); assert.equal(receipt.version, '20261003000001');
-    for (const key of ['discovery', 'revocation_endpoint', 'refreshed', 'token_health', 'human_read']) assert.equal(receipt[key], true, key);
+    for (const key of ['discovery', 'rotation', 'refreshed', 'token_health', 'human_read']) assert.equal(receipt[key], true, key);
     noProbeSecrets(f, produced.receipt, { ...between, stdout: between.stdout + proof });
   });
 
