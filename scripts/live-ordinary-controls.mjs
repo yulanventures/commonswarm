@@ -24,11 +24,11 @@ const SCOPE = 'openid offline_access mcp';
 const UA = 'curl/8.7.1';
 const VERSION = '2025-06-18';
 const TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
-const SEAT_NAME = 'c1-controls-runner';
+const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
   id !== '00000000-0000-4000-8000-000000000000';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-const seatRequestId = (release, workspace) => `c1_controls_claim_${sha256(`${release}:${workspace}:${SEAT_NAME}`).slice(0, 40)}`;
+const seatRequestId = (release, workspace) => `c1_controls_claim_${sha256(`${release}:${workspace}:${seatName(release)}`).slice(0, 40)}`;
 const challenge = verifier => createHash('sha256').update(verifier).digest('base64url');
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const exact = (v, keys) => object(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
@@ -186,7 +186,7 @@ function plan(o) {
   else requests.push(
     { method: 'POST', url: '<token endpoint>', body: 'refresh retained CIMD grant' },
     { method: 'POST', url: RESOURCE, rpc: 'initialize, notifications/initialized, tools/list' },
-    { method: 'POST', url: RESOURCE, rpc: 'tools/call claim_seat', name: SEAT_NAME, workspace_id: o['workspace-id'],
+    { method: 'POST', url: RESOURCE, rpc: 'tools/call claim_seat', name: seatName(o['release-sha']), workspace_id: o['workspace-id'],
       request_id: seatRequestId(o['release-sha'], o['workspace-id']),
       report: `${o.out}.report.json` },
     { method: 'POST', url: '<registration endpoint>', body: 'fresh public client; journal id immediately' },
@@ -306,19 +306,19 @@ async function run(o) {
         names.length === TOOLS.length && new Set(names).size === TOOLS.length && TOOLS.every(n => names.includes(n)), 'exact ordinary MCP tool set');
       if (claimSeat) {
         leg = 'seat_setup';
-        const requestId = seatRequestId(release, o['workspace-id']);
+        const name = seatName(release), requestId = seatRequestId(release, o['workspace-id']);
         const claim = await rpc(3, 'tools/call', { name: 'claim_seat', arguments: {
-          workspace_id: o['workspace-id'], name: SEAT_NAME, request_id: requestId,
+          workspace_id: o['workspace-id'], name, request_id: requestId,
         } });
         demand(claim.jsonrpc === '2.0' && claim.id === 3 && !claim.error && !claim.result?.isError &&
           claim.result?.content?.length === 1 && claim.result.content[0].type === 'text' && typeof claim.result.content[0].text === 'string',
         'successful MCP seat claim', 'claim rejected');
         const seat = json(Buffer.from(claim.result.content[0].text));
-        demand(seat.workspace_id === o['workspace-id'] && seat.name === SEAT_NAME && uuidOK(seat.seat_id) &&
+        demand(seat.workspace_id === o['workspace-id'] && seat.name === name && uuidOK(seat.seat_id) &&
           typeof seat.handle === 'string' && /^seat_[A-Za-z0-9_-]{22,64}$/.test(seat.handle), 'claimed test seat identity');
         await writePrivate(`${o.out}.report.json`, JSON.stringify({ kind: 'c1-controls-run', release_sha: release,
           window_id: o['window-id'], window: o.window, phase: o.phase, measured_at: new Date().toISOString(), producer_sha256: producer,
-          workspace_id: o['workspace-id'], seat: { name: SEAT_NAME, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
+          workspace_id: o['workspace-id'], seat: { name, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
       }
     };
     const refresh = async g => tokenContract(await request(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
