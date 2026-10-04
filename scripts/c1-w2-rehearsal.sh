@@ -4,6 +4,8 @@
 #   scripts/c1-w2-rehearsal.sh [--live-dump] [--catalogs-from <git-sha>] [--reserve-control] <dump-dir>
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --issuer [--plan-from <git-sha>] <dump-dir>
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --w2b-preconditions <dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --from-post-w2 (--issuer | --w2b-preconditions) <post-W2-dump-dir>
+#   scripts/c1-w2-rehearsal.sh --from-post-w2 --build-fixture <out-dir>
 #   scripts/c1-w2-rehearsal.sh --build-fixture <out-dir>
 #   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path> | --cleanup-run <path>   (test controls)
 #
@@ -53,6 +55,12 @@
 # the dump and runs only the plan's W2b database preconditions. Every mode ends by stopping the
 # cluster, deleting data, CA and secrets, and proving their absence. Passwords are generated fresh in
 # the 0700 directory and never printed.
+#
+# --from-post-w2: the dump is POST-W2 (all five 20261003 versions in its ledger, issuer NOLOGIN after the
+# W2 issuer rollback). The W2 apply and the rollback ALTER ROLE are skipped; --issuer and
+# --w2b-preconditions run on the dump's own state. The harness refuses a post-W2 dump without the flag,
+# and the flag on a dump whose ledger lacks any of the five. With --build-fixture it builds a post-W2
+# fixture: M1-M5 applied with their ledger rows, then the plan's own issuer rollback statement.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
@@ -117,7 +125,7 @@ if test "${1:-}" = --cleanup-selftest; then
   say "REFUSE cleanup-selftest: $2"; exit 3
 fi
 
-MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 ISSUER=0 PLAN_FROM= W2B_ONLY=0 TARGET=
+MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 ISSUER=0 PLAN_FROM= W2B_ONLY=0 POST_W2=0 TARGET=
 while test $# -gt 0; do
   case "$1" in
     --build-fixture) MODE=build; shift; TARGET=${1:-}; shift || true ;;
@@ -127,6 +135,7 @@ while test $# -gt 0; do
     --issuer) ISSUER=1; shift ;;
     --plan-from) shift; PLAN_FROM=${1:-}; shift || true ;;
     --w2b-preconditions) W2B_ONLY=1; shift ;;
+    --from-post-w2) POST_W2=1; shift ;;
     -*) die usage "unknown option $1" ;;
     *) test -z "$TARGET" || die usage 'one dump directory only'; TARGET=$1; shift ;;
   esac
@@ -139,6 +148,8 @@ if test -n "$PLAN_FROM"; then
   git -C "$REPO" cat-file -e "$PLAN_FROM^{commit}" 2>/dev/null || die plan-from "commit $PLAN_FROM not found"
 fi
 if test "$ISSUER" = 1 && { test "$W2B_ONLY" = 1 || test "$RESERVE_CONTROL" = 1; }; then die usage '--issuer, --w2b-preconditions and --reserve-control are separate modes'; fi
+if test "$POST_W2" = 1 && test "$MODE" != build && test "$ISSUER" = 0 && test "$W2B_ONLY" = 0; then die usage '--from-post-w2 needs --issuer, --w2b-preconditions or --build-fixture'; fi
+if test "$POST_W2" = 1 && { test -n "$CATALOGS_FROM" || test "$RESERVE_CONTROL" = 1; }; then die usage '--from-post-w2 skips the W2 apply: no --catalogs-from or --reserve-control'; fi
 if test "$W2B_ONLY" = 1 && test "$RESERVE_CONTROL" = 1; then die usage '--w2b-preconditions and --reserve-control are separate modes'; fi
 if test "$ISSUER" = 1; then command -v openssl >/dev/null 2>&1 || die setup 'openssl expected got missing'; fi
 umask 077
@@ -188,14 +199,27 @@ if test "$MODE" = build; then
   for FILE in "$REPO"/supabase/migrations/*.sql; do
     NAME=$(basename "$FILE"); VERSION=${NAME%%_*}
     [[ "$VERSION" =~ ^[0-9]{14}$ ]] || die fixture:migrations "unexpected migration name $NAME"
-    test "$VERSION" \< 20261003000001 || continue
+    if test "$POST_W2" = 1; then test "$VERSION" \< 20261003000006 || continue; else test "$VERSION" \< 20261003000001 || continue; fi
     # Fixture only: pg_cron is not packaged with local PostgreSQL; the prelude models its schedule API.
     sed 's/^CREATE EXTENSION IF NOT EXISTS pg_cron;/-- pg_cron is modelled by the rehearsal prelude/' "$FILE" >"$T/migration.sql"
     printf "INSERT INTO supabase_migrations.schema_migrations(version,name) VALUES ('%s','%s');\n" "$VERSION" "${NAME%.sql}" >>"$T/migration.sql"
     pgx -q -v ON_ERROR_STOP=1 -1 -f "$T/migration.sql" >/dev/null 2>"$PSQL_LOG" || die "fixture:migration-$VERSION" "$(first_error "$PSQL_LOG")"
     COUNT=$((COUNT+1))
   done
-  say "PASS fixture:migrations: $COUNT pre-W2 migrations applied with their ledger rows"
+  if test "$POST_W2" = 1; then
+    # The live W2 RGLqZX end state: the plan's own issuer rollback statement (LOGIN off, no password).
+    python3 - "$REPO/$PLAN_REL" >"$T/rollback-role.sql" <<'PY' || die fixture:post-w2 'issuer rollback statement expected once in the plan got other'
+import re,sys
+b=[x for x in re.findall(r'^`{3}sh\n(.*?)^`{3}$',open(sys.argv[1]).read(),re.M|re.S) if x.startswith('# step: ai-w2-issuer-rollback\n')]
+assert len(b)==1
+m=re.findall(r"ai_db -q --command '([^']*NOLOGIN PASSWORD NULL;)'",b[0]); assert len(m)==1
+print(m[0])
+PY
+    pgx -q -v ON_ERROR_STOP=1 -f "$T/rollback-role.sql" >/dev/null 2>"$PSQL_LOG" || die fixture:post-w2 "$(first_error "$PSQL_LOG")"
+    say "PASS fixture:migrations: $COUNT migrations through 20261003000005 applied with their ledger rows; issuer rolled back to NOLOGIN without a password"
+  else
+    say "PASS fixture:migrations: $COUNT pre-W2 migrations applied with their ledger rows"
+  fi
   "$PG_BIN/pg_dumpall" -h "$T" -p "$PORT" -U supabase_admin -r --no-role-passwords >"$TARGET/roles.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
   "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -s >"$TARGET/schema.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
   "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$TARGET/ledger.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
@@ -457,6 +481,18 @@ secret_step() { # label script
   say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
 }
 
+
+
+: >"$SECRET_STAGE/psql.log"
+# Pre-W2 or post-W2 is read from the dump's own ledger, and it must agree with --from-post-w2.
+W2_COUNT=$(pgx -Atq -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version IN ('20261003000001','20261003000002','20261003000003','20261003000004','20261003000005');" 2>"$PSQL_LOG") || die ledger "$(first_error "$PSQL_LOG")"
+LATER_COUNT=$(pgx -Atq -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version>'20261003000000';" 2>"$PSQL_LOG") || die ledger "$(first_error "$PSQL_LOG")"
+if test "$POST_W2" = 1; then
+  test "$W2_COUNT" = 5 || die post-w2-ledger "five 20261003 ledger versions expected got $W2_COUNT; not a post-W2 dump"
+  say "PASS post-w2-ledger: all five 20261003 versions present ($LATER_COUNT versions from 20261003 on); W2 apply skipped"
+else
+  test "$LATER_COUNT" = 0 || die pre-w2-ledger "no 20261003-or-later ledger version expected got $LATER_COUNT; a post-W2 dump needs --from-post-w2"
+fi
 if test "$W2B_ONLY" = 1; then
   : >"$SECRET_STAGE/psql.log"
   step ai-w2b-preflight:preconditions "$T/blocks/w2b-preconditions.sh"
@@ -464,7 +500,7 @@ if test "$W2B_ONLY" = 1; then
   exit 0
 fi
 
-: >"$SECRET_STAGE/psql.log"
+if test "$POST_W2" = 0; then
 step ai-db-session:ledger-before "$T/blocks/ledger-before.sh"
 # EMULATED ai-w2-backfill: every ledger version is recorded with the sha256 of its file in this release copy.
 python3 - "$PROOF_DIR" "$RELEASE_ROOT" <<'PY' || die ai-w2-backfill 'every ledger version expected one migration file got other'
@@ -483,11 +519,13 @@ step ai-w2-apply "$T/blocks/ai-w2-apply.sh"
 step ai-w2-probes "$T/blocks/ai-w2-probes.sh"
 
 say "PASS rehearsal: W2 SQL in plan order on the supplied pre-W2 dump"
+fi
 
 # ---- --issuer: the issuer credential with a REAL libpq TLS login (W2 issuer block, as W2b runs it) ----
 if test "$ISSUER" = 1; then
-  # The live W2 RGLqZX state: its issuer rollback disabled LOGIN and cleared the password.
-  step ai-w2-issuer-rollback:role "$T/blocks/issuer-rollback-role.sh"
+  # The live W2 RGLqZX state: its issuer rollback disabled LOGIN and cleared the password. A post-W2 dump
+  # already carries that state, so the statement is not run again there.
+  if test "$POST_W2" = 0; then step ai-w2-issuer-rollback:role "$T/blocks/issuer-rollback-role.sh"; fi
   step ai-w2b-preflight:preconditions "$T/blocks/w2b-preconditions.sh"
   # TLS on 127.0.0.1 only: a throwaway CA and server certificate for db.commonswarm.internal, all in the 0700 directory.
   TLS=$T/tls; mkdir -m 0700 "$TLS" || die tls 'cannot create the TLS directory'

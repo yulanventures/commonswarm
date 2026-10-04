@@ -229,6 +229,8 @@ async function produceReceipts(t) {
   assert.equal(w1.exit, 0, w1.output);
   const w2 = await f.run('window', ['--window', 'W2', '--phase', 'before']);
   assert.equal(w2.exit, 0, w2.output);
+  const w2b = await f.run('window', ['--window', 'W2b', '--phase', 'before']);
+  assert.equal(w2b.exit, 0, w2b.output);
   for (const window of ['W3', 'W4', 'W5']) {
     const w = await f.run('window', ['--window', window]);
     assert.equal(w.exit, 0, w.output);
@@ -245,6 +247,7 @@ async function produceReceipts(t) {
     preW1: { bytes: pre.bytes, path: pre.out },
     w1Before: { bytes: w1.bytes, path: w1.out },
     w2Before: { bytes: w2.bytes, path: w2.out },
+    w2bBefore: { bytes: w2b.bytes, path: w2b.out },
     postW5: { bytes: post.bytes, path: post.out },
     w5After: { bytes: w5after.bytes, path: w5after.out },
   };
@@ -523,6 +526,26 @@ test('cross-live-controls / ai-live-controls W2 before passes with real producer
   pass(result, /PASS live authenticated ordinary controls bound to consent pre-W1 and released producer/);
   const ordinary = readFileSync(join(f.proof, 'ordinary-before.json'), 'utf8');
   assert.deepEqual(JSON.parse(ordinary), JSON.parse(produced.w2Before.bytes.toString()));
+});
+
+test('cross-live-controls / W2b before: ai-open and ai-live-controls pass with the real producer bound to the pre-W1 consent', () => {
+  assert.equal(JSON.parse(produced.w2bBefore.bytes.toString()).window, 'W2b');
+  assert.equal(JSON.parse(produced.w2bBefore.bytes.toString()).producer_sha256, producerSha);
+  const opened = planFixture();
+  const proofDir = join(opened.root, 'admin-issuance/release-proofs', `${release}-W2b-${windowId}`);
+  pass(openRun(opened, 'W2b', produced.preW1.bytes, produced.w2bBefore.bytes), /PASS ai-open/);
+  assert.equal(readFileSync(join(proofDir, 'consent-pre-W1.json'), 'utf8'), produced.preW1.bytes.toString());
+  const f = planFixture();
+  pass(liveControlsRun(f, 'W2b', 'before', produced.preW1.bytes, produced.w2bBefore.bytes), /PASS live authenticated ordinary controls bound to consent pre-W1 and released producer/);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'ordinary-before.json'), 'utf8')), JSON.parse(produced.w2bBefore.bytes.toString()));
+});
+
+test('cross-live-controls / negative post-W5 consent at W2b refuses ai-live-controls', () => {
+  const f = planFixture();
+  const live = JSON.parse(produced.w2bBefore.bytes.toString());
+  live.consent_receipt_sha256 = digest(produced.postW5.bytes);
+  stopped(liveControlsRun(f, 'W2b', 'before', produced.postW5.bytes, Buffer.from(JSON.stringify(live, null, 2) + '\n')),
+    'FAIL ai-live-controls: consent_phase for W2b before expected pre-W1 got post-W5; STOP');
 });
 
 test('cross-live-controls / ai-live-controls W5 after passes with real producer and receipts', () => {

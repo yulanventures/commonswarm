@@ -54,7 +54,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
 | probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
 | w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
-| w2b_window_id | W6 only, optional: the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. When present, W6 activation checks require that closed W2b proof |
+| w2b_window_id | W6 only, REQUIRED there (absent in every other window): the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. W2 RGLqZX ran at 5f64fab4 and its issuer credential was rolled back, so at the W3–W7 release the credential exists only through W2b. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt and issuer-credential.txt |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
@@ -196,7 +196,8 @@ if d['window']=='W2b':
     need(isinstance(d.get('w2_release_sha'),str) and re.fullmatch('[0-9a-f]{40}',d['w2_release_sha']) is not None, 'W2b w2_release_sha')
     need(isinstance(d.get('w2_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2_window_id']) is not None, 'W2b w2_window_id')
 else: need('w2_release_sha' not in d and 'w2_window_id' not in d, 'w2_release_sha/w2_window_id are W2b-only')
-if 'w2b_window_id' in d: need(d['window']=='W6' and isinstance(d['w2b_window_id'],str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'w2b_window_id is W6-only')
+if d['window']=='W6': need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
+else: need('w2b_window_id' not in d, 'w2b_window_id is W6-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
@@ -1990,7 +1991,7 @@ ai-w2-issuer-credential block runs with the W2b PROOF_DIR; on failure,
 ai-w2-issuer-rollback and a recovered close. A successful close requires
 issuer-credential.txt. The order is W2b, W3, then W4, W5, W6 and W7; W2b checks
 no state of any later or earlier code window. W6 binds this proof by its
-optional `w2b_window_id` input at the same release.
+required `w2b_window_id` input at the same release.
 
 ```sh
 # step: ai-w2b-preflight
@@ -3159,14 +3160,13 @@ PY
 ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
-# Issuer credential provenance: with w2b_window_id, the closed W2b of THIS release provisioned it.
+# Issuer credential provenance: the W2b of THIS release, named by w2b_window_id, closed success and provisioned it.
 python3 - "$INPUTS_FILE" "$PROOF_DIR/issuer-provenance.txt" <<'PY'
-import json,pathlib,sys
+import json,pathlib,re,sys
 d=json.load(open(sys.argv[1])); out=pathlib.Path(sys.argv[2])
 def need(ok,what,expected,got):
     if not ok: raise SystemExit('FAIL ai-w6-activation-checks: '+what+' expected '+expected+' got '+got+'; STOP')
-if 'w2b_window_id' not in d:
-    out.write_text('issuer credential provenance: W2 of this release (no w2b_window_id input)\n'); raise SystemExit(0)
+need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None,'INPUTS w2b_window_id','six-alphanumeric-window-id','missing-or-other')
 w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+d['release_sha']+'-W2b-'+d['w2b_window_id'])
 need(w.is_dir() and not w.is_symlink() and w.resolve()==w,'W2b proof directory','directory','missing-or-symlink')
 def regular(name):
@@ -3174,6 +3174,8 @@ def regular(name):
 i=json.loads(regular('inputs.json').read_text())
 need(i.get('window')=='W2b' and i.get('release_sha')==d['release_sha'] and i.get('window_id')==d['w2b_window_id'],'W2b inputs.json','window-W2b-same-release-and-id','mismatch')
 for name in ('closed.txt','ordinary-after.json','w2b-preconditions.txt','issuer-credential.txt'): regular(name)
+# A success close retains the phase-after receipt only; a recovered close (phase recovery) never provisions.
+need(not (w/'ordinary-recovery.json').exists() and not (w/'ordinary-recovery.json').is_symlink(),'W2b close result','success','recovered')
 out.write_text('issuer credential provenance: W2b '+d['w2b_window_id']+' closed success at '+d['release_sha']+'\n')
 PY
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"

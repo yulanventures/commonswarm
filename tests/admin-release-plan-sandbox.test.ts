@@ -156,6 +156,8 @@ function inputsFor(window: string) {
     edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
   };
   if (window === 'W2') d.probe_workspace_id = probeWorkspace;
+  // W6 names the same-release W2b that provisioned the issuer credential (required since lane/w2b-issuer).
+  if (window === 'W6') d.w2b_window_id = 'W2bFx1';
   const action = { W6: 'activate-admin-issuance-and-smoke', W7: 'retire-legacy-admin-mint' }[window];
   if (action) d.approval = { approver: 'HezLead', action, release_sha: releaseSha, window_id: windowId, plan_sha256: digest(plan), prompt_ref: 'task/dry-run-fixture' };
   const path = join(scratch, `inputs-${window}.json`);

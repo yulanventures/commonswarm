@@ -209,3 +209,44 @@ test('c1 W2 rehearsal: the W2b database preconditions FAIL on the pre-W2 fixture
   assert.match(pre.stdout, /^FAIL ai-w2b-preflight:preconditions: FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP; w2b-preconditions failed checks: [a-z0-9,-]*w2b-ledger-five-20261003/m);
   assert.match(pre.stdout, /^PASS cleanup: /m);
 });
+
+// A POST-W2 dump (HezLead's live rehearsal-post-w2 shape): five 20261003 versions, issuer NOLOGIN without a password.
+let postFixtureDir: string | null = null;
+function postFixture(): string {
+  if (postFixtureDir) return postFixtureDir;
+  const dir = join(scratch, 'fixture-post-w2');
+  const built = run(['--from-post-w2', '--build-fixture', dir], { PG_BIN: PG() });
+  assert.equal(built.status, 0, built.stdout + built.stderr);
+  assert.match(built.stdout, /^PASS fixture:migrations: 73 migrations through 20261003000005 applied with their ledger rows; issuer rolled back to NOLOGIN without a password$/m);
+  return (postFixtureDir = dir);
+}
+
+test('c1 W2 rehearsal: --from-post-w2 runs --issuer and --w2b-preconditions on a post-W2 dump without the W2 apply', { skip: skipDb }, () => {
+  const env = { PG_BIN: PG() };
+  const issuer = run(['--from-post-w2', '--issuer', postFixture()], env);
+  assert.equal(issuer.status, 0, issuer.stdout + issuer.stderr);
+  assert.match(issuer.stdout, /^PASS post-w2-ledger: all five 20261003 versions present \(5 versions from 20261003 on\); W2 apply skipped$/m);
+  for (const line of [/^PASS ai-w2b-preflight:preconditions$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login/m, /^PASS issuer-plaintext: /m, /^PASS cleanup: /m]) {
+    assert.match(issuer.stdout, line);
+  }
+  // Nothing of the W2 apply or the rollback statement runs on a post-W2 dump.
+  assert.doesNotMatch(issuer.stdout, /^(?:PASS|FAIL) (?:ai-db-session|ai-w2-preflight|ai-w2-measure|ai-w2-apply|ai-w2-probes|ai-w2-issuer-rollback)/m);
+  const pre = run(['--from-post-w2', '--w2b-preconditions', postFixture()], env);
+  assert.equal(pre.status, 0, pre.stdout + pre.stderr);
+  assert.match(pre.stdout, /^PASS ai-w2b-preflight:preconditions$/m);
+  const old = run(['--from-post-w2', '--issuer', '--plan-from', '5f64fab4', postFixture()], env);
+  assert.notEqual(old.status, 0);
+  assert.match(old.stdout, /^FAIL ai-w2-issuer-credential:login: libpq login exit status expected 0 got nonzero: syntax error in service file "[^"]+issuer-service\.conf", line 2$/m);
+});
+
+test('c1 W2 rehearsal: the dump ledger must agree with --from-post-w2', { skip: skipDb }, () => {
+  const env = { PG_BIN: PG() };
+  const flagOnPre = run(['--from-post-w2', '--w2b-preconditions', fixture()], env);
+  assert.notEqual(flagOnPre.status, 0); assert.match(flagOnPre.stdout, /^FAIL post-w2-ledger: five 20261003 ledger versions expected got 0; not a post-W2 dump$/m);
+  const postWithoutFlag = run(['--issuer', postFixture()], env);
+  assert.notEqual(postWithoutFlag.status, 0); assert.match(postWithoutFlag.stdout, /^FAIL pre-w2-ledger: no 20261003-or-later ledger version expected got 5; a post-W2 dump needs --from-post-w2$/m);
+  assert.doesNotMatch(postWithoutFlag.stdout, /^PASS ai-w2-apply/m);
+  for (const args of [['--from-post-w2', fixture()], ['--from-post-w2', '--reserve-control', '--issuer', fixture()], ['--from-post-w2', '--catalogs-from', '835b7ae8', '--issuer', fixture()]]) {
+    const r = run(args, env); assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stdout, /^FAIL usage: /m);
+  }
+});
