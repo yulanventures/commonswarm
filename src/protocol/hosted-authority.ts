@@ -113,7 +113,12 @@ export interface HostedAuthorityFacts {
   workspace_consented: boolean;
   all_required_consents: boolean;
   all_required_memberships: boolean;
-  exact_name_principal_ids: readonly string[];
+  // Every exact-name principal in the workspace, any transport, live or revoked.
+  exact_name_principals: readonly {
+    principal_id: string;
+    owner_user_id: string;
+    revoked: boolean;
+  }[];
   live_seat_count: number;
 }
 
@@ -167,7 +172,12 @@ export interface DecideHostedAuthorityCtx {
 }
 
 export type HostedAuthorityDecision =
-  | { ok: true; events: HostedAuthorityEvent[]; reuse?: HostedSeatFacts }
+  | {
+      ok: true;
+      events: HostedAuthorityEvent[];
+      reuse?: HostedSeatFacts;
+      reclaimed_principal_ids?: readonly string[];
+    }
   | {
       ok: false;
       class: 'authz' | 'domain';
@@ -340,31 +350,38 @@ export function decideHostedAuthority(
   if (!hostedSeatNameValid(command.name)) {
     return refuse('domain', 'hosted_seat_name_invalid', 'Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.');
   }
+  const liveNamePrincipals = facts.exact_name_principals.filter((p) => !p.revoked);
   if (facts.seat !== null) {
     const seat = facts.seat;
     if (seat.revoked_at !== null || seat.handle_revoked_at !== null ||
         seat.principal_revoked_at !== null || seat.transport !== 'hosted_mcp' ||
         seat.turn_only !== true) {
-      return refuse('domain', 'hosted_seat_revoked', 'A revoked hosted seat cannot be restored; choose another name.');
+      return refuse('domain', 'hosted_seat_revoked', 'This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.');
     }
-    if (facts.exact_name_principal_ids.length !== 1 ||
-        facts.exact_name_principal_ids[0] !== seat.principal_id) {
+    if (liveNamePrincipals.length !== 1 ||
+        liveNamePrincipals[0].principal_id !== seat.principal_id) {
       return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
     }
     return { ok: true, events: [], reuse: seat };
   }
-  if (facts.exact_name_principal_ids.length !== 0) {
+  if (liveNamePrincipals.length !== 0 || facts.exact_name_principals.some(
+    (p) => p.revoked && p.owner_user_id !== grant.owner_user_id,
+  )) {
     return refuse('domain', HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
   }
   if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
     return refuse('domain', 'hosted_seat_limit_reached', `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
   }
-  return { ok: true, events: [event(ctx, 'HostedMcpSeatClaimed', {
-    ...command,
-    transport: 'hosted_mcp',
-    turn_only: true,
-    created_at: ctx.now,
-  })] };
+  return {
+    ok: true,
+    reclaimed_principal_ids: facts.exact_name_principals.map((p) => p.principal_id),
+    events: [event(ctx, 'HostedMcpSeatClaimed', {
+      ...command,
+      transport: 'hosted_mcp',
+      turn_only: true,
+      created_at: ctx.now,
+    })],
+  };
 }
 
 function requiredPayload(

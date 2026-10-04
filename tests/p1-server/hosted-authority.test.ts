@@ -36,6 +36,10 @@ const hmMigrationSequence = [
     ),
   },
 ] as const;
+const reclaimMigration = () => repoSql("supabase/migrations/20261004000010_hosted_seat_name_reclaim.sql");
+const reclaimRollback = () => repoSql("supabase/hosted-name-reclaim-reserve/20261004000010-rollback.sql");
+const reclaimCatalog = () => releaseCatalogQuery(repoSql("deploy/release-proofs/hosted-name-reclaim/20261004000010-catalog.sql"), "catalog_ok");
+const reclaimRollbackCatalog = () => releaseCatalogQuery(repoSql("deploy/release-proofs/hosted-name-reclaim/20261004000010-rollback-catalog.sql"), "rollback_ok");
 const migrationUrl = hmMigrationSequence[0].migrationUrl;
 const catalogUrl = new URL(
   "../../deploy/release-proofs/item-hm/20260928000002-catalog.sql",
@@ -90,7 +94,7 @@ const {
   handleHostedManagementCommand,
   handleRequest,
 } = commandModule;
-const { authenticateHostedGrantCapability } = authModule;
+const { authenticateHostedGrantCapability, authenticateHostedSeatCapability } = authModule;
 
 const commandInput = (workspaceId, name, commandId) => ({
   command_id: commandId,
@@ -224,6 +228,9 @@ async function race() {
       ...(input.competitor === "duplicate" ? { allow_duplicate_name: true } : {}),
     });
   };
+  if (input.order === "concurrent") {
+    return await Promise.all([claim(hostedSpec, firstCapability), runCompetitor()]);
+  }
   if (input.order === "competitor-first") {
     const competitor = await runCompetitor();
     const hosted = await claim(hostedSpec, firstCapability);
@@ -283,8 +290,36 @@ async function boundary() {
   return { hosted, human, hostedGoTrueCalls, humanGoTrueCalls: gotrueUserCalls };
 }
 
+async function seatCommand(spec) {
+  const cap = await db.begin(tx => authenticateHostedSeatCapability(tx, {
+    grantId: spec.grantId,
+    providerGrantId: "provider-" + spec.grantId,
+    handle: spec.handle,
+    tool: "note",
+    providerStatus: async () => ({ active: true }),
+  }, "command"));
+  if (cap === null) return { status: 403, body: { error: "hosted_seat_forbidden" } };
+  return await handleHostedCommand({
+    command_id: crypto.randomUUID(), client_version: "0.1.0",
+    workspace_id: spec.workspaceId, stream: { kind: "workspace" },
+    command: { kind: "post_signal", signal_kind: "note",
+      body: "D3 historical identity", to_user_id: null, to_agent_principal_id: null,
+      in_reply_to: null, about: null, until_ms: Date.now() + 3600000 },
+  }, cap);
+}
+
+async function revokedGrantClaim() {
+  const cap = await capability(input.claim.grantId, input.claim.ownerUserId, input.claim.workspaceId);
+  const revoked = await managementCommand(input.claim.ownerUserId, input.claim.workspaceId, {
+    kind: "revoke_hosted_mcp_grant", grant_id: input.claim.grantId,
+  });
+  return { revoked, refused: await claim(input.claim, cap) };
+}
+
 let result;
-if (input.operation === "claim") result = await claim(input.claim);
+if (input.operation === "seat-command") result = await seatCommand(input.seat);
+else if (input.operation === "revoked-grant-claim") result = await revokedGrantClaim();
+else if (input.operation === "claim") result = await claim(input.claim);
 else if (input.operation === "race") result = await race();
 else if (input.operation === "cap-race") result = await capRace();
 else if (input.operation === "public") {
@@ -341,6 +376,7 @@ interface HostedFixture {
   grantA: string;
   grantB: string;
   ownerJwt: string;
+  otherJwt: string;
 }
 
 async function createAuthUser(label: string): Promise<{ id: string; jwt: string }> {
@@ -358,7 +394,7 @@ async function createAuthUser(label: string): Promise<{ id: string; jwt: string 
   return { id: created.data.user.id, jwt: signedIn.data.session.access_token };
 }
 
-async function seedHostedFixture(): Promise<HostedFixture> {
+async function seedHostedFixture(grantBOwnerIsOther = false): Promise<HostedFixture> {
   const owner = await createAuthUser("hm-owner");
   const other = await createAuthUser("hm-other");
   const fixture: HostedFixture = {
@@ -367,6 +403,7 @@ async function seedHostedFixture(): Promise<HostedFixture> {
     streamA: randomUUID(), streamB: randomUUID(),
     grantA: randomUUID(), grantB: randomUUID(),
     ownerJwt: owner.jwt,
+    otherJwt: other.jwt,
   };
   await sql.begin(async (tx) => {
     await tx`
@@ -391,14 +428,20 @@ async function seedHostedFixture(): Promise<HostedFixture> {
         (${fixture.streamA}::uuid, ${fixture.workspaceA}::uuid, 'workspace'),
         (${fixture.streamB}::uuid, ${fixture.workspaceB}::uuid, 'workspace')
     `;
+    if (grantBOwnerIsOther) {
+      await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+        VALUES (${fixture.workspaceA}::uuid, ${fixture.other}::uuid, 'member'),
+               (${fixture.workspaceB}::uuid, ${fixture.other}::uuid, 'member')`;
+    }
     for (const grant of [fixture.grantA, fixture.grantB]) {
+      const grantOwner = grantBOwnerIsOther && grant === fixture.grantB ? fixture.other : fixture.owner;
       await tx`
         INSERT INTO swarm.hosted_mcp_grants (
           grant_id, provider_grant_id, owner_user_id, home_workspace_id,
           client_id, resource, selected_workspace_ids, manifest_digest,
           interaction_ref, state, created_at, activated_at
         ) VALUES (
-          ${grant}::uuid, ${`provider-${grant}`}, ${fixture.owner}::uuid,
+          ${grant}::uuid, ${`provider-${grant}`}, ${grantOwner}::uuid,
           ${fixture.workspaceA}::uuid, 'test-client',
           'https://mcp.commonswarm.com/mcp',
           ${[fixture.workspaceA, fixture.workspaceB]}::uuid[],
@@ -412,7 +455,7 @@ async function seedHostedFixture(): Promise<HostedFixture> {
             grant_id, workspace_id, owner_user_id, manifest_digest,
             consent_receipt_id, consented_at
           ) VALUES (
-            ${grant}::uuid, ${workspace}::uuid, ${fixture.owner}::uuid,
+            ${grant}::uuid, ${workspace}::uuid, ${grantOwner}::uuid,
             ${new Uint8Array(32).fill(7)}, ${randomUUID()}::uuid,
             statement_timestamp()
           )
@@ -564,6 +607,11 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
     for (const version of [...adminVersions].reverse()) {
       await tx.unsafe(repoSql(`supabase/admin-delegation-reserve/${version}-rollback.sql`));
     }
+    const [reclaimBefore] = await tx.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+    assert.equal(reclaimBefore?.catalog_ok, true, "010 forward schema positive control");
+    await tx.unsafe(reclaimRollback());
+    const [reclaimInverse] = await tx.unsafe<{ rollback_ok: boolean }[]>(reclaimRollbackCatalog());
+    assert.equal(reclaimInverse?.rollback_ok, true, "010 inverse before HM rollback");
     const [positive] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(positive?.catalog_ok, true, "positive control: applied catalog");
     // Real durable receipts must survive the inverse, including both HM kinds.
@@ -631,6 +679,9 @@ test("catalog rollback preserves every receipt kind and reapply is search-path i
       const [restored] = await tx.unsafe<{ catalog_ok: boolean; catalog_ok_failed_checks: string }[]>(query);
       assert.equal(restored?.catalog_ok, true, `reapplied admin catalog ${version}: ${restored?.catalog_ok_failed_checks}`);
     }
+    await tx.unsafe(reclaimMigration());
+    const [reclaimAfter] = await tx.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+    assert.equal(reclaimAfter?.catalog_ok, true, "010 reapply after HM restores live-name schema");
     throw rollbackDrill;
   }).catch((error) => {
     if (error !== rollbackDrill) throw error;
@@ -933,4 +984,294 @@ test("owner self-revocation uses the command path after activation, membership l
     assert.ok(grant?.revoked_at instanceof Date,
       `${condition}: command path did not persist revocation`);
   }
+});
+
+async function removeHostedSeat(fixture: HostedFixture, grantId: string, seatId: unknown): Promise<void> {
+  const removed = runHostedHarness<HarnessResult>({
+    operation: "management", ownerUserId: fixture.owner, workspaceId: fixture.workspaceA,
+    command: { kind: "revoke_hosted_mcp_seat", grant_id: grantId, seat_id: seatId },
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal(removed.body.status, "accepted");
+}
+
+function claimSeat(fixture: HostedFixture, grantId: string, name: string): HarnessResult {
+  const result = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(fixture, grantId, fixture.workspaceA, name) });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "accepted");
+  for (const field of ["seat_id", "principal_id", "handle"]) assert.equal(typeof result.body[field], "string");
+  return result;
+}
+
+async function hostedRows(seatId: unknown) {
+  return await sql`
+    SELECT row_to_json(hs) AS seat, row_to_json(h) AS handle, row_to_json(p) AS principal
+    FROM swarm.hosted_mcp_seats AS hs
+    JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
+    JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
+    WHERE hs.seat_id = ${String(seatId)}::uuid
+  `;
+}
+
+test("010 catalog and empty inverse prove the exact live-name schema", async () => {
+  const [forward] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+  assert.equal(forward?.catalog_ok, true);
+  const emptySchema = emptyApplicationSchema();
+  const drill = new Error("D3_EMPTY_ROLLBACK");
+  await sql.begin(async tx => {
+    await tx.unsafe(emptySchema);
+    await tx.unsafe(reclaimRollback());
+    const [inverse] = await tx.unsafe<{ rollback_ok: boolean }[]>(reclaimRollbackCatalog());
+    assert.equal(inverse?.rollback_ok, true);
+    const [negative] = await tx.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+    assert.equal(negative?.catalog_ok, false);
+    await tx.unsafe(reclaimMigration());
+    const [restored] = await tx.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+    assert.equal(restored?.catalog_ok, true);
+    throw drill;
+  }).catch(error => { if (error !== drill) throw error; });
+});
+
+test("same-owner hosted reclaim makes fresh identities and preserves removed rows and history across grants", { timeout: 180_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const name = `reclaim-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  const posted = runHostedHarness<HarnessResult>({ operation: "seat-command", seat: {
+    grantId: fixture.grantA, workspaceId: fixture.workspaceA, handle: old.body.handle,
+  } });
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  assert.equal(posted.body.status, "accepted");
+  const oldSignals = await sql`
+    SELECT * FROM swarm.signals WHERE from_principal = ${String(old.body.principal_id)}::uuid ORDER BY id
+  `;
+  assert.equal(oldSignals.length, 1, "real old-handle command authored a historical signal");
+  const oldEvents = await sql`
+    SELECT * FROM swarm.events
+    WHERE workspace_id = ${fixture.workspaceA}::uuid
+      AND payload->>'principal_id' = ${String(old.body.principal_id)} ORDER BY seq
+  `;
+  assert.equal(oldEvents.length, 1, "original claim event carries the old principal");
+  await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
+  const oldRevoked = await hostedRows(old.body.seat_id);
+  assert.equal(oldRevoked.length, 1);
+  for (const field of ["seat", "principal", "handle"]) assert.ok(oldRevoked[0]![field].revoked_at);
+  const sameGrant = claimSeat(fixture, fixture.grantA, name);
+  const reused = claimSeat(fixture, fixture.grantA, name);
+  for (const field of ["seat_id", "principal_id", "handle"]) assert.equal(reused.body[field], sameGrant.body[field]);
+  assert.deepEqual(reused.body.event_ids, [], "live replacement reuses despite revoked same-name history");
+  for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(sameGrant.body[field], old.body[field]);
+  assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked, "reclaim never edits removed identity rows");
+  const signalsAfter = await sql`
+    SELECT * FROM swarm.signals WHERE from_principal = ${String(old.body.principal_id)}::uuid ORDER BY id
+  `;
+  assert.deepEqual(signalsAfter, oldSignals);
+  const eventsAfter = await sql`
+    SELECT * FROM swarm.events WHERE event_id = ${String(oldEvents[0]!.event_id)}::uuid
+  `;
+  assert.deepEqual(eventsAfter, oldEvents);
+  const audits = await sql<{ outcome: string; reason: string; detail: string }[]>`
+    SELECT outcome, reason, detail FROM swarm.audit_log
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
+      AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
+  `;
+  assert.deepEqual(audits, [{ outcome: "accepted", reason: "hosted_seat_name_reclaimed",
+    detail: `reclaimed=1; closed_seats=0; principal_ids=${old.body.principal_id}; closed_seat_ids=` }]);
+  await removeHostedSeat(fixture, fixture.grantA, sameGrant.body.seat_id);
+  const freshGrant = claimSeat(fixture, fixture.grantB, name);
+  for (const field of ["seat_id", "principal_id", "handle"]) {
+    assert.notEqual(freshGrant.body[field], old.body[field]);
+    assert.notEqual(freshGrant.body[field], sameGrant.body[field]);
+  }
+  assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
+  const sameRevoked = await hostedRows(sameGrant.body.seat_id);
+  for (const field of ["seat", "principal", "handle"]) assert.ok(sameRevoked[0]![field].revoked_at);
+  const [audit] = await sql<{ detail: string }[]>`
+    SELECT detail FROM swarm.audit_log WHERE workspace_id = ${fixture.workspaceA}::uuid
+      AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id DESC LIMIT 1
+  `;
+  assert.equal(audit?.detail, `reclaimed=2; closed_seats=0; principal_ids=${[old.body.principal_id, sameGrant.body.principal_id].sort().join(",")}; closed_seat_ids=`);
+  await assert.rejects(sql.begin(tx => tx.unsafe(reclaimRollback())),
+    (error: unknown) => error instanceof postgres.PostgresError && error.code === "23505" &&
+      error.constraint_name === "hosted_mcp_seats_grant_id_workspace_id_name_key",
+    "historical same-grant duplicates prevent rollback without losing forward schema");
+  const [catalog] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+  assert.equal(catalog?.catalog_ok, true);
+  assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
+});
+
+test("app principal removal leaves an orphan that same-owner hosted reclaim closes", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const name = `app-reclaim-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  const unrelated = claimSeat(fixture, fixture.grantA, `unrelated-${randomUUID()}`);
+  const unrelatedBefore = await hostedRows(unrelated.body.seat_id);
+  const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA,
+    command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.equal(removed.body.status, "accepted");
+  const orphan = await hostedRows(old.body.seat_id);
+  assert.equal(orphan.length, 1);
+  assert.ok(orphan[0]!.principal.revoked_at, "public removal revoked the principal");
+  assert.equal(orphan[0]!.seat.revoked_at, null, "positive control: app removal left a live hosted seat");
+  assert.equal(orphan[0]!.handle.revoked_at, null, "positive control: app removal left a live handle");
+
+  const next = claimSeat(fixture, fixture.grantA, name);
+  for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(next.body[field], old.body[field]);
+  const closed = await hostedRows(old.body.seat_id);
+  assert.equal(closed.length, 1);
+  assert.ok(closed[0]!.seat.revoked_at);
+  assert.ok(closed[0]!.handle.revoked_at);
+  assert.deepEqual(closed[0]!.principal, orphan[0]!.principal, "reclaim never edits the removed principal");
+  const replacement = await hostedRows(next.body.seat_id);
+  assert.equal(replacement.length, 1);
+  for (const field of ["seat", "principal", "handle"]) assert.equal(replacement[0]![field].revoked_at, null);
+  assert.equal(closed[0]!.seat.revoked_at, replacement[0]!.seat.created_at, "closure uses the claim's server time");
+  assert.equal(closed[0]!.handle.revoked_at, replacement[0]!.seat.created_at);
+  assert.deepEqual(await hostedRows(unrelated.body.seat_id), unrelatedBefore, "other principals' seats stay unchanged");
+  const audits = await sql<{ outcome: string; detail: string }[]>`
+    SELECT outcome, detail FROM swarm.audit_log
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
+      AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
+  `;
+  assert.deepEqual(audits, [{ outcome: "accepted",
+    detail: `reclaimed=1; closed_seats=1; principal_ids=${old.body.principal_id}; closed_seat_ids=${old.body.seat_id}` }]);
+  const [catalog] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
+  assert.equal(catalog?.catalog_ok, true, "010 catalog still proves the live-name schema after app reclaim");
+});
+
+test("foreign-owner revoked name is refused with a same-owner positive control", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const name = `foreign-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
+  const refused = runHostedHarness<HarnessResult>({ operation: "claim", claim: {
+    ...claimSpec(fixture, fixture.grantB, fixture.workspaceA, name), ownerUserId: fixture.other,
+  } });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "hosted_seat_name_taken");
+  assert.equal(refused.body.message, "That name is taken in this workspace; choose another.");
+  claimSeat(fixture, fixture.grantA, name);
+});
+
+test("revoked grant cannot reclaim using a previously authenticated capability", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const name = `revoked-grant-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
+  const result = runHostedHarness<{ revoked: HarnessResult; refused: HarnessResult }>({
+    operation: "revoked-grant-claim", claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
+  });
+  assert.equal(result.revoked.status, 200);
+  assert.equal(result.refused.status, 403);
+  assert.equal(result.refused.body.error, "forbidden");
+  claimSeat(fixture, fixture.grantB, name);
+});
+
+test("old hosted handle is refused and replacement handle authenticates", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  const name = `handle-${randomUUID()}`;
+  const old = claimSeat(fixture, fixture.grantA, name);
+  await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
+  const next = claimSeat(fixture, fixture.grantA, name);
+  const call = (handle: unknown) => runHostedHarness<HarnessResult>({ operation: "seat-command", seat: {
+    grantId: fixture.grantA, workspaceId: fixture.workspaceA, handle,
+  } });
+  assert.equal(call(old.body.handle).status, 403);
+  const accepted = call(next.body.handle);
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.status, "accepted");
+});
+
+test("concurrent claims of a revoked name yield exactly one new live identity", { timeout: 180_000 }, async () => {
+  const fixture = await seedHostedFixture();
+  for (const competingGrantId of [fixture.grantA, fixture.grantB]) {
+    const name = `concurrent-reclaim-${randomUUID()}`;
+    const old = claimSeat(fixture, fixture.grantA, name);
+    await removeHostedSeat(fixture, fixture.grantA, old.body.seat_id);
+    const results = runHostedHarness<HarnessResult[]>({ operation: "race", order: "concurrent",
+      competitor: "hosted", competingGrantId,
+      hosted: claimSpec(fixture, fixture.grantA, fixture.workspaceA, name),
+    });
+    if (competingGrantId === fixture.grantA) {
+      assert.deepEqual(results.map(row => row.status), [200, 200]);
+      assert.equal(results[0]!.body.seat_id, results[1]!.body.seat_id);
+    } else {
+      assert.deepEqual(results.map(row => row.status).sort(), [200, 409]);
+      assert.equal(results.find(row => row.status === 409)?.body.error, "hosted_seat_name_taken");
+    }
+    const principals = await sql<{ principal_id: string; revoked_at: Date | null }[]>`
+      SELECT principal_id, revoked_at FROM swarm.agent_principals
+      WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
+    `;
+    assert.equal(principals.length, 2);
+    const live = principals.filter(row => row.revoked_at === null);
+    assert.equal(live.length, 1);
+    assert.notEqual(live[0]!.principal_id, old.body.principal_id);
+    const seats = await sql`SELECT seat_id FROM swarm.hosted_mcp_seats
+      WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name} AND revoked_at IS NULL`;
+    assert.equal(seats.length, 1);
+    const audits = await sql`SELECT audit_id FROM swarm.audit_log
+      WHERE workspace_id = ${fixture.workspaceA}::uuid AND reason = 'hosted_seat_name_reclaimed'
+        AND detail = ${`reclaimed=1; closed_seats=0; principal_ids=${old.body.principal_id}; closed_seat_ids=`}`;
+    assert.equal(audits.length, 1, "one reclaim audit per accepted creation");
+  }
+});
+
+test("same-owner revoked local principal is reclaimable through the hosted command path", { timeout: 120_000 }, async () => {
+  const fixture = await seedHostedFixture(true);
+  const name = `local-reclaim-${randomUUID()}`;
+  const created = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "create_agent_principal", name } });
+  assert.equal(created.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.status, "accepted");
+  const [localPrincipal] = await sql<{ principal_id: string; transport: string }[]>`
+    SELECT principal_id, transport FROM swarm.agent_principals
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${name}
+  `;
+  assert.equal(localPrincipal?.transport, "local");
+  const revoked = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
+    workspaceId: fixture.workspaceA,
+    command: { kind: "revoke_agent_principal", principal_id: localPrincipal!.principal_id } });
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+  assert.equal(revoked.body.status, "accepted");
+  const [before] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${localPrincipal!.principal_id}::uuid`;
+  assert.ok(before?.revoked_at);
+  const next = claimSeat(fixture, fixture.grantA, name);
+  assert.notEqual(next.body.principal_id, localPrincipal!.principal_id);
+  const [after] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${localPrincipal!.principal_id}::uuid`;
+  assert.deepEqual(after, before);
+
+  const foreignName = `foreign-local-${randomUUID()}`;
+  const foreignCreated = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.otherJwt,
+    workspaceId: fixture.workspaceA, command: { kind: "create_agent_principal", name: foreignName } });
+  assert.equal(foreignCreated.status, 200, JSON.stringify(foreignCreated.body));
+  assert.equal(foreignCreated.body.status, "accepted");
+  const [foreignPrincipal] = await sql<{ principal_id: string; owner_user_id: string; transport: string }[]>`
+    SELECT principal_id, owner_user_id, transport FROM swarm.agent_principals
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND name = ${foreignName}
+  `;
+  assert.equal(foreignPrincipal?.owner_user_id, fixture.other);
+  assert.equal(foreignPrincipal?.transport, "local");
+  const foreignRevoked = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.otherJwt,
+    workspaceId: fixture.workspaceA,
+    command: { kind: "revoke_agent_principal", principal_id: foreignPrincipal!.principal_id } });
+  assert.equal(foreignRevoked.status, 200, JSON.stringify(foreignRevoked.body));
+  assert.equal(foreignRevoked.body.status, "accepted");
+  const [foreignBefore] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${foreignPrincipal!.principal_id}::uuid`;
+  assert.ok(foreignBefore?.revoked_at);
+  const refused = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, foreignName) });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "hosted_seat_name_taken");
+  const [foreignAfter] = await sql`SELECT * FROM swarm.agent_principals WHERE principal_id = ${foreignPrincipal!.principal_id}::uuid`;
+  assert.deepEqual(foreignAfter, foreignBefore);
+  const audits = await sql<{ outcome: string; detail: string }[]>`
+    SELECT outcome, detail FROM swarm.audit_log
+    WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
+      AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
+  `;
+  assert.deepEqual(audits, [{ outcome: "accepted",
+    detail: `reclaimed=1; closed_seats=0; principal_ids=${localPrincipal!.principal_id}; closed_seat_ids=` }]);
 });

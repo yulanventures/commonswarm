@@ -9925,7 +9925,7 @@ async function handleHostedManagement(
     workspace_consented: existingConsent,
     all_required_consents: allRequired[0]?.consents === true,
     all_required_memberships: allRequired[0]?.memberships === true,
-    exact_name_principal_ids: [],
+    exact_name_principals: [],
     live_seat_count: 0,
   }, {
     now: frame.now,
@@ -10221,11 +10221,21 @@ async function claimHostedSeat(
       WHERE hs.grant_id = ${grant.grant_id}::uuid
         AND hs.workspace_id = ${route.workspaceId}::uuid
         AND hs.name = ${input.command.name}
+        AND hs.revoked_at IS NULL
+        AND h.revoked_at IS NULL
+        AND p.revoked_at IS NULL
+        AND p.transport = 'hosted_mcp'
+        AND p.turn_only = true
+      ORDER BY hs.seat_id
       LIMIT 1
       FOR UPDATE OF hs, h, p
     `;
-    const exactPrincipals = await tx<{ principal_id: string }[]>`
-      SELECT principal_id
+    const exactPrincipals = await tx<{
+      principal_id: string;
+      owner_user_id: string;
+      revoked: boolean;
+    }[]>`
+      SELECT principal_id, owner_user_id, revoked_at IS NOT NULL AS revoked
       FROM swarm.agent_principals
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND name = ${input.command.name}
@@ -10279,7 +10289,7 @@ async function claimHostedSeat(
       workspace_consented: grant.workspace_consented,
       all_required_consents: true,
       all_required_memberships: true,
-      exact_name_principal_ids: exactPrincipals.map((row) => row.principal_id),
+      exact_name_principals: exactPrincipals,
       live_seat_count: Number(seatCountRows[0]?.live ?? "0"),
     }, {
       now: frame.now,
@@ -10290,7 +10300,7 @@ async function claimHostedSeat(
       stream_id: route.streamId,
       nextSeq: () => ++nextSeq,
       nextEventId: () => crypto.randomUUID(),
-    }) as Decision & { reuse?: typeof existingRows[number] };
+    }) as Decision & { reuse?: typeof existingRows[number]; reclaimed_principal_ids?: readonly string[] };
 
     const auditAuth: HostedGrantAuditContext = {
       credentialKind: "hosted_grant",
@@ -10316,6 +10326,7 @@ async function claimHostedSeat(
     }
 
     const reused = decision.reuse;
+    let closedSeatIds: string[] = [];
     if (reused === undefined) {
       if (livePrincipals >= FREE_TIER_PRINCIPAL_LIMIT) {
         return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
@@ -10339,6 +10350,28 @@ async function claimHostedSeat(
           workspacePrincipal.transport !== foldedPrincipal.transport ||
           workspacePrincipal.turn_only !== foldedPrincipal.turn_only) {
         throw new Error("hosted and workspace principal folds disagree");
+      }
+      if (decision.reclaimed_principal_ids?.length) {
+        // The app's generic principal removal can leave hosted rows live.
+        // Close only seats of the reclaimed principals; their history stays intact.
+        const closedSeats = await tx<{ seat_id: string }[]>`
+          UPDATE swarm.hosted_mcp_seats
+          SET revoked_at = ${new Date(frame.now)}
+          WHERE workspace_id = ${route.workspaceId}::uuid
+            AND principal_id = ANY(${decision.reclaimed_principal_ids}::uuid[])
+            AND revoked_at IS NULL
+          RETURNING seat_id
+        `;
+        closedSeatIds = closedSeats.map((seat) => seat.seat_id).sort();
+        if (closedSeatIds.length) {
+          await tx`
+            UPDATE swarm.hosted_mcp_seat_handles
+            SET revoked_at = ${new Date(frame.now)}
+            WHERE workspace_id = ${route.workspaceId}::uuid
+              AND seat_id = ANY(${closedSeatIds}::uuid[])
+              AND revoked_at IS NULL
+          `;
+        }
       }
       await tx`
         INSERT INTO swarm.agent_principals (
@@ -10405,6 +10438,10 @@ async function claimHostedSeat(
       workspaceId: route.workspaceId,
       streamId: route.streamId,
       outcome: reused ? "replayed" : "accepted",
+      ...(decision.reclaimed_principal_ids?.length ? {
+        reason: "hosted_seat_name_reclaimed",
+        detail: `reclaimed=${decision.reclaimed_principal_ids.length}; closed_seats=${closedSeatIds.length}; principal_ids=${decision.reclaimed_principal_ids.join(",")}; closed_seat_ids=${closedSeatIds.join(",")}`,
+      } : {}),
       hash,
     });
     return { status: 200, body: { status: "accepted", ...response } };

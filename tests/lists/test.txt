@@ -110,3 +110,4 @@ tests/plan-guards-errexit.test.mjs
 tests/household-integration.test.ts
 tests/household-feature-gates.test.ts
 tests/household-human-invitations.test.ts
+tests/hosted-name-reclaim.test.ts

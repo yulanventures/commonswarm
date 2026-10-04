@@ -47,6 +47,10 @@ const activeGrant: HostedGrantFacts = {
   consented_workspace_ids: [workspace],
 };
 
+function namePrincipal(principal_id = principal, revoked = false, owner_user_id = owner) {
+  return { principal_id, owner_user_id, revoked };
+}
+
 function facts(overrides: Partial<HostedAuthorityFacts> = {}): HostedAuthorityFacts {
   return {
     grant: activeGrant,
@@ -56,7 +60,7 @@ function facts(overrides: Partial<HostedAuthorityFacts> = {}): HostedAuthorityFa
     workspace_consented: true,
     all_required_consents: true,
     all_required_memberships: true,
-    exact_name_principal_ids: [],
+    exact_name_principals: [],
     live_seat_count: 0,
     ...overrides,
   };
@@ -157,14 +161,23 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
   };
   const reuse = decideHostedAuthority(
     claim,
-    facts({ seat: liveSeat, exact_name_principal_ids: [principal] }),
+    facts({ seat: liveSeat, exact_name_principals: [namePrincipal()] }),
     context("hosted_grant"),
   );
   assert.equal(reuse.ok, true);
-  if (reuse.ok) assert.equal(reuse.reuse, liveSeat);
+  if (reuse.ok) {
+    assert.equal(reuse.reuse, liveSeat);
+    assert.deepEqual(reuse.events, []);
+  }
+  const historical = decideHostedAuthority(claim, facts({ seat: liveSeat,
+    exact_name_principals: [namePrincipal(), namePrincipal("old", true, "foreign")],
+    live_seat_count: HOSTED_MCP_SEAT_LIMIT,
+  }), context("hosted_grant"));
+  assert.equal(historical.ok, true, "live reuse precedes historical reservations and the cap");
+  if (historical.ok) assert.equal(historical.reuse, liveSeat);
   const collision = decideHostedAuthority(
     claim,
-    facts({ seat: liveSeat, exact_name_principal_ids: [principal, "other"] }),
+    facts({ seat: liveSeat, exact_name_principals: [namePrincipal(), namePrincipal("other")] }),
     context("hosted_grant"),
   );
   assert.equal(collision.ok, false);
@@ -172,13 +185,17 @@ test("stable reuse never adopts a collision or resurrects a revoked seat", () =>
     assert.equal(collision.reason, HOSTED_SEAT_NAME_TAKEN.code);
     assert.equal(collision.detail, HOSTED_SEAT_NAME_TAKEN.message);
   }
-  const revoked = decideHostedAuthority(
-    claim,
-    facts({ seat: { ...liveSeat, revoked_at: 1000 }, exact_name_principal_ids: [principal] }),
-    context("hosted_grant"),
-  );
-  assert.equal(revoked.ok, false);
-  if (!revoked.ok) assert.equal(revoked.reason, "hosted_seat_revoked");
+  for (const changed of [
+    { revoked_at: 1000 }, { handle_revoked_at: 1000 }, { principal_revoked_at: 1000 },
+  ]) {
+    const revoked = decideHostedAuthority(
+      claim,
+      facts({ seat: { ...liveSeat, ...changed }, exact_name_principals: [namePrincipal()] }),
+      context("hosted_grant"),
+    );
+    assert.equal(revoked.ok, false);
+    if (!revoked.ok) assert.equal(revoked.reason, "hosted_seat_revoked");
+  }
 });
 
 test("seat cap is grant-wide and the resource is fixed", () => {
@@ -266,4 +283,66 @@ test("seat names use one exact space, length, and control-character contract", (
     context("hosted_grant"),
   );
   assert.equal(control.ok, false);
+});
+
+
+test("same-owner revoked hosted and local names reclaim fresh identities across grants", () => {
+  // Name facts intentionally have no transport filter: local and hosted history
+  // have the same immutable owner boundary.
+  for (const previous of ["revoked-hosted", "revoked-local"]) {
+    for (const nextGrant of [grantId, "fresh-grant"]) {
+      const replacement = { ...claim, grant_id: nextGrant };
+      const decision = decideHostedAuthority(replacement, facts({
+        grant: { ...activeGrant, grant_id: nextGrant },
+        exact_name_principals: [namePrincipal(previous, true)],
+      }), context("hosted_grant"));
+      assert.equal(decision.ok, true, `${previous}/${nextGrant}`);
+      if (!decision.ok) continue;
+      assert.equal(decision.reuse, undefined);
+      assert.deepEqual(decision.reclaimed_principal_ids, [previous]);
+      assert.deepEqual(decision.events[0]?.payload, {
+        ...replacement, transport: "hosted_mcp", turn_only: true, created_at: 1234,
+      });
+      assert.notEqual(decision.events[0]?.payload.principal_id, previous);
+      assert.equal(reduceHostedAuthorityStream(decision.events).principals[principal]?.revoked_at, null);
+    }
+  }
+});
+
+test("live names and foreign-owner revoked names remain reserved", () => {
+  const sameOwnerHistory = namePrincipal("old", true);
+  const accepted = decideHostedAuthority(claim, facts({
+    exact_name_principals: [sameOwnerHistory],
+  }), context("hosted_grant"));
+  assert.equal(accepted.ok, true, "positive control: same owner can reclaim");
+  for (const collision of [namePrincipal("live"), namePrincipal("foreign-live", false, "other"),
+    namePrincipal("foreign-revoked", true, "other")]) {
+    const refused = decideHostedAuthority(claim, facts({
+      exact_name_principals: [sameOwnerHistory, collision],
+    }), context("hosted_grant"));
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.equal(refused.reason, HOSTED_SEAT_NAME_TAKEN.code);
+      assert.equal(refused.detail, HOSTED_SEAT_NAME_TAKEN.message);
+      assert.deepEqual(refused.events, []);
+    }
+  }
+});
+
+test("reclaim still requires capacity, active grant, consent, membership and an open workspace", () => {
+  const reclaimFacts = facts({ exact_name_principals: [namePrincipal("old", true)],
+    live_seat_count: HOSTED_MCP_SEAT_LIMIT - 1 });
+  assert.equal(decideHostedAuthority(claim, reclaimFacts, context("hosted_grant")).ok, true);
+  for (const [changed, reason] of [
+    [{ live_seat_count: HOSTED_MCP_SEAT_LIMIT }, "hosted_seat_limit_reached"],
+    [{ grant: { ...activeGrant, state: "revoked" as const } }, "hosted_grant_unavailable"],
+    [{ grant: { ...activeGrant, state: "pending" as const } }, "hosted_grant_unavailable"],
+    [{ workspace_consented: false }, "hosted_grant_unavailable"],
+    [{ owner_is_live_member: false }, "hosted_grant_unavailable"],
+    [{ workspace_archived: true }, "hosted_grant_unavailable"],
+  ] as const) {
+    const refused = decideHostedAuthority(claim, { ...reclaimFacts, ...changed }, context("hosted_grant"));
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.reason, reason);
+  }
 });
