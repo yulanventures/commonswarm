@@ -128,9 +128,10 @@ proc_state() { python3 -c "$PROC_PY" "$1" 2>/dev/null || printf 'unknown\n'; }
 record_identity() { # dir
   local pid state
   pid=$(head -1 "$1/data/postmaster.pid" 2>/dev/null)
-  [[ "$pid" =~ ^[0-9]+$ ]] || { : >"$1/postmaster.identity"; return 0; }
+  # Nothing is written when the identity cannot be read: an absent file means "unrecorded", never a malformed one.
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
   state=$(proc_state "$pid")
-  case "$state" in gone|unknown) : >"$1/postmaster.identity" ;; *) printf '%s %s\n' "$pid" "${state% *}" >"$1/postmaster.identity" ;; esac
+  case "$state" in gone|unknown) ;; *) printf '%s %s\n' "$pid" "${state% *}" >"$1/postmaster.identity" ;; esac
 }
 
 cleanup_dir() {
@@ -139,7 +140,17 @@ cleanup_dir() {
   if ! own_dir_ok "$dir"; then say "REFUSE cleanup: $dir is not this script's mktemp directory"; return 1; fi
   # The recorded postmaster identity (pid and start time, written after every start) governs cleanup whether or not
   # postmaster.pid still exists: a missing pid file never lets a possibly live cluster be deleted unchecked.
-  ident=$(cat "$dir/postmaster.identity" 2>/dev/null)
+  # Three states: ABSENT (unrecorded); PRESENT and parsed ("<pid> <start-time>"); PRESENT but unreadable, empty or
+  # malformed -> RETAIN, never delete.
+  ident=
+  if test -e "$dir/postmaster.identity" || test -L "$dir/postmaster.identity"; then
+    if ! ident=$(cat "$dir/postmaster.identity" 2>/dev/null); then
+      say "RETAIN cleanup: postmaster.identity present but unreadable; cluster directory $dir kept"; return 1
+    fi
+    if ! [[ "$ident" =~ ^[0-9]+\ [0-9]+(\.[0-9]+)?$ ]]; then
+      say "RETAIN cleanup: postmaster.identity present but empty or malformed; cluster directory $dir kept"; return 1
+    fi
+  fi
   if test -e "$dir/data/postmaster.pid"; then
     # The owned postmaster is the pid recorded in this directory's own postmaster.pid.
     pid=$(head -1 "$dir/data/postmaster.pid" 2>/dev/null)

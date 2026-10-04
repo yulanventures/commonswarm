@@ -169,6 +169,16 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
     spawnSync('/bin/sleep', ['0.5']);
     r = run(['--cleanup-run', unknownDir], { PG_BIN: bin });
     assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: processes of this cluster remain or cannot be checked/m); assert.ok(existsSync(unknownDir));
+    // postmaster.pid absent and postmaster.identity present but empty, malformed or unreadable: never deleted.
+    for (const [name, body, mode] of [['empty', '', 0o600], ['malformed', 'not an identity\n', 0o600], ['unreadable', `${process.pid} 1.000000\n`, 0o000]] as const) {
+      if (name === 'unreadable' && process.getuid?.() === 0) continue; // root reads a 000 file
+      const bad = mkdtempSync('/tmp/c1w2.'); mkdirSync(join(bad, 'data')); dirs.push(bad);
+      writeFileSync(join(bad, 'postmaster.identity'), body); chmodSync(join(bad, 'postmaster.identity'), mode);
+      r = run(['--cleanup-run', bad], { PG_BIN: bin });
+      assert.equal(r.status, 4, `${name}: ${r.stdout}${r.stderr}`); assert.ok(existsSync(join(bad, 'postmaster.identity')), name);
+      assert.match(r.stdout, name === 'unreadable' ? /^RETAIN cleanup: postmaster\.identity present but unreadable;/m : /^RETAIN cleanup: postmaster\.identity present but empty or malformed;/m, name);
+      chmodSync(join(bad, 'postmaster.identity'), 0o600);
+    }
     // Positive control: a directory where no cluster ever started (no identity, no data directory) is deleted.
     const never = mkdtempSync('/tmp/c1w2.');
     r = run(['--cleanup-run', never], { PG_BIN: bin });
