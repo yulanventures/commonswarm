@@ -68,12 +68,16 @@ elif name=='ai_ro':
         if not (root/'proof/w2b-preconditions.sql').read_text().startswith(chr(92)+'i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql'): refuse()
         output(cfg.get('w2b','t')); raise SystemExit(0)
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
-    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';"]: refuse()
+    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
+    if 'pg_authid' in args[2]:
+        if cfg.get('readback_failed'): raise SystemExit(1)
+        output(cfg.get('readback','t')); raise SystemExit(0)
     output(cfg.get('readonly','t'))
 elif name=='ai_db':
     if args==['-q','--file','-']:
         (root/'applied.sql').write_text(sys.stdin.read())
     elif args==['-q','--command','ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;']:
+        if cfg.get('alter_failed'): raise SystemExit(1)
         (root/'applied.sql').write_text(args[2])
     else: refuse()
 elif name=='openssl':
@@ -245,7 +249,8 @@ const restore = () => ({ ok: true, state: 'complete', at: new Date().toISOString
 const gateShim = `# test shim: ai_run runs the plan's own ai-backup-gate-check block
 ai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat "$FIXTURE_ROOT/gate-check.sh")"; }`;
 function gateWindow(f: ReturnType<typeof fixture>, window: string) {
-  const inputs = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window };
+  const inputs = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window,
+    window_end_utc: new Date(Date.now() + 1_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') };
   f.put('inputs.json', inputs); f.put('proof/inputs.json', inputs);
   f.put('proof/open.txt', new Date(Date.now() - 120_000).toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
   f.put('gate-check.sh', block('ai-backup-gate-check'));
@@ -614,6 +619,34 @@ test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-p
   const result = f.run(['ai-w2-issuer-rollback'], 'W2'); assert.notEqual(result.status, 0);
   assert.ok(!result.calls.some(c => c[0] === 'rm')); assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')));
   assert.equal(readFileSync(target, 'utf8'), 'must survive');
+});
+
+test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every rollback step fails on its own, also where errexit is ignored', () => {
+  const C = 'etc/commonswarm-oauth/admin-issuer-database-credentials';
+  // bash ignores errexit for ( ai_run ai-w2-issuer-rollback ) || ... (Ubuntu bash 5 even inside the block's own set -e).
+  // The mini's /bin/bash is 3.2, so that context is MODELLED here: the block runs with errexit off, under ||.
+  const modelled = '# modelled ignored errexit (left side of ||)\n( ' + block('ai-w2-issuer-rollback').replace('set -euo pipefail', 'set +e') + '\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+  const cases: Array<[string, Record<string, unknown>, (f: ReturnType<typeof fixture>) => void, string]> = [
+    ['ALTER ROLE fails', { alter_failed: true }, f => f.put(C, 'synthetic fixture'), 'FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP'],
+    ['readback false', { readback: 'f' }, f => f.put(C, 'synthetic fixture'), 'FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP'],
+    ['readback query fails', { readback_failed: true }, () => undefined, 'FAIL ai-w2-issuer-rollback: issuer role readback expected success got failure; STOP'],
+    ['credential is a directory', {}, f => mkdirSync(join(f.root, C)), 'FAIL ai-w2-issuer-rollback: issuer credential file expected regular-file got other; STOP'],
+    ['credential is a symlink', {}, f => symlinkSync(join(f.root, 'etc/commonswarm-oauth/protected-sibling'), join(f.root, C)), 'FAIL ai-w2-issuer-rollback: issuer credential file expected not-symlink got symlink; STOP'],
+  ];
+  for (const [name, config, setup, message] of cases) for (const [mode, steps] of [['as written', ['ai-w2-issuer-rollback']], ['modelled ignored errexit', [modelled]]] as const) {
+    const f = fixture(config); setup(f);
+    const result = f.run([...steps], 'W2b');
+    assert.notEqual(result.status, 0, `${name} ${mode}`); stopped(result, message);
+    if (mode !== 'as written') assert.match(result.stderr, /CALLER: rollback failure seen/, name);
+    assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')), `${name} ${mode}: no PASS receipt`);
+    assert.equal(readFileSync(join(f.root, 'etc/commonswarm-oauth/protected-sibling'), 'utf8'), 'must survive');
+    if (name === 'ALTER ROLE fails') assert.ok(!result.calls.some(c => c[0] === 'rm' || c[0] === 'ai_ro'), `${name} ${mode}: nothing after the failed ALTER`);
+  }
+  // Positive control in both modes.
+  for (const steps of [['ai-w2-issuer-rollback'], [modelled]]) {
+    const f = fixture(); f.put(C, 'synthetic fixture'); pass(f.run(steps, 'W2b'));
+    assert.equal(readFileSync(join(f.proof, 'issuer-rollback.txt'), 'utf8'), 'PASS issuer login disabled; additive roles/grants retained\n');
+  }
 });
 
 // Complete-block diagnostics must identify the failed measurement without

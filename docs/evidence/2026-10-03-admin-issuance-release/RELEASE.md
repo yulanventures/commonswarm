@@ -901,8 +901,9 @@ issuer credential, W4 preflight and apply, and the W1/W2b/W4 success close)
 validates it with this ONE block, never by file presence: exact keys, the
 receipt bound to its own window directory's inputs.json (release, window,
 window ID), the backup verified at most 1800 s and the restore drill completed
-at most 8 days before the gate time, the gate time inside that window (not
-before open.txt, not in the future) and the reviewed backup destination.
+at most 8 days before the gate time, the gate time inside that window
+(open.txt <= gate_at < window_end_utc, and not in the future) and the reviewed
+backup destination.
 
 ```sh
 # step: ai-backup-gate-check
@@ -943,7 +944,8 @@ need(0<=(gate-restore).total_seconds()<=8*86400,'restore drill completed_at at g
 need(isinstance(g['destination'],str) and g['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'),'backup destination','reviewed-r2-prefix','other')
 opened=read('open.txt'); need(opened is not None,'window open.txt','regular-file','missing')
 start=when(opened.decode(errors='replace').strip(),'open.txt')
-need(start<=gate<=datetime.datetime.now(datetime.timezone.utc),'gate_at','inside-this-window','before-open-or-future')
+end=when(i.get('window_end_utc'),'window inputs window_end_utc')
+need(start<=gate<end and gate<=datetime.datetime.now(datetime.timezone.utc),'gate_at','inside-this-window','before-open-after-end-or-future')
 print('PASS ai-backup-gate-check: '+g['window']+' '+g['window_id']+' backup and restore fresh at gate '+g['gate_at'])
 PY
 ```
@@ -1656,7 +1658,8 @@ PY
 # readonly: no
 # host: box root; replay revocation of the W2 probe DCR grant family (no RFC 7009) with a rejected-refresh proof; secrets never output
 set -euo pipefail
-test "$WINDOW" = W2
+# Runs as ( ai_run ai-w2-revoke-probes ) || ... in the W2 exit guards, where bash ignores errexit: fail explicitly.
+test "$WINDOW" = W2 || { printf 'FAIL ai-w2-revoke-probes: window expected W2 got other; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
 stage,proof=map(pathlib.Path,sys.argv[1:3]); sha=sys.argv[3]
@@ -1986,10 +1989,10 @@ case "$WINDOW" in
  *) printf 'FAIL ai-w2-issuer-credential: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;;
 esac
 ai_deadline
-test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials
-test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
-openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"
-chmod 0600 "$SECRET_STAGE/issuer-password"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+openssl rand -hex 32 >"$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password generation expected success got failure; STOP\n' >&2; exit 1; }
+chmod 0600 "$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password file mode expected 0600 got failure; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" <<'PY'
 import configparser,json,pathlib,re,sys
 try:
@@ -2012,9 +2015,9 @@ try:
 except Exception:
     raise SystemExit('FAIL issuer credential preparation; STOP') from None
 PY
-ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log"
-install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials
-test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
+ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log" || { printf 'FAIL ai-w2-issuer-credential: issuer ALTER ROLE LOGIN expected success got failure; STOP\n' >&2; exit 1; }
+install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: credential install expected success got failure; STOP\n' >&2; exit 1; }
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986' || { printf 'FAIL ai-w2-issuer-credential: credential mode expected 440-0-986 got other; STOP\n' >&2; exit 1; }
 docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
  --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
  --volume "$SECRET_STAGE/issuer-service.conf:/run/service.conf:ro" \
@@ -2033,13 +2036,18 @@ printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"
 # host: HezLead ONLY, box root; failed initial provisioning, not a rotation
 set -euo pipefail
 case "$WINDOW" in W2|W2b) ;; *) printf 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;; esac
-ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null
+# Every step fails explicitly: this block also runs as ( ai_run ai-w2-issuer-rollback ) || ..., where bash
+# ignores errexit, so no step may rely on set -e (Codex round 3).
+ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null || { printf 'FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP\n' >&2; exit 1; }
+if test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected not-symlink got symlink; STOP\n' >&2; exit 1; fi
 if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials; then
- test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
+ test -f /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected regular-file got other; STOP\n' >&2; exit 1; }
  rm -- /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL guarded issuer cleanup refused; STOP\n' >&2; exit 1; }
 fi
-test "$(ai_ro -Atq --command "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';")" = t
-printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt"
+if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials || test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected absent got present; STOP\n' >&2; exit 1; fi
+ROLLBACK_ROLE=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
+test "$ROLLBACK_ROLE" = t || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP\n' >&2; exit 1; }
+printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt" || { printf 'FAIL ai-w2-issuer-rollback: issuer-rollback.txt expected written got failure; STOP\n' >&2; exit 1; }
 ```
 
 W2b runs the five forward catalogs UNMODIFIED after the credential exists: the

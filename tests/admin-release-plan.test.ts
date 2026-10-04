@@ -1127,6 +1127,7 @@ test('admin release plan: the shared backup receipt check accepts only a bound, 
     const ok = check(window, receipt(window)); assert.equal(ok.status, 0, ok.stderr);
     assert.match(ok.stdout, new RegExp(`^PASS ai-backup-gate-check: ${window} Abc123 backup and restore fresh at gate `));
   }
+  const atEnd = stamp(60_000); // one exact instant used as both gate_at and window_end_utc
   const cases: Array<[string, string | null, RegExp, (dir: string) => void]> = [
     ['missing', null, /backup-gate\.json expected regular-file got missing-or-not-regular/, () => undefined],
     ['not JSON', 'PASS', /backup-gate\.json expected JSON-object got malformed/, () => undefined],
@@ -1142,8 +1143,14 @@ test('admin release plan: the shared backup receipt check accepts only a bound, 
     ['old restore drill', receipt('W4', { restore_completed_at: stamp(9 * 86400_000) }), /restore drill completed_at at gate time expected at-most-8-days-old got stale-or-future/, () => undefined],
     ['bad time', receipt('W4', { gate_at: 'yesterday' }), /gate_at expected UTC-ISO-8601-Z-time got other/, () => undefined],
     ['wrong destination', receipt('W4', { destination: 'r2:other/x' }), /backup destination expected reviewed-r2-prefix got other/, () => undefined],
-    ['gate before open', receipt('W4', { gate_at: stamp(900_000), backup_verified_at: stamp(1000_000) }), /gate_at expected inside-this-window got before-open-or-future/, () => undefined],
-    ['gate in future', receipt('W4', { gate_at: stamp(-600_000), backup_verified_at: stamp(0) }), /gate_at expected inside-this-window got before-open-or-future/, () => undefined],
+    ['gate before open', receipt('W4', { gate_at: stamp(900_000), backup_verified_at: stamp(1000_000) }), /gate_at expected inside-this-window got before-open-after-end-or-future/, () => undefined],
+    ['gate in future', receipt('W4', { gate_at: stamp(-120_000), backup_verified_at: stamp(0) }), /gate_at expected inside-this-window got before-open-after-end-or-future/, () => undefined],
+    ['gate after window end', receipt('W4'), /gate_at expected inside-this-window got before-open-after-end-or-future/,
+      dir => writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window: 'W4', window_end_utc: stamp(120_000) }))],
+    ['gate at window end', receipt('W4', { gate_at: atEnd }), /gate_at expected inside-this-window got before-open-after-end-or-future/,
+      dir => writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window: 'W4', window_end_utc: atEnd }))],
+    ['no window end', receipt('W4'), /window inputs window_end_utc expected UTC-ISO-8601-Z-time got other/,
+      dir => { const i: Input = { ...base(), window: 'W4' }; delete i.window_end_utc; writeFileSync(join(dir, 'inputs.json'), JSON.stringify(i)); }],
     ['no open.txt', receipt('W4'), /window open\.txt expected regular-file got missing/, dir => rmSync(join(dir, 'open.txt'))],
   ];
   for (const [name, gate, message, change] of cases) {
@@ -1186,6 +1193,47 @@ ai_run() { test "$1" = ai-w2-issuer-rollback || return 1; printf 'rollback\\n' >
   assert.notEqual(wrong.status, 0); assert.match(wrong.stderr, /FAIL ai-w2b-forward-catalogs: window expected W2b got other; STOP/);
   const noCredential = run('ai_deadline() { :; }\n' + source, { WINDOW: 'W2b', PROOF_DIR: mkdtempSync(join(scratch, 'w2b-forward-')) });
   assert.notEqual(noCredential.status, 0); assert.match(noCredential.stderr, /issuer-credential\.txt expected present got missing/);
+});
+
+test('admin release plan: a false post-credential catalog reaches the REAL issuer rollback; a failed ALTER or false readback is reported and writes no PASS', () => {
+  const forward = block('ai-w2b-forward-catalogs');
+  const attempt = (opts: { alter?: number; readback?: string; modelled?: boolean }) => {
+    const root = realpathSync(mkdtempSync(join(scratch, 'fwd-rollback-')));
+    const proof = join(root, 'proof'), etc = join(root, 'etc'); mkdirSync(proof); mkdirSync(etc);
+    writeFileSync(join(proof, 'issuer-credential.txt'), 'PASS issuer login; credential 0440 root:986; password stays on box\n');
+    writeFileSync(join(etc, 'admin-issuer-database-credentials'), '{"user":"commonswarm_admin_issuer","password":"synthetic"}\n');
+    // The plan's own rollback block (credential path remapped into this test's directory). "modelled" runs it with
+    // errexit off, as bash 5 does on the left of || (the mini's /bin/bash 3.2 cannot show that context itself).
+    let rollback = block('ai-w2-issuer-rollback').split('/etc/commonswarm-oauth/').join(etc + '/');
+    if (opts.modelled) rollback = rollback.replace('set -euo pipefail', 'set +e');
+    writeFileSync(join(root, 'rollback.sh'), rollback);
+    const harness = `ai_deadline() { :; }
+ai_ro() { case "$*" in *catalog.sql*) case "$(cat "$PROOF_DIR/catalog.sql")" in *20261003000002-catalog*) printf 'f\\n';; *) printf 't\\n';; esac;;
+  *pg_authid*) printf '%s\\n' '${opts.readback ?? 't'}';; *) return 7;; esac; }
+ai_db() { printf '%s\\n' "$*" >>"$PROOF_DIR/ai_db.log"; return ${opts.alter ?? 0}; }
+ai_run() { test "$1" = ai-w2-issuer-rollback || return 1; eval "$(cat '${join(root, 'rollback.sh')}')"; }
+`;
+    const result = run(harness + forward, { WINDOW: 'W2b', PROOF_DIR: proof });
+    return { result, proof, etc, rollback: existsSync(join(proof, 'issuer-rollback.txt')), forwardProof: existsSync(join(proof, 'w2b-forward-catalogs.txt')),
+      credential: existsSync(join(etc, 'admin-issuer-database-credentials')), dbLog: existsSync(join(proof, 'ai_db.log')) ? readFileSync(join(proof, 'ai_db.log'), 'utf8') : '' };
+  };
+  for (const modelled of [false, true]) {
+    const ok = attempt({ modelled }); assert.notEqual(ok.result.status, 0);
+    assert.match(ok.result.stderr, /FAIL ai-w2b-forward-catalogs: forward catalog 20261003000002 expected t got other; running ai-w2-issuer-rollback; STOP/);
+    assert.doesNotMatch(ok.result.stderr, /issuer rollback expected PASS got failure/);
+    assert.ok(ok.rollback && !ok.credential && !ok.forwardProof, `rollback applied (modelled=${modelled})`);
+    assert.match(ok.dbLog, /ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;/);
+    for (const [name, opts, message] of [
+      ['ALTER fails', { alter: 1 }, /FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP/],
+      ['readback false', { readback: 'f' }, /FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP/],
+    ] as const) {
+      const r = attempt({ ...opts, modelled }); assert.notEqual(r.result.status, 0, name);
+      assert.match(r.result.stderr, message, `${name} modelled=${modelled}`);
+      assert.match(r.result.stderr, /FAIL ai-w2b-forward-catalogs: issuer rollback expected PASS got failure; STOP/, `${name}: the caller reports the rollback failure`);
+      assert.ok(!r.rollback, `${name} modelled=${modelled}: no issuer-rollback.txt PASS`); assert.ok(!r.forwardProof);
+      if (name === 'ALTER fails') assert.ok(r.credential, 'nothing after the failed ALTER: the credential file is untouched');
+    }
+  }
 });
 
 test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {
