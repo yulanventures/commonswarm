@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -517,10 +517,14 @@ test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses
     f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4' });
     const pre = JSON.stringify(consentReceipt('pre-W1'));
     f.put('proof/consent-pre-W1.json', pre); f.put('proof/ordinary-before.json', liveReceipt('before', pre, { window: 'W4' }));
+    f.put('proof/backup-gate.json', { status: 'PASS', backup_verified_at: '2026-10-04T00:00:00Z', restore_at: '2026-10-01T00:00:00Z' });
     if (override) f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
     renameSync(join(f.root, 'edge/releases', sha), join(f.root, 'moved-new-edge'));
   };
   const good = fixture(); ready(good); admitted(good.run(['ai-w4-preflight']), 'ADMITTED mkdir -p');
+  // W4 runs the shared backup gate after open, as W1 does: its preflight refuses without that window's backup-gate.json.
+  const noBackup = fixture(); ready(noBackup); rmSync(join(noBackup.root, 'proof/backup-gate.json'));
+  guardRefused(noBackup, noBackup.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: W4 backup-gate.json expected present got missing; STOP');
   const missing = fixture(); ready(missing, false);
   guardRefused(missing, missing.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected regular-file got missing; STOP');
   const linked = fixture(); ready(linked, false); linked.put('real-override.yaml', 'reviewed override\n');

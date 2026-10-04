@@ -900,7 +900,7 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
 });
 
 
-test('admin release plan: W2b close needs its preconditions and issuer credential, or a recovered state without issuer login', () => {
+test('admin release plan: W2b close needs its backup gate, preconditions and issuer credential, or a recovered state without issuer login', () => {
   const root=mkdtempSync(join(scratch,'w2b-close-'));
   const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
   writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
@@ -910,30 +910,38 @@ test('admin release plan: W2b close needs its preconditions and issuer credentia
   const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
   const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
-  const liveFor=(phase:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W2b',phase,controls,
+  const liveFor=(phase:string,window='W2b')=>JSON.stringify({release_sha:sha,window_id:'Abc123',window,phase,controls,
     consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
-  const inputs=join(root,'inputs.json');
+  const inputs=join(root,'inputs.json'), w4Inputs=join(root,'inputs-w4.json');
+  writeFileSync(w4Inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha}));
   writeFileSync(inputs,JSON.stringify({...base(),window:'W2b',archive_sha256:archiveSha,w2_release_sha:'e'.repeat(40),w2_window_id:'RGLqZX'}));
   const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   // Filesystem boundary remap only: the box credential path moves into this test's directory.
   const etc=join(root,'etc'); mkdirSync(etc);
   const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
   const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`;
-  const attempt=(outcome:string,files:string[],role='t')=>{
+  const attempt=(outcome:string,files:string[],role='t',window='W2b')=>{
     const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
     writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
-    writeFileSync(join(proof,'ordinary-after.json'),liveFor('after')); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery'));
+    writeFileSync(join(proof,'ordinary-after.json'),liveFor('after',window)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery',window));
     for(const file of files) writeFileSync(join(proof,file),'PASS');
-    const result=run(harness(role)+close,{WINDOW:'W2b',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputs,PLAN_FILE:planPath,
+    const result=run(harness(role)+close,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
       BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:outcome,PATH:shim+':'+process.env.PATH});
     const closed=existsSync(join(proof,'closed.txt'));
+    const record=existsSync(join(proof,'close-result.json'))?readFileSync(join(proof,'close-result.json'),'utf8'):'';
+    const closedAt=closed?readFileSync(join(proof,'closed.txt'),'utf8').trim():'';
     if(existsSync(stage)) removeStage(stage);
-    return {result,closed};
+    return {result,closed,record,closedAt};
   };
-  let r=attempt('success',['w2b-preconditions.txt','issuer-credential.txt']); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
-  r=attempt('success',['w2b-preconditions.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  let r=attempt('success',['backup-gate.json','w2b-preconditions.txt','issuer-credential.txt']); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  // The explicit terminal record W6 reads: exact sorted JSON bound to the window, at the closed.txt time.
+  assert.deepEqual(JSON.parse(r.record),{closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'});
+  assert.equal(r.record,'{'+Object.entries({closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'}).map(([k,v])=>JSON.stringify(k)+': '+JSON.stringify(v)).join(', ')+'}\n');
+  r=attempt('success',['w2b-preconditions.txt','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W2b backup-gate\.json expected present got missing; STOP/);
+  r=attempt('success',['backup-gate.json','w2b-preconditions.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W2b issuer-credential\.txt expected present got missing; STOP/);
-  r=attempt('success',['issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  r=attempt('success',['backup-gate.json','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W2b w2b-preconditions\.txt expected present got missing; STOP/);
   r=attempt('recovered',[]); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   r=attempt('recovered',[],'f'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
@@ -941,42 +949,136 @@ test('admin release plan: W2b close needs its preconditions and issuer credentia
   writeFileSync(join(etc,'admin-issuer-database-credentials'),'{}');
   r=attempt('recovered',[]); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: recovered W2b credential file expected absent got present; STOP/);
+  // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
+  r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  assert.equal(JSON.parse(r.record).window,'W4');
+  r=attempt('success',['W4-readback.txt'],'t','W4'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W4 backup-gate\.json expected present got missing; STOP/);
+  r=attempt('success',['backup-gate.json'],'t','W4'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W4 W4-readback\.txt expected present got missing; STOP/);
 });
 
-test('admin release plan: W6 activation checks require the closed-success same-release W2b named by w2b_window_id', () => {
-  const source=block('ai-w6-activation-checks');
-  const start=`python3 - "$INPUTS_FILE" "$PROOF_DIR/issuer-provenance.txt" <<'PY'\n`;
-  assert.equal(source.split(start).length,2,'one provenance check');
-  const root=realpathSync(mkdtempSync(join(scratch,'w6-w2b-')));
-  const python=source.split(start)[1]!.split('\nPY\n')[0]!.split('/home/commonswarm/admin-issuance').join(join(root,'admin-issuance'));
-  const out=join(root,'provenance.txt');
-  const dir=join(root,'admin-issuance/release-proofs',`${sha}-W2b-Xyz789`); mkdirSync(dir,{recursive:true});
-  writeFileSync(join(dir,'inputs.json'),JSON.stringify({window:'W2b',release_sha:sha,window_id:'Xyz789'}));
-  for(const file of ['closed.txt','ordinary-after.json','w2b-preconditions.txt','issuer-credential.txt']) writeFileSync(join(dir,file),'PASS');
-  const check=(input:Input)=>spawnSync('python3',['-c',python,inputFile(input),out],{encoding:'utf8'});
-  let r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.equal(r.status,0,r.stderr);
-  assert.equal(readFileSync(out,'utf8'),`issuer credential provenance: W2b Xyz789 closed success at ${sha}\n`);
-  // Required: no W2b binding refuses, and nothing is recorded.
-  rmSync(out); r=check({...base(),window:'W6'}); assert.notEqual(r.status,0);
-  assert.match(r.stderr,/FAIL ai-w6-activation-checks: INPUTS w2b_window_id expected six-alphanumeric-window-id got missing-or-other; STOP/); assert.ok(!existsSync(out));
-  // A recovered W2b close (phase-recovery receipt) never provisions the credential.
-  writeFileSync(join(dir,'ordinary-recovery.json'),'PASS');
-  r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.notEqual(r.status,0);
-  assert.match(r.stderr,/FAIL ai-w6-activation-checks: W2b close result expected success got recovered; STOP/);
-  rmSync(join(dir,'ordinary-recovery.json'));
-  for(const file of ['closed.txt','ordinary-after.json','w2b-preconditions.txt','issuer-credential.txt']) {
-    const saved=readFileSync(join(dir,file)); rmSync(join(dir,file));
-    r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.notEqual(r.status,0,file);
-    assert.match(r.stderr,new RegExp(`FAIL ai-w6-activation-checks: W2b ${file.replace(/\./g,'\\.')} expected regular-file got missing-or-not-regular; STOP`));
-    writeFileSync(join(dir,file),saved);
+// ---- shared W2/W2b proof validator (ai-w2b-proof-check), run from plan bytes; paths remapped only ----
+const pyJson = (value: Record<string, unknown>) => '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(value[k])).join(', ') + '}\n';
+const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n';
+const ISSUER_CREDENTIAL_LINE = 'PASS issuer login; credential 0440 root:986; password stays on box\n';
+function proofCheckFixture(kind: 'W2' | 'W2b') {
+  const root = realpathSync(mkdtempSync(join(scratch, `proof-check-${kind}-`)));
+  const target = kind === 'W2' ? { sha: 'e'.repeat(40), id: 'RGLqZX' } : { sha, id: 'Xyz789' };
+  const producerFile = join(root, 'producer.mjs'); writeFileSync(producerFile, 'export const proofCheck = "live-ordinary-controls";\n');
+  const archive = join(root, `archive-${target.sha}-${target.id}.tar`);
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const producerSha = digest(readFileSync(producerFile));
+  const dir = join(root, 'admin-issuance/release-proofs', `${target.sha}-${kind}-${target.id}`); mkdirSync(dir, { recursive: true });
+  const consent = JSON.stringify({ kind: 'c1-consent', release_sha: target.sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
+    producer_sha256: producerSha, controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-own'], cleanup: null });
+  const controls = { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true };
+  const live = (phase: string, change: Record<string, unknown> = {}) => JSON.stringify({ release_sha: target.sha, window_id: target.id, window: kind, phase, controls,
+    consent_receipt_sha256: digest(consent), producer_sha256: producerSha, dcr_client_ids: ['dcr-window'], ...change });
+  const put = (name: string, value: string) => writeFileSync(join(dir, name), value);
+  put('inputs.json', JSON.stringify({ release_sha: target.sha, window: kind, window_id: target.id, archive_sha256: digest(readFileSync(archive)) }));
+  put('consent-pre-W1.json', consent); put('closed.txt', '2026-10-04T09:00:00Z\n');
+  if (kind === 'W2') {
+    put('ordinary-recovery.json', live('recovery'));
+    put('schema-committed.txt', 'all five ledger rows, M4/M5 checksums and complete backfills exact\n'); put('W2-probes.txt', 'PASS\n');
+    put('dcr-probe-revoked.json', pyJson({ client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' }));
+  } else {
+    put('close-result.json', pyJson({ release_sha: target.sha, window: 'W2b', window_id: target.id, result: 'success', closed_at: '2026-10-04T09:00:00Z' }));
+    put('ordinary-after.json', live('after')); put('w2b-preconditions.txt', W2B_PRECONDITIONS_LINE); put('issuer-credential.txt', ISSUER_CREDENTIAL_LINE);
   }
-  for(const other of [{window:'W2b',release_sha:'f'.repeat(40),window_id:'Xyz789'},{window:'W2',release_sha:sha,window_id:'Xyz789'},{window:'W2b',release_sha:sha,window_id:'Other1'}]) {
-    writeFileSync(join(dir,'inputs.json'),JSON.stringify(other));
-    r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.notEqual(r.status,0);
-    assert.match(r.stderr,/FAIL ai-w6-activation-checks: W2b inputs\.json expected window-W2b-same-release-and-id got mismatch; STOP/);
+  const checking: Input = kind === 'W2' ? { ...base(), window: 'W2b', w2_release_sha: target.sha, w2_window_id: target.id }
+    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id };
+  const inputs = join(root, 'checking-inputs.json'); writeFileSync(inputs, JSON.stringify(checking));
+  const source = block('ai-w2b-proof-check').split('/home/commonswarm/admin-issuance').join(join(root, 'admin-issuance')).split('/tmp/admin-issuance-').join(join(root, 'archive-'));
+  const check = (env: Record<string, string> = {}) => run(source, { PLAN_FILE: planPath, INPUTS_FILE: inputs, PROOF_CHECK_KIND: kind, ...env });
+  return { root, dir, target, put, live, consent, archive, check, inputs };
+}
+
+test('admin release plan: the shared proof validator accepts exact W2 and W2b proofs and prints the binding', () => {
+  const w2 = proofCheckFixture('W2'); let r = w2.check();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { kind: 'W2', release_sha: 'e'.repeat(40), window_id: 'RGLqZX', result: 'recovered', closed_at: '2026-10-04T09:00:00Z' });
+  // A W2 with an explicit close record uses it.
+  w2.put('close-result.json', pyJson({ release_sha: 'e'.repeat(40), window: 'W2', window_id: 'RGLqZX', result: 'recovered', closed_at: '2026-10-04T09:00:00Z' }));
+  r = w2.check(); assert.equal(r.status, 0, r.stderr);
+  const w2b = proofCheckFixture('W2b'); r = w2b.check();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { kind: 'W2b', release_sha: sha, window_id: 'Xyz789', result: 'success', closed_at: '2026-10-04T09:00:00Z' });
+  // Validator constants are the writers' exact bytes (no retyped drift).
+  assert.ok(block('ai-w2b-preflight').includes(`printf '${W2B_PRECONDITIONS_LINE.trimEnd()}\\n' >"$PROOF_DIR/w2b-preconditions.txt"`));
+  assert.ok(block('ai-w2-issuer-credential').includes(`printf '${ISSUER_CREDENTIAL_LINE.trimEnd()}\\n' >"$PROOF_DIR/issuer-credential.txt"`));
+  assert.ok(block('ai-w2-reconcile').includes(`(p/'schema-committed.txt').write_text('all five ledger rows, M4/M5 checksums and complete backfills exact\\n')`));
+  assert.ok(block('ai-w2-probes').includes(`printf 'PASS\\n' >"$PROOF_DIR/W2-probes.txt"`));
+  assert.ok(block('ai-close').includes(`pathlib.Path(sys.argv[4]).write_text(json.dumps({'release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],'result':sys.argv[2],'closed_at':sys.argv[3]},sort_keys=True)+'\\n')`));
+  // Both consumers call the one validator through ai_run.
+  assert.match(block('ai-w2b-preflight'), /PROOF_CHECK_KIND=W2\nW2_BINDING=\$\(ai_run ai-w2b-proof-check\)/);
+  assert.match(block('ai-w6-activation-checks'), /PROOF_CHECK_KIND=W2b\nW2B_BINDING=\$\(ai_run ai-w2b-proof-check\)/);
+});
+
+test('admin release plan: the shared proof validator refuses invalid CONTENT in every W2 proof file', () => {
+  const recovery = (f: ReturnType<typeof proofCheckFixture>, change: Record<string, unknown>) => f.put('ordinary-recovery.json', f.live('recovery', change));
+  const cases: Array<[string, (f: ReturnType<typeof proofCheckFixture>) => void, RegExp]> = [
+    ['inputs.json other window', f => f.put('inputs.json', JSON.stringify({ release_sha: f.target.sha, window: 'W3', window_id: f.target.id })), /W2 inputs\.json expected window-W2-bound-release-and-window-id got mismatch/],
+    ['inputs.json other id', f => f.put('inputs.json', JSON.stringify({ release_sha: f.target.sha, window: 'W2', window_id: 'Other1' })), /W2 inputs\.json expected window-W2-bound-release-and-window-id got mismatch/],
+    ['inputs.json not JSON', f => f.put('inputs.json', '{'), /W2 inputs\.json expected/],
+    ['closed.txt object', f => f.put('closed.txt', '{}'), /W2 closed\.txt expected one-UTC-close-time-line got other/],
+    ['closed.txt two lines', f => f.put('closed.txt', '2026-10-04T09:00:00Z\n2026-10-04T09:00:01Z\n'), /W2 closed\.txt expected one-UTC-close-time-line got other/],
+    ['close-result.json object', f => f.put('close-result.json', '{}\n'), /W2 close-result\.json binding expected exact-keys-bound-to-inputs got other/],
+    ['close-result.json unsorted', f => f.put('close-result.json', JSON.stringify({ window: 'W2', release_sha: f.target.sha, window_id: f.target.id, result: 'recovered', closed_at: '2026-10-04T09:00:00Z' }) + '\n'), /W2 close-result\.json bytes expected exact-sorted-JSON-line got other/],
+    ['close-result.json other time', f => f.put('close-result.json', pyJson({ release_sha: f.target.sha, window: 'W2', window_id: f.target.id, result: 'recovered', closed_at: '2026-10-04T10:00:00Z' })), /W2 close-result\.json result expected success-or-recovered-at-closed\.txt got other/],
+    ['both receipts without record', f => f.put('ordinary-after.json', f.live('after')), /W2 close receipt expected exactly-one-of-after-or-recovery got 2/],
+    ['no receipt', f => rmSync(join(f.dir, 'ordinary-recovery.json')), /W2 close receipt expected exactly-one-of-after-or-recovery got 0/],
+    ['receipt object', f => f.put('ordinary-recovery.json', '{}'), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['receipt other window id', f => recovery(f, { window_id: 'Other1' }), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['receipt control false', f => recovery(f, { controls: { hosted_mcp_consent_refresh: false, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true } }), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['receipt phase after', f => recovery(f, { phase: 'after' }), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['consent object', f => f.put('consent-pre-W1.json', '{}'), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['archive missing', f => rmSync(f.archive), /W2 ordinary-recovery\.json expected valid-bound-live-controls-receipt got refused/],
+    ['schema-committed object', f => f.put('schema-committed.txt', '{}'), /W2 schema-committed\.txt expected exact-reconcile-line got other/],
+    ['W2-probes object', f => f.put('W2-probes.txt', '{}'), /W2 W2-probes\.txt expected exact-PASS-line got other/],
+    ['revoke proof object', f => f.put('dcr-probe-revoked.json', '{}\n'), /W2 dcr-probe-revoked\.json expected client_id-refresh-rejected-revoked-true got other/],
+    ['revoke proof not revoked', f => f.put('dcr-probe-revoked.json', pyJson({ client_id: 'c', revoked: false, proof: 'refresh rejected' })), /W2 dcr-probe-revoked\.json expected client_id-refresh-rejected-revoked-true got other/],
+    ['revoke proof other proof', f => f.put('dcr-probe-revoked.json', pyJson({ client_id: 'c', revoked: true, proof: 'assumed' })), /W2 dcr-probe-revoked\.json expected client_id-refresh-rejected-revoked-true got other/],
+    ['revoke proof compact bytes', f => f.put('dcr-probe-revoked.json', JSON.stringify({ client_id: 'c', proof: 'refresh rejected', revoked: true }) + '\n'), /W2 dcr-probe-revoked\.json bytes expected exact-sorted-JSON-line got other/],
+    ['revoke proof missing', f => rmSync(join(f.dir, 'dcr-probe-revoked.json')), /W2 dcr-probe-revoked\.json expected regular-file got missing-or-not-regular/],
+  ];
+  for (const [name, change, message] of cases) {
+    const f = proofCheckFixture('W2'); change(f); const r = f.check();
+    assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`); assert.equal(r.stdout, '', name);
   }
-  r=check({...base(),window:'W6',w2b_window_id:'Nope00'}); assert.notEqual(r.status,0);
-  assert.match(r.stderr,/FAIL ai-w6-activation-checks: W2b proof directory expected directory got missing-or-symlink; STOP/);
+  const wrongKind = proofCheckFixture('W2'); const r = wrongKind.check({ PROOF_CHECK_KIND: 'W3' });
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /PROOF_CHECK_KIND expected W2-or-W2b got other/);
+});
+
+test('admin release plan: the shared proof validator refuses a W2b that did not close success with exact proofs, or whose issuer rollback ran', () => {
+  const record = (f: ReturnType<typeof proofCheckFixture>, change: Record<string, unknown>) =>
+    f.put('close-result.json', pyJson({ release_sha: f.target.sha, window: 'W2b', window_id: f.target.id, result: 'success', closed_at: '2026-10-04T09:00:00Z', ...change }));
+  const cases: Array<[string, (f: ReturnType<typeof proofCheckFixture>) => void, RegExp]> = [
+    ['no close record', f => rmSync(join(f.dir, 'close-result.json')), /W2b close-result\.json expected regular-file got missing-or-not-regular/],
+    ['recovered close', f => { record(f, { result: 'recovered' }); f.put('ordinary-recovery.json', f.live('recovery')); }, /W2b close result expected success got recovered/],
+    ['record at another release', f => record(f, { release_sha: 'f'.repeat(40) }), /W2b close-result\.json binding expected exact-keys-bound-to-inputs got other/],
+    ['record other window', f => record(f, { window: 'W3' }), /W2b close-result\.json binding expected exact-keys-bound-to-inputs got other/],
+    ['closed.txt object', f => f.put('closed.txt', '{}'), /W2b closed\.txt expected one-UTC-close-time-line got other/],
+    ['inputs at another release', f => f.put('inputs.json', JSON.stringify({ release_sha: 'f'.repeat(40), window: 'W2b', window_id: f.target.id })), /W2b inputs\.json expected window-W2b-bound-release-and-window-id got mismatch/],
+    ['after receipt object', f => f.put('ordinary-after.json', '{}'), /W2b ordinary-after\.json expected valid-bound-live-controls-receipt got refused/],
+    ['after receipt phase before', f => f.put('ordinary-after.json', f.live('before')), /W2b ordinary-after\.json expected valid-bound-live-controls-receipt got refused/],
+    ['after receipt window W2', f => f.put('ordinary-after.json', f.live('after', { window: 'W2' })), /W2b ordinary-after\.json expected valid-bound-live-controls-receipt got refused/],
+    ['after receipt missing', f => rmSync(join(f.dir, 'ordinary-after.json')), /W2b ordinary-after\.json expected regular-file got missing-or-not-regular/],
+    ['preconditions object', f => f.put('w2b-preconditions.txt', '{}'), /W2b w2b-preconditions\.txt expected exact-preconditions-line got other/],
+    ['preconditions older text', f => f.put('w2b-preconditions.txt', 'PASS W2b preconditions: bound W2 closed, ledger exact, issuer NOLOGIN without password, credential absent, issuance OFF\n'), /W2b w2b-preconditions\.txt expected exact-preconditions-line got other/],
+    ['issuer credential object', f => f.put('issuer-credential.txt', '{}'), /W2b issuer-credential\.txt expected exact-issuer-login-line got other/],
+    ['issuer credential missing', f => rmSync(join(f.dir, 'issuer-credential.txt')), /W2b issuer-credential\.txt expected regular-file got missing-or-not-regular/],
+    ['issuer rollback ran', f => f.put('issuer-rollback.txt', 'PASS issuer login disabled; additive roles/grants retained\n'), /W2b issuer-rollback\.txt expected absent got present/],
+  ];
+  for (const [name, change, message] of cases) {
+    const f = proofCheckFixture('W2b'); change(f); const r = f.check();
+    assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`); assert.equal(r.stdout, '', name);
+  }
+  // W6 inputs without the binding refuse before reading anything.
+  const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input.w2b_window_id;
+  writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/);
 });
 
 test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {
@@ -1336,7 +1438,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 17, 'one shared reader at all 17 sites (16 plan-text sites, including ai-w2b-preflight, and ai-w2-backfill)');
+  assert.equal(readers.length, 18, 'one shared reader at all 18 sites (17 plan-text sites, including ai-w2b-preflight and ai-w2b-proof-check, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);

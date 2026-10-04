@@ -12,6 +12,11 @@ WITH checks(label,ok) AS (VALUES
   ),false)),
   ('w2b-issuer-role-nologin-nopassword', COALESCE((
     (SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer')
+  ),false)),
+  -- The forward 0002 catalog's issuer row without its LOGIN term (W2b restores LOGIN).
+  ('w2b-issuer-role-attributes', COALESCE((
+    EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='commonswarm_admin_issuer' AND NOT rolinherit
+    AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)
   ),false))
 )
 SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS w2b_ok_failed_checks,

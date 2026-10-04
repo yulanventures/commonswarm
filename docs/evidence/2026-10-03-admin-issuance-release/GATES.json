@@ -281,13 +281,14 @@
       "release-plan-contract",
       "admin-issuer-credential-provisioning"
     ],
-    "W2b": ["admin-issuer-credential-provisioning", "ordinary-paths-unchanged", "release-plan-contract"],
+    "W2b": ["backup-restore-gate", "admin-issuer-credential-provisioning", "ordinary-paths-unchanged", "release-plan-contract"],
     "W3": [
       "oauth-build-route",
       "ordinary-paths-unchanged",
       "release-plan-contract"
     ],
     "W4": [
+      "backup-restore-gate",
       "legacy-admin-unreachable",
       "legacy-db-fence",
       "edge-caddy-route",

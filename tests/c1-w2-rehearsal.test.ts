@@ -193,7 +193,8 @@ test('c1 W2 rehearsal: --issuer real libpq verify-full login PASSES; the 5f64fab
   for (const line of [/^PASS ai-w2-issuer-rollback:role$/m, /^PASS ai-w2b-preflight:preconditions$/m, /^PASS tls: cluster restarted with ssl=on on 127\.0\.0\.1:\d+;/m,
     /^PASS listener: postmaster \d+ listens on TCP 127\.0\.0\.1:\d+ only/m, /^PASS service-conf: /m, /^PASS ai-w2-issuer-credential:prepare$/m,
     /^PASS ai-w2-issuer-credential:alter-role$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer/m,
-    /^PASS issuer-plaintext: /m, /^PASS cleanup: cluster stopped; data, CA and secrets deleted; \S+ absent$/m]) assert.match(good.stdout, line);
+    /^PASS issuer-plaintext: /m, /^PASS forward-catalogs: all five forward catalogs true after the issuer credential$/m,
+    /^PASS cleanup: cluster stopped; data, CA and secrets deleted; \S+ absent$/m]) assert.match(good.stdout, line);
   assert.doesNotMatch(good.stdout + good.stderr, /\b[0-9a-f]{48,64}\b/, 'no generated password is printed');
   const present = spawnSync('git', ['cat-file', '-e', '5f64fab4^{commit}']);
   assert.equal(present.status, 0, 'commit 5f64fab4 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 5f64fab4)');
@@ -210,20 +211,22 @@ test('c1 W2 rehearsal: the W2b database preconditions FAIL on the pre-W2 fixture
   assert.match(pre.stdout, /^PASS cleanup: /m);
 });
 
-// A POST-W2 dump (HezLead's live rehearsal-post-w2 shape): five 20261003 versions, issuer NOLOGIN without a password.
+// A POST-W2 dump (HezLead's live rehearsal-post-w2 shape) made by the plan's own W2 apply, then its issuer rollback.
 let postFixtureDir: string | null = null;
+const headSha = (): string => spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 function postFixture(): string {
   if (postFixtureDir) return postFixtureDir;
   const dir = join(scratch, 'fixture-post-w2');
-  const built = run(['--from-post-w2', '--build-fixture', dir], { PG_BIN: PG() });
+  const built = run(['--dump-post-w2', dir, fixture()], { PG_BIN: PG() });
   assert.equal(built.status, 0, built.stdout + built.stderr);
-  assert.match(built.stdout, /^PASS fixture:migrations: 73 migrations through 20261003000005 applied with their ledger rows; issuer rolled back to NOLOGIN without a password$/m);
+  assert.match(built.stdout, /^PASS ai-w2-probes$/m);
+  assert.match(built.stdout, /^PASS dump-post-w2: roles\.sql, schema\.sql and ledger\.sql \(ledger, checksums, cutover state\) of the post-W2 database, issuer rolled back$/m);
   return (postFixtureDir = dir);
 }
 
 test('c1 W2 rehearsal: --from-post-w2 runs --issuer and --w2b-preconditions on a post-W2 dump without the W2 apply', { skip: skipDb }, () => {
   const env = { PG_BIN: PG() };
-  const issuer = run(['--from-post-w2', '--issuer', postFixture()], env);
+  const issuer = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', postFixture()], env);
   assert.equal(issuer.status, 0, issuer.stdout + issuer.stderr);
   assert.match(issuer.stdout, /^PASS post-w2-ledger: all five 20261003 versions present \(5 versions from 20261003 on\); W2 apply skipped$/m);
   for (const line of [/^PASS ai-w2b-preflight:preconditions$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login/m, /^PASS issuer-plaintext: /m, /^PASS cleanup: /m]) {
@@ -231,22 +234,28 @@ test('c1 W2 rehearsal: --from-post-w2 runs --issuer and --w2b-preconditions on a
   }
   // Nothing of the W2 apply or the rollback statement runs on a post-W2 dump.
   assert.doesNotMatch(issuer.stdout, /^(?:PASS|FAIL) (?:ai-db-session|ai-w2-preflight|ai-w2-measure|ai-w2-apply|ai-w2-probes|ai-w2-issuer-rollback)/m);
-  const pre = run(['--from-post-w2', '--w2b-preconditions', postFixture()], env);
+  const pre = run(['--from-post-w2', '--w2-release-sha', headSha(), '--w2b-preconditions', postFixture()], env);
   assert.equal(pre.status, 0, pre.stdout + pre.stderr);
   assert.match(pre.stdout, /^PASS ai-w2b-preflight:preconditions$/m);
-  const old = run(['--from-post-w2', '--issuer', '--plan-from', '5f64fab4', postFixture()], env);
+  const old = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--plan-from', '5f64fab4', postFixture()], env);
   assert.notEqual(old.status, 0);
   assert.match(old.stdout, /^FAIL ai-w2-issuer-credential:login: libpq login exit status expected 0 got nonzero: syntax error in service file "[^"]+issuer-service\.conf", line 2$/m);
 });
 
 test('c1 W2 rehearsal: the dump ledger must agree with --from-post-w2', { skip: skipDb }, () => {
   const env = { PG_BIN: PG() };
-  const flagOnPre = run(['--from-post-w2', '--w2b-preconditions', fixture()], env);
+  const flagOnPre = run(['--from-post-w2', '--w2-release-sha', headSha(), '--w2b-preconditions', fixture()], env);
   assert.notEqual(flagOnPre.status, 0); assert.match(flagOnPre.stdout, /^FAIL post-w2-ledger: five 20261003 ledger versions expected got 0; not a post-W2 dump$/m);
   const postWithoutFlag = run(['--issuer', postFixture()], env);
   assert.notEqual(postWithoutFlag.status, 0); assert.match(postWithoutFlag.stdout, /^FAIL pre-w2-ledger: no 20261003-or-later ledger version expected got 5; a post-W2 dump needs --from-post-w2$/m);
   assert.doesNotMatch(postWithoutFlag.stdout, /^PASS ai-w2-apply/m);
-  for (const args of [['--from-post-w2', fixture()], ['--from-post-w2', '--reserve-control', '--issuer', fixture()], ['--from-post-w2', '--catalogs-from', '835b7ae8', '--issuer', fixture()]]) {
+  // A checksum recorded at another release is refused (the W2b checksum precondition binds w2_release_sha).
+  const otherRelease = run(['--from-post-w2', '--w2-release-sha', 'f'.repeat(40), '--w2b-preconditions', postFixture()], env);
+  assert.notEqual(otherRelease.status, 0);
+  assert.match(otherRelease.stdout, /^FAIL ai-w2b-preflight:preconditions: FAIL ai-w2b-preflight: 20261003000001 checksum row expected release-file-sha256-backfill-at-w2_release_sha got other; STOP/m);
+  for (const args of [['--from-post-w2', '--w2-release-sha', headSha(), fixture()], ['--from-post-w2', '--issuer', fixture()],
+    ['--from-post-w2', '--w2-release-sha', headSha(), '--reserve-control', '--issuer', fixture()], ['--from-post-w2', '--w2-release-sha', headSha(), '--catalogs-from', '835b7ae8', '--issuer', fixture()],
+    ['--w2-release-sha', headSha(), '--issuer', fixture()], ['--dump-post-w2', join(scratch, 'never'), '--issuer', fixture()]]) {
     const r = run(args, env); assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stdout, /^FAIL usage: /m);
   }
 });
