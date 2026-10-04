@@ -1,0 +1,18 @@
+---
+import { renderHouseholdConflict, type HouseholdObjectsState } from '../../lib/household-objects-view';
+interface Props { state: HouseholdObjectsState }
+const { state } = Astro.props;
+---
+<div class="household-object-conflict">
+  <Fragment set:html={renderHouseholdConflict(state)} />
+</div>
+<style is:global>
+  .household-object-conflict { color: var(--text, #252a35); font-family: var(--font-sans); line-height: 1.6; overflow-wrap: anywhere; }
+  .household-object-conflict .hh-conflict { background: var(--surface-2, #f1efea); padding: 20px; border-left: 3px solid var(--accent, #315cff); }
+  .household-object-conflict .hh-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .household-object-conflict label { display: flex; gap: 10px; margin: 20px 0; }
+  .household-object-conflict button { min-height: 44px; padding: 8px 12px; color: inherit; font: inherit; border: 1px solid var(--border-interactive, #767676); border-radius: 6px; background: var(--surface, #fff); cursor: pointer; }
+  .household-object-conflict :is(button, input):focus-visible { outline: 3px solid var(--focus, #315cff); outline-offset: 3px; }
+  .household-object-conflict pre { white-space: pre-wrap; }
+  @media (max-width: 720px) { .household-object-conflict .hh-comparison { grid-template-columns: 1fr; } }
+</style>

@@ -1,0 +1,14 @@
+---
+import { renderHouseholdObjectHistory, type HouseholdObjectView } from '../../lib/household-objects-view';
+interface Props { object: HouseholdObjectView | null; busy?: boolean }
+const { object, busy = false } = Astro.props;
+---
+<div class="household-object-history">
+  <Fragment set:html={renderHouseholdObjectHistory(object, busy)} />
+</div>
+<style is:global>
+  .household-object-history { color: var(--text, #252a35); font-family: var(--font-sans); line-height: 1.6; overflow-wrap: anywhere; }
+  .household-object-history li { margin-bottom: 20px; }
+  .household-object-history button { min-height: 44px; padding: 8px 12px; font: inherit; color: inherit; background: var(--surface, #fff); border: 1px solid var(--border-interactive, #767676); border-radius: 6px; margin-right: 12px; cursor: pointer; }
+  .household-object-history button:focus-visible { outline: 3px solid var(--focus, #315cff); outline-offset: 3px; }
+</style>
