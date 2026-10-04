@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -220,7 +220,7 @@ function postFixture(): string {
   const built = run(['--dump-post-w2', dir, fixture()], { PG_BIN: PG() });
   assert.equal(built.status, 0, built.stdout + built.stderr);
   assert.match(built.stdout, /^PASS ai-w2-probes$/m);
-  assert.match(built.stdout, /^PASS dump-post-w2: roles\.sql, schema\.sql and ledger\.sql \(ledger, checksums, cutover state\) of the post-W2 database, issuer rolled back$/m);
+  assert.match(built.stdout, /^PASS dump-post-w2: roles\.sql, schema\.sql, ledger\.sql and ledger-extra\.sql \(checksums, cutover state\) of the post-W2 database, issuer rolled back$/m);
   return (postFixtureDir = dir);
 }
 
@@ -229,6 +229,7 @@ test('c1 W2 rehearsal: --from-post-w2 runs --issuer and --w2b-preconditions on a
   const issuer = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', postFixture()], env);
   assert.equal(issuer.status, 0, issuer.stdout + issuer.stderr);
   assert.match(issuer.stdout, /^PASS post-w2-ledger: all five 20261003 versions present \(5 versions from 20261003 on\); W2 apply skipped$/m);
+  assert.match(issuer.stdout, /^PASS restore-ledger-extra$/m);
   for (const line of [/^PASS ai-w2b-preflight:preconditions$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login/m, /^PASS issuer-plaintext: /m, /^PASS cleanup: /m]) {
     assert.match(issuer.stdout, line);
   }
@@ -258,4 +259,34 @@ test('c1 W2 rehearsal: the dump ledger must agree with --from-post-w2', { skip: 
     ['--w2-release-sha', headSha(), '--issuer', fixture()], ['--dump-post-w2', join(scratch, 'never'), '--issuer', fixture()]]) {
     const r = run(args, env); assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stdout, /^FAIL usage: /m);
   }
+});
+
+// HezLead's live split: ledger.sql (ledger) plus a data-only ledger-extra.sql (checksums, cutover state).
+test('c1 W2 rehearsal: ledger-extra.sql is restored when present, SKIPped when absent; the W2b preconditions need its checksum and cutover rows', { skip: skipDb }, () => {
+  const env = { PG_BIN: PG() };
+  const variant = (name: string, extra: string | null) => {
+    const dir = join(scratch, name); mkdirSync(dir);
+    for (const file of ['roles.sql', 'schema.sql', 'ledger.sql']) copyFileSync(join(postFixture(), file), join(dir, file));
+    if (extra !== null) writeFileSync(join(dir, 'ledger-extra.sql'), extra);
+    return dir;
+  };
+  const extra = readFileSync(join(postFixture(), 'ledger-extra.sql'), 'utf8');
+  assert.match(extra, /^COPY commonswarm_ops\.migration_checksums /m); assert.match(extra, /^COPY commonswarm_oauth\.admin_cutover_state /m);
+  // Without the extra file: SKIP line, and the checksum precondition refuses (no checksum rows).
+  const none = run(['--from-post-w2', '--w2-release-sha', headSha(), '--w2b-preconditions', variant('post-no-extra', null)], env);
+  assert.notEqual(none.status, 0);
+  assert.match(none.stdout, /^SKIP restore-ledger-extra: \S+ledger-extra\.sql absent$/m);
+  assert.match(none.stdout, /^FAIL ai-w2b-preflight:preconditions: FAIL ai-w2b-preflight: checksum rows expected one-per-ledger-version got other; STOP$/m);
+  // Checksums but no cutover state: the plan's own forward catalog 0003 row 064 (the cutover singleton) refuses.
+  const noCutover = extra.replace(/^COPY commonswarm_oauth\.admin_cutover_state [^\n]*\n[\s\S]*?^\\\.\n/m, '');
+  assert.notEqual(noCutover, extra);
+  const cut = run(['--from-post-w2', '--w2-release-sha', headSha(), '--w2b-preconditions', variant('post-no-cutover', noCutover)], env);
+  assert.notEqual(cut.status, 0); assert.match(cut.stdout, /^PASS restore-ledger-extra$/m);
+  assert.match(cut.stdout, /^FAIL ai-w2b-preflight:preconditions: FAIL ai-w2b-preflight: forward catalog 20261003000003 expected all-rows-true \(0002: only the issuer LOGIN row\) got failed checks 20261003000003-064-commonswarm_oauth-admin_cutover_state; STOP/m);
+  // A broken extra file stops the restore (ON_ERROR_STOP).
+  const broken = run(['--from-post-w2', '--w2-release-sha', headSha(), '--w2b-preconditions', variant('post-broken-extra', 'INSERT INTO no_such_table VALUES (1);\n')], env);
+  assert.notEqual(broken.status, 0); assert.match(broken.stdout, /^FAIL restore-ledger-extra: .*no_such_table/m);
+  // A pre-W2 dump without the extra file still runs: SKIP, then the usual W2 rehearsal.
+  const pre = run(['--w2b-preconditions', fixture()], env);
+  assert.match(pre.stdout, /^SKIP restore-ledger-extra: /m);
 });

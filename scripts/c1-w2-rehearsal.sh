@@ -63,10 +63,10 @@
 # at (the W2b preconditions compare the five checksum rows, recorded at that release, with this
 # release's migration files); without --from-post-w2 it is this checkout's HEAD, which the W2 apply used.
 # --dump-post-w2 <dir> runs the W2 rehearsal, then the plan's own issuer rollback statement (the live
-# W2 RGLqZX end state), and writes a post-W2 dump: roles.sql, schema.sql and ledger.sql with the data of
-# supabase_migrations.schema_migrations, commonswarm_ops.migration_checksums and
-# commonswarm_oauth.admin_cutover_state (the W2b preconditions read the first two; the forward catalogs
-# need the cutover singleton). A live post-W2 ledger.sql needs the same three tables.
+# W2 RGLqZX end state), and writes a post-W2 dump: roles.sql, schema.sql, ledger.sql (the ledger data) and
+# ledger-extra.sql (data of commonswarm_ops.migration_checksums and commonswarm_oauth.admin_cutover_state).
+# Every rehearsal restores <dump-dir>/ledger-extra.sql right after ledger.sql when it exists (SKIP line
+# otherwise). The W2b checksum precondition needs the checksum rows.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
@@ -274,6 +274,9 @@ else
   run_sql_file restore-schema "$TARGET/schema.sql"
 fi
 run_sql_file restore-ledger "$TARGET/ledger.sql"
+# Optional data-only extra (HezLead's live split): migration checksums and, when supplied, the cutover state.
+if test -f "$TARGET/ledger-extra.sql"; then run_sql_file restore-ledger-extra "$TARGET/ledger-extra.sql"
+else say "SKIP restore-ledger-extra: $TARGET/ledger-extra.sql absent"; fi
 
 # Release copy: the reviewed files the plan reads, from this checkout; item-ai proofs from --catalogs-from.
 if test -n "$PLAN_FROM"; then
@@ -533,9 +536,11 @@ if test -n "$DUMP_POST"; then
   mkdir -p "$DUMP_POST" || die dump-post-w2 'cannot create the output directory'
   "$PG_BIN/pg_dumpall" -h "$T" -p "$PORT" -U supabase_admin -r --no-role-passwords >"$DUMP_POST/roles.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
   "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -s >"$DUMP_POST/schema.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
-  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a --disable-triggers -t supabase_migrations.schema_migrations \
-    -t commonswarm_ops.migration_checksums -t commonswarm_oauth.admin_cutover_state >"$DUMP_POST/ledger.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
-  say "PASS dump-post-w2: roles.sql, schema.sql and ledger.sql (ledger, checksums, cutover state) of the post-W2 database, issuer rolled back"
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$DUMP_POST/ledger.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  # The live split: data-only ledger-extra.sql with the checksums and the cutover state.
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a --disable-triggers -t commonswarm_ops.migration_checksums \
+    -t commonswarm_oauth.admin_cutover_state >"$DUMP_POST/ledger-extra.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  say "PASS dump-post-w2: roles.sql, schema.sql, ledger.sql and ledger-extra.sql (checksums, cutover state) of the post-W2 database, issuer rolled back"
 fi
 
 # ---- --issuer: the issuer credential with a REAL libpq TLS login (W2 issuer block, as W2b runs it) ----
