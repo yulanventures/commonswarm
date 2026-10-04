@@ -368,7 +368,8 @@ test('real command adapters approve without role rewrite, list exact active appr
       const [forward] = await tx.unsafe(releaseCatalogQuery(repoSql(`${proofRoot}-catalog.sql`), 'catalog_ok'));
       assert.equal(forward!.catalog_ok, true);
       await t.test('rollback ends NULL-expiry approvals without deleting rows or changing audits and restores NOT NULL', async () => {
-        const connections = () => tx`SELECT (to_jsonb(c)-'expires_at')::text AS retained, expires_at
+        const connections = () => tx`SELECT (to_jsonb(c)-'expires_at')::text AS retained, expires_at,
+          expires_at <= clock_timestamp() AS ended
           FROM swarm.household_content_connections c ORDER BY workspace_id,connection_id,grant_id,principal_id`;
         const audits = () => tx`SELECT to_jsonb(a)::text AS row FROM swarm.household_object_audit a ORDER BY audit_id`;
         const beforeConnections = await connections(), beforeAudit = await audits();
@@ -379,7 +380,8 @@ test('real command adapters approve without role rewrite, list exact active appr
         if (access.credential.kind !== 'agent') assert.fail('agent facts required');
         const liveAccess: HouseholdAccessFacts = { ...access, credential: { kind: 'agent',
           connection: { ...access.credential.connection, revoked_at: null } } };
-        assert.equal(householdAccessRefusal(liveAccess, f.workspace, 'read', Date.now()), null);
+        const [clock] = await tx`SELECT (extract(epoch FROM clock_timestamp())*1000)::float8 AS now`;
+        assert.equal(householdAccessRefusal(liveAccess, f.workspace, 'read', clock!.now), null);
         await tx.unsafe(repoSql(`${proofRoot}-rollback.sql`));
         const [inverse] = await tx.unsafe(releaseCatalogQuery(repoSql(`${proofRoot}-rollback-catalog.sql`), 'rollback_ok'));
         assert.equal(inverse!.rollback_ok, true);
@@ -390,15 +392,23 @@ test('real command adapters approve without role rewrite, list exact active appr
           const expiry = afterConnections[index]!.expires_at;
           if (beforeRow.expires_at === null) {
             assert.ok(expiry !== null);
-            const stamp = new Date(expiry as string).getTime();
-            assert.ok(Number.isFinite(stamp) && stamp <= Date.now(), 'NULL approval is now expired under the old finite-future-expiry policy');
+            assert.equal(afterConnections[index]!.ended, true,
+              'NULL approval is now expired according to the database clock');
           } else assert.deepEqual(expiry, beforeRow.expires_at, 'existing finite expiries stay unchanged');
         }
-        const [ended] = await tx`SELECT expires_at FROM swarm.household_content_connections
+        const [ended] = await tx`SELECT expires_at, (extract(epoch FROM clock_timestamp())*1000)::float8 AS now
+          FROM swarm.household_content_connections
           WHERE connection_id=${f.connection}::uuid AND grant_id=${f.grant}::uuid AND principal_id=${f.principal}::uuid`;
         const endedAccess: HouseholdAccessFacts = { ...liveAccess, credential: { kind: 'agent',
           connection: { ...access.credential.connection, revoked_at: null, expires_at: new Date(ended!.expires_at as string).getTime() } } };
-        assert.equal(householdAccessRefusal(endedAccess, f.workspace, 'read', Date.now()), 'connection_access_refused');
+        assert.equal(householdAccessRefusal(endedAccess, f.workspace, 'read', ended!.now), 'connection_access_refused');
+        await tx`SET LOCAL ROLE swarm_command`;
+        assert.deepEqual(await api.approveHouseholdConnection(tx, f.workspace, actor, request, input, yes), approved,
+          'the earlier approve request id returns the stored success with expires_at null');
+        await tx`RESET ROLE`;
+        assert.deepEqual(await connections(), afterConnections, 'replay leaves every ended approval unchanged');
+        assert.equal(householdAccessRefusal(endedAccess, f.workspace, 'read', ended!.now), 'connection_access_refused',
+          'replay does not restore access');
         assert.deepEqual(await audits(), beforeAudit, 'all audit rows survive byte-for-byte');
         const [column] = await tx`SELECT attnotnull, col_description(attrelid,attnum) AS comment FROM pg_attribute
           WHERE attrelid='swarm.household_content_connections'::regclass AND attname='expires_at' AND NOT attisdropped`;
