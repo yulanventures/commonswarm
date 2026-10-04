@@ -1,3 +1,4 @@
+import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
@@ -126,6 +127,9 @@ import {
   type FileCommand,
   type FileStorage,
 } from "./file-artifacts.ts";
+import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
+import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
+import { provisionHouseholdPermissions } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
   parseSignalAttachmentRefs,
@@ -144,6 +148,8 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
+  HOUSEHOLD_LOCAL_SEAT,
+  HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
   decideWorkspace,
@@ -168,6 +174,7 @@ import {
   reduceHostedAuthority,
 } from "../_shared/protocol.js";
 import {
+  revalidateHostedSeatContent,
   hostedCapabilityTool,
   revalidateHostedGrantCommand,
   revalidateHostedSeatCommand,
@@ -1059,6 +1066,8 @@ const COMMAND_KINDS = [
   "release_wake_lease",
   TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
+  ...HOUSEHOLD_SURFACE_KINDS,
+  "household_legacy",
 ] as const;
 const TASK_COMMAND_KINDS = [
   "create",
@@ -1110,6 +1119,8 @@ const WORKSPACE_COMMAND_KINDS = [
   "release_wake_lease",
   TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
+  ...HOUSEHOLD_SURFACE_KINDS,
+  "household_legacy",
 ] as const;
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
 import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
@@ -1488,6 +1499,10 @@ async function readBody(
   | { ok: true; body: RequestBody; byteLength: number }
   | { ok: false; response: Response }
 > {
+  if (request.headers.get("content-type")?.startsWith("multipart/form-data;")) {
+    try { const attached = await parseHouseholdAttachment(request); return { ok: true, body: { ...attached.body, household_attachment: attached.attachment }, byteLength: attached.attachment.length }; }
+    catch (error) { if (error instanceof HouseholdAttachmentError) return { ok: false, response: json(error.status, { error: "household_attachment_refused" }) }; throw error; }
+  }
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, response: json(413, { error: "payload_too_large" }) };
@@ -9515,6 +9530,7 @@ export interface HostedHumanManagementIdentity {
 
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
   const command = record(body.command);
+  if (command?.kind === "household_tool") return command.tool === tool;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
@@ -10413,6 +10429,7 @@ async function handleTransaction(
 
     const hostedSeat = hostedSeatCapability === null
       ? null
+      : kind === "household_tool" ? await revalidateHostedSeatContent(tx, hostedSeatCapability)
       : await revalidateHostedSeatCommand(tx, hostedSeatCapability);
     if (hostedSeatCapability !== null && hostedSeat === null) {
       return { status: 403, body: { error: "forbidden" } };
@@ -10676,6 +10693,45 @@ async function handleTransaction(
       return { status: 200, body: { ok: true, status: "accepted", event_ids: [],
         events: [], ...result } };
     }
+    if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
+      if (!COMMAND_ID_RE.test(commandId) || typeof body.client_version !== "string") return { status: 400, body: { error: "invalid_request" } };
+      const [config] = await tx`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+      const order = typeof config?.value === "string" ? compareSemver(body.client_version, config.value) : null;
+      if (order === null || order < 0) return { status: 426, body: { error: "upgrade_required" } };
+      const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,
+        connection: hostedSeat ? { connection_id: hostedSeat.seat_id, grant_id: hostedSeat.grant_id }
+          : auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
+      const recheck = async (checkTx: Sql) => {
+        if (hostedSeatCapability) {
+          const seat = await revalidateHostedSeatContent(checkTx, hostedSeatCapability);
+          return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
+        }
+        return !await revoked(checkTx, auth, route);
+      };
+      try {
+        const surface = record(body.command)!;
+        if (kind === "household_tool" && record(surface.arguments)?.seat !== (hostedSeat?.handle ?? HOUSEHOLD_LOCAL_SEAT)) return { status: 403, body: { error: "forbidden" } };
+        if (kind === "household_legacy") {
+          const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+          if (!boundary) return { status: 200, body: { status: "refused", reason: "workspace_not_managed" } };
+          const legacy = record(surface.command);
+          if (!legacy || ![...FILE_COMMAND_KINDS,"brain_put","brain_get","brain_history"].includes(String(legacy.kind))) return { status: 400, body: { error: "invalid_request" } };
+        }
+        const output = kind === "household_legacy"
+          ? await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
+            ...(surface.base_revision ? { base_revision: surface.base_revision as never } : {}) }, identity, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined)
+          : kind === "household_permissions"
+          ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
+          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined);
+        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: output.status === "refused" ? "authz" : "accepted",
+          reason: output.status === "refused" ? String(output.reason) : null });
+        return { status: 200, body: output };
+      } catch (error) {
+        if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
+        throw error;
+      }
+    }
     const validation = validateCommand(body.command);
     const configRows = await tx<{ value: unknown }[]>`
       SELECT value FROM swarm.config WHERE key = 'min_client_version' LIMIT 1
@@ -10841,6 +10897,16 @@ async function handleTransaction(
       (FILE_COMMAND_KINDS as readonly string[]).includes(
         validation.command.kind,
       );
+    if (isFileCommand) {
+      const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+      if (boundary) {
+        const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,
+          connection: auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
+        const result = await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId,
+          command: validation.command as FileCommand }, identity, async checkTx => !await revoked(checkTx, auth, route));
+        return { status: 200, body: result as unknown as Record<string, unknown> };
+      }
+    }
     if (
       auth.agent !== null &&
       !isRenewal &&

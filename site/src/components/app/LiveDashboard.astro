@@ -15,6 +15,9 @@
  * list makes a click look idle because the reader stays pinned to the newest row.
  */
 
+import HouseholdObjects from "./HouseholdObjects.astro";
+import { createHouseholdObjectsState } from "../../lib/household-objects-view";
+const emptyHousehold = createHouseholdObjectsState({ workspace_id: "", name: "Shared objects", audience: [], viewer_user_id: "", content_role: null, operations: [], objects: [] });
 import AgentConnect from "../connect/AgentConnect.astro";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
@@ -315,7 +318,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <button
               class="dashboard__text-button dashboard__mobile-view"
               type="button"
-              data-workspace-view="brain"
+              data-workspace-view="objects">Shared objects</button>
+            <button class="dashboard__text-button dashboard__mobile-view" type="button" data-workspace-view="brain"
             >
               Brain
             </button>
@@ -380,7 +384,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <button
               class="dashboard__sidebar-place"
               type="button"
-              data-workspace-view="brain"
+              data-workspace-view="objects">Shared objects</button>
+            <button class="dashboard__sidebar-place" type="button" data-workspace-view="brain"
             >
               <span class="dashboard__sidebar-place-mark" aria-hidden="true">◇</span>
               <span>Brain</span>
@@ -698,6 +703,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <ol class="dashboard__feed" data-feed-list></ol>
             </section>
 
+            <section data-channel-view="objects" hidden>
+              <form data-household-consent>
+                <p>In a shared workspace, members who confirm content access can read committed content and retained history. Choose your content access explicitly.</p>
+                <label>Workspace purpose
+                  <select data-household-purpose required>
+                    <option value="">Choose a purpose</option>
+                    <option value="shared">Shared with current workspace members</option>
+                    <option value="personal">Personal workspace owned by me</option>
+                  </select>
+                </label>
+                <label>Also approve one of your connected agents
+                  <select data-household-connection><option value="">Only confirm my access</option></select>
+                </label>
+                <div data-household-operations></div>
+                <p>Agent approval applies only to this workspace and your chosen operations. Hosted content approval expires after 24 hours; local approval expires with its credential.</p>
+                <button type="button" data-household-confirm="reader">Confirm reader access</button>
+                <button type="button" data-household-confirm="editor">Confirm editor access</button>
+                <p data-household-consent-result role="status"></p>
+              </form>
+              <HouseholdObjects state={emptyHousehold} />
+            </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
               <p class="dashboard__file-warning" data-file-warning hidden></p>
               <p class="dashboard__file-empty" data-file-empty hidden>No files shared yet.</p>
@@ -1150,6 +1176,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </live-dashboard>
 
 <script>
+  import { HOUSEHOLD_CONTENT_CONSENT } from "../../../../src/protocol/household-tool-registry";
+  import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import type { Session } from "@supabase/supabase-js";
   import {
     ClientTooOld,
@@ -1476,7 +1504,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * the channel's name over a Files body, with both Files and that channel marked current.
      * Found by a review arm.
      */
-    let activeWorkspaceView: "signals" | "files" | "brain" = "signals";
+    let activeWorkspaceView: "signals" | "files" | "brain" | "objects" = "signals";
     /**
      * The channel read soft-fails to an empty list so a channel outage cannot take the feed
      * down with it. That makes an empty list ambiguous — no channels, or none READ — and a
@@ -1557,6 +1585,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * flagging a healthy list as failed. Raised by a review arm.
      */
     let channelReadGeneration = 0;
+    let householdConnections: Record<string, unknown>[] = [];
+    const householdRoot = one<HTMLElement>("[data-household-objects]");
+    const householdDashboard = householdRoot ? createHouseholdDashboard(householdRoot) : null;
     let activeWorkspaceId = "";
     let requestVersion = 0;
     let sampleMode = false;
@@ -1799,7 +1830,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         | "feed-error"
         | "feed"
         | "files"
-        | "brain",
+        | "brain"
+        | "objects",
     ): void => {
       if (name !== "feed") {
         window.clearTimeout(signalExpiryTimer);
@@ -6413,6 +6445,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       closeEntityPanel(false);
       closeWorkspaceMenu();
       const changesWorkspace = activeWorkspaceId !== selected.id;
+      householdDashboard?.clear();
+      householdConnections = [];
+      const connectionSelect = one<HTMLSelectElement>("[data-household-connection]");
+      if (connectionSelect) connectionSelect.replaceChildren(new Option("Only confirm my access", ""));
+      const consentStatus = one<HTMLElement>("[data-household-consent-result]");
+      if (consentStatus) consentStatus.textContent = "";
+      const purposeSelect = one<HTMLSelectElement>("[data-household-purpose]");
+      if (purposeSelect) purposeSelect.value = "";
       if (changesWorkspace) {
         previousSignalIds.clear();
         feedWasEmpty = false;
@@ -6749,7 +6789,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
-    const activateWorkspaceView = (view: "signals" | "files" | "brain"): void => {
+    const activateWorkspaceView = (view: "signals" | "files" | "brain" | "objects"): void => {
       if (keepConnectCredentialVisible()) return;
       activeWorkspaceView = view;
       const name = one<HTMLElement>("[data-channel-name]");
@@ -6767,7 +6807,30 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           button.removeAttribute("aria-current");
         }
       }
-      if (view === "files") {
+      if (view === "objects") {
+        if (name) name.textContent = "Shared objects";
+        if (description) description.textContent = "Shared lists, docs and retained history.";
+        showChannelView("objects");
+        const selected = workspaces.find(row => row.id === activeWorkspaceId);
+        const activeSession = session;
+        const selectedId = activeWorkspaceId;
+        if (selected && activeSession) {
+          void postCommand(activeSession, uuid(), { kind: "household_connections" }, { workspace_id: selectedId, stream: { kind: "workspace" } }).then(result => {
+            if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+            const selector = one<HTMLSelectElement>("[data-household-connection]");
+            householdConnections = result.body.status === "ok" && Array.isArray(result.body.connections) ? result.body.connections : [];
+            if (selector) selector.replaceChildren(new Option("Only confirm my access", ""), ...householdConnections.map((row,index) => new Option(String(row.name),String(index))));
+          }).catch(() => {});
+        }
+        if (selected && activeSession) void householdDashboard?.open({ workspace_id: selectedId, name: selected.name,
+          viewer_user_id: activeSession.user.id, audience: [...people.values()] },
+          async (command, requestId) => {
+            if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) throw new Error("workspace changed");
+            const result = await postCommand(activeSession, requestId, command, { workspace_id: selectedId, stream: { kind: "workspace" } }, "Save outcome unknown. Retry the same request.");
+            if (result.status !== 200) throw new Error("household request refused");
+            return result.body;
+          });
+      } else if (view === "files") {
         if (name) name.textContent = "Files";
         if (description) {
           description.textContent = "Files shared for this workspace’s work. Downloads are untrusted input.";
@@ -7723,6 +7786,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch (error) {
         if (version !== requestVersion) return;
         if (error instanceof SessionExpired) {
+          householdDashboard?.clear();
           session = null;
           renderedAuthUserId = "";
           resetWorkspaceSessionState();
@@ -7895,6 +7959,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         button.disabled = true;
         if (session) clearCreateIntent(session.user.id);
         requestVersion += 1;
+        householdDashboard?.clear();
         renderedAuthUserId = "";
         resetWorkspaceSessionState();
         await signOut();
@@ -9114,10 +9179,41 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });
     syncComposerControls();
+    const operationsRoot = one<HTMLElement>("[data-household-operations]");
+    if (operationsRoot) for (const consent of HOUSEHOLD_CONTENT_CONSENT) {
+      const label = document.createElement("label");
+      const input = document.createElement("input"); input.type = "checkbox"; input.value = consent.operation; input.dataset.householdOperation = "";
+      input.checked = consent.operation === "read"; input.disabled = consent.operation === "read";
+      label.append(input, document.createTextNode(consent.description)); operationsRoot.append(label);
+    }
+    for (const button of all<HTMLButtonElement>("[data-household-confirm]")) {
+      button.addEventListener("click", async () => {
+        const activeSession = session;
+        const workspaceId = activeWorkspaceId;
+        const purpose = one<HTMLSelectElement>("[data-household-purpose]")?.value;
+        const notice = one<HTMLElement>("[data-household-consent-result]");
+        if (!activeSession || !workspaceId || !purpose) { if (notice) notice.textContent = "Choose the workspace purpose before confirming."; return; }
+        button.disabled = true;
+        try {
+          const selectedConnection = one<HTMLSelectElement>("[data-household-connection]")?.value;
+          const connection = selectedConnection ? householdConnections[Number(selectedConnection)] : undefined;
+          const operations = button.dataset.householdConfirm === "reader" ? ["read"]
+            : all<HTMLInputElement>("[data-household-operation]").filter(input => input.checked).map(input => input.value);
+          const result = await postCommand(activeSession, uuid(), { kind: "household_permissions", purpose, content_role: button.dataset.householdConfirm,
+            ...(connection ? { connection: { kind: connection.kind, connection_id: connection.connection_id,
+              grant_id: connection.grant_id, principal_id: connection.principal_id, operations } } : {}) },
+            { workspace_id: workspaceId, stream: { kind: "workspace" } }, "Confirmation outcome unknown. Reload before confirming again.");
+          if (workspaceId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+          if (notice) notice.textContent = result.body.status === "committed" ? "Your content access is confirmed." : "Content access was refused. Check your membership and workspace purpose.";
+          if (result.body.status === "committed") activateWorkspaceView("objects");
+        } catch { if (notice && workspaceId === activeWorkspaceId) notice.textContent = "Confirmation outcome unknown. Reload before confirming again."; }
+        finally { button.disabled = false; }
+      });
+    }
     for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
       button.addEventListener("click", () => {
         const view = button.dataset.workspaceView;
-        if (view === "signals" || view === "files" || view === "brain") {
+        if (view === "signals" || view === "files" || view === "brain" || view === "objects") {
           activateWorkspaceView(view);
         }
       });

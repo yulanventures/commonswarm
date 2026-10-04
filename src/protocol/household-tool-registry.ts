@@ -11,8 +11,10 @@ import {
 } from './household-object-events.js';
 import type { HouseholdObjectCommand, HouseholdReadQuery } from './household-objects.js';
 
+export const HOUSEHOLD_LOCAL_SEAT = 'seat_0000000000000000000000';
+
 type Arguments = Record<string, unknown>;
-type Schema = {
+export type Schema = {
   type?: 'object' | 'array' | 'string' | 'integer' | 'boolean' | 'null';
   properties?: Readonly<Record<string, Schema>>;
   required?: readonly string[];

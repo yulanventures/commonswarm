@@ -16,3 +16,8 @@ export * from './brain-version-window.js';
 export * from './admin-policy.js';
 export * from './admin-authority.js';
 export * from './admin-routine.js';
+export * from './household-object-events.js';
+export * from './household-object-policy.js';
+export * from './household-objects.js';
+export * from './household-tool-registry.js';
+export { brainFileName, brainTopicFromFileName } from '../cloud/brain.js';

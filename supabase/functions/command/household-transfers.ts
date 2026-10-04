@@ -2,7 +2,7 @@
  * signed URL to the model. The command adapter rechecks rights at every use.
  * Lane 4 supplies FILE_BUCKET and the service credential from its existing path.
  */
-import type { HouseholdBlob, HouseholdContent } from '../../../src/protocol/household-object-events.js';
+import type { HouseholdBlob, HouseholdContent } from '../_shared/household-object-events.d.ts';
 
 export interface HouseholdStorage {
   putImmutable(path: string, bytes: Uint8Array): Promise<void>;

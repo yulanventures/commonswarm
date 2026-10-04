@@ -1,3 +1,4 @@
+import { HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import {
   commandAllowedOrigins,
   commandPreflight,
@@ -442,6 +443,21 @@ async function handle(
       ["hosted_capability", "hosted_grant_id", "hosted_seat_handle", "seat_handle"]
         .some((key) => Object.hasOwn(parsed, key))) {
     return json(403, { error: "forbidden" });
+  }
+  // Household reads use the private content store and its credential rechecks.
+  // The ordinary swarm_read transaction below retains its existing role contract.
+  const contentBody = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  if (contentBody && ["household", "household_draft", "household_access"].includes(String(contentBody.resource))) {
+    if (typeof contentBody.workspace_id !== "string" || !UUID_RE.test(contentBody.workspace_id)) return json(400, { error: "invalid_request" });
+    let command: Record<string, unknown>;
+    if (contentBody.resource === "household") {
+      if (!HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === contentBody.tool && row.effect === "read")) return json(403, { error: "forbidden" });
+      command = { kind: "household_tool", tool: contentBody.tool, arguments: contentBody.arguments };
+    } else command = { kind: contentBody.resource, ...(contentBody.resource === "household_draft" ? { draft_id: contentBody.draft_id } : {}) };
+    const content = await import("../command/index.ts");
+    return await content.handleRequest(new Request(request.url, { method: "POST", headers: request.headers,
+      body: JSON.stringify({ command_id: `read_${crypto.randomUUID()}`, client_version: "0.1.80",
+        workspace_id: contentBody.workspace_id, stream: { kind: "workspace" }, command }) }));
   }
   const body = parseBody(parsed);
   if (body === null) {
@@ -1028,6 +1044,7 @@ async function handle(
 }
 
 export type HostedReadInput =
+  | { resource: "household"; workspace_id: string; tool: string; arguments: Record<string, unknown> }
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
   | {
@@ -1065,6 +1082,13 @@ export async function handleHostedRead(
     return { status: 400, body: { error: "invalid_request" } };
   }
   const tool = hostedCapabilityTool(capability);
+  if (input.resource === "household") {
+    if (tool !== input.tool || !HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool && row.effect === "read")) return { status: 403, body: { error: "forbidden" } };
+    const content = await import("../command/index.ts");
+    return await content.handleHostedCommand({ command_id: `read_${crypto.randomUUID()}`, client_version: "0.1.80",
+      workspace_id: input.workspace_id, stream: { kind: "workspace" },
+      command: { kind: "household_tool", tool, arguments: input.arguments } }, capability);
+  }
   if ((input.resource === "whoami" && tool !== "whoami") ||
       (input.resource === "members" && tool !== "members") ||
       (input.resource === "signals" && tool !== "check")) {

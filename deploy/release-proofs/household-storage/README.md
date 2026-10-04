@@ -101,3 +101,22 @@ valid. Canonical routing, legacy/brain parity, credential adapters, activation
 metering and host failure recovery are lane 4 dependencies, not live claims.
 Server tests/catalogs/rollback have not run. HezLead arranges the family check
 and CI. No Actions run was triggered.
+
+## Draft integration overlay 05
+
+The post-C1 packet adds `20261004000005_household_permission_provisioning.sql`.
+It grants command-role INSERT on the three consent tables and column UPDATE on
+confirmed role/receipt/time/revocation and connection operations/receipt/expiry/revocation.
+Human confirmation is explicit and audited; memberships and OAuth grants are not backfilled.
+No table UPDATE, DELETE, public content access or OAuth scope is added.
+
+Run catalogs 01–04 before applying 05, then the 05 catalog. Catalog 01 deliberately
+rejects the permissions that 05 adds; it is not a post-05 aggregate catalog.
+For an inverse drill, undo 05 and verify its rollback catalog before testing or
+undoing 01–04. The 05 inverse preserves existing consent and audit rows.
+All three 05 proof files have byte-identical reserve/release copies; the inverse
+is also included verbatim as commented SQL in the migration.
+
+See [the integration checklist](../../../docs/evidence/2026-10-04-household-integration/LEAD-CHECKLIST.md)
+for the incomplete transport/legacy work and the required review/CI sequence.
+This packet does not authorize applying schema or activating household content.

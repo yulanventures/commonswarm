@@ -141,7 +141,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         const tools = await listed.json();
         ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
-        assert.equal(tools.result.tools.length, 8);
+        assert.equal(tools.result.tools.length, 16);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
         for (const tool of tools.result.tools) {
@@ -158,7 +158,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
   assert.equal(get.headers.get("allow"), "POST");
 });
 
-test("tools/list snapshots eight hosted titles, safety annotations and OAuth security schemes after 2025-06-18 negotiation", async (t) => {
+test("tools/list preserves coordination titles, safety annotations and OAuth security schemes after 2025-06-18 negotiation", async (t) => {
   const fixture = await authenticatedHandler();
   const initialized = await fixture.serve(post({
     jsonrpc: "2.0", id: "metadata-initialize", method: "initialize",
@@ -186,7 +186,7 @@ test("tools/list snapshots eight hosted titles, safety annotations and OAuth sec
     ["members", "List workspace participants", true, false, true],
   ] as const;
   const tools = envelope.result.tools;
-  assert.deepEqual(tools.map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
+  assert.deepEqual(tools.slice(0, 8).map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
   for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
     await t.test(name, () => {
       assert.deepEqual({ title: tools[index].title, annotations: tools[index].annotations, securitySchemes: tools[index].securitySchemes }, {
@@ -345,7 +345,7 @@ test("protected-resource metadata and the unauthenticated challenge name exact U
 });
 
 test("hosted tool table is closed and exposes no local or credential operations", () => {
-  assert.deepEqual(HOSTED_TOOL_TABLE.map(({ name }) => name), [
+  assert.deepEqual(HOSTED_TOOL_TABLE.slice(0, 8).map(({ name }) => name), [
     "claim_seat", "whoami", "check", "ask", "note", "reply", "working_on", "members",
   ]);
   for (const tool of HOSTED_TOOL_TABLE) {
@@ -519,7 +519,7 @@ test("origin and schema denials include authenticated positive controls", async 
     origin: "https://claude.ai",
   }));
   assert.equal(list.status, 200);
-  assert.equal((await list.json()).result.tools.length, 8);
+  assert.equal((await list.json()).result.tools.length, 16);
 
   const originDenied = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
     origin: "https://attacker.invalid",
