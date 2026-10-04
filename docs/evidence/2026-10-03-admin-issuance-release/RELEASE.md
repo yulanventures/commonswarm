@@ -1011,9 +1011,11 @@ HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<absolute path>` to a ruling file
 (regular, not a symlink, mode 0600 or 0644) with exactly `action`
 (`accept-unproven-dcr-revoke`), `approver` (`HezLead`), `release_sha`,
 `window_id`, `plan_sha256`, `client_id` and `at`; each is bound to INPUTS and to
-the client_id in the nonsecret `dcr-probe-revoke-unproven.json`. ai-close records
-it with its sha256 in `dcr-probe-revoke-accepted.json`, so a window is never stuck
-open. A W2 that
+the client_id in the nonsecret `dcr-probe-revoke-unproven.json`. The file is read
+completely (at most 64 KiB) and parsed and hashed as those exact bytes. ai-close
+validates it before any other close check and records it with its sha256 in
+`dcr-probe-revoke-accepted.json` only in the successful close commit, just before
+closed.txt, so a window is never stuck open. A W2 that
 stopped before its fence (no apply-started.txt) closes by proving the ledger
 holds no 20261003 version; admin_cutover_state does not exist before W2 applies.
 This plan does not invent issuance; the producer's final cleanup relies on this
@@ -3830,13 +3832,14 @@ if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$P
  if test -f "$PROOF_DIR/dcr-probe-revoke-attempted.txt"; then
   # A started revoke is never re-run. The close reports REVOKE-UNPROVEN and continues only with an
   # explicit HezLead ruling input, which it records; the window is never stuck open.
-  python3 - "$PROOF_DIR" "$INPUTS_FILE" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" <<'PY'
+  w2_unproven_ruling() {
+  python3 - "$PROOF_DIR" "$INPUTS_FILE" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" "$1" <<'PY'
 import datetime,hashlib,json,os,pathlib,re,stat,sys
-proof=pathlib.Path(sys.argv[1]); inputs=json.load(open(sys.argv[2])); ruling_path=sys.argv[3]
+proof=pathlib.Path(sys.argv[1]); inputs=json.load(open(sys.argv[2])); ruling_path=sys.argv[3]; mode=sys.argv[4]
 record=proof/'dcr-probe-revoke-unproven.json'
 # The staged client_id comes from the nonsecret proof record, never from the secret file.
 client=json.loads(record.read_text()).get('client_id') if record.exists() else None
-if not record.exists(): record.write_text(json.dumps({'client_id':None,'revoked':False,'status':'REVOKE-UNPROVEN','reason':'a started revoke was not proven'},sort_keys=True)+'\n')
+if not record.exists() and mode=='check': record.write_text(json.dumps({'client_id':None,'revoked':False,'status':'REVOKE-UNPROVEN','reason':'a started revoke was not proven'},sort_keys=True)+'\n')
 def refuse(what): raise SystemExit('REVOKE-UNPROVEN ai-close: DCR probe grant client_id '+str(client)+' is not proven revoked; ruling '+what+'; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<absolute ruling file> to close; STOP')
 if not (isinstance(client,str) and client): refuse('cannot bind: no staged client_id recorded')
 if not os.path.isabs(ruling_path): refuse('file expected absolute-path got missing')
@@ -3845,8 +3848,15 @@ except OSError: refuse('file expected regular-non-symlink got missing-or-symlink
 try:
     info=os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in (0o600,0o644): refuse('file expected regular-0600-or-0644 got other')
-    raw=os.read(fd,65536)
+    # Read the COMPLETE file with an enforced bound: parse and hash exactly those bytes.
+    chunks,size=[],0
+    while True:
+        chunk=os.read(fd,65537-size)
+        if not chunk: break
+        chunks.append(chunk); size+=len(chunk)
+        if size>65536: refuse('file expected at-most-65536-bytes got larger')
 finally: os.close(fd)
+raw=b''.join(chunks)
 try: r=json.loads(raw)
 except ValueError: r=None
 keys={'action','approver','release_sha','window_id','plan_sha256','client_id','at'}
@@ -3860,9 +3870,15 @@ if r['client_id']!=client: refuse('client_id expected staged-client-id got misma
 try: when=datetime.datetime.strptime(r['at'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc) if isinstance(r['at'],str) else None
 except ValueError: when=None
 if when is None or when>datetime.datetime.now(datetime.timezone.utc): refuse('at expected UTC-Z-not-future got other')
-(proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True)+'\n')
-print('REVOKE-UNPROVEN accepted by HezLead ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+'; close continues')
+if mode=='record':
+    # Written only in the successful close commit, after every close refusal check.
+    (proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True)+'\n')
+    print('REVOKE-UNPROVEN accepted by HezLead ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+'; recorded with the close')
+else: print('REVOKE-UNPROVEN ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+' validated; recorded only if the close succeeds')
 PY
+  }
+  w2_unproven_ruling check
+  W2_UNPROVEN_RULING=1
  else
   ai_run ai-w2-revoke-probes
  fi
@@ -3943,6 +3959,7 @@ PY
 rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 test ! -e "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+if test "${W2_UNPROVEN_RULING:-0}" = 1; then w2_unproven_ruling record; fi
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 ```

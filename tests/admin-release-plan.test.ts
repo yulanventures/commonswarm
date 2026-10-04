@@ -1872,6 +1872,12 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
       const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling(), LEDGER_COUNT: '1' });
       assert.notEqual(out.status, 0); assert.match(out.stderr, /FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP/);
       assert.ok(!existsSync(join(c.proof, 'closed.txt')));
+      assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')), 'no acceptance record on a refused close');
+      // A valid ruling with CLOSE_RESULT withheld: the close refuses and records no acceptance.
+      const env: Record<string, string> = { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling() }; delete env.CLOSE_RESULT;
+      const withheld = run(c.harness + c.close, env);
+      assert.notEqual(withheld.status, 0); assert.match(withheld.stderr, /CLOSE_RESULT/);
+      assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
     } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
   // Every binding of the ruling is checked; each refusal leaves the window open with no acceptance record.
   { const c = setup();
@@ -1893,6 +1899,14 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
       refusals.push([linked, 'file expected regular-non-symlink got missing-or-symlink']);
       const keys = c.ruling(); writeFileSync(keys, JSON.stringify({ action: 'accept-unproven-dcr-revoke' }), { mode: 0o600 });
       refusals.push([keys, 'keys expected exact-ruling-keys got other-set']);
+      // The bound ruling padded to exactly 65536 bytes, then a trailing conflicting document.
+      const trailing = c.ruling(); const bound = readFileSync(trailing, 'utf8');
+      writeFileSync(trailing, bound + ' '.repeat(65536 - Buffer.byteLength(bound)) + JSON.stringify({ window_id: 'yPolVl' }), { mode: 0o600 });
+      refusals.push([trailing, 'file expected at-most-65536-bytes got larger']);
+      const trailingSmall = c.ruling(); writeFileSync(trailingSmall, readFileSync(trailingSmall, 'utf8') + '\n' + JSON.stringify({ window_id: 'yPolVl' }), { mode: 0o600 });
+      refusals.push([trailingSmall, 'keys expected exact-ruling-keys got other-set']);
+      const oversized = c.ruling(); writeFileSync(oversized, ' '.repeat(70000) + readFileSync(oversized, 'utf8'), { mode: 0o600 });
+      refusals.push([oversized, 'file expected at-most-65536-bytes got larger']);
       for (const [file, reason] of refusals) {
         const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: file });
         assert.notEqual(out.status, 0, reason);
