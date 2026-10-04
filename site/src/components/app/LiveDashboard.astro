@@ -12845,6 +12845,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     grid-column: 2 / -1;
   }
 
+  /* The access line and its result are row meta, like the owner and model line in the copy
+     above them: same muted colour and small size, not body text. */
+  .dashboard__roster-dialog-list [data-agent-content-access],
+  .dashboard__roster-dialog-list [data-agent-content-result] {
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+  }
+
   .dashboard__agent-content-withdraw {
     justify-self: start;
     text-align: start;
