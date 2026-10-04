@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -30,8 +30,14 @@ function pgBin(): string | null {
   }
   return null;
 }
-const PG = process.env.RUN_PG_REHEARSAL === '1' ? pgBin() : null;
-const skipDb = PG ? false : 'set RUN_PG_REHEARSAL=1 with local PostgreSQL 17+ binaries to run the rehearsal';
+// Skip only when the rehearsal is not requested; with RUN_PG_REHEARSAL=1 missing PostgreSQL 17+ FAILS the tests.
+const REQUESTED = process.env.RUN_PG_REHEARSAL === '1';
+const PG_FOUND = REQUESTED ? pgBin() : null;
+const skipDb = REQUESTED ? false : 'RUN_PG_REHEARSAL is unset: the database rehearsal is not requested';
+const PG = (): string => {
+  assert.ok(PG_FOUND, 'RUN_PG_REHEARSAL=1 but no PostgreSQL 17+ binaries (PG_BIN, PATH or Homebrew postgresql@17)');
+  return PG_FOUND!;
+};
 
 test('c1 W2 rehearsal: the script is Bash 3.2 syntax and never puts a heredoc inside a command substitution', () => {
   const syntax = spawnSync('/bin/bash', ['-n', script], { encoding: 'utf8' });
@@ -74,14 +80,57 @@ test('c1 W2 rehearsal: cleanup deletes only the script\'s own mktemp directory (
   } finally { rmSync(own, { recursive: true, force: true }); }
 });
 
-test('c1 W2 rehearsal: 835b7ae8 catalogs FAIL and the current plan PASSES end to end on the repository pre-W2 fixture', { skip: skipDb }, () => {
-  const env = { PG_BIN: PG! };
-  const fixture = join(scratch, 'fixture');
-  const built = run(['--build-fixture', fixture], env);
+test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster directory and exits nonzero', () => {
+  // Stub pg_ctl in a test-owned directory; the recorded postmaster pid is this live test process.
+  const bin = join(scratch, 'stub-bin'); mkdirSync(bin, { recursive: true });
+  const stub = (status: number) => { writeFileSync(join(bin, 'pg_ctl'), `#!/bin/sh\nexit ${status}\n`); chmodSync(join(bin, 'pg_ctl'), 0o755); };
+  const cluster = (pid: number) => {
+    const dir = mkdtempSync('/tmp/c1w2.'); mkdirSync(join(dir, 'data'));
+    writeFileSync(join(dir, 'data', 'postmaster.pid'), `${pid}\n${join(dir, 'data')}\n`); return dir;
+  };
+  const dirs: string[] = [];
+  try {
+    stub(1);
+    const failed = cluster(process.pid); dirs.push(failed);
+    let r = run(['--cleanup-run', failed], { PG_BIN: bin });
+    assert.equal(r.status, 4, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`^RETAIN cleanup: pg_ctl stop failed; postmaster ${process.pid} may still run; cluster directory ${failed} kept$`, 'm'));
+    assert.ok(existsSync(join(failed, 'data', 'postmaster.pid')), 'a failed stop never reaches rm');
+    stub(0);
+    const alive = cluster(process.pid); dirs.push(alive);
+    r = run(['--cleanup-run', alive], { PG_BIN: bin });
+    assert.equal(r.status, 4, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`^RETAIN cleanup: postmaster ${process.pid} still running after stop; cluster directory ${alive} kept$`, 'm'));
+    assert.ok(existsSync(join(alive, 'data')), 'a still-running postmaster keeps its directory');
+    const garbled = cluster(0); dirs.push(garbled); writeFileSync(join(garbled, 'data', 'postmaster.pid'), 'not-a-pid\n');
+    r = run(['--cleanup-run', garbled], { PG_BIN: bin });
+    assert.equal(r.status, 4); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.pid unreadable/m); assert.ok(existsSync(garbled));
+    // Positive control: a stopped postmaster (an exited pid) lets cleanup remove the directory.
+    const exited = spawnSync('/bin/sh', ['-c', 'echo $$'], { encoding: 'utf8' });
+    const stopped = cluster(Number(exited.stdout.trim()));
+    r = run(['--cleanup-run', stopped], { PG_BIN: bin });
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /^REMOVED cleanup-run: /m); assert.ok(!existsSync(stopped));
+    // Refusal still applies before any stop is attempted.
+    r = run(['--cleanup-run', scratch], { PG_BIN: bin });
+    assert.notEqual(r.status, 0); assert.match(r.stdout, /^REFUSE cleanup: /m); assert.ok(existsSync(scratch));
+  } finally { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); }
+});
+
+let fixtureDir: string | null = null;
+function fixture(): string {
+  if (fixtureDir) return fixtureDir;
+  const dir = join(scratch, 'fixture');
+  const built = run(['--build-fixture', dir], { PG_BIN: PG() });
   assert.equal(built.status, 0, built.stdout + built.stderr);
   assert.match(built.stdout, /^PASS fixture:migrations: 68 pre-W2 migrations applied with their ledger rows$/m);
+  return (fixtureDir = dir);
+}
 
-  const current = run([fixture], env);
+test('c1 W2 rehearsal: the current plan PASSES end to end on the repository pre-W2 fixture', { skip: skipDb }, () => {
+  const env = { PG_BIN: PG() };
+  const fixtureDir = fixture();
+
+  const current = run([fixtureDir], env);
   assert.equal(current.status, 0, current.stdout + current.stderr);
   assert.match(current.stdout, /^PASS isolation: /m);
   for (const label of ['restore-schema', 'ai-db-session:ledger-before', 'ai-w2-preflight:ledger-and-reserves', 'ai-w2-preflight:before-catalogs',
@@ -91,20 +140,34 @@ test('c1 W2 rehearsal: 835b7ae8 catalogs FAIL and the current plan PASSES end to
   for (let i = 1; i <= 5; i++) assert.match(current.stdout, new RegExp(`^PASS ai-w2-apply:2026100300000${i}: `, 'm'));
   assert.doesNotMatch(current.stdout, /^FAIL /m);
 
-  const reserve = run(['--reserve-control', fixture], env);
+  const reserve = run(['--reserve-control', fixtureDir], env);
   assert.equal(reserve.status, 0, reserve.stdout + reserve.stderr);
   assert.match(reserve.stdout, /^PASS control: every reserve applied and every reverse catalog true$/m);
 
   // --live-dump replaces only the exact live statements: a dump without them is refused, not guessed.
-  const live = run(['--live-dump', fixture], env);
+  const live = run(['--live-dump', fixtureDir], env);
   assert.notEqual(live.status, 0);
   assert.match(live.stdout, /^FAIL restore-schema: "CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;" expected once got 0$/m);
 
-  // Negative control: the released 835b7ae8 catalogs, as that plan ran them. Needs that commit in the clone.
-  if (spawnSync('git', ['cat-file', '-e', '835b7ae8^{commit}']).status === 0) {
-    const old = run(['--catalogs-from', '835b7ae8', fixture], env);
-    assert.notEqual(old.status, 0);
-    assert.match(old.stdout, /^FAIL ai-w2-preflight:before-catalogs: FAIL ai-w2-preflight: before-apply catalog for 20261003000004 expected t got other; STOP; .*ERROR: +schema "commonswarm_ops" does not exist$/m);
-    assert.doesNotMatch(old.stdout, /^PASS ai-w2-measure$/m, 'nothing after the failed step runs');
-  }
+});
+
+test('c1 W2 rehearsal: a failing inventory query fails ai-w2-preflight:before-catalogs (errexit is enforced)', { skip: skipDb }, () => {
+  const r = run([fixture()], { PG_BIN: PG(), C1_W2_REHEARSAL_FAULT: 'preflight-inventory' });
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.match(r.stdout, /^FAULT injected: the functions-before inventory query/m);
+  assert.match(r.stdout, /^FAIL ai-w2-preflight:before-catalogs: .*relation "rehearsal_fault_missing_relation" does not exist$/m);
+  assert.doesNotMatch(r.stdout, /^PASS ai-w2-preflight:before-catalogs$/m);
+  assert.doesNotMatch(r.stdout, /^PASS ai-w2-measure$/m);
+});
+
+// Not skipped when the rehearsal is requested: a clone without the baseline commit FAILS this test.
+// CI that sets RUN_PG_REHEARSAL=1 needs the commit (actions/checkout fetch-depth: 0, or git fetch origin 835b7ae8).
+test('c1 W2 rehearsal: the released 835b7ae8 catalogs FAIL at before-catalogs for 20261003000004 (negative control)', { skip: skipDb }, () => {
+  const present = spawnSync('git', ['cat-file', '-e', '835b7ae8^{commit}']);
+  assert.equal(present.status, 0, 'baseline commit 835b7ae8 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 835b7ae8)');
+  const old = run(['--catalogs-from', '835b7ae8', fixture()], { PG_BIN: PG() });
+  assert.notEqual(old.status, 0);
+  // Errexit stops at the failing psql call, as on the box; the failing file names the version.
+  assert.match(old.stdout, /^FAIL ai-w2-preflight:before-catalogs: .*ERROR: +schema "commonswarm_ops" does not exist \(last SQL file: \/proof\/catalog\.sql -> \/release\/deploy\/release-proofs\/item-ai\/20261003000004-rollback-catalog\.sql\)$/m);
+  assert.doesNotMatch(old.stdout, /^PASS ai-w2-measure$/m, 'nothing after the failed step runs');
 });

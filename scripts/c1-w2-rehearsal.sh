@@ -3,7 +3,7 @@
 #
 #   scripts/c1-w2-rehearsal.sh [--live-dump] [--catalogs-from <git-sha>] [--reserve-control] <dump-dir>
 #   scripts/c1-w2-rehearsal.sh --build-fixture <out-dir>
-#   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path>
+#   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path> | --cleanup-run <path>   (test controls)
 #
 # Rehearsal: <dump-dir> holds roles.sql, schema.sql and ledger.sql of a pre-W2 database. The script makes a
 # cluster in an absolute mktemp directory, listens only on a unix socket in that directory, restores the dump,
@@ -40,7 +40,9 @@
 # W2 result.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
-# the refusal). HOME is never assigned.
+# the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
+# stop, or a postmaster pid still alive, keeps the directory, prints RETAIN and exits nonzero
+# (--cleanup-run proves it). HOME is never assigned.
 set -u
 set -o pipefail
 
@@ -62,9 +64,19 @@ own_dir_ok() {
 }
 
 cleanup_dir() {
-  local dir=$1
+  local dir=$1 pid
   if ! own_dir_ok "$dir"; then say "REFUSE cleanup: $dir is not this script's mktemp directory"; return 1; fi
-  if test -f "$dir/data/postmaster.pid"; then "$PG_BIN/pg_ctl" -D "$dir/data" -m fast -w stop >/dev/null 2>&1; fi
+  if test -e "$dir/data/postmaster.pid"; then
+    # The owned postmaster is the pid recorded in this directory's own postmaster.pid.
+    pid=$(head -1 "$dir/data/postmaster.pid" 2>/dev/null)
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then say "RETAIN cleanup: postmaster.pid unreadable; cluster directory $dir kept"; return 1; fi
+    if ! "$PG_BIN/pg_ctl" -D "$dir/data" -m fast -w -t 60 stop >/dev/null 2>&1; then
+      say "RETAIN cleanup: pg_ctl stop failed; postmaster $pid may still run; cluster directory $dir kept"; return 1
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      say "RETAIN cleanup: postmaster $pid still running after stop; cluster directory $dir kept"; return 1
+    fi
+  fi
   rm -rf -- "$dir"
 }
 
@@ -75,6 +87,12 @@ on_exit() {
   exit "$status"
 }
 
+# Test control only: run the real cleanup on a directory of this script's own shape.
+if test "${1:-}" = --cleanup-run; then
+  test $# = 2 || die cleanup-run 'expected one path'
+  cleanup_dir "$2" || exit 4
+  say "REMOVED cleanup-run: $2"; exit 0
+fi
 if test "${1:-}" = --cleanup-selftest; then
   test $# = 2 || die cleanup-selftest 'expected one path'
   if own_dir_ok "$2"; then say "ACCEPT cleanup-selftest: $2"; exit 0; fi
@@ -249,6 +267,15 @@ extract "$PLAN" ai-db-session line '>"$PROOF_DIR/ledger-before.txt"' >"$T/blocks
 extract "$PLAN" ai-w2-preflight slice 'python3 - "$RELEASE_ROOT" "$PROOF_DIR" <<' '# Current backup/restore evidence' >"$T/blocks/preflight-ledger.sh"
 extract "$T/catalog-plan.md" ai-w2-preflight slice '# Before proofs:' 'ai_run ai-w2-measure' >"$T/blocks/preflight-before.sh"
 for STEP in ai-w2-measure ai-w2-apply ai-w2-reconcile ai-w2-probes; do extract "$PLAN" "$STEP" block >"$T/blocks/$STEP.sh"; done
+if test "${C1_W2_REHEARSAL_FAULT:-}" = preflight-inventory; then
+  python3 - "$T/blocks/preflight-before.sh" <<'PY' || die fault 'functions-before inventory query expected once got other'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); s=p.read_text(); a='FROM pg_proc p JOIN pg_namespace n'
+assert s.count(a)==1 and s.count('functions-before.txt')==1
+p.write_text(s.replace(a,'FROM rehearsal_fault_missing_relation p JOIN pg_namespace n'))
+PY
+  say "FAULT injected: the functions-before inventory query in ai-w2-preflight names a missing relation (test control)"
+fi
 for f in "$T"/blocks/*.sh; do /bin/bash -n "$f" || die extract "$(basename "$f") is not valid bash"; done
 # Isolation: nothing the W2 rehearsal runs names an object of a modelled (or other Supabase-only) extension.
 python3 - "$RELEASE_ROOT" "$T/blocks" <<'PY' || exit 1
@@ -285,9 +312,13 @@ def mapped(p):
 print(mapped(src))
 PY
 ai_db() {
-  local args=() prev= a
+  local args=() prev= a src
+  : >"$T/last-sql.txt"
   for a in "$@"; do
     if test "$prev" = --file && test "$a" != -; then
+      # Record which plan SQL file (and the files it includes) this call runs: paths only, never contents.
+      case "$a" in /release/*) src=$RELEASE_ROOT${a#/release} ;; /proof/*) src=$PROOF_DIR${a#/proof} ;; *) src=$a ;; esac
+      { printf '%s' "$a"; sed -n 's#^\\i \(/[^ ]*\)$# -> \1#p' "$src" | tr -d '\n'; } >"$T/last-sql.txt" 2>/dev/null
       a=$(python3 "$T/map.py" "$RELEASE_ROOT" "$PROOF_DIR" "$T/mapped" "$a") || return 1
     fi
     args+=("$a"); prev=$a
@@ -314,7 +345,8 @@ ai_run() {
     ai-w2-revoke-probes)
       test -f "$PROOF_DIR/dcr-probe-revoked.json" || printf '{"client_id":"rehearsal","proof":"refresh rejected","revoked":true}\n' >"$PROOF_DIR/dcr-probe-revoked.json" ;;
     ai-w2-reconcile|ai-w2-measure)
-      eval "$(cat "$T/blocks/$1.sh")" || return 1
+      # As the plan's ai_run: plain eval, so the caller's errexit applies inside the block.
+      eval "$(cat "$T/blocks/$1.sh")"
       say "PASS $1" >&3 ;;
     *) return 1 ;;
   esac
@@ -342,10 +374,21 @@ fi
 
 step() { # label script
   local label=$1 file=$2
-  if ( eval "$(cat "$file")" ) 3>&1 >"$T/step.out" 2>"$T/step.err"; then say "PASS $label"; return 0; fi
+  : >"$T/last-sql.txt"
+  # Plain command, not an if/|| condition: there bash would suppress errexit inside the subshell.
+  ( set -euo pipefail; eval "$(cat "$file")" ) 3>&1 >"$T/step.out" 2>"$T/step.err"
+  local status=$?
+  if test "$status" = 0; then say "PASS $label"; return 0; fi
   local why
   why=$(first_error "$T/step.err")
-  case "$why" in *ERROR:*|*FATAL:*) ;; *) test -s "$SECRET_STAGE/psql.log" && grep -q 'ERROR:' "$SECRET_STAGE/psql.log" && why="$why; $(first_error "$SECRET_STAGE/psql.log")" ;; esac
+  case "$why" in
+    *ERROR:*|*FATAL:*) ;;
+    *) if test -s "$SECRET_STAGE/psql.log" && grep -q 'ERROR:' "$SECRET_STAGE/psql.log"; then
+         if test "$why" = 'no diagnostic'; then why=$(first_error "$SECRET_STAGE/psql.log"); else why="$why; $(first_error "$SECRET_STAGE/psql.log")"; fi
+       fi
+       test "$why" != 'no diagnostic' || why="exit status $status" ;;
+  esac
+  if test -s "$T/last-sql.txt"; then why="$why (last SQL file: $(head -c 300 "$T/last-sql.txt"))"; fi
   say "FAIL $label: $why"; exit 1
 }
 
