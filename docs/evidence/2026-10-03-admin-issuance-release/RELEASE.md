@@ -617,12 +617,20 @@ umask 077
 if test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"])' "$INPUTS_FILE")" = W6; then
  : "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
  python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
-import datetime,json,pathlib,sys
+import datetime,json,pathlib,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
 assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
 w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
 assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
-t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+closed_at=box_utc(close.read_text().strip()); assert closed_at is not None, 'FAIL W5 closed.txt expected aware-UTC-ISO-8601-time got other; STOP'
+t=closed_at.timestamp()
 assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
 PY
 fi
@@ -1070,20 +1078,31 @@ set -euo pipefail
 case "$WINDOW" in W1|W2b|W4) ;; *) printf 'FAIL ai-w1-backup-gate: window expected W1-W2b-or-W4 got other; STOP\n' >&2; exit 1;; esac
 ai_deadline
 python3 - "$PROOF_DIR/backup-gate.json" "$INPUTS_FILE" "$WINDOW" <<'PY'
-import datetime,json,pathlib,sys
+import datetime,json,pathlib,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 now=datetime.datetime.now(datetime.timezone.utc)
 try:
     b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
     r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
 except (OSError,ValueError): raise SystemExit('FAIL backup and restore status files; STOP') from None
 assert all(b.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified')), 'FAIL verified backup; STOP'
-age=(now-datetime.datetime.fromisoformat(b['verified_at'].replace('Z','+00:00'))).total_seconds()
+verified=box_utc(b.get('verified_at')); assert verified is not None, 'FAIL backup verified_at expected aware-UTC-ISO-8601-time got other; STOP'
+age=(now-verified).total_seconds()
 assert 0<=age<=1800 and b['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL fresh backup; STOP'
 assert r.get('ok') is True and r.get('state')=='complete', 'FAIL complete restore drill; STOP'
-age=(now-datetime.datetime.fromisoformat(r['at'].replace('Z','+00:00'))).total_seconds()
+restored=box_utc(r.get('at')); assert restored is not None, 'FAIL restore at expected aware-UTC-ISO-8601-time got other; STOP'
+age=(now-restored).total_seconds()
 assert 0<=age<=8*86400, 'FAIL restore freshness; STOP'
 d=json.load(open(sys.argv[2])); assert d['window']==sys.argv[3], 'FAIL backup gate window binding; STOP'
-# A bound receipt: release, window and window ID, the measured times, the destination and the gate time.
+# A bound receipt: release, window and window ID, the measured times (the box strings as written, +00:00 with
+# microseconds), the destination and the gate time (written ...Z with 6 digits); ai-backup-gate-check reads all
+# three with the same box_utc parser.
 pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],
     'backup_verified_at':b['verified_at'],'restore_completed_at':r['at'],'destination':b['destination'],
     'gate_at':now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')},sort_keys=True)+'\n')
@@ -1094,7 +1113,11 @@ ai_run ai-backup-gate-check
 
 Every consumer of a backup-gate.json (W2 preflight for W1, W2b preflight and
 issuer credential, W4 preflight and apply, and the W1/W2b/W4 success close)
-validates it with this ONE block, never by file presence: exact keys, the
+validates it with this ONE block, never by file presence: exact keys, every
+time read with the shared strict `box_utc` parser (an aware UTC time with
+offset `+00:00` or `Z` and 0-6 fraction digits, as the box backup writer
+emits, e.g. `2026-10-04T22:12:09.199316+00:00`; any other offset, a naive time
+or a non-ISO value is refused), the
 receipt bound to its own window directory's inputs.json (release, window,
 window ID), the backup verified at most 1800 s and the restore drill completed
 at most 8 days before the gate time, the gate time inside that window
@@ -1119,11 +1142,15 @@ def read(name):
         if not stat.S_ISREG(os.fstat(fd).st_mode): return None
         return os.read(fd,65537)
     finally: os.close(fd)
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 def when(value,what):
-    ok=isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z',value) is not None
-    try: t=datetime.datetime.fromisoformat(value.replace('Z','+00:00')) if ok else None
-    except ValueError: t=None
-    need(t is not None,what,'UTC-ISO-8601-Z-time','other'); return t
+    t=box_utc(value); need(t is not None,what,'aware-UTC-ISO-8601-time','other'); return t
 need(w.is_absolute() and w.is_dir() and not w.is_symlink(),'backup gate directory','absolute-directory','missing-or-symlink')
 raw=read('backup-gate.json'); need(raw is not None and len(raw)<=65536,'backup-gate.json','regular-file','missing-or-not-regular')
 try: g=json.loads(raw)
@@ -1487,10 +1514,18 @@ trap w2_probe_exit EXIT
 ai_deadline
 : "${BACKFILL_FILE:?}" "${HISTORICAL_ARCHIVES_DIR:?}" "${W1_CLOSED_FILE:?}"
 python3 - "$W1_CLOSED_FILE" "$RELEASE_SHA" <<'PY'
-import datetime,json,pathlib,sys
+import datetime,json,pathlib,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
 d=json.load(open(p.parent/"inputs.json")); assert d["window"]=="W1" and d["release_sha"]==sys.argv[2]
-assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(p.read_text().strip().replace("Z","+00:00"))).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
+closed_at=box_utc(p.read_text().strip()); assert closed_at is not None, "FAIL W1 closed.txt expected aware-UTC-ISO-8601-time got other; STOP"
+assert 0<=(datetime.datetime.now(datetime.timezone.utc)-closed_at).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
 PY
 BACKUP_GATE_DIR="${W1_CLOSED_FILE%/*}"
 ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2-preflight: W1: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
@@ -1548,10 +1583,18 @@ for v in required:
 PY
 # Current backup/restore evidence is read-only; neither starts an Actions run nor a drill.
 python3 - /var/backups/commonswarm-postgres/status.json <<'PY'
-import datetime,json,sys
+import datetime,json,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 r=json.load(open(sys.argv[1]))
 assert all(r.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified'))
-age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r['verified_at'].replace('Z','+00:00'))).total_seconds()
+verified=box_utc(r.get('verified_at')); assert verified is not None, 'FAIL backup verified_at expected aware-UTC-ISO-8601-time got other; STOP'
+age=(datetime.datetime.now(datetime.timezone.utc)-verified).total_seconds()
 assert -300<=age<86400 and r['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL backup gate; STOP'
 PY
 # Before proofs: one reviewed before-apply catalog per version, read from the verified release
@@ -3618,12 +3661,20 @@ receipt and close timestamp travel together. Never fabricate a close marker.
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
 python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
-import datetime,json,pathlib,sys
+import datetime,json,pathlib,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
 assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
 w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
 assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
-t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+closed_at=box_utc(close.read_text().strip()); assert closed_at is not None, 'FAIL W5 closed.txt expected aware-UTC-ISO-8601-time got other; STOP'
+t=closed_at.timestamp()
 assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
 PY
 ```
@@ -4204,12 +4255,20 @@ PY
 : "${W5_CLOSED_FILE:?}" "${BROWSER_READY_FILE:?}"
 test "$BROWSER_READY_FILE" = /Users/yulanbot/work/BROWSER-READY
 python3 - "$INPUTS_FILE" "$W5_CLOSED_FILE" "$BROWSER_READY_FILE" <<'PY'
-import datetime,json,pathlib,sys
+import datetime,json,pathlib,re,sys
+def box_utc(value):
+    # Shared strict parser for box-written times: an AWARE UTC time, offset +00:00 or Z, 0-6 fraction digits.
+    # Any other offset, a naive time or a non-ISO value is None, which every caller refuses.
+    m=re.fullmatch(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)',value) if isinstance(value,str) else None
+    if m is None: return None
+    try: return datetime.datetime(*(int(x) for x in m.groups()[:6]),int((m.group(7) or '0').ljust(6,'0')),tzinfo=datetime.timezone.utc)
+    except ValueError: return None
 d=json.load(open(sys.argv[1])); close,ready=map(pathlib.Path,sys.argv[2:])
 assert all(p.is_absolute() and p.is_file() and not p.is_symlink() for p in (close,ready)), 'FAIL W6 fresh BROWSER-READY required; STOP'
 w=json.load(open(close.parent/'inputs.json')); assert w['release_sha']==d['release_sha'] and w['window']=='W5'
 assert json.load(open(close.parent/'W5-closed.json'))['state']=='closed'
-t=datetime.datetime.fromisoformat(close.read_text().strip().replace('Z','+00:00')).timestamp()
+closed_at=box_utc(close.read_text().strip()); assert closed_at is not None, 'FAIL W5 closed.txt expected aware-UTC-ISO-8601-time got other; STOP'
+t=closed_at.timestamp()
 assert ready.stat().st_mtime>t and ready.stat().st_mtime<=datetime.datetime.now(datetime.timezone.utc).timestamp(), 'FAIL W6 BROWSER-READY must be newer than W5 close; STOP'
 PY
 

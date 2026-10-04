@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "verified_at": "2026-10-04T22:12:09.199316+00:00",
+  "retention_policy_observed_at": "2026-09-18T00:13:29.059720+00:00",
+  "database_bytes_verified": true,
+  "object_bytes_verified": true,
+  "destination": "r2:yulan-vps-1-backups/000-commonswarm-postgres/20261004T221209Z-fixture",
+  "format": "commonswarm-backup-v1",
+  "host_snapshot_before": "20261004T031501Z",
+  "host_snapshot_after": "20261004T031501Z",
+  "objects": [],
+  "invocation_id": "fixture-invocation",
+  "immutable_bucket_lock": false,
+  "retention_days": 35,
+  "source_bucket": "commonswarm-files",
+  "physical_key_format": "fixture"
+}
