@@ -134,17 +134,24 @@ record_identity() { # dir
 }
 
 cleanup_dir() {
-  local dir=$1 pid tenths=0 limit=${C1_W2_CLEANUP_WAIT_TENTHS:-100} ident state verdict left status_f status_g
+  local dir=$1 pid= tenths=0 limit=${C1_W2_CLEANUP_WAIT_TENTHS:-100} ident state verdict left status_f status_g=1
   [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] && test "$limit" -le 100 || limit=100
   if ! own_dir_ok "$dir"; then say "REFUSE cleanup: $dir is not this script's mktemp directory"; return 1; fi
+  # The recorded postmaster identity (pid and start time, written after every start) governs cleanup whether or not
+  # postmaster.pid still exists: a missing pid file never lets a possibly live cluster be deleted unchecked.
+  ident=$(cat "$dir/postmaster.identity" 2>/dev/null)
   if test -e "$dir/data/postmaster.pid"; then
     # The owned postmaster is the pid recorded in this directory's own postmaster.pid.
     pid=$(head -1 "$dir/data/postmaster.pid" 2>/dev/null)
     if ! [[ "$pid" =~ ^[0-9]+$ ]]; then say "RETAIN cleanup: postmaster.pid unreadable; cluster directory $dir kept"; return 1; fi
-    ident=$(cat "$dir/postmaster.identity" 2>/dev/null)
     if ! "$PG_BIN/pg_ctl" -D "$dir/data" -m fast -w -t 60 stop >/dev/null 2>&1; then
       say "RETAIN cleanup: pg_ctl stop failed; postmaster $pid may still run; cluster directory $dir kept"; return 1
     fi
+  elif test -n "$ident"; then
+    pid=${ident%% *}
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then say "RETAIN cleanup: postmaster.identity unreadable; cluster directory $dir kept"; return 1; fi
+  fi
+  if test -n "$pid"; then
     # pg_ctl -w returns once postmaster.pid is gone; the process may still be exiting. Wait, bounded (default 10 s in
     # 100 ms steps), until the RECORDED postmaster is verifiably gone: no such process; or an unreaped zombie with the
     # recorded start time; or the pid now belongs to another process (a different start time). Unknown state waits.
@@ -164,10 +171,13 @@ cleanup_dir() {
       fi
       sleep 0.1; tenths=$((tenths + 1))
     done
-    # Nothing of this cluster may remain: no process naming its data directory and none in the postmaster's process
-    # group (pg_ctl starts the postmaster in its own session). A check that cannot run counts as a survivor.
+  fi
+  # Whenever a cluster may have run here (an identity, a pid, or a data directory), nothing of it may remain: no
+  # process naming its data directory and none in the postmaster's process group (pg_ctl starts it in its own
+  # session). A check that cannot run counts as a survivor. Only a directory where no cluster ever started skips this.
+  if test -n "$ident" || test -n "$pid" || test -e "$dir/data"; then
     left=$(pgrep -f -- "$dir/data" 2>/dev/null); status_f=$?
-    left="$left $(pgrep -g "$pid" 2>/dev/null)"; status_g=$?
+    if test -n "$pid"; then left="$left $(pgrep -g "$pid" 2>/dev/null)"; status_g=$?; fi
     if test "$status_f" != 1 || test "$status_g" != 1; then
       say "RETAIN cleanup: processes of this cluster remain or cannot be checked after the postmaster exit; cluster directory $dir kept"; return 1
     fi
