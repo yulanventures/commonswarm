@@ -33,7 +33,10 @@ async function fixture(t, config = {}) {
   const creds = join(root, 'credentials'), human = join(root, 'human'), seat = join(root, 'seat');
   for (const dir of [creds, human, seat]) await mkdir(dir, { mode: 0o700 });
   const clientTimes = new Map();
-  const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Set(), events = [], violations = [];
+  const releaseSha = config.releaseSha ?? release;
+  const claimedNames = config.claimedNames ?? new Map();
+  const claimReplays = new Map();
+  const secrets = [], clients = new Set(), families = new Map(), codes = new Map(), access = new Map(), events = [], violations = [];
   const secret = () => { const s = randomBytes(32).toString('base64url'); secrets.push(s); return s; };
   const seatToken = `swm_agt_${secret()}`, anon = secret(); let humanRefresh = secret();
   const clientMetadata = { client_id: client, client_name: 'CommonSwarm C1 ordinary controls', client_uri: 'https://yulanventures.com',
@@ -43,7 +46,7 @@ async function fixture(t, config = {}) {
     res.writeHead(status, { 'Content-Type': 'application/json', ...headers }); res.end(body === null ? undefined : JSON.stringify(body));
   };
   const token = (res, f) => {
-    const a = secret(), r = secret(); access.add(a); families.set(r, { family: f, consumed: false });
+    const a = secret(), r = secret(); access.set(a, f); families.set(r, { family: f, consumed: false });
     return emit(res, 200, { token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 300, scope: 'mcp', ignored_cookie: secret() });
   };
   let signal;
@@ -116,12 +119,31 @@ async function fixture(t, config = {}) {
         } else if (body.method === 'tools/call') {
           assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           assert.equal(body.params.name, 'claim_seat');
-          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner',
-            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}` });
-          event.claim = body.params.arguments;
+          const args = body.params.arguments, grant = access.get(req.headers.authorization.slice(7));
+          event.claim = args;
+          const replay = claimReplays.get(args.request_id);
+          if (replay && replay.grant === grant) {
+            assert.deepEqual(args, replay.args, 'a request id replays the same claim');
+            event.replayed = true;
+            return emit(res, 200, { jsonrpc: '2.0', id: body.id, result: replay.result });
+          }
+          const existing = claimedNames.get(args.name);
+          // Every principal reserves its exact name, even after its grant is revoked.
+          if (config.claimedNames && existing && existing.grant !== grant) {
+            event.refused = 'hosted_seat_name_taken';
+            return emit(res, 200, { jsonrpc: '2.0', id: body.id, result: { isError: true,
+              content: [{ type: 'text', text: JSON.stringify({ code: event.refused }) }] } });
+          }
+          const name = `c1-controls-runner-${releaseSha.slice(0, 8)}`;
+          assert.deepEqual(args, { workspace_id: wid, name,
+            request_id: `c1_controls_claim_${hash(`${releaseSha}:${wid}:${name}`).slice(0, 40)}` });
           result = { ...(config.claimError ? { isError: true } : {}),
-            content: [{ type: 'text', text: JSON.stringify({ workspace_id: config.wrongClaimWorkspace ? randomUUID() : wid, name: 'c1-controls-runner',
+            content: [{ type: 'text', text: JSON.stringify({ workspace_id: config.wrongClaimWorkspace ? randomUUID() : wid, name,
               seat_id: '44444444-4444-4444-8444-444444444444', handle: config.badClaimHandle ? 'unsafe' : 'seat_' + 'a'.repeat(32) }) }] };
+          if (!config.claimError) {
+            claimedNames.set(name, existing ?? { principal_id: randomUUID(), grant });
+            claimReplays.set(args.request_id, { grant, args, result });
+          }
         } else {
           assert.equal(body.method, 'tools/list'); assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           result = { tools: (config.badTools ? tools.slice(1) : tools).map(name => ({ name })) };
@@ -183,7 +205,7 @@ async function fixture(t, config = {}) {
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
       args.push(arg); if (arg !== '--dry-run') args.push(extra[++i]); }
-    const child = spawn(process.execPath, ['--import', preload, script, ...args, ...(command === 'final-cleanup' || workspaceId === null ? [] : ['--workspace-id', workspaceId]), '--release-sha', release, '--cred-dir', credDir, '--out', out,
+    const child = spawn(process.execPath, ['--import', preload, script, ...args, ...(command === 'final-cleanup' || workspaceId === null ? [] : ['--workspace-id', workspaceId]), '--release-sha', releaseSha, '--cred-dir', credDir, '--out', out,
       '--request-timeout-ms', '1000', '--consent-timeout-ms', '2000', '--total-timeout-ms', '12000'], { env: { ...process.env, LIVE_CONTROLS_FIXTURE_ORIGIN: origin, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', done = false, handoffError;
     child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
@@ -257,8 +279,8 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
     assert.equal(r.bytes.toString(), JSON.stringify(r.receipt, null, 2) + '\n');
     assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
     assert.equal(r.report.workspace_id, wid);
-    assert.deepEqual(r.report.seat, { name: 'c1-controls-runner',
-      request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}`,
+    assert.deepEqual(r.report.seat, { name: 'c1-controls-runner-aaaaaaaa',
+      request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-aaaaaaaa`).slice(0, 40)}`,
       seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) });
     for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) assert.equal((await stat(join(f.creds, name))).mode & 0o777, 0o600);
     const record = JSON.parse(await readFile(join(f.human, `${hash(api).slice(0, 24)}.json`))); assert.equal(record.generation, ++generation);
@@ -268,6 +290,54 @@ test('executable produces exact consent/live bytes with real PKCE, rotating refr
   assert.equal(f.events.filter(e => e.claim).length, 3);
   assert.equal(new Set(f.events.filter(e => e.claim).map(e => e.claim.request_id)).size, 1, 'claim replay uses the same request id across windows');
   await missing(join(f.human, 'live-controls.lock'));
+});
+
+test('consecutive releases succeed while live and revoked principals keep their seat names reserved', async t => {
+  const claimedNames = new Map([
+    ['c1-controls-runner', { principal_id: randomUUID(), grant: { revoked: true } }],
+  ]);
+  const firstSha = '0123abcd' + 'a'.repeat(32), secondSha = '89abcdef' + 'b'.repeat(32);
+  const first = await fixture(t, { releaseSha: firstSha, claimedNames });
+  const firstConsent = await pre(first);
+  const firstWindow = await first.run('window');
+  assert.equal(firstWindow.exit, 0, firstWindow.output);
+  assert.equal(firstWindow.receipt.release_sha, firstSha);
+  assert.equal(firstWindow.report.seat.name, 'c1-controls-runner-0123abcd');
+  assert.equal(firstWindow.report.seat.request_id,
+    `c1_controls_claim_${hash(`${firstSha}:${wid}:c1-controls-runner-0123abcd`).slice(0, 40)}`);
+  const replay = await first.run('window', ['--window', 'W2']);
+  assert.equal(replay.exit, 0, replay.output);
+  assert.deepEqual(replay.report.seat, firstWindow.report.seat);
+  assert.ok(first.events.some(e => e.claim && e.replayed), 'same release replays the original claim');
+
+  // A different grant with the same eight-character prefix reaches the name refusal.
+  const collision = await fixture(t, { releaseSha: '0123abcd' + 'c'.repeat(32), claimedNames });
+  await pre(collision);
+  async function refusesCollision() {
+    const refused = await collision.run('window');
+    assert.equal(refused.exit, 1, refused.output);
+    assert.equal(refused.receipt, undefined);
+    assert.equal(refused.report, undefined);
+    assert.equal(collision.events.filter(e => e.claim).at(-1).refused, 'hosted_seat_name_taken');
+    assert.ok(!collision.events.some(e => e.command === 'post_signal'));
+  }
+  await refusesCollision();
+  const cleanup = await first.run('consent', ['--phase', 'post-W5', '--prior-consent', firstConsent.out]);
+  assert.equal(cleanup.exit, 0, cleanup.output);
+  assert.equal(cleanup.receipt.cleanup.grants_revoked, true);
+  assert.equal(claimedNames.get(firstWindow.report.seat.name).grant.revoked, true);
+  await refusesCollision();
+
+  const second = await fixture(t, { releaseSha: secondSha, claimedNames });
+  await pre(second);
+  const secondWindow = await second.run('window');
+  assert.equal(secondWindow.exit, 0, secondWindow.output);
+  assert.equal(secondWindow.receipt.release_sha, secondSha);
+  assert.equal(secondWindow.report.seat.name, 'c1-controls-runner-89abcdef');
+  assert.equal(secondWindow.report.seat.request_id,
+    `c1_controls_claim_${hash(`${secondSha}:${wid}:c1-controls-runner-89abcdef`).slice(0, 40)}`);
+  assert.notEqual(secondWindow.report.seat.request_id, firstWindow.report.seat.request_id);
+  assert.equal(claimedNames.size, 3, 'both releases claim new names alongside the revoked legacy principal');
 });
 
 test('dry-run of all subcommands makes zero requests and writes no files', async t => {
@@ -341,7 +411,7 @@ test('seat claim failures withhold receipts and a later failure retains the priv
     const r = await f.run('window'); assert.equal(r.exit, 1, r.output); await missing(r.out);
     assert.match(r.output, config.noReadback ? /FAIL worker_command_read:/ : /FAIL seat_setup:/);
     if (config.noReadback) {
-      assert.equal(r.report.seat.name, 'c1-controls-runner'); assert.equal(r.report.workspace_id, wid);
+      assert.equal(r.report.seat.name, 'c1-controls-runner-aaaaaaaa'); assert.equal(r.report.workspace_id, wid);
       assert.equal((await stat(`${r.out}.report.json`)).mode & 0o777, 0o600);
     } else { await missing(`${r.out}.report.json`); assert.ok(!f.events.some(e => e.command === 'post_signal')); }
   }

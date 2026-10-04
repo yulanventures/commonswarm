@@ -118,9 +118,9 @@ async function liveFixture(t) {
         else if (body.method === 'tools/call') {
           assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
           assert.equal(body.params.name, 'claim_seat');
-          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner',
-            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner`).slice(0, 40)}` });
-          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: 'c1-controls-runner',
+          assert.deepEqual(body.params.arguments, { workspace_id: wid, name: 'c1-controls-runner-aaaaaaaa',
+            request_id: `c1_controls_claim_${hash(`${release}:${wid}:c1-controls-runner-aaaaaaaa`).slice(0, 40)}` });
+          result = { content: [{ type: 'text', text: JSON.stringify({ workspace_id: wid, name: 'c1-controls-runner-aaaaaaaa',
             seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) }) }] };
         } else {
           assert.equal(body.method, 'tools/list');
