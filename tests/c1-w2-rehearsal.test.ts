@@ -350,9 +350,11 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS ai-w6-finish:default-closed$/m, /^PASS w6-finish-default: closed and measured/m, /^PASS ai-edge-receipt:W6-default-final$/m,
     /^PASS ai-w6-finish:keep-open$/m, /^PASS w6-finish-keep-open: reopened only through the measured hook path/m, /^PASS ai-edge-receipt:W6-keep-open-final-for-W7$/m,
     /^PASS ai-w7-proof:binding-and-sql$/m, /^PASS ai-w7-preflight:other-w6: refused /m,
-    /^PASS recycle-good-reopens: before \[true gen=\d+ measured=\d+ invalidated=false\] after \[true gen=\d+ measured=\d+ invalidated=false\]$/m,
-    /^PASS recycle-bad-stays-closed: hook after refused the wrong image; before \[true [^\]]*\] after \[false gen=\d+ measured=\d+ invalidated=true\]$/m,
-    /^PASS recycle-after-bad-stays-closed: .* after \[false gen=\d+ measured=\d+ invalidated=false\]$/m,
+    /^PASS w6-apply-failure-marker: one journal line and one 0644 log line, unit ai-edge-remeasure, reason edge-measurement-failed, measured null$/m,
+    /^PASS recycle-good-reopens: no marker; before \[true gen=\d+ measured=\d+ invalidated=false\] after \[true gen=\d+ measured=\d+ invalidated=false\]$/m,
+    /^PASS recycle-bad-stays-closed: hook after refused the wrong image; one marker \(journal \+ 0644 log, unit rehearsal-edge-recycle\.service, reason edge-measurement-failed\); before \[true [^\]]*\] after \[false gen=\d+ measured=\d+ invalidated=true\]$/m,
+    /^PASS recycle-after-bad-stays-closed: no new marker; .* after \[false gen=\d+ measured=\d+ invalidated=false\]$/m,
+    /^PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and issuance stays closed; /m,
     /^PASS emergency-close-rearms: /m, /^PASS rehearsal: W4, recycle hook, W6 activation/m, /^PASS cleanup: /m]) assert.match(r.stdout, line);
   assert.doesNotMatch(r.stdout, /^FAIL /m);
 });

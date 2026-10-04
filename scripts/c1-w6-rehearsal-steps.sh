@@ -50,10 +50,11 @@ src,dst,root=sys.argv[1:4]
 raw=open(src,encoding='utf-8',newline='').read()
 subs=[('/private/tmp/anvil-secret',root+'/secret/anvil-secret'),('/etc/commonswarm-admin-release',root+'/etc'),
       ('/usr/local/libexec/commonswarm-admin-edge-recycle',root+'/libexec/commonswarm-admin-edge-recycle'),
-      ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),
+      ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),('/var/lib/commonswarm-release',root+'/var-lib'),
       ('path.stat().st_uid==0','path.stat().st_uid==os.getuid()')]
 count={a:raw.count(a) for a,_ in subs}
-assert count['path.stat().st_uid==0']==1 and all(count.values())
+# The closed-issuance marker path exists only from 04d09c3d on; a C1_W6_PLAN_FROM control may lack it.
+assert count['path.stat().st_uid==0']==1 and all(v for k,v in count.items() if k!='/var/lib/commonswarm-release')
 forward=dict(subs); inverse={b:a for a,b in subs}
 assert not any(b in raw for b in inverse)
 out=re.compile('|'.join(re.escape(a) for a,_ in subs)).sub(lambda m:forward[m.group(0)],raw)
@@ -104,7 +105,7 @@ for name,d in [('inputs-W4.json',inputs('W4',w4)),('inputs-W6.json',inputs('W6',
                ('inputs-W7-other.json',inputs('W7',w7,w6_window_id='W6zzz9'))]:
     (root/name).write_text(json.dumps(d,sort_keys=True)+'\n')
 PY
-printf 'active' >"$W6R/timer"; printf 'good' >"$W6R/docker-mode"; : >"$W6R/calls"
+printf 'active' >"$W6R/timer"; printf 'good' >"$W6R/docker-mode"; printf ok >"$W6R/logger-mode"; : >"$W6R/calls"
 python3 - "$W6R" "$PG_BIN" "$T" "$PORT" <<'PY' || die w6-stubs 'stubs could not be written'
 import os,pathlib,shlex,sys
 root,pg,t,port=sys.argv[1:5]; q=shlex.quote; assert '#' not in root and ' ' not in root; b=pathlib.Path(root)/'bin'
@@ -112,6 +113,7 @@ def stub(name,body):
     p=b/name; p.write_text('#!/bin/bash\n# c1 W6 rehearsal stub (test fixture), never a real '+name+'\n'+body); p.chmod(0o700)
 stub('systemctl',"printf 'systemctl %s\\n' \"$*\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n stop) printf inactive >"+q(root+'/timer')+" ;;\n start) test ! -e "+q(root+'/timer-start-fails')+" || exit 1; printf active >"+q(root+'/timer')+" ;;\n is-active) test \"$(cat "+q(root+'/timer')+")\" = active ;;\n show) printf 'inactive\\n' ;;\n *) exit 64 ;;\nesac\n")
 stub('docker',"printf 'docker %s\\n' \"$1\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n inspect)\n  if test \"$2\" = --format; then printf 'healthy\\n'; exit 0; fi\n  if test \"$(cat "+q(root+'/docker-mode')+")\" = bad-image; then exec cat "+q(root+'/container-bad.json')+"; fi\n  exec cat "+q(root+'/container.json')+" ;;\n run)\n  shift; while test $# -gt 0; do if test \"$1\" = --entrypoint; then shift 3; break; fi; shift; done\n  set -o pipefail; stdin=0; prev=\n  for a in \"$@\"; do if test \"$prev\" = --file && test \"$a\" = -; then stdin=1; fi; prev=$a; done\n  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).\n  if test \"$stdin\" = 1; then sed \"s#"+root+"/home#/home/commonswarm#g\" | "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"\n  else "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"; fi\n  exit $? ;;\nesac\nexit 64\n")
+stub('logger',"test \"$(cat "+q(root+'/logger-mode')+")\" = ok || exit 1\nprintf '%s\\n' \"${@: -1}\" >>"+q(root+'/journal.log')+"\n")
 stub('node',': >"$PG_SERVICE_OUTPUT"; : >"$PG_PASS_OUTPUT"\n')
 PY
 PATH=$W6R/bin:$PATH; export PATH
@@ -145,6 +147,21 @@ export PLAN_FILE=$PLANC RELEASE_SHA
 EDGE_RECYCLE_TIMER=rehearsal-edge-recycle.timer EDGE_RECYCLE_SERVICE=rehearsal-edge-recycle.service
 HOOK=$W6R/libexec/commonswarm-admin-edge-recycle
 x() { extract "$PLANC" "$@"; }
+MARKER=$W6R/var-lib/admin-issuance-closed.log JOURNAL=$W6R/journal.log
+marker_count() { if test -f "$MARKER"; then wc -l <"$MARKER" | tr -d ' '; else printf 0; fi; }
+# The last marker line: exact keys, event, this release, the unit and reason given; journal holds the same line.
+marker_last() { # unit reason
+  python3 - "$MARKER" "$JOURNAL" "$RELEASE_SHA" "$1" "$2" <<'PY'
+import json,os,re,stat,sys
+marker,journal,sha,unit,reason=sys.argv[1:6]
+line=open(marker).read().splitlines()[-1]; m=json.loads(line)
+assert sorted(m)==['approved_edge_release_sha','at','event','measured_edge_release_sha','reason','unit'], sorted(m)
+assert re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ',m['at']) and m['event']=='admin-issuance-closed-needs-reactivation'
+assert m['approved_edge_release_sha']==sha and m['measured_edge_release_sha'] is None and m['unit']==unit and m['reason']==reason, m
+assert stat.S_IMODE(os.stat(marker).st_mode)==0o644 and open(journal).read().splitlines()[-1]==line
+assert not re.search(r'pass|token|secret|postgres(ql)?://',line,re.I)
+PY
+}
 
 # Negative control: the command must fail and its output or psql log must show the expected refusal.
 expect_fail() { # label script pattern
@@ -298,6 +315,8 @@ printf 'good' >"$W6R/docker-mode"
 timer_active || die ai-w6-activation-apply:failed-measurement 'recycle timer expected re-armed by the failure trap got inactive'
 test ! -e "$W6_PROOF/edge-measurement.json" && test ! -e "$W6_PROOF/activation-attempted.txt" || die ai-w6-activation-apply:failed-measurement 'no receipt and no activation-attempted expected got present'
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-w6-activation-apply:failed-measurement 'issuance expected closed and invalidated got other'
+test "$(marker_count)" = 1 && marker_last ai-edge-remeasure edge-measurement-failed || die w6-apply-failure 'one closed-issuance marker expected got other'
+say "PASS w6-apply-failure-marker: one journal line and one 0644 log line, unit ai-edge-remeasure, reason edge-measurement-failed, measured null"
 say "PASS w6-apply-failure-rearms: failed measurement left issuance closed+invalidated, no receipt, and the apply trap re-armed the timer; state $(state)"
 PROOF_DIR=$W6_PROOF INPUTS_FILE=$W6_INPUTS WINDOW=W6 step ai-w6-activation-apply:remeasure-and-activate "$T/blocks/w6-apply-head.sh"
 timer_active && die ai-w6-activation-apply 'recycle timer expected HELD stopped got active'
@@ -470,26 +489,41 @@ INPUTS_FILE=$W6R/inputs-W7-other.json expect_fail ai-w7-preflight:other-w6 "$T/b
 # ---------------- ruling 1: six-hour recycles after a keep-open W6 ----------------
 recycle_pair() { # label
   local before
-  before=$(state)
+  before=$(state); MARKERS_BEFORE=$(marker_count)
   systemctl stop "$EDGE_RECYCLE_TIMER" || exit 1
-  "$HOOK" before >"$T/hook.out" 2>"$T/hook.err" || die "$1" "hook before failed: $(first_error "$T/hook.err")"
-  if "$HOOK" after >"$T/hook.out" 2>"$T/hook.err"; then HOOK_AFTER=pass; else HOOK_AFTER=fail; fi
+  # As the drop-in's Environment=COMMONSWARM_RECYCLE_UNIT=%n sets it for the service.
+  COMMONSWARM_RECYCLE_UNIT=$EDGE_RECYCLE_SERVICE "$HOOK" before >"$T/hook.out" 2>"$T/hook.err" || die "$1" "hook before failed: $(first_error "$T/hook.err")"
+  if COMMONSWARM_RECYCLE_UNIT=$EDGE_RECYCLE_SERVICE "$HOOK" after >"$T/hook.out" 2>"$T/hook.err"; then HOOK_AFTER=pass; else HOOK_AFTER=fail; fi
+  MARKERS_NEW=$(( $(marker_count) - MARKERS_BEFORE ))
   systemctl start "$EDGE_RECYCLE_TIMER" || exit 1
   RECYCLE_LINE="before [$before] after [$(state)]"
 }
 recycle_pair recycle-good
 test "$HOOK_AFTER" = pass && test "$(q1 "$OPEN_MEASURED")" = t || die recycle-good "good measurement expected reopened got $RECYCLE_LINE"
-say "PASS recycle-good-reopens: $RECYCLE_LINE"
+test "$MARKERS_NEW" = 0 || die recycle-good "no marker expected got $MARKERS_NEW"
+say "PASS recycle-good-reopens: no marker; $RECYCLE_LINE"
 printf 'bad-image' >"$W6R/docker-mode"
 recycle_pair recycle-bad
 printf 'good' >"$W6R/docker-mode"
 test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle hook; issuance stays closed' "$T/hook.err" || die recycle-bad "bad measurement expected hook failure got $HOOK_AFTER"
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-bad "bad measurement expected closed and invalidated got $RECYCLE_LINE"
-say "PASS recycle-bad-stays-closed: hook after refused the wrong image; $RECYCLE_LINE"
+test "$MARKERS_NEW" = 1 && marker_last "$EDGE_RECYCLE_SERVICE" edge-measurement-failed || die recycle-bad "exactly one closed-issuance marker expected got $MARKERS_NEW"
+say "PASS recycle-bad-stays-closed: hook after refused the wrong image; one marker (journal + 0644 log, unit $EDGE_RECYCLE_SERVICE, reason edge-measurement-failed); $RECYCLE_LINE"
 recycle_pair recycle-after-bad
 test "$HOOK_AFTER" = pass && test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t \
   || die recycle-after-bad "next good recycle expected measured-but-closed got $RECYCLE_LINE"
-say "PASS recycle-after-bad-stays-closed: the next good recycle measures but keeps issuance CLOSED (intent reopen=false); keep-open is lost until a W6 reopens it; $RECYCLE_LINE"
+test "$MARKERS_NEW" = 0 || die recycle-after-bad "no new marker expected got $MARKERS_NEW"
+say "PASS recycle-after-bad-stays-closed: no new marker; the next good recycle measures but keeps issuance CLOSED (intent reopen=false); keep-open is lost until a W6 reopens it; $RECYCLE_LINE"
+
+# A marker that cannot be written is reported; the close stands (journal refused, log replaced by a symlink).
+printf fail >"$W6R/logger-mode"; mv "$MARKER" "$MARKER.kept" && ln -s /dev/null "$MARKER" || exit 1
+printf 'bad-image' >"$W6R/docker-mode"
+recycle_pair recycle-marker-failure
+printf 'good' >"$W6R/docker-mode"; printf ok >"$W6R/logger-mode"; mv -f "$MARKER.kept" "$MARKER" || exit 1
+test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle closed-marker not fully written' "$T/hook.err" && grep -q 'FAIL recycle hook; issuance stays closed' "$T/hook.err" \
+  || die recycle-marker-failure 'marker failure expected reported with the hook failure got other'
+test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-marker-failure 'closed and invalidated expected got other'
+say "PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and issuance stays closed; $RECYCLE_LINE"
 
 # ---------------- ruling 3: emergency close of an OPEN W6 re-arms the held timer ----------------
 # Issuance returns only through a W6 activation (new proof directory), which holds the timer; then the emergency path.

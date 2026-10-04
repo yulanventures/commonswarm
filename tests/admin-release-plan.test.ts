@@ -1292,6 +1292,9 @@ def fixture_stat(p, *args, **kwargs):
     return value
 pathlib.Path.stat = fixture_stat
 def fixture_run(args, **kwargs):
+    if args[:3] == ['logger', '-t', 'commonswarm-admin-recycle']:
+        with open(os.environ['RECYCLE_FIXTURE_JOURNAL'], 'a') as journal: journal.write(args[-1] + '\\n')
+        return SimpleNamespace(returncode=0)
     assert args[0] == 'node'
     env = kwargs['env']
     pathlib.Path(env['PG_SERVICE_OUTPUT']).write_text('synthetic service fixture')
@@ -1328,16 +1331,18 @@ subprocess.check_output = fixture_output
   for (const [from, to] of [
     ['/etc/commonswarm-admin-release', configDir], ['/home/commonswarm/edge', edgeRoot],
     ['/home/commonswarm/admin-issuance/releases', join(root, 'release')],
-    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')],
+    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')], ['/var/lib/commonswarm-release', join(root, 'var-lib')],
     ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
   ]) source = source.split(from).join(to);
-  const imports = 'import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time\n';
+  const imports = 'import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
   assert.equal(source.split(imports).length - 1, 1);
   source = source.replace(imports, imports + boundary);
   const hook = (mode: string, failed = false) => run(`set -- ${mode}\n${source}`, {
     PATH: `${shim}:${process.env.PATH}`, RECYCLE_FIXTURE_STATE: stateFile, RECYCLE_FIXTURE_CONFIG: config,
-    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0',
+    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0', RECYCLE_FIXTURE_JOURNAL: journalFile, COMMONSWARM_RECYCLE_UNIT: 'fixture-recycle.service',
   });
+  const journalFile = join(root, 'journal.log'), markerFile = join(root, 'var-lib', 'admin-issuance-closed.log');
+  const lines = (file: string) => existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
   const state = () => JSON.parse(readFileSync(stateFile, 'utf8'));
   const initial = { enabled: true, generation: 7, measured_generation: 7, invalidated: false };
   for (const failed of [true, false]) {
@@ -1349,8 +1354,18 @@ subprocess.check_output = fixture_output
     if (failed) {
       assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance stays closed/);
       assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+      // One NONSECRET marker line in the journal and in the 0644 append-only log, after the close.
+      const marker = lines(markerFile); assert.equal(marker.length, 1); assert.deepEqual(lines(journalFile), marker);
+      const m = JSON.parse(marker[0]!);
+      assert.deepEqual(Object.keys(m).sort(), ['approved_edge_release_sha', 'at', 'event', 'measured_edge_release_sha', 'reason', 'unit']);
+      assert.match(m.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      assert.deepEqual({ ...m, at: 'x' }, { at: 'x', unit: 'fixture-recycle.service', event: 'admin-issuance-closed-needs-reactivation',
+        approved_edge_release_sha: sha, measured_edge_release_sha: null, reason: 'edge-measurement-failed' });
+      assert.equal(statSync(markerFile).mode & 0o777, 0o644);
+      assert.doesNotMatch(marker[0]!, /pass|token|secret|postgres(?:ql)?:\/\//i);
     } else {
       assert.equal(after.status, 0, after.stderr);
+      assert.equal(lines(markerFile).length, 1, 'a good recycle writes no marker'); assert.equal(lines(journalFile).length, 1);
       assert.deepEqual(state(), { enabled: true, generation: 8, measured_generation: 8, invalidated: false });
     }
     assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');

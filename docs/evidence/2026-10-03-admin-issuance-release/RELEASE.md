@@ -446,8 +446,8 @@ REMEASURE_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])
 REMEASURE_SERVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_service"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-remeasure: recycle service name expected readable got failure; STOP\n' >&2; exit 1; }
 if systemctl is-active --quiet "$REMEASURE_TIMER"; then printf 'FAIL ai-edge-remeasure: recycle timer expected stopped-by-caller got active; STOP\n' >&2; exit 1; fi
 test "$(systemctl show -p ActiveState --value "$REMEASURE_SERVICE")" = inactive || { printf 'FAIL ai-edge-remeasure: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
-/usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; issuance stays closed; STOP\n' >&2; exit 1; }
-/usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; issuance stays closed; STOP\n' >&2; exit 1; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; issuance stays closed; STOP\n' >&2; exit 1; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; issuance stays closed; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_OUT" <<'PY'
 import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,out=sys.argv[1:4]
@@ -2999,7 +2999,21 @@ drop-in. Install in W4 while the timer is stopped, before restoring it.
 The hook closes issuance/increments generation in ExecStartPre, before the
 existing restart, then remeasures target, image, health, immutable mounts and
 all archive bytes in ExecStartPost. Only a previously open, still-approved
-release can reopen. Failed restart/measurement stays closed. HezLead executes
+release can reopen. Failed restart/measurement stays closed. When the after
+hook fails, issuance is already closed by the before hook; the hook then
+writes a NONSECRET watch marker for HezLead: one journal line with tag
+`commonswarm-admin-recycle` and one appended line in the root-owned 0644
+`/var/lib/commonswarm-release/admin-issuance-closed.log`, both the JSON
+`{"at","unit","event":"admin-issuance-closed-needs-reactivation","approved_edge_release_sha","measured_edge_release_sha"|null,"reason"}`
+(reason: recycle-config-invalid, database-session-failed, recycle-intent-invalid,
+edge-measurement-failed or database-measurement-refused; the unit comes from
+the drop-in's `Environment=COMMONSWARM_RECYCLE_UNIT=%n`, or is
+`ai-edge-remeasure`). A marker failure is reported on stderr; the close
+stands. A good recycle writes no marker. Issuance closed this way stays
+closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
+measured-reopen procedure under HezLead approval (remeasure, then reopen only
+through the measured path) replaces that W6 rerun; it is not part of this
+release. HezLead executes
 these blocks; this preparation worker never installs or invokes a hook.
 
 ```sh
@@ -3022,8 +3036,29 @@ PY
 }
 trap ai_hook_cleanup EXIT
 python3 - "$1" "$HOOK_SECRET_STAGE" <<'PY'
-import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time
+import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time
 stage=pathlib.Path(sys.argv[2]); mode=sys.argv[1]
+reason='recycle-config-invalid'; approved=None; measured=None
+def closed_marker():
+    # NONSECRET watch marker, written only AFTER the failure left issuance closed: one journal line and one
+    # appended JSON line. No token, credential, connection value or database row beyond the two release SHAs.
+    unit=os.environ.get('COMMONSWARM_RECYCLE_UNIT','')
+    line=json.dumps({'at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'unit':unit if re.fullmatch(r'[A-Za-z0-9@._:-]{1,256}',unit) else 'unknown',
+        'event':'admin-issuance-closed-needs-reactivation','approved_edge_release_sha':approved,'measured_edge_release_sha':measured,'reason':reason},sort_keys=True)
+    ok=True
+    try: subprocess.run(['logger','-t','commonswarm-admin-recycle','--',line],check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except Exception: ok=False
+    try:
+        d='/var/lib/commonswarm-release'
+        if not os.path.lexists(d): os.mkdir(d,0o755); os.chmod(d,0o755)
+        assert os.path.isdir(d) and not os.path.islink(d)
+        fd=os.open(d+'/admin-issuance-closed.log',os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o644)
+        try:
+            st=os.fstat(fd); assert stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid()
+            os.fchmod(fd,0o644); assert os.write(fd,(line+'\n').encode())==len(line)+1
+        finally: os.close(fd)
+    except Exception: ok=False
+    if not ok: print('FAIL recycle closed-marker not fully written (journal or admin-issuance-closed.log); issuance stays closed; HezLead must check the database',file=sys.stderr)
 try:
     path=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
     assert path.is_file() and not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode & 0o777==0o600
@@ -3033,6 +3068,7 @@ try:
     archive=pathlib.Path(r['archive']); assert archive.is_file() and not archive.is_symlink()
     assert re.fullmatch(r'/tmp/admin-issuance-'+sha+r'-[A-Za-z0-9]{6}\.tar',str(archive))
     root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
+    approved=sha; reason='database-session-failed'
     env=dict(os.environ); env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
     with (stage/'session.log').open('w') as log:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
@@ -3051,7 +3087,9 @@ try:
         assert len(result)==2 and result[0] in ('t','f') and result[1].isdigit()
         intent.write_text(json.dumps({'reopen':result[0]=='t','generation':int(result[1])})+'\n')
     else:
+        reason='recycle-intent-invalid'
         state=json.loads(intent.read_text()); assert isinstance(state['generation'],int) and type(state['reopen']) is bool
+        reason='edge-measurement-failed'
         live=pathlib.Path('/home/commonswarm/edge/current').resolve(strict=True); assert str(live)==target
         for attempt in range(46):
             c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],stderr=subprocess.DEVNULL))[0]
@@ -3071,6 +3109,7 @@ try:
                 assert not pathlib.PurePosixPath(member.name).is_absolute() and '..' not in pathlib.PurePosixPath(member.name).parts
                 if member.isfile(): assert not dest.is_symlink() and dest.read_bytes()==tar.extractfile(member).read()
                 elif member.issym(): assert dest.is_symlink() and dest.readlink().as_posix()==member.linkname
+        measured=sha; reason='database-measurement-refused'
         gen=str(state['generation']); enabled='true' if state['reopen'] else 'false'
         # M4 grants migration_checksum_failures() to the runtime and command roles only, never to the release
         # role: the gate runs as the session's admin user, then the same transaction takes the release role.
@@ -3079,6 +3118,8 @@ try:
         if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
         db(sql)
 except Exception:
+    # The hook-before close stands; the marker is written after it and cannot reopen anything.
+    if mode=='after': closed_marker()
     raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
 PY
 ```
@@ -3129,7 +3170,7 @@ if installed is None or installed!=hook: raise SystemExit('FAIL ai-recycle-insta
 d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
 p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json'); p.write_text(json.dumps(r)+'\n'); p.chmod(0o600)
 PY
-printf '[Service]\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
+printf '[Service]\nEnvironment=COMMONSWARM_RECYCLE_UNIT=%%n\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
 chmod 0644 "$RECYCLE_DROPIN"
 systemctl daemon-reload
 systemctl cat "$EDGE_RECYCLE_SERVICE" >"$PROOF_DIR/recycle-unit-after.txt"
