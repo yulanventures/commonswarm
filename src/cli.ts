@@ -653,7 +653,7 @@ export const KNOWN_FLAGS = new Set([
   "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel", "before", "grant-id",
-  "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
+  "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
   "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "parent", "thread",
@@ -964,6 +964,7 @@ Credential selection for command/dogfood:
                             file put, file ls, file get, file rm, file restore,
                             brain ls, brain get, brain put
                                           read and command, nothing persisted -- either form
+                            object        read and command, nothing persisted -- either form
                             feedback      command only, nothing persisted     -- either form
                             command, dogfood
                                           task protocol commands              -- either form
@@ -10192,10 +10193,10 @@ async function runProfileLs(args: Arguments): Promise<void> {
 export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 export const ADMIN_READ_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "limit", "before", "json"] as const;
 export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "request-id", "json"] as const;
-const HOUSEHOLD_INPUT_FLAGS = [...agentFlags, "input-file"] as const;
+export const HOUSEHOLD_INPUT_ACCEPTED_FLAGS = [...agentFlags, "input-file"] as const;
 
 async function runHouseholdObject(args: Arguments): Promise<void> {
-  const context = await fileContext(args, HOUSEHOLD_INPUT_FLAGS, 2);
+  const context = await fileContext(args, HOUSEHOLD_INPUT_ACCEPTED_FLAGS, 2);
   const inputPath = args.required("input-file");
   const input = JSON.parse(readFileSync(inputPath, "utf8"));
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new UsageError("--input-file must contain an object of tool arguments");
@@ -10210,10 +10211,10 @@ async function runHouseholdObject(args: Arguments): Promise<void> {
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   object: group(Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [row.name, commandEntry({
     tool: row.name, mcp: true, handler: runHouseholdObject, description: row.description, mutates: row.effect !== "read",
-    flags: HOUSEHOLD_INPUT_FLAGS, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true,
+    flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true,
     help: [`cswarm object ${row.name} --input-file <path> [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`],
   })])), args => args.positionals[1], (_args, names) => new UsageError(`cswarm object takes ${formatOrList(names)}`), {
-    refusalPolicy: { flags: HOUSEHOLD_INPUT_FLAGS, ...EXPAND_PROFILE },
+    refusalPolicy: { flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, ...EXPAND_PROFILE },
   }),
 
   admin: group({
@@ -10428,7 +10429,7 @@ function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly stri
 }
 
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  ...Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_FLAGS])),
+  ...Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
   "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,

@@ -14,6 +14,7 @@ const calls: { name: string; arguments: any }[] = [];
 const seats = new Map<string, any>();
 const signals: any[] = [];
 let claims = 0;
+const objects = new Map<string, any>();
 const serve = createMcpProtocolHandler({
   issuer, resource: issuer + '/mcp', publicEnabled: true, allowedOrigins: new Set(),
   limits: { maxBodyBytes: 128 * 1024, maxResponseBytes: 64 * 1024, requestTimeoutMs: 2000, maxConcurrentRequests: 2 },
@@ -33,6 +34,20 @@ const serve = createMcpProtocolHandler({
     if (name === 'members') return { members: [], agents: [...seats.values()] };
     if (name === 'check') return { batch_id: workspace, signals: signals.filter(s =>
       s.recipients.some((r: any) => r.id === seat.principal_id)), cursor: null, acknowledged_batch_id: null };
+    if (name === 'object_create') {
+      const revision = { workspace_id: workspace, object_id: args.object_id, token: 'r'.repeat(32) };
+      objects.set(String(args.object_id), { revision: { revision, kind: 'doc', title: args.title }, content: args.content });
+      return { status: 'committed', object_id: args.object_id, revision };
+    }
+    if (name === 'object_list') return { status: 'ok', objects: [...objects.keys()].map(object_id => ({ object_id })), next_offset: null };
+    if (name === 'object_read') return { status: 'ok', kind: 'object_read', live: true, ...objects.get(String(args.object_id)) };
+    if (name === 'object_update') {
+      const row = objects.get(String(args.object_id));
+      row.content = { kind: 'doc', markdown: (args.patch as { splices: { after: string }[] }).splices[0]!.after };
+      row.revision = { ...row.revision, revision: { ...row.revision.revision, token: 'u'.repeat(32) } };
+      return { status: 'committed', object_id: args.object_id, revision: row.revision.revision };
+    }
+    if (name === 'object_history') return { status: 'ok', revisions: [objects.get(String(args.object_id))], next_offset: null };
     const parent = signals.find(s => s.id === args.signal_id);
     const signal = { id: `00000000-0000-4000-8000-${String(signals.length + 10).padStart(12, '0')}`,
       body: args.body, from: seat.principal_id, kind: name,

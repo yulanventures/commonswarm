@@ -1,0 +1,16 @@
+✔ the mint asks for a standing grant (0.908125ms)
+✔ the mint never puts renewal_horizon_ms on the wire, not even as null (0.158084ms)
+✔ the mint still sends the device the standing grant will be bound to (0.130083ms)
+✔ a standing grant is read off the server, never computed here (0.149708ms)
+✔ a timeboxed answer keeps the horizon the SERVER gave it, not a local sum (0.170084ms)
+✔ a deployment that names no grant kind degrades to unknown, never to a guess (0.130458ms)
+✔ workspace switching clears household content and ignores an earlier authenticated load (0.582375ms)
+✔ a refused content read shows confirmation guidance and makes no object request (0.111875ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 199.864291

@@ -1,5 +1,12 @@
 # Household integration worker report — 2026-10-04
 
+**Security fold update:** [FOLD-REPORT.md](FOLD-REPORT.md) records the fixes
+against `92a21537` and supersedes this original report's reachability and gate
+results. The two legacy entry paths now have separate default-OFF server gates.
+The three unfinished hosted file tools are excluded from admission by their own
+default-OFF server gate. None may be activated before the checklist prerequisites.
+The remaining integration limitations below still apply.
+
 **Result: reviewable draft implementation, incomplete end-to-end integration.**
 The branch remains uncommitted and unpushed. Do not activate this packet: the
 legacy adoption/result bridge and protected file delivery are incomplete.
@@ -142,3 +149,10 @@ archive `/private/tmp/household-baseline.KJZavk`: “rm -f style commands are no
 permitted. Use a safer approach”. The archive remains in place; the refusal
 was not bypassed. It contains the starting-SHA source archive and dependency
 symlinks, not production credentials.
+
+## Fold 2 — CI repair
+
+[FOLD2-REPORT.md](FOLD2-REPORT.md) records the incremental file inventory, causes,
+fixes and gate exits. Fold 1 remains in place. Dispatcher shards and focused
+service-free checks pass. `check:tests` retains the same eight diagnostics; real
+server proofs and the host-blocked `ps` test remain CI work. No commit or push.

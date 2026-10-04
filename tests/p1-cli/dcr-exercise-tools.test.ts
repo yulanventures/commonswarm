@@ -45,7 +45,7 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   const { code, receipt, calls } = await run();
   assert.equal(code, 0);
   assert.equal(receipt.ok, true);
-  assert.equal(calls.length, 14);
+  assert.equal(calls.length, 20);
   const negatives = new Set([0, 1, 6]);
   const positives = calls.filter((_, i) => !negatives.has(i));
   assert.deepEqual(new Set(positives.map(c => c.name)), new Set(HOSTED_TOOL_TABLE.map(t => t.name)));
@@ -64,6 +64,9 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   assert.equal(ask.arguments.recipients[0].id, '00000000-0000-4000-8000-000000000002');
   assert.equal(reply.arguments.signal_id, '00000000-0000-4000-8000-000000000010');
   assert.deepEqual(calls[12].arguments.recipients, ask.arguments.recipients);
+  const update = calls.find(c => c.name === 'object_update')!;
+  assert.deepEqual(update.arguments.base, { workspace_id: workspace, object_id: update.arguments.object_id, token: 'r'.repeat(32) });
+  assert.ok(!calls.some(c => ['file_read', 'file_upload_begin', 'file_upload_commit'].includes(c.name)));
   assert.ok(calls.filter(c => c.name === 'check').every(c => !('ack' in c.arguments)));
   const ids = positives.map(c => c.arguments.request_id).filter(Boolean);
   assert.equal(new Set(ids).size, ids.length);

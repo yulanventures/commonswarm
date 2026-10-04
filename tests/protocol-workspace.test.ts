@@ -1602,6 +1602,9 @@ describe('agent session proof exemption', () => {
     for (const kind of quotedStrings(arrayBlock(sources.commandSrc, 'CHANNEL_COMMAND_KINDS'))) {
       kinds.add(kind);
     }
+    const householdSrc = readFileSync(join(repoRoot, 'supabase/functions/command/household-integration.ts'), 'utf8');
+    const householdKinds = arrayBlock(householdSrc, 'HOUSEHOLD_SURFACE_KINDS');
+    for (const match of householdKinds.matchAll(/'([a-z0-9_]+)'/g)) kinds.add(match[1]);
     for (const kind of exportedKindConstants(sources.fileSrc)) kinds.add(kind);
     for (const kind of exportedKindConstants(sources.deliverySrc)) kinds.add(kind);
     for (const kind of exportedKindConstants(sources.receiptsSrc)) kinds.add(kind);

@@ -229,7 +229,7 @@ test("every table row that accepts --profile refuses B and parses A's id", { tim
     }
     // mcp connect uses --profile as a destination for a new profile, not as an opener.
     const accepting = rows.filter(({ command, entry }) => command.join(" ") !== "mcp connect" && entry.flags.includes("profile") && entry.profile !== "refuse");
-    assert.equal(accepting.length, 39, "reconcile the generated profile rows when the command table changes");
+    assert.equal(accepting.length, 47, "reconcile the generated profile rows when the command table changes");
     for (const { command, entry } of accepting) {
       const extra = [
         ...(entry.flags.includes("connection-file") ? ["--connection-file", f.input] : []),

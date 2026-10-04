@@ -175,7 +175,7 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { jsonrpc: "2.0", id: 1, error: {
     code: -32602,
-    message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
+    message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members, object_list, object_read, object_history, object_create, object_update) and arguments as a JSON object.",
   } });
   assert.equal(executed, 0);
   assert.equal((await serve(request("whoami", { seat }))).status, 200);

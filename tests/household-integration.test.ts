@@ -13,7 +13,6 @@ test('hosted content admission accepts valid patches and rejects model-supplied 
   assert.throws(() => validateHostedToolArguments('object_create', { ...args, content: { kind: 'file', name: 'x.txt', media_type: 'text/plain' } }), HostedToolInputError);
   const tool = HOSTED_TOOL_TABLE.find(row => row.name === 'object_create')!;
   assert.equal(tool.annotations.readOnlyHint, false);
-  assert.equal(HOSTED_TOOL_TABLE.find(row => row.name === 'file_upload_begin')!.annotations.readOnlyHint, false);
   assert.equal(HOSTED_TOOL_TABLE.find(row => row.name === 'object_history')!.annotations.readOnlyHint, true);
 });
 

@@ -128,6 +128,7 @@ import {
   type FileStorage,
 } from "./file-artifacts.ts";
 import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
+import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
 import { provisionHouseholdPermissions } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
@@ -8107,7 +8108,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3939 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3955 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -10694,6 +10695,9 @@ async function handleTransaction(
         events: [], ...result } };
     }
     if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
+      if (kind === "household_legacy" && !HOUSEHOLD_FEATURE_GATES.legacyCommand) {
+        return { status: 403, body: { error: "household_legacy_disabled" } };
+      }
       if (!COMMAND_ID_RE.test(commandId) || typeof body.client_version !== "string") return { status: 400, body: { error: "invalid_request" } };
       const [config] = await tx`SELECT value FROM swarm.config WHERE key='min_client_version'`;
       const order = typeof config?.value === "string" ? compareSemver(body.client_version, config.value) : null;
@@ -10897,7 +10901,7 @@ async function handleTransaction(
       (FILE_COMMAND_KINDS as readonly string[]).includes(
         validation.command.kind,
       );
-    if (isFileCommand) {
+    if (isFileCommand && HOUSEHOLD_FEATURE_GATES.legacyFileRedirect) {
       const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
       if (boundary) {
         const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,

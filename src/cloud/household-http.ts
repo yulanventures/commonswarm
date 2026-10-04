@@ -1,5 +1,6 @@
 import type { CloudTarget } from './config.js';
-import { CLI_BUILD_VERSION } from './client-build.js';
+import { withClientBuild } from './client-build.js';
+import { CLIENT_PROTOCOL_VERSION } from './config.js';
 import type { HouseholdTransport } from './household-objects.js';
 import type { HouseholdToolInvocation } from '../protocol/household-tool-registry.js';
 /** Local credentials select identity. The seat field only preserves the shared
@@ -34,8 +35,8 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
         method: 'POST', headers: { authorization: `Bearer ${credential}`, apikey: options.target.anonKey, 'content-type': 'application/json' },
         body: JSON.stringify(reading
           ? { resource: 'household', workspace_id: invocation.workspace_id, ...wire }
-          : { command_id: invocation.request_id, client_version: CLI_BUILD_VERSION, workspace_id: invocation.workspace_id,
-            stream: { kind: 'workspace' }, command: { kind: 'household_tool', ...wire } }), signal,
+          : withClientBuild({ command_id: invocation.request_id, client_version: CLIENT_PROTOCOL_VERSION, workspace_id: invocation.workspace_id,
+            stream: { kind: 'workspace' }, command: { kind: 'household_tool', ...wire } })), signal,
       });
       if (response.status >= 500) throw new Error('household transport unavailable');
       if (!response.ok) { await response.body?.cancel(); return { status: 'refused', reason: 'request_refused' }; }

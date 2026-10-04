@@ -13,12 +13,14 @@ const REQUEST_MS = 10_000;
 const CONSENT_MS = 25 * 60_000;
 const VERSION = '2025-06-18';
 const SCOPES = new Set(['openid', 'offline_access', 'mcp']);
-const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on']);
+const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on',
+  'object_list', 'object_read', 'object_history', 'object_create', 'object_update']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HANDLE = /^seat_[A-Za-z0-9_-]{22,64}$/u;
 const SHAPE_KEYS = new Set(['grant_id', 'seat_id', 'handle', 'workspace_id', 'principal_id',
   'name', 'transport', 'turn_only', 'members', 'agents', 'signal_id', 'kind', 'created_at',
-  'in_reply_to', 'batch_id', 'signals', 'cursor', 'acknowledged_batch_id', 'error', 'reused']);
+  'in_reply_to', 'batch_id', 'signals', 'cursor', 'acknowledged_batch_id', 'error', 'reused',
+  'status', 'object_id', 'revision', 'objects', 'next_offset', 'revisions', 'content']);
 
 function parseOptions(args) {
   const options = { dryRun: false, exerciseTools: false, workspaceId: undefined };
@@ -131,6 +133,11 @@ function safeToolReceipt(row) {
 // This intentionally supports only the bounded schema vocabulary used by these tools.
 function matchesSchema(value, schema) {
   if (!schema || typeof schema !== 'object') return false;
+  if (schema.oneOf) return schema.oneOf.filter(choice => matchesSchema(value, choice)).length === 1;
+  if (Object.hasOwn(schema, 'const') && value !== schema.const) return false;
+  if (schema.type === 'null') return value === null;
+  if (schema.type === 'boolean') return typeof value === 'boolean';
+  if (schema.type === 'integer') return Number.isSafeInteger(value) && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
   if (schema.enum && !schema.enum.includes(value)) return false;
   if (schema.not?.enum?.includes(value)) return false;
   if (schema.type === 'string') return typeof value === 'string' &&
@@ -219,6 +226,25 @@ async function exerciseHostedTools(catalog, workspaceId, rpc, receipts) {
   requireThat(UUID.test(note.signal_id) && note.kind === 'note', 'exercise_signal_failed');
   const work = await call('working_on', { seat: a, body: 'Checking the synthetic review checklist.', request_id: requestId('work') });
   requireThat(UUID.test(work.signal_id) && work.kind === 'working_on', 'exercise_signal_failed');
+  const objectId = `review_doc_${run}`;
+  const markdown = 'Synthetic directory review document.';
+  const created = await call('object_create', { seat: a, request_id: requestId('object_create'),
+    object_id: objectId, title: `Directory Review ${run}`, content: { kind: 'doc', markdown } });
+  requireThat(created.status === 'committed' && created.object_id === objectId, 'exercise_object_failed');
+  const listed = await call('object_list', { seat: a, offset: 0, limit: 100 });
+  requireThat(listed.status === 'ok' && Array.isArray(listed.objects), 'exercise_object_failed');
+  const read = await call('object_read', { seat: a, object_id: objectId });
+  requireThat(read.status === 'ok' && read.revision?.revision?.workspace_id === workspaceId &&
+    read.revision.revision.object_id === objectId && read.content?.markdown === markdown, 'exercise_object_failed');
+  const updated = await call('object_update', { seat: a, request_id: requestId('object_update'),
+    object_id: objectId, base: read.revision.revision,
+    patch: { kind: 'doc', splices: [{ start: 0, before: markdown, after: 'Synthetic review complete.' }] } });
+  requireThat(updated.status === 'committed' && updated.object_id === objectId, 'exercise_object_failed');
+  const history = await call('object_history', { seat: a, object_id: objectId, offset: 0, limit: 10 });
+  requireThat(history.status === 'ok' && Array.isArray(history.revisions), 'exercise_object_failed');
+  const readUpdated = await call('object_read', { seat: a, object_id: objectId });
+  requireThat(readUpdated.status === 'ok' && readUpdated.content?.markdown === 'Synthetic review complete.',
+    'exercise_readback_failed');
   // No release/delete tool exists. Do not ACK: a batch can also include existing workspace signals.
 }
 

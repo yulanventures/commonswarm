@@ -32,10 +32,10 @@ const repo = resolve(import.meta.dirname, "../..");
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5288-5293; src/cloud/wake-lease.ts:69,72");
+  assert.equal(row.citation, "src/cli.ts:5292-5297; src/cloud/wake-lease.ts:69,72");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5287, 5293).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(cli.slice(5291, 5297).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
   assert.match(lease[68]!, /timeoutMs\?: number/);
   assert.match(lease[71]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });

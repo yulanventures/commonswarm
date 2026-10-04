@@ -1,0 +1,697 @@
+✔ the mint asks for a standing grant (1.304542ms)
+✔ the mint never puts renewal_horizon_ms on the wire, not even as null (0.162875ms)
+✔ the mint still sends the device the standing grant will be bound to (0.146458ms)
+✔ a standing grant is read off the server, never computed here (0.154416ms)
+✔ a timeboxed answer keeps the horizon the SERVER gave it, not a local sum (0.176667ms)
+✔ a deployment that names no grant kind degrades to unknown, never to a guess (0.143916ms)
+✔ exercise CLI calls every live tool with schema-valid arguments and synthetic dependency order (148.347292ms)
+✔ exercise CLI fails closed on wrong_workspace and retains redacted partial receipts (87.495542ms)
+✔ exercise CLI fails closed on schema_changed and retains redacted partial receipts (91.86275ms)
+✔ exercise CLI fails closed on negative_succeeds and retains redacted partial receipts (87.8295ms)
+✔ exercise CLI fails closed on transport_failure and retains redacted partial receipts (94.232417ms)
+✔ every tool receipt field projects hostile values onto safe allowlists (0.276667ms)
+✔ exercise requires an explicit TEST workspace and dry-run never calls fetch (180.56525ms)
+✔ local household HTTP dispatch preserves exact request IDs and binds reads and writes to the profile workspace (25.963667ms)
+✔ CLI publishes every registry operation with the reviewed input-file route (143.83625ms)
+✔ wake lease release citation points to the call and abort timer (7.625667ms)
+✔ HEAD timeout citations resolve to their exact operations (2.856667ms)
+✔ timeout inventory and mapping are exact in both directions for each measured ref (3346.857375ms)
+✔ main alias validates the post-merge HEAD inventory including MCP rows (334.059125ms)
+✔ MCP register abort-timer citation points to the actual timer line (0.678833ms)
+✔ setup whole-operation timeout citation names the constant and deadline block (0.493083ms)
+✔ merged storage lock citations resolve to the constant and default (0.565959ms)
+✔ Fold 10 MCP register budget citation points to its constant (0.516208ms)
+✔ MCP hidden-input timeout citation points to the stty deadline (0.499417ms)
+✔ machine-id timeout citation points to the bounded ioreg call (0.533459ms)
+✔ shipped timeout mapping stays byte-identical to main (29.748459ms)
+✔ HEAD timeout mapping citations point to their measured source lines (1.329792ms)
+✔ HEAD signal read citations resolve for each mapped row (0.669083ms)
+✔ HEAD onboarding stdin timer is labeled for hook input (0.301375ms)
+✔ Fold 3 records the removed real-main timeout assertion and its pre-merge reason (0.532583ms)
+✔ a pure line shift does not change inventory ids (0.541625ms)
+✔ enumerator records timeoutMs defaults, ?? literals, as const, identifier AbortSignal, and import aliases (177.137208ms)
+✔ args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED (28.131291ms)
+✔ delayed local endpoint makes the rendered row pass below half-budget and fail above it (461.628583ms)
+✔ preload rewrites only the origin and logs no header, body, query, or secret (59.104958ms)
+✔ preload duration includes the response body and does not forward writes or other origins (357.620125ms)
+✔ private profile copy is removed after success and injected failure (5.285209ms)
+✔ unexpected exit 13 removes the profile copy and the git worktree (1359.332375ms)
+✔ SIGTERM removes the profile copy and the git worktree (967.905708ms)
+✔ SIGHUP removes the profile copy and the git worktree (956.972084ms)
+✔ finalizeRunResources deletes the temp root before uninstalling signals (0.469458ms)
+✔ SIGINT removes the profile copy and the git worktree (999.462916ms)
+✔ measurement children do not create or change parent state directories (108.849ms)
+# Client timeout table — http://127.0.0.1:15804
+
+Ref `HEAD`; client `not given`. Inventory comes from the ref; timings come from the client binary and source helpers.
+
+Client start-up (`--version`): not run.
+
+| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |
+|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|
+| site/src/lib/admin-delegations.ts:AbortSignal.timeout | 24 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS | 102 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:setTimeout | 200 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AbortSignal.timeout | 199 | 10000 ms | per-request | /auth/v1/settings | auth-settings-site (proxy: auth-settings) | not-run | 1 | 7.9 | 7.9 | 7.9 | 1265.63 | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS | 82 | 10000 ms | per-request | /auth/v1/settings | auth-settings | safe-read | 1 | 7.9 | 7.9 | 7.9 | 1265.63 | PASS | — |
+| site/src/lib/commonswarm.ts:BROWSER_REQUEST_TIMEOUT_MS | 69 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/commonswarm.ts:setTimeout | 479 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS | 4 | 30000 ms | whole-operation | — | browser-wake-roster-refresh | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:deliveryHoldBudgetMs | 7340 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS | 322 | 30000 ms | whole-operation | — | listener-stop-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout | 7787 | 100 ms | whole-operation | — | listener-stop-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout#2 | 8577 | 250 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:timeoutMs | 5296 | 2000 ms | per-request | /functions/v1/command | wake-lease-release | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS | 3414 | 110000 ms | whole-operation | — | listener-turn-margin | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:turnBudgetMs | 7139 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/admin-delegations-gate.ts:AbortSignal.timeout | 7 | 2500 ms | per-request | /admin/gate | admin-issuance-gate-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout | 25 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout#2 | 41 | 15000 ms | per-request | /functions/v1/command | admin-recovery-revoke | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:deadlineMs | 216 | 10000 ms | whole-operation | /functions/v1/command | channel-delivery-deadline | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:setInterval | 409 | 5000 ms | per-request | — | channel-heartbeat | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-channel.ts:signalRequestTimeoutMs | 217 | 10000 ms | per-request | /functions/v1/command | channel-signal-timeout | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS | 22 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS | 28 | 4900 ms | whole-operation | — | hook-hard-exit (proxy: check) | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS | 2 | 5000 ms | whole-operation | — | claude-hook | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET | 33 | 4000 raw | whole-operation | — | check-body-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:timeoutMs | 216 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check-site (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-grok-bot-gateway.ts:AbortSignal.timeout | 31 | 10000 ms | per-request | — | grok-bot-gateway | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-host.ts:timeout | 14 | 250 ms | per-request | — | host-ps | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeout | 150 | 5000 ms | whole-operation | — | claude-hook-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs | 94 | 2000 ms | whole-operation | — | receive-update-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs#2 | 284 | 2000 ms | whole-operation | — | receive-config-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS | 17 | 10000 ms | whole-operation | /functions/v1/read, /functions/v1/command | agent-setup (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:AGENT_SEEN_TIMEOUT_MS | 10 | 5000 ms | per-request | /functions/v1/command | signals-seen | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:setTimeout | 58 | 5000 ms | per-request | /functions/v1/command | signals-seen-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/arrival-watch.ts:timeout | 268 | 2000 ms | whole-operation | — | arrival-host-machine-id | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/auth.ts:CALLBACK_TIMEOUT_MS | 17 | 300000 ms | whole-operation | — | oauth-callback | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/channels.ts:timeoutMs | 248 | 30000 ms | per-request | /functions/v1/read | channel-ls | safe-read | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/channels.ts:timeoutMs#2 | 343 | 30000 ms | per-request | /rest/v1/channels | channel-ls-human (proxy: channel-ls) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout | 883 | 30000 ms | per-request | /functions/v1/command | declare-agent-model | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#2 | 933 | 30000 ms | per-request | /functions/v1/command | task-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#3 | 1036 | 30000 ms | per-request | /functions/v1/command | connect-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#4 | 1148 | 30000 ms | per-request | /functions/v1/command | capability-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#5 | 1222 | 30000 ms | per-request | /functions/v1/command | channel-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#6 | 1345 | 30000 ms | whole-operation | /functions/v1/command | signal-write-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS | 396 | 30000 ms | whole-operation | /functions/v1/command | signal-write | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/current-target.ts:AbortSignal.timeout | 293 | 10000 ms | per-request | — | site-discovery | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/delivery.ts:DELIVERY_REQUEST_TIMEOUT_MS | 66 | 30000 ms | per-request | /functions/v1/command | delivery-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:REQUEST_TIMEOUT_MS | 25 | 30000 ms | per-request | /functions/v1/command | feedback | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:setTimeout | 47 | 30000 ms | per-request | /functions/v1/command | feedback-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:REQUEST_TIMEOUT_MS | 181 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls | safe-read | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:setTimeout | 216 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/live-session-context.ts:timeoutMs | 43 | 5000 ms | per-request | /functions/v1/read | verified-live-session-status | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS | 22 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:setTimeout | 825 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:timeout | 353 | 2000 ms | whole-operation | — | mcp-hidden-input | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/pending-access.ts:AbortSignal.timeout | 66 | 10000 ms | per-request | /functions/v1/read | pending-access (proxy: signal-read) | not-run | 1 | 10.0 | 10.0 | 10.0 | 999.20 | NOT RUN | — |
+| src/cloud/renewal-grants.ts:AbortSignal.timeout | 115 | 15000 ms | per-request | /functions/v1/read | renewal-grants (proxy: signal-read) | not-run | 1 | 10.0 | 10.0 | 10.0 | 1498.80 | NOT RUN | — |
+| src/cloud/renewal.ts:RENEW_TIMEOUT_MS | 131 | 30000 ms | per-request | /functions/v1/command | credential-renewal | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/renewal.ts:setTimeout | 390 | 30000 ms | per-request | /functions/v1/command | credential-renewal-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/seed.ts:connect_timeout | 86 | 10000 ms | per-request | — | postgres-connect | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/seed.ts:timeout | 272 | 5000 ms | whole-operation | — | postgres-close | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/session-client.ts:setTimeout | 81 | 30000 ms | per-request | /functions/v1/command | session-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/session-client.ts:setTimeout#2 | 265 | 30000 ms | per-request | /functions/v1/read | session-status (proxy: signal-read) | not-run | 1 | 10.0 | 10.0 | 10.0 | 2997.60 | NOT RUN | — |
+| src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS | 41 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read | safe-read | 1 | 10.0 | 10.0 | 10.0 | 2997.60 | NOT MEASURED | — |
+| src/cloud/signals.ts:timeoutMs | 944 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 10.0 | 10.0 | 10.0 | 2997.60 | NOT RUN | — |
+| src/cloud/signals.ts:timeoutMs#2 | 1057 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 10.0 | 10.0 | 10.0 | 2997.60 | NOT RUN | — |
+| src/cloud/storage.ts:LOCK_TIMEOUT_MS | 35 | 30000 ms | whole-operation | — | storage-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs | 528 | 1000 ms | whole-operation | — | host-id-pid-probe | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs#2 | 631 | 30000 ms | whole-operation | — | storage-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/wake-lease.ts:setTimeout | 72 | 15000 ms | per-request | /functions/v1/command | wake-lease-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/wake-lease.ts:setTimeout#2 | 141 | 15000 ms | per-request | /functions/v1/read | wake-lease-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/host/bounds.ts:ACP_CANARY_TIMEOUT_MS | 12 | 30000 ms | whole-operation | — | provider-canary | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_DEFAULT_REQUEST_TIMEOUT_MS | 10 | 120000 ms | per-request | — | acp-request | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_VERSION_CHECK_TIMEOUT_MS | 11 | 5000 ms | whole-operation | — | provider-version | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:requestTimeoutMs | 638 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeout | 339 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeoutMs | 332 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:requestTimeoutMs | 413 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeout | 230 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeoutMs | 223 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs | 267 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs#2 | 328 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeout | 122 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeoutMs | 117 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:requestTimeoutMs | 836 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout | 289 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout#2 | 551 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeoutMs | 283 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/stderr-tail.ts:setTimeout | 141 | 100 ms | per-request | — | stderr-exit-grace | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/activity.ts:ACTIVITY_REQUEST_TIMEOUT_MS | 15 | 5000 ms | per-request | /functions/v1/activity | activity-frame | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/activity.ts:requestTimeoutMs | 95 | 5000 ms | per-request | /functions/v1/activity | activity-frame-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/brain-digest.ts:BRAIN_DIGEST_LOCK_TIMEOUT_MS | 17 | 250 ms | whole-operation | — | brain-digest-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/brain-digest.ts:timeoutMs | 163 | 250 ms | whole-operation | — | brain-digest-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:CONTROL_TIMEOUT_MS | 46 | 2000 ms | whole-operation | — | control-socket | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:setTimeout | 1148 | 25 ms | per-request | — | control-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:timeoutMs | 1276 | 2000 ms | whole-operation | — | control-socket-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:budget | 109 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:timeoutMs | 183 | 30000 ms | whole-operation | — | provider-canary-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:budgetBytes | 727 | 131072 raw | whole-operation | — | hook-render-size-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS | 74 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:HOOK_LOCK_TIMEOUT_MS | 70 | 250 ms | whole-operation | — | hook-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_PROCESS_DEADLINE_MS | 76 | 4900 ms | whole-operation | — | hook-hard-exit-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_RENDER_BUDGET_BYTES | 101 | 131072 raw | whole-operation | — | hook-render-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:setTimeout | 1179 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check-timer (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:timeoutMs | 354 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#2 | 386 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#3 | 419 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#4 | 464 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:idleTimeoutMs | 93 | 60000 ms | per-request | — | http-idle-close-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:LISTENER_HTTP_IDLE_TIMEOUT_MS | 19 | 60000 ms | per-request | — | http-idle-close | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:deliveryHoldBudgetMs | 1016 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:LISTENER_DELIVERY_HOLD_BUDGET_MS | 136 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:TAIL_SERIALIZED_BUDGET_BYTES | 311 | 3000 raw | whole-operation | — | tail-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:timeoutMs | 1279 | 120000 ms | whole-operation | — | listener-start-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/types.ts:LISTENER_PROMPT_TIMEOUT_MS | 78 | 600000 ms | whole-operation | — | listener-prompt | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/wake.ts:WAKE_CLAIMS_PER_MINUTE_BUDGET | 16 | 50 raw | whole-operation | — | wake-rate-count | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/onboarding-cli.ts:setTimeout | 76 | 1000 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS | 24 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc-default | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs | 54 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#2 | 188 | 5000 ms | whole-operation | — | notify-stdout-inspection | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#3 | 211 | 5000 ms | whole-operation | — | notify-stdout-inspection-system | local | 0 | — | — | — | — | NOT NETWORK | — |
+# Client timeout table — http://127.0.0.1:15804
+
+Ref `HEAD`; client `not given`. Inventory comes from the ref; timings come from the client binary and source helpers.
+
+Client start-up (`--version`): not run.
+
+| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |
+|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|
+| site/src/lib/admin-delegations.ts:AbortSignal.timeout | 24 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS | 102 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:setTimeout | 200 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AbortSignal.timeout | 199 | 10000 ms | per-request | /auth/v1/settings | auth-settings-site (proxy: auth-settings) | not-run | 2 | 7.9 | 7.9 | 7.9 | 1262.36 | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS | 82 | 10000 ms | per-request | /auth/v1/settings | auth-settings | safe-read | 2 | 7.9 | 7.9 | 7.9 | 1262.36 | PASS | — |
+| site/src/lib/commonswarm.ts:BROWSER_REQUEST_TIMEOUT_MS | 69 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/commonswarm.ts:setTimeout | 479 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS | 4 | 30000 ms | whole-operation | — | browser-wake-roster-refresh | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:deliveryHoldBudgetMs | 7340 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS | 322 | 30000 ms | whole-operation | — | listener-stop-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout | 7787 | 100 ms | whole-operation | — | listener-stop-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout#2 | 8577 | 250 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:timeoutMs | 5296 | 2000 ms | per-request | /functions/v1/command | wake-lease-release | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS | 3414 | 110000 ms | whole-operation | — | listener-turn-margin | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:turnBudgetMs | 7139 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/admin-delegations-gate.ts:AbortSignal.timeout | 7 | 2500 ms | per-request | /admin/gate | admin-issuance-gate-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout | 25 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout#2 | 41 | 15000 ms | per-request | /functions/v1/command | admin-recovery-revoke | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:deadlineMs | 216 | 10000 ms | whole-operation | /functions/v1/command | channel-delivery-deadline | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:setInterval | 409 | 5000 ms | per-request | — | channel-heartbeat | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-channel.ts:signalRequestTimeoutMs | 217 | 10000 ms | per-request | /functions/v1/command | channel-signal-timeout | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS | 22 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS | 28 | 4900 ms | whole-operation | — | hook-hard-exit (proxy: check) | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS | 2 | 5000 ms | whole-operation | — | claude-hook | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET | 33 | 4000 raw | whole-operation | — | check-body-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:timeoutMs | 216 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check-site (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-grok-bot-gateway.ts:AbortSignal.timeout | 31 | 10000 ms | per-request | — | grok-bot-gateway | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-host.ts:timeout | 14 | 250 ms | per-request | — | host-ps | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeout | 150 | 5000 ms | whole-operation | — | claude-hook-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs | 94 | 2000 ms | whole-operation | — | receive-update-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs#2 | 284 | 2000 ms | whole-operation | — | receive-config-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS | 17 | 10000 ms | whole-operation | /functions/v1/read, /functions/v1/command | agent-setup (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:AGENT_SEEN_TIMEOUT_MS | 10 | 5000 ms | per-request | /functions/v1/command | signals-seen | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:setTimeout | 58 | 5000 ms | per-request | /functions/v1/command | signals-seen-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/arrival-watch.ts:timeout | 268 | 2000 ms | whole-operation | — | arrival-host-machine-id | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/auth.ts:CALLBACK_TIMEOUT_MS | 17 | 300000 ms | whole-operation | — | oauth-callback | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/channels.ts:timeoutMs | 248 | 30000 ms | per-request | /functions/v1/read | channel-ls | safe-read | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/channels.ts:timeoutMs#2 | 343 | 30000 ms | per-request | /rest/v1/channels | channel-ls-human (proxy: channel-ls) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout | 883 | 30000 ms | per-request | /functions/v1/command | declare-agent-model | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#2 | 933 | 30000 ms | per-request | /functions/v1/command | task-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#3 | 1036 | 30000 ms | per-request | /functions/v1/command | connect-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#4 | 1148 | 30000 ms | per-request | /functions/v1/command | capability-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#5 | 1222 | 30000 ms | per-request | /functions/v1/command | channel-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#6 | 1345 | 30000 ms | whole-operation | /functions/v1/command | signal-write-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS | 396 | 30000 ms | whole-operation | /functions/v1/command | signal-write | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/current-target.ts:AbortSignal.timeout | 293 | 10000 ms | per-request | — | site-discovery | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/delivery.ts:DELIVERY_REQUEST_TIMEOUT_MS | 66 | 30000 ms | per-request | /functions/v1/command | delivery-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:REQUEST_TIMEOUT_MS | 25 | 30000 ms | per-request | /functions/v1/command | feedback | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:setTimeout | 47 | 30000 ms | per-request | /functions/v1/command | feedback-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:REQUEST_TIMEOUT_MS | 181 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls | safe-read | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:setTimeout | 216 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/live-session-context.ts:timeoutMs | 43 | 5000 ms | per-request | /functions/v1/read | verified-live-session-status | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS | 22 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:setTimeout | 825 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:timeout | 353 | 2000 ms | whole-operation | — | mcp-hidden-input | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/pending-access.ts:AbortSignal.timeout | 66 | 10000 ms | per-request | /functions/v1/read | pending-access (proxy: signal-read) | not-run | 2 | 8.9 | 9.0 | 9.0 | 1107.52 | NOT RUN | — |
+| src/cloud/renewal-grants.ts:AbortSignal.timeout | 115 | 15000 ms | per-request | /functions/v1/read | renewal-grants (proxy: signal-read) | not-run | 2 | 8.9 | 9.0 | 9.0 | 1661.28 | NOT RUN | — |
+| src/cloud/renewal.ts:RENEW_TIMEOUT_MS | 131 | 30000 ms | per-request | /functions/v1/command | credential-renewal | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/renewal.ts:setTimeout | 390 | 30000 ms | per-request | /functions/v1/command | credential-renewal-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/seed.ts:connect_timeout | 86 | 10000 ms | per-request | — | postgres-connect | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/seed.ts:timeout | 272 | 5000 ms | whole-operation | — | postgres-close | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/session-client.ts:setTimeout | 81 | 30000 ms | per-request | /functions/v1/command | session-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/session-client.ts:setTimeout#2 | 265 | 30000 ms | per-request | /functions/v1/read | session-status (proxy: signal-read) | not-run | 2 | 8.9 | 9.0 | 9.0 | 3322.57 | NOT RUN | — |
+| src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS | 41 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read | safe-read | 2 | 8.9 | 9.0 | 9.0 | 3322.57 | NOT MEASURED | — |
+| src/cloud/signals.ts:timeoutMs | 944 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 2 | 8.9 | 9.0 | 9.0 | 3322.57 | NOT RUN | — |
+| src/cloud/signals.ts:timeoutMs#2 | 1057 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 2 | 8.9 | 9.0 | 9.0 | 3322.57 | NOT RUN | — |
+| src/cloud/storage.ts:LOCK_TIMEOUT_MS | 35 | 30000 ms | whole-operation | — | storage-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs | 528 | 1000 ms | whole-operation | — | host-id-pid-probe | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs#2 | 631 | 30000 ms | whole-operation | — | storage-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/wake-lease.ts:setTimeout | 72 | 15000 ms | per-request | /functions/v1/command | wake-lease-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/wake-lease.ts:setTimeout#2 | 141 | 15000 ms | per-request | /functions/v1/read | wake-lease-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/host/bounds.ts:ACP_CANARY_TIMEOUT_MS | 12 | 30000 ms | whole-operation | — | provider-canary | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_DEFAULT_REQUEST_TIMEOUT_MS | 10 | 120000 ms | per-request | — | acp-request | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_VERSION_CHECK_TIMEOUT_MS | 11 | 5000 ms | whole-operation | — | provider-version | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:requestTimeoutMs | 638 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeout | 339 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeoutMs | 332 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:requestTimeoutMs | 413 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeout | 230 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeoutMs | 223 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs | 267 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs#2 | 328 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeout | 122 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeoutMs | 117 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:requestTimeoutMs | 836 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout | 289 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout#2 | 551 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeoutMs | 283 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/stderr-tail.ts:setTimeout | 141 | 100 ms | per-request | — | stderr-exit-grace | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/activity.ts:ACTIVITY_REQUEST_TIMEOUT_MS | 15 | 5000 ms | per-request | /functions/v1/activity | activity-frame | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/activity.ts:requestTimeoutMs | 95 | 5000 ms | per-request | /functions/v1/activity | activity-frame-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/brain-digest.ts:BRAIN_DIGEST_LOCK_TIMEOUT_MS | 17 | 250 ms | whole-operation | — | brain-digest-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/brain-digest.ts:timeoutMs | 163 | 250 ms | whole-operation | — | brain-digest-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:CONTROL_TIMEOUT_MS | 46 | 2000 ms | whole-operation | — | control-socket | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:setTimeout | 1148 | 25 ms | per-request | — | control-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:timeoutMs | 1276 | 2000 ms | whole-operation | — | control-socket-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:budget | 109 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:timeoutMs | 183 | 30000 ms | whole-operation | — | provider-canary-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:budgetBytes | 727 | 131072 raw | whole-operation | — | hook-render-size-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS | 74 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:HOOK_LOCK_TIMEOUT_MS | 70 | 250 ms | whole-operation | — | hook-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_PROCESS_DEADLINE_MS | 76 | 4900 ms | whole-operation | — | hook-hard-exit-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_RENDER_BUDGET_BYTES | 101 | 131072 raw | whole-operation | — | hook-render-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:setTimeout | 1179 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check-timer (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:timeoutMs | 354 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#2 | 386 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#3 | 419 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#4 | 464 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:idleTimeoutMs | 93 | 60000 ms | per-request | — | http-idle-close-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:LISTENER_HTTP_IDLE_TIMEOUT_MS | 19 | 60000 ms | per-request | — | http-idle-close | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:deliveryHoldBudgetMs | 1016 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:LISTENER_DELIVERY_HOLD_BUDGET_MS | 136 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:TAIL_SERIALIZED_BUDGET_BYTES | 311 | 3000 raw | whole-operation | — | tail-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:timeoutMs | 1279 | 120000 ms | whole-operation | — | listener-start-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/types.ts:LISTENER_PROMPT_TIMEOUT_MS | 78 | 600000 ms | whole-operation | — | listener-prompt | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/wake.ts:WAKE_CLAIMS_PER_MINUTE_BUDGET | 16 | 50 raw | whole-operation | — | wake-rate-count | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/onboarding-cli.ts:setTimeout | 76 | 1000 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS | 24 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc-default | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs | 54 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#2 | 188 | 5000 ms | whole-operation | — | notify-stdout-inspection | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#3 | 211 | 5000 ms | whole-operation | — | notify-stdout-inspection-system | local | 0 | — | — | — | — | NOT NETWORK | — |
+# Client timeout table — http://127.0.0.1:15804
+
+Ref `HEAD`; client `/var/folders/bb/7n7qfbls651d80fs4r9wdyk40000gn/T/timeout-table-run-ruGgKz/silent-client.mjs`. Inventory comes from the ref; timings come from the client binary and source helpers.
+
+Client start-up (`--version`): p50 26.6 ms; p95 26.6 ms; max 26.6 ms.
+
+| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |
+|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|
+| site/src/lib/admin-delegations.ts:AbortSignal.timeout | 24 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS | 102 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:setTimeout | 200 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AbortSignal.timeout | 199 | 10000 ms | per-request | /auth/v1/settings | auth-settings-site (proxy: auth-settings) | not-run | 1 | 7.9 | 7.9 | 7.9 | 1264.80 | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS | 82 | 10000 ms | per-request | /auth/v1/settings | auth-settings | safe-read | 1 | 7.9 | 7.9 | 7.9 | 1264.80 | PASS | — |
+| site/src/lib/commonswarm.ts:BROWSER_REQUEST_TIMEOUT_MS | 69 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/commonswarm.ts:setTimeout | 479 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS | 4 | 30000 ms | whole-operation | — | browser-wake-roster-refresh | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:deliveryHoldBudgetMs | 7340 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS | 322 | 30000 ms | whole-operation | — | listener-stop-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout | 7787 | 100 ms | whole-operation | — | listener-stop-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout#2 | 8577 | 250 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:timeoutMs | 5296 | 2000 ms | per-request | /functions/v1/command | wake-lease-release | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS | 3414 | 110000 ms | whole-operation | — | listener-turn-margin | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:turnBudgetMs | 7139 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/admin-delegations-gate.ts:AbortSignal.timeout | 7 | 2500 ms | per-request | /admin/gate | admin-issuance-gate-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout | 25 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout#2 | 41 | 15000 ms | per-request | /functions/v1/command | admin-recovery-revoke | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:deadlineMs | 216 | 10000 ms | whole-operation | /functions/v1/command | channel-delivery-deadline | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:setInterval | 409 | 5000 ms | per-request | — | channel-heartbeat | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-channel.ts:signalRequestTimeoutMs | 217 | 10000 ms | per-request | /functions/v1/command | channel-signal-timeout | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS | 22 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS | 28 | 4900 ms | whole-operation | — | hook-hard-exit (proxy: check) | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS | 2 | 5000 ms | whole-operation | — | claude-hook | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET | 33 | 4000 raw | whole-operation | — | check-body-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:timeoutMs | 216 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check-site (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-grok-bot-gateway.ts:AbortSignal.timeout | 31 | 10000 ms | per-request | — | grok-bot-gateway | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-host.ts:timeout | 14 | 250 ms | per-request | — | host-ps | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeout | 150 | 5000 ms | whole-operation | — | claude-hook-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs | 94 | 2000 ms | whole-operation | — | receive-update-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs#2 | 284 | 2000 ms | whole-operation | — | receive-config-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS | 17 | 10000 ms | whole-operation | /functions/v1/read, /functions/v1/command | agent-setup (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:AGENT_SEEN_TIMEOUT_MS | 10 | 5000 ms | per-request | /functions/v1/command | signals-seen | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:setTimeout | 58 | 5000 ms | per-request | /functions/v1/command | signals-seen-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/arrival-watch.ts:timeout | 268 | 2000 ms | whole-operation | — | arrival-host-machine-id | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/auth.ts:CALLBACK_TIMEOUT_MS | 17 | 300000 ms | whole-operation | — | oauth-callback | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/channels.ts:timeoutMs | 248 | 30000 ms | per-request | /functions/v1/read | channel-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/channels.ts:timeoutMs#2 | 343 | 30000 ms | per-request | /rest/v1/channels | channel-ls-human (proxy: channel-ls) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout | 883 | 30000 ms | per-request | /functions/v1/command | declare-agent-model | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#2 | 933 | 30000 ms | per-request | /functions/v1/command | task-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#3 | 1036 | 30000 ms | per-request | /functions/v1/command | connect-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#4 | 1148 | 30000 ms | per-request | /functions/v1/command | capability-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#5 | 1222 | 30000 ms | per-request | /functions/v1/command | channel-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#6 | 1345 | 30000 ms | whole-operation | /functions/v1/command | signal-write-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS | 396 | 30000 ms | whole-operation | /functions/v1/command | signal-write | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/current-target.ts:AbortSignal.timeout | 293 | 10000 ms | per-request | — | site-discovery | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/delivery.ts:DELIVERY_REQUEST_TIMEOUT_MS | 66 | 30000 ms | per-request | /functions/v1/command | delivery-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:REQUEST_TIMEOUT_MS | 25 | 30000 ms | per-request | /functions/v1/command | feedback | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:setTimeout | 47 | 30000 ms | per-request | /functions/v1/command | feedback-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:REQUEST_TIMEOUT_MS | 181 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/files.ts:setTimeout | 216 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/live-session-context.ts:timeoutMs | 43 | 5000 ms | per-request | /functions/v1/read | verified-live-session-status | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS | 22 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:setTimeout | 825 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:timeout | 353 | 2000 ms | whole-operation | — | mcp-hidden-input | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/pending-access.ts:AbortSignal.timeout | 66 | 10000 ms | per-request | /functions/v1/read | pending-access (proxy: signal-read) | not-run | 1 | 9.1 | 9.1 | 9.1 | 1104.06 | NOT RUN | — |
+| src/cloud/renewal-grants.ts:AbortSignal.timeout | 115 | 15000 ms | per-request | /functions/v1/read | renewal-grants (proxy: signal-read) | not-run | 1 | 9.1 | 9.1 | 9.1 | 1656.09 | NOT RUN | — |
+| src/cloud/renewal.ts:RENEW_TIMEOUT_MS | 131 | 30000 ms | per-request | /functions/v1/command | credential-renewal | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/renewal.ts:setTimeout | 390 | 30000 ms | per-request | /functions/v1/command | credential-renewal-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/seed.ts:connect_timeout | 86 | 10000 ms | per-request | — | postgres-connect | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/seed.ts:timeout | 272 | 5000 ms | whole-operation | — | postgres-close | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/session-client.ts:setTimeout | 81 | 30000 ms | per-request | /functions/v1/command | session-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/session-client.ts:setTimeout#2 | 265 | 30000 ms | per-request | /functions/v1/read | session-status (proxy: signal-read) | not-run | 1 | 9.1 | 9.1 | 9.1 | 3312.17 | NOT RUN | — |
+| src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS | 41 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read | safe-read | 1 | 9.1 | 9.1 | 9.1 | 3312.17 | NOT MEASURED | — |
+| src/cloud/signals.ts:timeoutMs | 944 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 9.1 | 9.1 | 9.1 | 3312.17 | NOT RUN | — |
+| src/cloud/signals.ts:timeoutMs#2 | 1057 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 9.1 | 9.1 | 9.1 | 3312.17 | NOT RUN | — |
+| src/cloud/storage.ts:LOCK_TIMEOUT_MS | 35 | 30000 ms | whole-operation | — | storage-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs | 528 | 1000 ms | whole-operation | — | host-id-pid-probe | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs#2 | 631 | 30000 ms | whole-operation | — | storage-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/wake-lease.ts:setTimeout | 72 | 15000 ms | per-request | /functions/v1/command | wake-lease-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/wake-lease.ts:setTimeout#2 | 141 | 15000 ms | per-request | /functions/v1/read | wake-lease-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/host/bounds.ts:ACP_CANARY_TIMEOUT_MS | 12 | 30000 ms | whole-operation | — | provider-canary | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_DEFAULT_REQUEST_TIMEOUT_MS | 10 | 120000 ms | per-request | — | acp-request | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_VERSION_CHECK_TIMEOUT_MS | 11 | 5000 ms | whole-operation | — | provider-version | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:requestTimeoutMs | 638 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeout | 339 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeoutMs | 332 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:requestTimeoutMs | 413 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeout | 230 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeoutMs | 223 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs | 267 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs#2 | 328 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeout | 122 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeoutMs | 117 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:requestTimeoutMs | 836 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout | 289 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout#2 | 551 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeoutMs | 283 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/stderr-tail.ts:setTimeout | 141 | 100 ms | per-request | — | stderr-exit-grace | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/activity.ts:ACTIVITY_REQUEST_TIMEOUT_MS | 15 | 5000 ms | per-request | /functions/v1/activity | activity-frame | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/activity.ts:requestTimeoutMs | 95 | 5000 ms | per-request | /functions/v1/activity | activity-frame-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/brain-digest.ts:BRAIN_DIGEST_LOCK_TIMEOUT_MS | 17 | 250 ms | whole-operation | — | brain-digest-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/brain-digest.ts:timeoutMs | 163 | 250 ms | whole-operation | — | brain-digest-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:CONTROL_TIMEOUT_MS | 46 | 2000 ms | whole-operation | — | control-socket | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:setTimeout | 1148 | 25 ms | per-request | — | control-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:timeoutMs | 1276 | 2000 ms | whole-operation | — | control-socket-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:budget | 109 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:timeoutMs | 183 | 30000 ms | whole-operation | — | provider-canary-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:budgetBytes | 727 | 131072 raw | whole-operation | — | hook-render-size-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS | 74 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:HOOK_LOCK_TIMEOUT_MS | 70 | 250 ms | whole-operation | — | hook-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_PROCESS_DEADLINE_MS | 76 | 4900 ms | whole-operation | — | hook-hard-exit-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_RENDER_BUDGET_BYTES | 101 | 131072 raw | whole-operation | — | hook-render-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:setTimeout | 1179 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check-timer (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:timeoutMs | 354 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#2 | 386 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#3 | 419 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#4 | 464 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:idleTimeoutMs | 93 | 60000 ms | per-request | — | http-idle-close-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:LISTENER_HTTP_IDLE_TIMEOUT_MS | 19 | 60000 ms | per-request | — | http-idle-close | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:deliveryHoldBudgetMs | 1016 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:LISTENER_DELIVERY_HOLD_BUDGET_MS | 136 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:TAIL_SERIALIZED_BUDGET_BYTES | 311 | 3000 raw | whole-operation | — | tail-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:timeoutMs | 1279 | 120000 ms | whole-operation | — | listener-start-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/types.ts:LISTENER_PROMPT_TIMEOUT_MS | 78 | 600000 ms | whole-operation | — | listener-prompt | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/wake.ts:WAKE_CLAIMS_PER_MINUTE_BUDGET | 16 | 50 raw | whole-operation | — | wake-rate-count | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/onboarding-cli.ts:setTimeout | 76 | 1000 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS | 24 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc-default | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs | 54 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#2 | 188 | 5000 ms | whole-operation | — | notify-stdout-inspection | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#3 | 211 | 5000 ms | whole-operation | — | notify-stdout-inspection-system | local | 0 | — | — | — | — | NOT NETWORK | — |
+# Client timeout table — http://127.0.0.1:15804
+
+Ref `HEAD`; client `/var/folders/bb/7n7qfbls651d80fs4r9wdyk40000gn/T/timeout-table-run-ruGgKz/silent-client.mjs`. Inventory comes from the ref; timings come from the client binary and source helpers.
+
+Client start-up (`--version`): p50 24.9 ms; p95 24.9 ms; max 24.9 ms.
+
+| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |
+|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|
+| site/src/lib/admin-delegations.ts:AbortSignal.timeout | 24 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS | 102 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:setTimeout | 200 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AbortSignal.timeout | 199 | 10000 ms | per-request | /auth/v1/settings | auth-settings-site (proxy: auth-settings) | not-run | 1 | 7.9 | 7.9 | 7.9 | 1270.82 | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS | 82 | 10000 ms | per-request | /auth/v1/settings | auth-settings | safe-read | 1 | 7.9 | 7.9 | 7.9 | 1270.82 | PASS | — |
+| site/src/lib/commonswarm.ts:BROWSER_REQUEST_TIMEOUT_MS | 69 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/commonswarm.ts:setTimeout | 479 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS | 4 | 30000 ms | whole-operation | — | browser-wake-roster-refresh | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:deliveryHoldBudgetMs | 7340 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS | 322 | 30000 ms | whole-operation | — | listener-stop-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout | 7787 | 100 ms | whole-operation | — | listener-stop-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout#2 | 8577 | 250 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:timeoutMs | 5296 | 2000 ms | per-request | /functions/v1/command | wake-lease-release | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS | 3414 | 110000 ms | whole-operation | — | listener-turn-margin | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:turnBudgetMs | 7139 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/admin-delegations-gate.ts:AbortSignal.timeout | 7 | 2500 ms | per-request | /admin/gate | admin-issuance-gate-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout | 25 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout#2 | 41 | 15000 ms | per-request | /functions/v1/command | admin-recovery-revoke | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:deadlineMs | 216 | 10000 ms | whole-operation | /functions/v1/command | channel-delivery-deadline | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:setInterval | 409 | 5000 ms | per-request | — | channel-heartbeat | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-channel.ts:signalRequestTimeoutMs | 217 | 10000 ms | per-request | /functions/v1/command | channel-signal-timeout | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS | 22 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS | 28 | 4900 ms | whole-operation | — | hook-hard-exit (proxy: check) | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS | 2 | 5000 ms | whole-operation | — | claude-hook | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET | 33 | 4000 raw | whole-operation | — | check-body-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:timeoutMs | 216 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check-site (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-grok-bot-gateway.ts:AbortSignal.timeout | 31 | 10000 ms | per-request | — | grok-bot-gateway | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-host.ts:timeout | 14 | 250 ms | per-request | — | host-ps | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeout | 150 | 5000 ms | whole-operation | — | claude-hook-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs | 94 | 2000 ms | whole-operation | — | receive-update-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs#2 | 284 | 2000 ms | whole-operation | — | receive-config-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS | 17 | 10000 ms | whole-operation | /functions/v1/read, /functions/v1/command | agent-setup (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:AGENT_SEEN_TIMEOUT_MS | 10 | 5000 ms | per-request | /functions/v1/command | signals-seen | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:setTimeout | 58 | 5000 ms | per-request | /functions/v1/command | signals-seen-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/arrival-watch.ts:timeout | 268 | 2000 ms | whole-operation | — | arrival-host-machine-id | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/auth.ts:CALLBACK_TIMEOUT_MS | 17 | 300000 ms | whole-operation | — | oauth-callback | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/channels.ts:timeoutMs | 248 | 30000 ms | per-request | /functions/v1/read | channel-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/channels.ts:timeoutMs#2 | 343 | 30000 ms | per-request | /rest/v1/channels | channel-ls-human (proxy: channel-ls) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout | 883 | 30000 ms | per-request | /functions/v1/command | declare-agent-model | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#2 | 933 | 30000 ms | per-request | /functions/v1/command | task-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#3 | 1036 | 30000 ms | per-request | /functions/v1/command | connect-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#4 | 1148 | 30000 ms | per-request | /functions/v1/command | capability-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#5 | 1222 | 30000 ms | per-request | /functions/v1/command | channel-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#6 | 1345 | 30000 ms | whole-operation | /functions/v1/command | signal-write-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS | 396 | 30000 ms | whole-operation | /functions/v1/command | signal-write | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/current-target.ts:AbortSignal.timeout | 293 | 10000 ms | per-request | — | site-discovery | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/delivery.ts:DELIVERY_REQUEST_TIMEOUT_MS | 66 | 30000 ms | per-request | /functions/v1/command | delivery-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:REQUEST_TIMEOUT_MS | 25 | 30000 ms | per-request | /functions/v1/command | feedback | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:setTimeout | 47 | 30000 ms | per-request | /functions/v1/command | feedback-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:REQUEST_TIMEOUT_MS | 181 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/files.ts:setTimeout | 216 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/live-session-context.ts:timeoutMs | 43 | 5000 ms | per-request | /functions/v1/read | verified-live-session-status | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS | 22 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:setTimeout | 825 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:timeout | 353 | 2000 ms | whole-operation | — | mcp-hidden-input | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/pending-access.ts:AbortSignal.timeout | 66 | 10000 ms | per-request | /functions/v1/read | pending-access (proxy: signal-read) | not-run | 1 | 8.8 | 8.8 | 8.8 | 1142.56 | NOT RUN | — |
+| src/cloud/renewal-grants.ts:AbortSignal.timeout | 115 | 15000 ms | per-request | /functions/v1/read | renewal-grants (proxy: signal-read) | not-run | 1 | 8.8 | 8.8 | 8.8 | 1713.85 | NOT RUN | — |
+| src/cloud/renewal.ts:RENEW_TIMEOUT_MS | 131 | 30000 ms | per-request | /functions/v1/command | credential-renewal | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/renewal.ts:setTimeout | 390 | 30000 ms | per-request | /functions/v1/command | credential-renewal-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/seed.ts:connect_timeout | 86 | 10000 ms | per-request | — | postgres-connect | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/seed.ts:timeout | 272 | 5000 ms | whole-operation | — | postgres-close | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/session-client.ts:setTimeout | 81 | 30000 ms | per-request | /functions/v1/command | session-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/session-client.ts:setTimeout#2 | 265 | 30000 ms | per-request | /functions/v1/read | session-status (proxy: signal-read) | not-run | 1 | 8.8 | 8.8 | 8.8 | 3427.69 | NOT RUN | — |
+| src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS | 41 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read | safe-read | 1 | 8.8 | 8.8 | 8.8 | 3427.69 | NOT MEASURED | — |
+| src/cloud/signals.ts:timeoutMs | 944 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 8.8 | 8.8 | 8.8 | 3427.69 | NOT RUN | — |
+| src/cloud/signals.ts:timeoutMs#2 | 1057 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 8.8 | 8.8 | 8.8 | 3427.69 | NOT RUN | — |
+| src/cloud/storage.ts:LOCK_TIMEOUT_MS | 35 | 30000 ms | whole-operation | — | storage-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs | 528 | 1000 ms | whole-operation | — | host-id-pid-probe | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs#2 | 631 | 30000 ms | whole-operation | — | storage-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/wake-lease.ts:setTimeout | 72 | 15000 ms | per-request | /functions/v1/command | wake-lease-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/wake-lease.ts:setTimeout#2 | 141 | 15000 ms | per-request | /functions/v1/read | wake-lease-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/host/bounds.ts:ACP_CANARY_TIMEOUT_MS | 12 | 30000 ms | whole-operation | — | provider-canary | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_DEFAULT_REQUEST_TIMEOUT_MS | 10 | 120000 ms | per-request | — | acp-request | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_VERSION_CHECK_TIMEOUT_MS | 11 | 5000 ms | whole-operation | — | provider-version | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:requestTimeoutMs | 638 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeout | 339 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeoutMs | 332 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:requestTimeoutMs | 413 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeout | 230 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeoutMs | 223 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs | 267 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs#2 | 328 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeout | 122 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeoutMs | 117 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:requestTimeoutMs | 836 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout | 289 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout#2 | 551 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeoutMs | 283 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/stderr-tail.ts:setTimeout | 141 | 100 ms | per-request | — | stderr-exit-grace | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/activity.ts:ACTIVITY_REQUEST_TIMEOUT_MS | 15 | 5000 ms | per-request | /functions/v1/activity | activity-frame | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/activity.ts:requestTimeoutMs | 95 | 5000 ms | per-request | /functions/v1/activity | activity-frame-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/brain-digest.ts:BRAIN_DIGEST_LOCK_TIMEOUT_MS | 17 | 250 ms | whole-operation | — | brain-digest-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/brain-digest.ts:timeoutMs | 163 | 250 ms | whole-operation | — | brain-digest-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:CONTROL_TIMEOUT_MS | 46 | 2000 ms | whole-operation | — | control-socket | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:setTimeout | 1148 | 25 ms | per-request | — | control-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:timeoutMs | 1276 | 2000 ms | whole-operation | — | control-socket-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:budget | 109 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:timeoutMs | 183 | 30000 ms | whole-operation | — | provider-canary-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:budgetBytes | 727 | 131072 raw | whole-operation | — | hook-render-size-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS | 74 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:HOOK_LOCK_TIMEOUT_MS | 70 | 250 ms | whole-operation | — | hook-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_PROCESS_DEADLINE_MS | 76 | 4900 ms | whole-operation | — | hook-hard-exit-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_RENDER_BUDGET_BYTES | 101 | 131072 raw | whole-operation | — | hook-render-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:setTimeout | 1179 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check-timer (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:timeoutMs | 354 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#2 | 386 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#3 | 419 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#4 | 464 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:idleTimeoutMs | 93 | 60000 ms | per-request | — | http-idle-close-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:LISTENER_HTTP_IDLE_TIMEOUT_MS | 19 | 60000 ms | per-request | — | http-idle-close | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:deliveryHoldBudgetMs | 1016 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:LISTENER_DELIVERY_HOLD_BUDGET_MS | 136 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:TAIL_SERIALIZED_BUDGET_BYTES | 311 | 3000 raw | whole-operation | — | tail-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:timeoutMs | 1279 | 120000 ms | whole-operation | — | listener-start-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/types.ts:LISTENER_PROMPT_TIMEOUT_MS | 78 | 600000 ms | whole-operation | — | listener-prompt | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/wake.ts:WAKE_CLAIMS_PER_MINUTE_BUDGET | 16 | 50 raw | whole-operation | — | wake-rate-count | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/onboarding-cli.ts:setTimeout | 76 | 1000 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS | 24 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc-default | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs | 54 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#2 | 188 | 5000 ms | whole-operation | — | notify-stdout-inspection | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#3 | 211 | 5000 ms | whole-operation | — | notify-stdout-inspection-system | local | 0 | — | — | — | — | NOT NETWORK | — |
+# Client timeout table — http://127.0.0.1:15804
+
+Ref `HEAD`; client `/var/folders/bb/7n7qfbls651d80fs4r9wdyk40000gn/T/timeout-table-run-ruGgKz/timeout-client.mjs`. Inventory comes from the ref; timings come from the client binary and source helpers.
+
+Client start-up (`--version`): p50 25.1 ms; p95 25.1 ms; max 25.1 ms.
+
+| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |
+|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|
+| site/src/lib/admin-delegations.ts:AbortSignal.timeout | 24 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS | 102 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/agent-connect.ts:setTimeout | 200 | 30000 ms | per-request | /functions/v1/command | browser-agent-connect-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AbortSignal.timeout | 199 | 10000 ms | per-request | /auth/v1/settings | auth-settings-site (proxy: auth-settings) | not-run | 1 | 7.8 | 7.8 | 7.8 | 1274.83 | NOT RUN | — |
+| site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS | 82 | 10000 ms | per-request | /auth/v1/settings | auth-settings | safe-read | 1 | 7.8 | 7.8 | 7.8 | 1274.83 | PASS | — |
+| site/src/lib/commonswarm.ts:BROWSER_REQUEST_TIMEOUT_MS | 69 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/commonswarm.ts:setTimeout | 479 | 30000 ms | per-request | /functions/v1/command, /functions/v1/read, /rest/v1/..., /storage/v1/..., /auth/v1/... | browser-shared-request-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS | 4 | 30000 ms | whole-operation | — | browser-wake-roster-refresh | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:deliveryHoldBudgetMs | 7340 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS | 322 | 30000 ms | whole-operation | — | listener-stop-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout | 7787 | 100 ms | whole-operation | — | listener-stop-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:setTimeout#2 | 8577 | 250 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:timeoutMs | 5296 | 2000 ms | per-request | /functions/v1/command | wake-lease-release | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS | 3414 | 110000 ms | whole-operation | — | listener-turn-margin | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cli.ts:turnBudgetMs | 7139 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/admin-delegations-gate.ts:AbortSignal.timeout | 7 | 2500 ms | per-request | /admin/gate | admin-issuance-gate-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout | 25 | 15000 ms | per-request | /functions/v1/read | admin-recovery-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/admin-delegations.ts:AbortSignal.timeout#2 | 41 | 15000 ms | per-request | /functions/v1/command | admin-recovery-revoke | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:deadlineMs | 216 | 10000 ms | whole-operation | /functions/v1/command | channel-delivery-deadline | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-channel.ts:setInterval | 409 | 5000 ms | per-request | — | channel-heartbeat | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-channel.ts:signalRequestTimeoutMs | 217 | 10000 ms | per-request | /functions/v1/command | channel-signal-timeout | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS | 22 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS | 28 | 4900 ms | whole-operation | — | hook-hard-exit (proxy: check) | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS | 2 | 5000 ms | whole-operation | — | claude-hook | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET | 33 | 4000 raw | whole-operation | — | check-body-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-check.ts:timeoutMs | 216 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | check-site (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-grok-bot-gateway.ts:AbortSignal.timeout | 31 | 10000 ms | per-request | — | grok-bot-gateway | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-host.ts:timeout | 14 | 250 ms | per-request | — | host-ps | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeout | 150 | 5000 ms | whole-operation | — | claude-hook-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs | 94 | 2000 ms | whole-operation | — | receive-update-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-receive.ts:timeoutMs#2 | 284 | 2000 ms | whole-operation | — | receive-config-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS | 17 | 10000 ms | whole-operation | /functions/v1/read, /functions/v1/command | agent-setup (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:AGENT_SEEN_TIMEOUT_MS | 10 | 5000 ms | per-request | /functions/v1/command | signals-seen | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/agent-signal-receipts.ts:setTimeout | 58 | 5000 ms | per-request | /functions/v1/command | signals-seen-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/arrival-watch.ts:timeout | 268 | 2000 ms | whole-operation | — | arrival-host-machine-id | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/auth.ts:CALLBACK_TIMEOUT_MS | 17 | 300000 ms | whole-operation | — | oauth-callback | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/channels.ts:timeoutMs | 248 | 30000 ms | per-request | /functions/v1/read | channel-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/channels.ts:timeoutMs#2 | 343 | 30000 ms | per-request | /rest/v1/channels | channel-ls-human (proxy: channel-ls) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout | 883 | 30000 ms | per-request | /functions/v1/command | declare-agent-model | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#2 | 933 | 30000 ms | per-request | /functions/v1/command | task-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#3 | 1036 | 30000 ms | per-request | /functions/v1/command | connect-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#4 | 1148 | 30000 ms | per-request | /functions/v1/command | capability-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#5 | 1222 | 30000 ms | per-request | /functions/v1/command | channel-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:setTimeout#6 | 1345 | 30000 ms | whole-operation | /functions/v1/command | signal-write-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/command-client.ts:SIGNAL_REQUEST_TIMEOUT_MS | 396 | 30000 ms | whole-operation | /functions/v1/command | signal-write | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/current-target.ts:AbortSignal.timeout | 293 | 10000 ms | per-request | — | site-discovery | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/delivery.ts:DELIVERY_REQUEST_TIMEOUT_MS | 66 | 30000 ms | per-request | /functions/v1/command | delivery-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:REQUEST_TIMEOUT_MS | 25 | 30000 ms | per-request | /functions/v1/command | feedback | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/feedback.ts:setTimeout | 47 | 30000 ms | per-request | /functions/v1/command | feedback-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/files.ts:REQUEST_TIMEOUT_MS | 181 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls | safe-read | 0 | — | — | — | — | NOT MEASURED | — |
+| src/cloud/files.ts:setTimeout | 216 | 30000 ms | per-request | /functions/v1/read, /functions/v1/command, /storage/v1/... | file-ls-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/live-session-context.ts:timeoutMs | 43 | 5000 ms | per-request | /functions/v1/read | verified-live-session-status | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS | 22 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:setTimeout | 825 | 10000 ms | per-request | /functions/v1/h0/register | mcp-register | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/mcp-connect.ts:timeout | 353 | 2000 ms | whole-operation | — | mcp-hidden-input | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/pending-access.ts:AbortSignal.timeout | 66 | 10000 ms | per-request | /functions/v1/read | pending-access (proxy: signal-read) | not-run | 1 | 9.0 | 9.0 | 9.0 | 1116.60 | NOT RUN | — |
+| src/cloud/renewal-grants.ts:AbortSignal.timeout | 115 | 15000 ms | per-request | /functions/v1/read | renewal-grants (proxy: signal-read) | not-run | 1 | 9.0 | 9.0 | 9.0 | 1674.90 | NOT RUN | — |
+| src/cloud/renewal.ts:RENEW_TIMEOUT_MS | 131 | 30000 ms | per-request | /functions/v1/command | credential-renewal | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/renewal.ts:setTimeout | 390 | 30000 ms | per-request | /functions/v1/command | credential-renewal-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/seed.ts:connect_timeout | 86 | 10000 ms | per-request | — | postgres-connect | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/seed.ts:timeout | 272 | 5000 ms | whole-operation | — | postgres-close | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/session-client.ts:setTimeout | 81 | 30000 ms | per-request | /functions/v1/command | session-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/session-client.ts:setTimeout#2 | 265 | 30000 ms | per-request | /functions/v1/read | session-status (proxy: signal-read) | not-run | 1 | 9.0 | 9.0 | 9.0 | 3349.80 | NOT RUN | — |
+| src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS | 41 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read | safe-read | 1 | 9.0 | 9.0 | 9.0 | 3349.80 | NOT MEASURED | — |
+| src/cloud/signals.ts:timeoutMs | 944 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 9.0 | 9.0 | 9.0 | 3349.80 | NOT RUN | — |
+| src/cloud/signals.ts:timeoutMs#2 | 1057 | 30000 ms | per-request | /functions/v1/read, /rest/v1/... | signal-read-site (proxy: signal-read) | not-run | 1 | 9.0 | 9.0 | 9.0 | 3349.80 | NOT RUN | — |
+| src/cloud/storage.ts:LOCK_TIMEOUT_MS | 35 | 30000 ms | whole-operation | — | storage-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs | 528 | 1000 ms | whole-operation | — | host-id-pid-probe | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/storage.ts:timeoutMs#2 | 631 | 30000 ms | whole-operation | — | storage-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/cloud/wake-lease.ts:setTimeout | 72 | 15000 ms | per-request | /functions/v1/command | wake-lease-command | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/cloud/wake-lease.ts:setTimeout#2 | 141 | 15000 ms | per-request | /functions/v1/read | wake-lease-read | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/host/bounds.ts:ACP_CANARY_TIMEOUT_MS | 12 | 30000 ms | whole-operation | — | provider-canary | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_DEFAULT_REQUEST_TIMEOUT_MS | 10 | 120000 ms | per-request | — | acp-request | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/bounds.ts:ACP_VERSION_CHECK_TIMEOUT_MS | 11 | 5000 ms | whole-operation | — | provider-version | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:requestTimeoutMs | 638 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeout | 339 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/claude.ts:timeoutMs | 332 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:requestTimeoutMs | 413 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeout | 230 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/codex.ts:timeoutMs | 223 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs | 267 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:requestTimeoutMs#2 | 328 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeout | 122 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/grok.ts:timeoutMs | 117 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:requestTimeoutMs | 836 | 120000 ms | per-request | — | acp-request-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout | 289 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeout#2 | 551 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/opencode.ts:timeoutMs | 283 | 5000 ms | whole-operation | — | provider-version-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/host/stderr-tail.ts:setTimeout | 141 | 100 ms | per-request | — | stderr-exit-grace | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/activity.ts:ACTIVITY_REQUEST_TIMEOUT_MS | 15 | 5000 ms | per-request | /functions/v1/activity | activity-frame | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/activity.ts:requestTimeoutMs | 95 | 5000 ms | per-request | /functions/v1/activity | activity-frame-site | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/brain-digest.ts:BRAIN_DIGEST_LOCK_TIMEOUT_MS | 17 | 250 ms | whole-operation | — | brain-digest-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/brain-digest.ts:timeoutMs | 163 | 250 ms | whole-operation | — | brain-digest-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:CONTROL_TIMEOUT_MS | 46 | 2000 ms | whole-operation | — | control-socket | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:setTimeout | 1148 | 25 ms | per-request | — | control-poll | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/control.ts:timeoutMs | 1276 | 2000 ms | whole-operation | — | control-socket-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:budget | 109 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/grok-model.ts:timeoutMs | 183 | 30000 ms | whole-operation | — | provider-canary-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:budgetBytes | 727 | 131072 raw | whole-operation | — | hook-render-size-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS | 74 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:HOOK_LOCK_TIMEOUT_MS | 70 | 250 ms | whole-operation | — | hook-lock | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_PROCESS_DEADLINE_MS | 76 | 4900 ms | whole-operation | — | hook-hard-exit-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:HOOK_RENDER_BUDGET_BYTES | 101 | 131072 raw | whole-operation | — | hook-render-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:setTimeout | 1179 | 3900 ms | whole-operation | /functions/v1/read, /functions/v1/command | hook-check-timer (proxy: check) | not-run | 0 | — | — | — | — | NOT RUN | — |
+| src/listener/hook.ts:timeoutMs | 354 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#2 | 386 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#3 | 419 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/hook.ts:timeoutMs#4 | 464 | 250 ms | whole-operation | — | hook-lock-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:idleTimeoutMs | 93 | 60000 ms | per-request | — | http-idle-close-site | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/http-client.ts:LISTENER_HTTP_IDLE_TIMEOUT_MS | 19 | 60000 ms | per-request | — | http-idle-close | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:deliveryHoldBudgetMs | 1016 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/runtime.ts:LISTENER_DELIVERY_HOLD_BUDGET_MS | 136 | 600000 ms | whole-operation | — | listener-prompt-site | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:TAIL_SERIALIZED_BUDGET_BYTES | 311 | 3000 raw | whole-operation | — | tail-size | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/supervisor.ts:timeoutMs | 1279 | 120000 ms | whole-operation | — | listener-start-wait | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/types.ts:LISTENER_PROMPT_TIMEOUT_MS | 78 | 600000 ms | whole-operation | — | listener-prompt | external | 0 | — | — | — | — | NOT NETWORK | — |
+| src/listener/wake.ts:WAKE_CLAIMS_PER_MINUTE_BUDGET | 16 | 50 raw | whole-operation | — | wake-rate-count | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/onboarding-cli.ts:setTimeout | 76 | 1000 ms | whole-operation | — | hook-stdin | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS | 24 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc-default | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs | 54 | 5000 ms | whole-operation | — | notify-stdout-inspection-proc | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#2 | 188 | 5000 ms | whole-operation | — | notify-stdout-inspection | local | 0 | — | — | — | — | NOT NETWORK | — |
+| src/stdout-consumer.ts:timeoutMs#3 | 211 | 5000 ms | whole-operation | — | notify-stdout-inspection-system | local | 0 | — | — | — | — | NOT NETWORK | — |
+✔ runTable does not write to the origin and will not PASS unacknowledged NOT MEASURED rows (3297.650208ms)
+ℹ tests 44
+ℹ suites 0
+ℹ pass 44
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 12996.495875

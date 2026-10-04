@@ -4,6 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { HouseholdObjectClient } from '../../src/cloud/household-objects.js';
 import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from '../../src/cloud/household-http.js';
+import { CLI_BUILD_VERSION } from '../../src/cloud/client-build.js';
+import { CLIENT_PROTOCOL_VERSION } from '../../src/cloud/config.js';
 import { HOUSEHOLD_TOOL_REGISTRY } from '../../src/protocol/household-tool-registry.js';
 
 test('local household HTTP dispatch preserves exact request IDs and binds reads and writes to the profile workspace', async () => {
@@ -35,6 +37,8 @@ test('local household HTTP dispatch preserves exact request IDs and binds reads 
     assert.equal((await read.send()).status, 'ok');
     assert.equal((await read.retry()).status, 'ok');
     assert.deepEqual(requests.map(row => row.url), ['/functions/v1/command', '/functions/v1/read', '/functions/v1/read']);
+    assert.equal(requests[0]!.body.client_version, CLIENT_PROTOCOL_VERSION);
+    assert.equal(requests[0]!.body.client_build, CLI_BUILD_VERSION);
     assert.equal(requests[0]!.body.command_id, 'retry_0001');
     assert.equal(requests[0]!.body.command.arguments.request_id, 'retry_0001');
     assert.ok(requests.every(row => row.body.workspace_id === 'workspace-one'));

@@ -141,7 +141,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         const tools = await listed.json();
         ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
-        assert.equal(tools.result.tools.length, 16);
+        assert.equal(tools.result.tools.length, 13);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
         for (const tool of tools.result.tools) {
@@ -519,7 +519,7 @@ test("origin and schema denials include authenticated positive controls", async 
     origin: "https://claude.ai",
   }));
   assert.equal(list.status, 200);
-  assert.equal((await list.json()).result.tools.length, 16);
+  assert.equal((await list.json()).result.tools.length, 13);
 
   const originDenied = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
     origin: "https://attacker.invalid",

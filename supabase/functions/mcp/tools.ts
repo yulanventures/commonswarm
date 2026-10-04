@@ -3,6 +3,16 @@ import type { VerifiedMcpToken } from "./auth.ts";
 import { SIGNAL_UNSAFE_GLOBAL_RE } from "../_shared/signal-text.ts";
 
 import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, validateHouseholdToolArguments, HouseholdToolInputError } from "../_shared/protocol.js";
+// @ts-ignore TS5097: Node tests import this Deno module through tsx.
+import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
+
+// The registry includes prepared file definitions. Hosted admission excludes
+// file-only tools until protected byte transport has been completed and reviewed.
+const hostedHouseholdTools = HOUSEHOLD_TOOLS.filter(tool => {
+  const definition = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool.name)!;
+  return HOUSEHOLD_FEATURE_GATES.hostedFileTransport ||
+    !definition.objectTypes.every((kind: string) => kind === "file");
+});
 
 const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$";
 const HANDLE_PATTERN = "^seat_[A-Za-z0-9_-]{22,64}$";
@@ -87,7 +97,7 @@ export const HOSTED_TOOL_TABLE = [
     annotations: { title: "List workspace participants", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
   },
-  ...HOUSEHOLD_TOOLS.map(row => ({ ...row, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })),
+  ...hostedHouseholdTools.map(row => ({ ...row, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })),
 ] as const;
 
 export type HostedToolName = typeof HOSTED_TOOL_TABLE[number]["name"];
@@ -186,6 +196,7 @@ export function validateHostedToolArguments(
   name: HostedToolName,
   value: unknown,
 ): HostedToolArguments {
+  if (!hostedToolName(name)) throw new HostedToolInputError("Unknown or unavailable tool.");
   if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === name)) {
     try { return validateHouseholdToolArguments(name, value); }
     catch (error) { if (error instanceof HouseholdToolInputError) throw new HostedToolInputError(error.code); throw error; }

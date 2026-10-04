@@ -47,9 +47,9 @@ Enumerated from Git: **51 files** (23 modified tracked; 28 new). No files delete
 | `supabase/household-storage-reserve/20261004000005-rollback-catalog.sql` | New | Check new privileges/triggers/function are removed and prior SELECT/key-column lock grants remain. |
 | `supabase/household-storage-reserve/20261004000005-rollback.sql` | New | Remove only new grants/triggers/function; retain existing consent, audit and lock grants. |
 | `supabase/migrations/20261004000005_household_permission_provisioning.sql` | New | Three INSERT/eight column UPDATE grants, provenance-enforcing permission audit triggers and commented exact inverse. |
-| `tests/hosted-mcp-protocol.test.ts` | Modified | Expect 16 admitted tools while preserving the original eight coordination schema assertions. |
+| `tests/hosted-mcp-protocol.test.ts` | Modified | Expect 13 admitted tools with protected file transport OFF, preserving original coordination schema assertions. |
 | `tests/household-integration.test.ts` | New | New hosted admission/annotations and protected multipart positive/negative boundary tests. |
-| `tests/lists/test.txt` | Modified | Register only the new household-integration test. |
+| `tests/lists/test.txt` | Modified | Register only this packet's new household-integration and household-feature-gates tests. |
 | `tests/lists/test:p1-server.txt` | Modified | Register only the new household-permission-provisioning test; existing glob deduplicates it. |
 | `tests/p1-cli/household-integration.test.ts` | New | New HTTP transport/authentication/retry and shipped CLI help tests. |
 | `tests/p1-server/household-permission-provisioning.test.ts` | New | New isolated PostgreSQL permission provenance, independent confirmation, audit and inverse proof; CI only. |
@@ -57,3 +57,19 @@ Enumerated from Git: **51 files** (23 modified tracked; 28 new). No files delete
 | `tests/support/admin-issuer-privileges.json` | Modified | Eleven new reasoned household ACL entries; existing key-lock entries retain their values. |
 
 Generated ignored runtime artifacts (`dist/`, `dist-release/`, `services/mcp-auth/src/management-command.generated.js`) were rebuilt locally and are not delivery changes. Package files/lockfiles, OAuth scopes/provider consent code and original migrations 01–04 are unchanged.
+
+Security fold against `92a21537` adds `supabase/functions/_shared/household-feature-gates.ts`
+and `tests/household-feature-gates.test.ts`, and modifies `command/index.ts`,
+`mcp/tools.ts`, `tests/household-integration.test.ts`, the hosted protocol test and
+`tests/lists/test.txt`. Gate definitions and real admission tests make the three
+incomplete paths default OFF. `LEAD-CHECKLIST.md` lists activation prerequisites;
+`FOLD-REPORT.md` records the refutation/fix/test table and final gate exits.
+The new `fold-*.txt` files retain regression baseline, focused test, generation,
+build and type-check output. The generated core was regenerated unchanged.
+
+## Fold 2 — CI repair
+
+[FOLD2-REPORT.md](FOLD2-REPORT.md) records the incremental file inventory, causes,
+fixes and gate exits. Fold 1 remains in place. Dispatcher shards and focused
+service-free checks pass. `check:tests` retains the same eight diagnostics; real
+server proofs and the host-blocked `ps` test remain CI work. No commit or push.
