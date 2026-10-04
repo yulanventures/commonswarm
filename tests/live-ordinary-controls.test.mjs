@@ -177,7 +177,7 @@ async function fixture(t, config = {}) {
       }
       if (url.pathname === '/functions/v1/command') {
         assert.equal(req.headers.authorization, `Bearer ${seatToken}`); assert.equal(body.workspace_id, wid);
-        assert.equal(body.command.kind, 'post_signal'); assert.equal(body.command.signal_kind, 'note'); assert.match(body.command.body, /^C1 ordinary control W[1-7]\//);
+        assert.equal(body.command.kind, 'post_signal'); assert.equal(body.command.signal_kind, 'note'); assert.match(body.command.body, /^C1 ordinary control W(?:[1-7]|2b)\/[A-Za-z0-9]{6}\/(?:before|after|recovery) [0-9a-f]{24}$/);
         assert.deepEqual(body.stream, { kind: 'workspace' }); assert.equal(body.command.to_user_id, null); assert.equal(body.command.to_agent_principal_id, null);
         signal = { id: randomUUID(), workspace_id: wid, from: pid, from_kind: 'agent', to: null, to_agent: null, in_reply_to: null, about: null,
           kind: 'note', body: body.command.body, until: new Date(Date.now() + 60000).toISOString(), created_at: new Date().toISOString() };
@@ -639,6 +639,23 @@ function expirationTimes(entries, journal, f) {
   }
 }
 
+test('window W2b (issuer-only) runs every ordinary control bound to the pre-W1 consent; other window names and W2b probe credentials refuse', async t => {
+  const f = await fixture(t), p = await pre(f), producer = hash(await readFile(script));
+  for (const phase of ['before', 'after', 'recovery']) {
+    const r = await f.run('window', ['--window', 'W2b', '--phase', phase]); assert.equal(r.exit, 0, r.output);
+    assert.equal(r.receipt.window, 'W2b'); assert.equal(r.receipt.phase, phase); assert.equal(r.receipt.window_id, 'ABC123');
+    assert.equal(r.receipt.consent_receipt_sha256, hash(p.bytes)); assert.equal(r.receipt.producer_sha256, producer);
+    assert.deepEqual(r.receipt.controls, { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true });
+  }
+  for (const window of ['W8', 'W0', 'W2B', 'w2b', 'W2c', 'W2bb', 'W12', 'W2b ']) {
+    const r = await f.run('window', ['--window', window, '--phase', 'before']); assert.equal(r.exit, 1, window); await missing(r.out);
+    assert.match(r.output, /W1\.\.W7 or W2b and 6 alnum window ID/, window);
+  }
+  // Probe credentials stay W2-only: W2b has no DCR probe grant.
+  const probe = await f.run('probe-credentials', ['--window', 'W2b'], { outName: join(f.root, 'probe-w2b.json') });
+  assert.equal(probe.exit, 1, probe.output); assert.match(probe.output, /W2 and 6 alnum window ID/); await missing(join(f.root, 'probe-w2b.json'));
+});
+
 test('post-W5 proves pre-W1 CIMD revocation before new consent and retains the new grant through final cleanup', async t => {
   for (const [name, config] of [['rotation-replay', {}], ['RFC7009', { rfcRevoke: true }]]) await t.test(name, async t => {
     const f = await fixture(t, config), p = await pre(f);
@@ -667,6 +684,11 @@ test('post-W5 proves pre-W1 CIMD revocation before new consent and retains the n
     assert.ok([...f.clients].length > 0, 'registrations remain live; expiry is scheduled, never removed');
     assert.ok(f.events.every(e => e.method !== 'DELETE'));
     const afterIds = [...q.receipt.dcr_client_ids];
+    // W2b binds the pre-W1 consent like W1-W4: after post-W5 consent it refuses before any grant use.
+    { const refreshes = f.events.filter(e => e.grant === 'refresh_token').length;
+      const w2b = await f.run('window', ['--window', 'W2b', '--phase', 'before']); assert.equal(w2b.exit, 1, w2b.output); await missing(w2b.out);
+      assert.match(w2b.output, /FAIL consent_binding: control expected release-bound consent schema/);
+      assert.equal(f.events.filter(e => e.grant === 'refresh_token').length, refreshes); }
     for (const [window, phase] of [['W5', 'after'], ['W5', 'recovery'], ['W6', 'before'], ['W6', 'after'], ['W7', 'before'], ['W7', 'after']]) {
       const w = await f.run('window', ['--window', window, '--phase', phase]); assert.equal(w.exit, 0, w.output);
       assert.equal(w.receipt.consent_receipt_sha256, hash(q.bytes)); afterIds.push(...w.receipt.dcr_client_ids);
