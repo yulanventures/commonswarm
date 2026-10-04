@@ -10241,22 +10241,28 @@ async function claimHostedSeat(
         AND name = ${input.command.name}
       ORDER BY principal_id
     `;
-    const seatCountRows = await tx<{ live: string; reclaimable: string }[]>`
-      SELECT count(*)::text AS live,
-             count(*) FILTER (
-               WHERE hs.workspace_id = ${route.workspaceId}::uuid
-                 AND p.revoked_at IS NOT NULL
-                 AND p.name = ${input.command.name}
-                 AND p.owner_user_id = ${grant.owner_user_id}::uuid
-             )::text AS reclaimable
-      FROM swarm.hosted_mcp_seats AS hs
-      LEFT JOIN swarm.agent_principals AS p
-        ON p.principal_id = hs.principal_id AND p.workspace_id = hs.workspace_id
-      WHERE hs.grant_id = ${grant.grant_id}::uuid AND hs.revoked_at IS NULL
+    const seatCountRows = await tx<{ live: string }[]>`
+      SELECT count(*)::text AS live
+      FROM swarm.hosted_mcp_seats
+      WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
     `;
-    // A successful reclaim closes these orphan seats before inserting its replacement.
-    const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") -
-      Number(seatCountRows[0]?.reclaimable ?? "0");
+    // Live seats of this grant left behind by the app's generic Remove for this exact name and
+    // owner. A successful reclaim closes exactly these before its insert, so they do not count
+    // against the limit for this claim. Read as rows, not a count: the one principal-ceiling
+    // count stays in lockAndCountLivePrincipals (tests/p1-cli/agent-join-credential.test.ts).
+    const reclaimableSeats = await tx<{ seat_id: string }[]>`
+      SELECT hs.seat_id
+      FROM swarm.hosted_mcp_seats AS hs
+      JOIN swarm.agent_principals AS p
+        ON p.principal_id = hs.principal_id AND p.workspace_id = hs.workspace_id
+      WHERE hs.grant_id = ${grant.grant_id}::uuid
+        AND hs.workspace_id = ${route.workspaceId}::uuid
+        AND hs.revoked_at IS NULL
+        AND p.revoked_at IS NOT NULL
+        AND p.name = ${input.command.name}
+        AND p.owner_user_id = ${grant.owner_user_id}::uuid
+    `;
+    const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
     const handle = `seat_${randomBase64Url(18)}`;
