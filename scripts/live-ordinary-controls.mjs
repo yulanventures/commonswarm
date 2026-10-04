@@ -10,7 +10,7 @@
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { open, lstat, realpath, readdir, readFile } from 'node:fs/promises';
+import { open, lstat, realpath, readdir, readFile, rename } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -43,10 +43,12 @@ const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new
 
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
-  demand(['consent', 'window', 'final-cleanup'].includes(o.command), 'consent, window or final-cleanup', 'invalid subcommand');
-  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['phase', 'workspace-id'])];
+  demand(['consent', 'window', 'final-cleanup', 'probe-credentials'].includes(o.command), 'consent, window, final-cleanup or probe-credentials', 'invalid subcommand');
+  const common = ['release-sha', 'cred-dir', 'out', ...(o.command === 'final-cleanup' ? [] : ['workspace-id']),
+    ...(['consent', 'window'].includes(o.command) ? ['phase'] : [])];
   const allowed = [...common, ...(o.command === 'consent' ? ['pointer-dir', 'prior-consent'] :
-    o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
+    ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
+      ...(o.command === 'window' ? ['seat-profile'] : [])] : ['consent-receipt'])];
   const timeouts = { 'request-timeout-ms': ['requestMs', 10_000], 'consent-timeout-ms': ['consentMs', 1_500_000], 'total-timeout-ms': ['totalMs', 3_300_000] };
   const seen = new Set();
   for (let i = 0; i < args.length; i++) {
@@ -62,15 +64,17 @@ function options(args) {
     }
   }
   demand(/^[a-f0-9]{40}$/.test(o['release-sha'] ?? ''), '40 hex release SHA', 'invalid SHA');
-  demand(o.command === 'final-cleanup' || (o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
+  demand(['final-cleanup', 'probe-credentials'].includes(o.command) || (o.command === 'consent' ? ['pre-W1', 'post-W5'] : ['before', 'after', 'recovery']).includes(o.phase), 'valid phase', 'invalid phase');
   const required = [...common, ...(o.command === 'consent' ? ['pointer-dir', ...(o.phase === 'post-W5' ? ['prior-consent'] : [])] :
-    o.command === 'window' ? ['window', 'window-id', 'consent-receipt', 'human-profile', 'seat-profile'] : ['consent-receipt'])];
+    ['window', 'probe-credentials'].includes(o.command) ? ['window', 'window-id', 'consent-receipt', 'human-profile',
+      ...(o.command === 'window' ? ['seat-profile'] : [])] : ['consent-receipt'])];
   demand(required.every(k => typeof o[k] === 'string' && o[k].length > 0), 'all required options', 'missing option');
   if (o.command !== 'final-cleanup') {
     demand(uuidOK(o['workspace-id']), 'valid workspace UUID', 'invalid --workspace-id');
     o['workspace-id'] = o['workspace-id'].toLowerCase();
   }
   if (o.command === 'window') demand(/^W[1-7]$/.test(o.window) && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W1..W7 and 6 alnum window ID');
+  if (o.command === 'probe-credentials') demand(o.window === 'W2' && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W2 and 6 alnum window ID');
   for (const k of allowed.filter(k => k.endsWith('-dir') || k.endsWith('-profile') || ['out', 'prior-consent', 'consent-receipt'].includes(k))) {
     if (o[k]) { demand(o[k].startsWith('/'), 'absolute file paths', 'relative path'); o[k] = resolve(o[k]); }
   }
@@ -109,6 +113,16 @@ async function writePrivate(path, bytes, fresh = true) {
     demand(s.isFile() && s.nlink === 1 && s.uid === process.getuid() && (s.mode & 0o777) === 0o600, 'owned 0600 state file');
     await fd.truncate(0); await fd.writeFile(bytes); await fd.sync();
   } finally { await fd.close(); }
+}
+async function atomicPrivate(path, bytes, fresh) {
+  await directory(dirname(path));
+  if (fresh) await absent(path); else await privateRead(path);
+  const temporary = join(dirname(path), `.live-controls-${randomBytes(16).toString('hex')}.tmp`);
+  await writePrivate(temporary, bytes);
+  // Keep a failed temporary file private for operator recovery; never bypass rm.
+  await rename(temporary, path);
+  const fd = await open(dirname(path), constants.O_RDONLY);
+  try { await fd.sync(); } finally { await fd.close(); }
 }
 function json(bytes) {
   try { return JSON.parse(bytes.toString('utf8')); } catch { throw new Failure('valid JSON', 'invalid JSON'); }
@@ -169,7 +183,10 @@ function plan(o) {
   const fence = { method: 'POST', url: '<revocation endpoint if advertised; otherwise token endpoint>',
     body: 'revoke bound CIMD grant; rotation/replay fallback, then require refresh invalid_grant' };
   const expiry = { method: 'REPORT', body: 'leave recorded DCR clients to expire; journal last registration/token time + 30 days; no deletion' };
-  if (o.command === 'final-cleanup') requests.push(fence, expiry);
+  if (o.command === 'probe-credentials') requests.push(
+    { method: 'POST', url: `${API}/auth/v1/token?grant_type=refresh_token`, via: 'CLI refreshedCredential + forced file store; once' },
+    { method: 'WRITE', body: 'exclusive 0600 probe credentials; atomically hand off bound DCR grant to W2-probes' });
+  else if (o.command === 'final-cleanup') requests.push(fence, expiry);
   else if (o.command === 'consent') {
     if (o.phase === 'post-W5') requests.push({ ...fence, grant: 'pre-W1' }, expiry);
     const flow = clientId => [
@@ -226,7 +243,9 @@ async function run(o) {
     if (o.command === 'consent') for (const name of ['cimd', 'dcr']) for (const suffix of ['authorize-url', 'callback-url']) {
       reserved.push(join(o['pointer-dir'], `${name}-${suffix}.txt`));
     }
-    if (o.command === 'window') reserved.push(join(o['human-profile'], 'live-controls.lock'));
+    if (o['human-profile']) reserved.push(join(o['human-profile'], 'live-controls.lock'));
+    for (const k of ['consent-receipt', 'prior-consent']) if (o[k]) reserved.push(o[k]);
+    if (o['human-profile']) for (const name of await readdir(o['human-profile'])) reserved.push(join(o['human-profile'], name));
     demand(!reserved.includes(o.out), 'receipt distinct from credentials and handoffs', 'file path collision');
     await absent(o.out);
     if (o.command === 'window') {
@@ -235,7 +254,7 @@ async function run(o) {
     }
     // Credential lock serializes grants/journals; profile lock also excludes runs
     // using the same human profile with a different credential directory.
-    for (const dir of new Set([cred, ...(o.command === 'window' ? [o['human-profile']] : [])])) {
+    for (const dir of new Set([cred, ...(o['human-profile'] ? [o['human-profile']] : [])])) {
       await directory(dir); const path = join(dir, 'live-controls.lock');
       await absent(path); const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       locks.push({ path, fd }); await fd.writeFile('running\n');
@@ -245,8 +264,10 @@ async function run(o) {
     let journal = journalBytes ? json(journalBytes) : { release_sha: release, grants: [] };
     let ids = idsBytes ? json(idsBytes) : { release_sha: release, ids: [] };
     demand(exact(journal, ['release_sha', 'grants']) && journal.release_sha === release && Array.isArray(journal.grants) &&
-      journal.grants.every(g => exact(g, ['client_id', 'refresh_token', 'consent_sha256', 'revoked']) &&
-        (g.client_id === CLIENT || idOK(g.client_id)) && typeof g.refresh_token === 'string' && /^[a-f0-9]{64}$/.test(g.consent_sha256) && typeof g.revoked === 'boolean'), 'same-release grant journal');
+      journal.grants.every(g => exact(g, ['client_id', 'refresh_token', 'consent_sha256', 'revoked', ...(Object.hasOwn(g, 'handed_off') ? ['handed_off'] : [])]) &&
+        (g.client_id === CLIENT || idOK(g.client_id)) && typeof g.refresh_token === 'string' && /^[a-f0-9]{64}$/.test(g.consent_sha256) && typeof g.revoked === 'boolean' &&
+        (!Object.hasOwn(g, 'handed_off') || (exact(g.handed_off, ['to', 'window_id', 'at']) && g.handed_off.to === 'W2-probes' &&
+          /^[A-Za-z0-9]{6}$/.test(g.handed_off.window_id) && utc(g.handed_off.at)))), 'same-release grant journal');
     demand(exact(ids, ['release_sha', 'ids']) && ids.release_sha === release && Array.isArray(ids.ids) &&
       ids.ids.every(c => exact(c, ['client_id', 'last_used_at']) && idOK(c.client_id) && utc(c.last_used_at) && Date.parse(c.last_used_at) <= Date.now()) &&
       new Set(ids.ids.map(c => c.client_id)).size === ids.ids.length, 'same-release timestamped DCR ids journal');
@@ -255,7 +276,7 @@ async function run(o) {
       demand(journal.grants.filter(g => g.client_id !== CLIENT).every(g => ids.ids.some(c => c.client_id === g.client_id)),
         'complete consent DCR journal', 'missing journal ids');
     }
-    const saveGrants = async () => { await writePrivate(journalPath, JSON.stringify(journal) + '\n', !journalBytes); journalBytes = true; };
+    const saveGrants = async () => { await atomicPrivate(journalPath, JSON.stringify(journal) + '\n', !journalBytes); journalBytes = true; };
     const saveIds = async () => { await writePrivate(idsPath, JSON.stringify(ids) + '\n', !idsBytes); idsBytes = true; };
     const request = async (url, { status = 200, ...init } = {}) => {
       const r = await transport(url, { headers: { Accept: 'application/json', ...init.headers }, ...init });
@@ -321,8 +342,32 @@ async function run(o) {
           workspace_id: o['workspace-id'], seat: { name, request_id: requestId, seat_id: seat.seat_id, handle: seat.handle } }, null, 2) + '\n');
       }
     };
-    const refresh = async g => tokenContract(await request(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
-      refresh_token: g.refresh_token, resource: RESOURCE })));
+    const retained = g => demand(!g.handed_off, 'retained grant owned by live controls', 'handed-off grant');
+    const refresh = async g => {
+      retained(g);
+      return tokenContract(await request(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
+        refresh_token: g.refresh_token, resource: RESOURCE })));
+    };
+    const humanSession = async () => {
+      const dir = o['human-profile']; await directory(dir);
+      for (const name of await readdir(dir)) {
+        const s = await lstat(join(dir, name)); if (s.isDirectory()) await directory(join(dir, name)); else await privateRead(join(dir, name));
+      }
+      const document = json(await privateRead(join(dir, 'target.json')));
+      demand(exact(document, ['url', 'anon_key']) && document.url === API && typeof document.anon_key === 'string' && document.anon_key.length > 0, 'human test target file');
+      const { cloudTarget } = await import('../dist/cloud/config.js');
+      const { credentialStore } = await import('../dist/cloud/storage.js');
+      const { refreshedCredential } = await import('../dist/cloud/auth.js');
+      const target = cloudTarget(API, document.anon_key);
+      const store = await credentialStore({ target, stateDirectory: dir, forceFile: true, allowFileFallback: true, warn: () => {} });
+      await privateRead(store.location); await privateRead(join(dir, `${target.profileId}.profile.json`));
+      const profile = await store.readProfile();
+      demand(profile.workspaceId === o['workspace-id'], 'same test workspace and hosted target');
+      return { target, refresh: async () => {
+        const human = await refreshedCredential(target, store);
+        demand(human.userId === profile.userId, 'same human session after refresh'); return human;
+      } };
+    };
     const boundGrant = bytes => {
       const g = journal.grants.find(g => g.client_id === CLIENT && g.consent_sha256 === sha256(bytes));
       demand(g, 'retained CIMD grant bound to consent receipt', 'missing grant'); return g;
@@ -332,6 +377,7 @@ async function run(o) {
     const completeIds = clientIds => demand(clientIds.every(id => ids.ids.some(c => c.client_id === id)),
       'complete receipt DCR journal', 'missing journal ids');
     const fence = async g => {
+      retained(g); // Includes revocation proof refreshes, even when already revoked.
       const rejected = async refreshToken => {
         const response = await transport(tokenUrl, form({ grant_type: 'refresh_token', client_id: g.client_id,
           refresh_token: refreshToken, resource: RESOURCE }));
@@ -360,7 +406,34 @@ async function run(o) {
       await rejected(g.refresh_token); g.revoked = true; await saveGrants();
     };
     let receipt;
-    if (o.command === 'consent') {
+    if (o.command === 'probe-credentials') {
+      leg = 'probe_binding';
+      const bytes = await privateRead(o['consent-receipt']);
+      const consent = consentReceipt(bytes, release, producer, 'pre-W1');
+      const grants = journal.grants.filter(g => g.client_id === consent.dcr_client_ids[0]);
+      demand(grants.length === 1, 'exactly one DCR grant for consent client', 'missing or ambiguous DCR grant');
+      const grant = grants[0];
+      demand(grant.consent_sha256 === sha256(bytes) && !grant.revoked && grant.refresh_token.length > 0,
+        'unrevoked DCR grant bound to consent receipt', 'unbound or revoked DCR grant');
+      retained(grant); completeIds([grant.client_id]);
+      leg = 'profiles'; const session = await humanSession();
+      leg = 'human_recovery'; const human = await session.refresh();
+      let payload;
+      try {
+        const parts = human.accessToken.split('.'); demand(parts.length === 3, 'human JWT with exp');
+        payload = json(Buffer.from(parts[1], 'base64url'));
+      } catch { throw new Failure('human JWT with integer exp', 'invalid JWT'); }
+      demand(Number.isSafeInteger(payload?.exp) && payload.exp >= Math.ceil(Date.now() / 1000) + 45 * 60,
+        'human token exp at least now + 45 minutes', 'short or invalid human token expiry');
+      leg = 'probe_handoff';
+      grant.handed_off = { to: 'W2-probes', window_id: o['window-id'], at: new Date().toISOString() };
+      await saveGrants();
+      // The durable ownership fence precedes secret output. On any failure it
+      // remains handed off; no live-controls caller may consume this grant again.
+      await writePrivate(o.out, JSON.stringify({ release_sha: release, window_id: o['window-id'], workspace_id: o['workspace-id'],
+        mcp_client_id: grant.client_id, mcp_refresh_token: grant.refresh_token, mcp_resource: RESOURCE,
+        human_access_token: human.accessToken, human_token_exp: payload.exp }, null, 2) + '\n');
+    } else if (o.command === 'consent') {
       leg = 'consent_files'; await directory(o['pointer-dir']);
       for (const name of ['cimd', 'dcr']) for (const suffix of ['authorize-url', 'callback-url']) await absent(join(o['pointer-dir'], `${name}-${suffix}.txt`));
       let cleanup = null;
@@ -420,6 +493,11 @@ async function run(o) {
       const earlier = new Set(consent.cleanup.dcr_clients_expiring.map(c => c.client_id));
       receipt = { kind: 'c1-final-cleanup', release_sha: release, measured_at: new Date().toISOString(), producer_sha256: producer,
         grants_revoked: true, dcr_clients_expiring: expiring(ids.ids.filter(c => !earlier.has(c.client_id))) };
+      const handedOff = journal.grants.filter(g => g.client_id !== CLIENT && g.handed_off);
+      if (handedOff.length) {
+        receipt.handed_off_grants = handedOff.map(g => ({ client_id: g.client_id, handed_off: true, revoked_by: 'W2 plan' }));
+        receipt.revoke_proof_dependency = 'W2 proof directory dcr-probe-revoked.json; revocation is proved by the W2 plan';
+      }
       receiptBytes = JSON.stringify(receipt, null, 2) + '\n';
     } else {
       leg = 'consent_binding'; const bytes = await privateRead(o['consent-receipt']);
@@ -433,22 +511,15 @@ async function run(o) {
       demand(grant, 'unrevoked CIMD grant bound to consent receipt', 'missing or revoked grant');
       // Validate both profiles before consuming any grant or creating a client.
       leg = 'profiles';
-      for (const dir of [o['human-profile'], o['seat-profile']]) { await directory(dir);
+      for (const dir of [o['seat-profile']]) { await directory(dir);
         for (const name of await readdir(dir)) { const s = await lstat(join(dir, name)); if (s.isDirectory()) await directory(join(dir, name)); else await privateRead(join(dir, name)); } }
-      const targetDocument = json(await privateRead(join(o['human-profile'], 'target.json')));
-      demand(exact(targetDocument, ['url', 'anon_key']) && targetDocument.url === API && typeof targetDocument.anon_key === 'string' && targetDocument.anon_key.length > 0, 'human test target file');
+      const session = await humanSession(), { target } = session;
       const { cloudTarget } = await import('../dist/cloud/config.js');
-      const { credentialStore } = await import('../dist/cloud/storage.js');
-      const { refreshedCredential } = await import('../dist/cloud/auth.js');
       const { readAgentProfile, readProfileCredential } = await import('../dist/cloud/agent-profile.js');
       const { readAgentSignalDirectory, readSignals } = await import('../dist/cloud/signals.js');
       const { ThinCommandClient } = await import('../dist/cloud/command-client.js');
-      const target = cloudTarget(API, targetDocument.anon_key);
-      const store = await credentialStore({ target, stateDirectory: o['human-profile'], forceFile: true, allowFileFallback: true, warn: () => {} });
-      await privateRead(store.location); await privateRead(join(o['human-profile'], `${target.profileId}.profile.json`));
-      const humanProfile = await store.readProfile();
       const seat = await readAgentProfile(join(o['seat-profile'], 'profile.json'));
-      demand(seat.url === API && seat.workspace_id === o['workspace-id'] && humanProfile.workspaceId === o['workspace-id'], 'same test workspace and hosted target');
+      demand(seat.url === API && seat.workspace_id === o['workspace-id'], 'same test workspace and hosted target');
       await privateRead(seat.credential_file); const agent = await readProfileCredential(seat);
       receipt = { release_sha: release, window_id: o['window-id'], window: o.window, phase: o.phase,
         controls: { hosted_mcp_consent_refresh: false, dcr_registration_consent: false, cimd_consent: false, human_recovery: false, worker_command_read: false },
@@ -460,8 +531,7 @@ async function run(o) {
       let location; try { location = new URL(r.headers.get('location'), ISSUER); } catch { throw new Failure('interaction redirect', 'missing location'); }
       demand(r.status === 303 && location.origin === ISSUER && /^\/interaction\/[A-Za-z0-9_-]+$/.test(location.pathname) && !location.username && !location.password,
         '303 to issuer interaction', `HTTP ${r.status} or unexpected location`); receipt.controls[leg] = true;
-      leg = 'human_recovery'; const human = await refreshedCredential(target, store);
-      demand(human.userId === humanProfile.userId, 'same human session after refresh');
+      leg = 'human_recovery'; const human = await session.refresh();
       const w = new URL(`${API}/rest/v1/workspaces`); w.search = new URLSearchParams({ select: 'workspace_id,name', workspace_id: `eq.${seat.workspace_id}`, limit: '1' });
       const hr = await transport(w, { headers: { Authorization: `Bearer ${human.accessToken}`, apikey: target.anonKey, 'Accept-Profile': 'swarm_read', Accept: 'application/json' } });
       demand(hr.status === 200, 'successful human read', `HTTP ${hr.status}`); const rows = json(await boundedBody(hr));
@@ -493,6 +563,7 @@ async function run(o) {
       catch { process.stderr.write('FAIL lock_cleanup: removal expected guarded rm success got refusal; live-controls.lock retained; STOP\n'); process.exitCode = 1; }
     }
   }
+  if (o.command === 'probe-credentials' && !process.exitCode) process.stdout.write('PASS probe-credentials written; DCR grant handed off to W2-probes\n');
   if (receiptBytes && !process.exitCode) {
     try { await writePrivate(o.out, receiptBytes); process.stdout.write(`PASS live ordinary controls; ${o.command === 'final-cleanup' ? 'final-cleanup report' : 'receipt'} written\n`); }
     catch { process.stderr.write('FAIL receipt: output expected fresh 0600 receipt got file failure; STOP\n'); process.exitCode = 1; }
