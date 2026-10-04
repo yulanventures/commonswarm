@@ -347,11 +347,14 @@ class Opener:
         if url==I+'/token':
             form=dict(urllib.parse.parse_qsl(req.data.decode())); count(s,'refresh'); count(s,('refresh-after-revoke' if s['revoked'] else 'refresh:'+point)); save(s)
             assert form['grant_type']=='refresh_token' and form['client_id']=='dcr-probe-client' and form['resource']==I+'/mcp'
+            if form['refresh_token']!=s['current'] and form['refresh_token'] in s.get('consumed',[]): s['revoked']=True; save(s)  # oidc-provider: reuse of a consumed token revokes the grant
             if os.environ.get('REFRESH_FAIL_POINT')==point or s['revoked'] or form['refresh_token']!=s['current']: refuse(url,400,{'error':'invalid_grant'})
+            s.setdefault('consumed',[]).append(s['current'])
             s['n']+=1; s['current']='rt-'+str(s['n']); s['access']='at-'+str(s['n']); save(s)
             return Response({'token_type':'Bearer','access_token':s['access'],'refresh_token':s['current'],'expires_in':300,'scope':'mcp'})
         if url==I+'/revoke':
-            form=dict(urllib.parse.parse_qsl(req.data.decode())); count(s,'revoke')
+            form=dict(urllib.parse.parse_qsl(req.data.decode())); count(s,'revoke'); save(s)
+            if os.environ.get('REVOKE_TRANSPORT_FAIL'): raise urllib.error.URLError('synthetic revoke timeout')
             assert form['token_type_hint']=='refresh_token' and form['client_id']=='dcr-probe-client'
             if form['token']==s['current']: s['revoked']=True
             save(s); return Response({})
@@ -1517,6 +1520,32 @@ test('admin release plan: W2 stage-probes validates the credential file, uploads
   mkdirSync(work); mkdirSync(shim); mkdirSync(box);
   writeFileSync(join(shim, 'ssh'), `#!/bin/bash\nprintf '%s\\n' "$*" >>'${join(root, 'ssh-calls')}'\ncase "\${@: -1}" in *ordinary-probes.json*install*/dev/stdin*) ;; *) exit 9;; esac\ncat >'${join(box, 'ordinary-probes.json')}'\nif test -n "\${BOX_CORRUPT:-}"; then printf x >>'${join(box, 'ordinary-probes.json')}'; fi\nprintf '600 %s\\n' "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' '${join(box, 'ordinary-probes.json')}')"\n`, { mode: 0o700 });
   writeFileSync(join(shim, 'rm'), `#!/bin/bash\nprintf '%s\\n' "$*" >>'${join(root, 'rm-calls')}'\nexec /bin/rm "$@"\n`, { mode: 0o700 });
+  if (!/exit 9;; esac/.test(readFileSync(join(shim, 'ssh'), 'utf8'))) throw new Error('ssh stub shape');
+  writeFileSync(join(shim, 'ssh'), readFileSync(join(shim, 'ssh'), 'utf8').replace('cat >', 'if test -n "${SSH_FAIL:-}"; then cat >/dev/null; exit 255; fi\ncat >'), { mode: 0o700 });
+  // Issuer boundary for the Mac-side revoke (RFC 7009 + one refresh that must be rejected).
+  const pyShim = join(root, 'pyshim'); mkdirSync(pyShim);
+  writeFileSync(join(pyShim, 'sitecustomize.py'), `import io,json,os,urllib.error,urllib.parse,urllib.request
+LOG=${JSON.stringify(join(root, 'issuer-calls'))}; I='https://mcp.commonswarm.com'
+class R:
+    def __init__(self,data,status=200): self.data=data; self.status=status
+    def __enter__(self): return self
+    def __exit__(self,*a): pass
+    def read(self,n): return json.dumps(self.data).encode()
+class O:
+    def open(self,req,timeout):
+        url=req.full_url; form=dict(urllib.parse.parse_qsl(req.data.decode())) if req.data else {}
+        with open(LOG,'a') as f: f.write(url+' '+form.get('grant_type',form.get('token_type_hint',''))+'\\n')
+        state=os.path.exists(LOG+'.revoked')
+        if url.endswith('oauth-authorization-server'): return R({'issuer':I,'token_endpoint':I+'/token','revocation_endpoint':I+'/revoke'})
+        if url==I+'/revoke':
+            if not os.environ.get('REVOKE_NOOP'): open(LOG+'.revoked','w').close()
+            return R({})
+        if url==I+'/token':
+            if state: raise urllib.error.HTTPError(url,400,'x',{},io.BytesIO(b'{"error":"invalid_grant"}'))
+            return R({'token_type':'Bearer','access_token':'at-new','refresh_token':'rt-rotated','expires_in':300,'scope':'mcp'})
+        raise AssertionError('unmodelled '+url)
+urllib.request.build_opener=lambda *a: O()
+`);
   const source = block('ai-w2-stage-probes').split('/Users/yulanbot/.local/bin/rm').join(join(shim, 'rm')).split('/Users/yulanbot/work/c1-run/').join(work + '/');
   assert.ok(!source.includes('/Users/yulanbot/'), 'fixture rewrites every Mac literal');
   const input = { ...base(), window: 'W2', rollback_decision: 'retain-additive', probe_workspace_id: 'c2ea0541-f56d-4c73-bf71-56c5405c4934' };
@@ -1526,9 +1555,9 @@ test('admin release plan: W2 stage-probes validates the credential file, uploads
     mcp_refresh_token: 'rt-secret', mcp_resource: 'https://mcp.commonswarm.com/mcp', human_access_token: 'human-secret', human_token_exp: end + 300 });
   const file = join(work, 'probe-credentials-W2-Abc123.json');
   const stageRun = (creds: Record<string, unknown> | string, mode = 0o600, env: Record<string, string> = {}) => {
-    for (const f of [file, join(box, 'ordinary-probes.json'), join(root, 'ssh-calls'), join(root, 'rm-calls')]) if (existsSync(f)) rmSync(f);
+    for (const f of [file, join(box, 'ordinary-probes.json'), join(root, 'ssh-calls'), join(root, 'rm-calls'), join(root, 'issuer-calls'), join(root, 'issuer-calls.revoked')]) if (existsSync(f)) rmSync(f);
     writeFileSync(file, typeof creds === 'string' ? creds : JSON.stringify(creds), { mode }); chmodSync(file, mode);
-    return run(source, { INPUTS_FILE: inputs, PATH: shim + ':' + process.env.PATH, ...env });
+    return run(source, { INPUTS_FILE: inputs, PATH: shim + ':' + process.env.PATH, PYTHONPATH: pyShim, ...env });
   };
   const ok = stageRun(good()); assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /PASS ai-w2-stage-probes/); assert.ok(!existsSync(file), 'local copy removed');
@@ -1547,8 +1576,36 @@ test('admin release plan: W2 stage-probes validates the credential file, uploads
   refused(stageRun(bad({ workspace_id: '11111111-1111-1111-1111-111111111111' })), 'FAIL ai-w2-stage-probes: probe credentials workspace_id expected input-probe-workspace-id got mismatch; STOP before any W2 write');
   refused(stageRun(bad({ human_token_exp: end + 299 })), 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write');
   refused(stageRun(bad({ human_token_exp: String(end + 3600) })), 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write');
-  // A box copy whose digest differs is refused and the local file is kept.
-  const corrupt = stageRun(good(), 0o600, { BOX_CORRUPT: '1' });
-  assert.notEqual(corrupt.status, 0); assert.match(corrupt.stderr, /FAIL ai-w2-stage-probes: box ordinary-probes.json expected 0600-and-same-sha256 got mismatch; STOP/);
-  assert.ok(existsSync(file)); assert.ok(!existsSync(join(root, 'rm-calls')), 'no deletion after a failed verification');
+  // After validation, a failed upload or a digest mismatch revokes the grant from the local file,
+  // proves a rejected refresh, deletes the file with the guarded rm and STOPs.
+  for (const [env, reason] of [[{ BOX_CORRUPT: '1' }, 'box ordinary-probes.json expected 0600-and-same-sha256 got mismatch'], [{ SSH_FAIL: '1' }, 'ssh upload expected success got failure']] as const) {
+    const out = stageRun(good(), 0o600, env);
+    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(`FAIL ai-w2-stage-probes: ${reason}; revoking the probe grant from the local file; STOP`), out.stderr);
+    assert.match(out.stderr, /STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant/);
+    assert.deepEqual(readFileSync(join(root, 'issuer-calls'), 'utf8').trim().split('\n').map(l => l.split(' ')[0]!.replace('https://mcp.commonswarm.com', '')),
+      ['/.well-known/oauth-authorization-server', '/revoke', '/token'], 'one revoke and exactly one refresh proof');
+    assert.ok(!existsSync(file), 'local file removed after the proven revoke'); assert.ok(existsSync(join(root, 'rm-calls')));
+    assert.doesNotMatch(out.stdout + out.stderr, /rt-secret|human-secret/);
+  }
+  // Revocation unproven (refresh still works): the rotated token is kept in the 0600 local file for HezLead.
+  const unproven = stageRun(good(), 0o600, { BOX_CORRUPT: '1', REVOKE_NOOP: '1' });
+  assert.notEqual(unproven.status, 0); assert.match(unproven.stderr, /FAIL ai-w2-stage-probes: local revoke refresh proof expected HTTP-400-invalid_grant got HTTP-200; local file retained 0600 for HezLead; STOP/);
+  assert.ok(existsSync(file)); assert.equal(statSync(file).mode & 0o777, 0o600); assert.equal(JSON.parse(readFileSync(file, 'utf8')).mcp_refresh_token, 'rt-rotated');
+  assert.ok(!existsSync(join(root, 'rm-calls')), 'no deletion while the grant may be live');
+});
+
+test('admin release plan: W2 revoke proof holds after a lost rotation even when the RFC 7009 call fails; refresh never retried', () => {
+  const f = w2Fixture();
+  try {
+    // The probe held rt-4; the issuer rotated to rt-5 but the response was lost (rt-4 consumed).
+    writeFileSync(join(f.proof, 'oauth-state.json'), JSON.stringify({ current: 'rt-5', access: 'at-5', n: 5, revoked: false, consumed: ['rt-0', 'rt-1', 'rt-2', 'rt-3', 'rt-4'], calls: {} }));
+    const creds = JSON.parse(readFileSync(join(f.stage, 'ordinary-probes.json'), 'utf8'));
+    writeFileSync(join(f.stage, 'ordinary-probes.json'), JSON.stringify({ ...creds, mcp_refresh_token: 'rt-4' }), { mode: 0o600 });
+    const result = run(f.harness + portable(block('ai-w2-revoke-probes'), { stage: 1, pointer: 0 }), { ...f.env, REVOKE_TRANSPORT_FAIL: '1' });
+    assert.equal(result.status, 0, result.stderr);
+    const state = oauthState(f);
+    assert.equal(state.revoked, true, 'reuse of the consumed token revoked the whole grant');
+    assert.equal(state.calls.revoke, 1); assert.equal(state.calls.refresh, 1, 'exactly one refresh: the rejection proof');
+    assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoked.json'), 'utf8')), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
+  } finally { f.clean(); }
 });

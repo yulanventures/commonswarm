@@ -971,8 +971,15 @@ revocation_endpoint, so a failure there applies nothing. After the loop, and on
 every W2 exit path that reached the stage (ai-w2-apply's EXIT guard and
 ai-close), ai-w2-revoke-probes revokes the DCR grant family (RFC 7009,
 token_type_hint=refresh_token) and proves a refresh with the current token is
-rejected with invalid_grant (`dcr-probe-revoked.json`). This plan does not
-invent issuance; the producer's final cleanup relies on this revoke proof.
+rejected with invalid_grant (`dcr-probe-revoked.json`). A lost refresh response needs no
+retry: the issuer (oidc-provider `consumeGrantSource`) revokes the WHOLE grant
+when a consumed refresh token is presented again, so the single rejected refresh
+proves the family revoked whether the RFC 7009 call or that reuse revoked it.
+If ai-w2-stage-probes fails after the local file validated, it revokes the
+grant from the local file the same way, deletes the file with the guarded rm,
+proves absence and STOPs; a retry needs a new DCR grant (a new consent run).
+This plan does not invent issuance; the producer's final cleanup relies on this
+revoke proof.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
 `<released_sha>.tar` archives from the historical release inputs (release-record
@@ -1028,8 +1035,60 @@ W2_PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/$W2_RELEASE_SHA-W2-
 # One ssh call: the box resolves the window's retained secret-stage pointer, installs stdin as 0600 and reports mode and digest only.
 W2_REMOTE_SCRIPT='set -euo pipefail; stage=$(cat "$1/secret-stage.path"); case "$stage" in /private/tmp/anvil-secret.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) exit 65;; esac; test -d "$stage"; test ! -L "$stage"; test "$(stat -c %a "$stage")" = 700; f=$stage/ordinary-probes.json; test ! -e "$f"; test ! -L "$f"; install -o root -g root -m 600 /dev/stdin "$f"; mode=$(stat -c %a "$f"); digest=$(sha256sum "$f" | cut -d " " -f 1); printf "%s %s\n" "$mode" "$digest"'
 printf -v W2_REMOTE 'sudo -n /bin/bash -c %q _ %q' "$W2_REMOTE_SCRIPT" "$W2_PROOF_DIR"
-W2_UPLOAD=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_REMOTE" <"$PROBE_CREDENTIALS_FILE")
-test "$W2_UPLOAD" = "600 $PROBE_SHA256" || { printf 'FAIL ai-w2-stage-probes: box ordinary-probes.json expected 0600-and-same-sha256 got mismatch; STOP\n' >&2; exit 1; }
+# After validation, any failure revokes the grant from the LOCAL file (RFC 7009, then one refresh that
+# must be rejected), deletes the file with the guarded rm and proves absence, then STOPs.
+w2_stage_fail() {
+ printf 'FAIL ai-w2-stage-probes: %s; revoking the probe grant from the local file; STOP\n' "$1" >&2
+ python3 -c '
+import json,os,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+name=sys.argv[1]; I="https://mcp.commonswarm.com"
+def fail(what): raise SystemExit("FAIL ai-w2-stage-probes: local revoke "+what+"; local file retained 0600 for HezLead; STOP")
+fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): fail("expected regular file")
+    raw=os.read(fd,1048576)
+finally: os.close(fd)
+c=json.loads(raw)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+def send(url,form=None):
+    data=None if form is None else urllib.parse.urlencode(form).encode()
+    req=urllib.request.Request(url,data=data,headers={"Accept":"application/json","User-Agent":"curl/8.7.1"})
+    try:
+        with opener.open(req,timeout=15) as r: return r.status,r.read(1048577)
+    except urllib.error.HTTPError as e: return e.code,e.read(1048577)
+d=None
+for attempt in (1,2):
+    try: status,body=send(I+"/.well-known/oauth-authorization-server"); d=json.loads(body) if status==200 else None; break
+    except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError,ValueError): continue
+if not isinstance(d,dict) or d.get("issuer")!=I: fail("discovery expected issuer metadata")
+token,revocation=d.get("token_endpoint"),d.get("revocation_endpoint")
+if not all(isinstance(u,str) and u.startswith(I+"/") for u in (token,revocation)): fail("discovery expected issuer-origin token and revocation endpoints")
+try: send(revocation,{"token":c["mcp_refresh_token"],"token_type_hint":"refresh_token","client_id":c["mcp_client_id"]})
+except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): pass
+try: status,body=send(token,{"grant_type":"refresh_token","client_id":c["mcp_client_id"],"refresh_token":c["mcp_refresh_token"],"resource":c["mcp_resource"]})
+except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): fail("refresh proof expected HTTP-400-invalid_grant got transport-error-not-retried")
+try: t=json.loads(body)
+except ValueError: t=None
+if status!=400 or not isinstance(t,dict) or t.get("error")!="invalid_grant":
+    if isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384:
+        c["mcp_refresh_token"]=t["refresh_token"]; tmp=name+"."+secrets.token_hex(6)+".tmp"
+        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+        finally: os.close(fd)
+        os.rename(tmp,name)
+    fail("refresh proof expected HTTP-400-invalid_grant got HTTP-"+str(status))
+print("probe grant family revoked from the local file; refresh rejected")
+' "$PROBE_CREDENTIALS_FILE" || exit 1
+ rm -- "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: guarded rm of local probe credentials refused; retain path and guard message; STOP\n' >&2; exit 1; }
+ test ! -e "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials expected absent got present; STOP\n' >&2; exit 1; }
+ test ! -L "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials expected absent got symlink; STOP\n' >&2; exit 1; }
+ printf 'STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant (new consent run)\n' >&2
+ exit 1
+}
+W2_UPLOAD=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_REMOTE" <"$PROBE_CREDENTIALS_FILE") || w2_stage_fail 'ssh upload expected success got failure'
+test "$W2_UPLOAD" = "600 $PROBE_SHA256" || w2_stage_fail 'box ordinary-probes.json expected 0600-and-same-sha256 got mismatch'
 rm -- "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: guarded rm of local probe credentials refused; retain path and guard message; STOP\n' >&2; exit 1; }
 test ! -e "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials expected absent got symlink; STOP\n' >&2; exit 1; }
@@ -1486,9 +1545,10 @@ def refresh(c,token_url):
 c=credentials()
 token_url,revocation=discover()
 revocation=endpoint(revocation,'revocation_endpoint')
-try: status,_=send(revocation,form={'token':c['mcp_refresh_token'],'token_type_hint':'refresh_token','client_id':c['mcp_client_id']})
-except Transport: fail('RFC 7009 revocation','HTTP-200-or-204','transport-error')
-if status not in (200,204): fail('RFC 7009 revocation','HTTP-200-or-204','HTTP-'+str(status))
+# RFC 7009 first; its own outcome is not the proof. The single rejected refresh below is: after a
+# lost rotation the held token is already consumed, and presenting it revokes the whole grant.
+try: send(revocation,form={'token':c['mcp_refresh_token'],'token_type_hint':'refresh_token','client_id':c['mcp_client_id']})
+except Transport: pass
 status,t=refresh(c,token_url)
 if status!=400 or not isinstance(t,dict) or t.get('error')!='invalid_grant':
     if isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384:
