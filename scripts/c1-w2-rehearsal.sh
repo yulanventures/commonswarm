@@ -2,6 +2,10 @@
 # C1 W2 schema rehearsal on a disposable local PostgreSQL cluster. Bash 3.2-safe. No network, no docker.
 #
 #   scripts/c1-w2-rehearsal.sh [--live-dump] [--catalogs-from <git-sha>] [--reserve-control] <dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --issuer [--plan-from <git-sha>] <dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --w2b-preconditions <dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --from-post-w2 --w2-release-sha <sha> (--issuer | --w2b-preconditions) <post-W2-dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --dump-post-w2 <out-dir> <pre-W2-dump-dir>
 #   scripts/c1-w2-rehearsal.sh --build-fixture <out-dir>
 #   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path> | --cleanup-run <path>   (test controls)
 #
@@ -38,6 +42,31 @@
 # rehearsal mode then proves isolation: no W2 migration, catalog, reserve or plan block the harness runs
 # names a cron., net., graphql., graphql_public., vault. or pgsodium. object, so a model cannot change a
 # W2 result.
+#
+# --issuer runs the W2 rehearsal, then the issuer credential as W2b runs it, with a REAL libpq login: the
+# live W2 issuer rollback's ALTER ROLE (NOLOGIN, no password), the W2b database preconditions, a restart
+# with ssl=on listening on 127.0.0.1 only (ephemeral port; pg_hba: hostssl 127.0.0.1/32 for the issuer
+# role, everything else rejected; the unix-socket superuser line is the harness's own setup), a throwaway
+# CA and server certificate for db.commonswarm.internal (hostaddr 127.0.0.1), service.conf and pass from the
+# released make-pg-service.mjs, the plan's issuer preparation and ALTER ROLE from the RELEASE.md bytes,
+# and psql with PGSERVICEFILE=issuer-service.conf, PGPASSFILE=issuer-pass and sslmode=verify-full running
+# the plan's own measurement query. --plan-from <sha> takes only the issuer block from that commit
+# (negative control: 5f64fab4 fails with "syntax error in service file"). --w2b-preconditions restores
+# the dump and runs only the plan's W2b database preconditions. Every mode ends by stopping the
+# cluster, deleting data, CA and secrets, and proving their absence. Passwords are generated fresh in
+# the 0700 directory and never printed.
+#
+# --from-post-w2: the dump is POST-W2 (all five 20261003 versions in its ledger, issuer NOLOGIN after the
+# W2 issuer rollback). The W2 apply and the rollback ALTER ROLE are skipped; --issuer and
+# --w2b-preconditions run on the dump's own state. The harness refuses a post-W2 dump without the flag,
+# and the flag on a dump whose ledger lacks any of the five. --w2-release-sha names the release W2 ran
+# at (the W2b preconditions compare the five checksum rows, recorded at that release, with this
+# release's migration files); without --from-post-w2 it is this checkout's HEAD, which the W2 apply used.
+# --dump-post-w2 <dir> runs the W2 rehearsal, then the plan's own issuer rollback statement (the live
+# W2 RGLqZX end state), and writes a post-W2 dump: roles.sql, schema.sql, ledger.sql (the ledger data) and
+# ledger-extra.sql (data of commonswarm_ops.migration_checksums and commonswarm_oauth.admin_cutover_state).
+# Every rehearsal restores <dump-dir>/ledger-extra.sql right after ledger.sql when it exists (SKIP line
+# otherwise). The W2b checksum precondition needs the checksum rows.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
@@ -83,7 +112,10 @@ cleanup_dir() {
 on_exit() {
   local status=$?
   trap - EXIT
-  if test -n "$T"; then cleanup_dir "$T" || status=1; fi
+  if test -n "$T"; then
+    if cleanup_dir "$T" && test ! -e "$T" && test ! -L "$T"; then say "PASS cleanup: cluster stopped; data, CA and secrets deleted; $T absent"
+    else status=1; fi
+  fi
   exit "$status"
 }
 
@@ -99,19 +131,43 @@ if test "${1:-}" = --cleanup-selftest; then
   say "REFUSE cleanup-selftest: $2"; exit 3
 fi
 
-MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 TARGET=
+MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 ISSUER=0 PLAN_FROM= W2B_ONLY=0 POST_W2=0 W2_SHA= DUMP_POST= TARGET=
 while test $# -gt 0; do
   case "$1" in
     --build-fixture) MODE=build; shift; TARGET=${1:-}; shift || true ;;
     --catalogs-from) shift; CATALOGS_FROM=${1:-}; shift || true ;;
     --reserve-control) RESERVE_CONTROL=1; shift ;;
     --live-dump) LIVE_DUMP=1; shift ;;
+    --issuer) ISSUER=1; shift ;;
+    --plan-from) shift; PLAN_FROM=${1:-}; shift || true ;;
+    --w2b-preconditions) W2B_ONLY=1; shift ;;
+    --from-post-w2) POST_W2=1; shift ;;
+    --w2-release-sha) shift; W2_SHA=${1:-}; shift || true ;;
+    --dump-post-w2) shift; DUMP_POST=${1:-}; shift || true ;;
     -*) die usage "unknown option $1" ;;
     *) test -z "$TARGET" || die usage 'one dump directory only'; TARGET=$1; shift ;;
   esac
 done
 test -n "$TARGET" || die usage 'scripts/c1-w2-rehearsal.sh [--catalogs-from <sha>] [--reserve-control] <dump-dir> | --build-fixture <out-dir>'
 case "$TARGET" in /*) ;; *) TARGET=$(pwd -P)/$TARGET ;; esac
+if test -n "$PLAN_FROM"; then
+  test "$ISSUER" = 1 || die plan-from '--plan-from needs --issuer'
+  [[ "$PLAN_FROM" =~ ^[0-9a-f]{7,40}$ ]] || die plan-from 'expected a hex commit id'
+  git -C "$REPO" cat-file -e "$PLAN_FROM^{commit}" 2>/dev/null || die plan-from "commit $PLAN_FROM not found"
+fi
+if test "$ISSUER" = 1 && { test "$W2B_ONLY" = 1 || test "$RESERVE_CONTROL" = 1; }; then die usage '--issuer, --w2b-preconditions and --reserve-control are separate modes'; fi
+if test "$POST_W2" = 1 && { test "$MODE" = build || { test "$ISSUER" = 0 && test "$W2B_ONLY" = 0; }; }; then die usage '--from-post-w2 needs --issuer or --w2b-preconditions'; fi
+if test "$POST_W2" = 1; then [[ "$W2_SHA" =~ ^[0-9a-f]{40}$ ]] || die usage '--from-post-w2 needs --w2-release-sha <full 40-hex sha of the release W2 ran at>'; fi
+if test "$POST_W2" = 0 && test -n "$W2_SHA"; then die usage '--w2-release-sha is for --from-post-w2 (otherwise the W2 apply runs at HEAD)'; fi
+if test -n "$DUMP_POST"; then
+  { test "$MODE" = rehearse && test "$POST_W2$ISSUER$W2B_ONLY$RESERVE_CONTROL" = 0000 && test -z "$CATALOGS_FROM"; } || die usage '--dump-post-w2 is a plain W2 rehearsal of a pre-W2 dump'
+  case "$DUMP_POST" in /*) ;; *) DUMP_POST=$(pwd -P)/$DUMP_POST ;; esac
+  test ! -e "$DUMP_POST" || die dump-post-w2 "$DUMP_POST expected absent got present"
+fi
+if test "$POST_W2" = 1 && { test -n "$CATALOGS_FROM" || test "$RESERVE_CONTROL" = 1; }; then die usage '--from-post-w2 skips the W2 apply: no --catalogs-from or --reserve-control'; fi
+if test "$W2B_ONLY" = 1 && test "$RESERVE_CONTROL" = 1; then die usage '--w2b-preconditions and --reserve-control are separate modes'; fi
+if test "$ISSUER" = 1; then command -v openssl >/dev/null 2>&1 || die setup 'openssl expected got missing'; fi
+umask 077
 if test -n "$CATALOGS_FROM"; then
   [[ "$CATALOGS_FROM" =~ ^[0-9a-f]{7,40}$ ]] || die catalogs-from 'expected a hex commit id'
   git -C "$REPO" cat-file -e "$CATALOGS_FROM^{commit}" 2>/dev/null || die catalogs-from "commit $CATALOGS_FROM not found"
@@ -131,12 +187,13 @@ trap on_exit EXIT
 trap 'exit 130' INT TERM
 
 "$PG_BIN/initdb" -U supabase_admin --auth=trust -E UTF8 --locale=C -D "$T/data" >"$T/initdb.log" 2>&1 || die cluster 'initdb failed'
-"$PG_BIN/pg_ctl" -D "$T/data" -o "-c listen_addresses='' -c unix_socket_directories='$T'" -l "$T/pg.log" -w start >/dev/null 2>&1 \
+PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()') || die cluster 'no ephemeral port'
+"$PG_BIN/pg_ctl" -D "$T/data" -o "-p $PORT -c listen_addresses='' -c unix_socket_directories='$T'" -l "$T/pg.log" -w start >/dev/null 2>&1 \
   || die cluster 'postgres did not start (see the server log in the temporary directory)'
 say "PASS cluster: disposable PostgreSQL $("$PG_BIN/psql" --version | awk '{print $3}') on a unix socket only"
 
 PSQL_LOG=$T/psql-err.log
-pgx() { "$PG_BIN/psql" -h "$T" -U supabase_admin -d postgres -X "$@"; }
+pgx() { "$PG_BIN/psql" -h "$T" -p "$PORT" -U supabase_admin -d postgres -X "$@"; }
 first_error() {
   local line
   line=$(grep -m1 -E 'ERROR:|FATAL:|psql: error' "$1" 2>/dev/null | cut -c1-300)
@@ -165,9 +222,9 @@ if test "$MODE" = build; then
     COUNT=$((COUNT+1))
   done
   say "PASS fixture:migrations: $COUNT pre-W2 migrations applied with their ledger rows"
-  "$PG_BIN/pg_dumpall" -h "$T" -U supabase_admin -r --no-role-passwords >"$TARGET/roles.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
-  "$PG_BIN/pg_dump" -h "$T" -U supabase_admin -d postgres -s >"$TARGET/schema.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
-  "$PG_BIN/pg_dump" -h "$T" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$TARGET/ledger.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
+  "$PG_BIN/pg_dumpall" -h "$T" -p "$PORT" -U supabase_admin -r --no-role-passwords >"$TARGET/roles.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -s >"$TARGET/schema.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$TARGET/ledger.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
   say "PASS fixture:dump: roles.sql, schema.sql and ledger.sql written"
   exit 0
 fi
@@ -217,12 +274,18 @@ else
   run_sql_file restore-schema "$TARGET/schema.sql"
 fi
 run_sql_file restore-ledger "$TARGET/ledger.sql"
+# Optional data-only extra (HezLead's live split): migration checksums and, when supplied, the cutover state.
+if test -f "$TARGET/ledger-extra.sql"; then run_sql_file restore-ledger-extra "$TARGET/ledger-extra.sql"
+else say "SKIP restore-ledger-extra: $TARGET/ledger-extra.sql absent"; fi
 
 # Release copy: the reviewed files the plan reads, from this checkout; item-ai proofs from --catalogs-from.
+if test -n "$PLAN_FROM"; then
+  git -C "$REPO" show "$PLAN_FROM:$PLAN_REL" >"$T/issuer-plan.md" 2>/dev/null || die release-copy "plan at $PLAN_FROM not readable"
+fi
 python3 - "$REPO" "$RELEASE_ROOT" "$CATALOGS_FROM" "$PLAN_REL" <<'PY' || die release-copy 'could not assemble the release copy'
 import io,pathlib,shutil,subprocess,sys,tarfile
 repo,root,sha,plan=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3],sys.argv[4]
-for rel in ['supabase/migrations','supabase/admin-delegation-reserve','deploy/release-proofs',str(pathlib.Path(plan).parent)]:
+for rel in ['supabase/migrations','supabase/admin-delegation-reserve','deploy/release-proofs','deploy/supabase-stack/migrate',str(pathlib.Path(plan).parent)]:
     ignore=shutil.ignore_patterns('item-ai') if (sha and rel=='deploy/release-proofs') else None
     shutil.copytree(repo/rel,root/rel,ignore=ignore)
 if sha:
@@ -254,6 +317,18 @@ elif kind=='line':
     lines=[l for l in b.split('\n') if sys.argv[4] in l]
     if len(lines)!=1: raise SystemExit('line expected once in '+step+': '+sys.argv[4])
     out=lines[0]+'\n'
+elif kind=='lines':
+    rows=b.split('\n'); a=[i for i,l in enumerate(rows) if sys.argv[4] in l]
+    if len(a)!=1: raise SystemExit('line expected once in '+step+': '+sys.argv[4])
+    z=[i for i,l in enumerate(rows) if i>a[0] and sys.argv[5] in l]
+    if not z: raise SystemExit('end line not found in '+step+': '+sys.argv[5])
+    out='\n'.join(rows[a[0]:z[0]])+'\n'
+elif kind=='command-sql':
+    lines=[l for l in b.split('\n') if sys.argv[4] in l]
+    if len(lines)!=1: raise SystemExit('line expected once in '+step+': '+sys.argv[4])
+    m=re.search(r'--command "(.*)" \\$',lines[0])
+    if not m: raise SystemExit('command SQL not found in '+step)
+    out=m.group(1)
 elif kind=='slice':
     a=one(b,sys.argv[4]); z=b.index(sys.argv[5],a)
     out=b[a:z]
@@ -275,6 +350,24 @@ assert s.count(a)==1 and s.count('functions-before.txt')==1
 p.write_text(s.replace(a,'FROM rehearsal_fault_missing_relation p JOIN pg_namespace n'))
 PY
   say "FAULT injected: the functions-before inventory query in ai-w2-preflight names a missing relation (test control)"
+fi
+if test "$ISSUER" = 1 || test "$W2B_ONLY" = 1; then
+  extract "$PLAN" ai-w2b-preflight lines 'item-ai/w2b-preconditions.sql' 'W2B_ISSUANCE_OFF=' >"$T/blocks/w2b-preconditions.sh"
+fi
+if test "$ISSUER" = 1 || test -n "$DUMP_POST"; then
+  extract "$PLAN" ai-w2-issuer-rollback line 'NOLOGIN PASSWORD NULL' >"$T/blocks/issuer-rollback-role.sh"
+fi
+if test "$ISSUER" = 1; then
+  ISSUER_PLAN=$PLAN; test -z "$PLAN_FROM" || ISSUER_PLAN=$T/issuer-plan.md
+  extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+  extract "$ISSUER_PLAN" ai-w2-issuer-credential line 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-alter.sh"
+  # The block's own proof line (its docker login is replaced by the real libpq login below), then the plan's
+  # post-credential forward catalogs block and the issuer rollback it runs on failure, all from this checkout.
+  extract "$PLAN" ai-w2-issuer-credential line '>"$PROOF_DIR/issuer-credential.txt"' >"$T/blocks/issuer-credential-proof.sh"
+  extract "$PLAN" ai-w2b-forward-catalogs block >"$T/blocks/ai-w2b-forward-catalogs.sh"
+  extract "$PLAN" ai-w2-issuer-rollback block >"$T/blocks/ai-w2-issuer-rollback.sh"
+  extract "$ISSUER_PLAN" ai-w2-issuer-credential command-sql "--command \"SELECT current_user='commonswarm_admin_issuer'" >"$T/blocks/issuer-query.sql"
+  say "PASS extract: issuer block from ${PLAN_FROM:-this checkout}; W2b preconditions and rollback from this checkout"
 fi
 for f in "$T"/blocks/*.sh; do /bin/bash -n "$f" || die extract "$(basename "$f") is not valid bash"; done
 # Isolation: nothing the W2 rehearsal runs names an object of a modelled (or other Supabase-only) extension.
@@ -323,7 +416,7 @@ ai_db() {
     fi
     args+=("$a"); prev=$a
   done
-  "$PG_BIN/psql" -h "$T" -U supabase_admin -d postgres -X --set=ON_ERROR_STOP=1 "${args[@]}" 2>"$SECRET_STAGE/psql.log"
+  "$PG_BIN/psql" -h "$T" -p "$PORT" -U supabase_admin -d postgres -X --set=ON_ERROR_STOP=1 "${args[@]}" 2>"$SECRET_STAGE/psql.log"
 }
 eval "$(cat "$T/blocks/ai_ro.sh")"
 type ai_ro >/dev/null 2>&1 || die extract 'ai_ro definition not found in ai-db-session'
@@ -344,7 +437,7 @@ ai_run() {
       else say "PASS ai-w2-apply:$VERSION: migration and ledger row committed in one transaction" >&3; fi ;;
     ai-w2-revoke-probes)
       test -f "$PROOF_DIR/dcr-probe-revoked.json" || printf '{"client_id":"rehearsal","proof":"refresh rejected","revoked":true}\n' >"$PROOF_DIR/dcr-probe-revoked.json" ;;
-    ai-w2-reconcile|ai-w2-measure)
+    ai-w2-reconcile|ai-w2-measure|ai-w2-issuer-rollback)
       # As the plan's ai_run: plain eval, so the caller's errexit applies inside the block.
       eval "$(cat "$T/blocks/$1.sh")"
       say "PASS $1" >&3 ;;
@@ -352,6 +445,9 @@ ai_run() {
   esac
 }
 export WINDOW=W2
+# INPUTS for the W2b preconditions slice: the release W2 ran at (HEAD when this run applies W2 itself).
+W2B_INPUTS=$T/inputs-w2b.json
+python3 -c 'import json,sys; open(sys.argv[1],"w").write(json.dumps({"window":"W2b","release_sha":sys.argv[2],"w2_release_sha":sys.argv[3]})+"\n")' "$W2B_INPUTS" "$RELEASE_SHA" "${W2_SHA:-$RELEASE_SHA}"
 printf '{}\n' >"$SECRET_STAGE/ordinary-probes.json"; chmod 0600 "$SECRET_STAGE/ordinary-probes.json"
 
 if test "$RESERVE_CONTROL" = 1; then
@@ -388,11 +484,38 @@ step() { # label script
        fi
        test "$why" != 'no diagnostic' || why="exit status $status" ;;
   esac
+  if grep -q 'failed checks:' "$SECRET_STAGE/psql.log" 2>/dev/null; then why="$why; $(grep -m1 -o '[a-z0-9-]* failed checks: [a-z0-9,_-]*' "$SECRET_STAGE/psql.log" | cut -c1-300)"; fi
   if test -s "$T/last-sql.txt"; then why="$why (last SQL file: $(head -c 300 "$T/last-sql.txt"))"; fi
   say "FAIL $label: $why"; exit 1
 }
+# A step that handles secrets: its diagnostics stay in the 0700 stage and only a fixed message is printed.
+secret_step() { # label script
+  ( set -euo pipefail; eval "$(cat "$2")" ) >"$SECRET_STAGE/secret-step.out" 2>"$SECRET_STAGE/secret-step.err"
+  local status=$?
+  if test "$status" = 0; then say "PASS $1"; return 0; fi
+  say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
+}
+
+
 
 : >"$SECRET_STAGE/psql.log"
+# Pre-W2 or post-W2 is read from the dump's own ledger, and it must agree with --from-post-w2.
+W2_COUNT=$(pgx -Atq -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version IN ('20261003000001','20261003000002','20261003000003','20261003000004','20261003000005');" 2>"$PSQL_LOG") || die ledger "$(first_error "$PSQL_LOG")"
+LATER_COUNT=$(pgx -Atq -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version>'20261003000000';" 2>"$PSQL_LOG") || die ledger "$(first_error "$PSQL_LOG")"
+if test "$POST_W2" = 1; then
+  test "$W2_COUNT" = 5 || die post-w2-ledger "five 20261003 ledger versions expected got $W2_COUNT; not a post-W2 dump"
+  say "PASS post-w2-ledger: all five 20261003 versions present ($LATER_COUNT versions from 20261003 on); W2 apply skipped"
+else
+  test "$LATER_COUNT" = 0 || die pre-w2-ledger "no 20261003-or-later ledger version expected got $LATER_COUNT; a post-W2 dump needs --from-post-w2"
+fi
+if test "$W2B_ONLY" = 1; then
+  : >"$SECRET_STAGE/psql.log"
+  INPUTS_FILE=$W2B_INPUTS step ai-w2b-preflight:preconditions "$T/blocks/w2b-preconditions.sh"
+  say "PASS rehearsal: W2b database preconditions hold on the supplied dump"
+  exit 0
+fi
+
+if test "$POST_W2" = 0; then
 step ai-db-session:ledger-before "$T/blocks/ledger-before.sh"
 # EMULATED ai-w2-backfill: every ledger version is recorded with the sha256 of its file in this release copy.
 python3 - "$PROOF_DIR" "$RELEASE_ROOT" <<'PY' || die ai-w2-backfill 'every ledger version expected one migration file got other'
@@ -411,3 +534,107 @@ step ai-w2-apply "$T/blocks/ai-w2-apply.sh"
 step ai-w2-probes "$T/blocks/ai-w2-probes.sh"
 
 say "PASS rehearsal: W2 SQL in plan order on the supplied pre-W2 dump"
+fi
+
+if test -n "$DUMP_POST"; then
+  step ai-w2-issuer-rollback:role "$T/blocks/issuer-rollback-role.sh"
+  mkdir -p "$DUMP_POST" || die dump-post-w2 'cannot create the output directory'
+  "$PG_BIN/pg_dumpall" -h "$T" -p "$PORT" -U supabase_admin -r --no-role-passwords >"$DUMP_POST/roles.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -s >"$DUMP_POST/schema.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$DUMP_POST/ledger.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  # The live split: data-only ledger-extra.sql with the checksums and the cutover state.
+  "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a --disable-triggers -t commonswarm_ops.migration_checksums \
+    -t commonswarm_oauth.admin_cutover_state >"$DUMP_POST/ledger-extra.sql" 2>"$PSQL_LOG" || die dump-post-w2 "$(first_error "$PSQL_LOG")"
+  say "PASS dump-post-w2: roles.sql, schema.sql, ledger.sql and ledger-extra.sql (checksums, cutover state) of the post-W2 database, issuer rolled back"
+fi
+
+# ---- --issuer: the issuer credential with a REAL libpq TLS login (W2 issuer block, as W2b runs it) ----
+if test "$ISSUER" = 1; then
+  # The live W2 RGLqZX state: its issuer rollback disabled LOGIN and cleared the password. A post-W2 dump
+  # already carries that state, so the statement is not run again there.
+  if test "$POST_W2" = 0; then step ai-w2-issuer-rollback:role "$T/blocks/issuer-rollback-role.sh"; fi
+  INPUTS_FILE=$W2B_INPUTS step ai-w2b-preflight:preconditions "$T/blocks/w2b-preconditions.sh"
+  # TLS on 127.0.0.1 only: a throwaway CA and server certificate for db.commonswarm.internal, all in the 0700 directory.
+  TLS=$T/tls; mkdir -m 0700 "$TLS" || die tls 'cannot create the TLS directory'
+  {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=c1w2 rehearsal CA' -keyout "$TLS/ca.key" -out "$TLS/ca.crt" &&
+    printf 'basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:db.commonswarm.internal\n' >"$TLS/server.ext" &&
+    openssl req -newkey rsa:2048 -nodes -subj '/CN=db.commonswarm.internal' -keyout "$TLS/server.key" -out "$TLS/server.csr" &&
+    openssl x509 -req -days 1 -in "$TLS/server.csr" -CA "$TLS/ca.crt" -CAkey "$TLS/ca.key" -set_serial "0x$(openssl rand -hex 8)" -extfile "$TLS/server.ext" -out "$TLS/server.crt"
+  } >"$TLS/openssl.log" 2>&1 || die tls 'temporary CA or server certificate could not be made'
+  # Nothing of the CA may land outside the 0700 directory (an automatic CA serial file would).
+  test ! -e "${T%%.*}.srl" || die tls 'a CA serial file appeared outside the mktemp directory'
+  chmod 0600 "$TLS/ca.key" "$TLS/server.key"
+  # Only hostssl from 127.0.0.1/32 for the issuer role; every other TCP connection is rejected. The local line is the
+  # harness's own superuser setup over the unix socket in the 0700 directory.
+  printf '%s\n' 'local all supabase_admin trust' \
+    'hostssl postgres commonswarm_admin_issuer 127.0.0.1/32 scram-sha-256' \
+    'host all all 0.0.0.0/0 reject' 'host all all ::/0 reject' >"$TLS/pg_hba.conf"
+  "$PG_BIN/pg_ctl" -D "$T/data" -m fast -w -t 60 stop >/dev/null 2>&1 || die tls 'cluster stop before the TLS restart failed'
+  "$PG_BIN/pg_ctl" -D "$T/data" -o "-p $PORT -c listen_addresses='127.0.0.1' -c unix_socket_directories='$T' -c ssl=on -c ssl_cert_file='$TLS/server.crt' -c ssl_key_file='$TLS/server.key' -c hba_file='$TLS/pg_hba.conf'" \
+    -l "$T/pg.log" -w start >/dev/null 2>&1 || die tls 'cluster did not start with TLS on 127.0.0.1'
+  say "PASS tls: cluster restarted with ssl=on on 127.0.0.1:$PORT; hostssl 127.0.0.1/32 for the issuer only; temporary CA in the 0700 directory"
+  # Listener proof from the postmaster itself and from the OS: nothing on a non-loopback address.
+  LISTEN=$(pgx -Atq -c 'SHOW listen_addresses;' 2>"$PSQL_LOG") || die listener 'SHOW listen_addresses failed'
+  test "$LISTEN" = 127.0.0.1 || die listener "listen_addresses expected 127.0.0.1 got other"
+  PM_PID=$(head -1 "$T/data/postmaster.pid")
+  command -v lsof >/dev/null 2>&1 || die listener 'lsof expected present got missing'
+  lsof -nP -a -p "$PM_PID" -iTCP -sTCP:LISTEN >"$T/listen.txt" 2>/dev/null || die listener 'lsof found no TCP listener for the postmaster'
+  python3 - "$T/listen.txt" "$PORT" <<'PY' || die listener 'postmaster TCP listener expected 127.0.0.1 only got other'
+import sys
+rows=[l.split() for l in open(sys.argv[1]).read().splitlines()[1:] if l.strip()]
+names=[r[8] if len(r)>8 else '' for r in rows]
+assert names and all(n=='127.0.0.1:'+sys.argv[2] for n in names), names
+PY
+  say "PASS listener: postmaster $PM_PID listens on TCP 127.0.0.1:$PORT only ($(($(wc -l <"$T/listen.txt")-1)) socket; lsof and listen_addresses)"
+  # The box's service.conf and pass come from the released make-pg-service.mjs; a fresh rehearsal-only password.
+  command -v node >/dev/null 2>&1 || die service-conf 'node expected present got missing'
+  openssl rand -hex 24 >"$SECRET_STAGE/rehearsal-admin-password" || die service-conf 'password generation failed'
+  python3 - "$SECRET_STAGE" "$PORT" "$TLS/ca.crt" <<'PY' || die service-conf 'target env file could not be written'
+import pathlib,sys,urllib.parse
+stage,port,ca=pathlib.Path(sys.argv[1]),sys.argv[2],sys.argv[3]
+pw=(stage/'rehearsal-admin-password').read_text().strip()
+url='postgresql://supabase_admin:'+pw+'@db.commonswarm.internal:'+port+'/postgres?'+urllib.parse.urlencode({'sslmode':'verify-full','sslrootcert':ca,'hostaddr':'127.0.0.1'})
+(stage/'target.env').write_text('TARGET_DATABASE_URL='+url+'\n'); (stage/'target.env').chmod(0o600)
+PY
+  env -u SOURCE_DATABASE_URL -u TARGET_DATABASE_URL PG_SERVICE_OUTPUT="$SECRET_STAGE/service.conf" PG_PASS_OUTPUT="$SECRET_STAGE/pass" \
+    COMMONSWARM_ENV_FILE="$SECRET_STAGE/target.env" node "$RELEASE_ROOT/deploy/supabase-stack/migrate/make-pg-service.mjs" >"$SECRET_STAGE/db-session.log" 2>&1 \
+    || die service-conf 'make-pg-service.mjs failed (diagnostics kept in the 0700 stage)'
+  chmod 0600 "$SECRET_STAGE/service.conf" "$SECRET_STAGE/pass"
+  grep -qx 'sslmode=verify-full' "$SECRET_STAGE/service.conf" || die service-conf 'service.conf expected sslmode=verify-full got other'
+  say "PASS service-conf: service.conf and pass from the released make-pg-service.mjs (host db.commonswarm.internal, hostaddr 127.0.0.1, sslmode verify-full)"
+  # Issuer preparation and ALTER ROLE from the plan bytes (--plan-from selects the block's commit); secrets stay in the stage.
+  secret_step ai-w2-issuer-credential:prepare "$T/blocks/issuer-prepare.sh"
+  secret_step ai-w2-issuer-credential:alter-role "$T/blocks/issuer-alter.sh"
+  ISSUER_QUERY=$(cat "$T/blocks/issuer-query.sql")
+  issuer_psql() { env -u PGHOST -u PGHOSTADDR -u PGPORT -u PGUSER -u PGDATABASE -u PGPASSWORD -u PGSSLMODE -u PGSERVICE \
+    PGSERVICEFILE="$SECRET_STAGE/issuer-service.conf" PGPASSFILE="$SECRET_STAGE/issuer-pass" "$PG_BIN/psql" "$@"; }
+  if issuer_psql "service=target" -X --set=ON_ERROR_STOP=1 -Atq --command "$ISSUER_QUERY" >"$SECRET_STAGE/issuer-login.result" 2>"$SECRET_STAGE/issuer-login.log"; then
+    test "$(cat "$SECRET_STAGE/issuer-login.result")" = t || die ai-w2-issuer-credential:login 'dedicated-role measurement expected t got non-t'
+  else
+    WHY=$(grep -o 'syntax error in service file "[^"]*", line [0-9]*' "$SECRET_STAGE/issuer-login.log" | head -1)
+    die ai-w2-issuer-credential:login "libpq login exit status expected 0 got nonzero: ${WHY:-other libpq error (diagnostics kept in the 0700 stage)}"
+  fi
+  SSL_USED=$(issuer_psql "service=target" -X -Atq --command 'SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid();' 2>/dev/null) || SSL_USED=
+  test "$SSL_USED" = t || die ai-w2-issuer-credential:login 'session TLS expected on got other'
+  say "PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer via issuer-service.conf and issuer-pass; plan measurement query t"
+  if issuer_psql "service=target sslmode=disable" -X -Atq --command 'SELECT 1;' >/dev/null 2>&1; then die issuer-plaintext 'plaintext TCP login expected refused got accepted'; fi
+  say "PASS issuer-plaintext: a non-TLS TCP login as the issuer is refused by pg_hba"
+  step ai-w2-issuer-credential:proof "$T/blocks/issuer-credential-proof.sh"
+  if test "${C1_W2_REHEARSAL_FAULT:-}" = post-credential-catalog; then
+    # Test control: make one forward catalog row false AFTER provisioning (0002-001 requires NOT rolinherit).
+    pgx -q -v ON_ERROR_STOP=1 -c 'ALTER ROLE commonswarm_admin_issuer INHERIT;' >/dev/null 2>"$PSQL_LOG" || die fault "$(first_error "$PSQL_LOG")"
+    say "FAULT injected: the issuer role made INHERIT after the credential (forward catalog 0002 row 001 false)"
+    ( set -euo pipefail; export WINDOW=W2b; eval "$(cat "$T/blocks/ai-w2b-forward-catalogs.sh")" ) 3>&1 >"$T/step.out" 2>"$T/step.err"
+    FWD_STATUS=$?
+    test "$FWD_STATUS" != 0 || die ai-w2b-forward-catalogs 'a false forward catalog expected STOP got PASS'
+    say "FAIL ai-w2b-forward-catalogs: $(grep -m1 '^FAIL ai-w2b-forward-catalogs' "$T/step.err" | cut -c1-300)"
+    ROLLED=$(pgx -Atq -c "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_authid WHERE rolname='commonswarm_admin_issuer';" 2>"$PSQL_LOG") || ROLLED=
+    if test "$ROLLED" = t && test -f "$PROOF_DIR/issuer-rollback.txt" && test ! -e "$PROOF_DIR/w2b-forward-catalogs.txt"; then
+      say "PASS rollback-after-catalog-failure: ai-w2-issuer-rollback ran (issuer NOLOGIN without a password, issuer-rollback.txt); no w2b-forward-catalogs.txt"
+    else die rollback-after-catalog-failure 'issuer rollback expected applied got other'; fi
+    exit 1
+  fi
+  WINDOW=W2b step ai-w2b-forward-catalogs "$T/blocks/ai-w2b-forward-catalogs.sh"
+  say "PASS rehearsal: issuer credential provisioned and verified on the post-W2 database"
+fi

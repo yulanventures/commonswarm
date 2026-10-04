@@ -1,7 +1,8 @@
 # Admin issuance release: W2–W7
 
 Prepared, not executed. This plan releases one reviewed `RELEASE_SHA`, landed on
-main, in seven separately authorized windows. The preparation worker has made
+main, in seven separately authorized windows, plus the issuer-only W2b window
+when W2 committed the schema but not the issuer credential. The preparation worker has made
 no box measurements. Neither this document nor a PASS receipt grants approval.
 Admin issuance remains OFF until HezLead executes W6 after a fresh browser-readiness marker: the reviewed issuer
 coordinator, activation-only overlay, exact `MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1`,
@@ -39,7 +40,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | Input | Source and validation |
 | --- | --- |
 | release_sha, plan_sha256, archive_sha256 | Reviewed landed main commit; SHA-256 of this exact RELEASE.md and exact `git archive` tar; no abbreviated identities |
-| window, window_id, window_end_utc | W2…W7, six alphanumeric characters, UTC end within 30 minutes on box clock |
+| window, window_id, window_end_utc | W1…W7 or W2b, six alphanumeric characters, UTC end within 30 minutes on box clock |
 | baseline_oauth_sha, baseline_oauth_image | Live OAuth `current`/RELEASE_SHA + container source/image measurement; full SHA/digest |
 | baseline_edge_sha, baseline_edge_image | Live edge `current`/RELEASE_SHA, image and immutable bind mounts |
 | baseline_stack_sha, baseline_postgres_image | Live stack `current`/RELEASE_SHA and PostgreSQL container image |
@@ -48,10 +49,12 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | edge_recycle_service, edge_recycle_timer, edge_recycle_sha256 | Exact recycle units discovered from box timer/service inventory and systemctl cat byte digest, remeasured per window |
 | baseline_ledger_sha256 | SHA-256 of sorted version lines from live migration ledger, including final newline |
 | gate_receipt_sha256 | Independent checker's receipt digest; see GATES.json; exact combined build, no stale lane receipts |
-| rollback_decision | `retain-additive` W1–W2; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
+| rollback_decision | `retain-additive` W1–W2 and W2b; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
 | approval | `null` W1–W5; W6/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 authorizes activation and assigned human consent |
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
 | probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
+| w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
+| w2b_window_id | W6 only, REQUIRED there (absent in every other window): the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. W2 RGLqZX ran at 5f64fab4 and its issuer credential was rolled back, so at the W3–W7 release the credential exists only through W2b. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt and issuer-credential.txt |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
@@ -109,10 +112,11 @@ separately derived from RELEASE_SHA. A mismatch STOPs activation.
 
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
-| W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
+| W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate (shared with W2b and W4) verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
 | W2 SCHEMA | common preflight/open/session; ai-w2-stage-probes (Mac), ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (pre-fence probe, five separate transactions, probes after each, DCR probe grant revoke), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
+| W2b ISSUER | Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back. common preflight/open/session (ordinary probes and ai-live-controls before, pre-W1 consent receipt as for W1–W4); ai-w1-backup-gate (fresh backup, as W1); ai-w2b-preflight (bound W2 proof, ledger, NOLOGIN role without password, credential file absent); ai-w2-issuer-credential; ai-w2b-forward-catalogs (all five forward catalogs true, unmodified; a false one runs ai-w2-issuer-rollback and STOPs); ordinary probes, ai-live-controls after, ai-close. No DCR probe grant and no backfill. Failure: ai-w2-issuer-rollback, then recovered close. The order is W2b, W3, then W4, W5, W6, W7; nothing in W2b or in the W6 binding assumes which window ran just before or after it. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
-| W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
+| W4 EDGE/CADDY | common preflight/open/session; ai-w1-backup-gate (fresh backup, as W1); ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight (runs ai-live-controls phase before with the pre-W1 consent receipt), ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
 | W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
 | W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
@@ -153,7 +157,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id'}, 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_window_id'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -163,7 +167,7 @@ for k in keys:
         need(isinstance(d[k],str) and re.fullmatch('sha256:[0-9a-f]{64}',d[k]), k)
 for k,suffix in [('edge_recycle_service','.service'),('edge_recycle_timer','.timer')]:
     need(isinstance(d[k],str) and re.fullmatch(r'[A-Za-z0-9_-]+'+re.escape(suffix),d[k]), k)
-need(d['window'] in ['W'+str(x) for x in range(1,8)], 'window')
+need(d['window'] in ['W'+str(x) for x in range(1,8)]+['W2b'], 'window')
 need(isinstance(d['window_id'],str) and re.fullmatch('[A-Za-z0-9]{6}',d['window_id']), 'window_id')
 need(isinstance(d['window_end_utc'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',d['window_end_utc']), 'window_end_utc')
 end=datetime.datetime.strptime(d['window_end_utc'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
@@ -171,7 +175,7 @@ need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800,
 need(re.fullmatch(r'/srv/commonswarm/site/releases/[A-Za-z0-9._-]+',d['baseline_site_target']) is not None, 'site target')
 need(hashlib.sha256(plan.read_bytes()).hexdigest()==d['plan_sha256'], 'plan bytes')
 need(hashlib.sha256(receipt.read_bytes()).hexdigest()==d['gate_receipt_sha256'], 'checker receipt bytes')
-decision={'W1':'retain-additive','W2':'retain-additive','W3':'restore-service','W4':'restore-service','W5':'restore-service','W6':'close-and-reconcile','W7':'close-and-reconcile'}
+decision={'W1':'retain-additive','W2':'retain-additive','W2b':'retain-additive','W3':'restore-service','W4':'restore-service','W5':'restore-service','W6':'close-and-reconcile','W7':'close-and-reconcile'}
 need(d['rollback_decision']==decision[d['window']], 'rollback decision')
 def approval(v,action):
     need(isinstance(v,dict) and set(v)=={'approver','action','release_sha','window_id','plan_sha256','prompt_ref'}, action+' approval required')
@@ -188,6 +192,12 @@ if d.get('keep_open',False):
 else: need(d.get('keep_open_approval') is None,'no unused keep-open approval')
 if d['window']=='W2': need(isinstance(d.get('probe_workspace_id'),str) and re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',d['probe_workspace_id']) is not None, 'W2 probe_workspace_id')
 else: need('probe_workspace_id' not in d, 'probe_workspace_id is W2-only')
+if d['window']=='W2b':
+    need(isinstance(d.get('w2_release_sha'),str) and re.fullmatch('[0-9a-f]{40}',d['w2_release_sha']) is not None, 'W2b w2_release_sha')
+    need(isinstance(d.get('w2_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2_window_id']) is not None, 'W2b w2_window_id')
+else: need('w2_release_sha' not in d and 'w2_window_id' not in d, 'w2_release_sha/w2_window_id are W2b-only')
+if d['window']=='W6': need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
+else: need('w2b_window_id' not in d, 'w2b_window_id is W6-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
@@ -507,7 +517,7 @@ need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}
 try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
 except ValueError: measured=None
 need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
-phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+phase='pre-W1' if r['window'] in ('W1','W2','W2b','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
 need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
 if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
@@ -623,7 +633,7 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback) ;; *) return 1;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -814,7 +824,7 @@ need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}
 try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
 except ValueError: measured=None
 need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
-phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+phase='pre-W1' if r['window'] in ('W1','W2','W2b','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
 need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
 if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
@@ -842,7 +852,7 @@ PY
 
 HezLead supplies the controls worker's LIVE_CONTROLS_FILE before open and after
 each window, together with the CONSENT_RECEIPT_FILE it is bound to: `pre-W1`
-for W1–W4 and W5 before, `post-W5` for W5 after/recovery, W6 and W7. This plan
+for W1–W4, W2b and W5 before, `post-W5` for W5 after/recovery, W6 and W7. This plan
 only validates that external input and retains `ordinary-<phase>.json` and
 `consent-<consent_phase>.json` in PROOF_DIR; no operator-authored probe is
 permitted during the release window.
@@ -852,26 +862,91 @@ permitted during the release window.
 HezLead takes a fresh verified database/object backup before W1. The existing
 isolated restore drill must have a complete successful receipt; no live restore
 or service dispatch is authorized here. W2 consumes this exact W1 close.
+The same block is W2b's and W4's backup gate (HezLead ruling): it runs right
+after their common open/session, as in W1, and their success close requires its
+backup-gate.json. W1 is not rerun at a later release.
 
 ```sh
 # step: ai-w1-backup-gate
 # readonly: no
-# host: HezLead box root; status reads and nonsecret proof only
+# host: HezLead box root; status reads and nonsecret proof only; W1, W2b and W4
 set -euo pipefail
-test "$WINDOW" = W1
+case "$WINDOW" in W1|W2b|W4) ;; *) printf 'FAIL ai-w1-backup-gate: window expected W1-W2b-or-W4 got other; STOP\n' >&2; exit 1;; esac
 ai_deadline
-python3 - "$PROOF_DIR/backup-gate.json" <<'PY'
+python3 - "$PROOF_DIR/backup-gate.json" "$INPUTS_FILE" "$WINDOW" <<'PY'
 import datetime,json,pathlib,sys
 now=datetime.datetime.now(datetime.timezone.utc)
-b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
-r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
+try:
+    b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
+    r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
+except (OSError,ValueError): raise SystemExit('FAIL backup and restore status files; STOP') from None
 assert all(b.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified')), 'FAIL verified backup; STOP'
 age=(now-datetime.datetime.fromisoformat(b['verified_at'].replace('Z','+00:00'))).total_seconds()
 assert 0<=age<=1800 and b['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL fresh backup; STOP'
 assert r.get('ok') is True and r.get('state')=='complete', 'FAIL complete restore drill; STOP'
 age=(now-datetime.datetime.fromisoformat(r['at'].replace('Z','+00:00'))).total_seconds()
 assert 0<=age<=8*86400, 'FAIL restore freshness; STOP'
-pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','backup_verified_at':b['verified_at'],'restore_at':r['at']})+'\n')
+d=json.load(open(sys.argv[2])); assert d['window']==sys.argv[3], 'FAIL backup gate window binding; STOP'
+# A bound receipt: release, window and window ID, the measured times, the destination and the gate time.
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],
+    'backup_verified_at':b['verified_at'],'restore_completed_at':r['at'],'destination':b['destination'],
+    'gate_at':now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')},sort_keys=True)+'\n')
+PY
+BACKUP_GATE_DIR="$PROOF_DIR"
+ai_run ai-backup-gate-check
+```
+
+Every consumer of a backup-gate.json (W2 preflight for W1, W2b preflight and
+issuer credential, W4 preflight and apply, and the W1/W2b/W4 success close)
+validates it with this ONE block, never by file presence: exact keys, the
+receipt bound to its own window directory's inputs.json (release, window,
+window ID), the backup verified at most 1800 s and the restore drill completed
+at most 8 days before the gate time, the gate time inside that window
+(open.txt <= gate_at < window_end_utc, and not in the future) and the reviewed
+backup destination.
+
+```sh
+# step: ai-backup-gate-check
+# readonly: yes
+# host: box root; run through ai_run by every backup-gate consumer with BACKUP_GATE_DIR set to that window's proof directory
+set -euo pipefail
+: "${BACKUP_GATE_DIR:?FAIL ai-backup-gate-check: BACKUP_GATE_DIR expected window-proof-directory got unset; STOP}"
+python3 - "$BACKUP_GATE_DIR" <<'PY'
+import datetime,json,os,pathlib,re,stat,sys
+w=pathlib.Path(sys.argv[1])
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-backup-gate-check: '+what+' expected '+expected+' got '+got+'; STOP')
+def read(name):
+    try: fd=os.open(str(w/name),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except OSError: return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        return os.read(fd,65537)
+    finally: os.close(fd)
+def when(value,what):
+    ok=isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z',value) is not None
+    try: t=datetime.datetime.fromisoformat(value.replace('Z','+00:00')) if ok else None
+    except ValueError: t=None
+    need(t is not None,what,'UTC-ISO-8601-Z-time','other'); return t
+need(w.is_absolute() and w.is_dir() and not w.is_symlink(),'backup gate directory','absolute-directory','missing-or-symlink')
+raw=read('backup-gate.json'); need(raw is not None and len(raw)<=65536,'backup-gate.json','regular-file','missing-or-not-regular')
+try: g=json.loads(raw)
+except ValueError: g=None
+need(isinstance(g,dict),'backup-gate.json','JSON-object','malformed')
+need(set(g)=={'status','release_sha','window','window_id','backup_verified_at','restore_completed_at','destination','gate_at'} and g['status']=='PASS','backup-gate.json keys','exact-PASS-receipt','other')
+try: i=json.loads(read('inputs.json') or b'')
+except ValueError: i=None
+need(isinstance(i,dict),'window inputs.json','JSON-object','missing-or-malformed')
+need(g['window'] in ('W1','W2b','W4') and all(g[k]==i.get(k) for k in ('release_sha','window','window_id')),'backup-gate.json binding','same-release-window-and-window-id-as-inputs','other')
+gate=when(g['gate_at'],'gate_at'); backup=when(g['backup_verified_at'],'backup_verified_at'); restore=when(g['restore_completed_at'],'restore_completed_at')
+need(0<=(gate-backup).total_seconds()<=1800,'backup verified_at at gate time','at-most-1800s-old','stale-or-future')
+need(0<=(gate-restore).total_seconds()<=8*86400,'restore drill completed_at at gate time','at-most-8-days-old','stale-or-future')
+need(isinstance(g['destination'],str) and g['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'),'backup destination','reviewed-r2-prefix','other')
+opened=read('open.txt'); need(opened is not None,'window open.txt','regular-file','missing')
+start=when(opened.decode(errors='replace').strip(),'open.txt')
+end=when(i.get('window_end_utc'),'window inputs window_end_utc')
+need(start<=gate<end and gate<=datetime.datetime.now(datetime.timezone.utc),'gate_at','inside-this-window','before-open-after-end-or-future')
+print('PASS ai-backup-gate-check: '+g['window']+' '+g['window_id']+' backup and restore fresh at gate '+g['gate_at'])
 PY
 ```
 
@@ -1219,9 +1294,11 @@ python3 - "$W1_CLOSED_FILE" "$RELEASE_SHA" <<'PY'
 import datetime,json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
 d=json.load(open(p.parent/"inputs.json")); assert d["window"]=="W1" and d["release_sha"]==sys.argv[2]
-assert json.load(open(p.parent/"backup-gate.json"))["status"]=="PASS"
 assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(p.read_text().strip().replace("Z","+00:00"))).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
 PY
+BACKUP_GATE_DIR="${W1_CLOSED_FILE%/*}"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2-preflight: W1: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2-preflight <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
@@ -1581,7 +1658,8 @@ PY
 # readonly: no
 # host: box root; replay revocation of the W2 probe DCR grant family (no RFC 7009) with a rejected-refresh proof; secrets never output
 set -euo pipefail
-test "$WINDOW" = W2
+# Runs as ( ai_run ai-w2-revoke-probes ) || ... in the W2 exit guards, where bash ignores errexit: fail explicitly.
+test "$WINDOW" = W2 || { printf 'FAIL ai-w2-revoke-probes: window expected W2 got other; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
 stage,proof=map(pathlib.Path,sys.argv[1:3]); sha=sys.argv[3]
@@ -1883,25 +1961,38 @@ ai-gates enforces these named controls before any schema apply.
 
 ## HezLead box block: W2 issuer credential
 
-Run after ai-w2-reconcile/ai-w2-probes, before W2 close. The password is
+Run after ai-w2-reconcile/ai-w2-probes, before W2 close, or in W2b after
+ai-w2b-preflight (the same two blocks; see W2b). The password is
 created on the box, never printed and never copied to the Mac or 1Password
 this window (HezLead's ruling). The AS format is JSON `{user,password}`.
 The fresh role has no existing credential; an existing file stops this initial
 provisioning. Rotation is a separate credential window alongside management.
 Rollback disables login and clears the new password; it retains additive schema.
+libpq's service-file parser accepts only `key=value` with no space around `=`
+(release 5f64fab4 W2 RGLqZX failed its login on configparser's default
+`key = value`). The block writes the issuer service file with
+`space_around_delimiters=False` and byte-checks every line before use.
 
 ```sh
 # step: ai-w2-issuer-credential
 # readonly: no
-# host: HezLead ONLY, box root, W2 schema window
+# host: HezLead ONLY, box root, W2 schema window or W2b issuer-only window
 set -euo pipefail
-test "$WINDOW" = W2
+case "$WINDOW" in
+ W2) test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-w2-issuer-credential: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; };;
+ W2b)
+  test -f "$PROOF_DIR/w2b-preconditions.txt" || { printf 'FAIL ai-w2-issuer-credential: W2b w2b-preconditions.txt expected present got missing; STOP\n' >&2; exit 1; }
+  # Backup admission at the mutation boundary (the issuer LOGIN and credential are the W2b mutation).
+  BACKUP_GATE_DIR="$PROOF_DIR"
+  ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2-issuer-credential: W2b backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+  unset BACKUP_GATE_DIR;;
+ *) printf 'FAIL ai-w2-issuer-credential: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;;
+esac
 ai_deadline
-test -f "$PROOF_DIR/schema-committed.txt"
-test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials
-test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
-openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"
-chmod 0600 "$SECRET_STAGE/issuer-password"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+openssl rand -hex 32 >"$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password generation expected success got failure; STOP\n' >&2; exit 1; }
+chmod 0600 "$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password file mode expected 0600 got failure; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" <<'PY'
 import configparser,json,pathlib,re,sys
 try:
@@ -1912,7 +2003,11 @@ try:
     (p/'issuer.sql').write_text("SET password_encryption='scram-sha-256'; ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"+value+"';\n")
     c=configparser.ConfigParser(interpolation=None); c.read(p/'service.conf')
     assert c.has_section('target'); c['target']['user']='commonswarm_admin_issuer'
-    with (p/'issuer-service.conf').open('w') as f: c.write(f)
+    # libpq service files take key=value only: no space around the delimiter.
+    with (p/'issuer-service.conf').open('w') as f: c.write(f,space_around_delimiters=False)
+    for line in (p/'issuer-service.conf').read_text().splitlines():
+        if line and not re.fullmatch(r'\[[a-z_]+\]',line) and not re.fullmatch(r'[a-z_]+=[^ ].*',line):
+            raise SystemExit('FAIL ai-w2-issuer-credential: issuer-service.conf line expected key=value got other; STOP')
     rows=(p/'pass').read_text().splitlines(); assert len(rows)==1
     parts=rows[0].split(':'); assert len(parts)==5
     (p/'issuer-pass').write_text(':'.join(parts[:3]+['commonswarm_admin_issuer',value])+'\n')
@@ -1920,9 +2015,9 @@ try:
 except Exception:
     raise SystemExit('FAIL issuer credential preparation; STOP') from None
 PY
-ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log"
-install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials
-test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
+ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log" || { printf 'FAIL ai-w2-issuer-credential: issuer ALTER ROLE LOGIN expected success got failure; STOP\n' >&2; exit 1; }
+install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: credential install expected success got failure; STOP\n' >&2; exit 1; }
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986' || { printf 'FAIL ai-w2-issuer-credential: credential mode expected 440-0-986 got other; STOP\n' >&2; exit 1; }
 docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
  --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
  --volume "$SECRET_STAGE/issuer-service.conf:/run/service.conf:ro" \
@@ -1940,15 +2035,261 @@ printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"
 # readonly: no
 # host: HezLead ONLY, box root; failed initial provisioning, not a rotation
 set -euo pipefail
-test "$WINDOW" = W2
-ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null
+case "$WINDOW" in W2|W2b) ;; *) printf 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;; esac
+# Every step fails explicitly: this block also runs as ( ai_run ai-w2-issuer-rollback ) || ..., where bash
+# ignores errexit, so no step may rely on set -e (Codex round 3).
+ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null || { printf 'FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP\n' >&2; exit 1; }
+if test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected not-symlink got symlink; STOP\n' >&2; exit 1; fi
 if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials; then
- test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
+ test -f /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected regular-file got other; STOP\n' >&2; exit 1; }
  rm -- /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL guarded issuer cleanup refused; STOP\n' >&2; exit 1; }
 fi
-test "$(ai_ro -Atq --command "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';")" = t
-printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt"
+if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials || test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected absent got present; STOP\n' >&2; exit 1; fi
+ROLLBACK_ROLE=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
+test "$ROLLBACK_ROLE" = t || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP\n' >&2; exit 1; }
+printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt" || { printf 'FAIL ai-w2-issuer-rollback: issuer-rollback.txt expected written got failure; STOP\n' >&2; exit 1; }
 ```
+
+W2b runs the five forward catalogs UNMODIFIED after the credential exists: the
+issuer LOGIN is back, so every row must hold, with no accepted failure. A false
+or failed catalog runs ai-w2-issuer-rollback (LOGIN off, password cleared,
+credential file removed) and STOPs; the window can then only close recovered.
+
+```sh
+# step: ai-w2b-forward-catalogs
+# readonly: no
+# host: HezLead box root, W2b after ai-w2-issuer-credential; database read-only; on failure runs ai-w2-issuer-rollback
+set -euo pipefail
+test "$WINDOW" = W2b || { printf 'FAIL ai-w2b-forward-catalogs: window expected W2b got other; STOP\n' >&2; exit 1; }
+ai_deadline
+test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-w2b-forward-catalogs: issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/w2b-forward-catalogs.txt" || { printf 'FAIL ai-w2b-forward-catalogs: w2b-forward-catalogs.txt expected absent got present; STOP\n' >&2; exit 1; }
+W2B_FORWARD_FAILED=
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
+ W2B_FORWARD=$(ai_ro -Atq --file /proof/catalog.sql) || W2B_FORWARD=error
+ if test "$W2B_FORWARD" != t; then W2B_FORWARD_FAILED=$VERSION; break; fi
+done
+if test -n "$W2B_FORWARD_FAILED"; then
+ printf 'FAIL ai-w2b-forward-catalogs: forward catalog %s expected t got other; running ai-w2-issuer-rollback; STOP\n' "$W2B_FORWARD_FAILED" >&2
+ ( ai_run ai-w2-issuer-rollback ) || printf 'FAIL ai-w2b-forward-catalogs: issuer rollback expected PASS got failure; STOP\n' >&2
+ exit 1
+fi
+printf 'PASS W2b forward catalogs: all five true after the issuer credential\n' >"$PROOF_DIR/w2b-forward-catalogs.txt"
+printf 'PASS ai-w2b-forward-catalogs: all five forward catalogs true\n'
+```
+
+
+## W2b: issuer-only window after a W2 issuer failure
+
+Release 5f64fab4 W2 RGLqZX committed and reconciled all five migrations, then
+ai-w2-issuer-credential failed (libpq rejected the `key = value` issuer service
+file) and ai-w2-issuer-rollback passed: LOGIN disabled, password cleared,
+credential file removed. W2 cannot run again (apply fence). W2b provisions only
+the issuer credential, at the release that W3–W7 will use. It has no DCR probe
+grant, no backfill and no schema write; ai-db-session's ledger baseline is the
+post-W2 ledger. INPUTS binds the W2 proof directory by `w2_release_sha` and
+`w2_window_id` (W2 may have run at an earlier release). Read-only
+preconditions, each FAIL...STOP: a fresh backup gate in this window; the bound
+W2 window's retained proofs are valid by CONTENT (ai-w2b-proof-check below:
+inputs.json binding, closed.txt and its close receipt validated by
+ai-live-controls, the exact schema-committed.txt, W2-probes.txt and
+dcr-probe-revoked.json bytes); every ledger version has its checksum row and the
+five 20261003 rows equal the migration files of THIS release archive; the five
+forward catalogs hold (20261003000002-001 only for the issuer LOGIN, which the W2
+rollback removed; its other role attributes are a precondition row);
+the ledger holds all five 20261003 versions and nothing later
+(`deploy/release-proofs/item-ai/w2b-preconditions.sql`); the issuer role exists,
+NOLOGIN, without a password; the credential file is absent. Then the SAME
+ai-w2-issuer-credential block runs with the W2b PROOF_DIR; on failure,
+ai-w2-issuer-rollback and a recovered close. After the credential,
+ai-w2b-forward-catalogs runs the five forward catalogs unmodified against the
+live database; each must be true (no accepted failure), or it runs the issuer
+rollback and STOPs. A successful close requires issuer-credential.txt and
+w2b-forward-catalogs.txt. The order is W2b, W3, then W4, W5, W6 and W7; W2b checks
+no state of any later or earlier code window. W6 binds this proof by its
+required `w2b_window_id` input at the same release.
+
+```sh
+# step: ai-w2b-preflight
+# readonly: no
+# host: HezLead box root; database read-only, writes proof files only
+set -euo pipefail
+test "$WINDOW" = W2b || { printf 'FAIL ai-w2b-preflight: window expected W2b got other; STOP\n' >&2; exit 1; }
+ai_deadline
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
+test -f "$PROOF_DIR/ordinary-before.json"
+test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2b-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2b-preflight <<'PY' || { printf 'FAIL ai-w2b-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
+# The bound W2's retained proofs, by CONTENT, through the shared validator.
+PROOF_CHECK_KIND=W2
+W2_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w2b-preflight: bound W2 proofs expected valid got refused; STOP\n' >&2; exit 1; }
+unset PROOF_CHECK_KIND
+printf '%s\n' "$W2_BINDING" >"$PROOF_DIR/w2-binding.json"
+printf 'PASS ai-w2b-preflight: bound W2 proofs valid: %s\n' "$W2_BINDING"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2b-preflight: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2b-preflight: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+printf '\\i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql\nSELECT :\x27w2b_ok\x27::boolean;\n' >"$PROOF_DIR/w2b-preconditions.sql"
+W2B_OK=$(ai_ro -Atq --file /proof/w2b-preconditions.sql) || { printf 'FAIL ai-w2b-preflight: preconditions query expected success got failure; STOP\n' >&2; exit 1; }
+test "$W2B_OK" = t || { printf 'FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP\n' >&2; exit 1; }
+# Checksums, read-only: every ledger version has exactly one checksum row, and the five 20261003 rows equal the
+# migration files of THIS release archive (M1-M3 backfill, M4-M5 release, recorded at the bound W2's release).
+ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/w2b-ledger.txt" || { printf 'FAIL ai-w2b-preflight: ledger read expected success got failure; STOP\n' >&2; exit 1; }
+ai_ro -Atq --command 'SELECT version,sha256,source,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version;' >"$PROOF_DIR/w2b-checksums.txt" || { printf 'FAIL ai-w2b-preflight: checksum read expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$INPUTS_FILE" <<'PY'
+import hashlib,json,pathlib,sys
+root,proof=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]); w2sha=json.load(open(sys.argv[3]))['w2_release_sha']
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w2b-preflight: '+what+' expected '+expected+' got '+got+'; STOP')
+ledger=(proof/'w2b-ledger.txt').read_text().splitlines()
+rows=[r.split('|') for r in (proof/'w2b-checksums.txt').read_text().splitlines()]
+need(all(len(r)==4 for r in rows) and [r[0] for r in rows]==ledger,'checksum rows','one-per-ledger-version','other')
+for i in range(1,6):
+    v='2026100300000'+str(i); files=list((root/'supabase/migrations').glob(v+'_*.sql'))
+    need(len(files)==1,v+' migration file in this release','one','other')
+    expected=[v,hashlib.sha256(files[0].read_bytes()).hexdigest(),'backfill' if i<=3 else 'release',w2sha]
+    need(expected in rows,v+' checksum row','release-file-sha256-'+expected[2]+'-at-w2_release_sha','other')
+print('PASS ai-w2b-preflight: '+str(len(rows))+' checksum rows match the ledger; five W2 rows equal this release archive')
+PY
+# Forward catalogs by failed-check label. Every row holds, except one: 20261003000002-001 also requires the issuer
+# LOGIN that the W2 issuer rollback removed and W2b restores (its other attributes are w2b-preconditions.sql rows).
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok_failed_checks\x27;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
+ W2B_CATALOG_FAILED=$(ai_ro -Atq --file /proof/catalog.sql) || { printf 'FAIL ai-w2b-preflight: forward catalog %s query expected success got failure; STOP\n' "$VERSION" >&2; exit 1; }
+ case "$VERSION:$W2B_CATALOG_FAILED" in
+  *:|20261003000002:20261003000002-001-commonswarm_admin_issuer) ;;
+  *) printf 'FAIL ai-w2b-preflight: forward catalog %s expected all-rows-true (0002: only the issuer LOGIN row) got failed checks %s; STOP\n' "$VERSION" "$W2B_CATALOG_FAILED" >&2; exit 1;;
+ esac
+done
+W2B_ISSUANCE_OFF=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w2b-preflight: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+test "$W2B_ISSUANCE_OFF" = t || { printf 'FAIL ai-w2b-preflight: admin issuance expected OFF got other; STOP\n' >&2; exit 1; }
+printf 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n' >"$PROOF_DIR/w2b-preconditions.txt"
+printf 'PASS ai-w2b-preflight\n'
+```
+
+The shared proof validator below is the ONE reader of a retained window's proof
+files for W2b. ai-w2b-preflight runs it on the bound W2 (`PROOF_CHECK_KIND=W2`);
+ai-w6-activation-checks runs it on the bound W2b (`PROOF_CHECK_KIND=W2b`). It
+checks CONTENTS, never presence alone: the exact bytes each plan writer writes,
+the window's own inputs.json binding, the close record, and the retained
+ordinary receipt through the plan's own ai-live-controls validator with that
+window's inputs, consent copy and verified release archive
+(`/tmp/admin-issuance-<release_sha>-<window_id>.tar`, retained on the box). A
+W2 closed before `close-result.json` existed derives its result from its single
+retained after/recovery receipt; a W2b must carry `close-result.json` with result
+success, the exact preconditions and issuer-credential lines, and no
+`issuer-rollback.txt`.
+
+```sh
+# step: ai-w2b-proof-check
+# readonly: yes
+# host: box root; run through ai_run by ai-w2b-preflight (bound W2) and ai-w6-activation-checks (bound W2b); prints one JSON binding line
+set -euo pipefail
+: "${PROOF_CHECK_KIND:?FAIL ai-w2b-proof-check: PROOF_CHECK_KIND expected W2-or-W2b got unset; STOP}"
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PROOF_CHECK_KIND" <<'PY'
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,kind=sys.argv[1:4]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w2b-proof-check: '+what+' expected '+expected+' got '+got+'; STOP')
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+def strict_json(raw,label):
+    try: value=json.loads(raw)
+    except ValueError: value=None
+    need(isinstance(value,dict),label,'JSON-object','other')
+    need(raw==(json.dumps(value,sort_keys=True)+'\n').encode(),label+' bytes','exact-sorted-JSON-line','other')
+    return value
+need(kind in ('W2','W2b'),'PROOF_CHECK_KIND','W2-or-W2b','other')
+d=json.load(open(inputs))
+if kind=='W2':
+    need(d.get('window')=='W2b','checking window for a W2 proof','W2b','other'); sha,wid=d.get('w2_release_sha'),d.get('w2_window_id')
+else:
+    need(d.get('window')=='W6','checking window for a W2b proof','W6','other'); sha,wid=d.get('release_sha'),d.get('w2b_window_id')
+need(isinstance(sha,str) and re.fullmatch('[0-9a-f]{40}',sha) is not None and isinstance(wid,str) and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'INPUTS '+kind+' binding','full-sha-and-window-id','missing-or-other')
+w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+sha+'-'+kind+'-'+wid)
+need(w.is_dir() and not w.is_symlink() and w.resolve()==w,kind+' proof directory','directory','missing-or-symlink')
+def raw(name):
+    data=read_regular(str(w/name)); need(data is not None,kind+' '+name,'regular-file','missing-or-not-regular'); return data
+try: i=json.loads(raw('inputs.json'))
+except ValueError: i=None
+need(isinstance(i,dict) and i.get('window')==kind and i.get('release_sha')==sha and i.get('window_id')==wid,kind+' inputs.json','window-'+kind+'-bound-release-and-window-id','mismatch')
+closed=raw('closed.txt')
+need(re.fullmatch(rb'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\n',closed) is not None,kind+' closed.txt','one-UTC-close-time-line','other')
+record=read_regular(str(w/'close-result.json'))
+if record is not None:
+    r=strict_json(record,kind+' close-result.json')
+    need(set(r)=={'release_sha','window','window_id','result','closed_at'} and r['release_sha']==sha and r['window']==kind and r['window_id']==wid,kind+' close-result.json binding','exact-keys-bound-to-inputs','other')
+    need(r['closed_at']+'\n'==closed.decode() and r['result'] in ('success','recovered'),kind+' close-result.json result','success-or-recovered-at-closed.txt','other')
+    result=r['result']
+else:
+    # A W2 that closed before close-result.json existed: its single retained close receipt is its result.
+    need(kind=='W2',kind+' close-result.json','regular-file','missing-or-not-regular')
+    found=[res for res,f in (('success','ordinary-after.json'),('recovered','ordinary-recovery.json')) if read_regular(str(w/f)) is not None]
+    need(len(found)==1,'W2 close receipt','exactly-one-of-after-or-recovery',str(len(found)))
+    result=found[0]
+if kind=='W2b': need(result=='success','W2b close result','success',result)
+phase='after' if result=='success' else 'recovery'
+raw('ordinary-'+phase+'.json'); raw('consent-pre-W1.json')
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,'ai-w2b-proof-check').decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+need(len(found)==1,'ai-live-controls block','one','other')
+env=dict(os.environ,INPUTS_FILE=str(w/'inputs.json'),BOX_ARCHIVE_PATH='/tmp/admin-issuance-'+sha+'-'+wid+'.tar',PROOF_DIR=str(w),
+         LIVE_CONTROLS_FILE=str(w/('ordinary-'+phase+'.json')),CONSENT_RECEIPT_FILE=str(w/'consent-pre-W1.json'),LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN='no')
+need(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env,stdout=subprocess.DEVNULL).returncode==0,kind+' ordinary-'+phase+'.json','valid-bound-live-controls-receipt','refused')
+if kind=='W2':
+    need(raw('schema-committed.txt')==b'all five ledger rows, M4/M5 checksums and complete backfills exact\n','W2 schema-committed.txt','exact-reconcile-line','other')
+    need(raw('W2-probes.txt')==b'PASS\n','W2 W2-probes.txt','exact-PASS-line','other')
+    v=strict_json(raw('dcr-probe-revoked.json'),'W2 dcr-probe-revoked.json')
+    need(set(v)=={'client_id','proof','revoked'} and isinstance(v['client_id'],str) and bool(v['client_id']) and v['proof']=='refresh rejected' and v['revoked'] is True,'W2 dcr-probe-revoked.json','client_id-refresh-rejected-revoked-true','other')
+else:
+    need(raw('w2b-preconditions.txt')==b'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n','W2b w2b-preconditions.txt','exact-preconditions-line','other')
+    need(raw('issuer-credential.txt')==b'PASS issuer login; credential 0440 root:986; password stays on box\n','W2b issuer-credential.txt','exact-issuer-login-line','other')
+    need(raw('w2b-forward-catalogs.txt')==b'PASS W2b forward catalogs: all five true after the issuer credential\n','W2b w2b-forward-catalogs.txt','exact-forward-catalogs-line','other')
+    need(not (w/'issuer-rollback.txt').exists() and not (w/'issuer-rollback.txt').is_symlink(),'W2b issuer-rollback.txt','absent','present')
+print(json.dumps({'kind':kind,'release_sha':sha,'window_id':wid,'result':result,'closed_at':closed.decode().strip()},sort_keys=True))
+PY
+```
+
 
 ## W3: OAuth code release, ordinary MCP ON, issuance admin activation OFF
 
@@ -2159,6 +2500,9 @@ issuance closed. Other edge release paths must use the same marked hooks. Readin
 set -euo pipefail
 test "$WINDOW" = W4
 ai_deadline
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w4-preflight: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w4-preflight <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
@@ -2314,6 +2658,10 @@ ai_run ai-inputs
 ai_run ai-gates
 test -f "$SECRET_STAGE/mcp.new.caddy" || { printf 'FAIL ai-w4-apply: mcp.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
 test -f "$SECRET_STAGE/api.new.caddy" || { printf 'FAIL ai-w4-apply: api.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
+# Backup admission at the mutation boundary: the bound, fresh receipt of THIS window.
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w4-apply: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
@@ -3052,6 +3400,12 @@ PY
 ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
+# Issuer credential provenance: the W2b of THIS release, named by w2b_window_id, closed success and
+# provisioned it; validated by CONTENT through the shared validator (ai-w2b-proof-check).
+PROOF_CHECK_KIND=W2b
+W2B_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w6-activation-checks: issuer credential provenance expected closed-success W2b at this release got refused; STOP\n' >&2; exit 1; }
+unset PROOF_CHECK_KIND
+printf '%s\n' "$W2B_BINDING" >"$PROOF_DIR/issuer-provenance.json"
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)")" = "$RELEASE_SHA"
@@ -3880,7 +4234,7 @@ fi
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
-case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
+case "$WINDOW" in W1|W2|W2b|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
 test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no ai-close <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
 import hashlib,json,os,pathlib,re,stat,subprocess,sys
@@ -3909,14 +4263,29 @@ raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).
 PY
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
-  W1) test -f "$PROOF_DIR/backup-gate.json";;
+  W1)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W1: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   ;;
   W2)
    test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-close: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/W2-probes.txt" || { printf 'FAIL ai-close: W2 W2-probes.txt expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/dcr-probe-revoked.json" || { printf 'FAIL ai-close: W2 dcr-probe-revoked.json expected present got missing; STOP\n' >&2; exit 1; };;
+  W2b)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   test "$(cat "$PROOF_DIR/w2b-forward-catalogs.txt" 2>/dev/null)" = 'PASS W2b forward catalogs: all five true after the issuer credential' || { printf 'FAIL ai-close: W2b w2b-forward-catalogs.txt expected exact-PASS-line got missing-or-other; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/w2b-preconditions.txt" || { printf 'FAIL ai-close: W2b w2b-preconditions.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2b issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; };;
   W3) test -f "$PROOF_DIR/W3-probes.txt";;
-  W4) test -f "$PROOF_DIR/W4-readback.txt";;
+  W4)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   test -f "$PROOF_DIR/W4-readback.txt" || { printf 'FAIL ai-close: W4 W4-readback.txt expected present got missing; STOP\n' >&2; exit 1; };;
   W6)
    test -f "$PROOF_DIR/C1.json" || { printf 'FAIL ai-close: W6 C1.json expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/C1-cleanup.txt" || { printf 'FAIL ai-close: W6 C1-cleanup.txt expected present got missing; STOP\n' >&2; exit 1; }
@@ -3926,6 +4295,7 @@ if test "$CLOSE_RESULT" = success; then
  esac
 fi
 test ! -e "$PROOF_DIR/closed.txt"
+test ! -e "$PROOF_DIR/close-result.json"
 if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6 && test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
  ai_run ai-inputs
  test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
@@ -3939,6 +4309,13 @@ elif test "$WINDOW" = W2 && test ! -e "$PROOF_DIR/apply-started.txt"; then
  test "$W2_APPLIED" = 0 || { printf 'FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+fi
+if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered; then
+ # A recovered W2b leaves no issuer login: no credential file and a NOLOGIN role without a password.
+ test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-close: recovered W2b credential file expected absent got present; STOP\n' >&2; exit 1; }
+ test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-close: recovered W2b credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+ W2B_RECOVERED=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-close: recovered W2b issuer role query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W2B_RECOVERED" = t || { printf 'FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP\n' >&2; exit 1; }
 fi
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
 # Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.
@@ -3960,7 +4337,14 @@ if test "${W2_UNPROVEN_RULING:-0}" = 1; then
  printf '%s\n' "$W2_ACCEPT_PAYLOAD" >"$PROOF_DIR/dcr-probe-revoke-accepted.json"
  printf 'REVOKE-UNPROVEN accepted by HezLead ruling; recorded with the close\n'
 fi
-date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
+# The explicit terminal record (result and time) is written with closed.txt; later windows read it.
+CLOSED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+python3 - "$INPUTS_FILE" "$CLOSE_RESULT" "$CLOSED_AT" "$PROOF_DIR/close-result.json" <<'PY'
+import json,pathlib,sys
+d=json.load(open(sys.argv[1]))
+pathlib.Path(sys.argv[4]).write_text(json.dumps({'release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],'result':sys.argv[2],'closed_at':sys.argv[3]},sort_keys=True)+'\n')
+PY
+printf '%s\n' "$CLOSED_AT" >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 ```
 

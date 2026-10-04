@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -159,7 +159,9 @@ elif name=='caddy':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_run':
-    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install']]: refuse()
+    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check']]: refuse()
+    # The shared backup receipt validator's verdict; its content checks run from plan bytes in admin-release-plan.test.ts.
+    if args==['ai-backup-gate-check'] and cfg.get('backup_gate_refused'): raise SystemExit(1)
 elif name=='ai_db':
     if args==['-q','--command','BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;']: pass
     elif args==['-q','--file',str(root/'proof/measure.sql')]: owned(args[2]).read_text()
@@ -348,6 +350,20 @@ test('edge-caddy-route / mcp-get-head-gate-cors: fails closed on a non-wildcard 
   }
 });
 
+test('backup-restore-gate / w4-apply-mutation-boundary: ai-w4-apply validates the backup receipt right before its first database mutation', () => {
+  const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(good, r);
+  const gate = r.calls.findIndex(c => c[0] === 'ai_run' && c[1] === 'ai-backup-gate-check');
+  const mutation = r.calls.findIndex(c => c[0] === 'ai_db' && c.join(' ').includes('UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false'));
+  assert.ok(gate >= 0 && mutation > gate, 'the backup check precedes the first W4 database mutation');
+  const bad = fixture(); pass(bad, bad.run(['ai-w4-caddy-candidate']));
+  bad.put('fixture.json', { sha, image, client, backup_gate_refused: true });
+  const refused = bad.run(['ai-w4-apply']);
+  assert.notEqual(refused.status, 0);
+  assert.ok(refused.stderr.includes('FAIL ai-w4-apply: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'), refused.stderr);
+  assert.ok(!refused.calls.some(c => c[0] === 'ai_db'), 'no database mutation after a refused backup receipt');
+  assert.ok(!refused.calls.some(c => c[0] === 'systemctl' && c[1] === 'reload'), 'no Caddy reload after a refused backup receipt');
+});
+
 test('edge-caddy-route / caddy-validate-reload: fails closed before reload on candidate or live validation failure', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(good, r);
   assert.deepEqual(r.calls.filter(c => c[0] === 'systemctl' && c[1] === 'reload'), [['systemctl', 'reload', 'caddy']]);
@@ -517,10 +533,15 @@ test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses
     f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4' });
     const pre = JSON.stringify(consentReceipt('pre-W1'));
     f.put('proof/consent-pre-W1.json', pre); f.put('proof/ordinary-before.json', liveReceipt('before', pre, { window: 'W4' }));
+    f.put('proof/backup-gate.json', { status: 'PASS', backup_verified_at: '2026-10-04T00:00:00Z', restore_at: '2026-10-01T00:00:00Z' });
     if (override) f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
     renameSync(join(f.root, 'edge/releases', sha), join(f.root, 'moved-new-edge'));
   };
   const good = fixture(); ready(good); admitted(good.run(['ai-w4-preflight']), 'ADMITTED mkdir -p');
+  // W4 runs the shared backup gate after open, as W1 does: its preflight refuses unless the shared validator accepts this window's receipt.
+  assert.ok(good.run(['ai-w4-preflight']).calls.some(c => c[0] === 'ai_run' && c[1] === 'ai-backup-gate-check'));
+  const noBackup = fixture({ backup_gate_refused: true }); ready(noBackup);
+  guardRefused(noBackup, noBackup.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP');
   const missing = fixture(); ready(missing, false);
   guardRefused(missing, missing.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected regular-file got missing; STOP');
   const linked = fixture(); ready(linked, false); linked.put('real-override.yaml', 'reviewed override\n');

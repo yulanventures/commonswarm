@@ -73,7 +73,8 @@ function options(args) {
     demand(uuidOK(o['workspace-id']), 'valid workspace UUID', 'invalid --workspace-id');
     o['workspace-id'] = o['workspace-id'].toLowerCase();
   }
-  if (o.command === 'window') demand(/^W[1-7]$/.test(o.window) && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W1..W7 and 6 alnum window ID');
+  // W2b is the issuer-only window after a W2 issuer failure; like W1-W4 it binds the pre-W1 consent receipt.
+  if (o.command === 'window') demand(/^W(?:[1-7]|2b)$/.test(o.window) && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W1..W7 or W2b and 6 alnum window ID');
   if (o.command === 'probe-credentials') demand(o.window === 'W2' && /^[A-Za-z0-9]{6}$/.test(o['window-id']), 'W2 and 6 alnum window ID');
   for (const k of allowed.filter(k => k.endsWith('-dir') || k.endsWith('-profile') || ['out', 'prior-consent', 'consent-receipt'].includes(k))) {
     if (o[k]) { demand(o[k].startsWith('/'), 'absolute file paths', 'relative path'); o[k] = resolve(o[k]); }
