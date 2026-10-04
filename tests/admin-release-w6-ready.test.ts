@@ -123,6 +123,7 @@ test('ai-edge-remeasure: hook pair, row read with the receipt query bytes, a fre
     assert.deepEqual(hooks, opts?.timerActive ? [] : ['hook before', 'hook after', 'hook close'], name);
     // CLOSED is claimed only from the close mode's confirmed readback (exit 1); nothing says "stays closed".
     if (!opts?.timerActive) { assert.equal(r.status, 1, name); assert.match(r.stderr, /failure close confirmed issuance CLOSED by readback/); }
+    else assert.equal(r.status, 2, `${name}: a preflight failure establishes nothing, so it is UNKNOWN`);
     assert.doesNotMatch(r.stderr, /stays closed/, name);
     assert.ok(!existsSync(join(g.dir, 'edge-measurement.json')), `${name}: no receipt`);
   }
@@ -142,12 +143,14 @@ test('ai-edge-refresh: plain (non-exported) shell variables reach the child reme
 });
 
 test('ai-edge-refresh: stops the recycle timer for the remeasure and re-arms it on success and on failure', () => {
-  for (const [name, opts, ok] of [['success', {}, true], ['failed measurement', { hookAfterFails: true }, false]] as const) {
+  for (const [name, opts, ok] of [['success', {}, true], ['failed measurement', { hookAfterFails: true }, false], ['close refused', { hookAfterFails: true, hookCloseFails: true }, false]] as const) {
     const f = edgeFixture({ ...opts, timerActive: true });
     const out = join(f.dir, 'refreshed.json');
     const r = run(block('ai-edge-refresh', [...f.copy.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!)), { ...f.env, EDGE_MEASUREMENT_OUT: out });
     assert.equal(r.status === 0, ok, `${name}: ${r.stderr}`);
     if (!ok) assert.match(r.stderr, /FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP/);
+    if (name === 'failed measurement') { assert.equal(r.status, 1); assert.match(r.stderr, /FAIL ai-edge-refresh: issuance CLOSED \(remeasure failure close confirmed by readback\)/); }
+    if (name === 'close refused') { assert.equal(r.status, 2); assert.match(r.stderr, /FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure/); assert.doesNotMatch(r.stderr, /issuance CLOSED/); }
     assert.equal(f.timer(), 'active', `${name}: timer re-armed`);
     const systemd = f.trace().filter(c => c.startsWith('systemctl stop') || c.startsWith('systemctl start'));
     assert.deepEqual(systemd, ['systemctl stop', 'systemctl start'], name);
@@ -407,6 +410,8 @@ test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BE
     const bad = run(block('ai-w6-fence-driver'), { PLAN_FILE: planPath, INPUTS_FILE: inputFile(base()), C1_PROOF_DIR: bd, C1_INPUTS_FILE: bd, C1_FENCE_BUDGET_SECONDS: budget });
     assert.notEqual(bad.status, 0, budget); assert.match(bad.stderr, /FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP/, budget);
   }
+  const inherited = run(block('ai-w6-fence-driver'), { PLAN_FILE: planPath, INPUTS_FILE: inputFile(base()), C1_PROOF_DIR: bd, C1_INPUTS_FILE: bd, C1_RECOVERY_REVOKE: '1' });
+  assert.notEqual(inherited.status, 0); assert.match(inherited.stderr, /C1_RECOVERY_REVOKE expected unset in the fence window got 1/);
 });
 
 test('ai-w6-fence-driver: the deadline is the RUNNER cutoff: a delayed driver, a shortened token and an expired runner refuse normal revocation', { timeout: 120_000 }, async () => {
@@ -529,6 +534,10 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${call
   assert.notEqual(slowCli.r.status, 0); assert.ok(slowCli.seconds < 20, `${slowCli.seconds} s`);
   assert.match(slowCli.r.stderr, /revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown;.*never C1 proof/);
   assert.deepEqual(slowCli.calls, ['preflight', 'revoke-start']); assert.ok(!slowCli.fenced);
+  // A retained deadline with the recovery flag is still cleanup: never the receipt or the fence file.
+  const retained = fixture(); const kept = retained.go({ C1_RECOVERY_REVOKE: '1', C1_FENCE_DEADLINE: String(now() + 120) });
+  assert.equal(kept.r.status, 0, kept.r.stderr); assert.match(kept.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
+  assert.ok(existsSync(join(retained.proof, 'human-revoke-recovery.json')) && !existsSync(join(retained.proof, 'human-revoke.json')) && !kept.fenced);
   // After the window: a labelled cleanup revoke only, in its own file, with no fence file.
   const recovery = fixture(); const rec = recovery.go({ C1_RECOVERY_REVOKE: '1' });
   assert.equal(rec.r.status, 0, rec.r.stderr); assert.match(rec.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
@@ -548,7 +557,8 @@ test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close
       const harness = `ai_run() { case "$1" in ai-inputs|ai-w6-activation-probes|ai-w6-closed-gate-probe) :;; ai-w6-activation-rollback) systemctl start "$EDGE_RECYCLE_TIMER";; ai-edge-remeasure) return ${status};; *) return 1;; esac; }\nai_ro() { printf 't\\n'; }\n`;
       const r = run(`${harness}eval "$FINISH"\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, WINDOW: 'W6', PROOF_DIR: proof, FINISH: finish,
         INPUTS_FILE: inputFile({ ...base(), window: 'W6', keep_open: keep }) });
-      assert.match(r.stdout, /shell-continues 1/, r.stderr); assert.match(r.stderr, expected, `${status} keep=${keep}`);
+      // The caller's own status carries the result: 1 confirmed CLOSED, 2 UNKNOWN (through its EXIT trap).
+      assert.match(r.stdout, new RegExp(`shell-continues ${status}\\b`), r.stderr); assert.match(r.stderr, expected, `${status} keep=${keep}`);
       assert.doesNotMatch(r.stderr, /stays closed/); if (status === 2) assert.doesNotMatch(r.stderr, /issuance CLOSED/);
       assert.equal(t.state(), 'active', 'the finish re-armed the timer before the shell continued');
     }
@@ -556,6 +566,6 @@ test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close
     writeFileSync(join(t.dir, 'recovery.sh'), block('ai-w4-timer-recovery'));
     const harness = `ai_run() { case "$1" in ai-w4-timer-recovery) eval "$(cat '${join(t.dir, 'recovery.sh')}')";; ai-edge-remeasure) return ${status};; *) return 1;; esac; }\n`;
     const r = run(`${harness}( set -euo pipefail\n${apply.slice(applyStart, applyEnd)})\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, PROOF_DIR: proof });
-    assert.match(r.stdout, /shell-continues 1/); assert.match(r.stderr, expected, `apply ${status}`); assert.equal(t.state(), 'active');
+    assert.match(r.stdout, new RegExp(`shell-continues ${status}\\b`)); assert.match(r.stderr, expected, `apply ${status}`); assert.equal(t.state(), 'active');
   }
 });

@@ -2,6 +2,7 @@
 // a local fake AS/MCP. Preserve the canonical URI in its actual DPoP proof.
 // Reject every other URL before fetch; no production seam in the runner.
 import { lstatSync, realpathSync } from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, sep } from 'node:path';
 
@@ -32,3 +33,16 @@ globalThis.fetch = (input, options) => {
   }
   return originalFetch(new URL(url.pathname + url.search, origin), options);
 };
+
+// Test control only: a slow open of the fence handoff (ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS), so a read that
+// started inside the fence window finishes after the published cutoff.
+const slowFenceMs = Number(process.env.ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ?? 0);
+if (slowFenceMs > 0) {
+  const fsp = createRequire(import.meta.url)('node:fs/promises'), open = fsp.open;
+  fsp.open = async (path, ...rest) => {
+    const handle = await open(path, ...rest);
+    if (String(path).endsWith('/fence.txt')) await new Promise(done => setTimeout(done, slowFenceMs));
+    return handle;
+  };
+  syncBuiltinESMExports();
+}

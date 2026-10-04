@@ -1325,6 +1325,7 @@ def fixture_output(args, **kwargs):
     sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
     if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
     if sql.startswith('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL'):
+        if os.environ.get('RECYCLE_FIXTURE_READBACK_FAILS') == '1': raise subprocess.CalledProcessError(2, ['docker', 'run'])
         return 't' if not state['enabled'] and state['invalidated'] else 'f'
     if os.environ.get('RECYCLE_FIXTURE_CLOSE_FAILS') == '1' and sql.endswith('release_generation=release_generation+1 WHERE singleton; COMMIT;'):
         raise subprocess.CalledProcessError(3, ['docker', 'run'])
@@ -1368,7 +1369,7 @@ subprocess.check_output = fixture_output
     assert.deepEqual(JSON.parse(readFileSync(join(configDir, 'recycle-intent.json'), 'utf8')), { reopen: true, generation: 8 });
     const after = hook('after', failed);
     if (failed) {
-      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance stays closed/);
+      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance CLOSED \(confirmed by readback\)/);
       assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
       // One NONSECRET marker line in the journal and in the 0644 append-only log, after the close.
       const marker = lines(markerFile); assert.equal(marker.length, 1); assert.deepEqual(lines(journalFile), marker);
@@ -1386,6 +1387,13 @@ subprocess.check_output = fixture_output
     }
     assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');
   }
+  // An ordinary measurement failure whose readback is impossible is UNKNOWN, never CLOSED.
+  { writeFileSync(stateFile, JSON.stringify(initial)); const markersBefore = lines(markerFile).length;
+    assert.equal(hook('before').status, 0);
+    const after = hook('after', true, { RECYCLE_FIXTURE_READBACK_FAILS: '1' });
+    assert.notEqual(after.status, 0); assert.match(after.stderr, /issuance state UNKNOWN \(no confirming readback; may be OPEN\)/);
+    assert.doesNotMatch(after.stderr, /CLOSED|stays closed/);
+    const added = lines(markerFile).slice(markersBefore); assert.equal(added.length, 1); assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-state-unknown'); }
   // The reopen COMMITS but its response is lost: the hook closes again and claims CLOSED only after the readback.
   for (const closeFails of [false, true]) {
     writeFileSync(stateFile, JSON.stringify(initial)); const markersBefore = lines(markerFile).length;

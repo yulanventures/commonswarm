@@ -139,6 +139,7 @@ async function exercise(config = {}) {
       }
       if (fenced && config.fenceRefusal !== false) {
         if (config.fenceStatus === 500) return emit(res, 500, { error: secrets[1] });
+        if (config.slowRefusalMs) await new Promise(done => setTimeout(done, config.slowRefusalMs));
         return emit(res, 403, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'grant_inactive' } });
       }
       if (rpc.method === 'notifications/initialized') return emit(res, 204, null);
@@ -175,7 +176,7 @@ async function exercise(config = {}) {
       '--consent-timeout-ms', '2000', '--fence-timeout-ms', '2000', '--request-timeout-ms', '1000', '--total-timeout-ms', '6000',
       ...(config.fence ? ['--verify-fenced', '--fence-file', paths.fence] : [])];
     let handoff = Promise.resolve(), handledConsent = false, handledFence = false;
-    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot, ...(config.slowFenceOpenMs ? { ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: String(config.slowFenceOpenMs) } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', chunk => {
       out += chunk;
       if (!handledConsent && out.includes('consent_handoff_ready')) {
@@ -302,6 +303,17 @@ function fenceCutoff(out) {
 for (const config of [{ fenceRefusal: false }, { fenceStatus: 500 }]) test(`fence verification rejects ${config.fenceRefusal === false ? 'a successful follow-up call' : 'a server failure'}`, async () => {
   const r = await exercise({ fence: true, ...config }); assert.equal(r.exitCode, 1);
   assert.equal(r.receipt.failed_step, 'verify_fenced'); assert.equal(r.receipt.failure_code, 'fence_not_proven'); assert.equal(r.receipt.refused_after_fence, null);
+});
+
+// The published cutoff is enforced after the handoff read and around the follow-up request (2000 ms fence wait here).
+test('a fence read or a refused follow-up that crosses the published cutoff is not proof', async () => {
+  const slowRead = await exercise({ fence: true, slowFenceOpenMs: 2500 }); assert.equal(slowRead.exitCode, 1);
+  assert.equal(slowRead.receipt.failed_step, 'human_fence'); assert.equal(slowRead.receipt.failure_code, 'handoff_timeout');
+  assert.equal(slowRead.receipt.refused_after_fence, null); assert.equal(slowRead.receipt.ok, false);
+  const slowRefusal = await exercise({ fence: true, slowRefusalMs: 2500 }); assert.equal(slowRefusal.exitCode, 1);
+  assert.equal(slowRefusal.receipt.failed_step, 'verify_fenced'); assert.equal(slowRefusal.receipt.refused_after_fence, null); assert.equal(slowRefusal.receipt.ok, false);
+  // Control: the same refusal inside the cutoff is proof.
+  const inTime = await exercise({ fence: true, slowRefusalMs: 200 }); assert.equal(inTime.exitCode, 0); assert.equal(inTime.receipt.refused_after_fence.refusal_code, 'grant_inactive');
 });
 
 test('fence verification cannot pass solely because the access token expired', async () => {

@@ -194,6 +194,7 @@ expect_fail() { # label script pattern
   : >"$SECRET_STAGE/psql.log"
   ( set -euo pipefail; eval "$(cat "$2")" ) >"$T/neg.out" 2>"$T/neg.err"
   local status=$? hit
+  NEG_STATUS=$status
   if test "$status" = 0; then say "FAIL $1: refusal expected got success"; exit 1; fi
   hit=$(grep -hoE "$3" "$T/neg.out" "$T/neg.err" "$SECRET_STAGE/psql.log" 2>/dev/null | head -1)
   if test -n "$hit"; then say "PASS $1: refused ($hit)"; return 0; fi
@@ -541,7 +542,7 @@ say "PASS recycle-good-reopens: no marker; $RECYCLE_LINE"
 printf 'bad-image' >"$W6R/docker-mode"
 recycle_pair recycle-bad
 printf 'good' >"$W6R/docker-mode"
-test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle hook; issuance stays closed' "$T/hook.err" || die recycle-bad "bad measurement expected hook failure got $HOOK_AFTER"
+test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle hook; issuance CLOSED (confirmed by readback)' "$T/hook.err" || die recycle-bad "bad measurement expected hook failure got $HOOK_AFTER"
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-bad "bad measurement expected closed and invalidated got $RECYCLE_LINE"
 test "$MARKERS_NEW" = 1 && marker_last "$EDGE_RECYCLE_SERVICE" edge-measurement-failed || die recycle-bad "exactly one closed-issuance marker expected got $MARKERS_NEW"
 say "PASS recycle-bad-stays-closed: hook after refused the wrong image; one marker (journal + 0644 log, unit $EDGE_RECYCLE_SERVICE, reason edge-measurement-failed); $RECYCLE_LINE"
@@ -556,10 +557,10 @@ printf fail >"$W6R/logger-mode"; mv "$MARKER" "$MARKER.kept" && ln -s /dev/null 
 printf 'bad-image' >"$W6R/docker-mode"
 recycle_pair recycle-marker-failure
 printf 'good' >"$W6R/docker-mode"; printf ok >"$W6R/logger-mode"; mv -f "$MARKER.kept" "$MARKER" || exit 1
-test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle closed-marker not fully written' "$T/hook.err" && grep -q 'FAIL recycle hook; issuance stays closed' "$T/hook.err" \
+test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle closed-marker not fully written' "$T/hook.err" && grep -q 'FAIL recycle hook; issuance CLOSED (confirmed by readback)' "$T/hook.err" \
   || die recycle-marker-failure 'marker failure expected reported with the hook failure got other'
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-marker-failure 'closed and invalidated expected got other'
-say "PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and issuance stays closed; $RECYCLE_LINE"
+say "PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and the readback-confirmed CLOSED state stands; $RECYCLE_LINE"
 
 # ---------------- a shared remeasure that fails AFTER a committed reopen closes issuance (from OPEN) ----------------
 W6Q_PROOF=$T/proof-W6-postfail; mkdir -p "$W6Q_PROOF" || exit 1
@@ -570,6 +571,7 @@ MARKERS_BEFORE=$(marker_count) BEFORE_POSTFAIL=$(state)
 printf 'query-fails' >"$W6R/docker-mode"
 PROOF_DIR=$W6Q_PROOF INPUTS_FILE=$W6K_INPUTS expect_fail ai-edge-remeasure:row-read-fails-after-reopen "$T/blocks/remeasure-postfail.sh" 'cutover row expected readable got failure'
 printf 'good' >"$W6R/docker-mode"
+test "$NEG_STATUS" = 1 || die remeasure-postfail "remeasure status 1 (confirmed CLOSED) expected got $NEG_STATUS"
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die remeasure-postfail "closed and invalidated expected got $(state)"
 test "$(( $(marker_count) - MARKERS_BEFORE ))" = 1 && marker_last ai-edge-remeasure remeasure-validation-failed || die remeasure-postfail 'one remeasure-validation-failed marker expected got other'
 say "PASS remeasure-postfail-closes: the hook pair reopened, the row read then failed, and the hook close mode closed and invalidated issuance with one marker (reason remeasure-validation-failed); before [$BEFORE_POSTFAIL] after [$(state)]"
@@ -594,13 +596,14 @@ MARKERS_BEFORE=$(marker_count)
 printf 'lose-reopen-and-close' >"$W6R/docker-mode"
 PROOF_DIR=$W6U_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 expect_fail ai-w6-finish:keep-open-close-refused "$T/blocks/w6-finish-keep-run.sh" 'FAIL ai-w6-finish: issuance state UNKNOWN after the remeasure failure \(may be OPEN\)'
 printf 'good' >"$W6R/docker-mode"
+test "$NEG_STATUS" = 2 || die ai-w6-finish:keep-open-close-refused "finish status 2 (UNKNOWN) expected got $NEG_STATUS"
 grep -q 'issuance CLOSED' "$T/neg.err" && die ai-w6-finish:keep-open-close-refused 'no CLOSED claim expected got one'
 grep -q "issuance stays closed" "$T/neg.err" && die ai-w6-finish:keep-open-close-refused 'no closed claim expected got one'
 timer_active || die ai-w6-finish:keep-open-close-refused 'recycle timer expected re-armed got inactive'
 test "$(q1 "SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-w6-finish:keep-open-close-refused 'the modelled refused close leaves issuance OPEN; expected t got other'
 test "$(( $(marker_count) - MARKERS_BEFORE ))" = 2 && test "$(marker_event_last)" = admin-issuance-state-unknown && ! tail -2 "$MARKER" | grep -q closed-needs-reactivation \
   || die ai-w6-finish:keep-open-close-refused 'two state-unknown markers and no CLOSED marker expected got other'
-say "PASS w6-finish-unknown-propagates: reopen committed, both closes refused; issuance really OPEN; the hook, the remeasure and the finish all report UNKNOWN (may be OPEN), two state-unknown markers, no CLOSED claim; timer re-armed"
+say "PASS w6-finish-unknown-propagates: reopen committed, both closes refused; issuance really OPEN; the hook, the remeasure and the finish all report UNKNOWN (may be OPEN), two state-unknown markers, no CLOSED claim; finish exit status 2; timer re-armed"
 printf '%s\n' 'set -euo pipefail' 'ai_run ai-w6-activation-rollback' >"$T/blocks/recover-unknown.sh"
 PROOF_DIR=$W6U_PROOF step ai-emergency-close:recover-unknown "$T/blocks/recover-unknown.sh"
 test "$(q1 "SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-emergency-close:recover-unknown 'closed expected got other'

@@ -429,8 +429,13 @@ installed hook pair (before closes issuance and invalidates; after measures the
 live edge against the root-owned recycle.json and reopens only a previously open,
 still-approved release), reads the row with the exact query bytes of
 ai-edge-receipt, writes the new receipt from recycle.json and that generation,
-and then validates it with ai-edge-receipt itself. A failed measurement leaves
-issuance closed: any failure after the hooks start (a hook, the row read, the
+and then validates it with ai-edge-receipt itself. Two rules hold for every
+block here: a CLOSED claim or a CLOSED marker exists ONLY right after a
+successful independent readback, and everything else is UNKNOWN; and for
+ai-edge-remeasure, ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish and
+ai-w6-activation-rollback, exit 1 means confirmed CLOSED, 2 means UNKNOWN and
+any other nonzero status is UNKNOWN (their EXIT traps turn an unconfirmed 1
+into 2). Any failure after the hooks start (a hook, the row read, the
 receipt or its validation, possibly after a committed reopen) runs the hook's
 `close` mode (release role, close first, then invalidate, marker reason
 `remeasure-validation-failed`) before the step fails; a failed close is
@@ -445,6 +450,16 @@ ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs
 # readonly: no
 # host: box root; the CALLER has stopped the recycle timer and re-arms it afterwards
 set -euo pipefail
+# Status contract (also ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish, ai-w6-activation-rollback): 0 success;
+# 1 ONLY right after an independent readback confirmed issuance CLOSED; any other status (2 by convention) UNKNOWN.
+C1_CLOSED_CONFIRMED=0
+remeasure_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap remeasure_exit EXIT
 : "${INPUTS_FILE:?FAIL ai-edge-remeasure: INPUTS_FILE expected absolute-file got unset; STOP}" "${PLAN_FILE:?FAIL ai-edge-remeasure: PLAN_FILE expected absolute-file got unset; STOP}"
 : "${EDGE_MEASUREMENT_OUT:?FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-new-file got unset; STOP}"
 case "$EDGE_MEASUREMENT_OUT" in /*) ;; *) printf 'FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-path got relative; STOP\n' >&2; exit 1;; esac
@@ -458,6 +473,7 @@ test "$(systemctl show -p ActiveState --value "$REMEASURE_SERVICE")" = inactive 
 # Exit 1: failed, issuance CLOSED (confirmed by the close mode's readback). Exit 2: failed, state UNKNOWN.
 remeasure_fail() {
  if COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle close; then
+  C1_CLOSED_CONFIRMED=1
   printf 'FAIL ai-edge-remeasure: failure close confirmed issuance CLOSED by readback; STOP\n' >&2; exit 1
  fi
  printf 'FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; STOP\n' >&2
@@ -526,18 +542,22 @@ PY
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${PLAN_FILE:?}" "${EDGE_MEASUREMENT_OUT:?}"
 REFRESH_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-refresh: recycle timer name expected readable got failure; STOP\n' >&2; exit 1; }
+C1_CLOSED_CONFIRMED=0
 edge_refresh_rearm() {
  local status=$?
  trap - EXIT
  # Every exit re-arms the timer; a failed re-arm is reported and fails the step.
- systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; status=1; }
- systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; status=1; }
+ systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+ systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
 trap edge_refresh_rearm EXIT
 systemctl stop "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-edge-refresh "$EDGE_MEASUREMENT_OUT" <<'PY' || { printf 'FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-edge-refresh "$EDGE_MEASUREMENT_OUT" <<'PY' || { REFRESH_STATUS=$?; printf 'FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$REFRESH_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL ai-edge-refresh: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' >&2; exit 1; fi; printf 'FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' >&2; exit 2; }
 import hashlib,json,os,re,stat,subprocess,sys
+# The child's 0 or 1 passes through; anything else, including this script's own failure, is 2 (UNKNOWN).
 def read_regular(name):
     try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     except (OSError,TypeError,ValueError): return None
@@ -554,11 +574,17 @@ def verified_plan(name,inputs,step):
     if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
         raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
     return raw
-blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
-found=[b for b in blocks if b.startswith('# step: ai-edge-remeasure\n')]
-if len(found)!=1: raise SystemExit('FAIL ai-edge-refresh: ai-edge-remeasure block expected one got other; STOP')
-# The child bash gets its inputs explicitly; shell variables need not be exported.
-raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=dict(os.environ,PLAN_FILE=sys.argv[1],INPUTS_FILE=sys.argv[2],EDGE_MEASUREMENT_OUT=sys.argv[4])).returncode)
+rc=2
+try:
+    blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
+    found=[b for b in blocks if b.startswith('# step: ai-edge-remeasure\n')]
+    if len(found)!=1: raise SystemExit('FAIL ai-edge-refresh: ai-edge-remeasure block expected one got other; STOP')
+    # The child bash gets its inputs explicitly; shell variables need not be exported.
+    rc=(subprocess.run(['/bin/bash'],input=found[0],text=True,env=dict(os.environ,PLAN_FILE=sys.argv[1],INPUTS_FILE=sys.argv[2],EDGE_MEASUREMENT_OUT=sys.argv[4])).returncode)
+except BaseException as error:
+    if isinstance(error,SystemExit) and isinstance(error.code,str): print(error.code,file=sys.stderr)
+    rc=2
+sys.exit(rc if rc in (0,1) else 2)
 PY
 printf 'PASS ai-edge-refresh: fresh edge-measurement.json at %s; recycle timer re-armed on exit\n' "$EDGE_MEASUREMENT_OUT"
 )
@@ -3020,9 +3046,8 @@ drop-in. Install in W4 while the timer is stopped, before restoring it.
 The hook closes issuance/increments generation in ExecStartPre, before the
 existing restart, then remeasures target, image, health, immutable mounts and
 all archive bytes in ExecStartPost. Only a previously open, still-approved
-release can reopen. Failed restart/measurement stays closed. When the after
-hook fails, issuance is already closed by the before hook; the hook then
-writes a NONSECRET watch marker for HezLead: one journal line with tag
+release can reopen. When the after hook fails it reads the row back: only a
+confirmed CLOSED row gives "issuance CLOSED" and a NONSECRET watch marker for HezLead: one journal line with tag
 `commonswarm-admin-recycle` and one appended line in the root-owned 0644
 `/var/lib/commonswarm-release/admin-issuance-closed.log`, both the JSON
 `{"at","unit","event":"admin-issuance-closed-needs-reactivation","approved_edge_release_sha","measured_edge_release_sha"|null,"reason"}`
@@ -3038,8 +3063,10 @@ independent readback confirms CLOSED; otherwise it writes the same JSON with
 recycle and remeasure alike). The `close` mode runs its database close before
 any bookkeeping and confirms it the same way. ai-edge-remeasure exits 1 when its
 failure close is confirmed CLOSED and 2 when the state is unknown; every caller
-reports that result and no step claims CLOSED without it. A good recycle writes no marker. Issuance closed this way stays
-closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
+reports that result and no step claims CLOSED without it. A failure before a
+readback is possible (configuration, session) or a failed before hook gives
+the state-unknown line. A good recycle writes no marker. Issuance closed this
+way stays closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
 measured-reopen procedure under HezLead approval (remeasure, then reopen only
 through the measured path) replaces that W6 rerun; it is not part of this
 release. HezLead executes
@@ -3184,9 +3211,13 @@ except Exception:
         # The close may not have committed: never claim CLOSED here.
         closed_marker('admin-issuance-state-unknown')
         raise SystemExit('FAIL recycle hook before; issuance state UNKNOWN (close not confirmed; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
-    # No reopen was attempted: the hook-before close stands; the marker comes after it and cannot reopen anything.
-    if mode=='after': closed_marker()
-    raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
+    # No reopen was attempted, but CLOSED is still claimed only after an independent readback; a failure before the
+    # database session exists (no readback possible) is UNKNOWN. Nonrecursive: one readback, no close, no hook run.
+    if 'confirm_closed' in globals() and confirm_closed():
+        closed_marker()
+        raise SystemExit('FAIL recycle hook; issuance CLOSED (confirmed by readback); HezLead recovery required') from None
+    closed_marker('admin-issuance-state-unknown')
+    raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (no confirming readback; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
 PY
 ```
 
@@ -3257,7 +3288,8 @@ if test -e "$RECYCLE_DROPIN"; then
 fi
 systemctl daemon-reload
 test ! -e "$RECYCLE_DROPIN"
-printf 'PASS recycle drop-in removed; issuance closed; caller EXIT guard restores/verifies timer\n'
+test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t || { printf 'FAIL ai-recycle-rollback: issuance expected closed-by-readback got other-or-unreadable; state UNKNOWN; STOP\n' >&2; exit 2; }
+printf 'PASS recycle drop-in removed; issuance closed (readback); caller EXIT guard restores/verifies timer\n'
 ```
 
 ## W5: /app site release
@@ -3836,12 +3868,15 @@ test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
 test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-activation-apply: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
 # HezLead ruling: the recycle timer stays STOPPED from here until ai-w6-finish re-arms it. A failed apply
 # re-arms it at once (the hooks are marked complete blocks installed in W4; no generated operator script).
+C1_CLOSED_CONFIRMED=0
 w6_apply_exit() {
  local status=$?
  trap - EXIT
  if test "$status" != 0; then
   ( ai_run ai-w4-timer-recovery ) || printf 'FAIL ai-w6-activation-apply: recycle timer re-arm after a failed apply expected active got failure; STOP\n' >&2
  fi
+ # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
 trap w6_apply_exit EXIT
@@ -3849,7 +3884,7 @@ systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-apply: r
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive || { printf 'FAIL ai-w6-activation-apply: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
 # The shared remeasure owns this fresh measurement; it writes the W6 receipt and validates it.
 EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json
-( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-activation-apply; printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
+( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-activation-apply; printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
 unset EDGE_MEASUREMENT_OUT
 python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
 import pathlib,sys
@@ -3935,9 +3970,11 @@ w6_rollback_exit() {
  local status=$?
  trap - EXIT
  if ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
-  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP\n' >&2; test "$status" != 0 || status=1; }
-  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active on exit got inactive; STOP\n' >&2; test "$status" != 0 || status=1; }
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active on exit got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
  fi
+ # Status contract: a failed rollback never claims CLOSED (1 becomes 2, UNKNOWN); other codes are kept.
+ if test "$status" = 1; then status=2; fi
  exit "$status"
 }
 trap w6_rollback_exit EXIT
@@ -4456,6 +4493,7 @@ C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-$
 # deadline), printed with its ready line, less 5 s; never from when this driver noticed the line. A budget
 # (at most 220 s from that moment) may only shorten it (tests). Every transport below and in ai-w6-transfer is
 # bounded by what remains.
+test "${C1_RECOVERY_REVOKE:-0}" != 1 || { printf 'FAIL ai-w6-fence-driver: C1_RECOVERY_REVOKE expected unset in the fence window got 1; STOP\n' >&2; exit 1; }
 C1_FENCE_BUDGET=${C1_FENCE_BUDGET_SECONDS:-220}
 [[ "$C1_FENCE_BUDGET" =~ ^[1-9][0-9]{0,2}$ ]] && test "$C1_FENCE_BUDGET" -le 220 || { printf 'FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP\n' >&2; exit 1; }
 fence_block() {
@@ -4540,9 +4578,12 @@ C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
 test ! -e "$C1_PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-human-revoke: client-withdraw.json expected absent-before-revoke got present; STOP\n' >&2; exit 1; }
 # Normal revoke only inside the fence window ai-w6-fence-driver sets (C1_FENCE_DEADLINE). After it, only a labelled
 # cleanup revoke (C1_RECOVERY_REVOKE=1), recorded as human-revoke-recovery.json and never as C1 refusal proof.
-if test -z "${C1_FENCE_DEADLINE:-}"; then
- test "${C1_RECOVERY_REVOKE:-0}" = 1 || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 (never C1 proof); STOP\n' >&2; exit 1; }
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
+ # The recovery flag ALWAYS selects cleanup, even with a retained deadline: never the receipt or the fence file.
+ unset C1_FENCE_DEADLINE
  C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke-recovery.json
+elif test -z "${C1_FENCE_DEADLINE:-}"; then
+ printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 (never C1 proof); STOP\n' >&2; exit 1
 else
  [[ "$C1_FENCE_DEADLINE" =~ ^[0-9]{10}$ ]] || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected epoch-seconds got other; STOP\n' >&2; exit 1; }
  C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke.json
@@ -4579,7 +4620,7 @@ JS
 c1_revoke_bounded node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
  --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
  >"$C1_REVOKE_OUT" 2>"$C1_PROOF_DIR/human-revoke-status.log" || { printf 'FAIL ai-w6-human-revoke: revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown; reconcile request ID %s; a later revoke is recovery only, never C1 proof; STOP\n' "$C1_REVOKE_REQUEST_ID" >&2; exit 1; }
-if test -z "${C1_FENCE_DEADLINE:-}"; then
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
  python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["state"]=="revoked"' "$C1_REVOKE_OUT" || { printf 'FAIL ai-w6-human-revoke: recovery revoke expected revoked got other; STOP\n' >&2; exit 1; }
  printf 'RECOVERY ai-w6-human-revoke: grant revoked after the fence window; human-revoke-recovery.json is cleanup, NOT C1 refusal proof\n'
  exit 0
@@ -4716,13 +4757,16 @@ PY
 set -euo pipefail
 test "$WINDOW" = W6 || { printf 'FAIL ai-w6-finish: window expected W6 got other; STOP\n' >&2; exit 1; }
 # HezLead ruling: every exit re-arms the recycle timer W6 has held since ai-w6-activation-apply.
+C1_CLOSED_CONFIRMED=0
 w6_finish_exit() {
  local status=$?
  trap - EXIT
  if ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
-  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer start expected success got failure; STOP\n' >&2; status=1; }
-  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer expected active got inactive; STOP\n' >&2; status=1; }
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
  fi
+ # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
 trap w6_finish_exit EXIT
@@ -4738,9 +4782,9 @@ assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STO
 PY
 EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement-final.json
 if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
- # Keep open: the remeasure closes, measures and reopens ONLY through the measured path; a failed
- # measurement leaves issuance closed and this step fails.
- ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
+ # Keep open: the remeasure closes, measures and reopens ONLY through the measured path; on failure this
+ # step reports the remeasure's own result (1 confirmed CLOSED, otherwise UNKNOWN).
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
  W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: keep-open state expected open-and-measured got other; STOP\n' >&2; exit 1; }
  ai_run ai-w6-activation-probes
@@ -4749,7 +4793,7 @@ else
  ai_run ai-w6-activation-rollback
  # The closed state is measured too, so W7 opens on a fresh receipt; hold the timer for the hook pair.
  systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
- ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
  W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: default state expected closed-and-measured got other; STOP\n' >&2; exit 1; }
  ai_run ai-w6-closed-gate-probe

@@ -93,7 +93,8 @@ async function waitFile(path, ms, deadline) {
   const end = Math.min(Date.now() + ms, deadline);
   for (let n = 0; n <= Math.ceil(ms / 100); n++) {
     demand(Date.now() < end, 'handoff_timeout');
-    const value = await privateRead(path); if (value) return value;
+    // A value read at or after the cutoff is not a handoff within the window.
+    const value = await privateRead(path); if (value) { demand(Date.now() < end, 'handoff_timeout'); return value; }
     await sleep(Math.min(100, end - Date.now()));
   }
   throw new Failure('handoff_timeout');
@@ -157,13 +158,13 @@ async function run(o) {
       const input = `${header}.${claims}`;
       return `${input}.${sign('sha256', Buffer.from(input), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
     };
-    const request = async (url, { body, token, protectedRequest = false } = {}) => {
+    const request = async (url, { body, token, protectedRequest = false, until = deadline } = {}) => {
       for (let attempt = 0; attempt < (protectedRequest ? 2 : 1); attempt++) {
-        demand(Date.now() < deadline, 'total_timeout');
+        demand(Date.now() < until, until === deadline ? 'total_timeout' : 'fence_cutoff_passed');
         const response = await fetch(url, { method: body === undefined ? 'GET' : 'POST', body,
           headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': url === `${ISSUER}/token` ? 'application/x-www-form-urlencoded' : 'application/json' }),
             ...(protectedRequest ? { DPoP: proof(url, token, nonces.get(url)) } : {}), ...(token ? { Authorization: `DPoP ${token}` } : {}) },
-          redirect: 'error', signal: AbortSignal.timeout(Math.min(o.requestMs, deadline - Date.now())) });
+          redirect: 'error', signal: AbortSignal.timeout(Math.min(o.requestMs, until - Date.now())) });
         const data = response.status === 204 ? null : await boundedJson(response);
         const nonce = response.headers.get('dpop-nonce');
         if (nonce) { demand(nonce.length <= 512 && /^[A-Za-z0-9_-]+$/.test(nonce), 'invalid_nonce'); nonces.set(url, nonce); }
@@ -281,10 +282,13 @@ async function run(o) {
       const commandId = `c1_${runId}_verify_fenced`;
       await step('verify_fenced', async () => {
         demand(Date.now() + o.requestMs * 2 < claims.exp * 1000, 'fence_token_expired');
-        const r = await request(RESOURCE, { protectedRequest: true, token: tokens.access_token, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method: 'tools/call',
+        // The follow-up proves the fence only inside the published cutoff: bounded by it, checked before and after.
+        demand(Date.now() < fenceCutoff, 'fence_cutoff_passed');
+        const r = await request(RESOURCE, { protectedRequest: true, token: tokens.access_token, until: fenceCutoff, body: JSON.stringify({ jsonrpc: '2.0', id: randomUUID(), method: 'tools/call',
           params: { name: 'admin_read_metadata', arguments: { command_id: commandId, command: { kind: 'admin_read_metadata', grant_id: claims.admin_grant_id, resource_kind: 'grant', workspace_id: null } } } }) });
         const reason = r.data?.error === 'unauthenticated' ? 'unauthenticated' : r.data?.error?.message === 'grant_inactive' ? 'grant_inactive' : null;
         demand([401, 403].includes(r.status) && reason, 'fence_not_proven');
+        demand(Date.now() < fenceCutoff, 'fence_cutoff_passed');
         receipt.refused_after_fence = { http_status: r.status, refusal_code: reason, rpc_code: r.data?.error?.code === -32000 ? -32000 : null, command_id: commandId };
       }, commandId);
     }
