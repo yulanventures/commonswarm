@@ -10592,15 +10592,11 @@ async function handleTransaction(
     const invitationRouteHash = invitationToken === null
       ? null
       : await sha256(invitationToken);
-    if (kind === 'accept_invitation' && invitationRouteHash !== null) {
-      const [boundary] = await tx`SELECT b.purpose FROM swarm.invitations i
-        JOIN swarm.household_workspace_boundaries b USING(workspace_id) WHERE i.token_hash=${invitationRouteHash}`;
-      // Household links require independent audience/history and content consent.
-      // The old capability-only CLI/API path cannot bypass the review boundary.
-      if (boundary) {
-        await insertAudit(tx, { auth, commandKind: kind, outcome: 'authz', reason: 'recipient_consent_required' });
-        return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
-      }
+    if (kind === 'accept_invitation') {
+      // Every link requires independent audience/history and content consent,
+      // including workspaces whose Shared settings have not been confirmed yet.
+      await insertAudit(tx, { auth, commandKind: kind, outcome: 'authz', reason: 'recipient_consent_required' });
+      return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
     }
     const route = kind === "accept_invitation"
       ? invitationRouteHash === null

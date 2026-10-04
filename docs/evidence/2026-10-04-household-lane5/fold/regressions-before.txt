@@ -1,0 +1,69 @@
+Actual HEAD handlers; positive controls run before both negative probes.
+✖ invitation inbox refuses unconfirmed humans before metadata access and admits a confirmed recipient (67.090458ms)
+✖ legacy acceptance always requires recipient review, including workspaces without an overlay (47.933792ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 0
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 246.061459
+
+✖ failing tests:
+
+test at tests/household-human-invitations.test.ts:39:694
+✖ invitation inbox refuses unconfirmed humans before metadata access and admits a confirmed recipient (67.090458ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      body: {
+  +     invitations: [
+  +       {
+  +         invitation_id: 'inbox-invite',
+  +         workspace_name: 'Synthetic shared'
+  +       }
+  +     ]
+  -     error: 'human_sign_in_required'
+      },
+  +   status: 200
+  -   status: 403
+    }
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/household-human-invitations.test.ts:120:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { status: 200, body: { invitations: [Array] } },
+    expected: { status: 403, body: { error: 'human_sign_in_required' } },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/household-human-invitations.test.ts:39:1444
+✖ legacy acceptance always requires recipient review, including workspaces without an overlay (47.933792ms)
+  AssertionError [ERR_ASSERTION]: boundary present: false
+  + actual - expected
+  
+    {
+      body: {
+  +     error: 'forbidden'
+  -     error: 'recipient_consent_required',
+  -     message: 'Open the invitation in /invite and review it as yourself.'
+      },
+      status: 403
+    }
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/household-human-invitations.test.ts:134:12)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: { status: 403, body: { error: 'forbidden' } },
+    expected: { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

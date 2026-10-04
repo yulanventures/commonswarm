@@ -1,0 +1,14 @@
+✔ only the intended signed-in human can choose shared membership after current disclosure (0.755583ms)
+✔ consumed invitation retries do not revive removed members or borrow a different recipient identity (0.064083ms)
+✔ delegated account replay retains one consumed invitation and never refunds issuance (0.248583ms)
+✔ migration 06 carries the exact reserve inverse and release copies while preserving existing authority data (5.76475ms)
+✔ invitation inbox refuses unconfirmed humans before metadata access and admits a confirmed recipient (70.025958ms)
+✔ legacy acceptance always requires recipient review, including workspaces without an overlay (48.933542ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 278.455542

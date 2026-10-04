@@ -5,6 +5,10 @@
 production contact, deployment, service restart, browser launch, or secret retrieval.
 HezLead owns the cross-family check. Do not integrate before C1 closes.
 
+The [security fold report](FOLD-REPORT.md) records repairs against `fdcd62bf`
+and supersedes the admission and gate results below. Two confirmed code defects
+are fixed; real database proof remains blocked by this host's Docker guard.
+
 ## Prepared behavior
 
 The existing `admin_invite_member` records are delivered through the intended
@@ -18,8 +22,9 @@ recipient's content role, create her personal space, or authorize her agents.
 
 Ordinary privately copied `/app` links use the same review/join transaction.
 They retain fragment scrubbing, deployment pinning and browser resume cleanup.
-This new path binds the link to the recipient's verified email. Household links
-cannot bypass consent through the old `accept_invitation` API. The new join path
+This new path binds the link to the recipient's verified email. All links,
+including workspaces without a household boundary row, require consent through
+`/invite`; the old `accept_invitation` API refuses with review guidance. The new join path
 requires the owner to have explicitly confirmed a shared workspace in content
 settings; personal and unconfirmed boundaries refuse. Sender copy names this step.
 
@@ -110,10 +115,11 @@ The exact file enumeration is [FILES.md](FILES.md).
   workspace's 25-human policy. Text renders inertly. Sign-out/account change clears
   pending state; changed disclosure never triggers an automatic accept.
 - **Existing links:** new household review binds verified email whereas the old
-  unconfigured capability path historically did not. Configured household links
-  are fenced off that old path. This is a compatibility change to review explicitly.
+  unconfigured capability path historically did not. Every legacy acceptance
+  now requires `/invite` review. This is a compatibility change to review explicitly.
   Existing unconfirmed generic links now need the owner to confirm Shared before
-  the updated `/invite` path can finish. Do not activate site/edge separately.
+  the updated `/invite` path can finish. The recipient sees this prerequisite
+  before sign-in. Do not activate site/edge separately.
 - **Separate grants:** accepted membership is the recipient's own. Household
   membership grants no access to either person's private workspace. Recipient
   personal-space creation and own OAuth/agent consent reuse existing flows; no

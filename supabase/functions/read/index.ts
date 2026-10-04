@@ -487,6 +487,9 @@ async function handle(
     if (AGENT_TOKEN_RE.test(token)) return json(403, { error: 'credential_kind_forbidden' });
     const { data, error } = await authClient.auth.getUser(token);
     if (error || !data.user || !UUID_RE.test(data.user.id)) return json(401, { error: 'unauthenticated' });
+    if (data.user.email_confirmed_at === undefined || data.user.email_confirmed_at === null) {
+      return json(403, { error: 'human_sign_in_required' });
+    }
     return await withReadTransaction(async tx => {
       await setReadTransaction(tx);
       await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub: data.user!.id,role:'authenticated'})},true)`;
