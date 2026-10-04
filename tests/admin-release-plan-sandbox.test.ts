@@ -40,7 +40,7 @@ const stepOf = (source: string) => /^# step: (ai-[a-z0-9-]+)$/.exec(source.split
 const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)?.[1];
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w3-probes', 'ai-w4-probes',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-human-revoke',
@@ -49,7 +49,7 @@ const EXPECTED_MAC_STEPS = [
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
 ];
@@ -110,6 +110,7 @@ function portable(source: string) {
 // ---- Fixtures (synthetic, nonsecret) -------------------------------------------------
 const releaseSha = 'a'.repeat(40), siteSha = 'f'.repeat(40), hex = 'b'.repeat(64);
 const windowId = 'Dry0R1';
+const probeWorkspace = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
 // The release archive is a real tar carrying the producer: ai-live-controls (W5 opening
 // and close) reads the producer only from it, re-verified against archive_sha256.
 const producerFile = join(scratch, 'live-ordinary-controls.mjs');
@@ -139,7 +140,7 @@ const edgeObserved = JSON.stringify({ release_generation: 8, measured_generation
   approved_edge_release_sha: releaseSha, measured_edge_release_sha: releaseSha,
   measured_edge_target: edgeTarget, measured_mount: edgeTarget, measured_image_digest: `sha256:${hex}`,
   measured_artifact_digest: hex });
-const windowOf = (step: string) => /^ai-w5-/.test(step) ? 'W5' : /^ai-w6-/.test(step) ? 'W6' : /^ai-w7-/.test(step) ? 'W7' : 'W3';
+const windowOf = (step: string) => /^ai-w2-/.test(step) ? 'W2' : /^ai-w5-/.test(step) ? 'W5' : /^ai-w6-/.test(step) ? 'W6' : /^ai-w7-/.test(step) ? 'W7' : 'W3';
 function inputsFor(window: string) {
   const d: Record<string, unknown> = {
     release_sha: releaseSha, plan_sha256: digest(plan), archive_sha256: digest(archiveBytes),
@@ -150,10 +151,11 @@ function inputsFor(window: string) {
     baseline_site_sha: siteSha, baseline_site_target: '/srv/commonswarm/site/releases/20261003T120000Z-ffffffffffff-abcdef0123456789',
     baseline_mcp_caddy_sha256: hex, baseline_api_caddy_sha256: hex, baseline_caddyfile_sha256: hex,
     baseline_ledger_sha256: hex, gate_receipt_sha256: digest(readFileSync(gateReceiptFile)),
-    rollback_decision: { W3: 'restore-service', W5: 'restore-service', W6: 'close-and-reconcile', W7: 'close-and-reconcile' }[window],
+    rollback_decision: { W2: 'retain-additive', W3: 'restore-service', W5: 'restore-service', W6: 'close-and-reconcile', W7: 'close-and-reconcile' }[window],
     approval: null, legacy_fence_approval: null,
     edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
   };
+  if (window === 'W2') d.probe_workspace_id = probeWorkspace;
   const action = { W6: 'activate-admin-issuance-and-smoke', W7: 'retire-legacy-admin-mint' }[window];
   if (action) d.approval = { approver: 'HezLead', action, release_sha: releaseSha, window_id: windowId, plan_sha256: digest(plan), prompt_ref: 'task/dry-run-fixture' };
   const path = join(scratch, `inputs-${window}.json`);
@@ -207,6 +209,11 @@ writeFileSync(c1InputsFile, JSON.stringify({
   target_file: join(c1Dir, 'target.json'), state_directory: join(c1Dir, 'state'),
 }) + '\n');
 const c1ProofDir = join(workRoot, 'hm37-live-release', `c1-${releaseSha}-${windowId}`);
+// W2 probe credentials (synthetic) at the rewritten Mac path; ai-w2-stage-probes uploads and removes them.
+mkdirSync(join(workRoot, 'c1-run'), { recursive: true, mode: 0o700 });
+writeFileSync(join(workRoot, 'c1-run', `probe-credentials-W2-${windowId}.json`), JSON.stringify({ release_sha: releaseSha, window_id: windowId,
+  workspace_id: probeWorkspace, mcp_client_id: 'dry-run-dcr-client', mcp_refresh_token: 'dry-run-not-a-token', mcp_resource: 'https://mcp.commonswarm.com/mcp',
+  human_access_token: 'dry-run-not-a-token', human_token_exp: Math.floor(Date.now() / 1000) + 7200 }), { mode: 0o600 });
 const fixturePrepDir = join(privateTmp, 'admin-issuance-prep.Fixtu1');
 mkdirSync(fixturePrepDir, { mode: 0o700 }); chmodSync(fixturePrepDir, 0o700);
 const fixtureStage = join(privateTmp, 'anvil-secret.Fixtu2');
@@ -228,6 +235,8 @@ refuse() { printf 'c1gui stub refused unmodelled %s\\n' "$name" >&2; exit 97; }
 case "$name" in
  ssh) # Remote commands are recorded only. 'sudo -n cat FILE' prints a fixture receipt line.
   last=\${@: -1}
+  # W2 probe upload: consume stdin and answer with the mode and digest of what arrived (nothing is stored).
+  case "$last" in *ordinary-probes.json*install*/dev/stdin*) printf '600 %s\\n' "$(/usr/bin/shasum -a 256 | cut -d ' ' -f 1)"; exit 0;; esac
   if test "$last" = "sudo -n /bin/bash -s -- $C1GUI_RELEASE_SHA $C1GUI_POSTGRES_IMAGE"; then
    # Consume the query, but never execute its box-only secret/Docker commands.
    query=$(/bin/cat)
