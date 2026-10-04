@@ -72,19 +72,21 @@ test("invite target is pinned and auth resume storage is erasable", () => {
   assert.equal(recalledInvite(id, storage), null);
 });
 
-test("/invite specifies the complete first-time recipient journey", async () => {
+test("/invite retains fragment hygiene and requires independent human consent", async () => {
   const source = await readFile(new URL("./InviteOnramp.astro", import.meta.url), "utf8");
   assert.match(source, /A teammate<\/span> invited you to/);
   assert.match(source, /Sign in[\s\S]*Join the workspace[\s\S]*Copy one prompt/);
   assert.match(source, /payload\.inviter_user_id === session\.user\.id/);
-  assert.match(source, /acceptWorkspaceInvitation/);
+  assert.match(source, /data-independent-consent/);
+  assert.match(source, /data-confirm-join/);
+  assert.match(source, /prepareAcceptance/);
   assert.match(source, /forgetInvite/);
   assert.match(source, /history\.replaceState/);
   assert.match(
     source,
     /if \(encoded\) \{\s*history\.replaceState\(null, "", new URL\("\/invite"/,
   );
-  assert.match(source, /error instanceof CommandOutcomeUnknown/);
+  assert.match(source, /data-view="join-error"/);
   assert.match(source, /data-retry-join/);
   assert.match(source, /<AgentConnect/);
   assert.doesNotMatch(source, /searchParams\.set\([^,]+,\s*payload\.invitation_token/);

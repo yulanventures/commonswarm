@@ -1,4 +1,5 @@
 ---
+import HumanInvitationInbox from '../components/invite/HumanInvitationInbox.astro';
 /*
  * /app is a static Astro shell whose data is loaded in the browser. The page does not
  * render a workspace, signal, or identity until the browser client has read it from the
@@ -84,6 +85,7 @@ const description =
     })();
   </script>
 
+  <HumanInvitationInbox />
   <LiveDashboard />
   <AdminDelegations />
   {/* Runs during parsing, after all app asset tags and before deferred module scripts.

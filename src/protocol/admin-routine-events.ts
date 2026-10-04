@@ -9,5 +9,6 @@ export const ADMIN_ROUTINE_EVENT_TYPES = [
   "AdminMemberInvited",
   "AdminAgentInvitationIssued",
   "AdminInvitationRevoked",
+  "AdminMemberInvitationAccepted",
 ] as const;
 export type AdminRoutineEventType = typeof ADMIN_ROUTINE_EVENT_TYPES[number];

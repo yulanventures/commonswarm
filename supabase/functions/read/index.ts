@@ -133,6 +133,8 @@ interface RenewalGrantReadRequest {
   workspace_id: string;
 }
 
+interface HumanInvitationsReadRequest { resource: "human_invitations"; }
+
 interface PendingAccessReadRequest {
   resource: "pending_access";
   workspace_id: string;
@@ -234,9 +236,10 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | null {
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (body.resource === "human_invitations" && exactKeys(body, ["resource"])) return { resource: "human_invitations" };
   if (isAdminReadResource(body.resource)) return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
       exactKeys(body, ["resource", "workspace_id"]) &&
@@ -478,6 +481,17 @@ async function handle(
     return json(400, {
       error: "invalid_request",
       ...(slugProblem === null ? {} : { message: slugProblem }),
+    });
+  }
+  if (body.resource === 'human_invitations') {
+    if (AGENT_TOKEN_RE.test(token)) return json(403, { error: 'credential_kind_forbidden' });
+    const { data, error } = await authClient.auth.getUser(token);
+    if (error || !data.user || !UUID_RE.test(data.user.id)) return json(401, { error: 'unauthenticated' });
+    return await withReadTransaction(async tx => {
+      await setReadTransaction(tx);
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub: data.user!.id,role:'authenticated'})},true)`;
+      const invitations = await tx`SELECT * FROM swarm_read.human_invitations()`;
+      return json(200, { invitations });
     });
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);

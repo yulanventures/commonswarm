@@ -1,0 +1,71 @@
+---
+import { HOUSEHOLD_CONTENT_ROLES } from '../../../../src/protocol/household-object-policy';
+---
+<human-invitation-inbox hidden>
+  <section class="human-invitations" aria-label="Your workspace invitations">
+    <h2>Your invitations</h2>
+    <button type="button" data-refresh>Check invitations</button>
+    <div data-invitations></div>
+    <div data-review hidden>
+      <h3 data-title></h3>
+      <p data-audience></p>
+      <p data-disclosure></p>
+      <p data-expiry></p>
+      <label>My content access <select data-role required><option value="">Choose access</option>{HOUSEHOLD_CONTENT_ROLES.map(role => <option value={role}>{role[0].toUpperCase() + role.slice(1)}</option>)}</select></label>
+      <label><input type="checkbox" data-consent /> I choose to join this shared workspace and accept its audience and retained history.</label>
+      <button type="button" data-accept>Join as myself</button>
+      <button type="button" data-cancel>Close review</button>
+    </div>
+    <p data-result role="status" aria-live="polite"></p>
+    <p data-next hidden>Your agents still need your own authorization. Create a personal workspace in the workspace menu and confirm its personal settings. For hosted agents, connect https://mcp.commonswarm.com/mcp through your own account and select this shared workspace. Use separate grants for private work. Chats on one connector grant share its seats; names do not isolate chats.</p>
+    <a href="/app" data-open hidden>Open my workspace</a>
+  </section>
+</human-invitation-inbox>
+<style>
+  .human-invitations { padding: 1rem; border: 1px solid var(--border); margin: 1rem; }
+  [data-review] { display: grid; gap: .75rem; }
+  [data-review][hidden] { display: none; }
+  label { display: block; }
+  button { margin: .25rem; }
+</style>
+<script>
+  import { currentSession, client } from '../../lib/commonswarm';
+  import { browserHumanInvitations } from '../../lib/human-invitations';
+  import { createHumanInviteController } from '../../lib/human-invite-controller';
+  const root=document.querySelector<HTMLElement>('human-invitation-inbox');
+  if(root && client()) {
+    const one=<T extends HTMLElement>(selector:string)=>root.querySelector<T>(selector)!;
+    let account:string|null=null, shownDigest='';
+    const controller=createHumanInviteController(browserHumanInvitations(), view=>{
+      root.hidden=view.account===null;
+      one('[data-invitations]').replaceChildren();
+      for(const row of view.invitations) {
+        const button=document.createElement('button');button.type='button';
+        button.textContent=`${row.inviter_display_name} invited you to ${row.workspace_name}`;button.disabled=view.busy;
+        button.addEventListener('click',()=>{void controller.review(row.invitation_id);});one('[data-invitations]').append(button);
+      }
+      one('[data-review]').hidden=!view.preview;
+      if(shownDigest!==(view.preview?.preview_digest??'')){
+        shownDigest=view.preview?.preview_digest??'';one<HTMLInputElement>('[data-consent]').checked=false;one<HTMLSelectElement>('[data-role]').value='';
+      }
+      if(view.preview){one('[data-title]').textContent=view.preview.workspace_name;
+        one('[data-audience]').textContent='Current members: '+view.preview.audience.map(m=>`${m.display_name} (${m.role})`).join(', ');
+        one('[data-disclosure]').textContent=view.preview.disclosure;one('[data-expiry]').textContent='Expires '+new Date(view.preview.expires_at).toLocaleString();}
+      one<HTMLSelectElement>('[data-role]').disabled=view.confirmed_role!==null||view.busy;
+      one<HTMLInputElement>('[data-consent]').disabled=view.confirmed_role!==null||view.busy;
+      one('[data-result]').textContent=view.message;one<HTMLButtonElement>('[data-accept]').disabled=view.busy;
+      one('[data-next]').hidden=!view.joined;one('[data-open]').hidden=!view.joined;
+    });
+    const setAccount=(id:string|null)=>{account=id;controller.setAccount(id);if(id)void controller.load();};
+    one('[data-refresh]').addEventListener('click',()=>{void controller.load();});
+    one('[data-cancel]').addEventListener('click',()=>{void controller.load();});
+    one('[data-accept]').addEventListener('click',()=>{void controller.accept(one<HTMLSelectElement>('[data-role]').value,one<HTMLInputElement>('[data-consent]').checked);});
+    let authGeneration=0;
+    client()!.auth.onAuthStateChange((event,session)=>{
+      if(event==='SIGNED_OUT'||account!==(session?.user.id??null)){++authGeneration;controller.setAccount(null);account=session?.user.id??null;
+        const version=authGeneration;queueMicrotask(()=>{if(version===authGeneration)setAccount(account);});}
+    });
+    const version=authGeneration;
+    void currentSession().then(session=>{if(version===authGeneration)setAccount(session?.user.id??null);}).catch(()=>{setAccount(null);});
+  }
+</script>

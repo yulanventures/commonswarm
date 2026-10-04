@@ -21,3 +21,5 @@ export * from './household-object-policy.js';
 export * from './household-objects.js';
 export * from './household-tool-registry.js';
 export { brainFileName, brainTopicFromFileName } from '../cloud/brain.js';
+
+export * from './household-invitations.js';

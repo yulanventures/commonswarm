@@ -302,9 +302,13 @@ function requireProof(variable: 'catalog_ok' | 'rollback_ok', expected: boolean)
 test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane catalog inside one rolled-back transaction', () => {
   const containers = execFileSync('docker', ['ps','--format','{{.Names}}'], { encoding: 'utf8' }).trim().split('\n').filter(name => /^supabase_db_/.test(name));
   assert.equal(containers.length, 1, 'one local database required');
+  // Remove the dependent 06 delivery function before undoing the 05 overlay.
+  const inviteProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-invites/20261004000006-${suffix}.sql`, import.meta.url), 'utf8');
   // Migration 05 intentionally widens the lane-2 confirmation tables. Undo its
   // overlay first to test the original exact catalogs; this entire drill rolls back.
-  let script = 'BEGIN;\n' + proof('20261004000005','catalog') + requireProof('catalog_ok',true)
+  let script = 'BEGIN;\n' + inviteProof('catalog') + requireProof('catalog_ok',true)
+    + inviteProof('rollback') + inviteProof('rollback-catalog') + requireProof('rollback_ok',true)
+    + proof('20261004000005','catalog') + requireProof('catalog_ok',true)
     + proof('20261004000005','rollback') + proof('20261004000005','rollback-catalog') + requireProof('rollback_ok',true);
   for (const id of ids) script += proof(id,'catalog') + requireProof('catalog_ok',true);
   // Permission tables are read/locked only in lane 2. Each widening and loss of

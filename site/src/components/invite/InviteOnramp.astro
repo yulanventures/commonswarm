@@ -1,4 +1,5 @@
 ---
+import { HOUSEHOLD_CONTENT_ROLES } from '../../../../src/protocol/household-object-policy';
 import AgentConnect from "../connect/AgentConnect.astro";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 ---
@@ -59,6 +60,20 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     <a class="invite-onramp__button invite-onramp__button--quiet" href="/app">Back to the workspace</a>
   </section>
 
+  <section class="invite-onramp__panel" data-view="review" hidden>
+    <h1>Review <span data-review-workspace>this workspace</span></h1>
+    <p data-review-audience></p>
+    <p data-review-disclosure></p>
+    <p data-review-expiry></p>
+    <label for="invite-content-role">My content access</label>
+    <select id="invite-content-role" data-content-role required>
+      <option value="">Choose access</option>{HOUSEHOLD_CONTENT_ROLES.map(role => <option value={role}>{role[0].toUpperCase() + role.slice(1)}</option>)}
+    </select>
+    <label><input type="checkbox" data-independent-consent /> I choose to join and accept the audience and retained history.</label>
+    <button class="invite-onramp__button" type="button" data-confirm-join>Join as myself</button>
+    <a href="/app">Cancel and open my own account</a>
+  </section>
+
   <section class="invite-onramp__panel" data-view="joining" hidden role="status" aria-live="polite">
     <span class="invite-onramp__spinner" aria-hidden="true"></span>
     <p>Joining <strong data-workspace>a workspace</strong>…</p>
@@ -79,10 +94,13 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       <span aria-hidden="true">✓</span>
       <p>
         You joined <strong data-workspace>a workspace</strong>.
-        Now connect an agent you control.
+        Your agents need your own authorization. Use a separate OAuth connector grant for this workspace.
       </p>
     </div>
-    <AgentConnect eyebrow="Your agent" />
+    <p>Create your own personal workspace from the workspace menu. Keep private and shared agents on separate connections.</p>
+    <p>For hosted MCP, connect <code>https://mcp.commonswarm.com/mcp</code> through your own account, select this shared workspace, and call <code>claim_seat</code>. Each chat using the same connector grant can select its seats. Seat names do not isolate chats.</p>
+    <a href="/app">Open my workspaces and connected apps</a>
+    <AgentConnect eyebrow="Your local agent" />
   </section>
 
   <section class="invite-onramp__panel" data-view="complete" hidden>
@@ -98,16 +116,14 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
 
 <script>
   import {
-    CommandOutcomeUnknown,
     EmailAddressRejected,
     EmailRateLimited,
-    acceptWorkspaceInvitation,
     currentSession,
+    client,
     deployment,
     myWorkspaces,
     signInWithEmail,
     signInWithProvider,
-    uuid,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
   import {
@@ -120,12 +136,18 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     type MemberInvitePayload,
   } from "../../lib/member-invite";
 
+  import { browserHumanInvitations, HumanInviteRefused } from '../../lib/human-invitations';
+  import type { HumanInvitePreview } from '../../../../src/cloud/human-invitations';
   const host = document.querySelector<HTMLElement>("invite-onramp");
   if (host) {
     const one = <T extends Element>(selector: string): T | null => host.querySelector<T>(selector);
     let payload: MemberInvitePayload | null = null;
     let resumeId = "";
     let senderLink = "";
+    let authGeneration = 0;
+    let authUser: string | null = null;
+    let preview: HumanInvitePreview | null = null;
+    let prepared: ReturnType<ReturnType<typeof browserHumanInvitations>['prepareAcceptance']> | null = null;
 
     /*
      * The provider names for prose, read off the BUTTONS THAT ARE ON THIS PAGE.
@@ -187,10 +209,12 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       show("connect");
     };
 
-    const accept = async (): Promise<void> => {
+    const accept = async (confirmed = false): Promise<void> => {
       if (!payload) return unusable();
       const session = await currentSession();
       if (!session) return show("auth");
+      authUser = session.user.id;
+      const generation = authGeneration;
       if (payload.inviter_user_id === session.user.id) {
         senderLink = memberInviteUrl(window.location.origin, payload);
         return show("sender");
@@ -200,25 +224,47 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
         const existing = (await myWorkspaces()).find(
           (workspace) => workspace.id === payload?.workspace_id,
         );
+        if (generation !== authGeneration) return;
         if (existing) {
           forgetInvite(resumeId, localStorage);
           continueToAgent(existing.id, existing.name);
           return;
         }
-        const accepted = await acceptWorkspaceInvitation(
-          session,
-          `web_${uuid()}`,
-          payload.invitation_token,
-        );
-        const workspaceId = accepted.workspaceId || payload.workspace_id;
-        const workspaceName = accepted.workspaceName || payload.workspace_name;
+        const invitations = browserHumanInvitations();
+        if (!confirmed) {
+          prepared = null;
+          const value = await invitations.preview({source:'link',token:payload.invitation_token});
+          if (generation !== authGeneration) return;
+          if (value.status === 'joined') return continueToAgent(value.workspace_id, value.workspace_name);
+          preview = value;
+          one<HTMLElement>('[data-review-workspace]')!.textContent = value.workspace_name;
+          one<HTMLElement>('[data-review-audience]')!.textContent = 'Current members: ' + value.audience.map(m => `${m.display_name} (${m.role})`).join(', ');
+          one<HTMLElement>('[data-review-disclosure]')!.textContent = value.disclosure;
+          one<HTMLElement>('[data-review-expiry]')!.textContent = 'Expires ' + new Date(value.expires_at).toLocaleString();
+          one<HTMLInputElement>('[data-independent-consent]')!.disabled = false;
+          one<HTMLSelectElement>('[data-content-role]')!.disabled = false;
+          one<HTMLInputElement>('[data-independent-consent]')!.checked = false;
+          one<HTMLSelectElement>('[data-content-role]')!.value = '';
+          return show('review');
+        }
+        const role = one<HTMLSelectElement>('[data-content-role]')!.value;
+        if (!preview || !one<HTMLInputElement>('[data-independent-consent]')!.checked || (role !== 'reader' && role !== 'editor')) return show('review');
+        one<HTMLInputElement>('[data-independent-consent]')!.disabled = true;
+        one<HTMLSelectElement>('[data-content-role]')!.disabled = true;
+        prepared ??= invitations.prepareAcceptance({source:'link',token:payload.invitation_token},preview,role);
+        const accepted = await prepared.send();
+        if (generation !== authGeneration) return;
+        const workspaceId = String(accepted.workspace_id);
+        const workspaceName = String(accepted.workspace_name);
         forgetInvite(resumeId, localStorage);
         continueToAgent(workspaceId, workspaceName);
       } catch (error) {
+        if (generation !== authGeneration) return;
         try {
           const recovered = (await myWorkspaces()).find(
             (workspace) => workspace.id === payload?.workspace_id,
           );
+          if (generation !== authGeneration) return;
           if (recovered) {
             forgetInvite(resumeId, localStorage);
             continueToAgent(recovered.id, recovered.name);
@@ -227,11 +273,12 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
         } catch {
           // The saved invitation remains available for an explicit retry.
         }
-        if (error instanceof CommandOutcomeUnknown) {
+        if (error instanceof HumanInviteRefused && error.reason === 'review_changed') { preview = null; prepared = null; return await accept(); }
+        if (!(error instanceof HumanInviteRefused)) {
           show("join-error");
           return;
         }
-        unusable();
+        unusable("This invitation could not be accepted. Ask the sender to check the recipient address, expiry, and shared workspace settings.");
       }
     };
 
@@ -345,8 +392,10 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     }
 
     one<HTMLButtonElement>("[data-retry-join]")?.addEventListener("click", () => {
-      void accept();
+      void accept(true);
     });
+
+    one<HTMLButtonElement>("[data-confirm-join]")?.addEventListener("click", () => { void accept(true); });
 
     one<HTMLButtonElement>("[data-copy-sender]")?.addEventListener("click", async () => {
       const status = one<HTMLElement>("[data-sender-status]");
@@ -369,6 +418,14 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       show("complete");
     });
 
+    client()?.auth.onAuthStateChange((event, session) => {
+      const user = session?.user.id ?? null;
+      if (event === 'SIGNED_OUT' || authUser !== null && user !== authUser) {
+        ++authGeneration; preview = null; prepared = null; payload = null;
+        unusable('Sign in as the invited person and reopen the invitation.');
+      }
+      authUser = user;
+    });
     void boot();
   }
 </script>

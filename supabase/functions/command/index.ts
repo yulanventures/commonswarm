@@ -1,3 +1,5 @@
+import { HOUSEHOLD_JOIN_RATE_PER_HOUR } from '../_shared/protocol.js';
+import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
@@ -1302,7 +1304,7 @@ interface AuthContext {
    */
   agentFirstUse: boolean;
   identityVerified: boolean;
-  /** Bookkeeping for the §8 disposable-domain speed bump; never authorization. */
+  /** Verified recipient address for human invite review; also used by the §8 disposable-domain speed bump. */
   email: string | null;
   /** Newest interactive AMR timestamp from verified claims for this JWT. */
   interactiveAuthAtSeconds: number | null;
@@ -10460,6 +10462,19 @@ async function handleTransaction(
       );
       return { status: 401, body: { error: "unauthenticated" } };
     }
+    if (kind === 'household_invitation') {
+      if (typeof body.command_id !== 'string' || typeof body.client_version !== 'string' || body.workspace_id !== undefined || body.stream !== undefined) return { status: 400, body: { error: 'invalid_request' } };
+      if (auth.credentialKind !== 'user' || auth.agent !== null || !auth.identityVerified) return { status: 403, body: { error: 'human_sign_in_required' } };
+      const [configuration] = await tx`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+      const comparison = typeof configuration?.value === 'string' ? compareSemver(body.client_version, configuration.value) : null;
+      if (comparison === null) return { status: 400, body: { error: 'invalid_request' } };
+      if (comparison < 0) return { status: 426, body: { error: 'client_outdated' } };
+      const bucket = await incrementRateBucket(tx, `human-invitation:${auth.actor.user}`, HOUSEHOLD_JOIN_RATE_PER_HOUR);
+      if (bucket.count > HOUSEHOLD_JOIN_RATE_PER_HOUR) return { status: 429, body: { error: 'rate_limited', retry_after: bucket.resetsAt } };
+      return await humanInvitationTransaction(tx, commandId, body.command,
+        auth.credentialKind === 'user' && auth.agent === null && auth.actor.user !== null
+          ? { user_id: auth.actor.user, email: auth.email, verified: auth.identityVerified } : null);
+    }
     if (HOSTED_MANAGEMENT_KINDS.has(kind)) {
       return await handleHostedManagement(tx, body, auth);
     }
@@ -10577,6 +10592,16 @@ async function handleTransaction(
     const invitationRouteHash = invitationToken === null
       ? null
       : await sha256(invitationToken);
+    if (kind === 'accept_invitation' && invitationRouteHash !== null) {
+      const [boundary] = await tx`SELECT b.purpose FROM swarm.invitations i
+        JOIN swarm.household_workspace_boundaries b USING(workspace_id) WHERE i.token_hash=${invitationRouteHash}`;
+      // Household links require independent audience/history and content consent.
+      // The old capability-only CLI/API path cannot bypass the review boundary.
+      if (boundary) {
+        await insertAudit(tx, { auth, commandKind: kind, outcome: 'authz', reason: 'recipient_consent_required' });
+        return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
+      }
+    }
     const route = kind === "accept_invitation"
       ? invitationRouteHash === null
         ? null

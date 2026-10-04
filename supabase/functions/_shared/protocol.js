@@ -354,7 +354,8 @@ var ADMIN_ROUTINE_EVENT_TYPES = [
   "AdminSeatCredentialRevoked",
   "AdminMemberInvited",
   "AdminAgentInvitationIssued",
-  "AdminInvitationRevoked"
+  "AdminInvitationRevoked",
+  "AdminMemberInvitationAccepted"
 ];
 
 // src/protocol/workspace-events.ts
@@ -1905,6 +1906,7 @@ function reduceAdminAuthority(previous, event2) {
       reason_code: attempt.reason_code ?? String(p.reason_code)
     } } };
   }
+  if (event2.type === "AdminMemberInvitationAccepted" && (event2.actor_user !== p.recipient_user_id || event2.admin_identity_id !== null || event2.actor_agent_principal !== null)) throw new Error("human invitation acceptance requires the recipient actor");
   if (ADMIN_ROUTINE_EVENT_TYPES.includes(event2.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event2) };
   if (event2.type === "AdminConsentPrepared") {
     const c = { ...p, session_binding: "", consumed_at: null };
@@ -2150,7 +2152,7 @@ function decideAdminRoutine(command, account, ctx) {
         }))
       },
       related_event_ids: related,
-      next_action: reason ? "Ask the granting person to review access." : pendingConnection || events.some((e) => e.payload.delivery_state) ? "The recipient must authorize setup and verify its connection." : "none",
+      next_action: reason ? "Ask the granting person to review access." : command.kind === "admin_invite_member" ? "The recipient must sign in to /app, review the shared audience and history, and choose whether to join. The workspace owner must first confirm shared workspace settings." : pendingConnection || events.some((e) => e.payload.delivery_state) ? "The recipient must authorize setup and verify its connection." : "none",
       recovery_kind: reason ? "human" : "none"
     });
     return { ok: reason === null, reason, events, workspace_events };
@@ -2343,7 +2345,8 @@ function decideAdminRoutine(command, account, ctx) {
       worker_policy: agent ? grant.renewal_limits : null,
       expires_at: expires_at2,
       parent_admin_grant_id: grant.grant_id,
-      delivery_state: "awaiting_authorization"
+      delivery_state: "awaiting_authorization",
+      ...!agent ? { delivery_channel: "recipient_app_inbox" } : {}
     });
     return finish(null);
   }
@@ -2514,6 +2517,7 @@ function decideAdminRoutine(command, account, ctx) {
 function reduceAdminRoutine(previous, event2) {
   const state = previous ?? emptyAdminRoutine(), p = event2.payload, id = event2.grant_id;
   const required = {
+    AdminMemberInvitationAccepted: ["invitation_id", "recipient_user_id", "accepted_at"],
     AdminWorkspaceCreated: [
       "workspace_id",
       "name",
@@ -2702,6 +2706,12 @@ function reduceAdminRoutine(previous, event2) {
         revoked_at: null
       };
       break;
+    case "AdminMemberInvitationAccepted": {
+      const i = next.invitations[String(p.invitation_id)];
+      if (!i || i.invitation_kind !== "member" || i.parent_admin_grant_id !== id || i.recipient_user_id !== p.recipient_user_id || i.accepted_at !== null || i.revoked_at !== null || i.expires_at <= event2.occurred_at_server || !Number.isSafeInteger(p.accepted_at) || p.accepted_at !== event2.occurred_at_server) throw new Error("invalid human invitation acceptance");
+      next.invitations[i.invitation_id] = { ...i, accepted_at: event2.occurred_at_server };
+      break;
+    }
     case "AdminInvitationRevoked": {
       const i = next.invitations[String(p.invitation_id)];
       if (!i) throw new Error("unknown routine invitation");
@@ -4459,6 +4469,36 @@ function brainTopicFromFileName(name) {
     throw error;
   }
 }
+
+// src/protocol/household-invitations.ts
+var HOUSEHOLD_JOIN_RATE_PER_HOUR = 120;
+var HOUSEHOLD_JOIN_CONSENT_VERSION = "household-join-v1";
+var HOUSEHOLD_JOIN_DISCLOSURE = "Members can read shared workspace content and retained history, except directed messages restricted to their audience. Your personal and business spaces stay separate. You choose and authorize your own agents separately. Copies already read cannot be recalled.";
+var uuid2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function parseHumanInviteCommand(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const c = value, ref = c.invitation;
+  if (c.kind !== "household_invitation" || !ref || typeof ref !== "object" || Array.isArray(ref)) return null;
+  const keys = ref.source === "delegated" ? ["source", "invitation_id"] : ["source", "token"];
+  if (Object.keys(ref).length !== 2 || Object.keys(ref).some((k) => !keys.includes(k)) || !(ref.source === "delegated" ? typeof ref.invitation_id === "string" && uuid2.test(ref.invitation_id) : ref.source === "link" && typeof ref.token === "string" && /^swm_inv_[A-Za-z0-9_-]{43}$/.test(ref.token))) return null;
+  const allowed = c.action === "preview" ? ["kind", "action", "invitation"] : ["kind", "action", "invitation", "consent_version", "preview_digest", "content_role"];
+  if (Object.keys(c).length !== allowed.length || Object.keys(c).some((k) => !allowed.includes(k))) return null;
+  if (c.action !== "preview" && !(c.action === "accept" && c.consent_version === HOUSEHOLD_JOIN_CONSENT_VERSION && typeof c.preview_digest === "string" && /^[0-9a-f]{64}$/.test(c.preview_digest) && HOUSEHOLD_CONTENT_ROLES.includes(c.content_role))) return null;
+  return c;
+}
+function decideHumanInvite(command, facts) {
+  const refuse2 = (reason) => ({ status: "refused", reason });
+  if (!facts.human || !facts.identity_verified) return refuse2("human_sign_in_required");
+  if (!facts.recipient_matches || facts.invitation_kind !== "member" || facts.role !== "member") return refuse2("invitation_unavailable");
+  if (facts.accepted_at !== null) return facts.accepted_by === facts.user_id && facts.member_live ? { status: "already_joined" } : refuse2("invitation_unavailable");
+  if (facts.revoked_at !== null || facts.expires_at <= facts.now || !facts.parent_live || !facts.inviter_can_invite || facts.personal_boundary)
+    return refuse2("invitation_unavailable");
+  if (facts.member_live) return refuse2("member_exists");
+  if (command.action === "preview") return { status: "preview" };
+  if (command.consent_version !== HOUSEHOLD_JOIN_CONSENT_VERSION || !HOUSEHOLD_CONTENT_ROLES.includes(command.content_role)) return refuse2("recipient_consent_required");
+  if (command.preview_digest !== facts.preview_digest) return refuse2("review_changed");
+  return { status: "join" };
+}
 export {
   ADMIN_ACCESS_TTL_SECONDS,
   ADMIN_AVAILABILITY,
@@ -4509,6 +4549,9 @@ export {
   HOUSEHOLD_CONTENT_OPERATIONS,
   HOUSEHOLD_CONTENT_ROLES,
   HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT,
+  HOUSEHOLD_JOIN_CONSENT_VERSION,
+  HOUSEHOLD_JOIN_DISCLOSURE,
+  HOUSEHOLD_JOIN_RATE_PER_HOUR,
   HOUSEHOLD_LIVE_REVISION_LIMIT,
   HOUSEHOLD_LOCAL_SEAT,
   HOUSEHOLD_OBJECT_EVENT_TYPES,
@@ -4560,6 +4603,7 @@ export {
   decideHostedAuthority,
   decideHostedCheck,
   decideHouseholdObject,
+  decideHumanInvite,
   decideWorkspace,
   emptyAdminAccount,
   emptyAdminRoutine,
@@ -4582,6 +4626,7 @@ export {
   normalizedFeedbackContext,
   parseAdminClientApprovalCommand,
   parseAdminRoutineCommand,
+  parseHumanInviteCommand,
   planFileVersionWindow,
   publicHostedCommandForbidden,
   readHouseholdObjects,

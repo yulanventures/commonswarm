@@ -440,6 +440,8 @@ export function decideAdminRoutine(
       related_event_ids: related,
       next_action: reason
         ? "Ask the granting person to review access."
+        : command.kind === "admin_invite_member"
+        ? "The recipient must sign in to /app, review the shared audience and history, and choose whether to join. The workspace owner must first confirm shared workspace settings."
         : pendingConnection || events.some((e) => e.payload.delivery_state)
         ? "The recipient must authorize setup and verify its connection."
         : "none",
@@ -713,6 +715,7 @@ export function decideAdminRoutine(
       expires_at,
       parent_admin_grant_id: grant.grant_id,
       delivery_state: "awaiting_authorization",
+      ...(!agent ? { delivery_channel: "recipient_app_inbox" } : {}),
     });
     return finish(null);
   }
@@ -998,6 +1001,7 @@ export function reduceAdminRoutine(
     p = event.payload,
     id = event.grant_id;
   const required: Record<AdminRoutineEventType, string[]> = {
+    AdminMemberInvitationAccepted: ["invitation_id", "recipient_user_id", "accepted_at"],
     AdminWorkspaceCreated: [
       "workspace_id",
       "name",
@@ -1199,6 +1203,12 @@ export function reduceAdminRoutine(
         revoked_at: null,
       };
       break;
+    case "AdminMemberInvitationAccepted": {
+      const i = next.invitations[String(p.invitation_id)];
+      if (!i || i.invitation_kind !== "member" || i.parent_admin_grant_id !== id || i.recipient_user_id !== p.recipient_user_id || i.accepted_at !== null || i.revoked_at !== null || i.expires_at <= event.occurred_at_server || !Number.isSafeInteger(p.accepted_at) || p.accepted_at !== event.occurred_at_server) throw new Error("invalid human invitation acceptance");
+      next.invitations[i.invitation_id] = { ...i, accepted_at: event.occurred_at_server };
+      break;
+    }
     case "AdminInvitationRevoked": {
       const i = next.invitations[String(p.invitation_id)];
       if (!i) throw new Error("unknown routine invitation");
