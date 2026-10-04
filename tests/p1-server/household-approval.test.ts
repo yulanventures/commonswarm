@@ -11,22 +11,11 @@ import { householdAccessRefusal, type HouseholdAccessFacts } from '../../src/pro
 
 const proofRoot = 'deploy/release-proofs/household-approval/20261004000015';
 const migration = () => repoSql('supabase/migrations/20261004000015_household_approval_until_withdrawn.sql');
-function fixture() {
-  const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), principal = randomUUID();
-  const consent = randomUUID(), connection = randomUUID(), grant = randomUUID();
+function hostedFixture(workspace: string, owner: string) {
+  const principal = randomUUID(), connection = randomUUID(), grant = randomUUID();
   const setup = `
-    INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),
-      ('${other}','authenticated','authenticated','${other}@example.test');
-    INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','Synthetic owner'),('${other}','Synthetic other');
-    INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic household','${owner}');
-    INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'),('${workspace}','${other}','member');
-    INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${randomUUID()}','${workspace}','workspace');
     INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
       VALUES ('${principal}','${workspace}','${owner}','Synthetic agent','hosted_mcp',true);
-    INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared');
-    INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
-      VALUES ('${workspace}','${owner}','editor','${consent}','2026-10-04T00:00:00Z'),
-        ('${workspace}','${other}','reader','${randomUUID()}','2026-10-04T00:00:00Z');
     INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
       selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at)
       VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','https://mcp.commonswarm.com/mcp',
@@ -35,6 +24,25 @@ function fixture() {
       VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',clock_timestamp());
     INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
       VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','Synthetic agent',clock_timestamp());
+  `;
+  return { principal, connection, grant, setup };
+}
+function fixture() {
+  const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), consent = randomUUID();
+  const hosted = hostedFixture(workspace, owner);
+  const { principal, connection, grant } = hosted;
+  const setup = `
+    INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),
+      ('${other}','authenticated','authenticated','${other}@example.test');
+    INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','Synthetic owner'),('${other}','Synthetic other');
+    INSERT INTO swarm.workspaces(workspace_id,name,created_by) VALUES ('${workspace}','Synthetic household','${owner}');
+    INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${workspace}','${owner}','owner'),('${workspace}','${other}','member');
+    INSERT INTO swarm.streams(stream_id,workspace_id,kind) VALUES ('${randomUUID()}','${workspace}','workspace');
+    INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES ('${workspace}','shared');
+    INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+      VALUES ('${workspace}','${owner}','editor','${consent}','2026-10-04T00:00:00Z'),
+        ('${workspace}','${other}','reader','${randomUUID()}','2026-10-04T00:00:00Z');
+    ${hosted.setup}
   `;
   const insert = (operations = "ARRAY['read','update']", receipt = consent, id = connection, expiry = 'NULL') =>
     `INSERT INTO swarm.household_content_connections(connection_id,grant_id,workspace_id,principal_id,owner_user_id,purpose,operations,consent_receipt_id,expires_at,hosted_grant_id)
@@ -114,7 +122,7 @@ test('approval trigger preserves human consent; reader ceiling, owner-only withd
 });
 
 class RollbackProof extends Error {}
-test('real command adapters approve without role rewrite, list exact active approvals, replay, recheck and withdraw after reconfirmation and grant revocation', async () => {
+test('real command adapters approve without role rewrite, list exact active approvals, replay, recheck and withdraw after reconfirmation and grant revocation', async t => {
   let local: { DB_URL: string };
   try { local = JSON.parse(execFileSync('supabase', ['status', '-o', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); }
   catch { throw new Error('Local Supabase is unavailable; this proof requires the authorized CI stack.'); }
@@ -135,6 +143,82 @@ test('real command adapters approve without role rewrite, list exact active appr
       await tx.unsafe(emptyApplicationSchema());
       await tx.unsafe(migration());
       await tx.unsafe(f.setup);
+      // Compare complete persisted rows so a refusal cannot silently insert,
+      // update, delete, audit or consume an idempotency key.
+      const writes = async (sql: typeof tx) => ({
+        connections: await sql`SELECT to_jsonb(c)::text AS row FROM swarm.household_content_connections c
+          WHERE workspace_id=${f.workspace}::uuid ORDER BY connection_id,grant_id,principal_id`,
+        audits: await sql`SELECT to_jsonb(a)::text AS row FROM swarm.household_object_audit a
+          WHERE workspace_id=${f.workspace}::uuid ORDER BY audit_id`,
+        keys: await sql`SELECT to_jsonb(k)::text AS row FROM swarm.idempotency_keys k
+          WHERE workspace_id=${f.workspace}::uuid ORDER BY principal_kind,principal_id,command_id`,
+      });
+      const refusalWithoutWrites = async (sql: typeof tx, identity: typeof actor, command: Record<string, unknown>, reason: string) => {
+        const beforeWrites = await writes(sql), refusedId = randomUUID();
+        await sql`SET LOCAL ROLE swarm_command`;
+        assert.deepEqual(await api.executeHouseholdSurface(sql, f.workspace, identity, refusedId, command, yes),
+          { status: 'refused', reason });
+        await sql`RESET ROLE`;
+        assert.deepEqual(await writes(sql), beforeWrites, `${reason} leaves connections, audits and keys unchanged`);
+        const [key] = await sql`SELECT count(*)::int AS count FROM swarm.idempotency_keys WHERE command_id=${refusedId}`;
+        assert.equal(key!.count, 0, `${reason} does not consume the request id`);
+      };
+      const approveControl = async (sql: typeof tx) => {
+        await sql`SET LOCAL ROLE swarm_command`;
+        assert.deepEqual(await api.executeHouseholdSurface(sql, f.workspace, actor, randomUUID(), input, yes),
+          { status: 'committed', operations: ['read', 'update'], expires_at: null });
+        await sql`RESET ROLE`;
+        const [approval] = await sql`SELECT revoked_at,expires_at,operations FROM swarm.household_content_connections
+          WHERE workspace_id=${f.workspace}::uuid AND connection_id=${f.connection}::uuid
+            AND grant_id=${f.grant}::uuid AND principal_id=${f.principal}::uuid`;
+        assert.deepEqual(approval, { revoked_at: null, expires_at: null, operations: ['read', 'update'] });
+      };
+      await t.test('approve without a workspace boundary refuses owner_confirmation_required without writes; confirmed boundary approves', async () => {
+        await assert.rejects(tx.savepoint(async sql => {
+          await sql`DELETE FROM swarm.household_workspace_boundaries WHERE workspace_id=${f.workspace}::uuid`;
+          await refusalWithoutWrites(sql, actor, input, 'owner_confirmation_required');
+          await sql`INSERT INTO swarm.household_workspace_boundaries(workspace_id,purpose) VALUES (${f.workspace}::uuid,'shared')`;
+          await approveControl(sql);
+          throw new RollbackProof();
+        }), RollbackProof);
+      });
+      await t.test('personal workspace refuses another member with workspace_boundary_mismatch without writes; its owner approves', async () => {
+        await assert.rejects(tx.savepoint(async sql => {
+          const otherHosted = hostedFixture(f.workspace, f.other);
+          await sql.unsafe(otherHosted.setup);
+          await sql`UPDATE swarm.household_workspace_boundaries SET purpose='personal',owner_user_id=${f.owner}::uuid
+            WHERE workspace_id=${f.workspace}::uuid`;
+          const otherInput = { kind: 'household_approve_connection', connection: { kind: 'hosted',
+            connection_id: otherHosted.connection, grant_id: otherHosted.grant, principal_id: otherHosted.principal, operations: ['read'] } };
+          await refusalWithoutWrites(sql, { ...actor, user_id: f.other }, otherInput, 'workspace_boundary_mismatch');
+          await approveControl(sql);
+          const [approval] = await sql`SELECT purpose,owner_user_id FROM swarm.household_content_connections WHERE connection_id=${f.connection}::uuid`;
+          assert.deepEqual(approval, { purpose: 'personal', owner_user_id: f.owner });
+          throw new RollbackProof();
+        }), RollbackProof);
+      });
+      for (const state of ['missing', 'revoked'] as const) {
+        await t.test(`approve with ${state} content role refuses content_consent_required without writes; live consent approves`, async () => {
+          await assert.rejects(tx.savepoint(async sql => {
+            if (state === 'missing') {
+              await sql`DELETE FROM swarm.household_member_content_roles WHERE workspace_id=${f.workspace}::uuid AND user_id=${f.owner}::uuid`;
+            } else {
+              await sql`UPDATE swarm.household_member_content_roles SET revoked_at=clock_timestamp()
+                WHERE workspace_id=${f.workspace}::uuid AND user_id=${f.owner}::uuid`;
+            }
+            await refusalWithoutWrites(sql, actor, input, 'content_consent_required');
+            if (state === 'missing') {
+              await sql`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+                VALUES (${f.workspace}::uuid,${f.owner}::uuid,'editor',${f.consent}::uuid,'2026-10-04T00:00:00Z')`;
+            } else {
+              await sql`UPDATE swarm.household_member_content_roles SET revoked_at=NULL
+                WHERE workspace_id=${f.workspace}::uuid AND user_id=${f.owner}::uuid`;
+            }
+            await approveControl(sql);
+            throw new RollbackProof();
+          }), RollbackProof);
+        });
+      }
       const snapshot = async () => (await tx`SELECT to_jsonb(r)::text AS row FROM swarm.household_member_content_roles r WHERE workspace_id=${f.workspace}::uuid ORDER BY user_id`).map(r => r.row);
       const before = await snapshot();
       await tx`SET LOCAL ROLE swarm_command`;
@@ -154,9 +238,14 @@ test('real command adapters approve without role rewrite, list exact active appr
       assert.deepEqual(listed, { status: 'ok', connections: [{ kind: 'hosted', connection_id: f.connection, grant_id: f.grant, principal_id: f.principal,
         name: 'Synthetic agent', approval: { operations: ['read', 'update'], expires_at: null } }] });
       const withdrawInput = { kind: 'household_withdraw_connection', principal_id: f.principal };
-      assert.deepEqual(await api.withdrawHouseholdConnection(tx, f.workspace, { ...actor, user_id: f.other }, randomUUID(), withdrawInput, yes),
-        { status: 'refused', reason: 'connection_access_refused' });
       await tx`RESET ROLE`;
+      await t.test('withdraw another member\'s agent refuses connection_access_refused without writes and preserves their active approval', async () => {
+        await refusalWithoutWrites(tx, { ...actor, user_id: f.other }, withdrawInput, 'connection_access_refused');
+        const [active] = await tx`SELECT revoked_at,expires_at,operations FROM swarm.household_content_connections
+          WHERE workspace_id=${f.workspace}::uuid AND connection_id=${f.connection}::uuid
+            AND grant_id=${f.grant}::uuid AND principal_id=${f.principal}::uuid`;
+        assert.deepEqual(active, { revoked_at: null, expires_at: null, operations: ['read', 'update'] });
+      });
       // Active approvals sharing only part of the tuple must never attach to
       // this seat. These retained historical rows also exercise bulk withdrawal.
       const decoyPrincipal = randomUUID();
