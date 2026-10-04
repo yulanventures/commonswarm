@@ -76,7 +76,7 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         return;
       }
       const interactionReadsBody = request.method === "POST" &&
-        /^\/interaction\/[^/]+\/(?:selection|consent)$/u.test(path);
+        /^\/interaction\/[^/]+\/(?:selection|consent|signin)$/u.test(path);
       if (!interactionReadsBody) {
         // Observe bytes only when the route's reader pulls them. Adding a data
         // listener to an unpaused IncomingMessage starts flowing and can discard
@@ -250,7 +250,7 @@ export async function startServer({
         gotrue: createGoTrueClient({
           baseUrl: config.gotrueUrl,
           anonKey: config.supabaseAnonKey,
-          provider: config.gotrueProvider,
+          providers: config.gotrueProviders, provider: config.gotrueProvider,
         }),
         consentOrchestrator: createConsentOrchestrator({
           command: managementCommand,
@@ -270,7 +270,7 @@ export async function startServer({
       service: createAdminConsentService({ store: new PostgresAdminConsentStore(pool), provider,
         completeInTransaction: (...args) => adminLifecycle.completeConsent(...args) }),
       gotrue: createGoTrueClient({ baseUrl: config.gotrueUrl, anonKey: config.supabaseAnonKey,
-        provider: config.gotrueProvider }),
+        providers: config.gotrueProviders, provider: config.gotrueProvider }),
       workspaceReader: async identity => {
         if (!adminTransactionContext(false)) return managementWorkspaceReader(identity);
         return withAdminRole("swarm_command", async () => (await adminQuery(`SELECT w.workspace_id AS id,w.name

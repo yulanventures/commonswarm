@@ -166,3 +166,24 @@ test("production bindings refuse unverified identities and non-management comman
     userId: "20000000-0000-4000-8000-000000000001", identityVerified: true,
   }), { status: 403, body: { error: "forbidden" } });
 });
+
+test("sign-in config defaults to all methods, supports the legacy fallback and gives the new allowlist precedence", async t => {
+  const env = await fixture(t);
+  let config = await loadConfig(env);
+  assert.equal(config.gotrueProvider, "github");
+  assert.equal(config.gotrueProviders, undefined);
+  delete env.MCP_OAUTH_GOTRUE_PROVIDER;
+  config = await loadConfig(env);
+  assert.deepEqual(config.gotrueProviders, ["google", "email", "github"]);
+  env.MCP_OAUTH_GOTRUE_PROVIDER = "github";
+  env.MCP_OAUTH_GOTRUE_PROVIDERS = "email,google";
+  config = await loadConfig(env);
+  assert.deepEqual(config.gotrueProviders, ["google", "email"]);
+  assert.equal(config.gotrueProvider, undefined);
+  for (const invalid of ["google,unknown", "google,google", "google,", ",", "https://attacker.example"]) {
+    env.MCP_OAUTH_GOTRUE_PROVIDERS = invalid;
+    await assert.rejects(loadConfig(env), TypeError);
+  }
+  env.MCP_OAUTH_GOTRUE_PROVIDERS = " ";
+  assert.equal((await loadConfig(env)).gotrueProvider, "github");
+});

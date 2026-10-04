@@ -1,6 +1,8 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
+import { enabledSignInProviders } from "./signin-providers.js";
+
 import { Pool } from "pg";
 
 import { ISSUER, RESOURCE } from "./provider.js";
@@ -221,7 +223,11 @@ export async function loadConfig(env = process.env) {
     nativeLoopbackEnabled: env.MCP_OAUTH_NATIVE_LOOPBACK_ENABLED === "1",
     allowedOrigins,
     gotrueUrl: required(env, "MCP_OAUTH_GOTRUE_URL"),
-    gotrueProvider: required(env, "MCP_OAUTH_GOTRUE_PROVIDER"),
+    gotrueProviders: env.MCP_OAUTH_GOTRUE_PROVIDERS?.trim()
+      ? enabledSignInProviders(env.MCP_OAUTH_GOTRUE_PROVIDERS)
+      : env.MCP_OAUTH_GOTRUE_PROVIDER?.trim() ? undefined : enabledSignInProviders(),
+    gotrueProvider: env.MCP_OAUTH_GOTRUE_PROVIDERS?.trim()
+      ? undefined : env.MCP_OAUTH_GOTRUE_PROVIDER?.trim() || undefined,
     supabaseAnonKey: required(env, "SUPABASE_ANON_KEY"),
     activeSigningKid,
     jwks: parseSigningKeys(signingKeysText, activeSigningKid),

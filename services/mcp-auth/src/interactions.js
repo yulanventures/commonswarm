@@ -10,6 +10,7 @@ import {
   sessionCookie,
 } from "./browser-security.js";
 import { ClientError, InteractionStateError } from "./client-error.js";
+import { handleSignIn } from "./signin.js";
 import { renderConsentPage } from "./interaction-page.js";
 import { metadataUrlAllowed } from "./metadata-fetch.js";
 import { RESOURCE_SCOPES } from "./provider.js";
@@ -206,7 +207,7 @@ export function createInteractionHandler({
       return true;
     }
 
-    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
+    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent|signin))?$/u.exec(url.pathname);
     if (!match) return false;
     let interactionUid;
     try {
@@ -218,7 +219,7 @@ export function createInteractionHandler({
     const operation = match[2] ?? "view";
     let parsed;
     let body;
-    if (request.method === "POST" && ["selection", "consent"].includes(operation)) {
+    if (request.method === "POST" && ["selection", "consent", "signin"].includes(operation)) {
       parsed = await readBody(request, maxBodyBytes, bodyReadTimeoutMs);
       body = parsed.value;
       if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -264,14 +265,11 @@ export function createInteractionHandler({
       return consentSecurityHeaders(redirectUri, { allowLoopback: client?.applicationType === "native" });
     }
 
+    if (!session?.user_id || operation === "signin") {
+      if (await handleSignIn({ request, response, operation, parsed, browser, store, gotrue,
+        allowedOrigins, callbackUrl, interactionUid })) return true;
+    }
     if (request.method === "GET" && operation === "view") {
-      if (!session?.user_id) {
-        const signIn = gotrue.begin({ callbackUrl, interactionUid });
-        await store.beginSignIn(interactionUid, browser.id, signIn);
-        response.writeHead(303, { ...INTERACTION_SECURITY_HEADERS, location: signIn.url.toString() });
-        response.end();
-        return true;
-      }
       if (details.prompt?.name === "login") {
         await provider.interactionFinished(request, response, {
           login: { accountId: session.user_id },

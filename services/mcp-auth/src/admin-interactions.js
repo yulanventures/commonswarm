@@ -3,6 +3,7 @@ import { ClientError, InteractionStateError } from "./client-error.js";
 import { bindingFromDetails, ensureSession, identity, readBody, respond } from "./interactions.js";
 import { ADMIN_RESOURCE } from "./admin-policy.generated.js";
 import { AdminConsentError, requireFreshAdminSession } from "./admin-consent.js";
+import { handleSignIn } from "./signin.js";
 import { renderAdminConsentPage } from "./admin-interaction-page.js";
 
 export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
@@ -19,7 +20,7 @@ export function createResourceInteractionHandler({ mcpHandler, adminHandler }) {
 export function createAdminInteractionHandler({ provider, store, service, gotrue, workspaceReader,
   allowedOrigins, callbackUrl, maxBodyBytes = 64 * 1024, bodyReadTimeoutMs = 10_000 }) {
   return async (request, response, url, suppliedDetails, context) => {
-    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent))?$/u.exec(url.pathname);
+    const match = /^\/interaction\/([^/]+)(?:\/(selection|consent|signin))?$/u.exec(url.pathname);
     if (!match) return false;
     let uid;
     try { uid = decodeURIComponent(match[1]); }
@@ -33,12 +34,13 @@ export function createAdminInteractionHandler({ provider, store, service, gotrue
     try {
       requireFreshAdminSession(browser.session);
     } catch (error) {
-      if (!(error instanceof AdminConsentError) || request.method !== "GET") throw error;
-      const signIn = gotrue.begin({ callbackUrl, interactionUid: uid });
-      await store.beginSignIn(uid, browser.id, signIn);
-      response.writeHead(303, { ...INTERACTION_SECURITY_HEADERS, location: signIn.url.toString() });
-      response.end();
-      return true;
+      if (!(error instanceof AdminConsentError) ||
+          !(request.method === "GET" || (request.method === "POST" && operation === "signin"))) throw error;
+      const parsed = context?.parsed ?? (request.method === "POST"
+        ? await readBody(request, maxBodyBytes, bodyReadTimeoutMs) : undefined);
+      if (await handleSignIn({ request, response, operation, parsed, browser, store, gotrue,
+        allowedOrigins, callbackUrl, interactionUid: uid })) return true;
+      throw error;
     }
     const input = { uid, sessionId: browser.id, ownerUserId: browser.session.user_id, params: details.params };
     async function html(result) {
