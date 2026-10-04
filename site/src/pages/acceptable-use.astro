@@ -2,16 +2,16 @@
 /* The release owner updates both dates if the planned site release slips. */
 /* Enforcement pointers for the published caps; kept in frontmatter, outside the legal text.
  *   10 live workspaces per verified identity -> FREE_TIER_WORKSPACE_LIMIT,
- *                                               supabase/functions/command/index.ts:831
- *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :707
- *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :708
+ *                                               supabase/functions/command/index.ts:833
+ *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :709
+ *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :710
  *   fixed clock hour, not rolling           -> incrementRateBucket, :5397 uses
  *                                              date_trunc('hour', statement_timestamp())
  *   body 1-8000                             -> supabase/migrations/20260827000001_expand_signal_body.sql
- *   about <= 500                            -> index.ts:2142-2145
- *   until <= 30d                            -> index.ts:2149-2152 (SIGNAL_MAX_UNTIL_MS)
- *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :692
- *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :697
+ *   about <= 500                            -> index.ts:2144-2147
+ *   until <= 30d                            -> index.ts:2151-2154 (SIGNAL_MAX_UNTIL_MS)
+ *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :694
+ *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :699
  *   file version <= 25 MB                   -> FILE_MAX_VERSION_BYTES,
  *   workspace file bytes <= 1 GB            -> FILE_WORKSPACE_MAX_BYTES,
  *                                              supabase/functions/command/file-artifacts.ts:52-55

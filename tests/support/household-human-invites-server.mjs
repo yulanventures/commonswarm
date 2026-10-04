@@ -23,6 +23,7 @@ const worker={user_id:recipient,email:'recipient@example.test',verified:true};
 const ref=invitation_id=>({source:'delegated',invitation_id});
 const command=(invitation,action='preview',extra={})=>({kind:'household_invitation',action,invitation,...extra});
 const call=async(c,who=worker,request=id())=>await db.begin(async tx=>{await tx`SET LOCAL ROLE swarm_command`;return await humanInvitationTransaction(tx,request,c,who);});
+let phase='seed';
 try {
   await db.begin(async tx=>{
     for(const [user,name,email] of [[owner,'Synthetic inviter','owner@example.test'],[recipient,'Synthetic recipient','recipient@example.test'],[other,'Other human','other@example.test']]){
@@ -52,25 +53,32 @@ try {
     await tx`UPDATE swarm.admin_accounts SET seq=${seq},projection=${tx.json(next)} WHERE owner_user_id=${owner}::uuid`;
     return decision.events.find(e=>e.type==='AdminMemberInvited').payload.invitation_id;
   });
+  phase='issue';
   const valid=await issue(),expired=await issue(),revoked=await issue(),parent=await issue();
   const inbox=async user=>await db.begin(async tx=>{await tx`SET LOCAL ROLE swarm_read`;await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub:user,role:'authenticated'})},true)`;return await tx`SELECT * FROM swarm_read.human_invitations()`;});
+  phase='recipient-inbox';
   assert.equal((await inbox(recipient)).length,4);assert.equal((await inbox(other)).length,0);assert.equal((await inbox(owner)).length,0);
+  phase='negative-invitations';
   await db`UPDATE swarm.admin_routine_invitations SET expires_at=clock_timestamp()-interval '1 second' WHERE invitation_id=${expired}::uuid`;
   await db`UPDATE swarm.admin_routine_invitations SET revoked_at=clock_timestamp() WHERE invitation_id=${revoked}::uuid`;
   assert.equal((await call(command(ref(valid)),{...worker,user_id:other})).status,403);
   assert.equal((await call(command(ref(valid)),null)).status,403);
   assert.equal((await call(command(ref(expired)))).status,403);assert.equal((await call(command(ref(revoked)))).status,403);
+  phase='preview';
   const preview=await call(command(ref(valid)));assert.equal(preview.status,200);assert.equal(preview.body.status,'preview');
   const accept=command(ref(valid),'accept',{consent_version:preview.body.consent_version,preview_digest:preview.body.preview_digest,content_role:'reader'}),request=id();
+  phase='rollback';
   // Inject a real transaction failure after all join writes, not a fake adapter.
   try {await db.begin(async tx=>{await tx`SET LOCAL ROLE swarm_command`;const result=await humanInvitationTransaction(tx,request,accept,worker);assert.equal(result.status,200);throw new Error('owned rollback control');});}catch(e){assert.equal(e.message,'owned rollback control');}
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.memberships WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`)[0].n,0);
+  phase='concurrent-consumption';
   const outcomes=await Promise.all([call(accept,worker,request),call(accept,worker,request)]);assert.ok(outcomes.every(r=>r.status===200));
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.memberships WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`)[0].n,1);
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.events WHERE workspace_id=${workspace}::uuid AND type='MemberJoined'`)[0].n,1);
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.agent_principals WHERE owner_user_id=${recipient}::uuid`)[0].n,0);
   assert.equal((await db`SELECT content_role FROM swarm.household_member_content_roles WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`)[0].content_role,'reader');
   assert.equal((await call({...accept,content_role:'editor'},worker,request)).status,409);
+  phase='revoked-access';
   await db`UPDATE swarm.memberships SET revoked_at=clock_timestamp() WHERE workspace_id=${workspace}::uuid AND user_id=${recipient}::uuid`;
   assert.equal((await call(accept,worker,request)).status,403);
   await db`UPDATE swarm.admin_grants SET state='revoked',revoked_at=clock_timestamp(),reason_code='test_revoke' WHERE grant_id=${grantId}::uuid`;
@@ -78,6 +86,7 @@ try {
   assert.equal((await inbox(recipient)).length,0);
   assert.equal((await db`SELECT count(*)::int AS n FROM swarm.memberships WHERE workspace_id=${privateSpace}::uuid AND user_id=${recipient}::uuid`)[0].n,0);
   // Ordinary link has a separate human email binding and the same independent consent.
+  phase='link-consent';
   const token='swm_inv_'+Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>String.fromCharCode(b)).join('');
   const safeToken='swm_inv_'+btoa(token.slice(8)).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
   const tokenHash=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(safeToken))),linkId=id();
@@ -89,8 +98,15 @@ try {
   const lr=await call(lc);assert.equal(lr.status,200);
   const [consumed]=await db`SELECT consumed_by,consumed_at FROM swarm.invitations WHERE invitation_id=${linkId}::uuid`;
   assert.equal(consumed.consumed_by,recipient);assert.ok(consumed.consumed_at);
+  phase='credential-free-receipt';
   const serialized=JSON.stringify(await db`SELECT response FROM swarm.idempotency_keys WHERE principal_id=${recipient}`);
   assert.ok(!serialized.includes(safeToken));assert.ok(!serialized.includes('swm_agt_'));
   console.log('HOUSEHOLD_HUMAN_INVITES_SERVER_OK');
-} catch { console.error('HOUSEHOLD_HUMAN_INVITES_SERVER_FAILED');Deno.exitCode=1; }
+} catch(error) {
+  // Fixed phases, SQLSTATE and numeric assertion values only. Never driver text,
+  // SQL, parameters, credentials or a raw stack.
+  const code=typeof error?.code==='string' && /^(?:[A-Z0-9]{5}|ERR_ASSERTION)$/.test(error.code) ? error.code : 'unknown';
+  const numbers=Object.fromEntries(['expected','actual'].filter(k=>typeof error?.[k]==='number' && Number.isFinite(error[k])).map(k=>[k,error[k]]));
+  console.error('HOUSEHOLD_HUMAN_INVITES_SERVER_FAILED '+JSON.stringify({phase,code,...numbers}));Deno.exitCode=1;
+}
 finally {await db.end();}

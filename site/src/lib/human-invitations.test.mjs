@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {build} from 'esbuild';
 import {createHumanInviteController} from './human-invite-controller.ts';
 import {HumanInviteRefused} from '../../../src/cloud/human-invitations.ts';
 const preview={status:'preview',workspace_name:'Household',preview_digest:'a'.repeat(64),audience:[],disclosure:'Shared history'};
@@ -24,4 +25,10 @@ test('changed disclosure requires a fresh review and cannot be automatically acc
   controller.setAccount('recipient');await controller.review('invite');await controller.accept('reader',true);
   assert.equal(writes,1);assert.equal(views.at(-1).preview,null);assert.equal(views.at(-1).joined,false);
   await controller.accept('editor',true);assert.equal(writes,1);
+});
+
+test('browser recipient invitation entry bundles without Node-only CLI build dependencies',async()=>{
+  const result=await build({entryPoints:['site/src/lib/human-invitations.ts'],bundle:true,write:false,
+    platform:'browser',format:'esm',target:'es2022',logLevel:'silent'});
+  assert.ok(result.outputFiles[0].contents.length>0);
 });

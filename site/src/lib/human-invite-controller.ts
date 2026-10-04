@@ -1,4 +1,4 @@
-import { HumanInviteRefused, type HumanInvitePreview, humanInvitationClient } from '../../../src/cloud/human-invitations.js';
+import { HumanInviteRefused, type HumanInvitePreview, humanInvitationClient } from '../../../src/cloud/human-invitation-transport.js';
 type Client = ReturnType<typeof humanInvitationClient>;
 export interface HumanInviteView { account: string | null; invitations: Awaited<ReturnType<Client['inbox']>>;
   preview: HumanInvitePreview | null; joined: boolean; message: string; busy: boolean; confirmed_role: 'reader' | 'editor' | null }

@@ -43,7 +43,9 @@ test('real human join adapter serializes consumption, preserves independent cons
     const path=join(temp,'local.json');writeFileSync(path,JSON.stringify({db_url:isolated.url}),{mode:0o600});
     const result=spawnSync('deno',['run','--no-lock','--config','supabase/functions/command/deno.json','--allow-read','--allow-env','--allow-net','tests/support/household-human-invites-server.mjs',path],{encoding:'utf8',timeout:150000,env:process.env});
     // Never forward raw driver errors, SQL parameters or local credential files.
-    assert.equal(result.status,0,'local human enrollment harness failed');assert.match(result.stdout,/HOUSEHOLD_HUMAN_INVITES_SERVER_OK/);
+    const safeDiagnostic=result.stderr.match(/^HOUSEHOLD_HUMAN_INVITES_SERVER_FAILED (\{[^\n]+\})$/m)?.[1];
+    const diagnostic=safeDiagnostic ? JSON.parse(safeDiagnostic) : null;
+    assert.equal(result.status,0,`local human enrollment harness failed: ${JSON.stringify(diagnostic)}`);assert.match(result.stdout,/HOUSEHOLD_HUMAN_INVITES_SERVER_OK/);
   }finally{
     try{await isolated?.close();}finally{const resolved=realpathSync(temp);assert.equal(dirname(resolved),root);assert.ok(basename(resolved).startsWith('anvil-secret.'));assert.notEqual(resolved,process.env.HOME);execFileSync('rm',['-rf',resolved]);}
   }

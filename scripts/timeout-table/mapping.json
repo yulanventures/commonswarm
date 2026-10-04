@@ -3457,6 +3457,40 @@
             "removes": [],
             "reason": "Requires a human account session; the worker-profile timeout probe must not read private admin metadata or revoke a grant."
           }
+        },
+        "src/cloud/human-invitation-transport.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/human-invitation-transport.ts:13",
+          "detail": "Human invitation preview and acceptance deadline through response body; acceptance can write membership, consent, events and a receipt.",
+          "operation": {
+            "name": "human-invitations-command",
+            "class": "not-run",
+            "writes": [
+              "membership, invitation consumption, content consent, events and idempotency receipt"
+            ],
+            "removes": [],
+            "reason": "Requires the recipient human session. The agent-profile timeout runner cannot exercise this transport."
+          }
+        },
+        "src/cloud/human-invitation-transport.ts:setTimeout#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/human-invitation-transport.ts:37",
+          "detail": "Recipient inbox deadline through response body.",
+          "operation": {
+            "name": "human-invitations-inbox",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Requires the recipient human session. The agent-profile timeout runner cannot exercise this transport."
+          }
         }
       }
     }

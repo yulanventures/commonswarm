@@ -1,5 +1,7 @@
 -- Lane 5: authenticated, recipient-bound in-app delivery of existing member invites.
 -- Does not mint credentials, enroll agents, or extend the admin OAuth scopes.
+-- The read endpoint supplies verified claims. Parse sub directly, as the existing
+-- human recovery reader does; swarm_admin has no USAGE on the auth schema.
 CREATE FUNCTION swarm_read.human_invitations() RETURNS TABLE(
  invitation_id uuid, workspace_id uuid, workspace_name text, inviter_display_name text,
  expires_at timestamptz
@@ -11,7 +13,7 @@ CREATE FUNCTION swarm_read.human_invitations() RETURNS TABLE(
  JOIN swarm.admin_grants g ON g.grant_id=i.parent_admin_grant_id
  JOIN swarm.memberships m ON m.workspace_id=i.workspace_id AND m.user_id=i.owner_user_id
  JOIN swarm.household_workspace_boundaries b ON b.workspace_id=i.workspace_id AND b.purpose='shared'
- WHERE i.recipient_user_id=auth.uid() AND i.invitation_kind='member' AND i.projection->>'role'='member'
+ WHERE i.recipient_user_id=NULLIF(NULLIF(current_setting('request.jwt.claims',true),'')::jsonb->>'sub','')::uuid AND i.invitation_kind='member' AND i.projection->>'role'='member'
  AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at>statement_timestamp()
  AND g.state='active' AND g.expires_at>statement_timestamp() AND g.refresh_deadline>statement_timestamp()
  AND g.scope_names @> ARRAY['invites:create']::text[] AND g.target_rules->'recipient_user_ids' ? i.recipient_user_id::text

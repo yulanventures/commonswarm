@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {CLI_BUILD_VERSION} from '../../src/cloud/client-build.js';
 import {humanInvitationClient,HumanInviteUnknown,HumanInviteRefused} from '../../src/cloud/human-invitations.js';
 test('recipient transport refreshes identity and retries an uncertain join with the same consent/request without credentials in the body',async()=>{
   const requests:{body:any;headers:any}[]=[];let calls=0;let auth=0;
@@ -13,6 +14,7 @@ test('recipient transport refreshes identity and retries an uncertain join with 
   const join=api.prepareAcceptance(ref,preview,'reader');
   await assert.rejects(join.send(),HumanInviteUnknown);assert.equal((await join.send()).status,'joined');await join.send();
   assert.equal(requests.length,3);assert.deepEqual(requests[1]!.body,requests[2]!.body);
+  assert.ok(requests.every(r=>r.body.client_build===CLI_BUILD_VERSION));
   assert.equal(requests[2]!.body.command.content_role,'reader');assert.equal(requests[2]!.body.workspace_id,undefined);
   assert.deepEqual(requests.map(r=>r.headers.authorization),['Bearer human-1','Bearer human-2','Bearer human-3']);
   assert.ok(!JSON.stringify(requests.map(r=>r.body)).includes('Bearer'));

@@ -1,6 +1,7 @@
 # Exact lane-5 file inventory
 
-42 files: 17 modified and 25 new. Reasons and review points are in [LEAD-CHECKLIST.md](LEAD-CHECKLIST.md).
+Initial draft inventory: 42 files, 17 modified and 25 new. The Fold 2 delta is
+enumerated in [FOLD2-REPORT.md](FOLD2-REPORT.md). Reasons and review points are in [LEAD-CHECKLIST.md](LEAD-CHECKLIST.md).
 
 - `deploy/release-proofs/household-invites/20261004000006-catalog.sql`
 - `deploy/release-proofs/household-invites/20261004000006-rollback-catalog.sql`

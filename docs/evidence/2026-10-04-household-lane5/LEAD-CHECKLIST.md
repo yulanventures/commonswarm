@@ -9,6 +9,12 @@ The [security fold report](FOLD-REPORT.md) records repairs against `fdcd62bf`
 and supersedes the admission and gate results below. Two confirmed code defects
 are fixed; real database proof remains blocked by this host's Docker guard.
 
+The [Fold 2 CI repair report](FOLD2-REPORT.md) supersedes the earlier gate results.
+Citation, client-build and timeout regressions pass. Migration 06 no longer needs
+`auth` schema access; its exact ACL/catalog and real join proof still require CI.
+The pre-existing eight test type-check diagnostics remain. No new OAuth scope or
+privilege is granted. The shared browser transport stays free of Node imports.
+
 ## Prepared behavior
 
 The existing `admin_invite_member` records are delivered through the intended

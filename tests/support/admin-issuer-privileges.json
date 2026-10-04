@@ -379,5 +379,5 @@
   ["swarm_command","TABLE","swarm.workspaces","SELECT",false],
   ["swarm_command","TABLE","swarm.workspaces","UPDATE",false],
   ["swarm_command","TYPE","commonswarm_oauth.admin_security_reason","USAGE",false],
-  ["swarm_read","FUNCTION","swarm_read.human_invitations()","EXECUTE",false,"Recipient-only bounded in-app delivery of member invitations; no direct table access or agent enrollment."]
+  ["swarm_read","FUNCTION","swarm_read.human_invitations()","EXECUTE",false,"Recipient-only bounded in-app delivery from verified JWT sub; no auth-schema grant, direct table access or agent enrollment."]
 ]
