@@ -1,7 +1,7 @@
 #!/bin/bash
 # C1 W2 schema rehearsal on a disposable local PostgreSQL cluster. Bash 3.2-safe. No network, no docker.
 #
-#   scripts/c1-w2-rehearsal.sh [--catalogs-from <git-sha>] [--reserve-control] <dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] [--catalogs-from <git-sha>] [--reserve-control] <dump-dir>
 #   scripts/c1-w2-rehearsal.sh --build-fixture <out-dir>
 #   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path>
 #
@@ -27,6 +27,17 @@
 # then pg_dumpall -r --no-role-passwords, pg_dump -s and the ledger data. The prelude and the pg_cron line
 # strip apply ONLY in this mode; a supplied dump is restored as given and fails loudly if it needs an
 # extension the local PostgreSQL does not have.
+#
+# --live-dump restores the UNMODIFIED live dump files, read in place (never copied or moved), with exactly
+# four statements replaced by the test-only models in scripts/c1-w2-extension-models.sql:
+#   CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+#   CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
+#   CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;
+#   CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;
+# Each must occur exactly once. One MODEL line per replaced extension lists the modelled objects. Every
+# rehearsal mode then proves isolation: no W2 migration, catalog, reserve or plan block the harness runs
+# names a cron., net., graphql., graphql_public., vault. or pgsodium. object, so a model cannot change a
+# W2 result.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal). HOME is never assigned.
@@ -70,12 +81,13 @@ if test "${1:-}" = --cleanup-selftest; then
   say "REFUSE cleanup-selftest: $2"; exit 3
 fi
 
-MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 TARGET=
+MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 TARGET=
 while test $# -gt 0; do
   case "$1" in
     --build-fixture) MODE=build; shift; TARGET=${1:-}; shift || true ;;
     --catalogs-from) shift; CATALOGS_FROM=${1:-}; shift || true ;;
     --reserve-control) RESERVE_CONTROL=1; shift ;;
+    --live-dump) LIVE_DUMP=1; shift ;;
     -*) die usage "unknown option $1" ;;
     *) test -z "$TARGET" || die usage 'one dump directory only'; TARGET=$1; shift ;;
   esac
@@ -147,14 +159,45 @@ for f in roles.sql schema.sql ledger.sql; do test -f "$TARGET/$f" || die restore
 mkdir -p "$T/release" "$T/proof" "$T/stage" "$T/blocks" "$T/mapped" || exit 1
 chmod 0700 "$T/stage"
 RELEASE_ROOT=$T/release PROOF_DIR=$T/proof SECRET_STAGE=$T/stage
-# The bootstrap role exists in every cluster; the dump's CREATE ROLE for it is the one statement dropped.
-python3 - "$TARGET/roles.sql" "$T/roles.sql" <<'PY' || die restore-roles 'roles.sql could not be read'
-import sys
-lines=open(sys.argv[1],encoding='utf-8').read().split('\n')
-open(sys.argv[2],'w',encoding='utf-8').write('\n'.join(l for l in lines if l.strip()!='CREATE ROLE supabase_admin;'))
+# Dump files are read in place and streamed to psql; nothing is copied. The bootstrap role exists in
+# every cluster, so the dump's own "CREATE ROLE supabase_admin;" is the one roles statement dropped.
+cat >"$T/dumpfilter.py" <<'PY'
+import re,sys
+kind,path,models=sys.argv[1],sys.argv[2],sys.argv[3]
+text=open(path,encoding='utf-8').read()
+if kind=='roles':
+    sys.stdout.write('\n'.join(l for l in text.split('\n') if l.strip()!='CREATE ROLE supabase_admin;')); raise SystemExit(0)
+REPLACED={'pg_cron':'CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;',
+          'pg_net':'CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;',
+          'pg_graphql':'CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;',
+          'supabase_vault':'CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;'}
+sections={}
+for part in re.split(r'^(?=-- model: )',open(models,encoding='utf-8').read(),flags=re.M)[1:]:
+    sections[part.split('\n',1)[0][len('-- model: '):].strip()]=part
+if set(sections)!=set(REPLACED): raise SystemExit('FAIL restore-schema: model sections expected '+','.join(sorted(REPLACED))+' got '+','.join(sorted(sections)))
+lines=text.split('\n')
+for name,stmt in REPLACED.items():
+    hits=[i for i,l in enumerate(lines) if l==stmt]
+    if len(hits)!=1: raise SystemExit('FAIL restore-schema: "'+stmt+'" expected once got '+str(len(hits)))
+    if kind=='models':
+        objs=[l[len('-- object: '):] for l in sections[name].split('\n') if l.startswith('-- object: ')]
+        print('MODEL '+name+': schema.sql line '+str(hits[0]+1)+' replaced by the test-only model; objects: '+', '.join(objs))
+    lines[hits[0]]=sections[name]
+if kind=='schema': sys.stdout.write('\n'.join(lines))
 PY
-run_sql_file restore-roles "$T/roles.sql"
-run_sql_file restore-schema "$TARGET/schema.sql"
+MODELS=$REPO/scripts/c1-w2-extension-models.sql
+restore_stream() { # label kind file
+  if python3 "$T/dumpfilter.py" "$2" "$3" "$MODELS" 2>"$T/filter.err" | pgx -q -v ON_ERROR_STOP=1 -f - >/dev/null 2>"$PSQL_LOG"; then say "PASS $1"; return 0; fi
+  if test -s "$T/filter.err"; then say "$(head -1 "$T/filter.err" | cut -c1-300)"; exit 1; fi
+  say "FAIL $1: $(first_error "$PSQL_LOG")"; exit 1
+}
+restore_stream restore-roles roles "$TARGET/roles.sql"
+if test "$LIVE_DUMP" = 1; then
+  python3 "$T/dumpfilter.py" models "$TARGET/schema.sql" "$MODELS" 2>"$T/filter.err" || { say "$(head -1 "$T/filter.err" | cut -c1-300)"; exit 1; }
+  restore_stream restore-schema schema "$TARGET/schema.sql"
+else
+  run_sql_file restore-schema "$TARGET/schema.sql"
+fi
 run_sql_file restore-ledger "$TARGET/ledger.sql"
 
 # Release copy: the reviewed files the plan reads, from this checkout; item-ai proofs from --catalogs-from.
@@ -207,6 +250,21 @@ extract "$PLAN" ai-w2-preflight slice 'python3 - "$RELEASE_ROOT" "$PROOF_DIR" <<
 extract "$T/catalog-plan.md" ai-w2-preflight slice '# Before proofs:' 'ai_run ai-w2-measure' >"$T/blocks/preflight-before.sh"
 for STEP in ai-w2-measure ai-w2-apply ai-w2-reconcile ai-w2-probes; do extract "$PLAN" "$STEP" block >"$T/blocks/$STEP.sh"; done
 for f in "$T"/blocks/*.sh; do /bin/bash -n "$f" || die extract "$(basename "$f") is not valid bash"; done
+# Isolation: nothing the W2 rehearsal runs names an object of a modelled (or other Supabase-only) extension.
+python3 - "$RELEASE_ROOT" "$T/blocks" <<'PY' || exit 1
+import pathlib,re,sys
+root,blocks=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])
+migrations=sorted((root/'supabase/migrations').glob('20261003*.sql'))
+if len(migrations)!=5: raise SystemExit('FAIL isolation: W2 migrations expected 5 got '+str(len(migrations)))
+files=migrations+sorted((root/'deploy/release-proofs/item-ai').glob('*.sql'))
+files+=sorted((root/'supabase/admin-delegation-reserve').glob('20261003*.sql'))+sorted(blocks.glob('*.sh'))
+pat=re.compile(r'\b(cron|net|graphql|graphql_public|vault|pgsodium)\.[A-Za-z_"]',re.I)
+# Control: the pattern finds such references.
+assert pat.search("SELECT cron.schedule('x','* * * * *','SELECT 1')") and pat.search('GRANT ALL ON TABLE vault.secrets TO x')
+hits=[f.name for f in files if pat.search(f.read_text())]
+if hits: raise SystemExit('FAIL isolation: W2 SQL names a modelled-extension object in '+','.join(hits))
+print('PASS isolation: no cron., net., graphql., vault. or pgsodium. reference in '+str(len(files))+' W2 files (5 migrations, item-ai catalogs, W2 reserves, plan blocks)')
+PY
 
 # Box psql emulation: same flags; /release and /proof in --file paths and \i lines map to local copies.
 cat >"$T/map.py" <<'PY'

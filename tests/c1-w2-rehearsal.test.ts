@@ -44,6 +44,23 @@ test('c1 W2 rehearsal: the script is Bash 3.2 syntax and never puts a heredoc in
   assert.match(source, /extract "\$T\/catalog-plan\.md" ai-w2-preflight slice '# Before proofs:' 'ai_run ai-w2-measure'/);
 });
 
+test('c1 W2 rehearsal: --live-dump models exactly four extensions, and every modelled function raises', () => {
+  const models = readFileSync(resolve('scripts/c1-w2-extension-models.sql'), 'utf8');
+  const sections = models.split(/^(?=-- model: )/m).slice(1);
+  assert.deepEqual(sections.map(part => part.split('\n', 1)[0]), ['-- model: pg_cron', '-- model: pg_net', '-- model: pg_graphql', '-- model: supabase_vault']);
+  for (const part of sections) {
+    const functions = part.match(/^CREATE FUNCTION /gm)?.length ?? 0;
+    assert.ok(functions > 0);
+    assert.equal(part.match(/RAISE EXCEPTION 'rehearsal model: [a-z_]+ is not installed'/g)?.length, functions, part.split('\n', 1)[0]);
+    assert.doesNotMatch(part, /\b(?:swarm|swarm_read|commonswarm_oauth|commonswarm_ops|supabase_migrations)\./, 'models touch no CommonSwarm schema');
+  }
+  for (const statement of ['CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;', 'CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;',
+    'CREATE EXTENSION IF NOT EXISTS pg_graphql WITH SCHEMA graphql;', 'CREATE EXTENSION IF NOT EXISTS supabase_vault WITH SCHEMA vault;']) {
+    assert.ok(source.includes(`'${statement}'`), statement);
+  }
+  assert.match(source, /PASS isolation: no cron\., net\., graphql\., vault\. or pgsodium\. reference/);
+});
+
 test('c1 W2 rehearsal: cleanup deletes only the script\'s own mktemp directory (refusal controls)', () => {
   for (const path of ['/', '/tmp', '/tmp/', dirname(scratch), scratch, '/tmp/c1w2.abc', '/tmp/c1w2.abcdefg', '/tmp/c1w2.ab/cdef', '/tmp/other.abcdef']) {
     const r = run(['--cleanup-selftest', path]);
@@ -66,6 +83,7 @@ test('c1 W2 rehearsal: 835b7ae8 catalogs FAIL and the current plan PASSES end to
 
   const current = run([fixture], env);
   assert.equal(current.status, 0, current.stdout + current.stderr);
+  assert.match(current.stdout, /^PASS isolation: /m);
   for (const label of ['restore-schema', 'ai-db-session:ledger-before', 'ai-w2-preflight:ledger-and-reserves', 'ai-w2-preflight:before-catalogs',
     'ai-w2-measure', 'ai-w2-reconcile', 'ai-w2-apply', 'ai-w2-probes']) {
     assert.match(current.stdout, new RegExp(`^PASS ${label}$`, 'm'), label);
@@ -76,6 +94,11 @@ test('c1 W2 rehearsal: 835b7ae8 catalogs FAIL and the current plan PASSES end to
   const reserve = run(['--reserve-control', fixture], env);
   assert.equal(reserve.status, 0, reserve.stdout + reserve.stderr);
   assert.match(reserve.stdout, /^PASS control: every reserve applied and every reverse catalog true$/m);
+
+  // --live-dump replaces only the exact live statements: a dump without them is refused, not guessed.
+  const live = run(['--live-dump', fixture], env);
+  assert.notEqual(live.status, 0);
+  assert.match(live.stdout, /^FAIL restore-schema: "CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;" expected once got 0$/m);
 
   // Negative control: the released 835b7ae8 catalogs, as that plan ran them. Needs that commit in the clone.
   if (spawnSync('git', ['cat-file', '-e', '835b7ae8^{commit}']).status === 0) {
