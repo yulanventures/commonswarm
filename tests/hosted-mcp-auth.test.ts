@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
-import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/mcp/auth.ts";
+import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier, McpTokenError } from "../supabase/functions/mcp/auth.ts";
 
 const subject = "11111111-1111-4111-8111-111111111111";
 const now = 1_800_000_000;
@@ -119,38 +119,28 @@ test("an unknown kid performs one bounded JWKS refresh and then fails closed", a
   assert.equal(source.calls(), 3, "one refresh is attempted for the unknown kid");
 });
 
-test("hosted JWT measures missing mcp scope without rejecting valid legacy tokens or logging credentials", async (t) => {
-  const signing = await key("scope-measurement");
+test("hosted JWT requires the exact mcp scope after signature and claim validation", async () => {
+  const signing = await key("scope-enforcement");
   const source = jwksFetch([{ keys: [signing.publicJwk] }]);
   const verifier = new McpJwtVerifier({ fetch: source.fetch, now: () => now });
-  const logging = t.mock.method(console, "warn", () => undefined);
-  for (const [scope, hasMcp] of [
-    ["mcp", true], ["openid mcp offline_access", true], [undefined, false],
-    ["", false], ["openid", false], ["notmcp", false], ["mcp:read", false], [["mcp"], false],
-  ] as const) {
-    logging.mock.resetCalls();
-    const encoded = await token(signing, { scope, email: "private-user@example.invalid" });
-    assert.deepEqual(await verifier.verify(encoded), {
+  for (const scope of [undefined, "", "openid offline_access", "notmcp", "mcp:read", "MCP", "admin:read", ["mcp"]]) {
+    await assert.rejects(verifier.verify(await token(signing, { scope })),
+      (error: unknown) => error instanceof McpTokenError && error.code === "insufficient_scope");
+  }
+  for (const scope of ["mcp", "openid mcp offline_access"]) {
+    assert.deepEqual(await verifier.verify(await token(signing, { scope })), {
       providerGrantId: "provider-grant-1", subject, expiresAt: now + 300,
-    }, "scope measurement must preserve successful verification");
-    assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => {
-      assert.equal(args.length, 1);
-      assert.equal(args[0].includes(encoded), false);
-      return JSON.parse(args[0]);
-    }), hasMcp ? [] : [{ event: "mcp_missing_scope", client_id_prefix: "fixture-" }]);
+    });
   }
-
-  // Only verified, otherwise-valid tokens participate in measurement.
-  logging.mock.resetCalls();
-  await assert.rejects(verifier.verify(await token(signing, { scope: undefined, iat: now - 301, exp: now - 31 })), /invalid_token/u);
-  await assert.rejects(verifier.verify(await token(signing, { scope: undefined, aud: "https://wrong.invalid" })), /invalid_token/u);
-  assert.equal(logging.mock.callCount(), 0);
-
-  for (const [client_id, prefix] of [[undefined, null], ["tiny", "tin"], ["bad\n\"\\id-private", "bad___id"]] as const) {
-    logging.mock.resetCalls();
-    await verifier.verify(await token(signing, { scope: undefined, client_id }));
-    assert.deepEqual(logging.mock.calls.map(({ arguments: args }) => JSON.parse(args[0])), [
-      { event: "mcp_missing_scope", client_id_prefix: prefix },
-    ], "missing and unusual client IDs cannot add fields or print a full ID");
+  // Invalid tokens cannot obtain an authenticated insufficient-scope response.
+  for (const overrides of [
+    { scope: undefined, iat: now - 301, exp: now - 31 },
+    { scope: undefined, aud: "https://wrong.invalid" },
+  ]) {
+    await assert.rejects(verifier.verify(await token(signing, overrides)),
+      (error: unknown) => error instanceof McpTokenError && error.code === "invalid_token");
   }
+  const attacker = await key("scope-enforcement");
+  await assert.rejects(verifier.verify(await token(attacker, { scope: undefined })),
+    (error: unknown) => error instanceof McpTokenError && error.code === "invalid_token");
 });

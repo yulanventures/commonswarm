@@ -1,4 +1,5 @@
-import type { VerifiedMcpToken } from "./auth.ts";
+// @ts-ignore TS5097: Deno requires the source extension; Node tests use tsx.
+import { McpTokenError, type VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
 
@@ -251,8 +252,15 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
       let verified: VerifiedMcpToken;
       try {
         verified = await beforeAbort(options.verifyToken(token, lifetime.signal), lifetime.signal);
-      } catch {
-        return failed(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
+      } catch (error) {
+        if (error instanceof McpTokenError && error.code === "insufficient_scope") {
+          return failed(403, { error: "insufficient_scope" }, {
+            "www-authenticate": `${WWW_AUTHENTICATE}, error="insufficient_scope", scope="mcp"`,
+          });
+        }
+        return failed(401, { error: "unauthorized" }, {
+          "www-authenticate": `${WWW_AUTHENTICATE}, error="invalid_token"`,
+        });
       }
       if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
         return failed(415, { error: "unsupported_media_type" });

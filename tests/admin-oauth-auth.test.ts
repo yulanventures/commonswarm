@@ -59,6 +59,13 @@ test('admin-dpop-verifier-unit: real signatures, nonce challenges, cross-entry p
   const restarted = new AdminRequestVerifier(f.jwt, shared);
   await assert.rejects(restarted.verify(first.clone(), 'admin_command'), (e: unknown) => e instanceof AdminProofError && e.code === 'replay');
   assert.equal(isAdminAdmission(await restarted.verify(await f.request(access, 'admin_mcp', {}, { nonce: n }), 'admin_mcp')), true);
+  // C1's admin-only scopes remain valid without mcp on both admin surfaces.
+  const c1 = await f.token({ scope: 'admin:read seats:create seats:revoke' });
+  for (const surface of ['admin_command', 'admin_mcp'] as const) {
+    const admission = await restarted.verify(await f.request(c1, surface, {}, { nonce: n }), surface);
+    assert.deepEqual(admission.token.scope_names, ['admin:read', 'seats:create', 'seats:revoke']);
+    assert.equal(isAdminAdmission(admission), true);
+  }
 });
 
 test('admin-dpop-verifier-unit: reject Bearer, class/cnf, key, hash, method, configured URI, time, nonce and ambiguous headers before authority', async () => {

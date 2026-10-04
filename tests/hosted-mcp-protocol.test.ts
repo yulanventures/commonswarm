@@ -47,7 +47,10 @@ function post(body: unknown, headers: Record<string, string> = {}): Request {
   });
 }
 
-async function authenticatedHandler() {
+async function authenticatedHandler(
+  claims: Record<string, unknown> = {},
+  executeTool: HostedToolExecutor = async () => { throw new Error("initialize and list must not execute a tool"); },
+) {
   const now = 1_800_000_000;
   const pair = await crypto.subtle.generateKey(
     { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"],
@@ -66,7 +69,7 @@ async function authenticatedHandler() {
   const payload = Buffer.from(JSON.stringify({
     iss: MCP_ISSUER, aud: MCP_RESOURCE, sub: verified.subject,
     grant_id: verified.providerGrantId, iat: now, exp: now + 300,
-    scope: "mcp", client_id: "claude-fixture-client",
+    scope: "mcp", client_id: "claude-fixture-client", ...claims,
   })).toString("base64url");
   const signature = await crypto.subtle.sign(
     { name: "ECDSA", hash: "SHA-256" }, pair.privateKey,
@@ -81,7 +84,7 @@ async function authenticatedHandler() {
       requestTimeoutMs: 2_000, maxConcurrentRequests: 2,
     },
     verifyToken: (token: string, signal: AbortSignal) => verifier.verify(token, signal),
-    executeTool: async () => { throw new Error("initialize and list must not execute a tool"); },
+    executeTool,
   });
   return {
     serve,
@@ -321,6 +324,53 @@ test("MCP denials log only stable error codes and known method names", async (t)
     { event: "request_failed", error_code: -32700, method: null },
     { event: "request_failed", error_code: -32601, method: "unknown" },
   ]);
+});
+
+test("signed hosted tokens enforce scope on initialize, list and tools with OAuth challenges", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  const requests = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
+    { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "whoami", arguments: { seat: "seat_" + "x".repeat(32) } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "claim_seat", arguments: { name: "Scope test", request_id: "scope-test-request" } } },
+  ];
+  for (const scope of [undefined, "openid offline_access", "mcp:read", "admin:read", ["mcp"]]) {
+    const fixture = await authenticatedHandler({ scope });
+    for (const body of requests) {
+      const response = await fixture.serve(post(body, fixture.headers));
+      assert.equal(response.status, 403);
+      assert.deepEqual(await response.json(), { error: "insufficient_scope" });
+      assert.equal(response.headers.get("www-authenticate"),
+        `${WWW_AUTHENTICATE}, error="insufficient_scope", scope="mcp"`);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+  }
+  // Client registration and grant/seat use do not change the resource permission.
+  for (const [client_id, grant_id, scope] of [
+    ["ordinary-client", "ordinary-grant", "mcp"],
+    ["https://client.example/oauth/client.json", "cimd-grant", "mcp"],
+    ["registered-public-client", "dcr-grant", "mcp"],
+    ["ordinary-client", "refreshed-seat-grant", "openid mcp offline_access"],
+  ]) {
+    const calls: string[] = [];
+    const fixture = await authenticatedHandler({ client_id, grant_id, scope }, async ({ name, token }) => {
+      assert.equal(token.providerGrantId, grant_id);
+      calls.push(name);
+      return { called: name };
+    });
+    for (const body of requests) {
+      const response = await fixture.serve(post(body, fixture.headers));
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("www-authenticate"), null);
+      const result = (await response.json()).result;
+      assert.equal(result.isError, undefined);
+    }
+    assert.deepEqual(calls, ["whoami", "claim_seat"]);
+  }
+  const invalid = await authenticatedHandler({ scope: undefined, aud: "https://wrong.invalid" });
+  const response = await invalid.serve(post(requests[0], invalid.headers));
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("www-authenticate"), `${WWW_AUTHENTICATE}, error="invalid_token"`);
 });
 
 test("protected-resource metadata and the unauthenticated challenge name exact URLs", async () => {
