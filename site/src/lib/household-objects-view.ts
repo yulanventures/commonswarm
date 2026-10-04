@@ -112,7 +112,7 @@ export function householdAttribution(author: HouseholdAttribution, names?: House
   const person = names?.people[author.user_id];
   if (author.principal_id === null) return person ?? `Person ${author.user_id}`;
   const agent = names?.agents[author.principal_id];
-  if (agent && person) return `${agent}, ${person}’s agent`;
+  if (agent) return person ? `${agent}, ${person}’s agent` : agent;
   return `Agent ${author.principal_id} for ${author.user_id}`;
 }
 function stamp(time: number): string {

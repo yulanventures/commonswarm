@@ -1,12 +1,12 @@
 /*
  * The setup checklist a new workspace opens on.
  *
- * Three steps, each derived from facts the dashboard already reads; nothing here is stored. A
- * step is done when the fact is true now, so a revoked agent or a cancelled invite reopens its
+ * Only the needed steps, derived from dashboard reads and any unsettled creation setup.
+ * A step is done when the fact is true now, so a revoked agent or a cancelled invite reopens its
  * step instead of leaving a stale tick.
  *
- *   access  the person's Lists & docs access is confirmed (household_access says ok). For the
- *           owner this is also where the workspace's audience is chosen, which inviting needs.
+ *   access  shown when household_access refuses access or creation permissions did not commit. The owner also
+ *           chooses the audience here for workspaces created before that choice was recorded.
  *   agent   at least one live agent owned by this person is in the roster.
  *   invite  someone else is a member, or an invitation is pending. Owners and admins only:
  *           they are the people the server lets invite.
@@ -17,8 +17,10 @@ export type SetupStepId = "access" | "agent" | "invite";
 export interface SetupFacts {
   isOwner: boolean;
   canInvite: boolean;
-  /** null while the access read has not answered; the step then shows as not done. */
+  /** null while the read is unknown; creation can still establish that setup is needed. */
   accessConfirmed: boolean | null;
+  /** Creation permissions failed; keep setup visible until a read confirms access. */
+  accessNeedsSetup?: boolean;
   myAgentCount: number;
   otherMemberCount: number;
   pendingInviteCount: number;
@@ -33,32 +35,33 @@ export interface SetupStep {
 }
 
 export function setupSteps(facts: SetupFacts): SetupStep[] {
-  const steps: SetupStep[] = [
+  const steps: SetupStep[] = [];
+  if (facts.accessConfirmed !== true && (facts.accessConfirmed === false || facts.accessNeedsSetup)) steps.push(
     facts.isOwner
       ? {
         id: "access",
         title: "Choose who shares Lists & docs",
         detail: "Shared lists and invitations both need this.",
         action: "Choose",
-        done: facts.accessConfirmed === true,
+        done: false,
       }
       : {
         id: "access",
         title: "Choose your access",
         detail: "Editor or reader, for lists, docs and files.",
         action: "Choose",
-        done: facts.accessConfirmed === true,
+        done: false,
       },
-    {
-      id: "agent",
-      title: facts.isOwner ? "Connect your first agent" : "Connect your own agents",
-      detail: facts.myAgentCount > 0
-        ? `${facts.myAgentCount} connected. Add more any time.`
-        : "Claude, Muse and others join with one address.",
-      action: facts.myAgentCount > 0 ? "Add another" : "Add an agent",
-      done: facts.myAgentCount > 0,
-    },
-  ];
+  );
+  steps.push({
+    id: "agent",
+    title: facts.isOwner ? "Connect your first agent" : "Connect your own agents",
+    detail: facts.myAgentCount > 0
+      ? `${facts.myAgentCount} connected. Add more any time.`
+      : "Claude, Muse and others join with one address.",
+    action: facts.myAgentCount > 0 ? "Add another" : "Add an agent",
+    done: facts.myAgentCount > 0,
+  });
   if (facts.canInvite) {
     const done = facts.otherMemberCount > 0 || facts.pendingInviteCount > 0;
     steps.push({

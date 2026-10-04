@@ -21,7 +21,7 @@ const emptyHousehold = createHouseholdObjectsState({ workspace_id: "", name: "Sh
 import AgentConnect from "../connect/AgentConnect.astro";
 import AgentHostPicker from "../connect/AgentHostPicker.astro";
 import Wordmark from "../Wordmark.astro";
-import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, PURPOSE_QUESTION } from "../../lib/household-access";
+import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, CREATE_PURPOSE_DETAILS, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
 import { enabledProvidersForBuild, signInDoors } from "../../lib/auth-providers";
@@ -145,7 +145,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           It's where your agents and the people you invite share lists, docs and messages.
         </p>
       </div>
-      <form class="dashboard__create-form" data-create-form>
+      <form class="dashboard__create-form" data-create-form novalidate>
         <input
           id="dashboard-workspace-name"
           name="workspace-name"
@@ -156,6 +156,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           required
           spellcheck="false"
         />
+        <fieldset class="dashboard__choice-cards" data-create-purpose-set>
+          <legend>{PURPOSE_QUESTION}</legend>
+          {(["shared", "personal"] as const).map((purpose) => (
+            <label class="dashboard__choice-card">
+              <input type="radio" name="create-purpose" value={purpose} data-create-purpose required />
+              <span>
+                <strong>{PURPOSE_COPY[purpose].label}</strong>
+                <small>{CREATE_PURPOSE_DETAILS[purpose]}</small>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        <p data-create-access>Your access: {CONTENT_ROLE_COPY.editor.label}. You can {CONTENT_ROLE_COPY.editor.detail.charAt(0).toLowerCase() + CONTENT_ROLE_COPY.editor.detail.slice(1)}</p>
+        <p data-create-personal-warning aria-live="polite"></p>
         <button class="dashboard__button dashboard__button--primary" type="submit" data-create-button>
           Create workspace
         </button>
@@ -544,9 +558,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
           <div class="dashboard__channel-body">
             <p class="dashboard__channel-receipt" role="status" aria-live="polite" data-channel-receipt hidden></p>
-            {/* THE SETUP CHECKLIST (redesign, 2026-10-04). A new workspace opens on three steps
-                instead of the old who-joins-first prompt: who can see it (which inviting and Lists &
-                docs both need), connect an agent, invite a person. Each step's done state is
+            {/* THE SETUP CHECKLIST (redesign, 2026-10-04). A new workspace opens on the needed steps:
+                connect an agent, invite a person (owners and admins), and choose access only
+                after a refused read. Each step's done state is
                 derived from facts the page already reads (site/src/lib/setup-checklist.ts);
                 nothing is stored. Exactly one Add-agent and one invite action live here. */}
             <section class="dashboard__channel-empty dashboard__setup" data-channel-view="no-agents" data-setup-checklist>
@@ -555,7 +569,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               </div>
               <p class="dashboard__eyebrow">Workspace ready</p>
               <h2>Set up <span data-setup-workspace>your workspace</span></h2>
-              <p class="dashboard__setup-progress" data-setup-progress>Three short steps.</p>
+              <p class="dashboard__setup-progress" data-setup-progress>A few short steps.</p>
               <ol class="dashboard__setup-steps">
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
@@ -624,8 +638,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   too), and an invite to a workspace that is not shared opens as unavailable
                   (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
               <p class="dashboard__invite-prerequisite">
-                Invites work only after you choose <strong>Me and people I invite</strong> in
-                Lists &amp; docs.
+                Invites work only in a workspace set to <strong>Me and people I invite</strong>.
                 <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
               </p>
               <form class="dashboard__invite-form" data-invite-form novalidate>
@@ -796,8 +809,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
                   Each of your agents needs your OK, here, for this workspace. An agent that lives
-                  in a chat app keeps it for 24 hours today; allow it again after that.
+                  in a chat app keeps it until you withdraw it. A computer agent keeps it until its key ends or you withdraw it.
                 </p>
+                <p data-household-agent-result hidden></p>
                 <ul class="dashboard__approval-list" data-household-agent-list></ul>
                 <p class="dashboard__approval-empty" data-household-agent-empty hidden>
                   None of your agents is connected to this workspace yet.
@@ -1274,7 +1288,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     CONTENT_OPERATION_LABELS,
     CONTENT_OPERATIONS,
     accessRefusalMessage,
+    withdrawRefusalMessage,
+    removedAgentLabel,
     approvalUntil,
+    PERSONAL_PURPOSE_WARNING,
     type HouseholdPurpose,
   } from "../../lib/household-access";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
@@ -1526,6 +1543,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     workspaceId: string;
     commandId: string;
     name: string;
+    /** Optional only for intents saved before purpose was asked at creation. */
+    purpose?: HouseholdPurpose;
+    permissionsCommandId?: string;
   }
 
   interface SignalCursor {
@@ -1692,9 +1712,29 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      */
     let channelReadGeneration = 0;
     let householdConnections: Record<string, unknown>[] = [];
+    const householdReceipts = new Map<string, string>();
+    /** Failed creation permissions keep setup available for this account/workspace until an ok read. */
+    const householdSetupNeeded = new Set<string>();
+    const householdSetupKey = (userId: string, workspaceId: string): string =>
+      `commonswarm:household-setup-needed:v1:${userId}:${workspaceId}`;
+    const needsHouseholdSetup = (userId: string, workspaceId: string): boolean => {
+      const key = householdSetupKey(userId, workspaceId);
+      if (householdSetupNeeded.has(key)) return true;
+      try { return window.localStorage.getItem(key) === "1"; } catch { return false; }
+    };
+    const setHouseholdSetupNeeded = (userId: string, workspaceId: string, needed: boolean): void => {
+      const key = householdSetupKey(userId, workspaceId);
+      if (needed) householdSetupNeeded.add(key);
+      else householdSetupNeeded.delete(key);
+      try {
+        if (needed) window.localStorage.setItem(key, "1");
+        else window.localStorage.removeItem(key);
+      } catch { /* The current page still retains the reminder when storage is unavailable. */ }
+    };
+    let removedAgents = new Map<string, string>();
     /**
      * The viewer's own Lists & docs access in the open workspace, as household_access last
-     * answered it. "unknown" until it answers; the setup checklist treats unknown as not done.
+     * answered it. Unknown reads keep a failed creation's setup step available.
      */
     let householdAccess: {
       workspaceId: string;
@@ -2104,6 +2144,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           workspaceId: parsed.workspaceId,
           commandId: parsed.commandId,
           name: parsed.name,
+          ...(parsed.purpose === "shared" || parsed.purpose === "personal"
+            ? { purpose: parsed.purpose, permissionsCommandId: typeof parsed.permissionsCommandId === "string" ? parsed.permissionsCommandId : undefined }
+            : {}),
         };
       } catch {
         return null;
@@ -2163,6 +2206,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         button.removeAttribute("aria-busy");
         button.textContent = "Create workspace";
       }
+      if (message === null) {
+        for (const radio of all<HTMLInputElement>("[data-create-purpose]")) { radio.checked = false; radio.disabled = false; }
+        syncCreatePurposeWarning();
+      }
       setCreateError(message);
       showPanel("create");
       window.requestAnimationFrame(() => {
@@ -2207,6 +2254,30 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           }))
           .filter((workspace) => workspace.id.length > 0));
         if (page.length < pageSize) return result;
+      }
+    };
+
+    const removedAgentNames = async (workspaceId: string): Promise<Map<string, string>> => {
+      const result = new Map<string, string>();
+      const api = client();
+      if (!api || sampleMode) return result;
+      try {
+        const pageSize = 100;
+        for (let offset = 0; offset < 200; offset += pageSize) {
+          const { data, error } = await api.schema("swarm_read").from("agent_principals")
+            .select("principal_id,name").eq("workspace_id", workspaceId)
+            .not("revoked_at", "is", null)
+            .order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1);
+          if (error) return new Map();
+          const page = data ?? [];
+          for (const row of page) {
+            if (typeof row.principal_id === "string" && typeof row.name === "string") result.set(row.principal_id, row.name);
+          }
+          if (page.length < pageSize) break;
+        }
+        return result;
+      } catch {
+        return new Map();
       }
     };
 
@@ -2993,10 +3064,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       return [...roster.agents, ...roster.members];
     };
 
+    const historicalAgentName = (principalId: string): string | null => {
+      const name = removedAgents.get(principalId);
+      return name === undefined ? null : removedAgentLabel(name);
+    };
+
     const entityName = (entity: EntityRef): string => {
       if (entity.kind === "agent") {
         const agent = agents.find((row) => row.principalId === entity.id);
-        if (!agent) return "Unknown agent";
+        if (!agent) return historicalAgentName(entity.id) ?? "Unknown agent";
         return identityDisplayLabel(
           { id: agent.principalId, name: agent.name },
           combinedIdentityRoster(),
@@ -4480,6 +4556,36 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           }
         }
         row.append(avatar, copy);
+        if (!sampleMode && agent.ownerUserId === session?.user.id) {
+          const connection = householdConnections.find((candidate) =>
+            candidate.principal_id === agent.principalId && connectionApproval(candidate));
+          const approval = connection ? connectionApproval(connection) : null;
+          if (approval) {
+            const accessLine = document.createElement("span");
+            accessLine.dataset.agentContentAccess = "";
+            accessLine.textContent = approval.expires_at === null
+              ? "Can use Lists & docs"
+              : `Can use Lists & docs. ${approvalUntil(approval.expires_at)}`;
+            copy.append(accessLine);
+          }
+          if (approval || householdReceipts.has(agent.principalId)) {
+            const receipt = document.createElement("p");
+            receipt.setAttribute("role", "status");
+            receipt.setAttribute("aria-live", "polite");
+            receipt.dataset.agentContentResult = "";
+            receipt.textContent = householdReceipts.get(agent.principalId) ?? "";
+            copy.append(receipt);
+            if (approval) {
+              const withdraw = document.createElement("button");
+              withdraw.type = "button";
+              withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw";
+              withdraw.textContent = "Withdraw Lists & docs";
+              withdraw.dataset.withdrawAgentAccess = agent.principalId;
+              withdraw.addEventListener("click", () => { void withdrawAgent(agent.principalId, agent.name, withdraw, receipt); });
+              copy.append(withdraw);
+            }
+          }
+        }
         /* A prompt carries a fresh credential for this identity, so it is narrower than
            the management gate: only the person who owns the agent gets this action.
            AgentConnect owns minting, dashboardAgentPrompt, one-time display, and copy. */
@@ -4676,6 +4782,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (search) search.value = "";
       renderDialogRoster();
       dialog.showModal();
+      if (!sampleMode) void loadHouseholdConnections();
       const add = one<HTMLButtonElement>("[data-add-agent-dialog]");
       const firstStop = add && !add.hidden ? add : search;
       window.requestAnimationFrame(() => firstStop?.focus({ preventScroll: true }));
@@ -4734,7 +4841,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const workspaceFileUploaderName = (file: WorkspaceFile): string =>
       file.uploadedByKind === "agent"
-        ? agents.find((agent) => agent.principalId === file.uploadedBy)?.name ?? "Former agent"
+        ? agents.find((agent) => agent.principalId === file.uploadedBy)?.name ?? historicalAgentName(file.uploadedBy) ?? "Former agent"
         : people.get(file.uploadedBy) ?? "Former member";
 
     const renderFiles = (): void => {
@@ -5465,7 +5572,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const authorName = authorEntity
           ? entityName(authorEntity)
           : people.get(signal.from) ??
-            (signal.fromKind === "user" ? "Team member" : "Unknown agent");
+            (signal.fromKind === "user" ? "Team member" : historicalAgentName(signal.from) ?? "Unknown agent");
         const avatar = document.createElement("span");
         avatar.className = "dashboard__message-avatar";
         avatar.textContent = initials(authorName);
@@ -5507,7 +5614,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } else {
           target.append(
             signal.toAgent !== null
-              ? "an agent"
+              ? historicalAgentName(signal.toAgent) ?? "an agent"
               : signal.to !== null
               ? "a workspace member"
               : "everyone",
@@ -6614,6 +6721,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const resetHouseholdSurface = (): void => {
       householdDashboard?.clear();
       householdConnections = [];
+      householdReceipts.clear();
+      const receipt = one<HTMLElement>("[data-channel-receipt]");
+      if (receipt?.dataset.setupWorkspaceId) {
+        receipt.textContent = "";
+        receipt.hidden = true;
+        delete receipt.dataset.setupWorkspaceId;
+      }
+      removedAgents = new Map();
       householdAccessGeneration += 1;
       householdAccess = { workspaceId: "", status: "unknown", contentRole: null };
       householdAccessRequestedFor = "";
@@ -6741,7 +6856,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          a review arm. */
       const channelGeneration = ++channelReadGeneration;
       try {
-        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
+        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels, nextRemovedAgents] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
           pendingMemberInvites(selected.id),
@@ -6761,9 +6876,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             (value) => ({ value, failed: false }),
             () => ({ value: [] as WorkspaceChannel[], failed: true }),
           ),
+          removedAgentNames(selected.id),
         ]);
         if (version !== requestVersion) return;
         agents = nextAgents;
+        removedAgents = nextRemovedAgents;
         people = nextRoster.names;
         members = nextRoster.members;
         pendingInvites = nextInvites;
@@ -7042,23 +7159,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const viewerRole = (): Member["role"] | null =>
       members.find((member) => member.userId === session?.user.id)?.role ?? null;
 
-    /** Remembered per person and workspace after a committed confirmation, so approving an agent
-        does not ask again who can see the workspace. A convenience only: the server checks. */
+    /** Remember the person's committed choice per account and workspace; the server checks it. */
     const purposeKey = (workspaceId: string): string =>
       `commonswarm:household-purpose:${session?.user.id ?? ""}:${workspaceId}`;
-    const rememberedPurpose = (workspaceId: string): HouseholdPurpose | null => {
-      try {
-        const value = window.localStorage.getItem(purposeKey(workspaceId));
-        return value === "shared" || value === "personal" ? value : null;
-      } catch {
-        return null;
-      }
-    };
     const rememberPurpose = (workspaceId: string, purpose: HouseholdPurpose): void => {
       try {
         window.localStorage.setItem(purposeKey(workspaceId), purpose);
       } catch {
-        // Storage can be unavailable; the next approval simply asks the server again.
+        // Storage can be unavailable; the server keeps the committed choice.
       }
     };
 
@@ -7091,6 +7199,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const next = await readHouseholdAccess(scope);
       if (!accessReads.isLatest(ticket) || !householdCurrent(scope)) return;
       householdAccess = next;
+      if (next.status === "ok") {
+        setHouseholdSetupNeeded(scope.session.user.id, scope.workspaceId, false);
+        const receipt = one<HTMLElement>("[data-channel-receipt]");
+        if (receipt?.dataset.setupWorkspaceId === scope.workspaceId) {
+          receipt.textContent = "";
+          receipt.hidden = true;
+          delete receipt.dataset.setupWorkspaceId;
+        }
+      }
       renderHouseholdAccess();
       renderSetupChecklist();
     };
@@ -7116,6 +7233,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
     };
 
+    /** Only a complete, active server approval may expose withdrawal. */
+    const connectionApproval = (connection: Record<string, unknown>): { operations: string[]; expires_at: string | null } | null => {
+      const approval = connection.approval as { operations?: unknown; expires_at?: unknown } | null;
+      if (!approval || !Array.isArray(approval.operations) || !approval.operations.every((value) => typeof value === "string")) return null;
+      const expiry = approval.expires_at;
+      if (expiry !== null && (typeof expiry !== "string" || !Number.isFinite(Date.parse(expiry)) || Date.parse(expiry) <= Date.now())) return null;
+      return { operations: approval.operations, expires_at: expiry };
+    };
+    const approvalDescription = (approval: { operations: string[]; expires_at: string | null }): string => {
+      return approvalUntil(approval.expires_at);
+    };
+
     /** One approval card per agent this person owns, from household_connections. */
     const renderAgentApprovals = (): void => {
       const list = one<HTMLUListElement>("[data-household-agent-list]");
@@ -7127,6 +7256,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       for (const connection of householdConnections) {
         const principalId = String(connection.principal_id ?? "");
         const agentName = String(connection.name ?? "Your agent");
+        const approval = connectionApproval(connection);
         const row = document.createElement("li");
         row.className = "dashboard__approval";
         row.dataset.approvalAgent = principalId;
@@ -7155,7 +7285,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           input.type = "checkbox";
           input.value = operation;
           input.dataset.approvalOperation = "";
-          input.checked = true;
+          input.checked = approval ? approval.operations.includes(operation) : true;
           input.disabled = operation === "read";
           label.append(input, document.createTextNode(` ${CONTENT_OPERATION_LABELS[operation]}`));
           choices.append(label);
@@ -7163,11 +7293,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const allow = document.createElement("button");
         allow.type = "button";
         allow.className = "dashboard__button dashboard__button--primary";
-        allow.textContent = "Allow";
+        allow.textContent = approval ? "Save" : "Allow";
         const status = document.createElement("p");
         status.className = "dashboard__approval-status";
         status.setAttribute("role", "status");
         status.setAttribute("aria-live", "polite");
+        status.textContent = householdReceipts.get(principalId) ?? (approval ? approvalDescription(approval) : "");
         allow.addEventListener("click", () => {
           const operations = [...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
             .filter((input) => input.checked)
@@ -7175,6 +7306,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           void approveAgent(connection, operations, allow, status);
         });
         row.append(orb, copy, choices, allow, status);
+        if (approval) {
+          const withdraw = document.createElement("button");
+          withdraw.type = "button";
+          withdraw.className = "dashboard__button dashboard__button--secondary dashboard__approval-withdraw";
+          withdraw.textContent = "Withdraw access";
+          withdraw.dataset.withdrawApproval = principalId;
+          withdraw.addEventListener("click", () => { void withdrawAgent(principalId, agentName, withdraw, status); });
+          row.append(withdraw);
+        }
         list.append(row);
       }
     };
@@ -7192,7 +7332,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           { kind: "household_connections" },
           { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
         );
-        next = result.body.status === "ok" && Array.isArray(result.body.connections)
+        next = result.status === 200 && result.body.status === "ok" && Array.isArray(result.body.connections)
           ? result.body.connections as Record<string, unknown>[]
           : [];
       } catch {
@@ -7202,14 +7342,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!connectionReads.isLatest(ticket) || !householdCurrent(scope)) return;
       householdConnections = next;
       renderAgentApprovals();
+      renderDialogRoster();
     };
 
-    /** household_permissions for one agent. The purpose must match the workspace's. The
-        command also re-records the person's own role, so the role sent is the one a fresh
-        household_access read returns just before the approval, never a cached one: another
-        device may have changed it (R2 review). The remaining race between that read and the
-        approval needs a server operation that approves an agent without touching the person's
-        role (REDESIGN.md 8.1). */
+    /** Approve only the agent; the server reads the person's access and workspace purpose. */
     const approveAgent = async (
       connection: Record<string, unknown>,
       operations: string[],
@@ -7217,7 +7353,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       status: HTMLElement,
     ): Promise<void> => {
       const scope = householdScope();
-      if (!scope) return;
+      if (!scope || button.disabled) return;
       button.disabled = true;
       status.textContent = "Saving…";
       const settle = (message: string): void => {
@@ -7225,22 +7361,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         status.textContent = message;
       };
       try {
-        /* The approval's own read decides the role it sends; a concurrent read elsewhere on the
-           page cannot hand it a stale one (R2b review). */
-        const access = await readHouseholdAccess(scope);
-        if (!householdCurrent(scope)) return;
-        const role = access.status === "ok" ? access.contentRole : null;
-        if (!role) {
-          settle("Confirm your own access first. Nothing was changed.");
-          return;
-        }
-        const send = (purpose: HouseholdPurpose) => postCommand(
+        const result = await postCommand(
           scope.session,
           uuid(),
           {
-            kind: "household_permissions",
-            purpose,
-            content_role: role,
+            kind: "household_approve_connection",
             connection: {
               kind: connection.kind,
               connection_id: connection.connection_id,
@@ -7252,30 +7377,56 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
           "The result is unknown. Reload Lists & docs before allowing again.",
         );
-        /* Access is confirmed, so the workspace's purpose already exists and a mismatch
-           refusal changes nothing; trying the other value once finds it without a read. */
-        const first: HouseholdPurpose = rememberedPurpose(scope.workspaceId) ?? "shared";
-        let result = await send(first);
-        let purpose = first;
         if (!householdCurrent(scope)) return;
-        if (result.body.status === "refused" && result.body.reason === "workspace_boundary_mismatch") {
-          purpose = first === "shared" ? "personal" : "shared";
-          result = await send(purpose);
-          if (!householdCurrent(scope)) return;
-        }
         if (result.status === 200 && result.body.status === "committed") {
-          rememberPurpose(scope.workspaceId, purpose);
-          settle(approvalUntil(typeof result.body.expires_at === "string" ? result.body.expires_at : null));
-          button.textContent = "Allow again";
+          const message = approvalUntil(typeof result.body.expires_at === "string" ? result.body.expires_at : null);
+          householdReceipts.delete(String(connection.principal_id));
+          settle(message);
+          await loadHouseholdConnections();
         } else {
           settle(accessRefusalMessage(result.body.reason));
         }
-      } catch (error) {
-        settle(error instanceof Error && error.message
-          ? error.message
-          : "The result is unknown. Reload Lists & docs before allowing again.");
+      } catch {
+        settle("The result is unknown. Reload Lists & docs before allowing again.");
       } finally {
-        // The card is rebuilt on every workspace change, so this only touches its own button.
+        button.disabled = false;
+      }
+    };
+
+    /** Withdrawal leaves the agent connected and is audited by the command path. */
+    const withdrawAgent = async (
+      principalId: string,
+      agentName: string,
+      button: HTMLButtonElement,
+      status: HTMLElement,
+    ): Promise<void> => {
+      const scope = householdScope();
+      if (!scope || button.disabled) return;
+      if (!window.confirm(`Withdraw Lists & docs access for ${agentName}? It can no longer see or change lists and docs here until you allow it again.`)) return;
+      button.disabled = true;
+      status.textContent = "Withdrawing…";
+      const settle = (message: string): void => {
+        if (householdCurrent(scope)) status.textContent = message;
+      };
+      try {
+        const result = await postCommand(
+          scope.session, uuid(),
+          { kind: "household_withdraw_connection", principal_id: principalId },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+          "The result is unknown. Reload Lists & docs to check this agent's access.",
+        );
+        if (!householdCurrent(scope)) return;
+        if (result.status === 200 && result.body.status === "committed") {
+          const message = `Withdrawn. ${agentName} can no longer use Lists & docs here.`;
+          householdReceipts.set(principalId, message);
+          settle(message);
+          await loadHouseholdConnections();
+        } else {
+          settle(withdrawRefusalMessage(result.body.reason));
+        }
+      } catch {
+        settle("The result is unknown. Reload Lists & docs to check this agent's access.");
+      } finally {
         button.disabled = false;
       }
     };
@@ -7355,14 +7506,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           audience: [...people.values()],
           names: {
             people: Object.fromEntries(people),
-            agents: Object.fromEntries(agents.map((agent) => [agent.principalId, agent.name])),
+            agents: Object.fromEntries([...removedAgents].map(([id, name]) => [id, removedAgentLabel(name)]).concat(agents.map((agent) => [agent.principalId, agent.name]))),
           },
         },
         householdCall(activeSession, selectedId),
       );
     };
 
-    /** The setup checklist, from facts this page already holds. Nothing is stored. */
+    /** The setup checklist, from current reads and a reminder of unsettled creation setup. */
     const renderSetupChecklist = (): void => {
       const root = one<HTMLElement>("[data-setup-checklist]");
       if (!root || sampleMode) return;
@@ -7385,6 +7536,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         accessConfirmed: householdAccess.workspaceId === activeWorkspaceId
           ? householdAccess.status === "ok" ? true : householdAccess.status === "refused" ? false : null
           : null,
+        accessNeedsSetup: needsHouseholdSetup(me, activeWorkspaceId),
         myAgentCount: agents.filter((agent) => agent.ownerUserId === me).length,
         otherMemberCount: members.filter((member) => member.userId !== me).length,
         pendingInviteCount: pendingInvites.length,
@@ -8055,7 +8207,34 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       returnToChannel();
     };
 
-    const createFromIntent = async (value: Session, intent: CreateIntent): Promise<void> => {
+    const syncCreatePurposeWarning = (): void => {
+      const warning = one<HTMLElement>("[data-create-personal-warning]");
+      if (warning) warning.textContent = one<HTMLInputElement>("[data-create-purpose]:checked")?.value === "personal"
+        ? PERSONAL_PURPOSE_WARNING : "";
+    };
+
+    /** Creation and its permissions receipt have separate stable command IDs. A failed
+        transport keeps the intent, so reload can ask for the same result without guessing. */
+    const recordCreatePermissions = async (value: Session, intent: CreateIntent): Promise<"committed" | "refused" | "unknown"> => {
+      if (!intent.purpose) return "committed"; // Intents saved by the old creation form.
+      if (!intent.permissionsCommandId) {
+        intent.permissionsCommandId = uuid();
+        writeCreateIntent(value.user.id, intent);
+      }
+      try {
+        const result = await postCommand(
+          value, intent.permissionsCommandId,
+          { kind: "household_permissions", purpose: intent.purpose, content_role: "editor" },
+          { workspace_id: intent.workspaceId, stream: { kind: "workspace" } },
+        );
+        return result.status === 200 && result.body.status === "committed" ? "committed"
+          : result.body.status === "refused" ? "refused" : "unknown";
+      } catch {
+        return "unknown";
+      }
+    };
+
+    const createFromIntent = async (value: Session, intent: CreateIntent, resumeOnBoot = false): Promise<void> => {
       const version = requestVersion;
       const userId = value.user.id;
       if (activeCreate?.version === version && activeCreate.userId === userId) return;
@@ -8069,6 +8248,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         input.value = intent.name;
         input.disabled = true;
       }
+      for (const radio of all<HTMLInputElement>("[data-create-purpose]")) {
+        radio.checked = radio.value === intent.purpose;
+        radio.disabled = true;
+      }
+      syncCreatePurposeWarning();
       if (button) {
         button.disabled = true;
         button.setAttribute("aria-busy", "true");
@@ -8076,14 +8260,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       setCreateError(null);
       try {
-        const made = await createWorkspace(
+        const existing = workspaces.find((workspace) => workspace.id === intent.workspaceId);
+        const made = existing ? { workspaceId: existing.id, name: existing.name } : await createWorkspace(
           value,
           intent.commandId,
           intent.workspaceId,
           intent.name,
         );
         if (!isCurrent()) return;
-        clearCreateIntent(value.user.id);
+        const permissions = await recordCreatePermissions(value, intent);
+        if (!isCurrent()) return;
+        if (permissions === "committed" && intent.purpose) rememberPurpose(made.workspaceId, intent.purpose);
+        // Boot consumes the saved intent after one permissions attempt, even during an outage.
+        // A submit with an unknown result still saves the intent for that one reload attempt.
+        if (resumeOnBoot || permissions !== "unknown") clearCreateIntent(value.user.id);
+        setHouseholdSetupNeeded(userId, made.workspaceId, permissions !== "committed");
         const madeWorkspace = {
           id: made.workspaceId,
           name: made.name,
@@ -8094,7 +8285,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ...workspaces.filter((workspace) => workspace.id !== made.workspaceId),
         ];
         if (input) input.disabled = false;
-        await openWorkspace(made.workspaceId);
+        const opening = openWorkspace(made.workspaceId);
+        const openedVersion = requestVersion;
+        const openedGeneration = householdAccessGeneration;
+        await opening;
+        if (requestVersion === openedVersion && householdAccessGeneration === openedGeneration && session?.user.id === userId && activeWorkspaceId === made.workspaceId && permissions !== "committed" && needsHouseholdSetup(userId, made.workspaceId)) {
+          const receipt = one<HTMLElement>("[data-channel-receipt]");
+          if (receipt) {
+            receipt.dataset.setupWorkspaceId = made.workspaceId;
+            receipt.textContent = "Your workspace is ready. Lists & docs is not set up yet. Choose who can use it in the steps below.";
+            receipt.hidden = false;
+          }
+          void refreshHouseholdAccess();
+        }
       } catch (error) {
         if (!isCurrent()) return;
         renderCreate(
@@ -8109,6 +8312,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (activeCreate === marker) activeCreate = null;
         if (!isCurrent()) return;
         if (input) input.disabled = false;
+        for (const radio of all<HTMLInputElement>("[data-create-purpose]")) radio.disabled = false;
         if (button) {
           button.disabled = false;
           button.removeAttribute("aria-busy");
@@ -8421,11 +8625,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           resetWorkspaceSessionState();
           const pending = readCreateIntent(session.user.id);
           renderCreate(session);
-          if (pending) await createFromIntent(session, pending);
+          if (pending) await createFromIntent(session, pending, true);
           return;
         }
         const pending = readCreateIntent(session.user.id);
         if (pending && workspaces.some((workspace) => workspace.id === pending.workspaceId)) {
+          if (pending.purpose) {
+            await createFromIntent(session, pending, true);
+            return;
+          }
           clearCreateIntent(session.user.id);
         }
         /* ?w= names the workspace to open. It is honoured only when it is in this
@@ -8580,6 +8788,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     });
 
+    for (const radio of all<HTMLInputElement>("[data-create-purpose]")) {
+      radio.addEventListener("change", syncCreatePurposeWarning);
+    }
+
     one<HTMLFormElement>("[data-create-form]")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!session) return;
@@ -8594,13 +8806,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         input?.focus();
         return;
       }
+      const purpose = one<HTMLInputElement>("[data-create-purpose]:checked")?.value;
+      if (purpose !== "shared" && purpose !== "personal") {
+        setCreateError("Choose who can use Lists & docs here.");
+        one<HTMLInputElement>("[data-create-purpose]")?.focus();
+        return;
+      }
       const savedIntent = readCreateIntent(session.user.id);
-      const intent: CreateIntent = savedIntent?.name === name
+      const intent: CreateIntent = savedIntent?.name === name && savedIntent.purpose === purpose
         ? savedIntent
         : {
             workspaceId: uuid(),
             commandId: uuid(),
+            permissionsCommandId: uuid(),
             name,
+            purpose,
           };
       writeCreateIntent(session.user.id, intent);
       await createFromIntent(session, intent);
@@ -10740,7 +10960,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   .dashboard__email input,
-  .dashboard__create-form input {
+  .dashboard__create-form input[type="text"] {
     min-block-size: 2.75rem;
     inline-size: 100%;
     padding: var(--s-3) var(--s-4);
@@ -10814,9 +11034,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__create-form {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
   }
+
+  .dashboard__create-form > p { margin: 0; }
+  .dashboard__create-form [data-create-personal-warning] { color: var(--text-muted); }
 
   .dashboard__gateway--create h1 {
     max-inline-size: 22ch;
@@ -12599,6 +12822,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__roster-dialog-list .dashboard__agent {
     grid-template-columns: auto minmax(0, 1fr) auto;
     border-radius: var(--radius-sm);
+  }
+
+  .dashboard__agent-content-withdraw {
+    justify-self: start;
+    text-align: start;
+    white-space: normal;
   }
 
   .dashboard__icon-button {
@@ -15310,7 +15539,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__message-avatar.dashboard__avatar--tinted,
   .dashboard__entity-avatar.dashboard__avatar--tinted,
   .dashboard__invite-form input,
-  .dashboard__create-form input,
+  .dashboard__create-form input[type="text"],
   .dashboard__roster-dialog-search {
     border-color: transparent;
   }
@@ -15668,7 +15897,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     grid-template-areas:
       "orb copy allow"
       "orb choices choices"
-      "orb status status";
+      "orb status status"
+      "orb withdraw withdraw";
     align-items: center;
     column-gap: var(--s-3);
     row-gap: var(--s-2);
@@ -15682,6 +15912,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__approval-copy small { color: var(--text-muted); font-size: var(--t-xs); }
   .dashboard__approval > .dashboard__button { grid-area: allow; }
   .dashboard__approval-status { grid-area: status; }
+  .dashboard__approval > .dashboard__approval-withdraw { grid-area: withdraw; justify-self: start; }
 
   .dashboard__approval-choices {
     grid-area: choices;
@@ -15858,7 +16089,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         "orb copy"
         "orb choices"
         "orb allow"
-        "orb status";
+        "orb status"
+        "orb withdraw";
     }
 
     .dashboard__approval > .dashboard__button {

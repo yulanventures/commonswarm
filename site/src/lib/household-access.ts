@@ -34,8 +34,14 @@ export const PURPOSE_COPY: Readonly<Record<HouseholdPurpose, { label: string; de
   personal: {
     label: "Just me",
     detail:
-      "Only you can use Lists & docs here. Invitations to this workspace will not work, and this cannot be changed later. People already in it still see its messages and files.",
+      "Only you can use Lists & docs here. Invitations to this workspace will not work, and this cannot be changed later. People already in it still see its messages and files. To share with people later, create another workspace.",
   },
+});
+
+/** Creation describes the future audience; the legacy access card describes existing members. */
+export const CREATE_PURPOSE_DETAILS: Readonly<Record<HouseholdPurpose, string>> = Object.freeze({
+  shared: "You and the people you invite can see and use Lists & docs, including their history.",
+  personal: "Only you can use Lists & docs. Nobody can be invited to this workspace.",
 });
 
 export const CONTENT_ROLE_COPY: Readonly<Record<HouseholdContentRole, { label: string; detail: string }>> = Object.freeze({
@@ -66,6 +72,7 @@ const REFUSALS: Readonly<Record<string, string>> = Object.freeze({
   human_confirmation_required: "Sign in again, then confirm. Nothing was changed.",
   connection_access_refused:
     "That agent's connection is no longer active. Connect it again from its app, then allow it here.",
+  content_consent_required: "Confirm your own access to Lists & docs first. Nothing was changed.",
   invalid_connection_consent: "Choose at least See lists and docs for the agent. Nothing was changed.",
   invalid_request: "Choose both options, then confirm. Nothing was changed.",
   request_id_reused: "That confirmation was already sent. Reload Lists & docs to see the result.",
@@ -78,10 +85,10 @@ export function accessRefusalMessage(reason: unknown): string {
 }
 
 /**
- * The approval's end, as a person reads it. Hosted approvals end after 24 hours today
- * (supabase/functions/command/household-permissions.ts); local ones end with their key.
+ * Hosted approvals last until withdrawn; local approvals end with their key.
  */
 export function approvalUntil(expiresAt: string | null | undefined, now = Date.now()): string {
+  if (expiresAt === null) return "Allowed until you withdraw it.";
   if (!expiresAt) return "Allowed.";
   const end = new Date(expiresAt);
   if (Number.isNaN(end.getTime())) return "Allowed.";
@@ -94,3 +101,18 @@ export function approvalUntil(expiresAt: string | null | undefined, now = Date.n
     : new Intl.DateTimeFormat(undefined, { weekday: "long", month: "short", day: "numeric" }).format(end);
   return `Allowed until ${time} ${day}. Allow it again after that.`;
 }
+
+/** Withdrawal has a different owner check from approval. */
+export function withdrawRefusalMessage(reason: unknown): string {
+  return reason === "connection_access_refused"
+    ? "Only the person who connected this agent can withdraw its Lists & docs access. Nothing was changed."
+    : accessRefusalMessage(reason);
+}
+
+/** History stays on the old identity even when its name is used again. */
+export function removedAgentLabel(name: string): string {
+  return `${name} (removed)`;
+}
+
+export const PERSONAL_PURPOSE_WARNING =
+  "Just me cannot be changed later, and nobody can be invited to this workspace. To share with people later, create another workspace.";

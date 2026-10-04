@@ -16,6 +16,9 @@ test('attribution reads names when the dashboard supplies them, and keeps the ID
   const person = { user_id: 'person-b', principal_id: null, run_id: null, connection_id: null, grant_id: null };
   assert.equal(householdAttribution(agent, names), 'Claude, Tom’s agent');
   assert.equal(householdAttribution(person, names), 'Mei');
+  const removed = { people: {}, agents: { 'agent-a': 'Juniper (removed)' } };
+  assert.equal(householdAttribution(agent, removed), 'Juniper (removed)');
+  assert.match(renderHouseholdObjectHistory(householdObjectsFixture().objects[1]!, false, removed), /Juniper \(removed\)/);
   // Control: without names, or with an unknown agent, the unambiguous ID form remains.
   assert.equal(householdAttribution(agent), 'Agent agent-a for person-a');
   assert.equal(householdAttribution({ ...agent, principal_id: 'agent-z' }, names), 'Agent agent-z for person-a');
