@@ -283,6 +283,7 @@ function w2Fixture() {
     human_token_exp: Math.floor(Date.now() / 1000) + 3600,
   }), { mode: 0o600 });
   writeFileSync(join(proof, 'oauth-state.json'), JSON.stringify({ current: 'rt-0', access: null, n: 0, revoked: false, calls: {} }));
+  writeFileSync(join(proof, 'probe-staged.txt'), '2026-10-04T00:00:00Z\n'); // written by the ai-w2-stage-probes upload
   const migrations = w2Versions.map(version => {
     const filename = readdirSync('supabase/migrations').find(name => name.startsWith(version + '_'))!;
     return { version, file: filename, sha256: digest(readFileSync(join('supabase/migrations', filename))) };
@@ -345,7 +346,8 @@ class Opener:
             return Response(d)
         if url.endswith('oauth-protected-resource/mcp'): return Response({'resource':I+'/mcp'})
         if url==I+'/token':
-            form=dict(urllib.parse.parse_qsl(req.data.decode())); count(s,'refresh'); count(s,('refresh-after-revoke' if s['revoked'] else 'refresh:'+point)); save(s)
+            form=dict(urllib.parse.parse_qsl(req.data.decode())); count(s,'refresh'); count(s,('refresh-after-revoke' if s['revoked'] or s['calls'].get('revoke') else 'refresh:'+point)); save(s)
+            if os.environ.get('TOKEN_TRANSPORT_AFTER_REVOKE') and s['calls'].get('revoke'): raise urllib.error.URLError('synthetic lost response')
             assert form['grant_type']=='refresh_token' and form['client_id']=='dcr-probe-client' and form['resource']==I+'/mcp'
             if form['refresh_token']!=s['current'] and form['refresh_token'] in s.get('consumed',[]): s['revoked']=True; save(s)  # oidc-provider: reuse of a consumed token revokes the grant
             if os.environ.get('REFRESH_FAIL_POINT')==point or s['revoked'] or form['refresh_token']!=s['current']: refuse(url,400,{'error':'invalid_grant'})
@@ -1516,83 +1518,119 @@ test('admin release plan: W2 pre-fence probe failure or a missing revocation_end
 
 // ai-w2-stage-probes (Mac): validation before any write, one ssh upload, digest-only check, guarded removal.
 test('admin release plan: W2 stage-probes validates the credential file, uploads it once and removes the local copy', () => {
-  const root = mkdtempSync(join(scratch, 'stage-probes-')), work = join(root, 'c1-run'), shim = join(root, 'shim'), box = join(root, 'box');
-  mkdirSync(work); mkdirSync(shim); mkdirSync(box);
-  writeFileSync(join(shim, 'ssh'), `#!/bin/bash\nprintf '%s\\n' "$*" >>'${join(root, 'ssh-calls')}'\ncase "\${@: -1}" in *ordinary-probes.json*install*/dev/stdin*) ;; *) exit 9;; esac\ncat >'${join(box, 'ordinary-probes.json')}'\nif test -n "\${BOX_CORRUPT:-}"; then printf x >>'${join(box, 'ordinary-probes.json')}'; fi\nprintf '600 %s\\n' "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' '${join(box, 'ordinary-probes.json')}')"\n`, { mode: 0o700 });
-  writeFileSync(join(shim, 'rm'), `#!/bin/bash\nprintf '%s\\n' "$*" >>'${join(root, 'rm-calls')}'\nexec /bin/rm "$@"\n`, { mode: 0o700 });
-  if (!/exit 9;; esac/.test(readFileSync(join(shim, 'ssh'), 'utf8'))) throw new Error('ssh stub shape');
-  writeFileSync(join(shim, 'ssh'), readFileSync(join(shim, 'ssh'), 'utf8').replace('cat >', 'if test -n "${SSH_FAIL:-}"; then cat >/dev/null; exit 255; fi\ncat >'), { mode: 0o700 });
-  // Issuer boundary for the Mac-side revoke (RFC 7009 + one refresh that must be rejected).
-  const pyShim = join(root, 'pyshim'); mkdirSync(pyShim);
-  writeFileSync(join(pyShim, 'sitecustomize.py'), `import io,json,os,urllib.error,urllib.parse,urllib.request
+  // A fresh fixture root per case: the test itself never deletes plan-owned files.
+  const block_ = block('ai-w2-stage-probes');
+  const stageCase = (creds: Record<string, unknown> | string, mode = 0o600, env: Record<string, string> = {}) => {
+    const root = mkdtempSync(join(scratch, 'stage-probes-')), work = join(root, 'c1-run'), shim = join(root, 'shim'), box = join(root, 'box'), pyShim = join(root, 'pyshim');
+    for (const d of [work, shim, box, pyShim]) mkdirSync(d);
+    // ssh: the upload installs stdin and writes the probe-staged marker; the proof write records the box proof.
+    writeFileSync(join(shim, 'ssh'), `#!/bin/bash
+printf '%s\\n' "$*" >>'${join(root, 'ssh-calls')}'
+case "\${@: -1}" in
+ *ordinary-probes.json*install*/dev/stdin*)
+  if test -n "\${SSH_FAIL:-}"; then cat >/dev/null; exit 255; fi
+  cat >'${join(box, 'ordinary-probes.json')}'; date >'${join(box, 'probe-staged.txt')}'
+  if test -n "\${BOX_CORRUPT:-}"; then printf x >>'${join(box, 'ordinary-probes.json')}'; fi
+  printf '600 %s\\n' "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' '${join(box, 'ordinary-probes.json')}')";;
+ *dcr-probe-revoked.json*) python3 -c 'import json,sys; c=sys.argv[1].split(" ")[-1]; print("box proof write recorded")' "$*" >/dev/null; printf 'written\\n' >'${join(box, 'proof-write')}';;
+ *) exit 9;;
+esac
+`, { mode: 0o700 });
+    // Deletion guard stand-in, as the dry-run fixtures stub the host guard: only the exact local
+    // credential path, only "--", never -r/-f; it can be told to refuse.
+    writeFileSync(join(shim, 'rm'), `#!/bin/bash
+printf '%s\\n' "$*" >>'${join(root, 'rm-calls')}'
+if test -n "\${RM_REFUSE:-}"; then printf 'rm guard refused %s\\n' "$2" >&2; exit 1; fi
+if test "$#" != 2 || test "$1" != -- || test "$2" != '${join(work, 'probe-credentials-W2-Abc123.json')}'; then printf 'rm guard refused unexpected operands\\n' >&2; exit 1; fi
+exec /bin/rm -- "$2"
+`, { mode: 0o700 });
+    writeFileSync(join(pyShim, 'sitecustomize.py'), `import io,json,os,urllib.error,urllib.parse,urllib.request
 LOG=${JSON.stringify(join(root, 'issuer-calls'))}; I='https://mcp.commonswarm.com'
 class R:
-    def __init__(self,data,status=200): self.data=data; self.status=status
+    def __init__(self,data,status=200,raw=None): self.data=data; self.status=status; self.raw=raw
     def __enter__(self): return self
     def __exit__(self,*a): pass
-    def read(self,n): return json.dumps(self.data).encode()
+    def read(self,n): return self.raw if self.raw is not None else json.dumps(self.data).encode()
 class O:
     def open(self,req,timeout):
         url=req.full_url; form=dict(urllib.parse.parse_qsl(req.data.decode())) if req.data else {}
-        with open(LOG,'a') as f: f.write(url+' '+form.get('grant_type',form.get('token_type_hint',''))+'\\n')
-        state=os.path.exists(LOG+'.revoked')
-        if url.endswith('oauth-authorization-server'): return R({'issuer':I,'token_endpoint':I+'/token','revocation_endpoint':I+'/revoke'})
+        with open(LOG,'a') as f: f.write(url+'\\n')
+        revoked=os.path.exists(LOG+'.revoked')
+        if url.endswith('oauth-authorization-server'):
+            if os.environ.get('DISCOVERY_MALFORMED'): return R(None,200,b'not json')
+            return R({'issuer':I,'token_endpoint':I+'/token','revocation_endpoint':I+'/revoke'})
         if url==I+'/revoke':
             if not os.environ.get('REVOKE_NOOP'): open(LOG+'.revoked','w').close()
             return R({})
         if url==I+'/token':
-            if state: raise urllib.error.HTTPError(url,400,'x',{},io.BytesIO(b'{"error":"invalid_grant"}'))
+            if revoked: raise urllib.error.HTTPError(url,400,'x',{},io.BytesIO(b'{"error":"invalid_grant"}'))
             return R({'token_type':'Bearer','access_token':'at-new','refresh_token':'rt-rotated','expires_in':300,'scope':'mcp'})
         raise AssertionError('unmodelled '+url)
 urllib.request.build_opener=lambda *a: O()
 `);
-  const source = block('ai-w2-stage-probes').split('/Users/yulanbot/.local/bin/rm').join(join(shim, 'rm')).split('/Users/yulanbot/work/c1-run/').join(work + '/');
-  assert.ok(!source.includes('/Users/yulanbot/'), 'fixture rewrites every Mac literal');
-  const input = { ...base(), window: 'W2', rollback_decision: 'retain-additive', probe_workspace_id: 'c2ea0541-f56d-4c73-bf71-56c5405c4934' };
-  const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify(input));
-  const end = Math.floor(Date.parse(input.window_end_utc as string) / 1000);
-  const good = () => ({ release_sha: sha, window_id: 'Abc123', workspace_id: 'c2ea0541-f56d-4c73-bf71-56c5405c4934', mcp_client_id: 'dcr-probe-client',
+    const input = { ...base(), window: 'W2', rollback_decision: 'retain-additive', probe_workspace_id: 'c2ea0541-f56d-4c73-bf71-56c5405c4934' };
+    const inputs = join(root, 'inputs.json'); writeFileSync(inputs, JSON.stringify(input));
+    const file = join(work, 'probe-credentials-W2-Abc123.json');
+    const end = Math.floor(Date.parse(input.window_end_utc as string) / 1000);
+    const value = typeof creds === 'string' ? creds : JSON.stringify({ ...goodCreds(end), ...creds });
+    writeFileSync(file, value, { mode }); chmodSync(file, mode);
+    const source = block_.split('/Users/yulanbot/.local/bin/rm').join(join(shim, 'rm')).split('/Users/yulanbot/work/c1-run/').join(work + '/');
+    assert.ok(!source.includes('/Users/yulanbot/'), 'fixture rewrites every Mac literal');
+    const out = run(source, { INPUTS_FILE: inputs, PLAN_FILE: planPath, PATH: shim + ':' + process.env.PATH, PYTHONPATH: pyShim, ...env });
+    const lines = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), 'utf8').trim().split('\n') : [];
+    return { out, root, box, file, end, lines, issuer: () => lines('issuer-calls').map(l => l.replace('https://mcp.commonswarm.com', '')) };
+  };
+  const goodCreds = (end: number) => ({ release_sha: sha, window_id: 'Abc123', workspace_id: 'c2ea0541-f56d-4c73-bf71-56c5405c4934', mcp_client_id: 'dcr-probe-client',
     mcp_refresh_token: 'rt-secret', mcp_resource: 'https://mcp.commonswarm.com/mcp', human_access_token: 'human-secret', human_token_exp: end + 300 });
-  const file = join(work, 'probe-credentials-W2-Abc123.json');
-  const stageRun = (creds: Record<string, unknown> | string, mode = 0o600, env: Record<string, string> = {}) => {
-    for (const f of [file, join(box, 'ordinary-probes.json'), join(root, 'ssh-calls'), join(root, 'rm-calls'), join(root, 'issuer-calls'), join(root, 'issuer-calls.revoked')]) if (existsSync(f)) rmSync(f);
-    writeFileSync(file, typeof creds === 'string' ? creds : JSON.stringify(creds), { mode }); chmodSync(file, mode);
-    return run(source, { INPUTS_FILE: inputs, PATH: shim + ':' + process.env.PATH, PYTHONPATH: pyShim, ...env });
+  // Positive: one ssh call, bytes and marker on the box, local copy removed through the guard.
+  const ok = stageCase({}); assert.equal(ok.out.status, 0, ok.out.stderr);
+  assert.match(ok.out.stdout, /PASS ai-w2-stage-probes/); assert.ok(!existsSync(ok.file), 'local copy removed');
+  assert.equal(ok.lines('ssh-calls').length, 1, 'one ssh call'); assert.deepEqual(ok.lines('rm-calls'), ['-- ' + ok.file], 'deleted only through the guard');
+  assert.deepEqual(JSON.parse(readFileSync(join(ok.box, 'ordinary-probes.json'), 'utf8')), goodCreds(ok.end)); assert.ok(existsSync(join(ok.box, 'probe-staged.txt')));
+  assert.doesNotMatch(ok.lines('ssh-calls').join('\n') + ok.out.stdout + ok.out.stderr, /rt-secret|human-secret/, 'no secret in argv or output');
+  // Validation failures: nothing written, no revoke (the token was never used), local file kept.
+  const refused = (c: ReturnType<typeof stageCase>, text: string) => {
+    assert.notEqual(c.out.status, 0); assert.ok(c.out.stderr.includes(text), c.out.stderr);
+    assert.deepEqual(c.lines('ssh-calls'), [], 'no W2 write before validation passes'); assert.ok(existsSync(c.file), 'local file retained');
   };
-  const ok = stageRun(good()); assert.equal(ok.status, 0, ok.stderr);
-  assert.match(ok.stdout, /PASS ai-w2-stage-probes/); assert.ok(!existsSync(file), 'local copy removed');
-  assert.equal(readFileSync(join(root, 'ssh-calls'), 'utf8').trim().split('\n').length, 1, 'one ssh call');
-  assert.deepEqual(JSON.parse(readFileSync(join(box, 'ordinary-probes.json'), 'utf8')), good(), 'bytes reached the box on stdin');
-  assert.doesNotMatch(readFileSync(join(root, 'ssh-calls'), 'utf8') + ok.stdout + ok.stderr, /rt-secret|human-secret/, 'no secret in argv or output');
-  const refused = (out: ReturnType<typeof run>, text: string) => {
-    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(text), out.stderr);
-    assert.ok(!existsSync(join(root, 'ssh-calls')), 'no W2 write before validation passes'); assert.ok(existsSync(file), 'local file retained');
-  };
-  const bad = (change: Record<string, unknown>) => ({ ...good(), ...change });
-  refused(stageRun({ ...good(), extra: 1 }), 'FAIL ai-w2-stage-probes: probe credentials keys expected probe-contract-keys got other-set; STOP before any W2 write');
-  refused(stageRun(good(), 0o644), 'FAIL ai-w2-stage-probes: probe credentials file expected 0600-regular-file-owned-by-caller got other-mode-or-owner; STOP before any W2 write');
-  refused(stageRun(bad({ release_sha: 'e'.repeat(40) })), 'FAIL ai-w2-stage-probes: probe credentials release_sha expected input-release-sha got mismatch; STOP before any W2 write');
-  refused(stageRun(bad({ window_id: 'Zzz999' })), 'FAIL ai-w2-stage-probes: probe credentials window_id expected input-window-id got mismatch; STOP before any W2 write');
-  refused(stageRun(bad({ workspace_id: '11111111-1111-1111-1111-111111111111' })), 'FAIL ai-w2-stage-probes: probe credentials workspace_id expected input-probe-workspace-id got mismatch; STOP before any W2 write');
-  refused(stageRun(bad({ human_token_exp: end + 299 })), 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write');
-  refused(stageRun(bad({ human_token_exp: String(end + 3600) })), 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write');
-  // After validation, a failed upload or a digest mismatch revokes the grant from the local file,
-  // proves a rejected refresh, deletes the file with the guarded rm and STOPs.
+  refused(stageCase({ extra: 1 }), 'FAIL ai-w2-stage-probes: probe credentials keys expected probe-contract-keys got other-set; STOP before any W2 write');
+  refused(stageCase({}, 0o644), 'FAIL ai-w2-stage-probes: probe credentials file expected 0600-regular-file-owned-by-caller got other-mode-or-owner; STOP before any W2 write');
+  refused(stageCase({ release_sha: 'e'.repeat(40) }), 'FAIL ai-w2-stage-probes: probe credentials release_sha expected input-release-sha got mismatch; STOP before any W2 write');
+  refused(stageCase({ window_id: 'Zzz999' }), 'FAIL ai-w2-stage-probes: probe credentials window_id expected input-window-id got mismatch; STOP before any W2 write');
+  refused(stageCase({ workspace_id: '11111111-1111-1111-1111-111111111111' }), 'FAIL ai-w2-stage-probes: probe credentials workspace_id expected input-probe-workspace-id got mismatch; STOP before any W2 write');
+  { const c = stageCase({ human_token_exp: 0 }); refused(c, 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write'); }
+  { const c = stageCase({ human_token_exp: '9999999999' }); refused(c, 'FAIL ai-w2-stage-probes: human_token_exp expected window_end_utc-plus-300s got shorter; STOP before any W2 write'); }
+  // Every post-validation failure revokes (one RFC 7009 call, exactly one refresh proof) and removes the local copy.
   for (const [env, reason] of [[{ BOX_CORRUPT: '1' }, 'box ordinary-probes.json expected 0600-and-same-sha256 got mismatch'], [{ SSH_FAIL: '1' }, 'ssh upload expected success got failure']] as const) {
-    const out = stageRun(good(), 0o600, env);
-    assert.notEqual(out.status, 0); assert.ok(out.stderr.includes(`FAIL ai-w2-stage-probes: ${reason}; revoking the probe grant from the local file; STOP`), out.stderr);
-    assert.match(out.stderr, /STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant/);
-    assert.deepEqual(readFileSync(join(root, 'issuer-calls'), 'utf8').trim().split('\n').map(l => l.split(' ')[0]!.replace('https://mcp.commonswarm.com', '')),
-      ['/.well-known/oauth-authorization-server', '/revoke', '/token'], 'one revoke and exactly one refresh proof');
-    assert.ok(!existsSync(file), 'local file removed after the proven revoke'); assert.ok(existsSync(join(root, 'rm-calls')));
-    assert.doesNotMatch(out.stdout + out.stderr, /rt-secret|human-secret/);
+    const c = stageCase({}, 0o600, env);
+    assert.notEqual(c.out.status, 0); assert.ok(c.out.stderr.includes(`FAIL ai-w2-stage-probes: ${reason}; revoking the probe grant; STOP`), c.out.stderr);
+    assert.match(c.out.stderr, /STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant/);
+    assert.deepEqual(c.issuer(), ['/.well-known/oauth-authorization-server', '/revoke', '/token']);
+    assert.ok(!existsSync(c.file)); assert.deepEqual(c.lines('rm-calls'), ['-- ' + c.file]);
+    if ('BOX_CORRUPT' in env) assert.ok(existsSync(join(c.box, 'proof-write')), 'box proof recorded for the uploaded copy');
+    assert.doesNotMatch(c.out.stdout + c.out.stderr, /rt-secret|human-secret/);
   }
-  // Revocation unproven (refresh still works): the rotated token is kept in the 0600 local file for HezLead.
-  const unproven = stageRun(good(), 0o600, { BOX_CORRUPT: '1', REVOKE_NOOP: '1' });
-  assert.notEqual(unproven.status, 0); assert.match(unproven.stderr, /FAIL ai-w2-stage-probes: local revoke refresh proof expected HTTP-400-invalid_grant got HTTP-200; local file retained 0600 for HezLead; STOP/);
-  assert.ok(existsSync(file)); assert.equal(statSync(file).mode & 0o777, 0o600); assert.equal(JSON.parse(readFileSync(file, 'utf8')).mcp_refresh_token, 'rt-rotated');
-  assert.ok(!existsSync(join(root, 'rm-calls')), 'no deletion while the grant may be live');
+  // Finding 1: a guarded-rm refusal AFTER a matching upload still revokes before STOP.
+  { const c = stageCase({}, 0o600, { RM_REFUSE: '1' });
+    assert.notEqual(c.out.status, 0);
+    assert.ok(c.out.stderr.includes('FAIL ai-w2-stage-probes: guarded rm of local probe credentials refused; revoking the probe grant; STOP'), c.out.stderr);
+    assert.deepEqual(c.issuer(), ['/.well-known/oauth-authorization-server', '/revoke', '/token'], 'revoked from the local copy');
+    assert.ok(existsSync(join(c.box, 'proof-write')), 'the box copy is recorded as revoked');
+    assert.match(c.out.stderr, /FAIL ai-w2-stage-probes: guarded rm of the \(revoked\) local probe credentials refused/);
+    assert.ok(existsSync(c.file), 'the guard kept the (now revoked) file'); }
+  // Unproven revoke: REVOKE-UNPROVEN, rotated token kept 0600, one attempt only (a rerun refuses at once).
+  { const c = stageCase({}, 0o600, { BOX_CORRUPT: '1', REVOKE_NOOP: '1' });
+    assert.notEqual(c.out.status, 0); assert.match(c.out.stderr, /REVOKE-UNPROVEN ai-w2-stage-probes: local revoke refresh proof expected HTTP-400-invalid_grant got HTTP-200; local file retained 0600 for HezLead; never retried automatically; STOP/);
+    assert.ok(existsSync(c.file)); assert.equal(statSync(c.file).mode & 0o777, 0o600); assert.equal(JSON.parse(readFileSync(c.file, 'utf8')).mcp_refresh_token, 'rt-rotated');
+    assert.deepEqual(c.lines('rm-calls'), [], 'no deletion while the grant may be live');
+    assert.ok(existsSync(c.file + '.revoke-attempted'), 'single-attempt marker'); }
+  // Finding 4: a malformed HTTP-200 discovery body is not retried; nothing is revoked or deleted.
+  { const c = stageCase({}, 0o600, { BOX_CORRUPT: '1', DISCOVERY_MALFORMED: '1' });
+    assert.notEqual(c.out.status, 0); assert.match(c.out.stderr, /FAIL ai-w2-stage-probes: local revoke discovery expected HTTP-200-issuer-metadata got other; STOP/);
+    assert.deepEqual(c.issuer(), ['/.well-known/oauth-authorization-server'], 'exactly one discovery request');
+    assert.ok(!existsSync(c.file + '.revoke-attempted')); assert.ok(existsSync(c.file)); }
 });
+
 
 test('admin release plan: W2 revoke proof holds after a lost rotation even when the RFC 7009 call fails; refresh never retried', () => {
   const f = w2Fixture();
@@ -1608,4 +1646,62 @@ test('admin release plan: W2 revoke proof holds after a lost rotation even when 
     assert.equal(state.calls.revoke, 1); assert.equal(state.calls.refresh, 1, 'exactly one refresh: the rejection proof');
     assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoked.json'), 'utf8')), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
   } finally { f.clean(); }
+});
+
+test('admin release plan: W2 revoke is one durable attempt; an unproven revoke is REVOKE-UNPROVEN and never re-run', () => {
+  const f = w2Fixture();
+  try {
+    const revoke = () => run(f.harness + portable(block('ai-w2-revoke-probes'), { stage: 1, pointer: 0 }), { ...f.env, TOKEN_TRANSPORT_AFTER_REVOKE: '1' });
+    const first = revoke();
+    assert.notEqual(first.status, 0);
+    assert.match(first.stderr, /REVOKE-UNPROVEN ai-w2-revoke-probes: refresh proof got transport-error-not-retried; STOP; HezLead revokes the DCR probe grant by client_id; never retried automatically/);
+    assert.ok(existsSync(join(f.proof, 'dcr-probe-revoke-attempted.txt')) && !existsSync(join(f.proof, 'dcr-probe-revoked.json')));
+    assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoke-unproven.json'), 'utf8')), { client_id: 'dcr-probe-client', revoked: false, status: 'REVOKE-UNPROVEN', reason: 'refresh proof got transport-error-not-retried' });
+    const calls = readFileSync(join(f.proof, 'http-calls'), 'utf8');
+    const again = revoke();
+    assert.notEqual(again.status, 0); assert.match(again.stderr, /REVOKE-UNPROVEN ai-w2-revoke-probes: a started revoke is never re-run/);
+    assert.equal(readFileSync(join(f.proof, 'http-calls'), 'utf8'), calls, 'no request on a started revoke');
+    assert.equal(oauthState(f).calls['refresh-after-revoke'], 1, 'one refresh proof request in total');
+  } finally { f.clean(); }
+  // In ai-w2-apply the EXIT guard does not re-run the started revoke.
+  const g = w2Fixture();
+  try {
+    assert.equal(run(g.harness + block('ai-w2-measure'), g.env).status, 0);
+    const result = run(g.harness + block('ai-w2-apply'), { ...g.env, TOKEN_TRANSPORT_AFTER_REVOKE: '1' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /REVOKE-UNPROVEN ai-w2-revoke-probes: refresh proof got transport-error-not-retried/);
+    assert.match(result.stderr, /REVOKE-UNPROVEN ai-w2-revoke-probes: a started revoke is never re-run/);
+    assert.match(result.stderr, /FAIL ai-w2-apply: DCR probe grant revoke on exit expected proven got failed; STOP/);
+    assert.equal(oauthState(g).calls['refresh-after-revoke'], 1, 'the guard made no second refresh request');
+    assert.equal(oauthState(g).calls.revoke, 1);
+  } finally { g.clean(); }
+});
+test('admin release plan: W2 probe-staged marker makes preflight, early apply and open-abort exits revoke or refuse', () => {
+  // Preflight STOP right after staging (missing BACKFILL_FILE): the preflight EXIT guard revokes.
+  const f = w2Fixture();
+  try {
+    const result = run(f.harness + portable(block('ai-w2-preflight'), { stage: 0, pointer: 0 }), f.env);
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /BACKFILL_FILE/);
+    assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoked.json'), 'utf8')), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
+    assert.equal(oauthState(f).revoked, true);
+  } finally { f.clean(); }
+  // Early ai-w2-apply STOP (no lock measurements): the apply guard revokes before anything else.
+  const g = w2Fixture();
+  try {
+    const result = run(g.harness + block('ai-w2-apply'), g.env);
+    assert.notEqual(result.status, 0); assert.ok(!existsSync(join(g.proof, 'apply-started.txt')));
+    assert.ok(existsSync(join(g.proof, 'dcr-probe-revoked.json')), 'revoked on the early apply exit');
+  } finally { g.clean(); }
+  // Without the marker nothing is staged: the guard passes without any grant request.
+  const h = w2Fixture();
+  try {
+    rmSync(join(h.proof, 'probe-staged.txt'));
+    const result = run(h.harness + block('ai-w2-apply'), h.env);
+    assert.notEqual(result.status, 0); assert.match(result.stdout, /PASS ai-w2-revoke-probes: no DCR probe grant was staged/);
+    assert.ok(!existsSync(join(h.proof, 'http-calls')), 'no request without a staged grant');
+  } finally { h.clean(); }
+  // ai-open-abort refuses once a probe grant was staged (the recovered ai-close revokes it).
+  const root = mkdtempSync(join(scratch, 'abort-')); writeFileSync(join(root, 'probe-staged.txt'), 'x\n');
+  const abort = run(block('ai-open-abort'), { PROOF_DIR: root });
+  assert.notEqual(abort.status, 0); assert.match(abort.stderr, /FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP/);
 });
