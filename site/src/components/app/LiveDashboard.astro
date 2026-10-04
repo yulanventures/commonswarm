@@ -1701,6 +1701,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       contentRole: "reader" | "editor" | null;
     } = { workspaceId: "", status: "unknown", contentRole: null };
     let householdAccessGeneration = 0;
+    /** The workspace whose access the setup checklist last asked about (one read per visit). */
+    let householdAccessRequestedFor = "";
     /** While a host page of the Add an agent picker is open, a light roster poll notices the
         agent arriving. It stops on leaving the page, on a workspace change, and after 15 min. */
     let hostJoinTimer: number | undefined;
@@ -2580,8 +2582,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const initials = (name: string): string => {
-      const parts = name.trim().split(/\s+/).filter(Boolean);
-      return (parts.length > 1 ? `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}` : name.slice(0, 2))
+      /* Letters and digits only, so "Claude (Tom)" reads "CT" rather than "C(" (redesign
+         2026-10-04). A name with no letter or digit keeps its first two characters. */
+      const parts = name.trim().split(/\s+/)
+        .map((part) => part.replace(/[^\p{L}\p{N}]/gu, ""))
+        .filter(Boolean);
+      if (parts.length === 0) return name.trim().slice(0, 2).toUpperCase();
+      return (parts.length > 1 ? `${parts[0]![0]}${parts[1]![0]}` : parts[0]!.slice(0, 2))
         .toUpperCase();
     };
 
@@ -2597,7 +2604,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         hash = Math.imul(hash, 16_777_619);
       }
       const unsigned = hash >>> 0;
-      node.style.setProperty("--avatar-hue", String(unsigned % 360));
+      /* Daylight Orbs gives agents four pastel hues (lavender, peach, sage, sky), not the whole
+         wheel; the hash still picks one stably per agent (redesign 2026-10-04, audit F1). */
+      const BRAND_AGENT_HUES = [249, 19, 143, 210] as const;
+      node.style.setProperty("--avatar-hue", String(BRAND_AGENT_HUES[unsigned % BRAND_AGENT_HUES.length]));
       node.classList.add("dashboard__avatar--tinted");
     };
 
@@ -6603,6 +6613,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       householdConnections = [];
       householdAccessGeneration += 1;
       householdAccess = { workspaceId: "", status: "unknown", contentRole: null };
+      householdAccessRequestedFor = "";
       stopHostJoinWatch();
       const consentStatus = one<HTMLElement>("[data-household-consent-result]");
       if (consentStatus) consentStatus.textContent = "";
@@ -7063,9 +7074,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const card = one<HTMLElement>("[data-household-consent]");
       const approvals = one<HTMLElement>("[data-household-agents]");
       const purposeSet = one<HTMLElement>("[data-household-purpose-set]");
-      const confirmed = householdAccess.status === "ok" && householdAccess.workspaceId === activeWorkspaceId;
-      if (card) card.hidden = confirmed;
+      const current = householdAccess.workspaceId === activeWorkspaceId;
+      const confirmed = current && householdAccess.status === "ok";
+      /* Nothing shows until household_access answers for this workspace, so a confirmed
+         person never sees the access card flash before their lists. */
+      if (card) card.hidden = !current || confirmed;
       if (approvals) approvals.hidden = !confirmed;
+      const notice = one<HTMLElement>("[data-household-consent-result]");
+      if (notice && current && householdAccess.status === "unknown") {
+        notice.textContent = "Lists & docs could not check your access. Open it again to retry.";
+      }
       /* Only the owner chooses who can see the workspace; the server refuses anyone else's
          first choice (owner_confirmation_required). A member joined through an invitation,
          which only works in a shared workspace, so their card asks only for their access. */
@@ -7301,7 +7319,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /** The setup checklist, from facts this page already holds. Nothing is stored. */
-    let householdAccessRequestedFor = "";
     const renderSetupChecklist = (): void => {
       const root = one<HTMLElement>("[data-setup-checklist]");
       if (!root || sampleMode) return;
@@ -15646,6 +15663,46 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     margin: 0;
     color: var(--text-muted);
     font-size: var(--t-sm);
+  }
+
+  /* --- Lists & docs objects: bring the household renderer into the app's visual system --- */
+  .dashboard__objects-view .household-objects {
+    padding: var(--s-6);
+    border-color: var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--ring-top);
+  }
+
+  .dashboard__objects-view .household-objects > header h2 {
+    font-size: var(--t-xl);
+    line-height: var(--lh-xl);
+  }
+
+  .dashboard__objects-view .household-objects > header p {
+    margin: 0 0 var(--s-1);
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__objects-view .household-objects .hh-eyebrow {
+    color: var(--accent-bright);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--track-eyebrow);
+  }
+
+  .dashboard__objects-view .household-objects nav button {
+    font-weight: var(--weight-semibold);
+    background: var(--surface-2);
+    border-color: var(--border);
+    border-radius: var(--radius);
+  }
+
+  .dashboard__objects-view .household-objects nav button:hover:enabled {
+    border-color: var(--border-strong);
+  }
+
+  .dashboard__objects-view .household-objects article button {
+    border-radius: var(--radius-pill);
   }
 
   /* --- People & agents dialog: two doors and plain status --- */

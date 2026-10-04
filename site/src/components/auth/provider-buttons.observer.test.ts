@@ -1084,11 +1084,15 @@ test("CONTROL: ProviderButtons decides from the deployment, and no flag can over
   }
 });
 
-test("CONTROL: the buttons and the furniture above them render together or not at all", async () => {
+test("CONTROL: the buttons and the furniture around them render together or not at all", async () => {
   /*
    * Zero enabled providers is reachable in production: an operator turns every OAuth provider
-   * off in the dashboard and the next build has no buttons. A leftover "or" divider above
+   * off in the dashboard and the next build has no buttons. A leftover "or" divider next to
    * nothing promises a choice the page does not offer, so the component owns both.
+   *
+   * /invite puts the buttons first and the email form after them, so its divider is handed to
+   * the `after` slot (below the buttons). The `before` slot is guarded the same way, for any
+   * host that wants furniture above them.
    */
   const component = await readFile(BUTTONS, "utf8");
   assert.match(
@@ -1097,19 +1101,26 @@ test("CONTROL: the buttons and the furniture above them render together or not a
     'The `before` slot must sit inside the `providers.length > 0` guard. Outside it, a host ' +
       "page's divider survives a build with no enabled providers.",
   );
+  assert.match(
+    component,
+    /<slot name="after" \/>\s*<\/Fragment>\s*\)\}/,
+    'The `after` slot must sit inside the `providers.length > 0` guard too. /invite hands its ' +
+      "divider to it, and outside the guard that divider would survive a build with no " +
+      "enabled providers.",
+  );
 
   const host = await readFile(ONRAMP, "utf8");
   assert.match(
     host,
-    /<div slot="before" class="invite-onramp__divider"/,
+    /<div slot="after" class="invite-onramp__divider"/,
     "InviteOnramp must hand its divider to ProviderButtons through the slot.",
   );
   const dividerTags = host.match(/<[a-z]+[^>]*class="invite-onramp__divider"[^>]*>/g) ?? [];
-  assert.equal(dividerTags.length, 1, "there is one divider above the buttons");
+  assert.equal(dividerTags.length, 1, "there is one divider, between the buttons and the email form");
   for (const tag of dividerTags) {
     assert.match(
       tag,
-      /slot="before"/,
+      /slot="(?:before|after)"/,
       `A divider written outside the component is furniture the component cannot take ` +
         `away: ${tag}`,
     );
@@ -1131,6 +1142,26 @@ test("CONTROL: the buttons and the furniture above them render together or not a
     dividers > 0,
     `The built page has ${buttons} provider buttons and ${dividers} dividers. One without ` +
       `the other is the state this control exists to catch.`,
+  );
+
+  /*
+   * THE ORDER, MEASURED ON A REAL BUILD. A joiner sees the provider buttons first, then the
+   * "or" divider, then the email form. The template above only proves which slot the divider
+   * is handed to; this reads where Astro actually rendered it, in the all-providers state.
+   */
+  const fixture = await allProvidersFixture();
+  const invite = await readFile(new URL("invite/index.html", fixture.dir), "utf8");
+  const firstButton = invite.indexOf('data-signin-provider="');
+  const lastButton = invite.lastIndexOf('data-signin-provider="');
+  const divider = invite.indexOf('class="invite-onramp__divider"');
+  const emailForm = invite.indexOf("data-email-form");
+  assert.ok(
+    firstButton >= 0 && divider >= 0 && emailForm >= 0,
+    "the all-providers /invite must render buttons, a divider and the email form",
+  );
+  assert.ok(
+    firstButton < lastButton && lastButton < divider && divider < emailForm,
+    "/invite must read provider buttons, then the divider, then the email form",
   );
 });
 

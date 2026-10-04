@@ -113,10 +113,10 @@ const notesOf = (host: AgentHost): string[] => [
                 <span class="ahp__tile-copy">
                   <strong>{host.name}</strong>
                   <small>{host.maker}</small>
+                  {host.status && (
+                    <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+                  )}
                 </span>
-                {host.status && (
-                  <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-                )}
               </button>
             </li>
           ))}
@@ -139,10 +139,10 @@ const notesOf = (host: AgentHost): string[] => [
                 <span class="ahp__tile-copy">
                   <strong>{host.name}</strong>
                   <small>{host.maker}</small>
+                  {host.status && (
+                    <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+                  )}
                 </span>
-                {host.status && (
-                  <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-                )}
               </button>
             </li>
           ))}
@@ -245,10 +245,17 @@ const notesOf = (host: AgentHost): string[] => [
         {notesOf(host).map((note) => <li>{note}</li>)}
       </ul>
 
-      {host.status && host.status !== "waiting" && (
+      {/* Only /app watches the roster while a host page is open, so only the setter sees a
+          live "waiting" line; on /invite nothing polls, and a pulse there would never end. */}
+      {host.status && host.status !== "waiting" && audience === "setter" && (
         <p class="ahp__waiting" data-ahp-waiting role="status" aria-live="polite">
           <span class="ahp__pulse" aria-hidden="true"></span>
           <span data-ahp-waiting-text>Waiting for {host.name} to join <span data-ahp-slot="workspace-plain">this workspace</span>.</span>
+        </p>
+      )}
+      {host.status && host.status !== "waiting" && audience === "joiner" && (
+        <p class="ahp__waiting">
+          When {host.name} has joined, it shows up in <span data-ahp-slot="workspace-plain">this workspace</span> under your name.
         </p>
       )}
     </section>
@@ -510,7 +517,7 @@ const notesOf = (host: AgentHost): string[] => [
 
   .ahp__tiles {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 15.5rem), 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 13.5rem), 1fr));
     gap: var(--s-3);
     margin: 0;
     padding: 0;
@@ -521,7 +528,7 @@ const notesOf = (host: AgentHost): string[] => [
     inline-size: 100%;
     min-block-size: 4.25rem;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: var(--s-3);
     padding: var(--s-3) var(--s-4);
@@ -558,6 +565,8 @@ const notesOf = (host: AgentHost): string[] => [
 
   .ahp__tile-copy {
     display: grid;
+    justify-items: start;
+    gap: 0.1rem;
     min-inline-size: 0;
   }
 
@@ -568,12 +577,13 @@ const notesOf = (host: AgentHost): string[] => [
   }
 
   .ahp__tile-copy small {
-    overflow: hidden;
     color: var(--text-muted);
     font-size: var(--t-xs);
     line-height: var(--lh-xs);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+
+  .ahp__tile-copy .ahp__chip {
+    margin-block-start: 0.3rem;
   }
 
   .ahp__orb {
@@ -617,7 +627,6 @@ const notesOf = (host: AgentHost): string[] => [
   }
 
   .ahp__chip {
-    justify-self: end;
     padding: 0.2rem 0.6rem;
     border-radius: var(--radius-pill);
     font-size: var(--t-2xs);

@@ -72,10 +72,26 @@ test("invite target is pinned and auth resume storage is erasable", () => {
   assert.equal(recalledInvite(id, storage), null);
 });
 
+/**
+ * What a person reads on the page: the template without its frontmatter, script, style and
+ * comments. Attribute values stay in, so a protocol word cannot hide in an aria-label.
+ */
+function visibleMarkup(source: string): string {
+  return source
+    .replace(/^---[\s\S]*?\n---\n/, "")
+    .replace(/<script[\s\S]*?<\/script>/g, "")
+    .replace(/<style[\s\S]*?<\/style>/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, "");
+}
+
+/** Words the product keeps out of every screen a household member reads. */
+const PROTOCOL_WORDS = /\b(?:seat\w*|grant\w*|claim\w*|oauth|mcp|signal\w*|principal\w*)\b/i;
+
 test("/invite retains fragment hygiene and requires independent human consent", async () => {
   const source = await readFile(new URL("./InviteOnramp.astro", import.meta.url), "utf8");
   assert.match(source, /A teammate<\/span> invited you to/);
-  assert.match(source, /Sign in[\s\S]*Join the workspace[\s\S]*Copy one prompt/);
+  assert.match(source, /Sign in as yourself[\s\S]*Choose what you share[\s\S]*Connect your own agents/);
   assert.match(source, /payload\.inviter_user_id === session\.user\.id/);
   assert.match(source, /data-independent-consent/);
   assert.match(source, /data-confirm-join/);
@@ -88,7 +104,11 @@ test("/invite retains fragment hygiene and requires independent human consent", 
   );
   assert.match(source, /data-view="join-error"/);
   assert.match(source, /data-retry-join/);
-  assert.match(source, /<AgentConnect/);
+  // After joining she connects her own agents through the shared host picker. The one-time-key
+  // flow is not on the joiner's path, and no protocol word is in anything she reads.
+  assert.match(source, /<AgentHostPicker audience="joiner"/);
+  assert.doesNotMatch(source, /AgentConnect/);
+  assert.doesNotMatch(visibleMarkup(source), PROTOCOL_WORDS);
   assert.doesNotMatch(source, /searchParams\.set\([^,]+,\s*payload\.invitation_token/);
   assert.doesNotMatch(source, /innerHTML/);
 });

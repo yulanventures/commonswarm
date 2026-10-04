@@ -83,6 +83,14 @@ test("the privacy rule is said in plain words for every connector host", async (
   assert.match(picker, /privacyNote\(/u, "the host page must render the privacy note");
 });
 
+test("only the page that watches the roster shows a live waiting line", () => {
+  /* /app polls the roster while a host page is open; /invite does not, so a pulse there would
+     never resolve. The joiner gets a static sentence instead. */
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  assert.match(picker, /audience === "setter" && \(\s*<p class="ahp__waiting" data-ahp-waiting/u);
+  assert.match(picker, /audience === "joiner" && \(\s*<p class="ahp__waiting">\s*When \{host\.name\} has joined/u);
+});
+
 test("the join sentence names the agent and CommonSwarm", () => {
   assert.equal(joinSentence("Muse"), "Use CommonSwarm to join my workspace as Muse, then list who is there.");
 });

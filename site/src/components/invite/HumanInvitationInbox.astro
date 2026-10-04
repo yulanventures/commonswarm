@@ -1,33 +1,499 @@
 ---
-import { HOUSEHOLD_CONTENT_ROLES } from '../../../../src/protocol/household-object-policy';
+/*
+ * The invitation card on /app, for a person whom someone invited from inside CommonSwarm.
+ *
+ * INVISIBLE UNLESS THERE IS SOMETHING TO SHOW. Nothing is drawn until the signed-in person has at
+ * least one invitation, a review open, or a join result, and the dashboard behind it has finished
+ * loading. Signed in with nothing waiting, the page shows no card at all.
+ *
+ * THREE PARTS.
+ *   the card     small. "{inviter} invited you to {workspace}." and a Review button; after a
+ *                join, "You joined {workspace}." and the next step.
+ *   the review   a centered modal <dialog> (a bottom sheet on a phone) with the same content as
+ *                /invite: who is here, what she will see, what stays private, her access (two
+ *                cards, nothing preselected) and a tick for joining as herself. Escape or Not now
+ *                closes it back to the card and returns focus to the Review button.
+ *   the line     "Review this invitation first..." when the dashboard is on its create screen.
+ *
+ * WHERE THE CARD SITS. It must never cover the composer. Normally it floats at the bottom right,
+ * raised above the composer's height. On the create screen a person with no workspace has come
+ * for the invitation, not for a workspace of her own, so the card moves into the page flow above
+ * the create form (it watches live-dashboard[data-state]; it does not edit the dashboard).
+ *
+ * THE CONTROLLER IS UNCHANGED. human-invite-controller.ts owns the asynchronous state, the
+ * account switches and the join request; this file only draws its view. Dynamic text is set
+ * with textContent. The two access sentences come from household-access.ts, and the server's
+ * disclosure is shown exactly as sent.
+ */
+import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
 ---
-<human-invitation-inbox hidden>
-  <section class="human-invitations" aria-label="Your workspace invitations">
-    <h2>Your invitations</h2>
-    <button type="button" data-refresh>Check invitations</button>
-    <div data-invitations></div>
-    <div data-review hidden>
-      <h3 data-title></h3>
-      <p data-audience></p>
-      <p data-disclosure></p>
-      <p data-expiry></p>
-      <label>My content access <select data-role required><option value="">Choose access</option>{HOUSEHOLD_CONTENT_ROLES.map(role => <option value={role}>{role[0].toUpperCase() + role.slice(1)}</option>)}</select></label>
-      <label><input type="checkbox" data-consent /> I choose to join this shared workspace and accept its audience and retained history.</label>
-      <button type="button" data-accept>Join as myself</button>
-      <button type="button" data-cancel>Close review</button>
+
+<human-invitation-inbox hidden data-placement="corner">
+  <section class="human-invitations" aria-label="Workspace invitation">
+    <p class="human-invitations__first" data-first hidden>
+      Review this invitation first. You can still create your own workspace later.
+    </p>
+
+    <div class="human-invitations__list" data-list hidden>
+      <ul class="human-invitations__rows" role="list" data-invitations></ul>
+      <button class="human-invitations__text-button" type="button" data-refresh>Check again</button>
     </div>
-    <p data-result role="status" aria-live="polite"></p>
-    <p data-next hidden>Your agents still need your own authorization. Create a personal workspace in the workspace menu and confirm its personal settings. For hosted agents, connect https://mcp.commonswarm.com/mcp through your own account and select this shared workspace. Use separate grants for private work. Chats on one connector grant share its seats; names do not isolate chats.</p>
-    <a href="/app" data-open hidden>Open my workspace</a>
+
+    <div class="human-invitations__joined" data-joined hidden>
+      <h2 class="human-invitations__title" tabindex="-1" data-joined-title></h2>
+      <p data-next>Next: connect your own agents.</p>
+      <a class="human-invitations__button" href="/app" data-open>Open the workspace</a>
+    </div>
+
+    <p class="human-invitations__result" data-result role="status" aria-live="polite"></p>
   </section>
+
+  <dialog class="human-invitations__dialog" data-review-dialog aria-labelledby="human-invitations-review-title">
+    <div class="human-invitations__review" data-review>
+      <h2 class="human-invitations__title" id="human-invitations-review-title" tabindex="-1" data-review-heading>Join <span data-title></span>?</h2>
+      <h3 class="human-invitations__facet">Who is here</h3>
+      <p data-audience></p>
+      <h3 class="human-invitations__facet">What you will see</h3>
+      <p data-disclosure></p>
+      <p class="human-invitations__private"><strong>What stays private:</strong> your other workspaces.</p>
+
+      <fieldset class="human-invitations__choices">
+        <legend>Your access</legend>
+        <div class="human-invitations__choice-list">
+          {CONTENT_ROLES.map((role) => (
+            <label class="human-invitations__choice">
+              <input type="radio" name="inbox-content-role" value={role} data-role />
+              <span>
+                <strong>{CONTENT_ROLE_COPY[role].label}</strong>
+                <small>{CONTENT_ROLE_COPY[role].detail}</small>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <label class="human-invitations__consent">
+        <input type="checkbox" data-consent />
+        <span>I'm joining as myself.</span>
+      </label>
+      <p class="human-invitations__hint" data-hint role="alert" hidden></p>
+      <p class="human-invitations__result" data-review-result role="status" aria-live="polite"></p>
+      <p class="human-invitations__fineprint" data-expiry></p>
+
+      <div class="human-invitations__actions">
+        <button class="human-invitations__button" type="button" data-accept><span class="human-invitations__label">Join <span data-join-name></span></span></button>
+        <button class="human-invitations__button human-invitations__button--quiet" type="button" data-cancel>Not now</button>
+      </div>
+    </div>
+  </dialog>
+
+  <template data-row-template>
+    <li class="human-invitations__row">
+      <p><strong data-row-inviter></strong> invited you to <strong data-row-workspace></strong>.</p>
+      <button class="human-invitations__button" type="button" data-row-review>Review</button>
+    </li>
+  </template>
 </human-invitation-inbox>
+
 <style>
-  .human-invitations { padding: 1rem; border: 1px solid var(--border); margin: 1rem; }
-  [data-review] { display: grid; gap: .75rem; }
-  [data-review][hidden] { display: none; }
-  label { display: block; }
-  button { margin: .25rem; }
+  /* The composer is about 8rem tall at its tallest resting size: the composer observers budget
+     108px at rest and 130px with two lines, and record 129px at 320px wide. The card floats
+     above that, so it never sits on the composer or its Send button. */
+  human-invitation-inbox {
+    --human-invitations-clearance: 9rem;
+    position: fixed;
+    z-index: 20;
+    inset-block-end: calc(var(--human-invitations-clearance) + env(safe-area-inset-bottom, 0px));
+    inset-inline-end: var(--s-4);
+    inline-size: min(26rem, 100% - var(--s-8));
+    max-block-size: min(60svh, 24rem);
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    font-size: var(--t-base);
+    line-height: var(--lh-base);
+  }
+
+  /* On the create screen the card is part of the page, above the create form: it cannot cover
+     the form's button, and it is the first thing she reads. */
+  human-invitation-inbox[data-placement="top"] {
+    position: static;
+    inline-size: min(100% - var(--gutter) * 2, 42rem);
+    max-block-size: none;
+    margin: var(--s-6) auto 0;
+    overflow: visible;
+    border-color: var(--accent);
+    box-shadow: var(--shadow-md);
+  }
+
+  /* A display rule on the element beats the browser's [hidden]; say it back. */
+  human-invitation-inbox[hidden],
+  .human-invitations__list[hidden],
+  .human-invitations__joined[hidden],
+  .human-invitations__first[hidden] {
+    display: none;
+  }
+
+  .human-invitations {
+    display: grid;
+    gap: var(--s-3);
+    padding: var(--s-5);
+  }
+
+  .human-invitations__list,
+  .human-invitations__joined,
+  .human-invitations__review {
+    min-inline-size: 0;
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .human-invitations p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .human-invitations .human-invitations__first {
+    color: var(--text);
+    font-weight: var(--weight-medium);
+  }
+
+  .human-invitations__rows {
+    max-block-size: 14rem;
+    display: grid;
+    gap: var(--s-3);
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .human-invitations__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-3);
+  }
+
+  .human-invitations__row p {
+    flex: 1 1 11rem;
+    color: var(--text);
+  }
+
+  .human-invitations__title {
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-display);
+    font-size: var(--t-xl);
+    line-height: var(--lh-xl);
+    letter-spacing: var(--track-xl);
+    font-weight: var(--weight-head);
+    overflow-wrap: anywhere;
+  }
+
+  .human-invitations__title:focus {
+    outline: none;
+    box-shadow: none;
+  }
+
+  /* The review: a modal dialog, centered; a bottom sheet on phones (below). */
+  .human-invitations__dialog {
+    inline-size: min(34rem, 100% - var(--s-8));
+    max-inline-size: none;
+    max-block-size: min(90svh, 46rem);
+    margin: auto;
+    padding: var(--s-6) var(--s-6) 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    font-size: var(--t-base);
+    line-height: var(--lh-base);
+  }
+
+  .human-invitations__dialog::backdrop {
+    background: color-mix(in oklab, var(--text) 32%, transparent);
+  }
+
+  .human-invitations__dialog .human-invitations__facet {
+    margin: var(--s-2) 0 0;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: var(--t-xs);
+    line-height: var(--lh-xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--track-eyebrow);
+    text-transform: uppercase;
+  }
+
+  .human-invitations__dialog p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .human-invitations__review > p {
+    color: var(--text);
+  }
+
+  .human-invitations__choices {
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .human-invitations__choices legend {
+    padding: 0;
+    margin-block-end: var(--s-3);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-weight: var(--weight-head);
+  }
+
+  .human-invitations__choice-list {
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .human-invitations__choice {
+    min-block-size: 3.5rem;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s-3);
+    padding: var(--s-3) var(--s-4);
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-interactive);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .human-invitations__choice:has(input:checked) {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .human-invitations__choice:has(input:focus-visible) {
+    box-shadow: var(--focus-ring);
+  }
+
+  .human-invitations__choice input,
+  .human-invitations__consent input {
+    inline-size: 1.25rem;
+    block-size: 1.25rem;
+    flex: none;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+
+  .human-invitations__choice input {
+    margin-block-start: 0.15rem;
+  }
+
+  .human-invitations__consent input:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: var(--focus-ring);
+  }
+
+  .human-invitations__choice span {
+    display: grid;
+    min-inline-size: 0;
+  }
+
+  .human-invitations__choice strong {
+    font-weight: var(--weight-semibold);
+  }
+
+  .human-invitations__choice small {
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+    line-height: var(--lh-sm);
+  }
+
+  .human-invitations__consent {
+    min-block-size: 2.75rem;
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    color: var(--text);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+  }
+
+  .human-invitations .human-invitations__result,
+  .human-invitations__dialog .human-invitations__hint,
+  .human-invitations__dialog .human-invitations__result {
+    font-size: var(--t-sm);
+  }
+
+  .human-invitations__dialog .human-invitations__hint {
+    padding: var(--s-3) var(--s-4);
+    color: var(--text);
+    background: var(--danger-dim);
+    border-radius: var(--radius);
+  }
+
+  .human-invitations .human-invitations__result,
+  .human-invitations__dialog .human-invitations__result {
+    color: var(--text);
+  }
+
+  .human-invitations .human-invitations__result:empty,
+  .human-invitations__dialog .human-invitations__result:empty {
+    display: none;
+  }
+
+  .human-invitations__dialog .human-invitations__fineprint {
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  /* The join button stays in view while a tall review scrolls. */
+  .human-invitations__actions {
+    position: sticky;
+    inset-block-end: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-3);
+    padding-block: var(--s-4);
+    background: var(--surface);
+  }
+
+  .human-invitations__actions .human-invitations__button {
+    flex: 1 1 11rem;
+  }
+
+  .human-invitations__button {
+    min-block-size: 2.75rem;
+    inline-size: fit-content;
+    max-inline-size: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--s-2) var(--s-5);
+    color: var(--accent-ink);
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-pill);
+    font: inherit;
+    font-size: var(--t-base);
+    font-weight: var(--weight-semibold);
+    line-height: 1.3;
+    text-align: center;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+
+  /* One element inside the button holds "Join" and the workspace name together. As separate
+     children of an inline-flex button they become separate flex items and the space between
+     them is dropped. */
+  .human-invitations__label {
+    min-inline-size: 0;
+  }
+
+  .human-invitations__button:hover {
+    color: var(--accent-ink);
+    background: var(--accent-bright);
+    border-color: var(--accent-bright);
+  }
+
+  .human-invitations__button--quiet {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--border-interactive);
+  }
+
+  .human-invitations__button--quiet:hover {
+    color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--border-interactive);
+  }
+
+  .human-invitations__button:disabled {
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border-color: var(--border);
+    cursor: not-allowed;
+  }
+
+  .human-invitations__text-button {
+    min-block-size: 2.75rem;
+    justify-self: start;
+    padding: 0 var(--s-2);
+    color: var(--accent-bright);
+    font: inherit;
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .human-invitations__text-button:hover {
+    text-decoration: underline;
+  }
+
+  .human-invitations__button:focus-visible,
+  .human-invitations__text-button:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: var(--focus-ring);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .human-invitations__dialog[open] {
+      animation: human-invitations-dialog-in var(--dur-3) var(--ease-decelerate);
+    }
+
+    @keyframes human-invitations-dialog-in {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+    }
+  }
+
+  /* Phones: the card floats above the composer across the width; the review is a bottom sheet
+     with its own scroll. */
+  @media (max-width: 34rem) {
+    human-invitation-inbox {
+      inset-inline: var(--s-3);
+      inline-size: auto;
+    }
+
+    .human-invitations {
+      padding: var(--s-4);
+    }
+
+    .human-invitations__dialog {
+      inset: auto 0 0 0;
+      inline-size: 100%;
+      max-block-size: min(88svh, 100svh - var(--s-8));
+      margin: 0;
+      padding-inline: var(--s-5);
+      border-inline: 0;
+      border-block-end: 0;
+      border-end-start-radius: 0;
+      border-end-end-radius: 0;
+    }
+
+    .human-invitations__actions {
+      padding-block-end: max(var(--s-4), env(safe-area-inset-bottom));
+    }
+  }
 </style>
+
 <script>
   import { currentSession, client } from '../../lib/commonswarm';
   import { browserHumanInvitations } from '../../lib/human-invitations';
@@ -35,31 +501,131 @@ import { HOUSEHOLD_CONTENT_ROLES } from '../../../../src/protocol/household-obje
   const root=document.querySelector<HTMLElement>('human-invitation-inbox');
   if(root && client()) {
     const one=<T extends HTMLElement>(selector:string)=>root.querySelector<T>(selector)!;
-    let account:string|null=null, shownDigest='';
-    const controller=createHumanInviteController(browserHumanInvitations(), view=>{
-      root.hidden=view.account===null;
-      one('[data-invitations]').replaceChildren();
-      for(const row of view.invitations) {
-        const button=document.createElement('button');button.type='button';
-        button.textContent=`${row.inviter_display_name} invited you to ${row.workspace_name}`;button.disabled=view.busy;
-        button.addEventListener('click',()=>{void controller.review(row.invitation_id);});one('[data-invitations]').append(button);
+    const roles=()=>[...root.querySelectorAll<HTMLInputElement>('[data-role]')];
+    const chosenRole=()=>roles().find(input=>input.checked)?.value??'';
+    const rowTemplate=one<HTMLTemplateElement>('[data-row-template]');
+    const dialog=one<HTMLDialogElement>('[data-review-dialog]');
+    const dashboard=document.querySelector<HTMLElement>('live-dashboard');
+    type View=Parameters<Parameters<typeof createHumanInviteController>[1]>[0];
+    let account:string|null=null, shownDigest='', rowsKey='';
+    let lastView:View|null=null;
+    /*
+     * quiet: the controller's own line after a plain check ("Choose an invitation to review.",
+     * "No pending invitations.") is not worth a card. It is shown only after the person acted
+     * (Review or Join), when it carries a result such as "This invitation is unavailable."
+     * focusNext: where keyboard focus goes once the view settles after a click.
+     * dialogWanted: the review is open. Closing the dialog while this is true means the person
+     * dismissed it (Escape or Not now); the card closes it itself when the review ends.
+     */
+    let quiet=true;
+    let focusNext:'list'|'joined'|null=null;
+    let dialogWanted=false;
+    const datetime=(ms:number)=>new Date(ms).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
+    const paint=()=>{
+      const view=lastView;
+      if(!view)return;
+      const state=dashboard?.dataset.state??'';
+      const creating=state==='create';
+      const joined=view.joined;
+      const reviewing=!joined && view.preview!==null;
+      const listing=!joined && view.invitations.length>0;
+      const shown=view.account!==null && state!=='loading' && (joined || reviewing || listing);
+      root.hidden=!shown;
+      root.dataset.placement=creating?'top':'corner';
+      one('[data-first]').hidden=!(creating && listing);
+      one('[data-list]').hidden=!listing;
+
+      const key=view.invitations.map(row=>row.invitation_id).join(' ');
+      if(key!==rowsKey){
+        rowsKey=key;
+        const items:HTMLElement[]=[];
+        for(const row of view.invitations){
+          const item=rowTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
+          item.querySelector('[data-row-inviter]')!.textContent=row.inviter_display_name;
+          item.querySelector('[data-row-workspace]')!.textContent=row.workspace_name;
+          const review=item.querySelector<HTMLButtonElement>('[data-row-review]')!;
+          review.setAttribute('aria-label','Review the invitation to '+row.workspace_name);
+          review.addEventListener('click',()=>{quiet=false;void controller.review(row.invitation_id);});
+          items.push(item);
+        }
+        one('[data-invitations]').replaceChildren(...items);
       }
-      one('[data-review]').hidden=!view.preview;
+      for(const button of root.querySelectorAll<HTMLButtonElement>('[data-row-review]'))button.disabled=view.busy;
+
       if(shownDigest!==(view.preview?.preview_digest??'')){
-        shownDigest=view.preview?.preview_digest??'';one<HTMLInputElement>('[data-consent]').checked=false;one<HTMLSelectElement>('[data-role]').value='';
+        shownDigest=view.preview?.preview_digest??'';
+        one<HTMLInputElement>('[data-consent]').checked=false;
+        for(const input of roles())input.checked=false;
+        one('[data-hint]').hidden=true;
       }
-      if(view.preview){one('[data-title]').textContent=view.preview.workspace_name;
-        one('[data-audience]').textContent='Current members: '+view.preview.audience.map(m=>`${m.display_name} (${m.role})`).join(', ');
-        one('[data-disclosure]').textContent=view.preview.disclosure;one('[data-expiry]').textContent='Expires '+new Date(view.preview.expires_at).toLocaleString();}
-      one<HTMLSelectElement>('[data-role]').disabled=view.confirmed_role!==null||view.busy;
-      one<HTMLInputElement>('[data-consent]').disabled=view.confirmed_role!==null||view.busy;
-      one('[data-result]').textContent=view.message;one<HTMLButtonElement>('[data-accept]').disabled=view.busy;
-      one('[data-next]').hidden=!view.joined;one('[data-open]').hidden=!view.joined;
+      if(view.preview){
+        one('[data-title]').textContent=view.preview.workspace_name;
+        one('[data-join-name]').textContent=view.preview.workspace_name;
+        one('[data-audience]').textContent=view.preview.audience.map(m=>`${m.display_name} (${m.role})`).join(', ');
+        one('[data-disclosure]').textContent=view.preview.disclosure;
+        one('[data-expiry]').textContent='This invitation expires '+datetime(view.preview.expires_at)+'.';
+      }
+      const locked=view.confirmed_role!==null||view.busy;
+      for(const input of roles())input.disabled=locked;
+      one<HTMLInputElement>('[data-consent]').disabled=locked;
+      one<HTMLButtonElement>('[data-accept]').disabled=view.busy;
+      one<HTMLButtonElement>('[data-cancel]').disabled=view.busy;
+
+      one('[data-joined]').hidden=!joined;
+      if(joined)one('[data-joined-title]').textContent=view.message;
+      const message=!quiet && !joined ? view.message : '';
+      one('[data-result]').textContent=reviewing ? '' : message;
+      one('[data-review-result]').textContent=reviewing ? message : '';
+
+      dialogWanted=shown && reviewing;
+      if(dialogWanted && !dialog.open){dialog.showModal();one('[data-review-heading]').focus({preventScroll:true});}
+      else if(!dialogWanted && dialog.open)dialog.close();
+
+      if(focusNext && !view.busy){
+        const target=focusNext;focusNext=null;
+        if(target==='list' && listing && !reviewing)root.querySelector<HTMLElement>('[data-row-review]')?.focus({preventScroll:true});
+        else if(target==='joined' && joined)one('[data-joined-title]').focus({preventScroll:true});
+      }
+    };
+    const controller=createHumanInviteController(browserHumanInvitations(), view=>{lastView=view;paint();});
+    const setAccount=(id:string|null)=>{account=id;quiet=true;focusNext=null;controller.setAccount(id);if(id)void controller.load();};
+    one('[data-refresh]').addEventListener('click',()=>{quiet=true;void controller.load();});
+    /* Not now and Escape both close the dialog; the close event is the one way back to the card. */
+    one('[data-cancel]').addEventListener('click',()=>{dialog.close();});
+    dialog.addEventListener('cancel',event=>{if(lastView?.busy)event.preventDefault();});
+    dialog.addEventListener('close',()=>{
+      if(!dialogWanted)return;
+      dialogWanted=false;
+      /* A browser can close the dialog on a second Escape even though cancel was prevented. If the
+         join is still in flight, reloading the inbox would discard its result: leave it, and let
+         the result decide what shows next (the joined card, or the review again). */
+      if(lastView?.busy)return;
+      quiet=true;focusNext='list';void controller.load();
     });
-    const setAccount=(id:string|null)=>{account=id;controller.setAccount(id);if(id)void controller.load();};
-    one('[data-refresh]').addEventListener('click',()=>{void controller.load();});
-    one('[data-cancel]').addEventListener('click',()=>{void controller.load();});
-    one('[data-accept]').addEventListener('click',()=>{void controller.accept(one<HTMLSelectElement>('[data-role]').value,one<HTMLInputElement>('[data-consent]').checked);});
+    /*
+     * Joining needs a chosen role and the ticked box. If either is missing, say which one and
+     * stop here; the controller would refuse without a word.
+     */
+    one('[data-accept]').addEventListener('click',()=>{
+      const role=chosenRole(),consent=one<HTMLInputElement>('[data-consent]').checked;
+      if(!role || !consent){
+        const hint=one('[data-hint]');
+        hint.textContent=!role && !consent ? 'Choose your access and tick the box to join.'
+          : !role ? 'Choose your access to join.' : 'Tick the box to confirm you are joining as yourself.';
+        hint.hidden=false;
+        (!role ? roles()[0] : one<HTMLInputElement>('[data-consent]'))?.focus();
+        return;
+      }
+      one('[data-hint]').hidden=true;
+      quiet=false;focusNext='joined';
+      void controller.accept(role,consent);
+    });
+    one('[data-review]').addEventListener('change',()=>{
+      if(chosenRole() && one<HTMLInputElement>('[data-consent]').checked)one('[data-hint]').hidden=true;
+    });
+    /* The card moves above the create form when the dashboard is on its create screen, and waits
+       until the dashboard has loaded so it does not jump. */
+    if(dashboard)new MutationObserver(()=>paint()).observe(dashboard,{attributes:true,attributeFilter:['data-state']});
     let authGeneration=0;
     client()!.auth.onAuthStateChange((event,session)=>{
       if(event==='SIGNED_OUT'||account!==(session?.user.id??null)){++authGeneration;controller.setAccount(null);account=session?.user.id??null;
