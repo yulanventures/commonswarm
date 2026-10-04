@@ -1,5 +1,7 @@
--- Data-free reverse catalog for 20261003000002. History is retained.
--- Stable labels only: no row values or credential data in diagnostics.
+-- Before-apply catalog for 20261003000002: proves the W2 preflight state without invoking a reserve.
+-- Derived from 20261003000002-rollback-catalog.sql: reverse rows 001-025; rows 026-033 assert the roles the reserve KEEPS, so before apply the issuer role must be absent instead.
+-- Shared labels keep the reverse row text byte for byte; tests/admin-release-plan.test.ts checks it.
+-- Every row is NULL-safe on a pre-W2 database: no name casts or name-based privilege calls on W2 objects.
 WITH checks(label,ok) AS (VALUES
   ('20261003000002-rollback-001-commonswarm_oauth-admin_verified_clients', COALESCE((
     to_regclass('commonswarm_oauth.admin_verified_clients') IS NULL
@@ -77,44 +79,16 @@ WITH checks(label,ok) AS (VALUES
     to_regclass('commonswarm_oauth.refresh_family_tombstones') IS NOT NULL
   -- The reserve keeps constrained operator roles and safe creator edges.
   ),false)),
-  ('20261003000002-rollback-026-commonswarm_admin_issuer', COALESCE((
-    EXISTS(SELECT 1 FROM pg_roles WHERE rolname='commonswarm_admin_issuer' AND rolcanlogin AND NOT rolinherit
-    AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)
-  ),false)),
-  ('20261003000002-rollback-027-issuer-memberships', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname='commonswarm_admin_issuer'))
-  ),false)),
-  ('20261003000002-rollback-028-issuer-direct-privileges-and-ownership', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass
-    AND refobjid=(SELECT oid FROM pg_roles WHERE rolname='commonswarm_admin_issuer') AND deptype IN ('a','o'))
-  ),false)),
-  ('20261003000002-rollback-029-issuer-memberships', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE roleid=(SELECT oid FROM pg_roles WHERE rolname='commonswarm_admin_issuer')
-    AND (NOT admin_option OR inherit_option OR set_option))
-  ),false)),
-  ('20261003000002-rollback-030-catalog', COALESCE((
-    (SELECT count(*) FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))=3
-  ),false)),
-  ('20261003000002-rollback-031-catalog', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
-    AND (rolsuper OR rolcanlogin OR rolinherit OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
-  ),false)),
-  ('20261003000002-rollback-032-policy-role-memberships', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles parent ON parent.oid=m.roleid
-    WHERE parent.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance')
-      AND (NOT m.admin_option OR m.inherit_option OR m.set_option))
-  ),false)),
-  ('20261003000002-rollback-033-policy-role-memberships', COALESCE((
-    NOT EXISTS(SELECT 1 FROM pg_auth_members m JOIN pg_roles member ON member.oid=m.member
-    WHERE member.rolname IN ('commonswarm_admin_release','commonswarm_dpop_verifier','commonswarm_oauth_maintenance'))
+  ('20261003000002-before-026-commonswarm_admin_issuer-absent', COALESCE((
+    to_regrole('commonswarm_admin_issuer') IS NULL
   ),false))
 )
-SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS rollback_ok_failed_checks,
-  COALESCE(bool_and(ok),false) AS rollback_ok_checks_ok FROM checks
+SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS before_ok_failed_checks,
+  COALESCE(bool_and(ok),false) AS before_ok_checks_ok FROM checks
 \gset
-\if :rollback_ok_checks_ok
+\if :before_ok_checks_ok
 \else
-\warn 20261003000002-rollback failed checks: :rollback_ok_failed_checks
+\warn 20261003000002-before failed checks: :before_ok_failed_checks
 \endif
-SELECT :'rollback_ok_checks_ok'::boolean AS rollback_ok
+SELECT :'before_ok_checks_ok'::boolean AS before_ok
 \gset

@@ -1281,24 +1281,16 @@ assert all(r.get(k) is True for k in ('ok','database_bytes_verified','object_byt
 age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r['verified_at'].replace('Z','+00:00'))).total_seconds()
 assert -300<=age<86400 and r['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL backup gate; STOP'
 PY
-# Before proofs: all reverse catalogs must be true, without invoking a reserve. The reviewed
-# 20261003000002 reverse catalog also asserts the roles its reserve KEEPS (the issuer role,
-# casts to it); before apply those roles do not exist yet, so for that version the plan derives
-# a before-apply absence catalog: the reviewed rows 001-025 verbatim plus issuer-role absence
-# (to_regrole IS NULL, no cast). The full reverse catalogs remain the post-reserve proof.
-python3 - "$RELEASE_ROOT/deploy/release-proofs/item-ai/20261003000002-rollback-catalog.sql" "$PROOF_DIR/before-20261003000002.sql" <<'PY'
-import pathlib,sys
-src=pathlib.Path(sys.argv[1]).read_text()
-head,rest=src.split('WITH checks(label,ok) AS (VALUES\n',1)
-rows,tail=rest.split('\n)\nSELECT COALESCE',1)
-kept=rows[:rows.index("  ('20261003000002-rollback-026-")].rstrip().rstrip(',')
-if kept.count("('20261003000002-rollback-0")!=25 or '::regrole' in kept: raise SystemExit('FAIL ai-w2-preflight: before-apply 20261003000002 rows expected 25-role-free got other; STOP')
-issuer="  ('20261003000002-before-026-commonswarm_admin_issuer-absent', COALESCE((\n    to_regrole('commonswarm_admin_issuer') IS NULL\n  ),false))"
-pathlib.Path(sys.argv[2]).write_text('-- Before-apply absence catalog derived from the reviewed reverse catalog (rows 001-025) plus issuer-role absence.\nWITH checks(label,ok) AS (VALUES\n'+kept+',\n'+issuer+'\n)\nSELECT COALESCE'+tail)
-PY
+# Before proofs: one reviewed before-apply catalog per version, read from the verified release
+# archive, without invoking a reserve. The reverse catalogs also assert what each reserve KEEPS
+# (0002: the issuer and policy roles; 0005: the six private tables), so they cannot hold before
+# apply. Each <version>-before-catalog.sql keeps every other reverse row byte for byte and adds
+# absence rows instead; every row is NULL-safe on a pre-W2 database (no name casts and no
+# name-based privilege calls on objects or roles W2 creates). The full reverse catalogs remain
+# the post-reserve proof.
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
- if test "$VERSION" = 20261003000002; then BEFORE_CATALOG=/proof/before-20261003000002.sql; else BEFORE_CATALOG=/release/deploy/release-proofs/item-ai/$VERSION-rollback-catalog.sql; fi
- printf '\\i %s\nSELECT :\x27rollback_ok\x27::boolean;\n' "$BEFORE_CATALOG" >"$PROOF_DIR/catalog.sql"
+ BEFORE_CATALOG=/release/deploy/release-proofs/item-ai/$VERSION-before-catalog.sql
+ printf '\\i %s\nSELECT :\x27before_ok\x27::boolean;\n' "$BEFORE_CATALOG" >"$PROOF_DIR/catalog.sql"
  BEFORE_OK=$(ai_ro -Atq --file /proof/catalog.sql)
  test "$BEFORE_OK" = t || { printf 'FAIL ai-w2-preflight: before-apply catalog for %s expected t got other; STOP\n' "$VERSION" >&2; exit 1; }
 done

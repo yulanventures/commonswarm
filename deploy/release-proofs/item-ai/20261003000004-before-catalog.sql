@@ -1,5 +1,7 @@
--- Evidence-preserving reverse proof: the empty schema may predate this migration.
--- Stable labels only: no row values or credential data in diagnostics.
+-- Before-apply catalog for 20261003000004: proves the W2 preflight state without invoking a reserve.
+-- Derived from 20261003000004-rollback-catalog.sql: every reverse row holds before apply (privilege rows are NULL-safe joins).
+-- Shared labels keep the reverse row text byte for byte; tests/admin-release-plan.test.ts checks it.
+-- Every row is NULL-safe on a pre-W2 database: no name casts or name-based privilege calls on W2 objects.
 WITH checks(label,ok) AS (VALUES
   ('20261003000004-rollback-001-commonswarm_ops-migration_checksums', COALESCE((
     to_regclass('commonswarm_ops.migration_checksums') IS NULL
@@ -29,12 +31,12 @@ WITH checks(label,ok) AS (VALUES
     NOT EXISTS(SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.rolname='commonswarm_admin_release' WHERE n.nspname='commonswarm_ops' AND has_schema_privilege(r.oid,n.oid,'USAGE'))
   ),false))
 )
-SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS rollback_ok_failed_checks,
-  COALESCE(bool_and(ok),false) AS rollback_ok_checks_ok FROM checks
+SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS before_ok_failed_checks,
+  COALESCE(bool_and(ok),false) AS before_ok_checks_ok FROM checks
 \gset
-\if :rollback_ok_checks_ok
+\if :before_ok_checks_ok
 \else
-\warn 20261003000004-rollback failed checks: :rollback_ok_failed_checks
+\warn 20261003000004-before failed checks: :before_ok_failed_checks
 \endif
-SELECT :'rollback_ok_checks_ok'::boolean AS rollback_ok
+SELECT :'before_ok_checks_ok'::boolean AS before_ok
 \gset

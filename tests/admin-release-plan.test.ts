@@ -1777,16 +1777,87 @@ test('admin release plan: W2 ai-close revokes a staged DCR probe grant before CL
   } finally { f.clean(); }
 });
 
-// ---- W2 before-apply catalogs must not depend on objects W2 creates (production W2 yPolVl) ----
-test('admin release plan: W2 before-apply 20261003000002 catalog proves absence without casting to the missing issuer role', () => {
+// ---- W2 before-apply catalogs must not depend on objects W2 creates (production W2 yPolVl, release 835b7ae8) ----
+const W2_VERSIONS = ['20261003000001', '20261003000002', '20261003000003', '20261003000004', '20261003000005'] as const;
+const itemAiProof = (name: string) => readFileSync(resolve('deploy/release-proofs/item-ai', name), 'utf8');
+// One catalog row: its label and its exact text, from the row opener to the last character before the separator.
+const catalogRows = (sql: string) => {
+  const body = sql.split('WITH checks(label,ok) AS (VALUES\n')[1]!.split('\n)\nSELECT ')[0]!;
+  return new Map(body.split(/\n(?= {1,2}\('2026100300000[1-5]-)/).map(row => {
+    const text = row.replace(/,$/, '');
+    return [/^ {1,2}\('([^']+)'/.exec(text)![1]!, text] as const;
+  }));
+};
+// Reverse rows that assert what a reserve KEEPS: they can never hold before apply.
+const RESERVE_KEPT: Record<string, RegExp> = {
+  '20261003000002': /^20261003000002-rollback-0(?:2[6-9]|3[0-3])-/,
+  '20261003000005': /^20261003000005-private-tables$/,
+};
+const BEFORE_ADDED: Record<string, string[]> = {
+  '20261003000002': ['20261003000002-before-026-commonswarm_admin_issuer-absent'],
+  '20261003000005': ['20261003000005-before-private-tables-absent'],
+};
+
+test('admin release plan: W2 preflight reads one reviewed before-apply catalog per version from the release archive', () => {
   const pre = block('ai-w2-preflight');
-  const generator = pre.split(`python3 - "$RELEASE_ROOT/deploy/release-proofs/item-ai/20261003000002-rollback-catalog.sql" "$PROOF_DIR/before-20261003000002.sql" <<'PY'\n`)[1]!.split('\nPY\n')[0]!;
-  const dir = mkdtempSync(join(scratch, 'before-catalog-')), out = join(dir, 'before.sql');
-  const made = spawnSync('python3', ['-c', generator, resolve('deploy/release-proofs/item-ai/20261003000002-rollback-catalog.sql'), out], { encoding: 'utf8' });
-  assert.equal(made.status, 0, made.stderr);
-  const sql = readFileSync(out, 'utf8');
+  const start = pre.indexOf('for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do\n BEFORE_CATALOG=');
+  assert.ok(start > 0, 'the before loop covers all five versions');
+  const loop = pre.slice(start, pre.indexOf('\ndone\n', start) + 6);
+  assert.match(loop, /^ BEFORE_CATALOG=\/release\/deploy\/release-proofs\/item-ai\/\$VERSION-before-catalog\.sql$/m);
+  assert.match(loop, /SELECT :\\x27before_ok\\x27::boolean;/);
+  assert.doesNotMatch(pre, /rollback-catalog|before-20261003000002|\/proof\/before-/, 'no derived or reverse catalog in the before proof');
+  assert.doesNotMatch(loop, /if test "\$VERSION"/, 'no per-version special case');
+  // The loop STOPs with its own message for the first before-apply catalog that is not true.
+  const dir = mkdtempSync(join(scratch, 'before-loop-'));
+  const runLoop = (falseFor: string) => run(`set -euo pipefail\nai_ro() { case "$(cat "$PROOF_DIR/catalog.sql")" in *${falseFor}-before-catalog.sql*) printf 'f\\n';; *-before-catalog.sql*) printf 't\\n';; *) printf 'unexpected\\n';; esac; }\n${loop}`, { PROOF_DIR: dir });
+  assert.equal(runLoop('none').status, 0);
+  for (const v of W2_VERSIONS) {
+    const stop = runLoop(v); assert.notEqual(stop.status, 0, v);
+    assert.match(stop.stderr, new RegExp(`FAIL ai-w2-preflight: before-apply catalog for ${v} expected t got other; STOP`));
+  }
+});
+
+test('admin release plan: each W2 before-apply catalog keeps the reverse rows byte for byte except the reserve-kept rows', () => {
+  for (const v of W2_VERSIONS) {
+    const before = catalogRows(itemAiProof(`${v}-before-catalog.sql`)), reverse = catalogRows(itemAiProof(`${v}-rollback-catalog.sql`));
+    const expectedShared = [...reverse.keys()].filter(label => !RESERVE_KEPT[v]?.test(label));
+    assert.deepEqual([...before.keys()], [...expectedShared, ...(BEFORE_ADDED[v] ?? [])], v);
+    for (const label of expectedShared) assert.equal(before.get(label), reverse.get(label), `${label} row text`);
+    for (const label of BEFORE_ADDED[v] ?? []) assert.ok(label.startsWith(`${v}-before-`), label);
+    assert.ok(itemAiProof(`${v}-before-catalog.sql`).endsWith(`SELECT :'before_ok_checks_ok'::boolean AS before_ok\n\\gset\n`), v);
+  }
+  // Control: the exclusion pattern removes exactly the reserve-kept rows, no more.
+  assert.equal([...catalogRows(itemAiProof('20261003000002-rollback-catalog.sql')).keys()].filter(l => RESERVE_KEPT['20261003000002']!.test(l)).length, 8);
+  assert.equal([...catalogRows(itemAiProof('20261003000005-rollback-catalog.sql')).keys()].filter(l => RESERVE_KEPT['20261003000005']!.test(l)).length, 1);
+});
+
+test('admin release plan: W2 before and reverse catalogs never raise on a missing W2 role, schema or object', () => {
+  // Name casts and name-based privilege calls raise when the name does not exist. Only builtins
+  // and roles that exist before W2 may be named that way; everything else goes through to_reg* or catalog joins.
+  const castAllowed = new Set(["'pg_authid'::regclass", "'jsonb'::regtype"]);
+  const preW2Roles = new Set(['swarm_read', 'authenticated', 'anon']);
+  const lint = (sql: string) => {
+    const problems: string[] = [];
+    for (const [cast] of sql.matchAll(/'[^']*'::reg[a-z]+/g)) if (!castAllowed.has(cast)) problems.push(cast);
+    for (const [call, args] of sql.matchAll(/has_[a-z_]+_privilege\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)) {
+      if ([...args!.matchAll(/'([^']*)'/g)].some(([, name]) => !/^[A-Z ,]+$/.test(name!) && !preW2Roles.has(name!))) problems.push(call);
+    }
+    return problems;
+  };
+  for (const v of W2_VERSIONS) for (const kind of ['before', 'rollback']) {
+    assert.deepEqual(lint(itemAiProof(`${v}-${kind}-catalog.sql`)), [], `${v}-${kind}-catalog.sql`);
+  }
+  // Controls: the 835b7ae8 row shapes that raised before W2 are rejected.
+  assert.equal(lint("NOT has_schema_privilege('commonswarm_admin_release','commonswarm_ops','USAGE')").length, 1);
+  assert.equal(lint("WHERE member='commonswarm_admin_issuer'::regrole").length, 1);
+  assert.equal(lint("NOT has_function_privilege('anon','swarm_read.admin_recovery_page(text,uuid,integer,text)','EXECUTE')").length, 1);
+  assert.deepEqual(lint("has_table_privilege('swarm_read',c.oid,'SELECT') AND p.prorettype='jsonb'::regtype"), []);
+});
+
+test('admin release plan: W2 before-apply 20261003000002 catalog proves absence without casting to the missing issuer role', () => {
+  const sql = itemAiProof('20261003000002-before-catalog.sql');
   assert.doesNotMatch(sql, /::regrole/, 'no cast to a role the window creates');
-  // Minimal evaluator for exactly the predicate forms the generated catalog may contain.
+  // Minimal evaluator for exactly the predicate forms this catalog may contain.
   const evaluate = (present: Set<string>) => [...sql.matchAll(/\('([^']+)', COALESCE\(\(\n([\s\S]*?)\n  \),false\)\)/g)].map(([, label, body]) => {
     const text = body!.split('\n').filter(l => !l.trim().startsWith('--')).join(' ').trim();
     let m = /^to_reg(?:class|procedure|type|role)\('([^']+)'\) IS (NOT )?NULL$/.exec(text);
@@ -1800,12 +1871,6 @@ test('admin release plan: W2 before-apply 20261003000002 catalog proves absence 
   assert.equal(ok.length, 26); assert.ok(ok.every(([, v]) => v), 'role absent before apply: PASS');
   const withIssuer = evaluate(new Set([...beforeW2, 'commonswarm_admin_issuer']));
   assert.deepEqual(withIssuer.filter(([, v]) => !v).map(([l]) => l), ['20261003000002-before-026-commonswarm_admin_issuer-absent'], 'role present before apply: STOP');
-  // The plan loop STOPs with its own message when a before-apply catalog is not true.
-  const loop = pre.slice(pre.indexOf('for VERSION in 20261003000001 20261003000002'), pre.indexOf('\ndone\n', pre.indexOf('for VERSION in 20261003000001 20261003000002')) + 6);
-  const runLoop = (answer: string) => run(`set -euo pipefail\nai_ro() { case "$(cat "$PROOF_DIR/catalog.sql")" in *before-20261003000002.sql*) printf '%s\\n' "${answer}";; *) printf 't\\n';; esac; }\n${loop}`, { PROOF_DIR: dir });
-  assert.equal(runLoop('t').status, 0);
-  const stop = runLoop('f'); assert.notEqual(stop.status, 0);
-  assert.match(stop.stderr, /FAIL ai-w2-preflight: before-apply catalog for 20261003000002 expected t got other; STOP/);
 });
 
 // ---- W2 close after a pre-fence STOP (production W2 yPolVl) ----
