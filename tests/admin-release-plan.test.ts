@@ -204,7 +204,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
-    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : {}) };
+    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
     const noApproval = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.notEqual(noApproval.status, 0);
     assert.match(noApproval.stderr, /explicit .* approval required/);
@@ -418,7 +418,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 10, pointer: 5 }));
+  writeFileSync(planCopy, portable(plan, { stage: 10, pointer: 9 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -586,8 +586,12 @@ esac
   const dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
   // A failed database call in the real nested rollback stops before touching files/services.
   const harness = 'ai_db() { return 42; }\n' + dispatcher;
-  const owners = blocks.filter(source => /systemctl stop /.test(source));
-  assert.equal(owners.length, 3, 'unexpected unguarded stop owner');
+  // Every stop owner is known. W4's two use ai-timer-guard (tested here); ai-edge-refresh, ai-w6-activation-apply and
+  // ai-w6-finish own their own re-arm traps (tested in tests/admin-release-w6-ready.test.ts).
+  const stopOwners = blocks.filter(source => /systemctl stop /.test(source)).map(source => source.split('\n')[0]).sort();
+  assert.deepEqual(stopOwners, ['# step: ai-edge-refresh', '# step: ai-w4-apply', '# step: ai-w4-rollback', '# step: ai-w6-activation-apply', '# step: ai-w6-finish'], 'unexpected stop owner');
+  const owners = blocks.filter(source => /systemctl stop /.test(source) && source.includes('ai_run ai-timer-guard\n'));
+  assert.equal(owners.length, 2, 'unexpected unguarded stop owner');
   for (const source of owners) {
     assert.match(source, /^\(\nset -euo pipefail/m, 'guard lifetime must be a subshell');
     const start = source.indexOf('ai_run ai-timer-guard\n');
@@ -714,28 +718,40 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
   const shim=join(scratch,'shims'); mkdirSync(shim);
   const pythonPath=spawnSync('which',['python3'],{encoding:'utf8'}).stdout.trim();
   writeFileSync(join(shim,'python3'),`#!/bin/bash\nif test "$#" = 1 && test "$1" = -; then\n exec '${pythonPath}' -c 'import sys,types; m=types.ModuleType("urllib.request"); R=type("R",(),{"__enter__":lambda s:s,"__exit__":lambda *a:None,"read":lambda s,n:b"{\\"state\\":\\"closed\\"}" if s.method=="GET" else b"","status":200,"headers":{"Access-Control-Allow-Origin":"*","Cache-Control":"no-store"}}); m.Request=lambda url,method,headers:method; m.urlopen=lambda method,timeout:type("Response",(R,),{"method":method})(); import urllib; urllib.request=m; sys.modules["urllib.request"]=m; exec(sys.stdin.read())'\nelse\n exec '${pythonPath}' "$@"\nfi\n`,{mode:0o700});
-  const calls=join(proof,'calls');
-  const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback|ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; *) return 1;; esac; }\n`;
-  const finish=(keep:boolean|undefined)=>run(harness+block('ai-w6-finish'),{WINDOW:'W6',PROOF_DIR:proof,INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH});
+  const calls=join(proof,'calls'), timer=join(proof,'timer');
+  // Fixture systemctl: the recycle timer W6 holds since apply (inactive at finish start).
+  writeFileSync(join(shim,'systemctl'),`#!/bin/bash\nprintf 'systemctl %s\\n' "$1" >>"$PROOF_DIR/calls"\ncase "$1" in stop) printf inactive >"$TIMER";; start) printf active >"$TIMER";; is-active) test "$(cat "$TIMER")" = active;; *) exit 64;; esac\n`,{mode:0o700});
+  const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback) printf '%s\\n' "$1" >>"$PROOF_DIR/calls"; systemctl start; printf active >"$TIMER";;
+ ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; ai-edge-remeasure) printf 'ai-edge-remeasure %s\\n' "$(cat "$TIMER")" >>"$PROOF_DIR/calls"; printf '{}\\n' >"$EDGE_MEASUREMENT_OUT";; *) return 1;; esac; }
+ai_ro() { printf 't\\n'; }\n`;
+  const finish=(keep:boolean|undefined)=>{ writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
+    return run(harness+block('ai-w6-finish'),{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH}); };
+  const trace=()=>readFileSync(calls,'utf8').trim().split('\n');
   let result=finish(undefined); assert.equal(result.status,0,result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'closed',explicit_keep_open:false});
-  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-rollback');
-  writeFileSync(calls,''); result=finish(true); assert.equal(result.status,0,result.stderr);
+  // Default: rollback (re-arms), stop again, remeasure the closed state with the timer held, then re-arm on exit.
+  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-w6-activation-rollback','systemctl start','systemctl stop','ai-edge-remeasure inactive','systemctl start']);
+  assert.equal(readFileSync(timer,'utf8'),'active'); assert.ok(existsSync(join(proof,'edge-measurement-final.json')));
+  result=finish(true); assert.equal(result.status,0,result.stderr);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
-  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-probes');
+  // Keep open: remeasure with the timer still held (reopens only through the measured path), probe OPEN, re-arm on exit.
+  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-edge-remeasure inactive','ai-w6-activation-probes','systemctl start']);
+  assert.equal(readFileSync(timer,'utf8'),'active');
   // Former `A && B` guard: each receipt now refuses on its own line before any probe.
   for(const file of ['C1-fence.txt','client-withdraw.json']) {
-    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); writeFileSync(calls,''); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
+    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
     result=finish(undefined); assert.notEqual(result.status,0);
     assert.match(result.stderr,new RegExp(`FAIL ai-w6-finish: ${file.replace('.','\\.')} expected present got missing; STOP`));
-    assert.equal(readFileSync(calls,'utf8'),''); assert.ok(!existsSync(join(proof,'C1-finish.json')));
+    // A failed finish still re-arms the held timer (HezLead ruling); nothing else ran.
+    assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['systemctl start']); assert.equal(readFileSync(timer,'utf8'),'active');
+    assert.ok(!existsSync(join(proof,'C1-finish.json')));
     writeFileSync(join(proof,file),saved);
   }
 });
 
 test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
   // Never the real Mac pointer: the fixture pointer is under this file's scratch.
-  const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:1});
+  const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:2});
   assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer'); assert.ok(outsideHome(pointer));
   const stage=makeStage();
   const c1=join(scratch,'pointer-input.json');
@@ -777,9 +793,9 @@ test('admin release plan: C1 report requires ordered approval/withdrawal/revoke 
     const files:Record<string,unknown>={
       'agent.json':{ok:true,refused_after_fence:{http_status:403,refusal_code:'grant_revoked'},workspace:{accepted_residue:true,name:'c1-smoke-fixture (test, archive me)'}},
       'C1-audit.json':{audit_counts:{init:1,list:1,read:1,action:1}},
-      'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:03:00Z'},
+      'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:02:00Z'},
       'client-approve.json':{approval_at:'2026-10-03T12:01:00Z'},
-      'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:02:00Z'},
+      'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:03:00Z'},
       'C1-finish.json':{state:'closed',explicit_keep_open:false}, ...changes,
     };
     for(const [name,value] of Object.entries(files)) writeFileSync(join(root,name),JSON.stringify(value));
@@ -790,11 +806,13 @@ test('admin release plan: C1 report requires ordered approval/withdrawal/revoke 
   const good=report(); assert.equal(good.result.status,0,good.result.stderr);
   const receipt=JSON.parse(readFileSync(join(good.root,'C1.json'),'utf8'));
   assert.equal(receipt.approval_scope,'account-wide owner/client/version');
-  assert.equal(receipt.approval_at,'2026-10-03T12:01:00Z'); assert.equal(receipt.withdrawn_at,'2026-10-03T12:02:00Z'); assert.equal(receipt.revoked_at,'2026-10-03T12:03:00Z');
+  // F3 order: the human revoke fences the grant first; the approval withdrawal follows it.
+  assert.equal(receipt.approval_at,'2026-10-03T12:01:00Z'); assert.equal(receipt.revoked_at,'2026-10-03T12:02:00Z'); assert.equal(receipt.withdrawn_at,'2026-10-03T12:03:00Z');
   assert.deepEqual(receipt.refused_follow_up,{http_status:403,refusal_code:'grant_revoked'}); assert.equal(receipt.final_gate,'closed');
   for(const changes of [
     {'client-approve.json':{}}, {'client-withdraw.json':{status:'PASS'}}, {'human-revoke.json':{state:'revoked'}},
-    {'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:00:00Z'}},
+    {'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:01:30Z'}},
+    {'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:00:30Z'}},
     {'agent.json':{ok:true,refused_after_fence:{http_status:200,refusal_code:'grant_revoked'},workspace:{accepted_residue:true}}},
     {'C1-finish.json':{state:'open',explicit_keep_open:true}},
   ]) { const bad=report(changes); assert.notEqual(bad.result.status,0); assert.ok(!existsSync(join(bad.root,'C1.json'))); }
@@ -1455,13 +1473,17 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
   assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { ...measured, generation: 14, invalidated_at: null });
   assert.notEqual(run('set -euo pipefail\n'+read+source, { ...env, OBSERVED_GENERATION: '' }).status, 0);
   const apply = block('ai-w6-activation-apply');
-  const refreshStart = apply.indexOf('ACTIVATION_GENERATION=');
+  // W6 apply's receipt now comes only from the shared ai-edge-remeasure (tested in admin-release-w6-ready.test.ts).
+  const refreshStart = apply.indexOf('EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json');
   const refreshEnd = apply.indexOf('python3 - "$SECRET_STAGE/service.env"', refreshStart);
   const sqlStart = apply.indexOf('python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql"');
   const sqlEnd = apply.indexOf('ai_db -q --file /proof/activate.sql', sqlStart);
   assert.ok(refreshStart > 0 && refreshEnd > refreshStart && sqlStart > refreshEnd && sqlEnd > sqlStart);
+  assert.doesNotMatch(apply, /commonswarm-admin-edge-recycle (?:before|after)/, 'W6 apply runs the hook only through ai-edge-remeasure');
   const supplied = join(root, 'supplied.json'); writeFileSync(supplied, readFileSync(receipt));
-  const result = run('set -euo pipefail\n'+read+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
+  rmSync(receipt);
+  const remeasure = `ai_run() { test "$1" = ai-edge-remeasure || return 1; python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); m.update(generation=int(sys.argv[3]),invalidated_at=None); open(sys.argv[2],"x").write(json.dumps(m,sort_keys=True)+"\\n")' "$EDGE_MEASUREMENT_FILE" "$EDGE_MEASUREMENT_OUT" "$OBSERVED_GENERATION"; }\n`;
+  const result = run('set -euo pipefail\n'+read+remeasure+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
     ...env, OBSERVED_GENERATION: '15', EDGE_MEASUREMENT_FILE: supplied, INPUTS_FILE: inputFile(base()),
   });
   assert.equal(result.status, 0, result.stderr);
@@ -1593,7 +1615,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 18, 'one shared reader at all 18 sites (17 plan-text sites, including ai-w2b-preflight and ai-w2b-proof-check, and ai-w2-backfill)');
+  assert.equal(readers.length, 21, 'one shared reader at all 21 sites (20 plan-text sites, including ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
