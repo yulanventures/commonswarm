@@ -323,6 +323,32 @@ test('ai-w6-audit-watch runs the audit once agent.json arrives and refuses at th
   assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP/);
 });
 
+// Box-path mapper for the ssh/scp stubs: maps each path that starts with /home/commonswarm or /tmp to the fixture box
+// root, once. Anchored to a path start and idempotent: a path already under the box root (which itself is under /tmp
+// on Linux, where os.tmpdir() is /tmp) is left alone.
+const BOX_MAPPER = join(root, 'box-map.py');
+writeFileSync(BOX_MAPPER, String.raw`import re,sys
+box,cmd=sys.argv[1],sys.argv[2]
+def sub(m):
+    lead,path=m.group(1),m.group(2)
+    return m.group(0) if path==box or path.startswith(box+'/') else lead+box+path
+sys.stdout.write(re.sub(r'''(^|[\s'"=:])(/(?:home/commonswarm|tmp)(?:/[^\s'"]*)?)(?=$|[\s'"])''',sub,cmd))
+`);
+const boxMap = (box: string, cmd: string) => spawnSync('python3', [BOX_MAPPER, box, cmd], { encoding: 'utf8' }).stdout;
+
+test('fence stubs: the box-path mapper is anchored and idempotent with a /tmp-based box root (Linux tmpdir)', () => {
+  const box = '/tmp/admin-w6-ready-AbCdEf/fence-GhIjKl/box';
+  const cmd = 'install -m 0600 /tmp/admin-c1-W6-agent.json /home/commonswarm/admin-issuance/release-proofs/x/agent.json';
+  const once = boxMap(box, cmd);
+  assert.equal(once, `install -m 0600 ${box}/tmp/admin-c1-W6-agent.json ${box}/home/commonswarm/admin-issuance/release-proofs/x/agent.json`);
+  assert.equal(boxMap(box, once), once, 'mapping twice changes nothing');
+  assert.equal(boxMap(box, `test -f ${box}/home/commonswarm/a`), `test -f ${box}/home/commonswarm/a`, 'already-mapped path is kept');
+  assert.equal(boxMap(box, 'cat /tmpfoo /home/commonswarmx'), 'cat /tmpfoo /home/commonswarmx', 'only whole path prefixes map');
+  // The same command on a macOS-style box root.
+  const mac = '/var/folders/zz/T/admin-w6-ready-AbCdEf/fence-GhIjKl/box';
+  assert.equal(boxMap(mac, cmd), `install -m 0600 ${mac}/tmp/admin-c1-W6-agent.json ${mac}/home/commonswarm/admin-issuance/release-proofs/x/agent.json`);
+});
+
 /** cutoffInMs: the runner's printed fence cutoff relative to its ready line; the runner really exits at that cutoff.
  * driverDelayMs: the driver starts this long after the ready line (a retained line must not give it a fresh budget). */
 async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence: { cutoffInMs?: number; driverDelayMs?: number } = {}) {
@@ -341,11 +367,11 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 sleep ${LATENCY}; cmd="\${@: -1}"; printf 'ssh %s\\n' "$cmd" >>"${calls}"
 ${stallUpload ? 'case "$cmd" in "test ! -e "*agent.json) exec sleep 600;; esac' : ''}
-cmd="\${cmd//\\/home\\/commonswarm/${boxRoot.replace(/\//g, '\\/')}\\/home\\/commonswarm}"; cmd="\${cmd//\\/tmp\\//${boxRoot.replace(/\//g, '\\/')}\\/tmp\\/}"
+cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
 case "$cmd" in install*agent.json) eval "$cmd" || exit 1; ( sleep 2; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","provider_grant_id":"family","audit_counts":{"init":1,"list":1,"read":1,"action":1}}\\n' >"${boxProof}/C1-audit.json" ) & exit 0;; esac
 eval "$cmd"\n`, { mode: 0o700 });
-  writeFileSync(join(bin, 'scp'), `#!/bin/bash\nsleep ${LATENCY}; printf 'scp\\n' >>"${calls}"; dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"; cp "\${@: -2:1}" "${boxRoot}\${dest}"\n`, { mode: 0o700 });
+  writeFileSync(join(bin, 'scp'), `#!/bin/bash\nsleep ${LATENCY}; printf 'scp\\n' >>"${calls}"; dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"; cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
   const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(join(bin, 'node'), `#!/bin/bash
 case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls}"; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","request_id":"r","state":"revoked"}\\n';;
