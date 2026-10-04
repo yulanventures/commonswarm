@@ -21,7 +21,7 @@ const emptyHousehold = createHouseholdObjectsState({ workspace_id: "", name: "Sh
 import AgentConnect from "../connect/AgentConnect.astro";
 import AgentHostPicker from "../connect/AgentHostPicker.astro";
 import Wordmark from "../Wordmark.astro";
-import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY } from "../../lib/household-access";
+import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY, PURPOSE_QUESTION } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
 import { enabledProvidersForBuild, signInDoors } from "../../lib/auth-providers";
@@ -560,8 +560,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <li class="dashboard__setup-step" data-setup-step="access">
                   <span class="dashboard__setup-mark" aria-hidden="true"></span>
                   <span class="dashboard__setup-copy">
-                    <strong data-setup-title>Choose who can see it</strong>
-                    <span data-setup-detail>Shared lists and invites both need this.</span>
+                    <strong data-setup-title>Choose who shares Lists &amp; docs</strong>
+                    <span data-setup-detail>Shared lists and invitations both need this.</span>
                   </span>
                   <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
                     Choose
@@ -762,7 +762,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   version is kept, with who made it.
                 </p>
                 <fieldset class="dashboard__choice-cards" data-household-purpose-set>
-                  <legend>Who can see this workspace?</legend>
+                  <legend>{PURPOSE_QUESTION}</legend>
                   {(["shared", "personal"] as const).map((purpose) => (
                     <label class="dashboard__choice-card">
                       <input type="radio" name="household-purpose" value={purpose} data-household-purpose />
@@ -814,7 +814,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </section>
 
             <section class="dashboard__brain-view" data-channel-view="brain" hidden>
-              <aside class="dashboard__brain-index" aria-label="Brain topics">
+              <aside class="dashboard__brain-index" aria-label="Wiki pages">
                 <p class="dashboard__brain-notice" role="status" data-brain-notice hidden></p>
                 <p class="dashboard__brain-empty" data-brain-empty></p>
                 <ul class="dashboard__brain-list" data-brain-list hidden></ul>
@@ -1706,6 +1706,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     /** While a host page of the Add an agent picker is open, a light roster poll notices the
         agent arriving. It stops on leaving the page, on a workspace change, and after 15 min. */
     let hostJoinTimer: number | undefined;
+    let hostJoinGeneration = 0;
     let hostJoinKnown = new Set<string>();
     let hostJoinStartedAt = 0;
     const householdRoot = one<HTMLElement>("[data-household-objects]");
@@ -6603,6 +6604,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const stopHostJoinWatch = (): void => {
       window.clearInterval(hostJoinTimer);
       hostJoinTimer = undefined;
+      hostJoinGeneration += 1;
       hostJoinKnown = new Set();
       hostJoinStartedAt = 0;
     };
@@ -6997,6 +6999,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        household_connections answer, and sends household_permissions with the person's own
        explicit choices. Results are scoped to the workspace and session that asked. */
 
+    /** Everything an async household result must still match when it lands: the workspace,
+        the signed-in account, the boot/sign-out version and the household generation (bumped
+        on every workspace change). A result that fails any of these is dropped, success or
+        failure alike (R2 review). */
+    interface HouseholdScope {
+      session: Session;
+      workspaceId: string;
+      version: number;
+      generation: number;
+    }
+    const householdScope = (): HouseholdScope | null =>
+      session && activeWorkspaceId && !sampleMode
+        ? { session, workspaceId: activeWorkspaceId, version: requestVersion, generation: householdAccessGeneration }
+        : null;
+    const householdCurrent = (scope: HouseholdScope): boolean =>
+      scope.workspaceId === activeWorkspaceId &&
+      session?.user.id === scope.session.user.id &&
+      scope.version === requestVersion &&
+      scope.generation === householdAccessGeneration;
+
     /** The command caller the household dashboard uses, bound to one workspace and session. */
     const householdCall = (activeSession: Session, selectedId: string) =>
       async (command: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> => {
@@ -7038,32 +7060,29 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /** Ask household_access for the viewer's own access and repaint what depends on it. */
+    let householdAccessReads = 0;
     const refreshHouseholdAccess = async (): Promise<void> => {
-      const activeSession = session;
-      const selectedId = activeWorkspaceId;
-      const generation = ++householdAccessGeneration;
-      if (!activeSession || !selectedId || sampleMode) return;
+      const scope = householdScope();
+      if (!scope) return;
+      const read = ++householdAccessReads;
       let next: typeof householdAccess;
       try {
         const result = await postCommand(
-          activeSession,
+          scope.session,
           uuid(),
           { kind: "household_access" },
-          { workspace_id: selectedId, stream: { kind: "workspace" } },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
         );
         const body = result.body;
         const role = body.content_role;
         next = result.status === 200 && body.status === "ok"
-          ? { workspaceId: selectedId, status: "ok", contentRole: role === "editor" || role === "reader" ? role : null }
-          : { workspaceId: selectedId, status: "refused", contentRole: null };
+          ? { workspaceId: scope.workspaceId, status: "ok", contentRole: role === "editor" || role === "reader" ? role : null }
+          : { workspaceId: scope.workspaceId, status: "refused", contentRole: null };
       } catch {
-        next = { workspaceId: selectedId, status: "unknown", contentRole: null };
+        next = { workspaceId: scope.workspaceId, status: "unknown", contentRole: null };
       }
-      if (
-        generation !== householdAccessGeneration ||
-        selectedId !== activeWorkspaceId ||
-        session?.user.id !== activeSession.user.id
-      ) return;
+      // A newer read, or any change of workspace, account or session, wins.
+      if (read !== householdAccessReads || !householdCurrent(scope)) return;
       householdAccess = next;
       renderHouseholdAccess();
       renderSetupChecklist();
@@ -7154,138 +7173,152 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const loadHouseholdConnections = async (): Promise<void> => {
-      const activeSession = session;
-      const selectedId = activeWorkspaceId;
-      if (!activeSession || !selectedId || sampleMode) return;
+      const scope = householdScope();
+      if (!scope) return;
+      let next: Record<string, unknown>[] = [];
       try {
         const result = await postCommand(
-          activeSession,
+          scope.session,
           uuid(),
           { kind: "household_connections" },
-          { workspace_id: selectedId, stream: { kind: "workspace" } },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
         );
-        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
-        householdConnections = result.body.status === "ok" && Array.isArray(result.body.connections)
+        next = result.body.status === "ok" && Array.isArray(result.body.connections)
           ? result.body.connections as Record<string, unknown>[]
           : [];
       } catch {
-        if (selectedId !== activeWorkspaceId) return;
-        householdConnections = [];
+        next = [];
       }
+      // Success and failure are both dropped once the scope moved on.
+      if (!householdCurrent(scope)) return;
+      householdConnections = next;
       renderAgentApprovals();
     };
 
-    /** household_permissions for one agent. The purpose must match the workspace's; the
-        person's own role is resent unchanged, so approving an agent never changes it. */
+    /** household_permissions for one agent. The purpose must match the workspace's. The
+        command also re-records the person's own role, so the role sent is the one a fresh
+        household_access read returns just before the approval, never a cached one: another
+        device may have changed it (R2 review). The remaining race between that read and the
+        approval needs a server operation that approves an agent without touching the person's
+        role (REDESIGN.md 8.1). */
     const approveAgent = async (
       connection: Record<string, unknown>,
       operations: string[],
       button: HTMLButtonElement,
       status: HTMLElement,
     ): Promise<void> => {
-      const activeSession = session;
-      const selectedId = activeWorkspaceId;
-      const role = householdAccess.contentRole;
-      if (!activeSession || !selectedId || !role) {
-        status.textContent = "Confirm your own access first. Nothing was changed.";
-        return;
-      }
+      const scope = householdScope();
+      if (!scope) return;
       button.disabled = true;
       status.textContent = "Saving…";
-      const send = (purpose: HouseholdPurpose) => postCommand(
-        activeSession,
-        uuid(),
-        {
-          kind: "household_permissions",
-          purpose,
-          content_role: role,
-          connection: {
-            kind: connection.kind,
-            connection_id: connection.connection_id,
-            grant_id: connection.grant_id,
-            principal_id: connection.principal_id,
-            operations,
-          },
-        },
-        { workspace_id: selectedId, stream: { kind: "workspace" } },
-        "The result is unknown. Reload Lists & docs before allowing again.",
-      );
+      const settle = (message: string): void => {
+        if (!householdCurrent(scope)) return;
+        status.textContent = message;
+      };
       try {
+        await refreshHouseholdAccess();
+        if (!householdCurrent(scope)) return;
+        const role = householdAccess.status === "ok" ? householdAccess.contentRole : null;
+        if (!role) {
+          settle("Confirm your own access first. Nothing was changed.");
+          return;
+        }
+        const send = (purpose: HouseholdPurpose) => postCommand(
+          scope.session,
+          uuid(),
+          {
+            kind: "household_permissions",
+            purpose,
+            content_role: role,
+            connection: {
+              kind: connection.kind,
+              connection_id: connection.connection_id,
+              grant_id: connection.grant_id,
+              principal_id: connection.principal_id,
+              operations,
+            },
+          },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
+          "The result is unknown. Reload Lists & docs before allowing again.",
+        );
         /* Access is confirmed, so the workspace's purpose already exists and a mismatch
            refusal changes nothing; trying the other value once finds it without a read. */
-        const first: HouseholdPurpose = rememberedPurpose(selectedId) ?? "shared";
+        const first: HouseholdPurpose = rememberedPurpose(scope.workspaceId) ?? "shared";
         let result = await send(first);
         let purpose = first;
+        if (!householdCurrent(scope)) return;
         if (result.body.status === "refused" && result.body.reason === "workspace_boundary_mismatch") {
           purpose = first === "shared" ? "personal" : "shared";
           result = await send(purpose);
+          if (!householdCurrent(scope)) return;
         }
-        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
         if (result.status === 200 && result.body.status === "committed") {
-          rememberPurpose(selectedId, purpose);
-          status.textContent = approvalUntil(
-            typeof result.body.expires_at === "string" ? result.body.expires_at : null,
-          );
+          rememberPurpose(scope.workspaceId, purpose);
+          settle(approvalUntil(typeof result.body.expires_at === "string" ? result.body.expires_at : null));
           button.textContent = "Allow again";
         } else {
-          status.textContent = accessRefusalMessage(result.body.reason);
+          settle(accessRefusalMessage(result.body.reason));
         }
       } catch (error) {
-        status.textContent = error instanceof Error && error.message
+        settle(error instanceof Error && error.message
           ? error.message
-          : "The result is unknown. Reload Lists & docs before allowing again.";
+          : "The result is unknown. Reload Lists & docs before allowing again.");
       } finally {
+        // The card is rebuilt on every workspace change, so this only touches its own button.
         button.disabled = false;
       }
     };
 
-    /** The person's own access (and, for the owner, who can see the workspace). */
+    /** The person's own access (and, for the owner, who can use Lists & docs here). */
+    let householdConfirms = 0;
     const confirmOwnAccess = async (): Promise<void> => {
-      const activeSession = session;
-      const selectedId = activeWorkspaceId;
+      const scope = householdScope();
       const notice = one<HTMLElement>("[data-household-consent-result]");
       const button = one<HTMLButtonElement>("[data-household-confirm]");
+      if (!scope) return;
       const owner = viewerRole() === "owner";
       const purpose = owner
         ? one<HTMLInputElement>("[data-household-purpose]:checked")?.value
         : "shared";
       const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
-      if (!activeSession || !selectedId) return;
       if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
         if (notice) notice.textContent = owner
-          ? "Choose who can see this workspace and your access, then confirm."
+          ? "Choose who can use Lists & docs here and your access, then confirm."
           : "Choose your access, then confirm.";
         return;
       }
+      const token = ++householdConfirms;
+      const say = (message: string): void => {
+        if (notice && householdCurrent(scope) && token === householdConfirms) notice.textContent = message;
+      };
       if (button) button.disabled = true;
-      if (notice) notice.textContent = "Saving…";
+      say("Saving…");
       try {
         const result = await postCommand(
-          activeSession,
+          scope.session,
           uuid(),
           { kind: "household_permissions", purpose, content_role: role },
-          { workspace_id: selectedId, stream: { kind: "workspace" } },
+          { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
           "The result is unknown. Reload before confirming again.",
         );
-        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+        if (!householdCurrent(scope)) return;
         if (result.status === 200 && result.body.status === "committed") {
-          rememberPurpose(selectedId, purpose);
-          if (notice) notice.textContent = "Your access is confirmed.";
+          rememberPurpose(scope.workspaceId, purpose);
+          say("Your access is confirmed.");
           await refreshHouseholdAccess();
-          if (activeWorkspaceView === "objects") void openHouseholdView();
-        } else if (notice) {
-          notice.textContent = !owner && result.body.reason === "workspace_boundary_mismatch"
+          if (householdCurrent(scope) && activeWorkspaceView === "objects") void openHouseholdView();
+        } else {
+          say(!owner && result.body.reason === "workspace_boundary_mismatch"
             ? "Only the owner can use Lists & docs in this workspace. Nothing was changed."
-            : accessRefusalMessage(result.body.reason);
+            : accessRefusalMessage(result.body.reason));
         }
       } catch (error) {
-        if (notice && selectedId === activeWorkspaceId) {
-          notice.textContent = error instanceof Error && error.message
-            ? error.message
-            : "The result is unknown. Reload before confirming again.";
-        }
+        say(error instanceof Error && error.message
+          ? error.message
+          : "The result is unknown. Reload before confirming again.");
       } finally {
-        if (button) button.disabled = false;
+        // Only the latest confirmation in this scope may release the shared button.
+        if (button && token === householdConfirms) button.disabled = false;
       }
     };
 
@@ -7371,29 +7404,31 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
-    /** Notice the agent the person is connecting, while its host page is open. */
+    /** Notice the agent the person is connecting, while its host page is open. Each host page
+        starts its own watch; a reply from an older watch is ignored (R2 review). */
     const startHostJoinWatch = (): void => {
       stopHostJoinWatch();
       const me = session?.user.id ?? "";
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
       if (!me || !workspaceId || sampleMode) return;
+      const watch = hostJoinGeneration;
       hostJoinKnown = new Set(agents.map((agent) => agent.principalId));
       hostJoinStartedAt = Date.now();
+      const live = (): boolean =>
+        watch === hostJoinGeneration &&
+        version === requestVersion &&
+        workspaceId === activeWorkspaceId &&
+        session?.user.id === me &&
+        app.dataset.channelView === "agent-choice";
       hostJoinTimer = window.setInterval(() => {
-        if (
-          version !== requestVersion ||
-          workspaceId !== activeWorkspaceId ||
-          session?.user.id !== me ||
-          Date.now() - hostJoinStartedAt > 15 * 60_000 ||
-          app.dataset.channelView !== "agent-choice"
-        ) {
-          stopHostJoinWatch();
+        if (!live() || Date.now() - hostJoinStartedAt > 15 * 60_000) {
+          if (watch === hostJoinGeneration) stopHostJoinWatch();
           return;
         }
         if (document.visibilityState !== "visible") return;
         void roster(workspaceId).then((nextAgents) => {
-          if (version !== requestVersion || workspaceId !== activeWorkspaceId || hostJoinTimer === undefined) return;
+          if (!live()) return;
           const joined = nextAgents.find(
             (agent) => agent.ownerUserId === me && !hostJoinKnown.has(agent.principalId),
           );
@@ -7407,7 +7442,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           picker?.showJoined?.({
             name: joined.name,
             principalId: joined.principalId,
-            canApprove: householdAccess.status === "ok",
+            canApprove: householdAccess.status === "ok" && householdAccess.workspaceId === workspaceId,
           });
         }).catch(() => undefined);
       }, 5_000);
@@ -7448,10 +7483,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         renderFiles();
         showChannelView("files");
       } else if (view === "brain") {
-        if (name) name.textContent = "Brain";
+        /* "Wiki" is the word a person is taught (Tom's plain-words rule, 2026-09-11); "brain"
+           stays in code, the CLI and the agents' tools. */
+        if (name) name.textContent = "Wiki";
         if (description) {
           description.textContent =
-            "Durable Markdown notes kept by this workspace. Each save creates a new file version.";
+            "Notes this workspace keeps, written in Markdown. Every save keeps the earlier version.";
         }
         const refresh = one<HTMLButtonElement>("[data-refresh]");
         const count = one<HTMLElement>("[data-update-count]");
@@ -15493,8 +15530,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   /* --- Lists & docs: access card, choice cards, agent approvals --- */
   .dashboard__objects-view {
     display: grid;
+    align-content: start;
     gap: var(--s-6);
-    padding-block-end: var(--s-8);
+    min-inline-size: 0;
+    /* The same inset the Files view uses, so the cards never touch the channel edges. */
+    padding: clamp(var(--s-5), 4vw, var(--s-8));
   }
 
   .dashboard__access-card,
@@ -15771,6 +15811,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="inactive"],
   .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="suspended"] {
     color: var(--warning);
+  }
+
+  @media (max-width: 52rem) {
+    /* On a phone the channel head floats over the top of the body (--feed-band-height), and the
+       fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits about
+       10rem above the bottom edge. These views start below the band and leave room to scroll
+       every control clear of that box (after-screenshot defects 1 and 2). */
+    .dashboard__setup,
+    .dashboard__objects-view,
+    .dashboard__host-view {
+      padding-block-start: calc(var(--feed-band-height, 3.25rem) + var(--s-2));
+      padding-block-end: 16rem;
+    }
   }
 
   @media (max-width: 34rem) {

@@ -33,3 +33,15 @@ test('browser recipient invitation entry bundles without Node-only CLI build dep
     platform:'browser',format:'esm',target:'es2022',logLevel:'silent'});
   assert.ok(result.outputFiles[0].contents.length>0);
 });
+
+test('a failed inbox read is flagged as failed, unlike an empty inbox, and a retry clears it',async()=>{
+  /* R2 review: the card hid failures because an error looked like an empty list. The flag is
+     explicit; a positive control proves an empty inbox is not flagged. */
+  let fail=true;const views=[];
+  const controller=createHumanInviteController({inbox:async()=>{if(fail)throw new Error('offline');return [];}},v=>views.push(v));
+  controller.setAccount('recipient');await controller.load();
+  assert.equal(views.at(-1).failed,true);assert.deepEqual(views.at(-1).invitations,[]);
+  assert.match(views.at(-1).message,/could not be read/);
+  fail=false;await controller.load();
+  assert.equal(views.at(-1).failed,false);assert.equal(views.at(-1).message,'No pending invitations.');
+});

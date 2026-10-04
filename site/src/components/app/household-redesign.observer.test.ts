@@ -55,7 +55,7 @@ test("person-facing redesign markup uses plain words, not protocol words", () =>
     previous = visible;
     visible = visible.replace(/\{[^{}]*\}/g, " ");
   }
-  assert.match(visible, /Who can see this workspace\?/, "positive control: visible text survives the strip");
+  assert.match(visible, /Choose who shares Lists &amp; docs/, "positive control: visible text survives the strip");
   assert.doesNotMatch(visible, /\b(seat|grant|claim|OAuth|MCP|signal|principal|purpose|content access)\b/i);
   // Control: the instrument fires on the retired sentence it replaced.
   assert.match("the workspace owner must choose Shared in content settings and confirm content access", /content access/i);
@@ -75,26 +75,47 @@ test("Lists & docs access is two described radio groups, generated from the enfo
   assert.match(script, /if \(purposeSet\) purposeSet\.hidden = viewerRole\(\) !== "owner";/);
 });
 
-test("approving an agent resends the person's own confirmed role and never sets the purpose by guess", () => {
+test("approving an agent sends the role a fresh access read returns, never a cached one", () => {
   const approve = section(script, "const approveAgent = async (", "const confirmOwnAccess = async");
-  assert.match(approve, /const role = householdAccess\.contentRole;/);
+  /* R2 review: a cached role could restore Editor after another device chose Reader. */
+  assert.match(approve, /await refreshHouseholdAccess\(\);\s*if \(!householdCurrent\(scope\)\) return;\s*const role = householdAccess\.status === "ok" \? householdAccess\.contentRole : null;/);
   assert.match(approve, /content_role: role,/);
   assert.doesNotMatch(approve, /content_role: "(?:editor|reader)"/);
   /* The mismatch retry is safe only because confirmed access implies the purpose exists. */
   assert.match(approve, /result\.body\.reason === "workspace_boundary_mismatch"/);
-  assert.match(approve, /CONTENT_OPERATION_LABELS|approvalUntil\(/);
+  assert.match(approve, /approvalUntil\(/);
   /* Operations shown to the person come from the policy constant, in plain labels. */
   assert.match(script, /for \(const operation of CONTENT_OPERATIONS\)/);
   assert.match(script, /CONTENT_OPERATION_LABELS\[operation\]/);
 });
 
-test("the Add an agent poll runs only while a host page is open, and stops on any change", () => {
+test("every household result is dropped once its workspace, account, version or generation moved on", () => {
+  /* R2 review: success and failure paths alike, including the shared Confirm button. */
+  const current = section(script, "const householdCurrent = (scope: HouseholdScope): boolean =>", ";\n");
+  for (const fact of ["scope.workspaceId === activeWorkspaceId", "session?.user.id === scope.session.user.id",
+    "scope.version === requestVersion", "scope.generation === householdAccessGeneration"]) {
+    assert.ok(current.includes(fact), `householdCurrent must check ${fact}`);
+  }
+  const load = section(script, "const loadHouseholdConnections = async", "/** household_permissions for one agent.");
+  assert.match(load, /\} catch \{\s*next = \[\];\s*\}\s*\/\/ Success and failure are both dropped once the scope moved on\.\s*if \(!householdCurrent\(scope\)\) return;/);
+  const confirm = section(script, "const confirmOwnAccess = async", "/** Open Lists & docs:");
+  assert.match(confirm, /if \(button && token === householdConfirms\) button\.disabled = false;/);
+  assert.match(confirm, /notice && householdCurrent\(scope\) && token === householdConfirms/);
+  const refresh = section(script, "const refreshHouseholdAccess = async", "/** Show the access card");
+  assert.match(refresh, /if \(read !== householdAccessReads \|\| !householdCurrent\(scope\)\) return;/);
+});
+
+test("the Add an agent poll runs only while its own host page is open, and stops on any change", () => {
   const watch = section(script, "const startHostJoinWatch = (): void => {", "    };\n");
-  assert.match(watch, /version !== requestVersion/);
-  assert.match(watch, /workspaceId !== activeWorkspaceId/);
+  assert.match(watch, /const watch = hostJoinGeneration;/);
+  assert.match(watch, /watch === hostJoinGeneration &&/);
+  assert.match(watch, /version === requestVersion &&/);
+  assert.match(watch, /workspaceId === activeWorkspaceId &&/);
+  assert.match(watch, /app\.dataset\.channelView === "agent-choice"/);
   assert.match(watch, /15 \* 60_000/);
-  assert.match(watch, /app\.dataset\.channelView !== "agent-choice"/);
-  assert.match(watch, /stopHostJoinWatch\(\);/);
+  assert.match(watch, /if \(!live\(\)\) return;/, "a reply from a replaced watch is ignored");
+  const stop = section(script, "const stopHostJoinWatch = (): void => {", "    };\n");
+  assert.match(stop, /hostJoinGeneration \+= 1;/);
   assert.match(script, /hostPicker\?\.addEventListener\("agent-host-selected", \(\) => startHostJoinWatch\(\)\);/);
   assert.match(script, /hostPicker\?\.addEventListener\("agent-host-back", \(\) => stopHostJoinWatch\(\)\);/);
 });

@@ -218,10 +218,19 @@ test("the invitation card is invisible unless there is something to show, and wa
   // The old rule showed the box to every signed-in person.
   assert.doesNotMatch(page.script, /root\.hidden\s*=\s*view\.account\s*===\s*null\s*;/);
   assert.match(page.script, /const listing=!joined && view\.invitations\.length>0;/);
+  /* R2 review: a failed check is not an empty inbox. It shows, with Check again and Not now,
+     from the controller's explicit failed flag, never from the message text. */
   assert.match(
     page.script,
-    /const shown=view\.account!==null && state!=='loading' && \(joined \|\| reviewing \|\| listing\);/,
+    /const failing=view\.failed && !view\.busy && !joined && !reviewing && !listing && !failureDismissed;/,
   );
+  assert.match(
+    page.script,
+    /const shown=view\.account!==null && state!=='loading' && \(joined \|\| reviewing \|\| listing \|\| failing\);/,
+  );
+  assert.match(page.markup, /data-failure hidden/);
+  assert.match(page.markup, /data-retry>Check again</);
+  assert.doesNotMatch(page.script, /view\.message\s*===|message\.includes\(/, "visibility never branches on message text");
   assert.match(page.script, /root\.hidden=!shown;/);
   // A display rule on the element beats the browser's [hidden]; the stylesheet must say it back.
   assert.match(page.style, /human-invitation-inbox\[hidden\][\s\S]*?\{\s*display: none;/);

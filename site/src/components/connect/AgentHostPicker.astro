@@ -71,8 +71,11 @@ const orbHue: Record<string, string> = {
 };
 
 const stepsOf = (host: AgentHost): readonly AgentHostStep[] => host.steps;
+/* Any page that leads to a connection, including a waiting host's testing route, carries the
+   turn-only and shared-connection notes (R2 review: ChatGPT's developer-mode route lost them). */
+const connects = (host: AgentHost): boolean => (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
 const notesOf = (host: AgentHost): string[] => [
-  ...(host.status && host.status !== "waiting" ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
+  ...(connects(host) ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
   ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE] : []),
   ...host.notes,
   MENU_LABELS_NOTE,
@@ -297,7 +300,9 @@ const notesOf = (host: AgentHost): string[] => [
       }
       for (const back of this.querySelectorAll<HTMLButtonElement>("[data-ahp-back]")) {
         back.addEventListener("click", () => {
+          const from = this.#hostId;
           this.reset();
+          this.#focusGrid(from);
           this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
         });
       }
@@ -312,6 +317,7 @@ const notesOf = (host: AgentHost): string[] => [
       });
       this.querySelector<HTMLButtonElement>("[data-ahp-another]")?.addEventListener("click", () => {
         this.reset();
+        this.#focusGrid("");
         this.dispatchEvent(new CustomEvent("agent-host-another", { bubbles: true }));
       });
       this.#render();
@@ -352,7 +358,7 @@ const notesOf = (host: AgentHost): string[] => [
       this.#show(id);
       this.#resetWaiting(panel);
       panel.querySelector<HTMLElement>(".ahp__title")?.focus({ preventScroll: true });
-      panel.scrollIntoView?.({ block: "start" });
+      this.#scrollToTop(panel);
       this.dispatchEvent(new CustomEvent("agent-host-selected", { bubbles: true, detail: { host: id } }));
     }
 
@@ -373,6 +379,39 @@ const notesOf = (host: AgentHost): string[] => [
       this.#hostId = "";
       this.#show("joined");
       title?.focus({ preventScroll: true });
+    }
+
+    /** Back on the grid, focus the tile the person came from, or the grid's heading. */
+    #focusGrid(fromHost: string): void {
+      const tile = fromHost
+        ? this.querySelector<HTMLElement>(`[data-ahp-host="${CSS.escape(fromHost)}"]`)
+        : null;
+      const target = tile && tile.offsetParent !== null
+        ? tile
+        : this.querySelector<HTMLElement>("[data-ahp-grid-title]");
+      target?.focus({ preventScroll: true });
+      if (target) this.#scrollToTop(target === tile ? tile : this);
+    }
+
+    /**
+     * Bring a view's top into sight by scrolling only the nearest scrolling ancestor (the
+     * dashboard's channel body), or the window when the page itself scrolls (/invite).
+     * scrollIntoView would also scroll every outer box and push /app's one-row bar away.
+     */
+    #scrollToTop(node: HTMLElement): void {
+      let scroller: HTMLElement | null = this.parentElement;
+      while (scroller) {
+        const overflow = getComputedStyle(scroller).overflowY;
+        if ((overflow === "auto" || overflow === "scroll") && scroller.scrollHeight > scroller.clientHeight) break;
+        scroller = scroller.parentElement;
+      }
+      const top = node.getBoundingClientRect().top;
+      if (scroller) {
+        const delta = top - scroller.getBoundingClientRect().top - 16;
+        if (delta < 0 || delta > scroller.clientHeight / 2) scroller.scrollTop += delta;
+      } else if (top < 0 || top > window.innerHeight / 2) {
+        window.scrollTo({ top: Math.max(0, top + window.scrollY - 16) });
+      }
     }
 
     #show(view: string): void {
@@ -778,6 +817,7 @@ const notesOf = (host: AgentHost): string[] => [
 
   .ahp__copy {
     flex: none;
+    align-self: center;
     min-block-size: 2.75rem;
     min-inline-size: 4.5rem;
     padding: 0 var(--s-4);

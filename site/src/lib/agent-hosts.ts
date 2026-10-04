@@ -112,9 +112,16 @@ export function cursorInstallLink(address: string = AGENT_CONNECTOR_ADDRESS): st
   return `cursor://anysphere.cursor-deeplink/mcp/install?name=commonswarm&config=${encodeURIComponent(base64)}`;
 }
 
+/*
+ * What the joiner says to Muse. Plain words on purpose (R2 review): she reads and copies it. The
+ * household guide's working draft named the protocol ("over MCP with OAuth",
+ * docs/integrations/household/muse.md:24); this keeps its substance (a custom connector, this
+ * address, sign-in outside chat, only the household workspace) without the protocol names.
+ * Neither wording is tested in Muse yet, which is why the tile says "Not tested yet".
+ */
 const museRequest =
-  `Create a CommonSwarm custom connector over MCP with OAuth using ${AGENT_CONNECTOR_ADDRESS}. ` +
-  "Connect only my household workspace. Guide me through sign-in outside chat.";
+  `Create a custom connector called CommonSwarm with this address: ${AGENT_CONNECTOR_ADDRESS}. ` +
+  "It signs in with my own CommonSwarm account. Connect only my household workspace, and let me sign in outside this chat.";
 
 export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
   {

@@ -21,14 +21,20 @@ import {
 
 export type HouseholdPurpose = "shared" | "personal";
 
+/**
+ * The purpose governs Lists & docs, not the whole workspace: messages and ordinary Files stay
+ * visible to everyone already in it (R2 review). The words say exactly that.
+ */
+export const PURPOSE_QUESTION = "Who can use Lists & docs here?";
 export const PURPOSE_COPY: Readonly<Record<HouseholdPurpose, { label: string; detail: string }>> = Object.freeze({
   shared: {
     label: "Me and people I invite",
-    detail: "Everyone here can see shared lists, docs and files, including their history.",
+    detail: "Everyone in this workspace can see and use Lists & docs, including their history.",
   },
   personal: {
     label: "Just me",
-    detail: "Private to you. Invitations to it will not work, and this cannot be changed later.",
+    detail:
+      "Only you can use Lists & docs here. Invitations to this workspace will not work, and this cannot be changed later. People already in it still see its messages and files.",
   },
 });
 

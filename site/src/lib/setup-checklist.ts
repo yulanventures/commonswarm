@@ -37,8 +37,8 @@ export function setupSteps(facts: SetupFacts): SetupStep[] {
     facts.isOwner
       ? {
         id: "access",
-        title: "Choose who can see it",
-        detail: "Shared lists and invites both need this.",
+        title: "Choose who shares Lists & docs",
+        detail: "Shared lists and invitations both need this.",
         action: "Choose",
         done: facts.accessConfirmed === true,
       }

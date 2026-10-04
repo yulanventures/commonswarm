@@ -46,6 +46,16 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
     </div>
 
     <p class="human-invitations__result" data-result role="status" aria-live="polite"></p>
+
+    <!-- A failed check is shown, with a retry (R2 review): an empty inbox stays hidden, but a
+         read that failed must not look like "no invitations". -->
+    <div class="human-invitations__failure" data-failure hidden>
+      <p class="human-invitations__failure-text" data-failure-text role="alert"></p>
+      <div class="human-invitations__actions">
+        <button class="human-invitations__button" type="button" data-retry>Check again</button>
+        <button class="human-invitations__button human-invitations__button--quiet" type="button" data-dismiss-failure>Not now</button>
+      </div>
+    </div>
   </section>
 
   <dialog class="human-invitations__dialog" data-review-dialog aria-labelledby="human-invitations-review-title">
@@ -332,6 +342,21 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
 
   .human-invitations .human-invitations__result,
   .human-invitations__dialog .human-invitations__hint,
+  .human-invitations__failure {
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .human-invitations__failure[hidden] {
+    display: none;
+  }
+
+  .human-invitations__failure-text {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--t-sm);
+  }
+
   .human-invitations__dialog .human-invitations__result {
     font-size: var(--t-sm);
   }
@@ -344,6 +369,21 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
   }
 
   .human-invitations .human-invitations__result,
+  .human-invitations__failure {
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .human-invitations__failure[hidden] {
+    display: none;
+  }
+
+  .human-invitations__failure-text {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--t-sm);
+  }
+
   .human-invitations__dialog .human-invitations__result {
     color: var(--text);
   }
@@ -518,6 +558,8 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
      * dismissed it (Escape or Not now); the card closes it itself when the review ends.
      */
     let quiet=true;
+    /* A dismissed failure stays out of the way until the next check or account change. */
+    let failureDismissed=false;
     let focusNext:'list'|'joined'|null=null;
     let dialogWanted=false;
     const datetime=(ms:number)=>new Date(ms).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
@@ -529,11 +571,14 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
       const joined=view.joined;
       const reviewing=!joined && view.preview!==null;
       const listing=!joined && view.invitations.length>0;
-      const shown=view.account!==null && state!=='loading' && (joined || reviewing || listing);
+      const failing=view.failed && !view.busy && !joined && !reviewing && !listing && !failureDismissed;
+      const shown=view.account!==null && state!=='loading' && (joined || reviewing || listing || failing);
       root.hidden=!shown;
       root.dataset.placement=creating?'top':'corner';
       one('[data-first]').hidden=!(creating && listing);
       one('[data-list]').hidden=!listing;
+      one('[data-failure]').hidden=!failing;
+      one('[data-failure-text]').textContent=failing ? view.message : '';
 
       const key=view.invitations.map(row=>row.invitation_id).join(' ');
       if(key!==rowsKey){
@@ -588,8 +633,10 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
       }
     };
     const controller=createHumanInviteController(browserHumanInvitations(), view=>{lastView=view;paint();});
-    const setAccount=(id:string|null)=>{account=id;quiet=true;focusNext=null;controller.setAccount(id);if(id)void controller.load();};
-    one('[data-refresh]').addEventListener('click',()=>{quiet=true;void controller.load();});
+    const setAccount=(id:string|null)=>{account=id;quiet=true;failureDismissed=false;focusNext=null;controller.setAccount(id);if(id)void controller.load();};
+    one('[data-refresh]').addEventListener('click',()=>{quiet=true;failureDismissed=false;void controller.load();});
+    one('[data-retry]').addEventListener('click',()=>{quiet=true;failureDismissed=false;focusNext='list';void controller.load();});
+    one('[data-dismiss-failure]').addEventListener('click',()=>{failureDismissed=true;paint();});
     /* Not now and Escape both close the dialog; the close event is the one way back to the card. */
     one('[data-cancel]').addEventListener('click',()=>{dialog.close();});
     dialog.addEventListener('cancel',event=>{if(lastView?.busy)event.preventDefault();});

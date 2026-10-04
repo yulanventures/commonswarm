@@ -20,9 +20,13 @@ test("every enforced role and operation has plain words, and no extra ones exist
   assert.deepEqual(Object.keys(PURPOSE_COPY).sort(), ["personal", "shared"]);
 });
 
-test("the personal choice says it is final and blocks invitations", () => {
-  assert.match(PURPOSE_COPY.personal.detail, /Invitations to it will not work/u);
+test("the personal choice is scoped to Lists & docs, says it is final and blocks invitations", () => {
+  assert.match(PURPOSE_COPY.personal.detail, /^Only you can use Lists & docs here\./u);
+  assert.match(PURPOSE_COPY.personal.detail, /Invitations to this workspace will not work/u);
   assert.match(PURPOSE_COPY.personal.detail, /cannot be changed later/u);
+  /* Messages and Files are not governed by this choice; the copy must not imply privacy for them. */
+  assert.match(PURPOSE_COPY.personal.detail, /still see its messages and files/u);
+  assert.doesNotMatch(PURPOSE_COPY.personal.detail, /Private to you/u);
   assert.match(PURPOSE_COPY.shared.detail, /including their history/u);
 });
 

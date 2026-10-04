@@ -48,19 +48,26 @@ test("the waiting label names OpenAI, so only OpenAI hosts may use it", () => {
 test("people-facing step text has no protocol words or endorsement claims", () => {
   const banned = /\b(seat|grant|claim_seat|claim|ACK|listener|signal|principal|OAuth|partner|certified|endorsed|one-click|wakes up)\b/iu;
   for (const host of AGENT_HOSTS) {
+    const steps = [...host.steps, ...(host.testing?.steps ?? [])];
+    /* Everything a person reads or copies, including the sentences they say to the agent
+       (R2 review: the sweep used to skip `say`). Commands in `code` are for terminals. */
     const visible = [
       host.name,
       host.maker,
       ...host.notes,
-      ...[...host.steps, ...(host.testing?.steps ?? [])].map((step) => step.text),
+      ...steps.map((step) => step.text),
+      ...steps.flatMap((step) => (step.say ? [step.say] : [])),
       ...(host.testing ? [host.testing.heading] : []),
     ];
     for (const text of visible) {
       assert.doesNotMatch(text, banned, `${host.id}: "${text}"`);
+      /* The joiner's first screen also never names the protocol. */
+      if (host.joiner === "primary") assert.doesNotMatch(text, /\bMCP\b/u, `${host.id}: "${text}"`);
     }
   }
-  // Control: the instrument does fire on a protocol word.
+  // Controls: the instrument does fire on a protocol word and on the retired Muse draft.
   assert.match("claim a seat", banned);
+  assert.match("Create a CommonSwarm custom connector over MCP with OAuth", banned);
 });
 
 test("every connector host tells the person to sign in with the same account and say one sentence", () => {
