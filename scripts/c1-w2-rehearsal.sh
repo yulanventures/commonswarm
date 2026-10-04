@@ -78,7 +78,8 @@
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
-# stop, or a postmaster pid still alive, keeps the directory, prints RETAIN and exits nonzero
+# stop, or a postmaster pid still alive 10 s after the stop (a zombie counts as gone), keeps the directory, prints
+# RETAIN and exits nonzero
 # (--cleanup-run proves it). HOME is never assigned.
 set -u
 set -o pipefail
@@ -100,8 +101,26 @@ own_dir_ok() {
   test -d "$1" && ! test -L "$1"
 }
 
+# A pid counts as running unless it is gone or a zombie/dead entry (an exited postmaster that its parent has not
+# reaped yet still answers kill -0). Linux: /proc/<pid>/stat state; elsewhere (macOS): ps stat.
+pid_running() { # pid
+  local st
+  kill -0 "$1" 2>/dev/null || return 1
+  if test -r "/proc/$1/stat"; then
+    st=$(sed -n 's/^.*) \([A-Za-z]\).*$/\1/p' "/proc/$1/stat" 2>/dev/null)
+  else
+    # kill -0 answered, so the process exists: a ps that fails or prints nothing (e.g. denied in a sandbox) is no
+    # evidence of exit, and the pid stays running (never delete on missing evidence).
+    st=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ') || return 0
+    test -n "$st" || return 0
+  fi
+  case "$st" in Z*|X*|x*) return 1 ;; esac
+  return 0
+}
+
 cleanup_dir() {
-  local dir=$1 pid
+  local dir=$1 pid tenths=0 limit=${C1_W2_CLEANUP_WAIT_TENTHS:-100}
+  [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] && test "$limit" -le 100 || limit=100
   if ! own_dir_ok "$dir"; then say "REFUSE cleanup: $dir is not this script's mktemp directory"; return 1; fi
   if test -e "$dir/data/postmaster.pid"; then
     # The owned postmaster is the pid recorded in this directory's own postmaster.pid.
@@ -110,9 +129,14 @@ cleanup_dir() {
     if ! "$PG_BIN/pg_ctl" -D "$dir/data" -m fast -w -t 60 stop >/dev/null 2>&1; then
       say "RETAIN cleanup: pg_ctl stop failed; postmaster $pid may still run; cluster directory $dir kept"; return 1
     fi
-    if kill -0 "$pid" 2>/dev/null; then
-      say "RETAIN cleanup: postmaster $pid still running after stop; cluster directory $dir kept"; return 1
-    fi
+    # pg_ctl -w returns once postmaster.pid is gone; the process may still be exiting. Wait for it, bounded
+    # (default 10 s in 100 ms steps); never delete while it runs.
+    while pid_running "$pid"; do
+      if test "$tenths" -ge "$limit"; then
+        say "RETAIN cleanup: postmaster $pid still running $((limit / 10)).$((limit % 10)) s after stop; cluster directory $dir kept"; return 1
+      fi
+      sleep 0.1; tenths=$((tenths + 1))
+    done
   fi
   rm -rf -- "$dir"
 }

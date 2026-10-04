@@ -6,7 +6,7 @@
  * on it (negative control), and prove the current plan runs the W2 SQL end to end (positive control).
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -97,11 +97,34 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
     assert.match(r.stdout, new RegExp(`^RETAIN cleanup: pg_ctl stop failed; postmaster ${process.pid} may still run; cluster directory ${failed} kept$`, 'm'));
     assert.ok(existsSync(join(failed, 'data', 'postmaster.pid')), 'a failed stop never reaches rm');
     stub(0);
+    // A postmaster that never exits: RETAIN and nonzero within the (shortened) bound, directory kept.
     const alive = cluster(process.pid); dirs.push(alive);
-    r = run(['--cleanup-run', alive], { PG_BIN: bin });
-    assert.equal(r.status, 4, r.stdout + r.stderr);
-    assert.match(r.stdout, new RegExp(`^RETAIN cleanup: postmaster ${process.pid} still running after stop; cluster directory ${alive} kept$`, 'm'));
+    let started = Date.now();
+    r = run(['--cleanup-run', alive], { PG_BIN: bin, C1_W2_CLEANUP_WAIT_TENTHS: '20' });
+    assert.equal(r.status, 4, r.stdout + r.stderr); assert.ok(Date.now() - started < 10_000, 'bounded wait');
+    assert.match(r.stdout, new RegExp(`^RETAIN cleanup: postmaster ${process.pid} still running 2\\.0 s after stop; cluster directory ${alive} kept$`, 'm'));
     assert.ok(existsSync(join(alive, 'data')), 'a still-running postmaster keeps its directory');
+    // A postmaster still exiting when pg_ctl -w returns (an orphaned process that exits after 1.5 s and is reaped by
+    // init/launchd): cleanup waits for it, then removes the directory.
+    const exitingPid = Number(spawnSync('/bin/sh', ['-c', 'sleep 1.5 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
+    assert.ok(exitingPid > 0);
+    const slow = cluster(exitingPid);
+    started = Date.now();
+    r = run(['--cleanup-run', slow], { PG_BIN: bin });
+    assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /^REMOVED cleanup-run: /m); assert.ok(!existsSync(slow));
+    assert.ok(Date.now() - started >= 1000, 'cleanup waited for the exiting postmaster');
+    // An exited but unreaped postmaster (a zombie: kill -0 still answers) counts as gone at once, on Linux (/proc) and
+    // macOS (ps). The test process stays blocked, so nothing reaps the child before the check.
+    const zombie = spawn('/bin/sh', ['-c', 'exit 0'], { stdio: 'ignore' });
+    spawnSync('/bin/sleep', ['0.5']);
+    const reaped = cluster(zombie.pid!);
+    r = run(['--cleanup-run', reaped], { PG_BIN: bin, C1_W2_CLEANUP_WAIT_TENTHS: '1' });
+    const zombieVisible = /^Z/.test(spawnSync('/bin/sh', ['-c', `if test -r /proc/${zombie.pid}/stat; then sed 's/^.*) //' /proc/${zombie.pid}/stat; else ps -o stat= -p ${zombie.pid}; fi`], { encoding: 'utf8' }).stdout.trim());
+    if (zombieVisible) { assert.equal(r.status, 0, r.stdout + r.stderr); assert.ok(!existsSync(reaped)); }
+    else {
+      // Where the process state cannot be read (ps denied, e.g. inside a sandbox), a pid that answers kill -0 is kept.
+      assert.equal(r.status, 4, r.stdout + r.stderr); assert.ok(existsSync(reaped)); dirs.push(reaped);
+    }
     const garbled = cluster(0); dirs.push(garbled); writeFileSync(join(garbled, 'data', 'postmaster.pid'), 'not-a-pid\n');
     r = run(['--cleanup-run', garbled], { PG_BIN: bin });
     assert.equal(r.status, 4); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.pid unreadable/m); assert.ok(existsSync(garbled));
