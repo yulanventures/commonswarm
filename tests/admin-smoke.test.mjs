@@ -69,7 +69,7 @@ async function exercise(config = {}) {
   const code = secrets[0], attempts = [], seenProofs = new Set(), failures = [], commandRetries = new Map();
   let authorize, initialKey, currentToken, refreshToken, generation = 0, workspaceId, fenced = false, callbackMode, actionChallenged = false;
   let wireRunId = null, fencedRunId = null;
-  let out = '', err = '', child;
+  let out = '', err = '', child, readyAt = 0;
   const check = (value, reason) => { if (!value) throw new Error(reason); };
   const emit = (res, status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(data === null ? undefined : JSON.stringify(data)); };
   const event = (type, payload) => ({ type, event_id: randomUUID(), payload });
@@ -196,7 +196,7 @@ async function exercise(config = {}) {
         }).catch(e => failures.push(e.message));
       }
       if (!handledFence && out.includes('agent_steps_complete_awaiting_human_fence')) {
-        handledFence = true;
+        handledFence = true; readyAt = Date.now();
         // The human writes the run id that this run sent on the wire. Do not
         // re-read the receipt here: a failing run may be rewriting it now.
         // After exit the final receipt must name the same run id.
@@ -225,7 +225,7 @@ async function exercise(config = {}) {
     }
     assert.ok(!/"(?:access_token|refresh_token|code_verifier|cookie|email|private_key)"/.test(text), 'secret receipt key');
     assert.deepEqual(failures, [], 'fake AS/MCP wire contract failed');
-    return { exitCode, receipt, attempts, modes, out, err };
+    return { exitCode, receipt, attempts, modes, out, err, readyAt };
   } finally {
     if (child?.exitCode === null) child.kill();
     server.closeAllConnections(); await new Promise(done => server.close(done));
@@ -289,7 +289,15 @@ test('post-human-fence admin call is refused with the code recorded and all huma
   assert.equal(r.receipt.refused_after_fence.http_status, 403); assert.equal(r.receipt.refused_after_fence.refusal_code, 'grant_inactive');
   assert.equal(r.receipt.refused_after_fence.rpc_code, -32000); assert.equal(r.receipt.steps.verify_fenced.result, 'pass');
   assert.equal(r.receipt.human_grant_state, null); assert.deepEqual(r.receipt.audit_counts, { init: null, list: null, read: null, action: null });
+  // The runner prints its actual fence cutoff right before the ready line: here the 2000 ms fence wait bounds it.
+  const cutoff = fenceCutoff(r.out);
+  assert.ok(cutoff > r.readyAt - 500 && cutoff <= r.readyAt + 2000, `cutoff ${cutoff - r.readyAt} ms after ready`);
 });
+function fenceCutoff(out) {
+  const lines = out.split('\n'), i = lines.indexOf('agent_steps_complete_awaiting_human_fence');
+  assert.ok(i > 0); const m = /^fence_cutoff_epoch_ms=(\d+)$/.exec(lines[i - 1]); assert.ok(m, 'cutoff line precedes the ready line');
+  assert.equal(lines.filter(l => l.startsWith('fence_cutoff_epoch_ms=')).length, 1); return Number(m[1]);
+}
 
 for (const config of [{ fenceRefusal: false }, { fenceStatus: 500 }]) test(`fence verification rejects ${config.fenceRefusal === false ? 'a successful follow-up call' : 'a server failure'}`, async () => {
   const r = await exercise({ fence: true, ...config }); assert.equal(r.exitCode, 1);
@@ -299,6 +307,8 @@ for (const config of [{ fenceRefusal: false }, { fenceStatus: 500 }]) test(`fenc
 test('fence verification cannot pass solely because the access token expired', async () => {
   const r = await exercise({ fence: true, shortToken: true }); assert.equal(r.exitCode, 1);
   assert.equal(r.receipt.refused_after_fence, null); assert.equal(r.receipt.failed_step, 'human_fence');
+  // A shortened token moves the printed cutoff before the ready line itself: a fence driver must refuse at once.
+  assert.ok(fenceCutoff(r.out) < r.readyAt, 'token-bound cutoff is already past');
 });
 
 test('mid-run failure records accepted workspace residue and does not archive or revoke the human delegation', async () => {

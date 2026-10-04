@@ -1324,6 +1324,10 @@ def fixture_output(args, **kwargs):
     assert args[:2] == ['docker', 'run'] and args[-1] == '-'
     sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
     if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
+    if sql.startswith('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL'):
+        return 't' if not state['enabled'] and state['invalidated'] else 'f'
+    if os.environ.get('RECYCLE_FIXTURE_CLOSE_FAILS') == '1' and sql.endswith('release_generation=release_generation+1 WHERE singleton; COMMIT;'):
+        raise subprocess.CalledProcessError(3, ['docker', 'run'])
     enable = re.search(r'admin_issuance_enabled=(true|false)', sql)
     if enable: state['enabled'] = enable[1] == 'true'
     if 'release_generation=release_generation+1' in sql:
@@ -1331,6 +1335,8 @@ def fixture_output(args, **kwargs):
     if 'measured_generation=release_generation' in sql:
         state['measured_generation'] = state['generation']; state['invalidated'] = False
     fixture_state.write_text(json.dumps(state))
+    # The reopen COMMITS, then the response is lost.
+    if os.environ.get('RECYCLE_FIXTURE_LOSE_REOPEN') == '1' and 'admin_issuance_enabled=true' in sql: raise subprocess.CalledProcessError(1, ['docker', 'run'])
     return ('t' if prior else 'f')+'\\n'+str(state['generation']) if 'RETURNING release_generation' in sql else ''
 subprocess.run = fixture_run
 subprocess.check_output = fixture_output
@@ -1347,9 +1353,9 @@ subprocess.check_output = fixture_output
   const imports = 'import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
   assert.equal(source.split(imports).length - 1, 1);
   source = source.replace(imports, imports + boundary);
-  const hook = (mode: string, failed = false) => run(`set -- ${mode}\n${source}`, {
+  const hook = (mode: string, failed = false, extra: Record<string, string> = {}) => run(`set -- ${mode}\n${source}`, {
     PATH: `${shim}:${process.env.PATH}`, RECYCLE_FIXTURE_STATE: stateFile, RECYCLE_FIXTURE_CONFIG: config,
-    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0', RECYCLE_FIXTURE_JOURNAL: journalFile, COMMONSWARM_RECYCLE_UNIT: 'fixture-recycle.service',
+    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0', RECYCLE_FIXTURE_JOURNAL: journalFile, COMMONSWARM_RECYCLE_UNIT: 'fixture-recycle.service', ...extra,
   });
   const journalFile = join(root, 'journal.log'), markerFile = join(root, 'var-lib', 'admin-issuance-closed.log');
   const lines = (file: string) => existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
@@ -1379,6 +1385,24 @@ subprocess.check_output = fixture_output
       assert.deepEqual(state(), { enabled: true, generation: 8, measured_generation: 8, invalidated: false });
     }
     assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');
+  }
+  // The reopen COMMITS but its response is lost: the hook closes again and claims CLOSED only after the readback.
+  for (const closeFails of [false, true]) {
+    writeFileSync(stateFile, JSON.stringify(initial)); const markersBefore = lines(markerFile).length;
+    assert.equal(hook('before').status, 0);
+    const after = hook('after', false, { RECYCLE_FIXTURE_LOSE_REOPEN: '1', RECYCLE_FIXTURE_CLOSE_FAILS: closeFails ? '1' : '0' });
+    assert.notEqual(after.status, 0);
+    const added = lines(markerFile).slice(markersBefore); assert.equal(added.length, 1);
+    if (closeFails) {
+      assert.match(after.stderr, /FAIL recycle hook; issuance state UNKNOWN \(may be OPEN\); run ai-emergency-close/);
+      assert.doesNotMatch(after.stderr, /stays closed|closed again/);
+      assert.equal(state().enabled, true, 'the modelled refused close leaves the committed reopen OPEN');
+      assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-state-unknown');
+    } else {
+      assert.match(after.stderr, /FAIL recycle hook; reopen not confirmed; issuance closed again \(confirmed by readback\)/);
+      assert.deepEqual({ enabled: state().enabled, invalidated: state().invalidated }, { enabled: false, invalidated: true });
+      assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-closed-needs-reactivation');
+    }
   }
 });
 

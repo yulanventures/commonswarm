@@ -271,9 +271,12 @@ async function run(o) {
     const after = (await read('read_metadata_after_refresh')).grant;
     demand(after?.state === 'active' && after.grant_id === grant.grant_id && after.expires_at === grant.expires_at && after.refresh_deadline === grant.refresh_deadline, 'refresh_deadline_changed');
     if (o['verify-fenced']) {
-      await save(); process.stdout.write('agent_steps_complete_awaiting_human_fence\n');
+      // The actual nonsecret fence cutoff (fence wait, token expiry and total deadline), written with the ready line so
+      // a fence driver derives its deadline from it rather than from when it noticed the line.
+      const fenceCutoff = Math.min(Date.now() + o.fenceMs, deadline, claims.exp * 1000 - o.requestMs * 2);
+      await save(); process.stdout.write(`fence_cutoff_epoch_ms=${fenceCutoff}\nagent_steps_complete_awaiting_human_fence\n`);
       await step('human_fence', async () => {
-        demand(await waitFile(o.fence, o.fenceMs, Math.min(deadline, claims.exp * 1000 - o.requestMs * 2)) === runId, 'fence_run_mismatch');
+        demand(await waitFile(o.fence, o.fenceMs, fenceCutoff) === runId, 'fence_run_mismatch');
       });
       const commandId = `c1_${runId}_verify_fenced`;
       await step('verify_fenced', async () => {

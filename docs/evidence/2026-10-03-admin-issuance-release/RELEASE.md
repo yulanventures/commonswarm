@@ -455,14 +455,17 @@ if systemctl is-active --quiet "$REMEASURE_TIMER"; then printf 'FAIL ai-edge-rem
 test "$(systemctl show -p ActiveState --value "$REMEASURE_SERVICE")" = inactive || { printf 'FAIL ai-edge-remeasure: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
 # Any failure from here on may follow a committed reopen: close and invalidate (hook close mode, release role,
 # close first) before returning failure, and report a failed close separately.
+# Exit 1: failed, issuance CLOSED (confirmed by the close mode's readback). Exit 2: failed, state UNKNOWN.
 remeasure_fail() {
- COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle close \
-  || printf 'FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance may be OPEN; run ai-emergency-close; STOP\n' >&2
- exit 1
+ if COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle close; then
+  printf 'FAIL ai-edge-remeasure: failure close confirmed issuance CLOSED by readback; STOP\n' >&2; exit 1
+ fi
+ printf 'FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; STOP\n' >&2
+ exit 2
 }
-COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; issuance stays closed; STOP\n' >&2; remeasure_fail; }
-COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; issuance stays closed; STOP\n' >&2; remeasure_fail; }
-python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_OUT" <<'PY' || { printf 'FAIL ai-edge-remeasure: receipt validation after the hook pair expected PASS got failure; issuance stays closed; STOP\n' >&2; remeasure_fail; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; STOP\n' >&2; remeasure_fail; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; STOP\n' >&2; remeasure_fail; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_OUT" <<'PY' || { printf 'FAIL ai-edge-remeasure: receipt validation after the hook pair expected PASS got failure; STOP\n' >&2; remeasure_fail; }
 import hashlib,json,os,pathlib,re,stat,subprocess,sys
 plan,inputs,out=sys.argv[1:4]
 def need(ok,what,expected,got):
@@ -3028,7 +3031,14 @@ edge-measurement-failed, database-measurement-refused, or
 remeasure-validation-failed from the `close` mode when it shut OPEN issuance; the unit comes from
 the drop-in's `Environment=COMMONSWARM_RECYCLE_UNIT=%n`, or is
 `ai-edge-remeasure`). A marker failure is reported on stderr; the close
-stands. A good recycle writes no marker. Issuance closed this way stays
+stands. If the after hook fails once its reopen may have COMMITTED, it closes
+and invalidates again (release role) and writes the CLOSED marker only when an
+independent readback confirms CLOSED; otherwise it writes the same JSON with
+`"event":"admin-issuance-state-unknown"` and reports "may be OPEN" (scheduled
+recycle and remeasure alike). The `close` mode runs its database close before
+any bookkeeping and confirms it the same way. ai-edge-remeasure exits 1 when its
+failure close is confirmed CLOSED and 2 when the state is unknown; every caller
+reports that result and no step claims CLOSED without it. A good recycle writes no marker. Issuance closed this way stays
 closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
 measured-reopen procedure under HezLead approval (remeasure, then reopen only
 through the measured path) replaces that W6 rerun; it is not part of this
@@ -3057,13 +3067,13 @@ trap ai_hook_cleanup EXIT
 python3 - "$1" "$HOOK_SECRET_STAGE" <<'PY'
 import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time
 stage=pathlib.Path(sys.argv[2]); mode=sys.argv[1]
-reason='recycle-config-invalid'; approved=None; measured=None
-def closed_marker():
+reason='recycle-config-invalid'; approved=None; measured=None; reopen_attempted=False; close_confirmed=False
+def closed_marker(event='admin-issuance-closed-needs-reactivation'):
     # NONSECRET watch marker, written only AFTER the failure left issuance closed: one journal line and one
     # appended JSON line. No token, credential, connection value or database row beyond the two release SHAs.
     unit=os.environ.get('COMMONSWARM_RECYCLE_UNIT','')
     line=json.dumps({'at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'unit':unit if re.fullmatch(r'[A-Za-z0-9@._:-]{1,256}',unit) else 'unknown',
-        'event':'admin-issuance-closed-needs-reactivation','approved_edge_release_sha':approved,'measured_edge_release_sha':measured,'reason':reason},sort_keys=True)
+        'event':event,'approved_edge_release_sha':approved,'measured_edge_release_sha':measured,'reason':reason},sort_keys=True)
     ok=True
     try: subprocess.run(['logger','-t','commonswarm-admin-recycle','--',line],check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     except Exception: ok=False
@@ -3077,7 +3087,7 @@ def closed_marker():
             os.fchmod(fd,0o644); assert os.write(fd,(line+'\n').encode())==len(line)+1
         finally: os.close(fd)
     except Exception: ok=False
-    if not ok: print('FAIL recycle closed-marker not fully written (journal or admin-issuance-closed.log); issuance stays closed; HezLead must check the database',file=sys.stderr)
+    if not ok: print('FAIL recycle closed-marker not fully written (journal or admin-issuance-closed.log); the close decision above stands; HezLead must check the database',file=sys.stderr)
 try:
     path=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
     assert path.is_file() and not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode & 0o777==0o600
@@ -3098,14 +3108,25 @@ try:
         with (stage/'db.log').open('w') as log:
             return subprocess.check_output(args,input=sql,text=True,stderr=log).strip()
     intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
+    def confirm_closed():
+        # Independent readback: CLOSED is claimed only when the database says so.
+        try: return db('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        except Exception: return False
+    def failure_close():
+        # Release-role close (close first, then invalidate), then the readback; never a recursive hook run.
+        try: was=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;")
+        except Exception: was=None
+        return was,confirm_closed()
     if mode=='close':
-        # ai-edge-remeasure's failure close: never reopens; the next recycle starts from a closed row.
+        # ai-edge-remeasure's failure close: the safety transaction first, bookkeeping only after it.
         reason='remeasure-validation-failed'
-        intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
-        was=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;")
-        assert was in ('t','f')
-        # A marker only when this close shut OPEN issuance; a failed after hook has already marked its own close.
+        was,close_confirmed=failure_close()
+        if not close_confirmed:
+            closed_marker('admin-issuance-state-unknown')
+            raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (close not confirmed by readback; may be OPEN); run ai-emergency-close; HezLead recovery required')
+        # A CLOSED marker only when this close shut OPEN issuance; a failed after hook has already marked its own close.
         if was=='t': closed_marker()
+        intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
     elif mode=='before':
         # Stale intent can never be used after a failed/unknown pre-hook.
         intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
@@ -3143,11 +3164,28 @@ try:
         sql="BEGIN; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
         sql+="UPDATE commonswarm_oauth.admin_cutover_state SET measured_edge_release_sha='"+sha+"',measured_edge_target='"+target+"',measured_mount='"+target+"',measured_image_digest='"+r['image_digest']+"',measured_artifact_digest='"+r['artifact_digest']+"',measured_generation=release_generation,measured_at=statement_timestamp(),measurement_evidence_ref='systemd/recycle/"+gen+"',invalidated_at=NULL,admin_issuance_enabled="+enabled+" WHERE singleton; COMMIT;"
         if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        # From here the reopen may COMMIT even if this process sees a failure (lost response, psql exit).
+        reopen_attempted=bool(state['reopen'])
         db(sql)
 except Exception:
-    # The hook-before close stands; the marker is written after it and cannot reopen anything.
+    if mode=='close':
+        if close_confirmed: raise SystemExit('FAIL recycle hook close: bookkeeping failed after a close CONFIRMED by readback; issuance closed; HezLead must check recycle-intent.json') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='after' and reopen_attempted:
+        # The reopen may have committed: close it again, and claim CLOSED only after the readback confirms it.
+        was,close_confirmed=failure_close()
+        if close_confirmed:
+            closed_marker()
+            raise SystemExit('FAIL recycle hook; reopen not confirmed; issuance closed again (confirmed by readback); HezLead recovery required') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='before':
+        # The close may not have committed: never claim CLOSED here.
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook before; issuance state UNKNOWN (close not confirmed; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    # No reopen was attempted: the hook-before close stands; the marker comes after it and cannot reopen anything.
     if mode=='after': closed_marker()
-    if mode=='close': raise SystemExit('FAIL recycle hook close; issuance may be OPEN; HezLead recovery required') from None
     raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
 PY
 ```
@@ -3811,7 +3849,7 @@ systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-apply: r
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive || { printf 'FAIL ai-w6-activation-apply: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
 # The shared remeasure owns this fresh measurement; it writes the W6 receipt and validates it.
 EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json
-( ai_run ai-edge-remeasure ) || { printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; exit 1; }
+( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-activation-apply; printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
 unset EDGE_MEASUREMENT_OUT
 python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
 import pathlib,sys
@@ -4367,10 +4405,18 @@ ONE Mac step (ai-w6-fence-driver) that runs the reviewed blocks verbatim from th
 verified plan bytes: ai-w6-agent-receipt, upload of agent.json, the box audit
 (ai-w6-audit-watch, already waiting in the box root shell, runs ai-w6-audit as
 soon as agent.json arrives), download of C1-audit.json, and ai-w6-human-revoke.
-The driver sets one absolute deadline (220 s after the ready line, never more)
-and bounds every ssh/scp call by what remains, a stalled session included; with
-less than 45 s left it does NOT revoke and STOPs for ai-emergency-close and the
-recovery revoke. In ai-w6-human-revoke the human revoke verb fences the grant,
+The runner prints its actual nonsecret fence cutoff (`fence_cutoff_epoch_ms`,
+the minimum of its fence wait, token expiry and total deadline) just before its
+ready line. The driver's absolute deadline is that cutoff less 5 s, never a
+fresh interval from when the driver noticed the line; it refuses normal
+revocation when the runner has exited or the cutoff has passed. Every ssh/scp
+call is bounded by what remains, a stalled session included; with less than
+45 s left it does NOT revoke. Inside ai-w6-human-revoke both owner credential
+refreshes (the preflight and the CLI's own) and the revoke request run under one
+alarm at the revoke cutoff (deadline less 20 s): no revoke is dispatched after
+it, and a timeout leaves the outcome unknown, never C1 proof. After the window
+only `C1_RECOVERY_REVOKE=1` runs, as cleanup recorded in
+human-revoke-recovery.json, never as C1 refusal proof. In ai-w6-human-revoke the human revoke verb fences the grant,
 then the fence file is written and the runner proves the refused follow-up. The owner's approval withdrawal comes
 AFTER the runner exits: withdrawal itself fences every family of that
 owner/client/version (guard_owner_approval), so it must not precede the human
@@ -4406,8 +4452,10 @@ C1_POINTER=/Users/yulanbot/work/dcr-rt/c1-smoke.pointer
 RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
 WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
 C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
-# Absolute fence deadline: the runner waits at most 240 s after its ready line; 220 s keeps a margin. It may
-# only be shortened (tests); every transport below and in ai-w6-transfer is bounded by what remains.
+# The deadline comes from the RUNNER's own nonsecret fence cutoff (min of its fence wait, token expiry and total
+# deadline), printed with its ready line, less 5 s; never from when this driver noticed the line. A budget
+# (at most 220 s from that moment) may only shorten it (tests). Every transport below and in ai-w6-transfer is
+# bounded by what remains.
 C1_FENCE_BUDGET=${C1_FENCE_BUDGET_SECONDS:-220}
 [[ "$C1_FENCE_BUDGET" =~ ^[1-9][0-9]{0,2}$ ]] && test "$C1_FENCE_BUDGET" -le 220 || { printf 'FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP\n' >&2; exit 1; }
 fence_block() {
@@ -4448,7 +4496,13 @@ until grep -qx 'agent_steps_complete_awaiting_human_fence' "$C1_SECRET_STAGE/age
  sleep 1
 done
 FENCE_START=$(date +%s)
-C1_FENCE_DEADLINE=$(( FENCE_START + C1_FENCE_BUDGET )); export C1_FENCE_DEADLINE
+C1_RUNNER_CUTOFF_MS=$(grep -E '^fence_cutoff_epoch_ms=[0-9]{13}$' "$C1_SECRET_STAGE/agent-status.log" 2>/dev/null) || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected printed got missing; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$(printf '%s\n' "$C1_RUNNER_CUTOFF_MS" | wc -l | tr -d ' ')" = 1 || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected one line got several; STOP\n' >&2; exit 1; }
+C1_FENCE_DEADLINE=$(( ${C1_RUNNER_CUTOFF_MS#fence_cutoff_epoch_ms=} / 1000 - 5 ))
+test "$C1_FENCE_DEADLINE" -le "$(( FENCE_START + C1_FENCE_BUDGET ))" || C1_FENCE_DEADLINE=$(( FENCE_START + C1_FENCE_BUDGET ))
+export C1_FENCE_DEADLINE
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive at the fence got exited; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$C1_FENCE_DEADLINE" -gt "$FENCE_START" || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected ahead got passed; normal revoke refused; run ai-emergency-close, then a recovery revoke; STOP\n' >&2; exit 1; }
 fence_run ai-w6-agent-receipt || exit 1
 export C1_TRANSFER_DIRECTION=upload C1_TRANSFER_FILE=agent.json
 fence_run ai-w6-transfer || exit 1
@@ -4465,6 +4519,7 @@ fence_run ai-w6-transfer || exit 1
 unset C1_TRANSFER_DIRECTION C1_TRANSFER_FILE
 # The revoke needs live-token budget left for the runner's refused follow-up; otherwise do not revoke here.
 FENCE_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive before the human revoke got exited; revoke NOT attempted; STOP\n' >&2; exit 1; }
 test "$FENCE_LEFT" -ge 45 || { printf 'FAIL ai-w6-fence-driver: fence budget before the human revoke expected at-least-45-s got %s s; revoke NOT attempted; run ai-emergency-close, then the human revoke as recovery; STOP\n' "$FENCE_LEFT" >&2; exit 1; }
 fence_run ai-w6-human-revoke || exit 1
 FENCE_SECONDS=$(( $(date +%s) - FENCE_START ))
@@ -4483,12 +4538,32 @@ C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
 C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
 # The human revoke verb fences this grant/family FIRST; the approval withdrawal follows after the runner exits.
 test ! -e "$C1_PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-human-revoke: client-withdraw.json expected absent-before-revoke got present; STOP\n' >&2; exit 1; }
+# Normal revoke only inside the fence window ai-w6-fence-driver sets (C1_FENCE_DEADLINE). After it, only a labelled
+# cleanup revoke (C1_RECOVERY_REVOKE=1), recorded as human-revoke-recovery.json and never as C1 refusal proof.
+if test -z "${C1_FENCE_DEADLINE:-}"; then
+ test "${C1_RECOVERY_REVOKE:-0}" = 1 || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 (never C1 proof); STOP\n' >&2; exit 1; }
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke-recovery.json
+else
+ [[ "$C1_FENCE_DEADLINE" =~ ^[0-9]{10}$ ]] || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected epoch-seconds got other; STOP\n' >&2; exit 1; }
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke.json
+fi
+# Inside the fence window both owner refreshes and the revoke request run under one alarm at the revoke cutoff (20 s
+# before the fence deadline): no refresh can outlast it, and the revoke can be dispatched only before it.
+c1_revoke_bounded() {
+ if test -n "${C1_FENCE_DEADLINE:-}"; then
+  C1_LEFT=$(( C1_FENCE_DEADLINE - 20 - $(date +%s) ))
+  test "$C1_LEFT" -gt 0 || { printf 'FAIL ai-w6-human-revoke: revoke cutoff (fence deadline - 20 s) expected ahead got passed; revoke NOT dispatched; STOP\n' >&2; return 1; }
+  perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$C1_LEFT" "$@"
+ else
+  "$@"
+ fi
+}
 # The nonsecret C1-audit.json from the box is in C1_PROOF_DIR (ai-w6-fence-driver downloads it).
 C1_GRANT_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["grant_id"])' "$C1_PROOF_DIR/C1-audit.json")
 C1_REVOKE_REQUEST_ID=$(node -e 'console.log(require("node:crypto").randomUUID())')
 ( set -C; printf '%s\n' "$C1_REVOKE_REQUEST_ID" >"$C1_PROOF_DIR/revoke-request-id" )
 # Saved default CLI target/session must be the owner and production API; preflight checks below.
-node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS'
+c1_revoke_bounded node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS' || { printf 'FAIL ai-w6-human-revoke: owner preflight expected verified-before-the-revoke-cutoff got failure-or-timeout; revoke NOT dispatched; STOP\n' >&2; exit 1; }
 import { readFile } from 'node:fs/promises';
 import { credentialStore,defaultCredentialStateDirectory } from './src/cloud/storage.ts';
 import { cloudTarget } from './src/cloud/config.ts';
@@ -4501,9 +4576,14 @@ try {
  if(human.userId!==c.owner_user_id) throw Error();
 } catch { console.error('FAIL owner CLI target/session mismatch; STOP'); process.exitCode=1; }
 JS
-node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
+c1_revoke_bounded node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
  --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
- >"$C1_PROOF_DIR/human-revoke.json" 2>"$C1_PROOF_DIR/human-revoke-status.log"
+ >"$C1_REVOKE_OUT" 2>"$C1_PROOF_DIR/human-revoke-status.log" || { printf 'FAIL ai-w6-human-revoke: revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown; reconcile request ID %s; a later revoke is recovery only, never C1 proof; STOP\n' "$C1_REVOKE_REQUEST_ID" >&2; exit 1; }
+if test -z "${C1_FENCE_DEADLINE:-}"; then
+ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["state"]=="revoked"' "$C1_REVOKE_OUT" || { printf 'FAIL ai-w6-human-revoke: recovery revoke expected revoked got other; STOP\n' >&2; exit 1; }
+ printf 'RECOVERY ai-w6-human-revoke: grant revoked after the fence window; human-revoke-recovery.json is cleanup, NOT C1 refusal proof\n'
+ exit 0
+fi
 python3 - "$C1_PROOF_DIR/human-revoke.json" "$C1_PROOF_DIR/agent.json" "$C1_SECRET_STAGE/fenced" <<'PY'
 import datetime,json,os,pathlib,sys
 r=json.load(open(sys.argv[1])); assert r['state']=='revoked'
@@ -4660,7 +4740,7 @@ EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement-final.json
 if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
  # Keep open: the remeasure closes, measures and reopens ONLY through the measured path; a failed
  # measurement leaves issuance closed and this step fails.
- ( ai_run ai-edge-remeasure ) || { printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; issuance stays closed; STOP\n' >&2; exit 1; }
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
  W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: keep-open state expected open-and-measured got other; STOP\n' >&2; exit 1; }
  ai_run ai-w6-activation-probes
@@ -4669,7 +4749,7 @@ else
  ai_run ai-w6-activation-rollback
  # The closed state is measured too, so W7 opens on a fresh receipt; hold the timer for the hook pair.
  systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
- ( ai_run ai-edge-remeasure ) || { printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; exit 1; }
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 2; then printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; else printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; fi; exit 1; }
  W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: default state expected closed-and-measured got other; STOP\n' >&2; exit 1; }
  ai_run ai-w6-closed-gate-probe

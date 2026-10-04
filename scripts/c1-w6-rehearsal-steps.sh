@@ -112,7 +112,33 @@ root,pg,t,port=sys.argv[1:5]; q=shlex.quote; assert '#' not in root and ' ' not 
 def stub(name,body):
     p=b/name; p.write_text('#!/bin/bash\n# c1 W6 rehearsal stub (test fixture), never a real '+name+'\n'+body); p.chmod(0o700)
 stub('systemctl',"printf 'systemctl %s\\n' \"$*\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n stop) printf inactive >"+q(root+'/timer')+" ;;\n start) test ! -e "+q(root+'/timer-start-fails')+" || exit 1; printf active >"+q(root+'/timer')+" ;;\n is-active) test \"$(cat "+q(root+'/timer')+")\" = active ;;\n show) printf 'inactive\\n' ;;\n *) exit 64 ;;\nesac\n")
-stub('docker',"printf 'docker %s\\n' \"$1\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n inspect)\n  if test \"$2\" = --format; then printf 'healthy\\n'; exit 0; fi\n  if test \"$(cat "+q(root+'/docker-mode')+")\" = bad-image; then exec cat "+q(root+'/container-bad.json')+"; fi\n  exec cat "+q(root+'/container.json')+" ;;\n run)\n  shift; while test $# -gt 0; do if test \"$1\" = --entrypoint; then shift 3; break; fi; shift; done\n  set -o pipefail; stdin=0; prev=\n  for a in \"$@\"; do if test \"$prev\" = --file && test \"$a\" = -; then stdin=1; fi; prev=$a; done\n  if test \"$stdin\" = 0 && test \"$(cat "+q(root+'/docker-mode')+")\" = query-fails; then exit 1; fi\n  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).\n  if test \"$stdin\" = 1; then sed \"s#"+root+"/home#/home/commonswarm#g\" | "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"\n  else "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"; fi\n  exit $? ;;\nesac\nexit 64\n")
+DOCKER_TEMPLATE=r"""printf 'docker %s\n' "$1" >>@ROOT@/calls
+mode=$(cat @ROOT@/docker-mode)
+case "$1" in
+ inspect)
+  if test "$2" = --format; then printf 'healthy\n'; exit 0; fi
+  if test "$mode" = bad-image; then exec cat @ROOT@/container-bad.json; fi
+  exec cat @ROOT@/container.json ;;
+ run)
+  shift; while test $# -gt 0; do if test "$1" = --entrypoint; then shift 3; break; fi; shift; done
+  set -o pipefail; stdin=0; prev=
+  for a in "$@"; do if test "$prev" = --file && test "$a" = -; then stdin=1; fi; prev=$a; done
+  if test "$stdin" = 0 && test "$mode" = query-fails; then exit 1; fi
+  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).
+  if test "$stdin" = 1; then
+   sql=$(sed "s#@ROOT@/home#/home/commonswarm#g")
+   # Modelled faults: a reopen that COMMITS but whose response is lost; and a refused release-role close.
+   case "$mode:$sql" in lose-reopen-and-close:*'release_generation=release_generation+1 WHERE singleton; COMMIT;'*) exit 1;; esac
+   printf '%s\n' "$sql" | @PG@/psql -h @T@ -p @PORT@ -U supabase_admin -d postgres "$@" | sed "s#/home/commonswarm#@ROOT@/home#g" || exit $?
+   case "$mode:$sql" in lose-reopen-*:*'admin_issuance_enabled=true WHERE singleton'*) exit 1;; esac
+   exit 0
+  fi
+  @PG@/psql -h @T@ -p @PORT@ -U supabase_admin -d postgres "$@" | sed "s#/home/commonswarm#@ROOT@/home#g"
+  exit $? ;;
+esac
+exit 64
+"""
+stub('docker',DOCKER_TEMPLATE.replace('@ROOT@',root).replace('@PG@',pg).replace('@T@',t).replace('@PORT@',port))
 stub('logger',"test \"$(cat "+q(root+'/logger-mode')+")\" = ok || exit 1\nprintf '%s\\n' \"${@: -1}\" >>"+q(root+'/journal.log')+"\n")
 stub('node',': >"$PG_SERVICE_OUTPUT"; : >"$PG_PASS_OUTPUT"\n')
 PY
@@ -547,6 +573,37 @@ printf 'good' >"$W6R/docker-mode"
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die remeasure-postfail "closed and invalidated expected got $(state)"
 test "$(( $(marker_count) - MARKERS_BEFORE ))" = 1 && marker_last ai-edge-remeasure remeasure-validation-failed || die remeasure-postfail 'one remeasure-validation-failed marker expected got other'
 say "PASS remeasure-postfail-closes: the hook pair reopened, the row read then failed, and the hook close mode closed and invalidated issuance with one marker (reason remeasure-validation-failed); before [$BEFORE_POSTFAIL] after [$(state)]"
+
+# ---------------- a reopen that COMMITS but whose response is lost (scheduled recycle path) ----------------
+marker_event_last() { python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).read().splitlines()[-1])["event"])' "$MARKER"; }
+W6L_PROOF=$T/proof-W6-lost; mkdir -p "$W6L_PROOF" || exit 1
+PROOF_DIR=$W6L_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 step ai-w6-activation-apply:reopen-before-lost-response "$T/blocks/w6-apply-head.sh"
+printf 'lose-reopen-response' >"$W6R/docker-mode"
+recycle_pair recycle-lost-reopen-response
+printf 'good' >"$W6R/docker-mode"
+test "$HOOK_AFTER" = fail && grep -q 'reopen not confirmed; issuance closed again (confirmed by readback)' "$T/hook.err" || die recycle-lost-reopen-response "confirmed re-close expected got $HOOK_AFTER"
+test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-lost-reopen-response "closed expected got $RECYCLE_LINE"
+test "$MARKERS_NEW" = 1 && test "$(marker_event_last)" = admin-issuance-closed-needs-reactivation || die recycle-lost-reopen-response "one CLOSED marker expected got $MARKERS_NEW"
+say "PASS recycle-lost-reopen-response: the reopen committed, its response was lost; the hook closed again and confirmed CLOSED by readback before one CLOSED marker; $RECYCLE_LINE"
+
+# ---------------- refused failure close: every caller reports UNKNOWN, never CLOSED (finish in the same shell) ----------------
+W6U_PROOF=$T/proof-W6-unknown; mkdir -p "$W6U_PROOF" || exit 1
+cp "$W6_PROOF/C1-fence.txt" "$W6_PROOF/client-withdraw.json" "$W6_PROOF/agent-final.json" "$W6U_PROOF/" || exit 1
+PROOF_DIR=$W6U_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 step ai-w6-activation-apply:reopen-before-unknown "$T/blocks/w6-apply-head.sh"
+MARKERS_BEFORE=$(marker_count)
+printf 'lose-reopen-and-close' >"$W6R/docker-mode"
+PROOF_DIR=$W6U_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 expect_fail ai-w6-finish:keep-open-close-refused "$T/blocks/w6-finish-keep-run.sh" 'FAIL ai-w6-finish: issuance state UNKNOWN after the remeasure failure \(may be OPEN\)'
+printf 'good' >"$W6R/docker-mode"
+grep -q 'issuance CLOSED' "$T/neg.err" && die ai-w6-finish:keep-open-close-refused 'no CLOSED claim expected got one'
+grep -q "issuance stays closed" "$T/neg.err" && die ai-w6-finish:keep-open-close-refused 'no closed claim expected got one'
+timer_active || die ai-w6-finish:keep-open-close-refused 'recycle timer expected re-armed got inactive'
+test "$(q1 "SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-w6-finish:keep-open-close-refused 'the modelled refused close leaves issuance OPEN; expected t got other'
+test "$(( $(marker_count) - MARKERS_BEFORE ))" = 2 && test "$(marker_event_last)" = admin-issuance-state-unknown && ! tail -2 "$MARKER" | grep -q closed-needs-reactivation \
+  || die ai-w6-finish:keep-open-close-refused 'two state-unknown markers and no CLOSED marker expected got other'
+say "PASS w6-finish-unknown-propagates: reopen committed, both closes refused; issuance really OPEN; the hook, the remeasure and the finish all report UNKNOWN (may be OPEN), two state-unknown markers, no CLOSED claim; timer re-armed"
+printf '%s\n' 'set -euo pipefail' 'ai_run ai-w6-activation-rollback' >"$T/blocks/recover-unknown.sh"
+PROOF_DIR=$W6U_PROOF step ai-emergency-close:recover-unknown "$T/blocks/recover-unknown.sh"
+test "$(q1 "SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-emergency-close:recover-unknown 'closed expected got other'
 
 # ---------------- ruling 3: emergency close of an OPEN W6 re-arms the held timer ----------------
 # Issuance returns only through a W6 activation (new proof directory), which holds the timer; then the emergency path.

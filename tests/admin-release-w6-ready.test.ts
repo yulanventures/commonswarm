@@ -109,7 +109,7 @@ test('ai-edge-remeasure: hook pair, row read with the receipt query bytes, a fre
     { ...g.env, EDGE_MEASUREMENT_OUT: join(g.dir, 'edge-measurement.json') });
   const cases: Array<[string, Parameters<typeof edgeFixture>[0], RegExp]> = [
     ['timer still active', { timerActive: true }, /recycle timer expected stopped-by-caller got active/],
-    ['failed measurement', { hookAfterFails: true }, /recycle hook after expected measured got failure; issuance stays closed/],
+    ['failed measurement', { hookAfterFails: true }, /recycle hook after expected measured got failure; STOP/],
     ['stale generation', { row: { measured_generation: 6 } }, /measured generation expected measured-and-not-invalidated got stale-or-invalidated/],
     ['invalidated', { row: { invalidated_at: '2026-10-04T00:00:00Z' } }, /measured generation expected measured-and-not-invalidated got stale-or-invalidated/],
     ['other release approved', { row: { approved_edge_release_sha: 'c'.repeat(40) } }, /approved\/measured edge release expected this-release got other/],
@@ -121,13 +121,17 @@ test('ai-edge-remeasure: hook pair, row read with the receipt query bytes, a fre
     // Every failure after the hooks start may follow a committed reopen: the hook close mode runs before the failure.
     const hooks = g.trace().filter(c => c.startsWith('hook'));
     assert.deepEqual(hooks, opts?.timerActive ? [] : ['hook before', 'hook after', 'hook close'], name);
+    // CLOSED is claimed only from the close mode's confirmed readback (exit 1); nothing says "stays closed".
+    if (!opts?.timerActive) { assert.equal(r.status, 1, name); assert.match(r.stderr, /failure close confirmed issuance CLOSED by readback/); }
+    assert.doesNotMatch(r.stderr, /stays closed/, name);
     assert.ok(!existsSync(join(g.dir, 'edge-measurement.json')), `${name}: no receipt`);
   }
   const again = remeasure(f); assert.notEqual(again.status, 0); assert.match(again.stderr, /EDGE_MEASUREMENT_OUT expected absent got present/);
   // A failed failure-close is reported separately: issuance may be OPEN.
   const unclosed = edgeFixture({ row: { measured_generation: 6 }, hookCloseFails: true }); const u = remeasure(unclosed);
-  assert.notEqual(u.status, 0);
-  assert.match(u.stderr, /FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance may be OPEN; run ai-emergency-close; STOP/);
+  assert.equal(u.status, 2, 'state unknown is exit 2');
+  assert.match(u.stderr, /FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance state UNKNOWN \(may be OPEN\); run ai-emergency-close; STOP/);
+  assert.doesNotMatch(u.stderr, /CLOSED|stays closed/);
 });
 
 test('ai-edge-refresh: plain (non-exported) shell variables reach the child remeasure', () => {
@@ -308,7 +312,9 @@ test('ai-w6-audit-watch runs the audit once agent.json arrives and refuses at th
   assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP/);
 });
 
-async function fenceRun(LATENCY: number, stallUpload = false, budget = 0) {
+/** cutoffInMs: the runner's printed fence cutoff relative to its ready line; the runner really exits at that cutoff.
+ * driverDelayMs: the driver starts this long after the ready line (a retained line must not give it a fresh budget). */
+async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence: { cutoffInMs?: number; driverDelayMs?: number } = {}) {
   const dir = realpathSync(mkdtempSync(join(root, 'fence-')));
   const bin = join(dir, 'bin'), secret = join(dir, 'secret'), boxRoot = join(dir, 'box'), proof = join(dir, 'c1-proof');
   for (const d of [bin, secret, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -340,10 +346,13 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
     refused_after_fence: ok ? { http_status: 403, refusal_code: 'grant_inactive', rpc_code: null, command_id: `c1_${runId}_verify_fenced` } : null, failed_step: null, failure_code: null });
   writeFileSync(join(stage, 'agent.json'), receipt(false));
   // The runner: waits for the fence file with the run ID, then records the refused follow-up and exits.
-  const runner = spawn('/bin/bash', ['-c', `until test -f '${stage}/fenced'; do sleep 0.2; done; test "$(cat '${stage}/fenced')" = '${runId}' || exit 7; printf '%s' '${receipt(true)}' >'${stage}/agent.json'`], { stdio: 'ignore' });
+  const cutoff = Date.now() + (fence.cutoffInMs ?? 240_000);
+  // The runner waits for the fence file only until its own cutoff, then exits (as admin-smoke.mjs does).
+  const runner = spawn('/bin/bash', ['-c', `until test -f '${stage}/fenced'; do test "$(( $(date +%s) * 1000 ))" -lt ${cutoff} || exit 8; sleep 0.2; done; test "$(cat '${stage}/fenced')" = '${runId}' || exit 7; printf '%s' '${receipt(true)}' >'${stage}/agent.json'`], { stdio: 'ignore' });
   writeFileSync(join(proof, 'secret-stage.path'), stage + '\n'); writeFileSync(join(proof, 'runner.pid'), `${runner.pid}\n`);
   writeFileSync(join(proof, 'C1-inputs.json'), JSON.stringify({ owner_user_id: '22222222-2222-4222-8222-222222222222', state_directory: '/x' }));
-  writeFileSync(join(stage, 'agent-status.log'), 'agent_steps_complete_awaiting_human_fence\n');
+  writeFileSync(join(stage, 'agent-status.log'), `fence_cutoff_epoch_ms=${cutoff}\nagent_steps_complete_awaiting_human_fence\n`);
+  if (fence.driverDelayMs) await new Promise(done => setTimeout(done, fence.driverDelayMs));
   const started = Date.now();
   const r = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
     const child = spawn('/bin/bash', [], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs, C1_PROOF_DIR: proof,
@@ -398,6 +407,24 @@ test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BE
     const bad = run(block('ai-w6-fence-driver'), { PLAN_FILE: planPath, INPUTS_FILE: inputFile(base()), C1_PROOF_DIR: bd, C1_INPUTS_FILE: bd, C1_FENCE_BUDGET_SECONDS: budget });
     assert.notEqual(bad.status, 0, budget); assert.match(bad.stderr, /FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP/, budget);
   }
+});
+
+test('ai-w6-fence-driver: the deadline is the RUNNER cutoff: a delayed driver, a shortened token and an expired runner refuse normal revocation', { timeout: 120_000 }, async () => {
+  // Delayed driver: the ready line is retained, but the runner's cutoff passed and the runner really exited.
+  const late = await fenceRun(0, false, 0, { cutoffInMs: 1_000, driverDelayMs: 3_000 });
+  assert.notEqual(late.r.status, 0);
+  assert.match(late.r.stderr, /FAIL ai-w6-fence-driver: runner expected alive at the fence got exited; normal revoke refused; STOP/);
+  assert.ok(!late.trace.includes('node revoke') && !late.trace.some(l => l.startsWith('ssh')), late.trace.join('\n'));
+  // Shortened token: the runner (still alive) printed a cutoff 30 s ahead; less than 45 s remain at the revoke.
+  const short = await fenceRun(0, false, 0, { cutoffInMs: 30_000 });
+  assert.notEqual(short.r.status, 0);
+  assert.match(short.r.stderr, /fence budget before the human revoke expected at-least-45-s got \d+ s; revoke NOT attempted;/);
+  assert.ok(!short.trace.includes('node revoke'));
+  // Runner alive but its printed cutoff already passed (token expired before the ready line).
+  const expired = await fenceRun(0, false, 0, { cutoffInMs: -5_000 });
+  assert.notEqual(expired.r.status, 0);
+  assert.match(expired.r.stderr, /FAIL ai-w6-fence-driver: runner (?:fence cutoff expected ahead got passed|expected alive at the fence got exited); normal revoke refused/);
+  assert.ok(!expired.trace.includes('node revoke'));
 });
 
 test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdrawal itself fences the family)', () => {
@@ -456,4 +483,79 @@ test('ai-close W7: success compares the retained retirement gate state; a recove
   ok(check('recovered', 'f', { 'activation-rollback.txt': 'PASS\n' }));
   refused(check('recovered', 't', { 'activation-rollback.txt': 'PASS\n' }), /recovered W7 issuance expected closed got open/);
   refused(check('recovered', 'f', {}), /recovered W7 activation-rollback\.txt \(ai-emergency-close\) expected present got missing/);
+});
+
+// ---------------- the human revoke: both owner refreshes and the revoke request end at the revoke cutoff ----------------
+test('ai-w6-human-revoke: refreshes and the revoke request are bounded by the fence deadline; after it only a labelled recovery revoke', { timeout: 120_000 }, () => {
+  const source = block('ai-w6-human-revoke');
+  const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
+  const now = () => Math.floor(Date.now() / 1000);
+  const fixture = () => {
+    const dir = realpathSync(mkdtempSync(join(root, 'revoke-'))), bin = join(dir, 'bin'), proof = join(dir, 'proof'), stage = join(dir, 'stage');
+    for (const d of [bin, proof, stage]) mkdirSync(d, { mode: 0o700 });
+    writeFileSync(join(proof, 'C1-audit.json'), JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111' }));
+    writeFileSync(join(proof, 'agent.json'), JSON.stringify({ run_id: '0123456789abcdef' }));
+    writeFileSync(join(stage, 'agent.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403 } }));
+    writeFileSync(join(proof, 'C1-inputs.json'), '{}');
+    const calls = join(dir, 'calls'); writeFileSync(calls, '');
+    writeFileSync(join(bin, 'node'), `#!/bin/bash
+case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${calls}'; test "\${REVOKE_SLEEP:-0}" = 0 || exec sleep "\${REVOKE_SLEEP}"; printf 'revoke-done\\n' >>'${calls}'; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","state":"revoked"}\\n';;
+ *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}'; test "\${PREFLIGHT_SLEEP:-0}" = 0 || exec sleep "\${PREFLIGHT_SLEEP}";;
+ *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
+    const go = (env: Record<string, string>) => {
+      const started = Date.now();
+      // Production shape: ai-w6-fence-driver runs the block in its own bash -c process. The slow stubs exec
+      // one process (as node is), so the alarm on that process ends the call.
+      const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 60_000,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', ...env } });
+      return { r, seconds: (Date.now() - started) / 1000, calls: readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean), fenced: existsSync(join(stage, 'fenced')) };
+    };
+    return { proof, go };
+  };
+  const inWindow = fixture().go({ C1_FENCE_DEADLINE: String(now() + 120) });
+  assert.equal(inWindow.r.status, 0, inWindow.r.stderr); assert.deepEqual(inWindow.calls, ['preflight', 'revoke-start', 'revoke-done']); assert.ok(inWindow.fenced);
+  const unset = fixture().go({}); assert.notEqual(unset.r.status, 0);
+  assert.match(unset.r.stderr, /C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 \(never C1 proof\)/);
+  assert.deepEqual(unset.calls, []);
+  const late = fixture().go({ C1_FENCE_DEADLINE: String(now() + 10) }); assert.notEqual(late.r.status, 0);
+  assert.match(late.r.stderr, /revoke cutoff \(fence deadline - 20 s\) expected ahead got passed; revoke NOT dispatched/); assert.deepEqual(late.calls, []);
+  // A slow owner refresh is cut at the revoke cutoff; no revoke request is made.
+  const slowPreflight = fixture().go({ C1_FENCE_DEADLINE: String(now() + 24), PREFLIGHT_SLEEP: '600' });
+  assert.notEqual(slowPreflight.r.status, 0); assert.ok(slowPreflight.seconds < 20, `${slowPreflight.seconds} s`);
+  assert.match(slowPreflight.r.stderr, /owner preflight expected verified-before-the-revoke-cutoff got failure-or-timeout; revoke NOT dispatched/);
+  assert.deepEqual(slowPreflight.calls, ['preflight']); assert.ok(!slowPreflight.fenced);
+  // A slow CLI (its own credential refresh) is cut at the same cutoff: outcome unknown, no fence file, never proof.
+  const slowCli = fixture().go({ C1_FENCE_DEADLINE: String(now() + 24), REVOKE_SLEEP: '600' });
+  assert.notEqual(slowCli.r.status, 0); assert.ok(slowCli.seconds < 20, `${slowCli.seconds} s`);
+  assert.match(slowCli.r.stderr, /revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown;.*never C1 proof/);
+  assert.deepEqual(slowCli.calls, ['preflight', 'revoke-start']); assert.ok(!slowCli.fenced);
+  // After the window: a labelled cleanup revoke only, in its own file, with no fence file.
+  const recovery = fixture(); const rec = recovery.go({ C1_RECOVERY_REVOKE: '1' });
+  assert.equal(rec.r.status, 0, rec.r.stderr); assert.match(rec.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
+  assert.ok(existsSync(join(recovery.proof, 'human-revoke-recovery.json')) && !existsSync(join(recovery.proof, 'human-revoke.json')) && !rec.fenced);
+});
+
+// ---------------- remeasure failure results reach every caller unchanged (production shape: eval, continuing shell) ----------------
+test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close result: CLOSED only when confirmed, else UNKNOWN', () => {
+  const finish = block('ai-w6-finish'), apply = block('ai-w6-activation-apply');
+  const applyStart = apply.indexOf('w6_apply_exit() {'), applyEnd = apply.indexOf('unset EDGE_MEASUREMENT_OUT\n') + 'unset EDGE_MEASUREMENT_OUT\n'.length;
+  assert.ok(applyStart > 0 && applyEnd > applyStart);
+  for (const [status, expected] of [[1, /issuance CLOSED \(remeasure failure close confirmed by readback\)/], [2, /issuance state UNKNOWN after the remeasure failure \(may be OPEN\); run ai-emergency-close/]] as const) {
+    for (const keep of [true, false]) {
+      const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'inactive'); const proof = join(t.dir, 'proof'); mkdirSync(proof);
+      writeFileSync(join(proof, 'C1-fence.txt'), 'PASS'); writeFileSync(join(proof, 'client-withdraw.json'), JSON.stringify({ status: 'PASS', withdrawn_at: 'x' }));
+      writeFileSync(join(proof, 'agent-final.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403, refusal_code: 'grant_revoked' } }));
+      const harness = `ai_run() { case "$1" in ai-inputs|ai-w6-activation-probes|ai-w6-closed-gate-probe) :;; ai-w6-activation-rollback) systemctl start "$EDGE_RECYCLE_TIMER";; ai-edge-remeasure) return ${status};; *) return 1;; esac; }\nai_ro() { printf 't\\n'; }\n`;
+      const r = run(`${harness}eval "$FINISH"\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, WINDOW: 'W6', PROOF_DIR: proof, FINISH: finish,
+        INPUTS_FILE: inputFile({ ...base(), window: 'W6', keep_open: keep }) });
+      assert.match(r.stdout, /shell-continues 1/, r.stderr); assert.match(r.stderr, expected, `${status} keep=${keep}`);
+      assert.doesNotMatch(r.stderr, /stays closed/); if (status === 2) assert.doesNotMatch(r.stderr, /issuance CLOSED/);
+      assert.equal(t.state(), 'active', 'the finish re-armed the timer before the shell continued');
+    }
+    const t = timerStub(); const proof = join(t.dir, 'proof'); mkdirSync(proof);
+    writeFileSync(join(t.dir, 'recovery.sh'), block('ai-w4-timer-recovery'));
+    const harness = `ai_run() { case "$1" in ai-w4-timer-recovery) eval "$(cat '${join(t.dir, 'recovery.sh')}')";; ai-edge-remeasure) return ${status};; *) return 1;; esac; }\n`;
+    const r = run(`${harness}( set -euo pipefail\n${apply.slice(applyStart, applyEnd)})\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, PROOF_DIR: proof });
+    assert.match(r.stdout, /shell-continues 1/); assert.match(r.stderr, expected, `apply ${status}`); assert.equal(t.state(), 'active');
+  }
 });
