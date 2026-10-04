@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {build} from 'esbuild';
+import {fileURLToPath} from 'node:url';
 import {createHumanInviteController} from './human-invite-controller.ts';
 import {HumanInviteRefused} from '../../../src/cloud/human-invitations.ts';
 const preview={status:'preview',workspace_name:'Household',preview_digest:'a'.repeat(64),audience:[],disclosure:'Shared history'};
@@ -28,7 +29,7 @@ test('changed disclosure requires a fresh review and cannot be automatically acc
 });
 
 test('browser recipient invitation entry bundles without Node-only CLI build dependencies',async()=>{
-  const result=await build({entryPoints:['site/src/lib/human-invitations.ts'],bundle:true,write:false,
+  const result=await build({entryPoints:[fileURLToPath(new URL('./human-invitations.ts',import.meta.url))],bundle:true,write:false,
     platform:'browser',format:'esm',target:'es2022',logLevel:'silent'});
   assert.ok(result.outputFiles[0].contents.length>0);
 });

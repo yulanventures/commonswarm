@@ -1,0 +1,3 @@
+16 owned absolute temporary homes enumerated; all 16 passed resolved-path and ownership checks.
+6 unsafe/unowned path controls refused.
+Removed all 16 through PATH rm guard; shell HOME was never assigned.

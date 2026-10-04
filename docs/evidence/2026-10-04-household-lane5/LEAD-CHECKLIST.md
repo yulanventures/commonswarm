@@ -15,6 +15,13 @@ Citation, client-build and timeout regressions pass. Migration 06 no longer need
 The pre-existing eight test type-check diagnostics remain. No new OAuth scope or
 privilege is granted. The shared browser transport stays free of Node imports.
 
+The [Fold 3 CI repair report](FOLD3-REPORT.md) supersedes the blanket legacy
+consent fence and earlier compatibility notes. Household member invitations keep
+recipient review; workspaces without a household boundary retain the existing
+connect-loop acceptance. Archived/unknown routes and revoked access refuse first.
+Browser bundling passes from both root and site working directories. The unchanged
+server regressions still require CI; local Docker/Supabase is unavailable.
+
 ## Prepared behavior
 
 The existing `admin_invite_member` records are delivered through the intended
@@ -28,9 +35,10 @@ recipient's content role, create her personal space, or authorize her agents.
 
 Ordinary privately copied `/app` links use the same review/join transaction.
 They retain fragment scrubbing, deployment pinning and browser resume cleanup.
-This new path binds the link to the recipient's verified email. All links,
-including workspaces without a household boundary row, require consent through
-`/invite`; the old `accept_invitation` API refuses with review guidance. The new join path
+This new path binds the link to the recipient's verified email. Links into workspaces with a household boundary require consent through
+`/invite`; their old `accept_invitation` API refuses with review guidance after
+live-route and revocation checks. Existing generic connect-loop invitations,
+without a household boundary, retain their original acceptance path. The new join path
 requires the owner to have explicitly confirmed a shared workspace in content
 settings; personal and unconfirmed boundaries refuse. Sender copy names this step.
 
@@ -121,10 +129,10 @@ The exact file enumeration is [FILES.md](FILES.md).
   workspace's 25-human policy. Text renders inertly. Sign-out/account change clears
   pending state; changed disclosure never triggers an automatic accept.
 - **Existing links:** new household review binds verified email whereas the old
-  unconfigured capability path historically did not. Every legacy acceptance
-  now requires `/invite` review. This is a compatibility change to review explicitly.
-  Existing unconfirmed generic links now need the owner to confirm Shared before
-  the updated `/invite` path can finish. The recipient sees this prerequisite
+  unconfigured capability path historically did not. Household legacy acceptance
+  requires `/invite` review, including personal/unconfirmed boundary rows; generic
+  connect-loop acceptance without a boundary stays compatible. The updated
+  household `/invite` path still needs the owner to confirm Shared before joining. The recipient sees this prerequisite
   before sign-in. Do not activate site/edge separately.
 - **Separate grants:** accepted membership is the recipient's own. Household
   membership grants no access to either person's private workspace. Recipient

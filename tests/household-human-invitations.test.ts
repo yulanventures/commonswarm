@@ -51,7 +51,7 @@ async function invitationEntry(surface: 'read' | 'command') {
     platform: 'node', format: 'esm', target: 'es2022', logLevel: 'silent',
     banner: { js: `
       const queries = [], userId = '11111111-1111-4111-8111-111111111111';
-      let boundary = true;
+      let boundary = 'shared', archived = false, routeAvailable = true;
       const settings = { SWARM_ENV: 'test', SWARM_DATABASE_URL: 'postgres://127.0.0.1:1/unused',
         SUPABASE_URL: 'http://127.0.0.1:1', SUPABASE_ANON_KEY: 'inert-test-value' };
       const Deno = { env: { get: name => settings[name] }, serve: () => { throw new Error('unexpected server'); } };
@@ -60,6 +60,8 @@ async function invitationEntry(surface: 'read' | 'command') {
     footer: { js: `
       if (priorDeno) Object.defineProperty(globalThis, 'Deno', priorDeno); else Reflect.deleteProperty(globalThis, 'Deno');
       export { queries }; export function setBoundary(value) { boundary = value; }
+      export function setArchived(value) { archived = value; }
+      export function setRouteAvailable(value) { routeAvailable = value; }
       // ${randomUUID()}` },
     plugins: [{ name: 'inert-invitation-transports', setup(builder) {
       builder.onResolve({ filter: /^npm:/ }, args => ({ path: args.path, namespace: 'inert-edge' }));
@@ -82,12 +84,14 @@ async function invitationEntry(surface: 'read' | 'command') {
               if (query.includes('FROM swarm.config')) return [{ value: '0.1.0' }];
               if (query.includes('INSERT INTO swarm.rate_buckets')) return [{ count: 1, resets_at: new Date(Date.now() + 3600000) }];
               if (query.includes('created_by AS inviter')) return [{ invitation_id: userId, workspace_id: userId, inviter: userId }];
-              if (query.includes('FROM swarm.workspaces')) return [{ name: 'Synthetic shared', archived_at: null }];
+              if (query.includes('FROM swarm.invitations AS i') && query.includes('JOIN swarm.workspaces AS w'))
+                return !archived && routeAvailable ? [{ workspace_id: userId, stream_id: userId, role: null, revoked_at: null }] : [];
+              if (query.includes('FROM swarm.workspaces')) return [{ name: 'Synthetic shared', archived_at: archived ? new Date() : null }];
               if (query.includes('FROM swarm.streams')) return [{ stream_id: userId, head_seq: 0 }];
               if (query.includes('consumed_at AS accepted_at')) return [{ role: 'member', email: 'recipient@example.test',
                 expires_at: new Date(Date.now() + 3600000), revoked_at: null, accepted_at: null, accepted_by: null }];
               if (query.includes('SELECT role,revoked_at FROM swarm.memberships')) return [{ role: 'owner', revoked_at: null }];
-              if (query.includes('swarm.household_workspace_boundaries')) return boundary ? [{ purpose: 'shared' }] : [];
+              if (query.includes('swarm.household_workspace_boundaries')) return boundary ? [{ purpose: boundary }] : [];
               if (query.includes('floor(extract(epoch FROM clock_timestamp())')) return [{ now: Date.now() }];
               return [];
             };
@@ -101,7 +105,9 @@ async function invitationEntry(surface: 'read' | 'command') {
   return await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0]!.text).toString('base64')}`) as {
     handleRequest(request: Request): Promise<Response>;
     queries: Array<{ query: string; values: unknown[] }>;
-    setBoundary(value: boolean): void;
+    setBoundary(value: string | null): void;
+    setArchived(value: boolean): void;
+    setRouteAvailable(value: boolean): void;
   };
 }
 async function invitationHttp(entry: Awaited<ReturnType<typeof invitationEntry>>, body: object, token = 'confirmed') {
@@ -122,14 +128,14 @@ test('invitation inbox refuses unconfirmed humans before metadata access and adm
     assert.equal(entry.queries.length, 0, 'no recipient metadata transaction before identity verification');
   }
 });
-test('legacy acceptance always requires recipient review, including workspaces without an overlay', async () => {
+test('household legacy acceptance requires recipient review for shared, personal and unconfirmed boundaries', async () => {
   const entry = await invitationEntry('command');
   const token = 'swm_inv_' + 'A'.repeat(43);
   const control = await invitationHttp(entry, { command_id: 'review-invite', client_version: '0.1.80',
     command: { kind: 'household_invitation', action: 'preview', invitation: { source: 'link', token } } });
   assert.equal(control.status, 200); assert.equal(control.body.status, 'preview');
   assert.equal(control.body.workspace_name, 'Synthetic shared');
-  for (const boundary of [true, false]) {
+  for (const boundary of ['shared', 'personal', 'unconfirmed']) {
     entry.setBoundary(boundary); entry.queries.length = 0;
     assert.deepEqual(await invitationHttp(entry, { command_id: 'legacy-invite', client_version: '0.1.80',
       command: { kind: 'accept_invitation', token } }), { status: 403, body: {
@@ -138,4 +144,35 @@ test('legacy acceptance always requires recipient review, including workspaces w
     assert.ok(entry.queries.some(row => row.query.includes('INSERT INTO swarm.audit_log') && row.values.includes('recipient_consent_required')));
     assert.ok(!entry.queries.some(row => /INSERT INTO swarm.memberships|UPDATE swarm.invitations/.test(row.query)));
   }
+  entry.setBoundary(null); entry.queries.length = 0;
+  assert.deepEqual(await invitationHttp(entry, { command_id: 'unconfirmed-review', client_version: '0.1.80',
+    command: { kind: 'household_invitation', action: 'preview', invitation: { source: 'link', token } } }),
+    { status: 403, body: { status: 'refused', reason: 'invitation_unavailable' } });
+  assert.ok(!entry.queries.some(row => /INSERT INTO swarm.memberships|UPDATE swarm.invitations/.test(row.query)),
+    'household review cannot enroll a recipient without a confirmed Shared boundary');
+});
+
+test('legacy invitation routing refuses archived and unknown workspaces before consent; generic connect flows reach normal validation', async () => {
+  const entry = await invitationEntry('command');
+  const token = 'swm_inv_' + 'A'.repeat(43);
+  const body = { command_id: 'legacy-routing', client_version: '0.1.80', command: { kind: 'accept_invitation', token } };
+  // Positive control: the real legacy handler reaches the household consent gate.
+  assert.equal((await invitationHttp(entry, body)).body.error, 'recipient_consent_required');
+  for (const boundary of ['shared', 'personal', 'unconfirmed', null]) {
+    entry.setBoundary(boundary); entry.setArchived(true); entry.queries.length = 0;
+    assert.deepEqual(await invitationHttp(entry, body), { status: 403, body: { error: 'forbidden' } });
+    assert.ok(!entry.queries.some(row => row.query.includes('swarm.household_workspace_boundaries')),
+      'archived routing refuses before any consent query');
+    assert.ok(!entry.queries.some(row => /INSERT INTO swarm.memberships|UPDATE swarm.invitations/.test(row.query)));
+  }
+  entry.setArchived(false); entry.setRouteAvailable(false); entry.queries.length = 0;
+  assert.deepEqual(await invitationHttp(entry, body), { status: 403, body: { error: 'forbidden' } });
+  assert.ok(!entry.queries.some(row => row.values.includes('recipient_consent_required')));
+  entry.setRouteAvailable(true); entry.setBoundary(null); entry.queries.length = 0;
+  // A live generic invitation must get as far as ordinary version validation.
+  // Actual acceptance/concurrent consumption belongs to unchanged command.test.ts.
+  assert.deepEqual(await invitationHttp(entry, { ...body, client_version: 'invalid' }),
+    { status: 400, body: { error: 'invalid_request' } });
+  assert.ok(entry.queries.some(row => row.query.includes('INSERT INTO swarm.audit_log') && row.values.includes('invalid client_version')));
+  assert.ok(!entry.queries.some(row => row.values.includes('recipient_consent_required')));
 });

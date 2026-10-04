@@ -1,0 +1,36 @@
+✖ legacy invitation routing refuses archived and unknown workspaces before consent; generic connect flows reach normal validation (105.382792ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 184.737458
+
+✖ failing tests:
+
+test at tests/household-human-invitations.test.ts:43:2621
+✖ legacy invitation routing refuses archived and unknown workspaces before consent; generic connect flows reach normal validation (105.382792ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      body: {
+  +     error: 'recipient_consent_required',
+  +     message: 'Open the invitation in /invite and review it as yourself.'
+  -     error: 'forbidden'
+      },
+      status: 403
+    }
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/household-human-invitations.test.ts:157:12)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } },
+    expected: { status: 403, body: { error: 'forbidden' } },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }

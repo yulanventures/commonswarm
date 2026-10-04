@@ -10592,12 +10592,6 @@ async function handleTransaction(
     const invitationRouteHash = invitationToken === null
       ? null
       : await sha256(invitationToken);
-    if (kind === 'accept_invitation') {
-      // Every link requires independent audience/history and content consent,
-      // including workspaces whose Shared settings have not been confirmed yet.
-      await insertAudit(tx, { auth, commandKind: kind, outcome: 'authz', reason: 'recipient_consent_required' });
-      return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
-    }
     const route = kind === "accept_invitation"
       ? invitationRouteHash === null
         ? null
@@ -10635,6 +10629,15 @@ async function handleTransaction(
         detail: ignoredIdentity,
       });
       return { status: 403, body: { error: isDeliveryCommand ? "delivery_unavailable" : "forbidden" } };
+    }
+    if (kind === "accept_invitation") {
+      // Resolve a live workspace and reject revoked access before consent guidance.
+      // Only household member links require this review; legacy connect flows keep their acceptance path.
+      const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+      if (boundary) {
+        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: 'authz', reason: 'recipient_consent_required' });
+        return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
+      }
     }
     /* Dispatched HERE — after the route and the revocation sweep, before
        validateCommand — for two reasons. It needs route.workspaceId and
