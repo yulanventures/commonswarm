@@ -78,8 +78,9 @@
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
-# stop, or a postmaster pid still alive 10 s after the stop (a zombie counts as gone), keeps the directory, prints
-# RETAIN and exits nonzero
+# stop, a recorded postmaster not verifiably gone 10 s after the stop (only "no such process", an unreaped zombie
+# with the recorded start time, or a reused pid count as gone; unknown state does not), or any surviving process of
+# that cluster, keeps the directory, prints RETAIN and exits nonzero
 # (--cleanup-run proves it). HOME is never assigned.
 set -u
 set -o pipefail
@@ -101,42 +102,75 @@ own_dir_ok() {
   test -d "$1" && ! test -L "$1"
 }
 
-# A pid counts as running unless it is gone or a zombie/dead entry (an exited postmaster that its parent has not
-# reaped yet still answers kill -0). Linux: /proc/<pid>/stat state; elsewhere (macOS): ps stat.
-pid_running() { # pid
-  local st
-  kill -0 "$1" 2>/dev/null || return 1
-  if test -r "/proc/$1/stat"; then
-    st=$(sed -n 's/^.*) \([A-Za-z]\).*$/\1/p' "/proc/$1/stat" 2>/dev/null)
-  else
-    # kill -0 answered, so the process exists: a ps that fails or prints nothing (e.g. denied in a sandbox) is no
-    # evidence of exit, and the pid stays running (never delete on missing evidence).
-    st=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ') || return 0
-    test -n "$st" || return 0
-  fi
-  case "$st" in Z*|X*|x*) return 1 ;; esac
-  return 0
+# Process state for cleanup, from the kernel's own records (never a signal reply): prints "gone" (no such process),
+# "<start-time> <state>" (state Z = exited, unreaped), or "unknown" (permission denied, sandbox, any other failure).
+# Linux: /proc/<pid>/stat (state, starttime); macOS: libproc proc_pidinfo PROC_PIDTBSDINFO (status, start time).
+PROC_PY='
+import ctypes,errno,os,sys
+pid=int(sys.argv[1])
+try:
+    if os.path.isdir("/proc/self"):
+        try: raw=open("/proc/%d/stat"%pid).read()
+        except FileNotFoundError: print("gone"); sys.exit(0)
+        f=raw[raw.rindex(")")+2:].split()
+        print(f[19]+" "+f[0]); sys.exit(0)
+    lib=ctypes.CDLL("/usr/lib/libproc.dylib",use_errno=True)
+    buf=ctypes.create_string_buffer(136)
+    if lib.proc_pidinfo(pid,3,0,buf,136)!=136:
+        print("gone" if ctypes.get_errno()==errno.ESRCH else "unknown"); sys.exit(0)
+    status=int.from_bytes(buf.raw[4:8],"little")
+    print("%d.%06d %s"%(int.from_bytes(buf.raw[120:128],"little"),int.from_bytes(buf.raw[128:136],"little"),"Z" if status==5 else "R"))
+except Exception:
+    print("unknown")
+'
+proc_state() { python3 -c "$PROC_PY" "$1" 2>/dev/null || printf 'unknown\n'; }
+# Record the running postmaster's identity (pid and start time) beside its data directory, after every start.
+record_identity() { # dir
+  local pid state
+  pid=$(head -1 "$1/data/postmaster.pid" 2>/dev/null)
+  [[ "$pid" =~ ^[0-9]+$ ]] || { : >"$1/postmaster.identity"; return 0; }
+  state=$(proc_state "$pid")
+  case "$state" in gone|unknown) : >"$1/postmaster.identity" ;; *) printf '%s %s\n' "$pid" "${state% *}" >"$1/postmaster.identity" ;; esac
 }
 
 cleanup_dir() {
-  local dir=$1 pid tenths=0 limit=${C1_W2_CLEANUP_WAIT_TENTHS:-100}
+  local dir=$1 pid tenths=0 limit=${C1_W2_CLEANUP_WAIT_TENTHS:-100} ident state verdict left status_f status_g
   [[ "$limit" =~ ^[1-9][0-9]{0,2}$ ]] && test "$limit" -le 100 || limit=100
   if ! own_dir_ok "$dir"; then say "REFUSE cleanup: $dir is not this script's mktemp directory"; return 1; fi
   if test -e "$dir/data/postmaster.pid"; then
     # The owned postmaster is the pid recorded in this directory's own postmaster.pid.
     pid=$(head -1 "$dir/data/postmaster.pid" 2>/dev/null)
     if ! [[ "$pid" =~ ^[0-9]+$ ]]; then say "RETAIN cleanup: postmaster.pid unreadable; cluster directory $dir kept"; return 1; fi
+    ident=$(cat "$dir/postmaster.identity" 2>/dev/null)
     if ! "$PG_BIN/pg_ctl" -D "$dir/data" -m fast -w -t 60 stop >/dev/null 2>&1; then
       say "RETAIN cleanup: pg_ctl stop failed; postmaster $pid may still run; cluster directory $dir kept"; return 1
     fi
-    # pg_ctl -w returns once postmaster.pid is gone; the process may still be exiting. Wait for it, bounded
-    # (default 10 s in 100 ms steps); never delete while it runs.
-    while pid_running "$pid"; do
+    # pg_ctl -w returns once postmaster.pid is gone; the process may still be exiting. Wait, bounded (default 10 s in
+    # 100 ms steps), until the RECORDED postmaster is verifiably gone: no such process; or an unreaped zombie with the
+    # recorded start time; or the pid now belongs to another process (a different start time). Unknown state waits.
+    while :; do
+      state=$(proc_state "$pid"); verdict=wait
+      case "$state" in
+        gone) verdict=gone ;;
+        unknown) ;;
+        *) if test -n "$ident" && test "${ident%% *}" = "$pid"; then
+             if test "${ident#* }" = "${state% *}"; then case "${state#* }" in Z*) verdict=gone ;; esac
+             else verdict=gone; fi
+           fi ;;
+      esac
+      test "$verdict" = wait || break
       if test "$tenths" -ge "$limit"; then
-        say "RETAIN cleanup: postmaster $pid still running $((limit / 10)).$((limit % 10)) s after stop; cluster directory $dir kept"; return 1
+        say "RETAIN cleanup: postmaster $pid still running or unverified $((limit / 10)).$((limit % 10)) s after stop; cluster directory $dir kept"; return 1
       fi
       sleep 0.1; tenths=$((tenths + 1))
     done
+    # Nothing of this cluster may remain: no process naming its data directory and none in the postmaster's process
+    # group (pg_ctl starts the postmaster in its own session). A check that cannot run counts as a survivor.
+    left=$(pgrep -f -- "$dir/data" 2>/dev/null); status_f=$?
+    left="$left $(pgrep -g "$pid" 2>/dev/null)"; status_g=$?
+    if test "$status_f" != 1 || test "$status_g" != 1; then
+      say "RETAIN cleanup: processes of this cluster remain or cannot be checked after the postmaster exit; cluster directory $dir kept"; return 1
+    fi
   fi
   rm -rf -- "$dir"
 }
@@ -151,7 +185,11 @@ on_exit() {
   exit "$status"
 }
 
-# Test control only: run the real cleanup on a directory of this script's own shape.
+# Test controls only: record a directory's postmaster identity; run the real cleanup on a directory of this script's shape.
+if test "${1:-}" = --record-identity; then
+  test $# = 2 && own_dir_ok "$2" || die record-identity 'expected one directory of this script'"'"'s shape'
+  record_identity "$2"; say "IDENTITY record-identity: $(cat "$2/postmaster.identity")"; exit 0
+fi
 if test "${1:-}" = --cleanup-run; then
   test $# = 2 || die cleanup-run 'expected one path'
   cleanup_dir "$2" || exit 4
@@ -224,6 +262,7 @@ trap 'exit 130' INT TERM
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()') || die cluster 'no ephemeral port'
 "$PG_BIN/pg_ctl" -D "$T/data" -o "-p $PORT -c listen_addresses='' -c unix_socket_directories='$T'" -l "$T/pg.log" -w start >/dev/null 2>&1 \
   || die cluster 'postgres did not start (see the server log in the temporary directory)'
+record_identity "$T"
 say "PASS cluster: disposable PostgreSQL $("$PG_BIN/psql" --version | awk '{print $3}') on a unix socket only"
 
 PSQL_LOG=$T/psql-err.log
@@ -611,6 +650,7 @@ if test "$ISSUER" = 1; then
   "$PG_BIN/pg_ctl" -D "$T/data" -m fast -w -t 60 stop >/dev/null 2>&1 || die tls 'cluster stop before the TLS restart failed'
   "$PG_BIN/pg_ctl" -D "$T/data" -o "-p $PORT -c listen_addresses='127.0.0.1' -c unix_socket_directories='$T' -c ssl=on -c ssl_cert_file='$TLS/server.crt' -c ssl_key_file='$TLS/server.key' -c hba_file='$TLS/pg_hba.conf'" \
     -l "$T/pg.log" -w start >/dev/null 2>&1 || die tls 'cluster did not start with TLS on 127.0.0.1'
+  record_identity "$T"
   say "PASS tls: cluster restarted with ssl=on on 127.0.0.1:$PORT; hostssl 127.0.0.1/32 for the issuer only; temporary CA in the 0700 directory"
   # Listener proof from the postmaster itself and from the OS: nothing on a non-loopback address.
   LISTEN=$(pgx -Atq -c 'SHOW listen_addresses;' 2>"$PSQL_LOG") || die listener 'SHOW listen_addresses failed'
