@@ -10241,11 +10241,22 @@ async function claimHostedSeat(
         AND name = ${input.command.name}
       ORDER BY principal_id
     `;
-    const seatCountRows = await tx<{ live: string }[]>`
-      SELECT count(*)::text AS live
-      FROM swarm.hosted_mcp_seats
-      WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+    const seatCountRows = await tx<{ live: string; reclaimable: string }[]>`
+      SELECT count(*)::text AS live,
+             count(*) FILTER (
+               WHERE hs.workspace_id = ${route.workspaceId}::uuid
+                 AND p.revoked_at IS NOT NULL
+                 AND p.name = ${input.command.name}
+                 AND p.owner_user_id = ${grant.owner_user_id}::uuid
+             )::text AS reclaimable
+      FROM swarm.hosted_mcp_seats AS hs
+      LEFT JOIN swarm.agent_principals AS p
+        ON p.principal_id = hs.principal_id AND p.workspace_id = hs.workspace_id
+      WHERE hs.grant_id = ${grant.grant_id}::uuid AND hs.revoked_at IS NULL
     `;
+    // A successful reclaim closes these orphan seats before inserting its replacement.
+    const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") -
+      Number(seatCountRows[0]?.reclaimable ?? "0");
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
     const handle = `seat_${randomBase64Url(18)}`;
@@ -10290,7 +10301,7 @@ async function claimHostedSeat(
       all_required_consents: true,
       all_required_memberships: true,
       exact_name_principals: exactPrincipals,
-      live_seat_count: Number(seatCountRows[0]?.live ?? "0"),
+      live_seat_count: liveSeatCount,
     }, {
       now: frame.now,
       actor: { user: grant.owner_user_id, agent_principal: null, run: null },
@@ -10331,7 +10342,7 @@ async function claimHostedSeat(
       if (livePrincipals >= FREE_TIER_PRINCIPAL_LIMIT) {
         return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
       }
-      if (Number(seatCountRows[0]?.live ?? "0") >= HOSTED_MCP_SEAT_LIMIT) {
+      if (liveSeatCount >= HOSTED_MCP_SEAT_LIMIT) {
         return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT } };
       }
       const hostedProjection = reduceHostedAuthority(null, decision.events[0]);

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import { HOSTED_MCP_SEAT_LIMIT } from "../../src/protocol/hosted-authority.js";
 import { emptyApplicationSchema, migrationNames as adminMigrationNames, repoSql, versions as adminVersions } from "../support/admin-schema-db.js";
 import { releaseCatalogQuery } from "../support/release-catalog-query.js";
 
@@ -300,11 +301,11 @@ async function seatCommand(spec) {
   }, "command"));
   if (cap === null) return { status: 403, body: { error: "hosted_seat_forbidden" } };
   return await handleHostedCommand({
-    command_id: crypto.randomUUID(), client_version: "0.1.0",
+    command_id: crypto.randomUUID(), client_version: "0.1.80",
     workspace_id: spec.workspaceId, stream: { kind: "workspace" },
     command: { kind: "post_signal", signal_kind: "note",
       body: "D3 historical identity", to_user_id: null, to_agent_principal_id: null,
-      in_reply_to: null, about: null, until_ms: Date.now() + 3600000 },
+      in_reply_to: null, about: null },
   }, cap);
 }
 
@@ -1004,6 +1005,18 @@ function claimSeat(fixture: HostedFixture, grantId: string, name: string): Harne
   return result;
 }
 
+function assertAcceptedSeatNote(result: HarnessResult, principalId: unknown): void {
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "accepted");
+  assert.equal(result.body.ok, true);
+  assert.deepEqual(result.body.event_ids, []);
+  const signal = result.body.signal as Record<string, unknown>;
+  assert.ok(signal && typeof signal === "object" && !Array.isArray(signal));
+  assert.equal(typeof signal.id, "string");
+  assert.equal(signal.kind, "note");
+  assert.equal(signal.from, principalId);
+}
+
 async function hostedRows(seatId: unknown) {
   return await sql`
     SELECT row_to_json(hs) AS seat, row_to_json(h) AS handle, row_to_json(p) AS principal
@@ -1040,8 +1053,7 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   const posted = runHostedHarness<HarnessResult>({ operation: "seat-command", seat: {
     grantId: fixture.grantA, workspaceId: fixture.workspaceA, handle: old.body.handle,
   } });
-  assert.equal(posted.status, 200, JSON.stringify(posted.body));
-  assert.equal(posted.body.status, "accepted");
+  assertAcceptedSeatNote(posted, old.body.principal_id);
   const oldSignals = await sql`
     SELECT * FROM swarm.signals WHERE from_principal = ${String(old.body.principal_id)}::uuid ORDER BY id
   `;
@@ -1075,7 +1087,7 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
       AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
   `;
-  assert.deepEqual(audits, [{ outcome: "accepted", reason: "hosted_seat_name_reclaimed",
+  assert.deepEqual([...audits], [{ outcome: "accepted", reason: "hosted_seat_name_reclaimed",
     detail: `reclaimed=1; closed_seats=0; principal_ids=${old.body.principal_id}; closed_seat_ids=` }]);
   await removeHostedSeat(fixture, fixture.grantA, sameGrant.body.seat_id);
   const freshGrant = claimSeat(fixture, fixture.grantB, name);
@@ -1100,12 +1112,24 @@ test("same-owner hosted reclaim makes fresh identities and preserves removed row
   assert.deepEqual(await hostedRows(old.body.seat_id), oldRevoked);
 });
 
-test("app principal removal leaves an orphan that same-owner hosted reclaim closes", { timeout: 120_000 }, async () => {
+test("app-removed orphan is reclaimable at the hosted seat limit while new names are refused", { timeout: 180_000 }, async () => {
   const fixture = await seedHostedFixture();
   const name = `app-reclaim-${randomUUID()}`;
   const old = claimSeat(fixture, fixture.grantA, name);
   const unrelated = claimSeat(fixture, fixture.grantA, `unrelated-${randomUUID()}`);
   const unrelatedBefore = await hostedRows(unrelated.body.seat_id);
+  const seats = [old, unrelated];
+  while (seats.length < HOSTED_MCP_SEAT_LIMIT) {
+    seats.push(claimSeat(fixture, fixture.grantA, `cap-fill-${randomUUID()}`));
+  }
+  const liveSeatIds = async () => {
+    const rows = await sql<{ seat_id: string }[]>`
+      SELECT seat_id FROM swarm.hosted_mcp_seats
+      WHERE grant_id = ${fixture.grantA}::uuid AND revoked_at IS NULL
+      ORDER BY seat_id
+    `;
+    return rows.map(row => row.seat_id);
+  };
   const removed = runHostedHarness<HarnessResult>({ operation: "public", ownerJwt: fixture.ownerJwt,
     workspaceId: fixture.workspaceA,
     command: { kind: "revoke_agent_principal", principal_id: old.body.principal_id } });
@@ -1116,6 +1140,9 @@ test("app principal removal leaves an orphan that same-owner hosted reclaim clos
   assert.ok(orphan[0]!.principal.revoked_at, "public removal revoked the principal");
   assert.equal(orphan[0]!.seat.revoked_at, null, "positive control: app removal left a live hosted seat");
   assert.equal(orphan[0]!.handle.revoked_at, null, "positive control: app removal left a live handle");
+  const beforeSeatIds = await liveSeatIds();
+  assert.equal(beforeSeatIds.length, HOSTED_MCP_SEAT_LIMIT, "the orphan still counts toward the grant's cap");
+  assert.deepEqual(beforeSeatIds, seats.map(seat => String(seat.body.seat_id)).sort());
 
   const next = claimSeat(fixture, fixture.grantA, name);
   for (const field of ["seat_id", "principal_id", "handle"]) assert.notEqual(next.body[field], old.body[field]);
@@ -1130,12 +1157,20 @@ test("app principal removal leaves an orphan that same-owner hosted reclaim clos
   assert.equal(closed[0]!.seat.revoked_at, replacement[0]!.seat.created_at, "closure uses the claim's server time");
   assert.equal(closed[0]!.handle.revoked_at, replacement[0]!.seat.created_at);
   assert.deepEqual(await hostedRows(unrelated.body.seat_id), unrelatedBefore, "other principals' seats stay unchanged");
+  const afterSeatIds = await liveSeatIds();
+  assert.equal(afterSeatIds.length, HOSTED_MCP_SEAT_LIMIT, "reclaim replaces one live seat at the cap");
+  assert.deepEqual(afterSeatIds, [...beforeSeatIds.filter(id => id !== old.body.seat_id), String(next.body.seat_id)].sort());
+  const refused = runHostedHarness<HarnessResult>({ operation: "claim",
+    claim: claimSpec(fixture, fixture.grantA, fixture.workspaceA, `new-at-cap-${randomUUID()}`) });
+  assert.equal(refused.status, 403, JSON.stringify(refused.body));
+  assert.equal(refused.body.error, "hosted_seat_limit_reached", "a new name gets no reclaim discount");
+  assert.deepEqual(await liveSeatIds(), afterSeatIds, "refused creation leaves the grant at the cap");
   const audits = await sql<{ outcome: string; detail: string }[]>`
     SELECT outcome, detail FROM swarm.audit_log
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
       AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
   `;
-  assert.deepEqual(audits, [{ outcome: "accepted",
+  assert.deepEqual([...audits], [{ outcome: "accepted",
     detail: `reclaimed=1; closed_seats=1; principal_ids=${old.body.principal_id}; closed_seat_ids=${old.body.seat_id}` }]);
   const [catalog] = await sql.unsafe<{ catalog_ok: boolean }[]>(reclaimCatalog());
   assert.equal(catalog?.catalog_ok, true, "010 catalog still proves the live-name schema after app reclaim");
@@ -1180,8 +1215,7 @@ test("old hosted handle is refused and replacement handle authenticates", { time
   } });
   assert.equal(call(old.body.handle).status, 403);
   const accepted = call(next.body.handle);
-  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
-  assert.equal(accepted.body.status, "accepted");
+  assertAcceptedSeatNote(accepted, next.body.principal_id);
 });
 
 test("concurrent claims of a revoked name yield exactly one new live identity", { timeout: 180_000 }, async () => {
@@ -1272,6 +1306,6 @@ test("same-owner revoked local principal is reclaimable through the hosted comma
     WHERE workspace_id = ${fixture.workspaceA}::uuid AND command_kind = 'claim_hosted_seat'
       AND reason = 'hosted_seat_name_reclaimed' ORDER BY audit_id
   `;
-  assert.deepEqual(audits, [{ outcome: "accepted",
+  assert.deepEqual([...audits], [{ outcome: "accepted",
     detail: `reclaimed=1; closed_seats=0; principal_ids=${localPrincipal!.principal_id}; closed_seat_ids=` }]);
 });
