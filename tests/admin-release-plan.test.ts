@@ -1652,7 +1652,7 @@ urllib.request.build_opener=lambda *a: O()
 });
 
 
-test('admin release plan: W2 replay revoke: normal path, lost-rotation path and unproven server behaviors; one call per step', () => {
+test('admin release plan: W2 replay revoke: normal path proven; step-1 invalid_grant and server misbehavior unproven; one call per step', () => {
   const revoke = (f: ReturnType<typeof w2Fixture>, env: Record<string, string> = {}) => run(f.harness + portable(block('ai-w2-revoke-probes'), { stage: 1, pointer: 0 }), { ...f.env, ...env });
   const proofOf = (f: ReturnType<typeof w2Fixture>) => JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoked.json'), 'utf8'));
   // Normal: rotate (200, new token persisted), replay the consumed token (400, grant revoked), new token rejected (proof).
@@ -1665,16 +1665,27 @@ test('admin release plan: W2 replay revoke: normal path, lost-rotation path and 
       assert.deepEqual(proofOf(f), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
       assert.doesNotMatch(result.stdout + result.stderr, /rt-\d/);
     } finally { f.clean(); } }
-  // Lost rotation: the held rt-4 was consumed when the issuer rotated to rt-5; step 1 is invalid_grant
-  // (that replay revoked the grant), so the plan goes straight to the proof with the held token.
-  { const f = w2Fixture();
+  // Step 1 invalid_grant never proves anything: neither after a lost rotation (held token consumed)
+  // nor when the held token is unknown while the family is still live. REVOKE-UNPROVEN, no proof.
+  for (const [label, state, held] of [
+    ['lost rotation', { current: 'rt-5', access: 'at-5', n: 5, revoked: false, consumed: ['rt-0', 'rt-1', 'rt-2', 'rt-3', 'rt-4'], destroyed: [], calls: {} }, 'rt-4'],
+    ['unknown held token, family live', { current: 'rt-5', access: 'at-5', n: 5, revoked: false, consumed: [], destroyed: [], calls: {} }, 'rt-unknown'],
+  ] as const) {
+    const f = w2Fixture();
     try {
-      writeFileSync(join(f.proof, 'oauth-state.json'), JSON.stringify({ current: 'rt-5', access: 'at-5', n: 5, revoked: false, consumed: ['rt-0', 'rt-1', 'rt-2', 'rt-3', 'rt-4'], destroyed: [], calls: {} }));
+      writeFileSync(join(f.proof, 'oauth-state.json'), JSON.stringify(state));
       const creds = JSON.parse(readFileSync(join(f.stage, 'ordinary-probes.json'), 'utf8'));
-      writeFileSync(join(f.stage, 'ordinary-probes.json'), JSON.stringify({ ...creds, mcp_refresh_token: 'rt-4' }), { mode: 0o600 });
-      const result = revoke(f); assert.equal(result.status, 0, result.stderr);
-      assert.equal(oauthState(f).calls['revoke-step'], 2, 'step 1 and the proof only'); assert.equal(oauthState(f).revoked, true);
-      assert.deepEqual(proofOf(f), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
+      writeFileSync(join(f.stage, 'ordinary-probes.json'), JSON.stringify({ ...creds, mcp_refresh_token: held }), { mode: 0o600 });
+      const result = revoke(f); assert.notEqual(result.status, 0, label);
+      assert.match(result.stderr, /REVOKE-UNPROVEN ai-w2-revoke-probes: step 1 rotation refresh got HTTP-400-invalid_grant; the held token cannot prove the family revoked; STOP/);
+      assert.equal(oauthState(f).calls['revoke-step'], 1, `${label}: step 1 only, the same token is never presented twice`);
+      assert.ok(!existsSync(join(f.proof, 'dcr-probe-revoked.json')), `${label}: no proof`);
+      assert.equal(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoke-unproven.json'), 'utf8')).status, 'REVOKE-UNPROVEN');
+      if (label === 'unknown held token, family live') {
+        assert.equal(oauthState(f).revoked, false, 'the live family survived: a proof here would have been false');
+        // Negative control: the live family's own token still refreshes at the issuer.
+        assert.equal(oauthState(f).current, 'rt-5');
+      }
     } finally { f.clean(); } }
   const unproven = (env: Record<string, string>, reason: string, steps: number) => {
     const f = w2Fixture();
@@ -1822,38 +1833,71 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
     // Read-only database boundary: only the ledger query is modelled; admin_cutover_state must not be queried.
     const harness = `ai_ro() { printf '%s\\n' "$*" >>'${calls}'; case "$*" in *"version LIKE '20261003%'"*) printf '%s\\n' "\${LEDGER_COUNT:-0}";; *) printf 'UNEXPECTED\\n'; return 1;; esac; }\n`;
     const env = { WINDOW: 'W2', CLOSE_RESULT: 'recovered', SECRET_STAGE: stage, PROOF_DIR: proof, EDGE_RECYCLE_TIMER: 'fixture.timer', INPUTS_FILE: inputs, PLAN_FILE: planPath,
-      BOX_ARCHIVE_PATH: archive, PATH: shim + ':/Users/yulanbot/.local/bin:' + process.env.PATH };
-    return { stage, proof, close, harness, env, calls };
+      BOX_ARCHIVE_PATH: archive, PATH: shim + ':' + process.env.PATH };
+    // A HezLead ruling file bound to this window, release, plan digest and staged client_id.
+    const rulingDir = mkdtempSync(join(realpathSync(tmpdir()), 'w2-ruling-'));
+    const ruling = (change: Record<string, unknown> = {}, mode = 0o600) => {
+      const file = join(rulingDir, `ruling-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(file, JSON.stringify({ action: 'accept-unproven-dcr-revoke', approver: 'HezLead', release_sha: sha, window_id: 'Abc123',
+        plan_sha256: digest(plan), client_id: 'dcr-probe-client', at: new Date(Date.now() - 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z'), ...change }), { mode });
+      chmodSync(file, mode); return file;
+    };
+    const cleanRulings = () => rmSync(rulingDir, { recursive: true, force: true });
+    return { stage, proof, close, harness, env, calls, ruling, rulingDir, cleanRulings };
   };
   // No ruling: REVOKE-UNPROVEN naming the client_id, and the close stops.
   { const c = setup();
+    c.cleanRulings();
     try {
       const out = run(c.harness + c.close, c.env);
       assert.notEqual(out.status, 0);
-      assert.match(out.stderr, /REVOKE-UNPROVEN ai-close: DCR probe grant client_id dcr-probe-client is not proven revoked; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<approval id> to close; STOP/);
+      assert.match(out.stderr, /REVOKE-UNPROVEN ai-close: DCR probe grant client_id dcr-probe-client is not proven revoked; ruling file expected absolute-path got missing; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<absolute ruling file> to close; STOP/);
       assert.ok(!existsSync(join(c.proof, 'closed.txt')) && existsSync(c.stage));
     } finally { if (existsSync(c.stage)) removeStage(c.stage); } }
   // With the ruling: recorded, ledger proven empty without admin_cutover_state, window closed.
   { const c = setup();
     try {
-      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: 'hezlead/w2-yPolVl-revoke' });
+      const file = c.ruling();
+      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: file });
       assert.equal(out.status, 0, out.stderr);
       const accepted = JSON.parse(readFileSync(join(c.proof, 'dcr-probe-revoke-accepted.json'), 'utf8'));
-      assert.equal(accepted.client_id, 'dcr-probe-client'); assert.equal(accepted.approval_ref, 'hezlead/w2-yPolVl-revoke'); assert.equal(accepted.status, 'REVOKE-UNPROVEN-ACCEPTED');
+      assert.equal(accepted.status, 'REVOKE-UNPROVEN-ACCEPTED'); assert.equal(accepted.ruling.client_id, 'dcr-probe-client');
+      assert.equal(accepted.ruling.window_id, 'Abc123'); assert.equal(accepted.ruling_sha256, digest(readFileSync(file)));
       assert.ok(existsSync(join(c.proof, 'closed.txt')) && !existsSync(c.stage));
       assert.doesNotMatch(readFileSync(c.calls, 'utf8'), /admin_cutover_state/, 'no query of a relation W2 creates');
-    } finally { if (existsSync(c.stage)) removeStage(c.stage); } }
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
   // Ruling present but something was applied: the pre-fence close refuses.
   { const c = setup();
     try {
-      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: 'hezlead/w2-yPolVl-revoke', LEDGER_COUNT: '1' });
+      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling(), LEDGER_COUNT: '1' });
       assert.notEqual(out.status, 0); assert.match(out.stderr, /FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP/);
       assert.ok(!existsSync(join(c.proof, 'closed.txt')));
-    } finally { if (existsSync(c.stage)) removeStage(c.stage); } }
-  // An invalid ruling value is refused.
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
+  // Every binding of the ruling is checked; each refusal leaves the window open with no acceptance record.
   { const c = setup();
     try {
-      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: 'not ok; rm -rf' });
-      assert.notEqual(out.status, 0); assert.match(out.stderr, /REVOKE-UNPROVEN ai-close/);
-    } finally { if (existsSync(c.stage)) removeStage(c.stage); } }
+      const refusals: Array<[string, string]> = [
+        [c.ruling({ window_id: 'yPolVl' }), 'window_id expected input-window-id got mismatch'],
+        [c.ruling({ release_sha: 'e'.repeat(40) }), 'release_sha expected input-release-sha got mismatch'],
+        [c.ruling({ plan_sha256: 'f'.repeat(64) }), 'plan_sha256 expected input-plan-sha256 got mismatch'],
+        [c.ruling({ client_id: 'dcr-other-client' }), 'client_id expected staged-client-id got mismatch'],
+        [c.ruling({ extra: 1 }), 'keys expected exact-ruling-keys got other-set'],
+        [c.ruling({ approver: 'Tom' }), 'approver expected HezLead got other'],
+        [c.ruling({ action: 'accept' }), 'action expected accept-unproven-dcr-revoke got other'],
+        [c.ruling({ at: '2999-01-01T00:00:00Z' }), 'at expected UTC-Z-not-future got other'],
+        [c.ruling({}, 0o666), 'file expected regular-0600-or-0644 got other'],
+        [join(c.rulingDir, 'absent.json'), 'file expected regular-non-symlink got missing-or-symlink'],
+        ['relative/ruling.json', 'file expected absolute-path got missing'],
+      ];
+      const linked = join(c.rulingDir, 'linked.json'); symlinkSync(c.ruling(), linked);
+      refusals.push([linked, 'file expected regular-non-symlink got missing-or-symlink']);
+      const keys = c.ruling(); writeFileSync(keys, JSON.stringify({ action: 'accept-unproven-dcr-revoke' }), { mode: 0o600 });
+      refusals.push([keys, 'keys expected exact-ruling-keys got other-set']);
+      for (const [file, reason] of refusals) {
+        const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: file });
+        assert.notEqual(out.status, 0, reason);
+        assert.ok(out.stderr.includes(`ruling ${reason}; HezLead revokes it`), `${reason}: ${out.stderr}`);
+        assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
+      }
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
 });

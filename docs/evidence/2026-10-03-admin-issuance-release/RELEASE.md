@@ -987,11 +987,13 @@ current token, which must return 200 with a new refresh token (persisted
 atomically, never retried); (2) with the old, now consumed token, which must
 return 400 invalid_grant (this is the revocation); (3) with the new token, which
 must return 400 invalid_grant, the PROOF that the family is revoked
-(`dcr-probe-revoked.json`). If step (1) already returns invalid_grant (the held
-token was consumed, for example after a lost refresh response), the same
-mechanism has already revoked the grant: the plan goes straight to the proof
-with the token it holds. A lost refresh response needs no retry for the same
-reason. Discovery need not advertise a revocation_endpoint anywhere; the
+(`dcr-probe-revoked.json`). This is the ONLY accepted proof: a NEW token that
+step (1) issued, the replay of the OLD one rejected, and the NEW one rejected.
+Two rejections of the same token never count. If step (1) returns invalid_grant
+(the held token is unknown, expired, destroyed or already consumed, for example
+after a lost refresh response), nothing proves the grant is gone, because
+oidc-provider revokes a grant only for a consumed token that still exists: that
+is REVOKE-UNPROVEN, STOP, no proof file. Discovery need not advertise a revocation_endpoint anywhere; the
 token_endpoint must be on the issuer origin. An unproven revoke is
 REVOKE-UNPROVEN with a STOP report, never a partial apply.
 If ai-w2-stage-probes fails anywhere after the local file validated, it
@@ -1005,8 +1007,13 @@ ai-open-abort refuses. Each revoke is ONE attempt: `dcr-probe-revoke-attempted.t
 is written before the first grant request, a started revoke is never re-run, and
 an unproven one is recorded as REVOKE-UNPROVEN (`dcr-probe-revoke-unproven.json`)
 and STOPs for HezLead. ai-close then refuses to close (naming the client_id) until
-HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<approval id>`, which it records in
-`dcr-probe-revoke-accepted.json`, so a window is never stuck open. A W2 that
+HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<absolute path>` to a ruling file
+(regular, not a symlink, mode 0600 or 0644) with exactly `action`
+(`accept-unproven-dcr-revoke`), `approver` (`HezLead`), `release_sha`,
+`window_id`, `plan_sha256`, `client_id` and `at`; each is bound to INPUTS and to
+the client_id in the nonsecret `dcr-probe-revoke-unproven.json`. ai-close records
+it with its sha256 in `dcr-probe-revoke-accepted.json`, so a window is never stuck
+open. A W2 that
 stopped before its fence (no apply-started.txt) closes by proving the ledger
 holds no 20261003 version; admin_cutover_state does not exist before W2 applies.
 This plan does not invent issuance; the producer's final cleanup relies on this
@@ -1122,7 +1129,7 @@ def keep(t):
         finally: os.close(fd)
         os.rename(tmp,name)
 status,t=grant(c["mcp_refresh_token"],"step 1 rotation refresh")
-if rejected(status,t): pass
+if rejected(status,t): unproven("step 1 rotation refresh got HTTP-400-invalid_grant; the held token cannot prove the family revoked")
 elif status==200 and isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384 and t["refresh_token"]!=c["mcp_refresh_token"]:
     old=c["mcp_refresh_token"]; keep(t)
     status,t=grant(old,"step 2 consumed-token replay")
@@ -1686,7 +1693,9 @@ def keep(t):
         c['mcp_refresh_token']=t['refresh_token']; persist(c)
 status,t=grant(c['mcp_refresh_token'],'step 1 rotation refresh')
 if rejected(status,t):
-    pass  # the held token was already consumed: its replay revoked the grant; prove it below
+    # An unknown, expired or destroyed held token is rejected without revoking a surviving grant:
+    # two rejections of the same token never prove anything.
+    unproven('step 1 rotation refresh got HTTP-400-invalid_grant; the held token cannot prove the family revoked',c['mcp_client_id'])
 elif status==200 and isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384 and t['refresh_token']!=c['mcp_refresh_token']:
     old=c['mcp_refresh_token']; keep(t)
     status,t=grant(old,'step 2 consumed-token replay')
@@ -3821,16 +3830,38 @@ if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$P
  if test -f "$PROOF_DIR/dcr-probe-revoke-attempted.txt"; then
   # A started revoke is never re-run. The close reports REVOKE-UNPROVEN and continues only with an
   # explicit HezLead ruling input, which it records; the window is never stuck open.
-  python3 - "$PROOF_DIR" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" <<'PY'
-import datetime,json,pathlib,re,sys
-proof=pathlib.Path(sys.argv[1]); ruling=sys.argv[2]
+  python3 - "$PROOF_DIR" "$INPUTS_FILE" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" <<'PY'
+import datetime,hashlib,json,os,pathlib,re,stat,sys
+proof=pathlib.Path(sys.argv[1]); inputs=json.load(open(sys.argv[2])); ruling_path=sys.argv[3]
 record=proof/'dcr-probe-revoke-unproven.json'
+# The staged client_id comes from the nonsecret proof record, never from the secret file.
 client=json.loads(record.read_text()).get('client_id') if record.exists() else None
 if not record.exists(): record.write_text(json.dumps({'client_id':None,'revoked':False,'status':'REVOKE-UNPROVEN','reason':'a started revoke was not proven'},sort_keys=True)+'\n')
-if not re.fullmatch(r'[A-Za-z0-9/_.:-]{1,200}',ruling):
-    raise SystemExit('REVOKE-UNPROVEN ai-close: DCR probe grant client_id '+str(client)+' is not proven revoked; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<approval id> to close; STOP')
-(proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'client_id':client,'status':'REVOKE-UNPROVEN-ACCEPTED','approval_ref':ruling,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()},sort_keys=True)+'\n')
-print('REVOKE-UNPROVEN accepted by ruling '+ruling+' for DCR probe grant client_id '+str(client)+'; close continues')
+def refuse(what): raise SystemExit('REVOKE-UNPROVEN ai-close: DCR probe grant client_id '+str(client)+' is not proven revoked; ruling '+what+'; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<absolute ruling file> to close; STOP')
+if not (isinstance(client,str) and client): refuse('cannot bind: no staged client_id recorded')
+if not os.path.isabs(ruling_path): refuse('file expected absolute-path got missing')
+try: fd=os.open(ruling_path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except OSError: refuse('file expected regular-non-symlink got missing-or-symlink')
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in (0o600,0o644): refuse('file expected regular-0600-or-0644 got other')
+    raw=os.read(fd,65536)
+finally: os.close(fd)
+try: r=json.loads(raw)
+except ValueError: r=None
+keys={'action','approver','release_sha','window_id','plan_sha256','client_id','at'}
+if not (isinstance(r,dict) and set(r)==keys): refuse('keys expected exact-ruling-keys got other-set')
+if r['action']!='accept-unproven-dcr-revoke': refuse('action expected accept-unproven-dcr-revoke got other')
+if r['approver']!='HezLead': refuse('approver expected HezLead got other')
+if r['release_sha']!=inputs['release_sha']: refuse('release_sha expected input-release-sha got mismatch')
+if r['window_id']!=inputs['window_id']: refuse('window_id expected input-window-id got mismatch')
+if r['plan_sha256']!=inputs['plan_sha256']: refuse('plan_sha256 expected input-plan-sha256 got mismatch')
+if r['client_id']!=client: refuse('client_id expected staged-client-id got mismatch')
+try: when=datetime.datetime.strptime(r['at'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc) if isinstance(r['at'],str) else None
+except ValueError: when=None
+if when is None or when>datetime.datetime.now(datetime.timezone.utc): refuse('at expected UTC-Z-not-future got other')
+(proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True)+'\n')
+print('REVOKE-UNPROVEN accepted by HezLead ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+'; close continues')
 PY
  else
   ai_run ai-w2-revoke-probes
