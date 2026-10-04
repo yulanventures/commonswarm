@@ -13,9 +13,12 @@ const proofRoot = 'deploy/release-proofs/household-approval/20261004000015';
 const migration = () => repoSql('supabase/migrations/20261004000015_household_approval_until_withdrawn.sql');
 function hostedFixture(workspace: string, owner: string) {
   const principal = randomUUID(), connection = randomUUID(), grant = randomUUID();
+  // Migration 20261004000010 allows one live hosted seat per name in a workspace, so each
+  // fixture seat (one per member in the personal-boundary case) gets its own name.
+  const name = `Synthetic agent ${principal.slice(0, 8)}`;
   const setup = `
     INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
-      VALUES ('${principal}','${workspace}','${owner}','Synthetic agent','hosted_mcp',true);
+      VALUES ('${principal}','${workspace}','${owner}','${name}','hosted_mcp',true);
     INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
       selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at)
       VALUES ('${grant}','synthetic-${grant}','${owner}','${workspace}','synthetic-client','https://mcp.commonswarm.com/mcp',
@@ -23,14 +26,14 @@ function hostedFixture(workspace: string, owner: string) {
     INSERT INTO swarm.hosted_mcp_grant_workspaces(grant_id,workspace_id,owner_user_id,manifest_digest,consent_receipt_id,consented_at)
       VALUES ('${grant}','${workspace}','${owner}',decode(repeat('a',64),'hex'),'${randomUUID()}',clock_timestamp());
     INSERT INTO swarm.hosted_mcp_seats(seat_id,grant_id,workspace_id,owner_user_id,principal_id,name,created_at)
-      VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','Synthetic agent',clock_timestamp());
+      VALUES ('${connection}','${grant}','${workspace}','${owner}','${principal}','${name}',clock_timestamp());
   `;
-  return { principal, connection, grant, setup };
+  return { principal, connection, grant, name, setup };
 }
 function fixture() {
   const owner = randomUUID(), other = randomUUID(), workspace = randomUUID(), consent = randomUUID();
   const hosted = hostedFixture(workspace, owner);
-  const { principal, connection, grant } = hosted;
+  const { principal, connection, grant, name } = hosted;
   const setup = `
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','${owner}@example.test'),
       ('${other}','authenticated','authenticated','${other}@example.test');
@@ -51,7 +54,7 @@ function fixture() {
   const context = (kind: string, actor = owner) => `SELECT set_config('cswarm.household_actor','${actor}',true),
     set_config('cswarm.household_request','proof-${kind}',true),set_config('cswarm.household_digest',repeat('a',64),true),
     set_config('cswarm.household_command','${kind}',true);`;
-  return { owner, other, workspace, principal, consent, connection, grant, setup, insert, where, context };
+  return { owner, other, workspace, principal, consent, connection, grant, name, setup, insert, where, context };
 }
 function psqlProof(suffix: 'catalog' | 'rollback-catalog') {
   const alias = suffix === 'catalog' ? 'catalog_ok' : 'rollback_ok';
@@ -236,7 +239,7 @@ test('real command adapters approve without role rewrite, list exact active appr
         { ...input, connection: { ...connection, operations: ['read'] } }, yes), { status: 'refused', reason: 'request_id_reused' });
       const listed = await api.executeHouseholdSurface(tx, f.workspace, actor, randomUUID(), { kind: 'household_connections' }, yes);
       assert.deepEqual(listed, { status: 'ok', connections: [{ kind: 'hosted', connection_id: f.connection, grant_id: f.grant, principal_id: f.principal,
-        name: 'Synthetic agent', approval: { operations: ['read', 'update'], expires_at: null } }] });
+        name: f.name, approval: { operations: ['read', 'update'], expires_at: null } }] });
       const withdrawInput = { kind: 'household_withdraw_connection', principal_id: f.principal };
       await tx`RESET ROLE`;
       await t.test('withdraw another member\'s agent refuses connection_access_refused without writes and preserves their active approval', async () => {
