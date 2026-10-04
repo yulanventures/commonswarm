@@ -153,7 +153,12 @@ async function fixture(t, config = {}) {
       if (url.pathname === '/auth/v1/token') {
         if (config.holdHuman) await config.holdHuman;
         assert.equal(url.searchParams.get('grant_type'), 'refresh_token'); assert.equal(body.refresh_token, humanRefresh); assert.equal(req.headers.apikey, anon);
-        const now = new Date().toISOString(); humanRefresh = secret(); return emit(res, 200, { access_token: secret(), refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
+        const now = new Date().toISOString(); humanRefresh = secret();
+        const exp = config.humanExp ?? Math.floor(Date.now() / 1000) + 3600;
+        const humanAccess = config.badHumanJWT ? secret() : [Buffer.from('{"alg":"HS256"}').toString('base64url'),
+          Buffer.from(JSON.stringify({ sub: uid, exp })).toString('base64url'), secret()].join('.');
+        secrets.push(humanAccess); event.humanAccess = humanAccess; event.humanExp = exp;
+        return emit(res, 200, { access_token: humanAccess, refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
           user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
       }
       if (url.pathname === '/rest/v1/workspaces') {
@@ -200,7 +205,9 @@ async function fixture(t, config = {}) {
     const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
     const out = outName ?? join(root, `receipt${sequence}.json`);
     const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
-      command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] : ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
+      command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
+        command === 'probe-credentials' ? ['probe-credentials', '--window', 'W2', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human] :
+          ['window', '--phase', 'before', '--window', 'W1', '--window-id', 'ABC123', '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
     // Overrides replace their original pair, so the runner still tests duplicate refusal.
     for (let i = 0; i < extra.length; i++) { const arg = extra[i]; const n = args.indexOf(arg);
       if (n >= 0) args.splice(n, 2);
@@ -232,7 +239,8 @@ async function fixture(t, config = {}) {
     const exit = await completed; await handoffs; if (handoffError) throw handoffError;
     for (const value of secrets) assert.ok(!output.includes(value), 'no secret in process output');
     let receipt, bytes;
-    try { bytes = await readFile(out); receipt = JSON.parse(bytes); for (const value of secrets) assert.ok(!bytes.includes(Buffer.from(value)), 'no secret in receipt'); }
+    try { bytes = await readFile(out); receipt = JSON.parse(bytes);
+      if (command !== 'probe-credentials') for (const value of secrets) assert.ok(!bytes.includes(Buffer.from(value)), 'no secret in receipt'); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
     let report;
     try { const reportBytes = await readFile(`${out}.report.json`); report = JSON.parse(reportBytes);
@@ -263,6 +271,131 @@ function consentSchema(r, phase, producer) {
 async function pre(f) {
   const r = await f.run('consent'); assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
 }
+
+test('probe-credentials exclusively writes the binding secret schema, rotates the shared human store once and durably hands off DCR', async t => {
+  const f = await fixture(t), p = await pre(f);
+  const journalPath = join(f.creds, 'live-controls-state.json');
+  const before = JSON.parse(await readFile(journalPath));
+  const dcr = before.grants.find(g => g.client_id === p.receipt.dcr_client_ids[0]);
+  const inode = (await stat(journalPath)).ino, started = Date.now();
+  const r = await f.run('probe-credentials'); assert.equal(r.exit, 0, r.output);
+  assert.equal(r.output, 'PASS probe-credentials written; DCR grant handed off to W2-probes\n');
+  keys(r.receipt, ['release_sha', 'window_id', 'workspace_id', 'mcp_client_id', 'mcp_refresh_token', 'mcp_resource', 'human_access_token', 'human_token_exp']);
+  for (const key of Object.keys(r.receipt).filter(k => k !== 'human_token_exp')) assert.equal(typeof r.receipt[key], 'string');
+  assert.equal(r.receipt.release_sha, release); assert.equal(r.receipt.window_id, 'ABC123'); assert.equal(r.receipt.workspace_id, wid);
+  assert.equal(r.receipt.mcp_client_id, dcr.client_id); assert.equal(r.receipt.mcp_refresh_token, dcr.refresh_token);
+  assert.equal(r.receipt.mcp_resource, resource);
+  const humanEvent = f.events.find(e => e.path === '/auth/v1/token');
+  assert.equal(r.receipt.human_access_token, humanEvent.humanAccess);
+  assert.ok(Number.isSafeInteger(r.receipt.human_token_exp)); assert.equal(r.receipt.human_token_exp, humanEvent.humanExp);
+  assert.equal(r.receipt.human_token_exp, JSON.parse(Buffer.from(r.receipt.human_access_token.split('.')[1], 'base64url')).exp);
+  assert.ok(r.receipt.human_token_exp >= Math.ceil(Date.now() / 1000) + 45 * 60);
+  assert.equal((await stat(r.out)).mode & 0o777, 0o600); assert.equal((await stat(r.out)).nlink, 1);
+  const after = JSON.parse(await readFile(journalPath)), handedOff = after.grants.find(g => g.client_id === dcr.client_id);
+  keys(handedOff.handed_off, ['to', 'window_id', 'at']);
+  assert.equal(handedOff.handed_off.to, 'W2-probes'); assert.equal(handedOff.handed_off.window_id, 'ABC123');
+  assert.equal(new Date(handedOff.handed_off.at).toISOString(), handedOff.handed_off.at);
+  assert.ok(Date.parse(handedOff.handed_off.at) >= started);
+  assert.notEqual((await stat(journalPath)).ino, inode, 'journal update replaces the file atomically');
+  assert.equal((await stat(journalPath)).mode & 0o777, 0o600);
+  const sessionPath = join(f.human, `${hash(api).slice(0, 24)}.json`);
+  assert.equal(JSON.parse(await readFile(sessionPath)).generation, 1);
+  assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1);
+  assert.equal(f.events.filter(e => e.grant === 'refresh_token').length, 0, 'handoff never rotates the DCR token');
+  await missing(`${r.out}.report.json`); await missing(join(f.human, 'live-controls.lock'));
+  const retry = await f.run('probe-credentials');
+  assert.equal(retry.exit, 1, retry.output); assert.match(retry.output, /handed-off grant/); await missing(retry.out);
+  assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1, 'a repeated handoff does not rotate the human session');
+
+  // Ordinary controls keep using CIMD. None of these lifecycle callers may
+  // consume or revoke the DCR family now owned by the W2 plan.
+  const w = await f.run('window', ['--window', 'W2']); assert.equal(w.exit, 0, w.output);
+  assert.equal(JSON.parse(await readFile(sessionPath)).generation, 2, 'window uses the rotated shared session');
+  await post(f, p);
+  const final = await f.run('final-cleanup'); assert.equal(final.exit, 0, final.output);
+  assert.deepEqual(final.receipt.handed_off_grants, [{ client_id: dcr.client_id, handed_off: true, revoked_by: 'W2 plan' }]);
+  assert.match(final.receipt.revoke_proof_dependency, /W2 proof directory dcr-probe-revoked\.json/);
+  assert.ok(!f.events.some(e => e.client === dcr.client_id && (e.grant === 'refresh_token' || e.path === '/revoke')));
+  assert.deepEqual(JSON.parse(await readFile(journalPath)).grants.find(g => g.client_id === dcr.client_id), handedOff);
+});
+
+test('probe-credentials refuses an output created during refresh and retains the durable handoff fence', async t => {
+  const f = await fixture(t), p = await pre(f), out = join(f.root, 'probe-raced.json');
+  let releaseHuman; f.config.holdHuman = new Promise(r => { releaseHuman = r; });
+  const running = f.run('probe-credentials', [], { outName: out });
+  let r;
+  try {
+    const end = Date.now() + 3000;
+    while (!f.events.some(e => e.path === '/auth/v1/token') && Date.now() < end) await sleep(10);
+    assert.ok(f.events.some(e => e.path === '/auth/v1/token'), 'producer passed preflight and entered refresh');
+    await privateWrite(out, '{}');
+  } finally { releaseHuman(); r = await running; }
+  assert.equal(r.exit, 1, r.output); assert.match(r.output, /FAIL probe_handoff:/); assert.doesNotMatch(r.output, /PASS/);
+  assert.equal(await readFile(out, 'utf8'), '{}', 'exclusive create never overwrites the competing file');
+  const journal = JSON.parse(await readFile(join(f.creds, 'live-controls-state.json')));
+  assert.equal(journal.grants.find(g => g.client_id === p.receipt.dcr_client_ids[0]).handed_off.to, 'W2-probes');
+  const retry = await f.run('probe-credentials');
+  assert.equal(retry.exit, 1, retry.output); assert.match(retry.output, /handed-off grant/); await missing(retry.out);
+  assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1);
+  assert.ok(!f.events.some(e => e.grant === 'refresh_token'));
+});
+
+test('probe-credentials refuses unsafe or unavailable handoffs without secret output or MCP refresh', async t => {
+  for (const kind of ['missing', 'ambiguous', 'revoked', 'handed-off', 'unbound', 'wrong-workspace', 'short-exp', 'string-exp',
+    'fractional-exp', 'bad-JWT', 'existing-out', 'receipt-out', 'profile-out', 'wrong-window', 'wrong-window-id']) await t.test(kind, async t => {
+    const f = await fixture(t), p = await pre(f), journalPath = join(f.creds, 'live-controls-state.json');
+    const journal = JSON.parse(await readFile(journalPath)), dcr = journal.grants.find(g => g.client_id === p.receipt.dcr_client_ids[0]);
+    if (kind === 'missing') journal.grants = journal.grants.filter(g => g !== dcr);
+    if (kind === 'ambiguous') journal.grants.push({ ...dcr });
+    if (kind === 'revoked') dcr.revoked = true;
+    if (kind === 'handed-off') dcr.handed_off = { to: 'W2-probes', window_id: 'XYZ987', at: new Date().toISOString() };
+    if (kind === 'unbound') dcr.consent_sha256 = '0'.repeat(64);
+    await privateWrite(journalPath, journal);
+    if (kind === 'short-exp') f.config.humanExp = Math.floor(Date.now() / 1000) + 45 * 60 - 1;
+    if (kind === 'string-exp') f.config.humanExp = String(Math.floor(Date.now() / 1000) + 3600);
+    if (kind === 'fractional-exp') f.config.humanExp = Date.now() / 1000 + 3600.5;
+    if (kind === 'bad-JWT') f.config.badHumanJWT = true;
+    const out = kind === 'receipt-out' ? p.out : kind === 'profile-out' ? join(f.human, 'target.json') : join(f.root, 'probe.json');
+    if (kind === 'existing-out') await privateWrite(out, '{}');
+    let original; try { original = await readFile(out); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    const start = f.events.length;
+    const r = await f.run('probe-credentials', kind === 'wrong-window' ? ['--window', 'W1'] : kind === 'wrong-window-id' ? ['--window-id', 'bad'] : [],
+      { outName: out, workspaceId: kind === 'wrong-workspace' ? randomUUID() : wid });
+    assert.equal(r.exit, 1, r.output); assert.doesNotMatch(r.output, /PASS/);
+    const reason = {
+      missing: /missing or ambiguous DCR grant/, ambiguous: /missing or ambiguous DCR grant/,
+      revoked: /unbound or revoked DCR grant/, 'handed-off': /handed-off grant/, unbound: /unbound or revoked DCR grant/,
+      'wrong-workspace': /same test workspace/, 'short-exp': /short or invalid human token expiry/,
+      'string-exp': /short or invalid human token expiry/, 'fractional-exp': /short or invalid human token expiry/,
+      'bad-JWT': /invalid JWT/, 'existing-out': /existing path/, 'receipt-out': /file path collision/,
+      'profile-out': /file path collision/, 'wrong-window': /W2 and 6 alnum/, 'wrong-window-id': /W2 and 6 alnum/,
+    }[kind];
+    assert.match(r.output, reason);
+    if (original) assert.deepEqual(await readFile(out), original); else await missing(out);
+    assert.deepEqual(JSON.parse(await readFile(journalPath)), journal, 'failed preparation leaves grant ownership unchanged');
+    assert.ok(!f.events.slice(start).some(e => e.grant === 'refresh_token' && e.path === '/token'));
+    const humanCalls = f.events.slice(start).filter(e => e.path === '/auth/v1/token').length;
+    assert.equal(humanCalls, ['short-exp', 'string-exp', 'fractional-exp', 'bad-JWT'].includes(kind) ? 1 : 0);
+  });
+});
+
+test('window, consent and final-cleanup guard every refresh/proof path against handed-off grants', async t => {
+  for (const command of ['window', 'consent', 'final-cleanup']) await t.test(command, async t => {
+    const f = await fixture(t), p = await pre(f);
+    if (command === 'final-cleanup') await post(f, p);
+    const journalPath = join(f.creds, 'live-controls-state.json'), journal = JSON.parse(await readFile(journalPath));
+    // Fail closed even if an ownership annotation reaches the CIMD journal.
+    const consentHash = hash(await readFile(f.consent));
+    const g = journal.grants.find(g => g.client_id === client && g.consent_sha256 === consentHash);
+    g.handed_off = { to: 'W2-probes', window_id: 'ABC123', at: new Date().toISOString() };
+    await privateWrite(journalPath, journal);
+    const start = f.events.length;
+    const r = await f.run(command, command === 'consent' ? ['--phase', 'post-W5', '--prior-consent', p.out] : []);
+    assert.equal(r.exit, 1, r.output); assert.match(r.output, /handed-off grant/); await missing(r.out);
+    assert.ok(f.events.slice(start).every(e => e.method === 'GET'), 'neither refresh nor revocation proof consumes handed-off grants');
+    assert.deepEqual(JSON.parse(await readFile(journalPath)), journal);
+  });
+});
 
 test('executable produces exact consent/live bytes with real PKCE, rotating refresh, CLI file persistence and synthetic readback', async t => {
   const f = await fixture(t), p = await pre(f), producer = hash(await readFile(script));
@@ -342,7 +475,7 @@ test('consecutive releases succeed while live and revoked principals keep their 
 
 test('dry-run of all subcommands makes zero requests and writes no files', async t => {
   const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
-  for (const command of ['consent', 'window', 'final-cleanup']) {
+  for (const command of ['consent', 'window', 'final-cleanup', 'probe-credentials']) {
     const r = await f.run(command, ['--dry-run']); assert.equal(r.exit, 0, r.output); await missing(r.out);
     const plan = JSON.parse(r.output); assert.equal(plan.dry_run, true); assert.equal(plan.user_agent, 'curl/8.7.1'); assert.ok(plan.requests.length >= 4);
   }
@@ -385,9 +518,9 @@ test('timeout defaults allow two 25-minute consent legs and CLI overrides stay b
   });
 });
 
-test('consent and window require a valid workspace UUID even for dry-run', async t => {
+test('consent, window and probe-credentials require a valid workspace UUID even for dry-run', async t => {
   const f = await fixture(t); f.consent = join(f.root, 'nonexistent-consent');
-  for (const command of ['consent', 'window']) {
+  for (const command of ['consent', 'window', 'probe-credentials']) {
     const positive = await f.run(command, ['--dry-run']); assert.equal(positive.exit, 0, positive.output);
     for (const workspaceId of [null, 'bad', '00000000-0000-0000-0000-000000000000', '00000000-0000-4000-8000-000000000000']) {
       const r = await f.run(command, ['--dry-run'], { workspaceId });
@@ -418,37 +551,41 @@ test('seat claim failures withhold receipts and a later failure retains the priv
 });
 
 test('human profile runs serialize across credential directories and retain the caller PATH', async t => {
-  const f = await fixture(t); await pre(f);
-  const otherCreds = join(f.root, 'other-credentials'), bin = join(f.root, 'bin'), log = join(f.root, 'path.jsonl');
-  for (const dir of [otherCreds, bin]) await mkdir(dir, { mode: 0o700 });
-  for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) await privateWrite(join(otherCreds, name), await readFile(join(f.creds, name), 'utf8'));
-  const located = spawnSync('which', ['rm'], { encoding: 'utf8' }); assert.equal(located.status, 0);
-  const guardedRm = located.stdout.trim(); assert.ok(guardedRm.startsWith('/'));
-  await writeFile(join(bin, 'rm'), `#!${process.execPath}\n` +
-    `const {appendFileSync}=require('node:fs'); const {execFileSync}=require('node:child_process');\n` +
-    `appendFileSync(${JSON.stringify(log)},JSON.stringify({args:process.argv.slice(2),path:process.env.PATH})+'\\n',{mode:0o600});\n` +
-    `execFileSync(${JSON.stringify(guardedRm)},process.argv.slice(2),{stdio:'inherit'});\n`, { mode: 0o700 });
-  const callerPath = `${bin}${delimiter}${process.env.PATH}`, env = { PATH: callerPath };
-  let releaseHuman; f.config.holdHuman = new Promise(r => { releaseHuman = r; });
-  const firstRun = f.run('window', [], { env });
-  let first;
-  try {
-    const end = Date.now() + 3000;
-    while (!f.events.some(e => e.path === '/auth/v1/token') && Date.now() < end) await sleep(10);
-    assert.ok(f.events.some(e => e.path === '/auth/v1/token'), 'first run entered human refresh');
-    const start = f.events.length;
-    const refused = await f.run('window', [], { credDir: otherCreds, env });
-    assert.equal(refused.exit, 1, refused.output); assert.match(refused.output, /FAIL files:.*existing path/);
-    await missing(refused.out); assert.equal(f.events.length, start, 'overlap refuses before HTTP');
-    assert.equal((await stat(join(f.human, 'live-controls.lock'))).mode & 0o777, 0o600, 'first run still owns profile lock');
-  } finally { releaseHuman(); first = await firstRun; }
-  assert.equal(first.exit, 0, first.output);
-  assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1);
-  const calls = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.ok(calls.length >= 3); assert.ok(calls.every(c => c.path === callerPath));
-  assert.ok(calls.some(c => c.args[0] === join(f.human, 'live-controls.lock')));
-  for (const dir of [f.human, f.creds, otherCreds]) await missing(join(dir, 'live-controls.lock'));
-  const next = await f.run('window', [], { env }); assert.equal(next.exit, 0, next.output);
+  for (const [firstCommand, secondCommand] of [['window', 'window'], ['probe-credentials', 'window'], ['window', 'probe-credentials']]) {
+    await t.test(`${firstCommand}/${secondCommand}`, async t => {
+      const f = await fixture(t); await pre(f);
+      const otherCreds = join(f.root, 'other-credentials'), bin = join(f.root, 'bin'), log = join(f.root, 'path.jsonl');
+      for (const dir of [otherCreds, bin]) await mkdir(dir, { mode: 0o700 });
+      for (const name of ['live-controls-state.json', 'dcr-client-ids.json']) await privateWrite(join(otherCreds, name), await readFile(join(f.creds, name), 'utf8'));
+      const located = spawnSync('which', ['rm'], { encoding: 'utf8' }); assert.equal(located.status, 0);
+      const guardedRm = located.stdout.trim(); assert.ok(guardedRm.startsWith('/'));
+      await writeFile(join(bin, 'rm'), `#!${process.execPath}\n` +
+        `const {appendFileSync}=require('node:fs'); const {execFileSync}=require('node:child_process');\n` +
+        `appendFileSync(${JSON.stringify(log)},JSON.stringify({args:process.argv.slice(2),path:process.env.PATH})+'\\n',{mode:0o600});\n` +
+        `execFileSync(${JSON.stringify(guardedRm)},process.argv.slice(2),{stdio:'inherit'});\n`, { mode: 0o700 });
+      const callerPath = `${bin}${delimiter}${process.env.PATH}`, env = { PATH: callerPath };
+      let releaseHuman; f.config.holdHuman = new Promise(r => { releaseHuman = r; });
+      const firstRun = f.run(firstCommand, [], { env });
+      let first;
+      try {
+        const end = Date.now() + 3000;
+        while (!f.events.some(e => e.path === '/auth/v1/token') && Date.now() < end) await sleep(10);
+        assert.ok(f.events.some(e => e.path === '/auth/v1/token'), 'first run entered human refresh');
+        const start = f.events.length;
+        const refused = await f.run(secondCommand, [], { credDir: otherCreds, env });
+        assert.equal(refused.exit, 1, refused.output); assert.match(refused.output, /FAIL files:.*existing path/);
+        await missing(refused.out); assert.equal(f.events.length, start, 'overlap refuses before HTTP');
+        assert.equal((await stat(join(f.human, 'live-controls.lock'))).mode & 0o777, 0o600, 'first run still owns profile lock');
+      } finally { releaseHuman(); first = await firstRun; }
+      assert.equal(first.exit, 0, first.output);
+      assert.equal(f.events.filter(e => e.path === '/auth/v1/token').length, 1);
+      const calls = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
+      assert.ok(calls.length >= 3); assert.ok(calls.every(c => c.path === callerPath));
+      assert.ok(calls.some(c => c.args[0] === join(f.human, 'live-controls.lock')));
+      for (const dir of [f.human, f.creds, otherCreds]) await missing(join(dir, 'live-controls.lock'));
+      const next = await f.run('window', [], { env }); assert.equal(next.exit, 0, next.output);
+    });
+  }
 });
 
 test('every failed window leg withholds the entire receipt and redacts remote failures', async t => {

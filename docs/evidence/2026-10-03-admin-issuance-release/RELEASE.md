@@ -51,6 +51,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | rollback_decision | `retain-additive` W1–W2; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
 | approval | `null` W1–W5; W6/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 authorizes activation and assigned human consent |
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
+| probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
@@ -109,7 +110,7 @@ separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
 | W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
-| W2 SCHEMA | common preflight/open/session; ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (five separate transactions, probes after each), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
+| W2 SCHEMA | common preflight/open/session; ai-w2-stage-probes (Mac), ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (pre-fence probe, five separate transactions, probes after each, DCR probe grant revoke), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
 | W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight (runs ai-live-controls phase before with the pre-W1 consent receipt), ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
@@ -152,7 +153,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval'}, 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -185,6 +186,8 @@ if d.get('keep_open',False):
     need(d['window']=='W6','keep-open window')
     approval(d.get('keep_open_approval'),'keep-admin-issuance-open')
 else: need(d.get('keep_open_approval') is None,'no unused keep-open approval')
+if d['window']=='W2': need(isinstance(d.get('probe_workspace_id'),str) and re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',d['probe_workspace_id']) is not None, 'W2 probe_workspace_id')
+else: need('probe_workspace_id' not in d, 'probe_workspace_id is W2-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
@@ -620,7 +623,7 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes) ;; *) return 1;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -938,12 +941,53 @@ pass. M4 refuses checksum evidence; M1 refuses provider artifacts/bindings.
 Never erase ordinary or historical data to pass a reserve. No automatic or
 post-COMMIT production schema rollback is authorized.
 
-Between-probe credentials: HezLead stages ordinary-probes.json ONLY in
-SECRET_STAGE (0700 /private/tmp/anvil-secret.XXXXXX, file 0600), containing
-mcp_access_token, human_access_token and workspace_id for his authorized
-ordinary smoke workspace. Values never enter argv/env/proof or output. Missing,
-expired or refused credentials STOP. Refresh through the reviewed ordinary
-client procedure before W2; this plan does not invent issuance or refresh.
+Between-probe credentials (binding probe contract, lead and release owner,
+2026-10-04). MCP access tokens live 300 s and refresh tokens rotate, and the
+probes run inside ai-w2-apply after its no-rerun fence, so no staged access
+token is used. The producer (`scripts/live-ordinary-controls.mjs
+probe-credentials`) hands off a DEDICATED DCR grant (the pre-W1 consent
+receipt's `dcr_client_ids[0]`) and a fresh human GoTrue access token in
+`/Users/yulanbot/work/c1-run/probe-credentials-W2-<window_id>.json` (0600),
+with exactly: release_sha, window_id, workspace_id, mcp_client_id,
+mcp_refresh_token, mcp_resource (`https://mcp.commonswarm.com/mcp`),
+human_access_token and human_token_exp (integer JWT exp). ai-w2-stage-probes
+validates it on the Mac (0600, exact keys, release/window/workspace equal to
+INPUTS, human_token_exp >= window_end_utc + 300 s; otherwise STOP before any W2
+write), uploads its bytes on stdin in ONE ssh call to
+`$SECRET_STAGE/ordinary-probes.json` (0600), compares only digests, then
+deletes the local file with the guarded rm and proves it is gone. Values never
+enter argv, env, proof or output.
+
+Every probe (ai-w2-between-probes) refreshes first: grant_type=refresh_token
+with mcp_client_id and mcp_resource at the discovered token_endpoint; on 200 it
+writes the rotated refresh token back atomically (temp file in SECRET_STAGE,
+fsync, rename, 0600) BEFORE it uses the new access token for MCP initialize,
+then reads pending_access with human_access_token. Discovery, initialize and the
+human read may retry ONCE on a transport timeout or connection error, never on
+an HTTP status; the refresh grant is NEVER retried. Any failure STOPs before the
+next migration. The same probe runs once immediately BEFORE ai-w2-apply writes
+apply-started.txt (`between-prefence.json`); it also requires an advertised
+revocation_endpoint, so a failure there applies nothing. After the loop, and on
+every W2 exit path that reached the stage (ai-w2-apply's EXIT guard and
+ai-close), ai-w2-revoke-probes revokes the DCR grant family (RFC 7009,
+token_type_hint=refresh_token) and proves a refresh with the current token is
+rejected with invalid_grant (`dcr-probe-revoked.json`). A lost refresh response needs no
+retry: the issuer (oidc-provider `consumeGrantSource`) revokes the WHOLE grant
+when a consumed refresh token is presented again, so the single rejected refresh
+proves the family revoked whether the RFC 7009 call or that reuse revoked it.
+If ai-w2-stage-probes fails anywhere after the local file validated, it
+revokes the grant the same way (from the local copy, or from the box copy when
+the local one is gone), deletes the local file with the guarded rm, proves
+absence and STOPs; a retry needs a new DCR grant (a new consent run). The upload
+writes `probe-staged.txt` in PROOF_DIR, a durable revoke obligation: the EXIT
+guards of ai-w2-preflight and ai-w2-apply and every ai-close run
+ai-w2-revoke-probes while it exists without `dcr-probe-revoked.json`, and
+ai-open-abort refuses. Each revoke is ONE attempt: `dcr-probe-revoke-attempted.txt`
+is written before the first grant request, a started revoke is never re-run, and
+an unproven one is recorded as REVOKE-UNPROVEN (`dcr-probe-revoke-unproven.json`)
+and STOPs for HezLead.
+This plan does not invent issuance; the producer's final cleanup relies on this
+revoke proof.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
 `<released_sha>.tar` archives from the historical release inputs (release-record
@@ -953,11 +997,178 @@ It also checks the current files: if historical and reviewed hashes disagree,
 STOP rather than changing observed evidence to fit a new build.
 
 ```sh
+# step: ai-w2-stage-probes
+# readonly: no
+# host: Mac /bin/bash 3.2; after ai-open, before ai-w2-preflight; one ssh upload on stdin, secrets never in argv/env/output
+set -euo pipefail
+: "${INPUTS_FILE:?FAIL ai-w2-stage-probes: INPUTS_FILE expected absolute-regular-file got unset; STOP}"
+test "$(command -v rm)" = /Users/yulanbot/.local/bin/rm || { printf 'FAIL ai-w2-stage-probes: rm expected guarded /Users/yulanbot/.local/bin/rm got other; STOP\n' >&2; exit 1; }
+W2_RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+W2_WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
+PROBE_CREDENTIALS_FILE=/Users/yulanbot/work/c1-run/probe-credentials-W2-$W2_WINDOW_ID.json
+test ! -e "$PROBE_CREDENTIALS_FILE.revoke-attempted" || { printf 'REVOKE-UNPROVEN ai-w2-stage-probes: an earlier local revoke attempt exists; never retried automatically; STOP\n' >&2; exit 1; }
+# Validation reads the file once by a non-following fd and prints only its sha256; nothing is written before it passes.
+PROBE_SHA256=$(python3 -c '
+import calendar,hashlib,json,os,re,stat,sys,time
+inputs,name=sys.argv[1:3]
+def fail(what,expected,got): raise SystemExit("FAIL ai-w2-stage-probes: "+what+" expected "+expected+" got "+got+"; STOP before any W2 write")
+d=json.load(open(inputs))
+if d.get("window")!="W2": fail("INPUTS window","W2","other")
+try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except OSError: fail("probe credentials file","regular-file","missing-or-symlink")
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=os.getuid(): fail("probe credentials file","0600-regular-file-owned-by-caller","other-mode-or-owner")
+    chunks=[]
+    while True:
+        chunk=os.read(fd,65536)
+        if not chunk: break
+        chunks.append(chunk)
+finally: os.close(fd)
+raw=b"".join(chunks)
+try: c=json.loads(raw)
+except ValueError: c=None
+keys={"release_sha","window_id","workspace_id","mcp_client_id","mcp_refresh_token","mcp_resource","human_access_token","human_token_exp"}
+if not (isinstance(c,dict) and set(c)==keys): fail("probe credentials keys","probe-contract-keys","other-set")
+if c["release_sha"]!=d["release_sha"]: fail("probe credentials release_sha","input-release-sha","mismatch")
+if c["window_id"]!=d["window_id"]: fail("probe credentials window_id","input-window-id","mismatch")
+if c["workspace_id"]!=d.get("probe_workspace_id"): fail("probe credentials workspace_id","input-probe-workspace-id","mismatch")
+if c["mcp_resource"]!="https://mcp.commonswarm.com/mcp": fail("probe credentials mcp_resource","https://mcp.commonswarm.com/mcp","other")
+if not (isinstance(c["mcp_client_id"],str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,512}",c["mcp_client_id"])): fail("probe credentials mcp_client_id","bounded-id","other")
+if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ("mcp_refresh_token","human_access_token")): fail("probe credentials tokens","bounded-strings","other")
+end=calendar.timegm(time.strptime(d["window_end_utc"],"%Y-%m-%dT%H:%M:%SZ"))
+if type(c["human_token_exp"]) is not int or c["human_token_exp"]<end+300: fail("human_token_exp","window_end_utc-plus-300s","shorter")
+print(hashlib.sha256(raw).hexdigest())
+' "$INPUTS_FILE" "$PROBE_CREDENTIALS_FILE")
+W2_PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/$W2_RELEASE_SHA-W2-$W2_WINDOW_ID
+# One ssh call: the box resolves the window's retained secret-stage pointer, installs stdin as 0600 and reports mode and digest only.
+W2_REMOTE_SCRIPT='set -euo pipefail; stage=$(cat "$1/secret-stage.path"); case "$stage" in /private/tmp/anvil-secret.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) exit 65;; esac; test -d "$stage"; test ! -L "$stage"; test "$(stat -c %a "$stage")" = 700; f=$stage/ordinary-probes.json; test ! -e "$f"; test ! -L "$f"; install -o root -g root -m 600 /dev/stdin "$f"; date -u +%Y-%m-%dT%H:%M:%SZ >"$1/probe-staged.txt"; mode=$(stat -c %a "$f"); digest=$(sha256sum "$f" | cut -d " " -f 1); printf "%s %s\n" "$mode" "$digest"'
+printf -v W2_REMOTE 'sudo -n /bin/bash -c %q _ %q' "$W2_REMOTE_SCRIPT" "$W2_PROOF_DIR"
+# After validation, EVERY failure revokes the grant (one attempt): from the local copy when it is
+# still there, otherwise from the box copy through the verified plan's ai-w2-revoke-probes; then the
+# local copy is removed with the guarded rm and its absence proven, and the block STOPs.
+W2_SSH_ATTEMPTED=0
+w2_local_revoke() {
+ python3 -c '
+import json,os,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+name=sys.argv[1]; marker=name+".revoke-attempted"; I="https://mcp.commonswarm.com"
+def fail(what): raise SystemExit("FAIL ai-w2-stage-probes: local revoke "+what+"; STOP")
+def unproven(what): raise SystemExit("REVOKE-UNPROVEN ai-w2-stage-probes: local revoke "+what+"; local file retained 0600 for HezLead; never retried automatically; STOP")
+fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): fail("expected regular file")
+    raw=os.read(fd,1048576)
+finally: os.close(fd)
+c=json.loads(raw)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+TRANSPORT=(urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError)
+def send(url,form=None):
+    data=None if form is None else urllib.parse.urlencode(form).encode()
+    req=urllib.request.Request(url,data=data,headers={"Accept":"application/json","User-Agent":"curl/8.7.1"})
+    try:
+        with opener.open(req,timeout=15) as r: return r.status,r.read(1048577)
+    except urllib.error.HTTPError as e: return e.code,e.read(1048577)
+# Only a transport error may retry discovery once; a malformed or non-200 response never retries.
+reply=None
+for attempt in (1,2):
+    try: reply=send(I+"/.well-known/oauth-authorization-server"); break
+    except TRANSPORT:
+        if attempt==2: fail("discovery expected response got transport-error-after-one-retry")
+status,body=reply
+try: d=json.loads(body) if status==200 else None
+except ValueError: d=None
+if not isinstance(d,dict) or d.get("issuer")!=I: fail("discovery expected HTTP-200-issuer-metadata got other")
+token,revocation=d.get("token_endpoint"),d.get("revocation_endpoint")
+if not all(isinstance(u,str) and u.startswith(I+"/") for u in (token,revocation)): fail("discovery expected issuer-origin token and revocation endpoints")
+mfd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+os.close(mfd)
+try: send(revocation,{"token":c["mcp_refresh_token"],"token_type_hint":"refresh_token","client_id":c["mcp_client_id"]})
+except TRANSPORT: pass
+try: status,body=send(token,{"grant_type":"refresh_token","client_id":c["mcp_client_id"],"refresh_token":c["mcp_refresh_token"],"resource":c["mcp_resource"]})
+except TRANSPORT: unproven("refresh proof got transport-error-not-retried")
+try: t=json.loads(body)
+except ValueError: t=None
+if status!=400 or not isinstance(t,dict) or t.get("error")!="invalid_grant":
+    if isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384:
+        c["mcp_refresh_token"]=t["refresh_token"]; tmp=name+"."+secrets.token_hex(6)+".tmp"
+        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+        finally: os.close(fd)
+        os.rename(tmp,name)
+    unproven("refresh proof expected HTTP-400-invalid_grant got HTTP-"+str(status))
+print(json.dumps({"client_id":c["mcp_client_id"],"revoked":True,"proof":"refresh rejected"},sort_keys=True))
+' "$PROBE_CREDENTIALS_FILE"
+}
+w2_stage_fail() {
+ printf 'FAIL ai-w2-stage-probes: %s; revoking the probe grant; STOP\n' "$1" >&2
+ if test -f "$PROBE_CREDENTIALS_FILE" && test ! -L "$PROBE_CREDENTIALS_FILE"; then
+  W2_REVOKE_PROOF=$(w2_local_revoke) || exit 1
+  if test "$W2_SSH_ATTEMPTED" = 1; then
+   # The box copy holds the same, now revoked, token: record the proof there so no later step re-proves it.
+   printf -v W2_PROOF_REMOTE 'sudo -n /bin/bash -c %q _ %q %q' 'set -euo pipefail; test -f "$1/probe-staged.txt" || exit 0; set -C; printf "%s\n" "$2" >"$1/dcr-probe-revoked.json"' "$W2_PROOF_DIR" "$W2_REVOKE_PROOF"
+   ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_PROOF_REMOTE" </dev/null || printf 'FAIL ai-w2-stage-probes: box revoke proof write failed; the recovered ai-close re-proves on the box; STOP\n' >&2
+  fi
+ else
+  # No local copy left: revoke from the box copy with the verified plan's single-attempt revoke block.
+  W2_REVOKE_BLOCK=$(python3 -c '
+import hashlib,json,os,re,stat,sys
+plan,inputs=sys.argv[1:3]
+fd=os.open(plan,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit("FAIL ai-w2-stage-probes: PLAN_FILE expected regular-file got other; STOP")
+    chunks=[]
+    while True:
+        chunk=os.read(fd,1048576)
+        if not chunk: break
+        chunks.append(chunk)
+finally: os.close(fd)
+raw=b"".join(chunks)
+if hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get("plan_sha256"): raise SystemExit("FAIL ai-w2-stage-probes: PLAN_FILE expected input-plan_sha256 got digest-mismatch; STOP")
+found=[b for b in re.findall(r"^`{3}sh\n(.*?)^`{3}$",raw.decode(),re.M|re.S) if b.startswith("# step: ai-w2-revoke-probes\n")]
+if len(found)!=1: raise SystemExit("FAIL ai-w2-stage-probes: ai-w2-revoke-probes block expected one got other; STOP")
+sys.stdout.write(found[0])
+' "$PLAN_FILE" "$INPUTS_FILE") || exit 1
+  printf -v W2_BOX_REVOKE 'sudo -n /bin/bash -c %q _ %q %q' 'stage=$(cat "$1/secret-stage.path"); exec env WINDOW=W2 PROOF_DIR="$1" SECRET_STAGE="$stage" RELEASE_SHA="$2" /bin/bash -s' "$W2_PROOF_DIR" "$W2_RELEASE_SHA"
+  printf '%s\n' "$W2_REVOKE_BLOCK" | ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_BOX_REVOKE" || { printf 'REVOKE-UNPROVEN ai-w2-stage-probes: box revoke not proven; the box probe-staged.txt marker keeps the obligation for ai-close; STOP\n' >&2; exit 1; }
+ fi
+ if test -e "$PROBE_CREDENTIALS_FILE" || test -L "$PROBE_CREDENTIALS_FILE"; then
+  rm -- "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: guarded rm of the (revoked) local probe credentials refused; retain path and guard message; STOP\n' >&2; exit 1; }
+ fi
+ test ! -e "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials (revoked) expected absent got present; STOP\n' >&2; exit 1; }
+ test ! -L "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials (revoked) expected absent got symlink; STOP\n' >&2; exit 1; }
+ printf 'STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant (new consent run)\n' >&2
+ exit 1
+}
+W2_SSH_ATTEMPTED=1
+W2_UPLOAD=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_REMOTE" <"$PROBE_CREDENTIALS_FILE") || w2_stage_fail 'ssh upload expected success got failure'
+test "$W2_UPLOAD" = "600 $PROBE_SHA256" || w2_stage_fail 'box ordinary-probes.json expected 0600-and-same-sha256 got mismatch'
+rm -- "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'guarded rm of local probe credentials refused'
+test ! -e "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'local probe credentials expected absent got present'
+test ! -L "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'local probe credentials expected absent got symlink'
+printf 'PASS ai-w2-stage-probes: box ordinary-probes.json 0600 with matching digest; local copy removed\n'
+```
+
+```sh
 # step: ai-w2-preflight
 # readonly: no
 # host: box root; database read-only, writes proof files
 set -euo pipefail
 test "$WINDOW" = W2
+# Every exit from here revokes a staged DCR probe grant (the block itself skips when nothing is staged,
+# and never re-runs a started revoke).
+w2_probe_exit() {
+ local status=$?
+ trap - EXIT
+ # The guard runs only on an unfinished block; bash reports 0 for a ${VAR:?} exit, so force a failure status.
+ test "$status" != 0 || status=1
+ # Subshell: a failing revoke must reach this message even though the block re-enables set -e.
+ ( ai_run ai-w2-revoke-probes ) || printf 'FAIL %s: DCR probe grant revoke on exit expected proven got failed; STOP\n' "$W2_GUARD_STEP" >&2
+ exit "$status"
+}
+W2_GUARD_STEP=ai-w2-preflight
+trap w2_probe_exit EXIT
 ai_deadline
 : "${BACKFILL_FILE:?}" "${HISTORICAL_ARCHIVES_DIR:?}" "${W1_CLOSED_FILE:?}"
 python3 - "$W1_CLOSED_FILE" "$RELEASE_SHA" <<'PY'
@@ -1035,6 +1246,7 @@ ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,p
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-before.txt"
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-before.txt"
 ai_run ai-w2-measure
+trap - EXIT
 printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs/bounds; backup fresh\n'
 ```
 
@@ -1211,41 +1423,221 @@ printf 'PASS W2 measured every locked live table within row/size bounds\n'
 ```sh
 # step: ai-w2-between-probes
 # readonly: probe
-# host: box root; public ingress read-only probes; secrets never output
+# host: box root; refresh-per-probe of the dedicated DCR grant and public/authenticated reads; secrets never output
 set -euo pipefail
 ai_deadline
-python3 - "$SECRET_STAGE" "$PROOF_DIR" "$VERSION" "$RELEASE_SHA" <<'PY'
-import datetime,json,pathlib,re,stat,sys,urllib.request
-try:
-    stage,proof=map(pathlib.Path,sys.argv[1:3]); version,sha=sys.argv[3:]
-    assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink()
-    assert stat.S_IMODE(stage.stat().st_mode)==0o700
-    f=stage/'ordinary-probes.json'; assert f.is_file() and not f.is_symlink() and stat.S_IMODE(f.stat().st_mode)==0o600
-    c=json.loads(f.read_text()); assert set(c)=={'mcp_access_token','human_access_token','workspace_id'}
-    assert re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',c['workspace_id'])
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self,*args,**kwargs): return None
-    opener=urllib.request.build_opener(NoRedirect())
-    def call(url,body=None,token=None):
-        headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
-        if token: headers['Authorization']='Bearer '+token
-        req=urllib.request.Request(url,data=None if body is None else json.dumps(body).encode(),headers=headers)
-        with opener.open(req,timeout=15) as response:
-            raw=response.read(1048577); assert response.status==200 and len(raw)<=1048576
-            return json.loads(raw)
-    call('https://mcp.commonswarm.com/health')
-    discovery=call('https://mcp.commonswarm.com/.well-known/oauth-authorization-server')
-    assert discovery['issuer']=='https://mcp.commonswarm.com'
-    resource=call('https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp')
-    assert resource['resource']=='https://mcp.commonswarm.com/mcp'
-    # Authenticated ordinary initialize checks the live token/grant/family path.
-    mcp=call('https://mcp.commonswarm.com/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},c['mcp_access_token'])
-    assert mcp.get('id')==1 and 'error' not in mcp and 'serverInfo' in mcp['result']
-    human=call('https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
-    assert isinstance(human['pending'],list) and 'error' not in human
-    (proof/('between-'+version+'.json')).write_text(json.dumps(dict(release_sha=sha,version=version,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,token_health=True,human_read=True))+'\n')
-except Exception:
-    raise SystemExit('FAIL W2 ordinary discovery/token health/human read; STOP before next migration') from None
+python3 - "$SECRET_STAGE" "$PROOF_DIR" "${PROBE_POINT:-$VERSION}" "$RELEASE_SHA" <<'PY'
+import datetime,json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+stage,proof=map(pathlib.Path,sys.argv[1:3]); label,sha=sys.argv[3:]
+if not re.fullmatch(r'prefence|2026100300000[1-5]',label): raise SystemExit('FAIL ai-w2-between-probes: probe point expected prefence-or-W2-version got other; STOP')
+after='the apply-started fence' if label=='prefence' else 'next migration'
+def fail(what,expected,got): raise SystemExit('FAIL ai-w2-between-probes: '+label+' '+what+' expected '+expected+' got '+got+'; STOP before '+after)
+def read_with_info(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None,None
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode): return None,None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks),info
+            chunks.append(chunk)
+    finally: os.close(fd)
+KEYS={'release_sha','window_id','workspace_id','mcp_client_id','mcp_refresh_token','mcp_resource','human_access_token','human_token_exp'}
+ISSUER='https://mcp.commonswarm.com'
+def credentials():
+    if not (re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink() and stat.S_IMODE(stage.stat().st_mode)==0o700): fail('SECRET_STAGE','0700-anvil-secret','other')
+    raw,info=read_with_info(str(stage/'ordinary-probes.json'))
+    if raw is None or stat.S_IMODE(info.st_mode)!=0o600: fail('ordinary-probes.json','0600-regular-file','missing-or-mode')
+    try: c=json.loads(raw)
+    except ValueError: c=None
+    if not (isinstance(c,dict) and set(c)==KEYS): fail('ordinary-probes.json keys','probe-contract-keys','other-set')
+    if c['release_sha']!=sha or c['mcp_resource']!=ISSUER+'/mcp': fail('ordinary-probes.json binding','release-and-resource','mismatch')
+    if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ('mcp_client_id','mcp_refresh_token','human_access_token')): fail('ordinary-probes.json values','bounded-strings','other')
+    return c
+def persist(c):
+    # Rotated refresh token reaches the file atomically before any use of the new access token.
+    tmp=stage/('.ordinary-probes.'+secrets.token_hex(6)+'.tmp')
+    fd=os.open(str(tmp),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(str(tmp),str(stage/'ordinary-probes.json'))
+    dfd=os.open(str(stage),os.O_RDONLY)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+class Transport(Exception): pass
+def send(url,body=None,token=None,form=None):
+    headers={'Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
+    data=None
+    if form is not None: data=urllib.parse.urlencode(form).encode(); headers['Content-Type']='application/x-www-form-urlencoded'
+    elif body is not None: data=json.dumps(body).encode(); headers['Content-Type']='application/json'
+    if token: headers['Authorization']='Bearer '+token
+    req=urllib.request.Request(url,data=data,headers=headers)
+    try:
+        with opener.open(req,timeout=15) as response: status,raw=response.status,response.read(1048577)
+    except urllib.error.HTTPError as error: status,raw=error.code,error.read(1048577)
+    except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): raise Transport() from None
+    if len(raw)>1048576: return status,None
+    try: return status,json.loads(raw) if raw else {}
+    except ValueError: return status,None
+def idempotent(what,url,body=None,token=None):
+    # Retry ONCE on a transport error only; an HTTP status is never retried.
+    for attempt in (1,2):
+        try: status,value=send(url,body,token)
+        except Transport:
+            if attempt==2: fail(what,'response','transport-error-after-one-retry')
+            continue
+        if status!=200 or not isinstance(value,dict): fail(what,'HTTP-200-JSON','HTTP-'+str(status))
+        return value
+def endpoint(value,what):
+    if not (isinstance(value,str) and value.startswith(ISSUER+'/')): fail('discovery '+what,'issuer-origin-endpoint','missing-or-foreign')
+    return value
+def discover():
+    idempotent('health',ISSUER+'/health')
+    d=idempotent('authorization server discovery',ISSUER+'/.well-known/oauth-authorization-server')
+    if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
+    r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
+    if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
+    return endpoint(d.get('token_endpoint'),'token_endpoint'),d.get('revocation_endpoint')
+def refresh(c,token_url):
+    # The refresh grant is NEVER retried: a lost response may already have rotated the family.
+    try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
+    except Transport: fail('refresh grant','HTTP-200','transport-error-not-retried')
+    return status,t
+c=credentials()
+if not (type(c['human_token_exp']) is int and c['human_token_exp']>=datetime.datetime.now(datetime.timezone.utc).timestamp()+60): fail('human_token_exp','at-least-60s-left','expired')
+token_url,revocation=discover()
+endpoint(revocation,'revocation_endpoint')
+status,t=refresh(c,token_url)
+if status!=200 or not (isinstance(t,dict) and str(t.get('token_type','')).lower()=='bearer' and all(isinstance(t.get(k),str) and 0<len(t[k])<=16384 for k in ('access_token','refresh_token'))): fail('refresh grant','HTTP-200-Bearer-rotation','HTTP-'+str(status))
+c['mcp_refresh_token']=t['refresh_token']; persist(c)
+mcp=idempotent('MCP initialize',ISSUER+'/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},t['access_token'])
+if mcp.get('id')!=1 or 'error' in mcp or 'serverInfo' not in mcp.get('result',{}): fail('MCP initialize','serverInfo','error')
+human=idempotent('human pending_access read','https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
+if not isinstance(human.get('pending'),list) or 'error' in human: fail('human pending_access read','pending-list','error')
+(proof/('between-'+label+'.json')).write_text(json.dumps(dict(release_sha=sha,version=label,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,revocation_endpoint=True,refreshed=True,token_health=True,human_read=True))+'\n')
+PY
+```
+
+```sh
+# step: ai-w2-revoke-probes
+# readonly: no
+# host: box root; RFC 7009 revoke of the W2 probe DCR grant family with a rejected-refresh proof; secrets never output
+set -euo pipefail
+test "$WINDOW" = W2
+python3 - "$SECRET_STAGE" "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
+import json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+stage,proof=map(pathlib.Path,sys.argv[1:3]); sha=sys.argv[3]
+def fail(what,expected,got): raise SystemExit('FAIL ai-w2-revoke-probes: '+what+' expected '+expected+' got '+got+'; STOP')
+def unproven(reason,client_id=None):
+    # One attempt only: an unproven revoke is reported, never retried automatically.
+    record=proof/'dcr-probe-revoke-unproven.json'
+    if not record.exists(): record.write_text(json.dumps({'client_id':client_id,'revoked':False,'status':'REVOKE-UNPROVEN','reason':reason},sort_keys=True)+'\n')
+    raise SystemExit('REVOKE-UNPROVEN ai-w2-revoke-probes: '+reason+'; STOP; HezLead revokes the DCR probe grant by client_id; never retried automatically')
+if (proof/'dcr-probe-revoked.json').exists():
+    print('PASS ai-w2-revoke-probes: DCR probe grant already revoked'); raise SystemExit(0)
+if (proof/'dcr-probe-revoke-attempted.txt').exists(): unproven('a started revoke is never re-run')
+if not (proof/'probe-staged.txt').exists():
+    print('PASS ai-w2-revoke-probes: no DCR probe grant was staged'); raise SystemExit(0)
+def read_with_info(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None,None
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode): return None,None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks),info
+            chunks.append(chunk)
+    finally: os.close(fd)
+KEYS={'release_sha','window_id','workspace_id','mcp_client_id','mcp_refresh_token','mcp_resource','human_access_token','human_token_exp'}
+ISSUER='https://mcp.commonswarm.com'
+def credentials():
+    if not (re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink() and stat.S_IMODE(stage.stat().st_mode)==0o700): fail('SECRET_STAGE','0700-anvil-secret','other')
+    raw,info=read_with_info(str(stage/'ordinary-probes.json'))
+    if raw is None or stat.S_IMODE(info.st_mode)!=0o600: fail('ordinary-probes.json','0600-regular-file','missing-or-mode')
+    try: c=json.loads(raw)
+    except ValueError: c=None
+    if not (isinstance(c,dict) and set(c)==KEYS): fail('ordinary-probes.json keys','probe-contract-keys','other-set')
+    if c['release_sha']!=sha or c['mcp_resource']!=ISSUER+'/mcp': fail('ordinary-probes.json binding','release-and-resource','mismatch')
+    if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ('mcp_client_id','mcp_refresh_token','human_access_token')): fail('ordinary-probes.json values','bounded-strings','other')
+    return c
+def persist(c):
+    # Rotated refresh token reaches the file atomically before any use of the new access token.
+    tmp=stage/('.ordinary-probes.'+secrets.token_hex(6)+'.tmp')
+    fd=os.open(str(tmp),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(str(tmp),str(stage/'ordinary-probes.json'))
+    dfd=os.open(str(stage),os.O_RDONLY)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+class Transport(Exception): pass
+def send(url,body=None,token=None,form=None):
+    headers={'Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
+    data=None
+    if form is not None: data=urllib.parse.urlencode(form).encode(); headers['Content-Type']='application/x-www-form-urlencoded'
+    elif body is not None: data=json.dumps(body).encode(); headers['Content-Type']='application/json'
+    if token: headers['Authorization']='Bearer '+token
+    req=urllib.request.Request(url,data=data,headers=headers)
+    try:
+        with opener.open(req,timeout=15) as response: status,raw=response.status,response.read(1048577)
+    except urllib.error.HTTPError as error: status,raw=error.code,error.read(1048577)
+    except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): raise Transport() from None
+    if len(raw)>1048576: return status,None
+    try: return status,json.loads(raw) if raw else {}
+    except ValueError: return status,None
+def idempotent(what,url,body=None,token=None):
+    # Retry ONCE on a transport error only; an HTTP status is never retried.
+    for attempt in (1,2):
+        try: status,value=send(url,body,token)
+        except Transport:
+            if attempt==2: fail(what,'response','transport-error-after-one-retry')
+            continue
+        if status!=200 or not isinstance(value,dict): fail(what,'HTTP-200-JSON','HTTP-'+str(status))
+        return value
+def endpoint(value,what):
+    if not (isinstance(value,str) and value.startswith(ISSUER+'/')): fail('discovery '+what,'issuer-origin-endpoint','missing-or-foreign')
+    return value
+def discover():
+    idempotent('health',ISSUER+'/health')
+    d=idempotent('authorization server discovery',ISSUER+'/.well-known/oauth-authorization-server')
+    if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
+    r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
+    if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
+    return endpoint(d.get('token_endpoint'),'token_endpoint'),d.get('revocation_endpoint')
+def refresh(c,token_url):
+    # The refresh grant is NEVER retried: a lost response may already have rotated the family.
+    try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
+    except Transport: fail('refresh grant','HTTP-200','transport-error-not-retried')
+    return status,t
+c=credentials()
+token_url,revocation=discover()
+revocation=endpoint(revocation,'revocation_endpoint')
+# Durable single-attempt marker BEFORE the first grant request: no guard or close re-runs a started revoke.
+fd=os.open(str(proof/'dcr-probe-revoke-attempted.txt'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+try: os.write(fd,b'started\n'); os.fsync(fd)
+finally: os.close(fd)
+# RFC 7009 first; its own outcome is not the proof. The single rejected refresh below is: after a
+# lost rotation the held token is already consumed, and presenting it revokes the whole grant.
+try: send(revocation,form={'token':c['mcp_refresh_token'],'token_type_hint':'refresh_token','client_id':c['mcp_client_id']})
+except Transport: pass
+try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
+except Transport: unproven('refresh proof got transport-error-not-retried',c['mcp_client_id'])
+if status!=400 or not isinstance(t,dict) or t.get('error')!='invalid_grant':
+    if isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384:
+        c['mcp_refresh_token']=t['refresh_token']; persist(c)
+    unproven('refresh proof expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+(proof/'dcr-probe-revoked.json').write_text(json.dumps({'client_id':c['mcp_client_id'],'revoked':True,'proof':'refresh rejected'},sort_keys=True)+'\n')
+print('PASS ai-w2-revoke-probes: DCR probe grant family revoked; refresh rejected')
 PY
 ```
 
@@ -1255,9 +1647,26 @@ PY
 # host: box root; one transaction per unchanged migration, no retries
 set -euo pipefail
 test "$WINDOW" = W2
+# Every exit from here revokes a staged DCR probe grant (the block itself skips when nothing is staged,
+# and never re-runs a started revoke).
+w2_probe_exit() {
+ local status=$?
+ trap - EXIT
+ # The guard runs only on an unfinished block; bash reports 0 for a ${VAR:?} exit, so force a failure status.
+ test "$status" != 0 || status=1
+ # Subshell: a failing revoke must reach this message even though the block re-enables set -e.
+ ( ai_run ai-w2-revoke-probes ) || printf 'FAIL %s: DCR probe grant revoke on exit expected proven got failed; STOP\n' "$W2_GUARD_STEP" >&2
+ exit "$status"
+}
+W2_GUARD_STEP=ai-w2-apply
+trap w2_probe_exit EXIT
 ai_deadline
 test -f "$PROOF_DIR/lock-measurements.json"
 test -f "$SECRET_STAGE/ordinary-probes.json"
+# Pre-fence probe: the same routine once, BEFORE the durable fence; a failure applies nothing.
+PROBE_POINT=prefence
+ai_run ai-w2-between-probes
+PROBE_POINT=
 # Durable no-rerun fence BEFORE the first attempt (including unknown COMMIT).
 ( set -C; date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/apply-started.txt" )
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
@@ -1326,6 +1735,8 @@ assert int(sys.argv[2])<=json.load(open(sys.argv[1]))['expected_hold_seconds'], 
 PY
  ai_run ai-w2-between-probes
 done
+ai_run ai-w2-revoke-probes
+trap - EXIT
 ai_run ai-w2-reconcile
 ```
 
@@ -1374,6 +1785,10 @@ test -f "$PROOF_DIR/schema-committed.txt"
 python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import datetime,json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
+pre=json.loads((p/'between-prefence.json').read_text())
+assert pre['version']=='prefence' and pre['release_sha']==sha and all(pre[k] is True for k in ('discovery','revocation_endpoint','refreshed','token_health','human_read')), 'FAIL missing pre-fence probe; STOP'
+revoked=json.loads((p/'dcr-probe-revoked.json').read_text())
+assert set(revoked)=={'client_id','revoked','proof'} and revoked['revoked'] is True and revoked['proof']=='refresh rejected', 'FAIL missing DCR probe revoke proof; STOP'
 for i in range(1,6):
     v='2026100300000'+str(i); r=json.loads((p/('between-'+v+'.json')).read_text())
     assert r['version']==v and r['release_sha']==sha and all(r[k] is True for k in ('discovery','token_health','human_read')), 'FAIL missing between-migration controls; STOP'
@@ -3338,6 +3753,12 @@ Recovered close requires emergency env/overlay/DB close and ordinary controls.
 # readonly: no
 # host: box root; verified success/recovery only
 set -euo pipefail
+# W2: once probe-staged.txt exists, every close attempt revokes the DCR probe grant FIRST, before
+# CLOSE_RESULT or any receipt is checked (a withheld CLOSE_RESULT still revokes); an unproven
+# revoke STOPs the close.
+if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$PROOF_DIR/dcr-probe-revoked.json"; then
+ ai_run ai-w2-revoke-probes
+fi
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
@@ -3374,7 +3795,8 @@ if test "$CLOSE_RESULT" = success; then
   W2)
    test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-close: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/W2-probes.txt" || { printf 'FAIL ai-close: W2 W2-probes.txt expected present got missing; STOP\n' >&2; exit 1; }
-   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; };;
+   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/dcr-probe-revoked.json" || { printf 'FAIL ai-close: W2 dcr-probe-revoked.json expected present got missing; STOP\n' >&2; exit 1; };;
   W3) test -f "$PROOF_DIR/W3-probes.txt";;
   W4) test -f "$PROOF_DIR/W4-readback.txt";;
   W6)
@@ -3419,6 +3841,7 @@ printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 # host: box root; no production operation occurred before failed open
 set -euo pipefail
 : "${PROOF_DIR:?}"
+test ! -e "$PROOF_DIR/probe-staged.txt" || { printf 'FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP\n' >&2; exit 1; }
 SECRET_STAGE=$(cat "$PROOF_DIR/secret-stage.path")
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib,re,sys
