@@ -32,6 +32,7 @@ async function fixture() {
       aud: audience,
       sub: subject,
       grant_id: "provider-grant-server-suite",
+      scope: "mcp",
       iat: now,
       exp: now + 300,
     })));
@@ -95,6 +96,6 @@ test("HTTP MCP tool call verifies a real JWT before dispatch; bad audience canno
     body,
   }));
   assert.equal(denied.status, 401);
-  assert.equal(denied.headers.get("www-authenticate"), WWW_AUTHENTICATE);
+  assert.equal(denied.headers.get("www-authenticate"), `${WWW_AUTHENTICATE}, error="invalid_token"`);
   assert.equal(calls.length, 1, "invalid tokens never reach tool dispatch");
 });
