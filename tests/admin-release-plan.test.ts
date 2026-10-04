@@ -1705,3 +1705,16 @@ test('admin release plan: W2 probe-staged marker makes preflight, early apply an
   const abort = run(block('ai-open-abort'), { PROOF_DIR: root });
   assert.notEqual(abort.status, 0); assert.match(abort.stderr, /FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP/);
 });
+
+test('admin release plan: W2 ai-close revokes a staged DCR probe grant before CLOSE_RESULT is checked', () => {
+  const f = w2Fixture();
+  try {
+    const close = portable(block('ai-close'), { stage: 2, pointer: 0 });
+    const env: Record<string, string> = { ...f.env }; delete env.CLOSE_RESULT;
+    const result = run(f.harness + close, env);
+    assert.notEqual(result.status, 0, 'close still stops without CLOSE_RESULT');
+    assert.match(result.stderr, /CLOSE_RESULT/);
+    assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'dcr-probe-revoked.json'), 'utf8')), { client_id: 'dcr-probe-client', revoked: true, proof: 'refresh rejected' });
+    assert.equal(oauthState(f).revoked, true); assert.ok(!existsSync(join(f.proof, 'closed.txt')));
+  } finally { f.clean(); }
+});

@@ -3753,12 +3753,13 @@ Recovered close requires emergency env/overlay/DB close and ordinary controls.
 # readonly: no
 # host: box root; verified success/recovery only
 set -euo pipefail
-: "${CLOSE_RESULT:?}"
-# W2: once probe-staged.txt exists, every close (success or recovered) revokes the DCR probe grant
-# first; an unproven revoke STOPs the close.
+# W2: once probe-staged.txt exists, every close attempt revokes the DCR probe grant FIRST, before
+# CLOSE_RESULT or any receipt is checked (a withheld CLOSE_RESULT still revokes); an unproven
+# revoke STOPs the close.
 if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$PROOF_DIR/dcr-probe-revoked.json"; then
  ai_run ai-w2-revoke-probes
 fi
+: "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
 case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
