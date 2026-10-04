@@ -1013,9 +1013,9 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
 const pyJson = (value: Record<string, unknown>) => '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(value[k])).join(', ') + '}\n';
 const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n';
 const ISSUER_CREDENTIAL_LINE = 'PASS issuer login; credential 0440 root:986; password stays on box\n';
-function proofCheckFixture(kind: 'W2' | 'W2b') {
+function proofCheckFixture(kind: 'W2' | 'W2b', bound?: { sha: string; id: string }) {
   const root = realpathSync(mkdtempSync(join(scratch, `proof-check-${kind}-`)));
-  const target = kind === 'W2' ? { sha: 'e'.repeat(40), id: 'RGLqZX' } : { sha, id: 'Xyz789' };
+  const target = bound ?? (kind === 'W2' ? { sha: 'e'.repeat(40), id: 'RGLqZX' } : { sha, id: 'Xyz789' });
   const producerFile = join(root, 'producer.mjs'); writeFileSync(producerFile, 'export const proofCheck = "live-ordinary-controls";\n');
   const archive = join(root, `archive-${target.sha}-${target.id}.tar`);
   const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
@@ -1040,7 +1040,7 @@ function proofCheckFixture(kind: 'W2' | 'W2b') {
     put('w2b-forward-catalogs.txt', 'PASS W2b forward catalogs: all five true after the issuer credential\n');
   }
   const checking: Input = kind === 'W2' ? { ...base(), window: 'W2b', w2_release_sha: target.sha, w2_window_id: target.id }
-    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id };
+    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id, ...(bound ? { release_sha: target.sha } : {}) };
   const inputs = join(root, 'checking-inputs.json'); writeFileSync(inputs, JSON.stringify(checking));
   const source = block('ai-w2b-proof-check').split('/home/commonswarm/admin-issuance').join(join(root, 'admin-issuance')).split('/tmp/admin-issuance-').join(join(root, 'archive-'));
   const check = (env: Record<string, string> = {}) => run(source, { PLAN_FILE: planPath, INPUTS_FILE: inputs, PROOF_CHECK_KIND: kind, ...env });
@@ -1169,7 +1169,7 @@ test('admin release plan: the shared backup receipt check accepts only a bound, 
     ['stale backup', receipt('W4', { backup_verified_at: stamp(1900_000) }), /backup verified_at at gate time expected at-most-1800s-old got stale-or-future/, () => undefined],
     ['backup after gate', receipt('W4', { backup_verified_at: stamp(0) }), /backup verified_at at gate time expected at-most-1800s-old got stale-or-future/, () => undefined],
     ['old restore drill', receipt('W4', { restore_completed_at: stamp(9 * 86400_000) }), /restore drill completed_at at gate time expected at-most-8-days-old got stale-or-future/, () => undefined],
-    ['bad time', receipt('W4', { gate_at: 'yesterday' }), /gate_at expected UTC-ISO-8601-Z-time got other/, () => undefined],
+    ['bad time', receipt('W4', { gate_at: 'yesterday' }), /gate_at expected aware-UTC-ISO-8601-time got other/, () => undefined],
     ['wrong destination', receipt('W4', { destination: 'r2:other/x' }), /backup destination expected reviewed-r2-prefix got other/, () => undefined],
     ['gate before open', receipt('W4', { gate_at: stamp(900_000), backup_verified_at: stamp(1000_000) }), /gate_at expected inside-this-window got before-open-after-end-or-future/, () => undefined],
     ['gate in future', receipt('W4', { gate_at: stamp(-120_000), backup_verified_at: stamp(0) }), /gate_at expected inside-this-window got before-open-after-end-or-future/, () => undefined],
@@ -1177,7 +1177,7 @@ test('admin release plan: the shared backup receipt check accepts only a bound, 
       dir => writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window: 'W4', window_end_utc: stamp(120_000) }))],
     ['gate at window end', receipt('W4', { gate_at: atEnd }), /gate_at expected inside-this-window got before-open-after-end-or-future/,
       dir => writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window: 'W4', window_end_utc: atEnd }))],
-    ['no window end', receipt('W4'), /window inputs window_end_utc expected UTC-ISO-8601-Z-time got other/,
+    ['no window end', receipt('W4'), /window inputs window_end_utc expected aware-UTC-ISO-8601-time got other/,
       dir => { const i: Input = { ...base(), window: 'W4' }; delete i.window_end_utc; writeFileSync(join(dir, 'inputs.json'), JSON.stringify(i)); }],
     ['no open.txt', receipt('W4'), /window open\.txt expected regular-file got missing/, dir => rmSync(join(dir, 'open.txt'))],
   ];
@@ -2465,4 +2465,103 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
         assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
       }
     } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
+});
+
+// ---------------- box-written times (release Z): the EXACT box formats, one shared strict parser ----------------
+// Real box samples (nonsecret, HezLead 2026-10-04): status.json verified_at and restore-status.json at, as written.
+const BOX_TIME = { verified_at: '2026-10-04T22:12:09.199316+00:00', retention_policy_observed_at: '2026-09-18T00:13:29.059720+00:00',
+  restore_at: '2026-10-04T04:48:05.055995+00:00' };
+const boxTimeDir = resolve('tests/fixtures/box-time');
+
+test('box times: every box_utc copy is identical; it accepts the exact box samples and Z, and refuses other offsets, naive and 7 digits', () => {
+  const copies = [...plan.matchAll(/^def box_utc\(value\):\n(?: {4}.*\n)+/gm)].map(m => m[0]);
+  assert.equal(copies.length, 7, 'producer, check, W2 status and W1/W5 closed.txt readers');
+  assert.equal(new Set(copies).size, 1, 'all copies identical');
+  const parser = join(scratch, 'box-utc.py');
+  writeFileSync(parser, `import datetime,json,re,sys\n${copies[0]}print(json.dumps([None if (t:=box_utc(v)) is None else t.isoformat() for v in json.loads(sys.argv[1])]))\n`);
+  const parse = (values: unknown[]) => JSON.parse(spawnSync('python3', [parser, JSON.stringify(values)], { encoding: 'utf8' }).stdout) as (string | null)[];
+  assert.deepEqual(parse([BOX_TIME.verified_at, BOX_TIME.retention_policy_observed_at, BOX_TIME.restore_at]),
+    ['2026-10-04T22:12:09.199316+00:00', '2026-09-18T00:13:29.059720+00:00', '2026-10-04T04:48:05.055995+00:00']);
+  // The plan's own writers: date -u (Z, no fraction), the receipt gate_at (Z, 6 digits), python isoformat (+00:00).
+  assert.deepEqual(parse(['2026-10-04T22:05:00Z', '2026-10-04T22:20:00.000000Z', '2026-10-04T22:20:00.5Z', '2026-10-04T22:20:00+00:00']),
+    ['2026-10-04T22:05:00+00:00', '2026-10-04T22:20:00+00:00', '2026-10-04T22:20:00.500000+00:00', '2026-10-04T22:20:00+00:00']);
+  // Negatives: another offset, naive, 7 fraction digits, -00:00, a space separator, non-ISO, non-string, impossible date.
+  assert.deepEqual(parse(['2026-10-04T22:12:09.199316+01:00', '2026-10-04T22:12:09.199316', '2026-10-04T22:12:09.1993161+00:00',
+    '2026-10-04T22:12:09-00:00', '2026-10-04 22:12:09+00:00', 'yesterday', 1791151929, '2026-02-30T00:00:00Z']), [null, null, null, null, null, null, null, null]);
+});
+
+test('box times: the plan\'s ai-w1-backup-gate and ai-backup-gate-check PASS on the exact box status.json and restore-status.json', () => {
+  const run1 = (statusFile: string, restoreFile: string, gateBlock = block('ai-backup-gate-check')) => {
+    const dir = mkdtempSync(join(scratch, 'box-time-')), backups = join(dir, 'backups'), proof = join(dir, 'proof');
+    mkdirSync(backups); mkdirSync(proof);
+    writeFileSync(join(backups, 'status.json'), readFileSync(statusFile)); writeFileSync(join(backups, 'restore-status.json'), readFileSync(restoreFile));
+    const inputs = { ...base(), window: 'W2b', window_id: 'Abc123', window_end_utc: '2026-10-04T22:50:00Z' };
+    writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs)); writeFileSync(join(proof, 'open.txt'), '2026-10-04T22:05:00Z\n');
+    writeFileSync(join(dir, 'check.sh'), gateBlock);
+    const producer = block('ai-w1-backup-gate').split('/var/backups/commonswarm-postgres').join(backups);
+    const r = run(`ai_deadline() { :; }\nai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat '${join(dir, 'check.sh')}')"; }\n${producer}`,
+      { WINDOW: 'W2b', PROOF_DIR: proof, INPUTS_FILE: join(proof, 'inputs.json'), PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
+    return { r, proof };
+  };
+  const good = run1(join(boxTimeDir, 'status.json'), join(boxTimeDir, 'restore-status.json'));
+  assert.equal(good.r.status, 0, good.r.stderr);
+  assert.match(good.r.stdout, /^PASS ai-backup-gate-check: W2b Abc123 backup and restore fresh at gate 2026-10-04T22:20:00\.000000Z$/m);
+  const receipt = JSON.parse(readFileSync(join(good.proof, 'backup-gate.json'), 'utf8'));
+  assert.equal(receipt.backup_verified_at, BOX_TIME.verified_at, 'the receipt keeps the box string as written');
+  assert.equal(receipt.restore_completed_at, BOX_TIME.restore_at);
+  // Negative control: the released check (origin/main 14bf1604, Z-only) refuses the same real receipt.
+  const present = spawnSync('git', ['cat-file', '-e', '14bf1604^{commit}']);
+  assert.equal(present.status, 0, 'commit 14bf1604 is absent from this clone: fetch it (fetch-depth: 0)');
+  const oldPlan = spawnSync('git', ['show', '14bf1604:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }).stdout;
+  const oldCheck = [...oldPlan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(b => b.startsWith('# step: ai-backup-gate-check\n'))!;
+  const old = run1(join(boxTimeDir, 'status.json'), join(boxTimeDir, 'restore-status.json'), oldCheck);
+  assert.notEqual(old.r.status, 0); assert.match(old.r.stderr, /backup_verified_at expected UTC-ISO-8601-Z-time got other/);
+  // Negatives on the producer: the same sample with another offset, naive, or 7 fraction digits.
+  const status = JSON.parse(readFileSync(join(boxTimeDir, 'status.json'), 'utf8'));
+  for (const bad of ['2026-10-04T22:12:09.199316+01:00', '2026-10-04T22:12:09.199316', '2026-10-04T22:12:09.1993161+00:00']) {
+    const file = join(scratch, `status-${digest(bad).slice(0, 8)}.json`); writeFileSync(file, JSON.stringify({ ...status, verified_at: bad }));
+    const r = run1(file, join(boxTimeDir, 'restore-status.json'));
+    assert.notEqual(r.r.status, 0, bad); assert.match(r.r.stderr, /FAIL backup verified_at expected aware-UTC-ISO-8601-time got other; STOP/, bad);
+    assert.ok(!existsSync(join(r.proof, 'backup-gate.json')), `${bad}: no receipt`);
+  }
+  const restore = JSON.parse(readFileSync(join(boxTimeDir, 'restore-status.json'), 'utf8'));
+  const naiveRestore = join(scratch, 'restore-naive.json'); writeFileSync(naiveRestore, JSON.stringify({ ...restore, at: '2026-10-04T04:48:05.055995' }));
+  const nr = run1(join(boxTimeDir, 'status.json'), naiveRestore);
+  assert.notEqual(nr.r.status, 0); assert.match(nr.r.stderr, /FAIL restore at expected aware-UTC-ISO-8601-time got other; STOP/);
+});
+
+// Real Y W2b PLWaBd proofs, verbatim (HezLead 2026-10-04): one receipt mixes the box's +00:00 copies with the plan's own
+// ...Z gate_at; open.txt, closed.txt and close-result.json are the plan's date -u writers.
+const Y_W2B_RECEIPT = '{"backup_verified_at": "2026-10-04T22:12:09.199316+00:00", "destination": "r2:yulan-vps-1-backups/000-commonswarm-postgres/20261004T220618Z-a5fa66a8632e456d990c534f5be959e5", "gate_at": "2026-10-04T22:18:24.257697Z", "release_sha": "14bf1604f3299885070a01b46c610c6dda02db0e", "restore_completed_at": "2026-10-04T04:48:05.055995+00:00", "status": "PASS", "window": "W2b", "window_id": "PLWaBd"}';
+const Y_OLD_W1_RECEIPT = '{"status": "PASS", "backup_verified_at": "2026-10-04T13:16:05.296063+00:00", "restore_at": "2026-10-04T04:48:05.055995+00:00"}';
+const Y_CLOSE_RESULT = '{"closed_at": "2026-10-04T22:29:52Z", "release_sha": "14bf1604f3299885070a01b46c610c6dda02db0e", "result": "recovered", "window": "W2b", "window_id": "PLWaBd"}';
+
+test('box times: the exact Y W2b receipt (mixed +00:00 and Z) passes ai-backup-gate-check; the old W1 shape and the old check refuse', () => {
+  const check = (receipt: string, gateBlock = block('ai-backup-gate-check')) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'y-receipt-')));
+    writeFileSync(join(dir, 'backup-gate.json'), receipt + '\n');
+    writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), release_sha: '14bf1604f3299885070a01b46c610c6dda02db0e', window: 'W2b', window_id: 'PLWaBd', window_end_utc: '2026-10-04T22:47:31Z' }));
+    writeFileSync(join(dir, 'open.txt'), '2026-10-04T22:17:31Z\n');
+    return run(gateBlock, { BACKUP_GATE_DIR: dir, PYTHONPATH: boxTimeDir, C1_TEST_FIXED_NOW: '2026-10-04T22:20:00Z' });
+  };
+  const good = check(Y_W2B_RECEIPT); assert.equal(good.status, 0, good.stderr);
+  assert.match(good.stdout, /^PASS ai-backup-gate-check: W2b PLWaBd backup and restore fresh at gate 2026-10-04T22:18:24\.257697Z$/m);
+  const oldPlan = spawnSync('git', ['show', '14bf1604:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }).stdout;
+  const oldCheck = [...oldPlan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(b => b.startsWith('# step: ai-backup-gate-check\n'))!;
+  const old = check(Y_W2B_RECEIPT, oldCheck); assert.notEqual(old.status, 0);
+  assert.match(old.stderr, /backup_verified_at expected UTC-ISO-8601-Z-time got other/, 'the release Y refusal, reproduced');
+  // The 5f64fab4 W1 receipt shape: refused on its keys (not on its times); only W2's consumer ever read that shape.
+  const shape = check(Y_OLD_W1_RECEIPT); assert.notEqual(shape.status, 0); assert.match(shape.stderr, /backup-gate\.json keys expected exact-PASS-receipt got other/);
+});
+
+test('box times: the exact Y W2b closed.txt and close-result.json bytes parse; the shared proof validator decides on the result', () => {
+  const y = { sha: '14bf1604f3299885070a01b46c610c6dda02db0e', id: 'PLWaBd' };
+  const f = proofCheckFixture('W2b', y);
+  f.put('closed.txt', '2026-10-04T22:29:52Z\n'); f.put('close-result.json', Y_CLOSE_RESULT + '\n');
+  const recovered = f.check(); assert.notEqual(recovered.status, 0);
+  assert.match(recovered.stderr, /W2b close result expected success got recovered/, 'refused on the result, after the time strings and record bytes were accepted');
+  // The same real time strings in a success record pass.
+  f.put('close-result.json', Y_CLOSE_RESULT.replace('"recovered"', '"success"') + '\n');
+  const success = f.check(); assert.equal(success.status, 0, success.stderr);
+  assert.equal(JSON.parse(success.stdout).closed_at, '2026-10-04T22:29:52Z');
 });

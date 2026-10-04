@@ -50,7 +50,7 @@ src,dst,root=sys.argv[1:4]
 raw=open(src,encoding='utf-8',newline='').read()
 subs=[('/private/tmp/anvil-secret',root+'/secret/anvil-secret'),('/etc/commonswarm-admin-release',root+'/etc'),
       ('/usr/local/libexec/commonswarm-admin-edge-recycle',root+'/libexec/commonswarm-admin-edge-recycle'),
-      ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),('/var/lib/commonswarm-release',root+'/var-lib'),
+      ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),('/var/lib/commonswarm-release',root+'/var-lib'),('/var/backups/commonswarm-postgres',root+'/backups'),
       ('path.stat().st_uid==0','path.stat().st_uid==os.getuid()')]
 count={a:raw.count(a) for a,_ in subs}
 # The closed-issuance marker path exists only from 04d09c3d on; a C1_W6_PLAN_FROM control may lack it.
@@ -249,6 +249,53 @@ PROOF_DIR=$W4_PROOF step ai-w4-readback "$T/blocks/w4-readback.sh"
 test "$(q1 "SELECT legacy_closed AND legacy_fence_evidence_ref='W4/$W4_ID/ai-w4-apply' AND NOT has_table_privilege('swarm_command','swarm.admin_credentials','SELECT') FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t \
   || die w4-legacy-fence 'legacy_closed with W4 evidence and no swarm_command access expected got other'
 say "PASS w4-legacy-fence: legacy_closed false -> true by apply_legacy_admin_fence (evidence W4/$W4_ID/ai-w4-apply); swarm_command has no admin_credentials access; state $(state)"
+
+# ---------------- box-written times: the EXACT box formats and the plan's own writers ----------------
+if test -n "${C1_W6_PLAN_FROM:-}"; then
+  say "SKIP box-time section: C1_W6_PLAN_FROM control (the released box gate is checked in tests/admin-release-plan.test.ts)"
+else
+# The box backup writer's real files (tests/fixtures/box-time, verbatim times) and HezLead's real W2b open.txt time; the
+# test-only clock pin (tests/fixtures/box-time/sitecustomize.py) makes those exact samples "fresh" for the gate.
+mkdir -p "$W6R/backups" "$T/proof-W4-gate" || exit 1
+cp "$REPO/tests/fixtures/box-time/status.json" "$REPO/tests/fixtures/box-time/restore-status.json" "$W6R/backups/" || exit 1
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d["window_end_utc"]="2026-10-04T22:47:31Z"; open(sys.argv[2],"w").write(json.dumps(d))' "$W4_INPUTS" "$T/proof-W4-gate/inputs.json" || exit 1
+printf '2026-10-04T22:17:31Z\n' >"$T/proof-W4-gate/open.txt"
+x ai-w1-backup-gate block >"$T/blocks/w4-backup-gate.sh"
+x ai-backup-gate-check block >"$T/blocks/w6-ai-backup-gate-check.sh"
+say "EMUL w4-backup-gate: status.json/restore-status.json are the box writer's exact samples; clock pinned to 2026-10-04T22:20:00Z (test-only sitecustomize)"
+ai_run_box_gate() { test "$1" = ai-backup-gate-check || return 2; eval "$(cat "$T/blocks/w6-ai-backup-gate-check.sh")"; }
+printf '%s\n' 'ai_run() { ai_run_box_gate "$@"; }' "$(cat "$T/blocks/w4-backup-gate.sh")" >"$T/blocks/w4-backup-gate-run.sh"
+PYTHONPATH=$REPO/tests/fixtures/box-time C1_TEST_FIXED_NOW=2026-10-04T22:20:00Z PROOF_DIR=$T/proof-W4-gate INPUTS_FILE=$T/proof-W4-gate/inputs.json WINDOW=W4 \
+  step ai-w1-backup-gate:W4-exact-box-formats "$T/blocks/w4-backup-gate-run.sh"
+python3 - "$T/proof-W4-gate/backup-gate.json" <<'PY' || die w4-backup-gate 'receipt expected the box strings as written got other'
+import json,sys
+g=json.load(open(sys.argv[1]))
+assert g['backup_verified_at']=='2026-10-04T22:12:09.199316+00:00' and g['restore_completed_at']=='2026-10-04T04:48:05.055995+00:00' and g['gate_at']=='2026-10-04T22:20:00.000000Z'
+PY
+say "PASS w4-backup-gate-receipt: backup_verified_at and restore_completed_at kept as the box wrote them (+00:00, microseconds); gate_at written ...Z; one receipt, both forms, accepted by the check"
+# The plan's own time writers, run here, read back with the plan's own box_utc (never a hand-written value).
+cat >"$T/box-utc.py" <<'PY'
+import datetime,json,re,sys
+src=open(sys.argv[1]).read(); defs=re.findall(r'^def box_utc\(value\):\n(?: {4}.*\n)+',src,re.M)
+assert len(defs)==7 and len(set(defs))==1, 'box_utc copies'
+exec(defs[0])
+bad=[v for v in sys.argv[2:] if box_utc(v) is None]
+if bad: raise SystemExit('FAIL box_utc refused '+json.dumps(bad))
+print(' '.join(sys.argv[2:]))
+PY
+x ai-open line 'date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/open.txt"' >"$T/blocks/writer-open.sh"
+x ai-close line 'CLOSED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)' >"$T/blocks/writer-closed.sh"
+x ai-w5-closed line "(root/'closed.txt').write_text(" >"$T/blocks/writer-w5-closed.py"
+mkdir -p "$T/writers" || exit 1
+PROOF_DIR=$T/writers /bin/bash -c "set -euo pipefail; $(cat "$T/blocks/writer-open.sh")" || die writers 'open.txt writer failed'
+WRITTEN_CLOSED=$(/bin/bash -c "set -euo pipefail; $(cat "$T/blocks/writer-closed.sh"); printf '%s' \"\$CLOSED_AT\"") || die writers 'closed.txt writer failed'
+python3 -c "import datetime,pathlib; root=pathlib.Path('$T/writers'); $(cat "$T/blocks/writer-w5-closed.py")" || die writers 'W5 closed.txt writer failed'
+WRITERS=$(python3 "$T/box-utc.py" "$PLANC" "$(cat "$T/writers/open.txt")" "$WRITTEN_CLOSED" "$(cat "$T/writers/closed.txt")" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate_at"])' "$T/proof-W4-gate/backup-gate.json")" 2>&1) || die writers "$WRITERS"
+say "PASS plan-time-writers: open.txt, ai-close closed.txt, ai-w5-closed closed.txt and gate_at, written by the plan's own code, all parse with box_utc: $WRITERS"
+# psql-rendered times: the plan parses none (receipts only test invalidated_at for null); the real rendering for the record.
+PSQL_RENDER=$(q1 "SELECT row_to_json(r) FROM (SELECT invalidated_at,measured_at FROM commonswarm_oauth.admin_cutover_state WHERE singleton) r;") || die psql-render "$(first_error "$PSQL_LOG")"
+say "PASS psql-time-render: no plan parser reads a psql-rendered time; this cluster renders $PSQL_RENDER (session TimeZone $(q1 'SHOW TimeZone;'))"
+fi
 
 # ---------------- recycle hook and edge receipt ----------------
 printf '%s\n' 'set -euo pipefail' "EDGE_MEASUREMENT_FILE=$W4_PROOF/edge-measurement.json" 'export EDGE_MEASUREMENT_FILE' >"$T/blocks/w6-receipt-w4.sh"
@@ -563,6 +610,12 @@ test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle closed-marker not fully writt
   || die recycle-marker-failure 'marker failure expected reported with the hook failure got other'
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-marker-failure 'closed and invalidated expected got other'
 say "PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and the readback-confirmed CLOSED state stands; $RECYCLE_LINE"
+
+if test -z "${C1_W6_PLAN_FROM:-}"; then
+MARKER_TIMES=$(python3 -c 'import json,sys; print(" ".join(json.loads(l)["at"] for l in open(sys.argv[1]).read().splitlines()))' "$MARKER") || die marker-times 'marker lines expected JSON got other'
+MARKER_OK=$(python3 "$T/box-utc.py" "$PLANC" $MARKER_TIMES 2>&1) || die marker-times "$MARKER_OK"
+say "PASS marker-times: every closed-issuance marker 'at' written by the hook parses with box_utc ($(printf '%s\n' $MARKER_TIMES | wc -l | tr -d ' ') lines)"
+fi
 
 # ---------------- a shared remeasure that fails AFTER a committed reopen closes issuance (from OPEN) ----------------
 W6Q_PROOF=$T/proof-W6-postfail; mkdir -p "$W6Q_PROOF" || exit 1
