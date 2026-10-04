@@ -23,12 +23,15 @@ const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
 function pgBin(): string | null {
   const candidates = [process.env.PG_BIN, ...((process.env.PATH ?? '').split(':')), '/opt/homebrew/opt/postgresql@17/bin'];
   for (const dir of candidates) {
-    if (dir && ['initdb', 'pg_ctl', 'psql', 'pg_dump', 'pg_dumpall'].every(tool => existsSync(join(dir, tool)))) return dir;
+    if (!dir || !['initdb', 'pg_ctl', 'psql', 'pg_dump', 'pg_dumpall'].every(tool => existsSync(join(dir, tool)))) continue;
+    // The plan's W2 SQL sets transaction_timeout: PostgreSQL 17 or newer only.
+    const major = Number(/\(PostgreSQL\) (\d+)/.exec(spawnSync(join(dir, 'psql'), ['--version'], { encoding: 'utf8' }).stdout ?? '')?.[1]);
+    if (major >= 17) return dir;
   }
   return null;
 }
 const PG = process.env.RUN_PG_REHEARSAL === '1' ? pgBin() : null;
-const skipDb = PG ? false : 'set RUN_PG_REHEARSAL=1 with local PostgreSQL binaries to run the rehearsal';
+const skipDb = PG ? false : 'set RUN_PG_REHEARSAL=1 with local PostgreSQL 17+ binaries to run the rehearsal';
 
 test('c1 W2 rehearsal: the script is Bash 3.2 syntax and never puts a heredoc inside a command substitution', () => {
   const syntax = spawnSync('/bin/bash', ['-n', script], { encoding: 'utf8' });

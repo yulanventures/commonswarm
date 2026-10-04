@@ -90,6 +90,9 @@ for tool in initdb pg_ctl psql pg_dump pg_dumpall; do
   test -x "$PG_BIN/$tool" || die setup "PostgreSQL tool $tool expected in $PG_BIN got missing"
 done
 command -v python3 >/dev/null 2>&1 || die setup 'python3 expected got missing'
+# The plan's W2 SQL sets transaction_timeout, which needs PostgreSQL 17 (production runs 17).
+PG_MAJOR=$("$PG_BIN/psql" --version | awk '{print $3}' | cut -d. -f1)
+[[ "$PG_MAJOR" =~ ^[0-9]+$ ]] && test "$PG_MAJOR" -ge 17 || die setup "PostgreSQL 17 or newer expected in $PG_BIN got ${PG_MAJOR:-unknown}"
 
 T=$(mktemp -d /tmp/c1w2.XXXXXX) || die setup 'mktemp failed'
 T=$(cd -P "$T" && pwd -P) || exit 1

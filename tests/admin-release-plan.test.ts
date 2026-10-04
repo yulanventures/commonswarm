@@ -1839,8 +1839,14 @@ test('admin release plan: W2 before and reverse catalogs never raise on a missin
   const lint = (sql: string) => {
     const problems: string[] = [];
     for (const [cast] of sql.matchAll(/'[^']*'::reg[a-z]+/g)) if (!castAllowed.has(cast)) problems.push(cast);
-    for (const [call, args] of sql.matchAll(/has_[a-z_]+_privilege\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)) {
-      if ([...args!.matchAll(/'([^']*)'/g)].some(([, name]) => !/^[A-Z ,]+$/.test(name!) && !preW2Roles.has(name!))) problems.push(call);
+    // Up to two levels of nested parentheses: has_function_privilege(r.oid,to_regprocedure('f(x)'),'EXECUTE').
+    const calls = [...sql.matchAll(/has_[a-z_]+_privilege\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)/g)];
+    // Coverage: every privilege call is linted, none is skipped by the pattern.
+    if (calls.length !== (sql.match(/has_[a-z_]+_privilege\(/g) ?? []).length) problems.push('unlinted privilege call');
+    for (const [call, args] of calls) {
+      // A name inside to_reg*() is NULL-safe; only the call's own quoted arguments are name lookups that raise.
+      const direct = args!.replace(/to_reg[a-z]+\('[^']*'\)/g, '');
+      if ([...direct.matchAll(/'([^']*)'/g)].some(([, name]) => !/^[A-Z ,]+$/.test(name!) && !preW2Roles.has(name!))) problems.push(call);
     }
     return problems;
   };
@@ -1852,6 +1858,11 @@ test('admin release plan: W2 before and reverse catalogs never raise on a missin
   assert.equal(lint("WHERE member='commonswarm_admin_issuer'::regrole").length, 1);
   assert.equal(lint("NOT has_function_privilege('anon','swarm_read.admin_recovery_page(text,uuid,integer,text)','EXECUTE')").length, 1);
   assert.deepEqual(lint("has_table_privilege('swarm_read',c.oid,'SELECT') AND p.prorettype='jsonb'::regtype"), []);
+  assert.equal(lint("has_function_privilege('commonswarm_admin_issuer',to_regprocedure('f(text)'),'EXECUTE')").length, 1, 'a nested call is linted');
+  // The real 0005 reverse row (two nesting levels) is reached by the lint, not skipped.
+  const reverse5 = itemAiProof('20261003000005-rollback-catalog.sql');
+  assert.ok(reverse5.includes("has_function_privilege(r.oid,to_regprocedure('swarm_read.admin_recovery_page(text,uuid,integer,text)'),'EXECUTE')"));
+  assert.equal(lint(reverse5.replace("has_function_privilege(r.oid,", "has_function_privilege('commonswarm_admin_issuer',")).length, 1);
 });
 
 test('admin release plan: W2 before-apply 20261003000002 catalog proves absence without casting to the missing issuer role', () => {
