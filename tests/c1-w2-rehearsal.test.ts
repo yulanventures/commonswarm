@@ -87,7 +87,10 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
   const cluster = (pid: number, identity = true) => {
     const dir = mkdtempSync('/tmp/c1w2.'); mkdirSync(join(dir, 'data'));
     writeFileSync(join(dir, 'data', 'postmaster.pid'), `${pid}\n${join(dir, 'data')}\n`);
-    if (identity) { const r = run(['--record-identity', dir]); assert.equal(r.status, 0, r.stdout + r.stderr); }
+    if (identity) {
+      const r = run(['--record-identity', dir]); assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.ok(existsSync(join(dir, 'postmaster.identity')), `identity recorded for live pid ${pid}`);
+    }
     return dir;
   };
   const timed = (args: string[], env: Record<string, string>) => { const t0 = Date.now(); const r = run(args, env); return { r, seconds: (Date.now() - t0) / 1000 }; };
@@ -112,11 +115,14 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
       w = timed(['--cleanup-run', again], { PG_BIN: bin, C1_W2_CLEANUP_WAIT_TENTHS: value });
       assert.equal(w.r.status, 4); assert.match(w.r.stdout, / still running or unverified 10\.0 s after stop;/); assert.ok(w.seconds >= 9.5 && w.seconds < 30, `${value}: ${w.seconds} s`);
     }
-    // A process of another user (pid 1; kill -0 would answer EPERM): never "gone". Without its identity the
-    // state stays unverified, so the directory is kept.
-    const foreign = cluster(1, false); dirs.push(foreign);
+    // A process of another user (pid 1; kill -0 would answer EPERM) with a valid identity: never "gone", so kept after
+    // the wait.
+    // (macOS denies its state: unknown, waits; Linux reads it, start time differs, then pgrep -g 1 finds init.)
+    const foreign = cluster(1, false); dirs.push(foreign); writeFileSync(join(foreign, 'postmaster.identity'), '1 1.000000\n');
     w = timed(['--cleanup-run', foreign], { PG_BIN: bin, C1_W2_CLEANUP_WAIT_TENTHS: '5' });
-    assert.equal(w.r.status, 4, w.r.stdout); assert.match(w.r.stdout, /^RETAIN cleanup: postmaster 1 still running or unverified 0\.5 s after stop;/m); assert.ok(existsSync(foreign));
+    assert.equal(w.r.status, 4, w.r.stdout);
+    assert.match(w.r.stdout, /^RETAIN cleanup: (?:postmaster 1 still running or unverified 0\.5 s after stop|processes of this cluster remain or cannot be checked after the postmaster exit);/m);
+    assert.ok(existsSync(foreign));
     // A postmaster still exiting when pg_ctl -w returns (an orphan that exits after 1.5 s, reaped by init/launchd):
     // cleanup waits for it, then removes the directory.
     const exitingPid = Number(spawnSync('/bin/sh', ['-c', 'sleep 1.5 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim());
@@ -163,12 +169,25 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
     spawnSync('/bin/sleep', ['2']);
     r = run(['--cleanup-run', childOnly], { PG_BIN: bin });
     assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: processes of this cluster remain or cannot be checked/m); assert.ok(existsSync(childOnly));
-    // No identity and no pid file, but a data directory and a process naming it: unknown, so the survivor check keeps it.
+    // No identity and no pid file, but a data directory (and a process naming it): kept by the one rule.
     const unknownDir = mkdtempSync('/tmp/c1w2.'); mkdirSync(join(unknownDir, 'data')); dirs.push(unknownDir);
     const named = spawn('python3', ['-c', 'import time; time.sleep(30)', join(unknownDir, 'data')], { stdio: 'ignore' }); pids.push(named.pid!);
     spawnSync('/bin/sleep', ['0.5']);
     r = run(['--cleanup-run', unknownDir], { PG_BIN: bin });
-    assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: processes of this cluster remain or cannot be checked/m); assert.ok(existsSync(unknownDir));
+    assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.identity absent while a data directory exists \(identity never recorded\); cluster directory \S+ kept$/m); assert.ok(existsSync(unknownDir));
+    // Recording failed at start (no identity file), the postmaster exited and removed its pid file, and a child of its
+    // process group that does NOT name the data directory still runs: kept.
+    const tree3 = spawn('python3', ['-c', 'import os,time\nos.setsid()\nif os.fork()==0:\n    time.sleep(30); os._exit(0)\ntime.sleep(0.5)'], { stdio: 'ignore' });
+    spawnSync('/bin/sh', ['-c', `until test -n "$(pgrep -g ${tree3.pid} 2>/dev/null)"; do sleep 0.1; done`], { timeout: 10_000 });
+    pids.push(...spawnSync('pgrep', ['-g', String(tree3.pid)], { encoding: 'utf8' }).stdout.trim().split('\n').map(Number).filter(n => n && n !== tree3.pid));
+    const unrecorded = cluster(tree3.pid!, false); dirs.push(unrecorded); rmSync(join(unrecorded, 'data', 'postmaster.pid'));
+    spawnSync('/bin/sleep', ['1']);
+    r = run(['--cleanup-run', unrecorded], { PG_BIN: bin });
+    assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.identity absent while a data directory exists \(identity never recorded\); cluster directory \S+ kept$/m); assert.ok(existsSync(unrecorded));
+    // Recording failed and nothing of the cluster is alive: still kept, by the rule (absence is not evidence).
+    const quiet = mkdtempSync('/tmp/c1w2.'); mkdirSync(join(quiet, 'data')); dirs.push(quiet);
+    r = run(['--cleanup-run', quiet], { PG_BIN: bin });
+    assert.equal(r.status, 4, r.stdout + r.stderr); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.identity absent while a data directory exists \(identity never recorded\); cluster directory \S+ kept$/m); assert.ok(existsSync(quiet));
     // postmaster.pid absent and postmaster.identity present but empty, malformed or unreadable: never deleted.
     for (const [name, body, mode] of [['empty', '', 0o600], ['malformed', 'not an identity\n', 0o600], ['unreadable', `${process.pid} 1.000000\n`, 0o000]] as const) {
       if (name === 'unreadable' && process.getuid?.() === 0) continue; // root reads a 000 file
@@ -184,11 +203,13 @@ test('c1 W2 rehearsal: a failed or incomplete postmaster stop keeps the cluster 
     r = run(['--cleanup-run', never], { PG_BIN: bin });
     assert.equal(r.status, 0, r.stdout + r.stderr); assert.ok(!existsSync(never));
     const garbled = cluster(0, false); dirs.push(garbled); writeFileSync(join(garbled, 'data', 'postmaster.pid'), 'not-a-pid\n');
+    writeFileSync(join(garbled, 'postmaster.identity'), `${process.pid} 1.000000\n`);
     r = run(['--cleanup-run', garbled], { PG_BIN: bin });
     assert.equal(r.status, 4); assert.match(r.stdout, /^RETAIN cleanup: postmaster\.pid unreadable/m); assert.ok(existsSync(garbled));
-    // Positive control: a stopped postmaster (an exited, reaped pid) lets cleanup remove the directory.
+    // Positive control: a stopped postmaster (an exited, reaped pid) with its valid identity: the directory is removed.
     const exited = spawnSync('/bin/sh', ['-c', 'echo $$'], { encoding: 'utf8' });
     const stopped = cluster(Number(exited.stdout.trim()), false);
+    writeFileSync(join(stopped, 'postmaster.identity'), `${exited.stdout.trim()} 1.000000\n`);
     r = run(['--cleanup-run', stopped], { PG_BIN: bin });
     assert.equal(r.status, 0, r.stdout + r.stderr); assert.match(r.stdout, /^REMOVED cleanup-run: /m); assert.ok(!existsSync(stopped));
     // Refusal still applies before any stop is attempted.
