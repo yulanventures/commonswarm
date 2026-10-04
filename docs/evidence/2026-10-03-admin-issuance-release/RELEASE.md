@@ -77,13 +77,13 @@ per already-applied ledger version, and every row names its `evidence_kind`.
 `file` is always exactly `supabase/migrations/<version>_<name>.sql`. Nobody
 invents a released_sha. ai-w2-backfill refuses unknown kinds, duplicate rows,
 missing ledger versions and rows for versions that are not in the ledger, and
-retains the count per kind in `backfill-kinds.json`.
+retains each version's kind and the count per kind in `backfill-evidence.json`.
 
 | evidence_kind | Exact row keys | What ai-w2-backfill re-derives |
 | --- | --- | --- |
 | `release-record` | version, evidence_kind, released_sha, sha256, file | Today's rule, unchanged: released_sha is the SHA actually released when the migration was applied, supported by HezLead's historical release evidence. The file in the immutable `<released_sha>.tar` hashes to sha256 and equals the current file (drift STOPs). |
 | `ledger-statements` | version, evidence_kind, file, matched_sha, sha256 | The ledger's own recorded `statements` for the version are non-empty. matched_sha must equal RELEASE_SHA; the file is read from the verified release archive, hashes to sha256, and is an ordered verbatim cover of the recorded statements (below). matched_sha names the commit whose file covers what the ledger recorded; it is not a released_sha. |
-| `attested-baseline` | version, evidence_kind, file, sha256, attested_by, attested_at, reason | The ledger statements for the version are NULL or empty (non-empty STOPs: the row must be `ledger-statements`). The file in the verified release archive hashes to sha256. attested_by is exactly `HezLead`, attested_at is a UTC Z time and reason is exactly the release owner's statement: "no release record and no recorded statements exist; the file bytes at RELEASE_SHA are adopted as the UNVERIFIED drift baseline". That statement is the ONLY meaning of an attested-baseline row; it never proves that the applied SQL equals the file. |
+| `attested-baseline` | version, evidence_kind, file, sha256, attested_by, attested_at, reason | The ledger statements for the version are NULL or empty (non-empty STOPs: the row must be `ledger-statements`). The file in the verified release archive hashes to sha256. attested_by is exactly `HezLead`, attested_at is a UTC Z time not in the future, and reason is HezLead's own non-empty single-line text (at most 2000 characters, no control characters), retained verbatim. For every such row the plan prints its own fixed meaning line: "attested-baseline: no release record and no recorded statements; file bytes at RELEASE_SHA adopted as UNVERIFIED drift baseline". That line is the ONLY meaning of an attested-baseline row; it never proves that the applied SQL equals the file. |
 
 Ordered verbatim cover (`verbatim_cover` in ai-w2-backfill; no comment
 stripping and no normalization): every recorded statement is a non-empty string
@@ -92,12 +92,16 @@ the text before the first, between any two and after the last consists only of
 whitespace and semicolons. A reordered, changed, missing or extra statement, or
 a comment or any other text in a gap, STOPs.
 
-The current M4 `migration_checksums` table has no provenance column and accepts
-only source `release`/`backfill` with a 40-hex released_sha, so a
-`ledger-statements` or `attested-baseline` row cannot be recorded there without
-inventing a released_sha. Until a separately reviewed schema decision exists,
-ai-w2-backfill writes its proof and counts and then STOPs W2 before apply when
-any such row is present; ai-w2-apply refuses them too.
+`migration_checksums` keeps exactly its current meaning and shape (no
+migration changes): source `backfill` and the sha256 of the file bytes at
+RELEASE_SHA for every already-applied version, which is what drift detection
+needs. Its released_sha column holds the row's released_sha for
+`release-record` rows and RELEASE_SHA (the commit whose bytes are recorded, as
+for the M1–M3 backfills) for `ledger-statements` and `attested-baseline` rows.
+The provenance itself is W2 release evidence: ai-w2-backfill retains
+`backfill-evidence.json` (each version's kind with its release-record fields,
+cover result or attestation, plus per-kind counts) and prints its sha256 in its
+PASS line.
 Do not hash the current checkout for historical backfills, or copy expected
 activation hashes into observed evidence. Expected activation hashes are
 separately derived from RELEASE_SHA. A mismatch STOPs activation.
@@ -876,9 +880,9 @@ in its own transaction, inserts its ledger/checksum and backfills M1–M3 plus
 EVERY previously applied ledger version. M5 commits its ledger and checksum in
 its own transaction. M1–M3 checksums are source=backfill at RELEASE_SHA;
 historical backfills retain their actual released_sha after byte equality with
-RELEASE_SHA is verified. Only `release-record` backfill rows reach M4; the other
-evidence kinds stop W2 before apply (see BACKFILL_FILE). No migration or
-reserve SQL is edited.
+RELEASE_SHA is verified; `ledger-statements` and `attested-baseline` rows are
+recorded at RELEASE_SHA and their provenance stays in `backfill-evidence.json`
+(see BACKFILL_FILE). No migration or reserve SQL is edited.
 
 Before M1, ai-w2-measure counts rows and pg_total_relation_size (including
 indexes/TOAST) of every live table locked by M1–M5 and the release ledger.
@@ -1048,7 +1052,7 @@ python3 - "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA
 import datetime,hashlib,io,json,os,pathlib,re,stat,sys,tarfile
 proof,backfill,archives,sha,box_archive,inputs,root=sys.argv[1:8]
 proof,root=pathlib.Path(proof),pathlib.Path(root)
-ATTESTATION="no release record and no recorded statements exist; the file bytes at RELEASE_SHA are adopted as the UNVERIFIED drift baseline"
+MEANING="attested-baseline: no release record and no recorded statements; file bytes at RELEASE_SHA adopted as UNVERIFIED drift baseline"
 KEYS={'release-record':{'version','evidence_kind','released_sha','sha256','file'},
       'ledger-statements':{'version','evidence_kind','file','matched_sha','sha256'},
       'attested-baseline':{'version','evidence_kind','file','sha256','attested_by','attested_at','reason'}}
@@ -1100,7 +1104,7 @@ for line in (proof/'ledger-statements.jsonl').read_text().splitlines():
 if sorted(statements)!=ledger: fail('ledger statements versions','ledger-before','different')
 release_raw=read_regular(box_archive) if os.path.isabs(box_archive) else None
 if release_raw is None or hashlib.sha256(release_raw).hexdigest()!=json.load(open(inputs)).get('archive_sha256'): fail('BOX_ARCHIVE_PATH','verified-release-archive','missing-or-mismatch')
-seen=set(); kinds={}; attested=[]
+seen=set(); kinds={}; attested=[]; evidence={}
 for r in rows:
     kind=r.get('evidence_kind'); v=r.get('version')
     if kind not in KEYS: fail('evidence_kind for '+str(v),'release-record|ledger-statements|attested-baseline','unknown')
@@ -1117,6 +1121,7 @@ for r in rows:
         original=tar_member(historical(r['released_sha']),r['file'],r['released_sha']+'.tar')
         if hashlib.sha256(original).hexdigest()!=r['sha256']: raise SystemExit('FAIL historical backfill hash; STOP')
         if (root/r['file']).read_bytes()!=original: raise SystemExit('FAIL historical/current migration drift; STOP')
+        evidence[v]={'evidence_kind':kind,'released_sha':r['released_sha'],'sha256':r['sha256'],'file':r['file']}
     elif kind=='ledger-statements':
         if not re.fullmatch('[0-9a-f]{40}',str(r['matched_sha'])): fail('matched_sha for '+v,'40-hex','other')
         if not (isinstance(recorded,list) and recorded and all(isinstance(x,str) for x in recorded)): fail('ledger statements for '+v,'non-empty','null-or-empty')
@@ -1124,25 +1129,29 @@ for r in rows:
         data=tar_member(release_raw,r['file'],'release archive')
         if hashlib.sha256(data).hexdigest()!=r['sha256']: fail('sha256 of '+r['file']+' at matched_sha','row-sha256','mismatch')
         if not verbatim_cover(data,recorded): fail('ledger statements for '+v,'ordered-verbatim-cover-by-file-at-RELEASE_SHA','mismatch')
+        evidence[v]={'evidence_kind':kind,'matched_sha':r['matched_sha'],'sha256':r['sha256'],'file':r['file'],'match':'ordered-verbatim-cover','recorded_statements':len(recorded)}
     else:
         if recorded not in (None,[]): fail('ledger statements for attested-baseline '+v,'null-or-empty','non-empty; the row must be ledger-statements')
         if r['attested_by']!='HezLead': fail('attested_by for '+v,'HezLead','other')
-        if not (isinstance(r['attested_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',r['attested_at'])): fail('attested_at for '+v,'UTC-ISO-8601-Z','other')
-        if r['reason']!=ATTESTATION: fail('reason for '+v,'release-owner-attestation-verbatim','other')
+        at=r['attested_at']
+        try: when=datetime.datetime.strptime(at,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc) if isinstance(at,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',at) else None
+        except ValueError: when=None
+        if when is None or when>datetime.datetime.now(datetime.timezone.utc): fail('attested_at for '+v,'UTC-Z-not-future','other')
+        reason=r['reason']
+        if not (isinstance(reason,str) and reason.strip() and len(reason)<=2000 and not any(ord(ch)<32 or ord(ch)==127 for ch in reason)): fail('reason for '+v,'non-empty-single-line-at-most-2000-chars','other')
         data=tar_member(release_raw,r['file'],'release archive')
         if hashlib.sha256(data).hexdigest()!=r['sha256']: fail('sha256 of '+r['file']+' at RELEASE_SHA','row-sha256','mismatch')
         attested.append(v)
+        evidence[v]={'evidence_kind':kind,'sha256':r['sha256'],'file':r['file'],'attested_by':r['attested_by'],'attested_at':r['attested_at'],'reason':r['reason']}
     kinds[v]=kind
 missing=[v for v in ledger if v not in seen]
 if missing: fail('backfill rows','every-ledger-version','missing-'+str(len(missing)))
 counts={k:sum(1 for x in kinds.values() if x==k) for k in KEYS}
+record=(json.dumps({'release_sha':sha,'counts':counts,'attested_meaning':MEANING,'versions':evidence},sort_keys=True)+'\n').encode()
 (proof/'backfill.json').write_text(json.dumps(rows,sort_keys=True)+'\n')
-(proof/'backfill-kinds.json').write_text(json.dumps({'counts':counts,'kinds':kinds,'attestation':ATTESTATION if attested else None,'attested_versions':attested},sort_keys=True)+'\n')
-for v in attested: print('attested-baseline '+v+': '+ATTESTATION)
-print('backfill evidence kinds: '+', '.join(k+'='+str(counts[k]) for k in KEYS))
-other=counts['ledger-statements']+counts['attested-baseline']
-if other: fail('checksum provenance for '+str(other)+' ledger-statements/attested-baseline rows','recordable','needs-schema-decision')
-print('PASS ai-w2-backfill: every ledger version has release-record evidence')
+(proof/'backfill-evidence.json').write_bytes(record)
+for v in attested: print(v+' '+MEANING)
+print('PASS ai-w2-backfill: '+', '.join(k+'='+str(counts[k]) for k in KEYS)+'; backfill-evidence.json sha256='+hashlib.sha256(record).hexdigest())
 PY
 ```
 
@@ -1258,8 +1267,8 @@ import datetime,hashlib,json,pathlib,re,sys
 p,root=map(pathlib.Path,sys.argv[1:3]); sha,version=sys.argv[3:]
 assert re.fullmatch('[0-9a-f]{40}',sha)
 new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
-# M4 can record only release-record provenance (source/released_sha); others stop before apply.
-assert all(r.get('evidence_kind')=='release-record' for r in old), 'FAIL ai-w2-apply: backfill evidence_kind expected release-record got other; STOP'
+# Backfill rows record the file sha256 at RELEASE_SHA; provenance stays in backfill-evidence.json.
+assert all(r.get('evidence_kind') in ('release-record','ledger-statements','attested-baseline') for r in old), 'FAIL ai-w2-apply: backfill evidence_kind expected known-kind got other; STOP'
 i=int(version[-1]); assert version=='2026100300000'+str(i) and new[i-1]['version']==version
 measure=json.loads((p/'lock-measurements.json').read_text()); budget=measure['budgets'][i-1]
 assert budget['migration']==i and 0<budget['expected_hold_seconds']<=budget['timeout_seconds']<=60
@@ -1295,7 +1304,7 @@ if i>=4:
     sql += ['GRANT commonswarm_admin_release TO supabase_admin WITH ADMIN TRUE, INHERIT FALSE, SET TRUE;','SET LOCAL ROLE commonswarm_admin_release;']
     records=[dict(version=version,sha256=new[i-1]['sha256'],source='release',released_sha=sha)]
     if i==4:
-        records += [dict(version=r['version'],sha256=r['sha256'],source='backfill',released_sha=r['released_sha']) for r in old]
+        records += [dict(version=r['version'],sha256=r['sha256'],source='backfill',released_sha=r['released_sha'] if r['evidence_kind']=='release-record' else sha) for r in old]
         records += [dict(version=r['version'],sha256=r['sha256'],source='backfill',released_sha=sha) for r in new[:3]]
     for r in records:
         sql.append('INSERT INTO commonswarm_ops.migration_checksums(version,sha256,source,released_sha) VALUES ('+','.join(lit(r[k]) for k in ('version','sha256','source','released_sha'))+');')
@@ -1345,7 +1354,7 @@ assert prefix==new[:n] and ledger==sorted(baseline+[r['version'] for r in prefix
 assert ((p/'checksums-present.txt').read_text().strip()=='t')==(n>=4), 'FAIL checksum relation/ledger prefix conflict; STOP'
 expected=[]
 if n>=4:
-    expected=['|'.join([r['version'],r['sha256'],'backfill',r['released_sha']]) for r in old]
+    expected=['|'.join([r['version'],r['sha256'],'backfill',r['released_sha'] if r['evidence_kind']=='release-record' else sha]) for r in old]
     expected+=['|'.join([r['version'],r['sha256'],'backfill',sha]) for r in new[:3]]
     expected+=['|'.join([r['version'],r['sha256'],'release',sha]) for r in new[3:n]]
 assert (p/'checksums-after.txt').read_text().splitlines()==sorted(expected), 'FAIL D2 prefix checksum readback; STOP'
