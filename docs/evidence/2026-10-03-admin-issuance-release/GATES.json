@@ -281,6 +281,7 @@
       "release-plan-contract",
       "admin-issuer-credential-provisioning"
     ],
+    "W2b": ["admin-issuer-credential-provisioning", "ordinary-paths-unchanged", "release-plan-contract"],
     "W3": [
       "oauth-build-route",
       "ordinary-paths-unchanged",

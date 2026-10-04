@@ -171,3 +171,41 @@ test('c1 W2 rehearsal: the released 835b7ae8 catalogs FAIL at before-catalogs fo
   assert.match(old.stdout, /^FAIL ai-w2-preflight:before-catalogs: .*ERROR: +schema "commonswarm_ops" does not exist \(last SQL file: \/proof\/catalog\.sql -> \/release\/deploy\/release-proofs\/item-ai\/20261003000004-rollback-catalog\.sql\)$/m);
   assert.doesNotMatch(old.stdout, /^PASS ai-w2-measure$/m, 'nothing after the failed step runs');
 });
+
+test('c1 W2 rehearsal: --issuer listens on 127.0.0.1 only, with hostssl for the issuer and every other TCP connection rejected', () => {
+  assert.equal(source.match(/listen_addresses='[^']*'/g)?.sort().join(' '), "listen_addresses='' listen_addresses='127.0.0.1'");
+  assert.match(source, /'hostssl postgres commonswarm_admin_issuer 127\.0\.0\.1\/32 scram-sha-256'/);
+  assert.match(source, /'host all all 0\.0\.0\.0\/0 reject' 'host all all ::\/0 reject'/);
+  assert.doesNotMatch(source, /^\s*host(?:ssl)? [^\n]*(?:trust|password|md5)\b/m, 'no TCP trust or cleartext line');
+  // The plan's issuer block is executed from RELEASE.md bytes, not retyped.
+  assert.match(source, /extract "\$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32/);
+  assert.match(source, /extract "\$ISSUER_PLAN" ai-w2-issuer-credential command-sql/);
+  assert.doesNotMatch(source, /-CAcreateserial/, 'no CA serial file outside the mktemp directory');
+});
+
+// The real libpq rehearsal: the fixed issuer block logs in over verify-full TLS; the released 5f64fab4 block fails as
+// production W2 RGLqZX did. Needs openssl, lsof and node besides PostgreSQL 17, and commit 5f64fab4 in the clone.
+test('c1 W2 rehearsal: --issuer real libpq verify-full login PASSES; the 5f64fab4 issuer block FAILS with a service-file syntax error', { skip: skipDb }, () => {
+  for (const tool of ['openssl', 'lsof', 'node']) assert.equal(spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status, 0, `${tool} is required for --issuer`);
+  const env = { PG_BIN: PG() };
+  const good = run(['--issuer', fixture()], env);
+  assert.equal(good.status, 0, good.stdout + good.stderr);
+  for (const line of [/^PASS ai-w2-issuer-rollback:role$/m, /^PASS ai-w2b-preflight:preconditions$/m, /^PASS tls: cluster restarted with ssl=on on 127\.0\.0\.1:\d+;/m,
+    /^PASS listener: postmaster \d+ listens on TCP 127\.0\.0\.1:\d+ only/m, /^PASS service-conf: /m, /^PASS ai-w2-issuer-credential:prepare$/m,
+    /^PASS ai-w2-issuer-credential:alter-role$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer/m,
+    /^PASS issuer-plaintext: /m, /^PASS cleanup: cluster stopped; data, CA and secrets deleted; \S+ absent$/m]) assert.match(good.stdout, line);
+  assert.doesNotMatch(good.stdout + good.stderr, /\b[0-9a-f]{48,64}\b/, 'no generated password is printed');
+  const present = spawnSync('git', ['cat-file', '-e', '5f64fab4^{commit}']);
+  assert.equal(present.status, 0, 'commit 5f64fab4 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 5f64fab4)');
+  const old = run(['--issuer', '--plan-from', '5f64fab4', fixture()], env);
+  assert.notEqual(old.status, 0);
+  assert.match(old.stdout, /^FAIL ai-w2-issuer-credential:login: libpq login exit status expected 0 got nonzero: syntax error in service file "[^"]+issuer-service\.conf", line 2$/m);
+  assert.match(old.stdout, /^PASS cleanup: /m);
+});
+
+test('c1 W2 rehearsal: the W2b database preconditions FAIL on the pre-W2 fixture at the ledger precondition', { skip: skipDb }, () => {
+  const pre = run(['--w2b-preconditions', fixture()], { PG_BIN: PG() });
+  assert.notEqual(pre.status, 0);
+  assert.match(pre.stdout, /^FAIL ai-w2b-preflight:preconditions: FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP; w2b-preconditions failed checks: [a-z0-9,-]*w2b-ledger-five-20261003/m);
+  assert.match(pre.stdout, /^PASS cleanup: /m);
+});

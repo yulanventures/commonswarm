@@ -164,6 +164,36 @@ test('admin release plan: full baseline inputs pass; omissions, prefixes, malfor
   }
 });
 
+test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w2_window_id; only W6 may name a W2b', () => {
+  const w2b: Input = { ...base(), window: 'W2b', w2_release_sha: 'b'.repeat(40), w2_window_id: 'RGLqZX' };
+  const good = validate(w2b); assert.equal(good.status, 0, good.stderr);
+  for (const key of ['w2_release_sha', 'w2_window_id']) {
+    const missing: Input = { ...w2b }; delete missing[key];
+    const refused = validate(missing); assert.notEqual(refused.status, 0, key); assert.match(refused.stderr, new RegExp(`FAIL ai-inputs: W2b ${key}; STOP`));
+  }
+  for (const [key, value] of [['w2_release_sha', 'b'.repeat(39)], ['w2_release_sha', 'B'.repeat(40)], ['w2_window_id', '../bad'], ['w2_window_id', 'RGLqZ']] as const) {
+    const refused = validate({ ...w2b, [key]: value }); assert.notEqual(refused.status, 0, `${key}=${value}`); assert.match(refused.stderr, /FAIL ai-inputs: W2b w2_/);
+  }
+  const decision = validate({ ...w2b, rollback_decision: 'restore-service' }); assert.notEqual(decision.status, 0); assert.match(decision.stderr, /rollback decision/);
+  const approved = validate({ ...w2b, approval: approval(w2b, 'activate-admin-issuance-and-smoke') }); assert.notEqual(approved.status, 0); assert.match(approved.stderr, /no implicit activation approval/);
+  const probe = validate({ ...w2b, probe_workspace_id: '00000000-0000-4000-8000-000000000000' }); assert.notEqual(probe.status, 0); assert.match(probe.stderr, /probe_workspace_id is W2-only/);
+  for (const window of ['W1', 'W2', 'W3']) {
+    const input: Input = { ...base(), window, rollback_decision: window === 'W3' ? 'restore-service' : 'retain-additive', w2_release_sha: 'b'.repeat(40), w2_window_id: 'RGLqZX' };
+    if (window === 'W2') input.probe_workspace_id = '00000000-0000-4000-8000-000000000000';
+    const refused = validate(input); assert.notEqual(refused.status, 0, window); assert.match(refused.stderr, /w2_release_sha\/w2_window_id are W2b-only/);
+  }
+  // W6 may bind the same-release W2b by w2b_window_id; no other window may.
+  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  w6.approval = approval(w6, 'activate-admin-issuance-and-smoke');
+  const w6good = validate(w6); assert.equal(w6good.status, 0, w6good.stderr);
+  const w6bad = validate({ ...w6, w2b_window_id: 'bad id' }); assert.notEqual(w6bad.status, 0); assert.match(w6bad.stderr, /w2b_window_id is W6-only/);
+  const w5 = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_window_id: 'Xyz789' }); assert.notEqual(w5.status, 0); assert.match(w5.stderr, /w2b_window_id is W6-only/);
+  const w2bSelf = validate({ ...w2b, w2b_window_id: 'Xyz789' }); assert.notEqual(w2bSelf.status, 0); assert.match(w2bSelf.stderr, /w2b_window_id is W6-only/);
+  // Window order: W2b is followed by W3 and only then W4; nothing in W2b or the W6 binding reads W3 or W4 state.
+  for (const id of ['ai-w2b-preflight', 'ai-w2-issuer-credential']) assert.doesNotMatch(block(id), /W3-probes|W4-readback|-W3-|-W4-/, id);
+  assert.match(plan, /The order is W2b, W3, then W4, W5, W6, W7/);
+});
+
 test('admin release plan: W6 and W7 approval is action/release/window/plan bound; activation refuses absent approval before any operation', () => {
   for (const [window, action, id] of [
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
@@ -865,6 +895,78 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
 });
 
 
+test('admin release plan: W2b close needs its preconditions and issuer credential, or a recovered state without issuer login', () => {
+  const root=mkdtempSync(join(scratch,'w2b-close-'));
+  const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
+  const liveFor=(phase:string)=>JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W2b',phase,controls,
+    consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const inputs=join(root,'inputs.json');
+  writeFileSync(inputs,JSON.stringify({...base(),window:'W2b',archive_sha256:archiveSha,w2_release_sha:'e'.repeat(40),w2_window_id:'RGLqZX'}));
+  const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  // Filesystem boundary remap only: the box credential path moves into this test's directory.
+  const etc=join(root,'etc'); mkdirSync(etc);
+  const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
+  const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`;
+  const attempt=(outcome:string,files:string[],role='t')=>{
+    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+    writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
+    writeFileSync(join(proof,'ordinary-after.json'),liveFor('after')); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery'));
+    for(const file of files) writeFileSync(join(proof,file),'PASS');
+    const result=run(harness(role)+close,{WINDOW:'W2b',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputs,PLAN_FILE:planPath,
+      BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:outcome,PATH:shim+':'+process.env.PATH});
+    const closed=existsSync(join(proof,'closed.txt'));
+    if(existsSync(stage)) removeStage(stage);
+    return {result,closed};
+  };
+  let r=attempt('success',['w2b-preconditions.txt','issuer-credential.txt']); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  r=attempt('success',['w2b-preconditions.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W2b issuer-credential\.txt expected present got missing; STOP/);
+  r=attempt('success',['issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W2b w2b-preconditions\.txt expected present got missing; STOP/);
+  r=attempt('recovered',[]); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  r=attempt('recovered',[],'f'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP/);
+  writeFileSync(join(etc,'admin-issuer-database-credentials'),'{}');
+  r=attempt('recovered',[]); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: recovered W2b credential file expected absent got present; STOP/);
+});
+
+test('admin release plan: W6 activation checks bind the issuer credential to a closed same-release W2b when w2b_window_id is given', () => {
+  const source=block('ai-w6-activation-checks');
+  const start=`python3 - "$INPUTS_FILE" "$PROOF_DIR/issuer-provenance.txt" <<'PY'\n`;
+  assert.equal(source.split(start).length,2,'one provenance check');
+  const root=realpathSync(mkdtempSync(join(scratch,'w6-w2b-')));
+  const python=source.split(start)[1]!.split('\nPY\n')[0]!.split('/home/commonswarm/admin-issuance').join(join(root,'admin-issuance'));
+  const out=join(root,'provenance.txt');
+  const dir=join(root,'admin-issuance/release-proofs',`${sha}-W2b-Xyz789`); mkdirSync(dir,{recursive:true});
+  writeFileSync(join(dir,'inputs.json'),JSON.stringify({window:'W2b',release_sha:sha,window_id:'Xyz789'}));
+  for(const file of ['closed.txt','ordinary-after.json','w2b-preconditions.txt','issuer-credential.txt']) writeFileSync(join(dir,file),'PASS');
+  const check=(input:Input)=>spawnSync('python3',['-c',python,inputFile(input),out],{encoding:'utf8'});
+  let r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.equal(r.status,0,r.stderr);
+  assert.equal(readFileSync(out,'utf8'),`issuer credential provenance: W2b Xyz789 closed success at ${sha}\n`);
+  r=check({...base(),window:'W6'}); assert.equal(r.status,0,r.stderr); assert.match(readFileSync(out,'utf8'),/W2 of this release \(no w2b_window_id input\)/);
+  for(const file of ['closed.txt','ordinary-after.json','w2b-preconditions.txt','issuer-credential.txt']) {
+    const saved=readFileSync(join(dir,file)); rmSync(join(dir,file));
+    r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.notEqual(r.status,0,file);
+    assert.match(r.stderr,new RegExp(`FAIL ai-w6-activation-checks: W2b ${file.replace(/\./g,'\\.')} expected regular-file got missing-or-not-regular; STOP`));
+    writeFileSync(join(dir,file),saved);
+  }
+  for(const other of [{window:'W2b',release_sha:'f'.repeat(40),window_id:'Xyz789'},{window:'W2',release_sha:sha,window_id:'Xyz789'},{window:'W2b',release_sha:sha,window_id:'Other1'}]) {
+    writeFileSync(join(dir,'inputs.json'),JSON.stringify(other));
+    r=check({...base(),window:'W6',w2b_window_id:'Xyz789'}); assert.notEqual(r.status,0);
+    assert.match(r.stderr,/FAIL ai-w6-activation-checks: W2b inputs\.json expected window-W2b-same-release-and-id got mismatch; STOP/);
+  }
+  r=check({...base(),window:'W6',w2b_window_id:'Nope00'}); assert.notEqual(r.status,0);
+  assert.match(r.stderr,/FAIL ai-w6-activation-checks: W2b proof directory expected directory got missing-or-symlink; STOP/);
+});
+
 test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {
   const apply = block('ai-w6-activation-apply');
   assert.match(apply, /rows\+\['MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1'\]/, 'activation must explicitly opt in');
@@ -1222,7 +1324,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 16, 'one shared reader at all 16 sites (15 plan-text sites and ai-w2-backfill)');
+  assert.equal(readers.length, 17, 'one shared reader at all 17 sites (16 plan-text sites, including ai-w2b-preflight, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);

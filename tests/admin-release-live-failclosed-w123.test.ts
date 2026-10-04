@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -55,6 +55,9 @@ elif name=='python3':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_ro':
+    if args==['-Atq','--file','/proof/w2b-preconditions.sql']:
+        if not (root/'proof/w2b-preconditions.sql').read_text().startswith(chr(92)+'i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql'): refuse()
+        output(cfg.get('w2b','t')); raise SystemExit(0)
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
     if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';"]: refuse()
     output(cfg.get('readonly','t'))
@@ -575,8 +578,11 @@ test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set a
 test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', () => {
   const good = fixture(); const positive = good.run(['ai-w2-issuer-credential'], 'W2'); pass(positive);
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
-  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /sslmode = verify-full/);
-  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /user = commonswarm_admin_issuer/);
+  // libpq's service-file parser takes key=value only (5f64fab4 W2 RGLqZX failed on configparser's "key = value").
+  const service = readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8');
+  assert.match(service, /^sslmode=verify-full$/m);
+  assert.match(service, /^user=commonswarm_admin_issuer$/m);
+  assert.doesNotMatch(service, / = | =|= /);
   for (const [config, message] of [
     [{ login: 'f' }, 'FAIL ai-w2-issuer-credential: dedicated-role measurement expected t got non-t; STOP'],
     [{ tls_failed: true }, 'FAIL ai-w2-issuer-credential: TLS psql login exit status expected 0 got 1; STOP'],
@@ -586,6 +592,71 @@ test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: 
     assert.ok(result.calls.some(c => c[0] === 'docker' && c.includes('psql')));
     stopped(result, message);
   }
+});
+test('admin-issuer-credential-provisioning / libpq-service-file-bytes: refuses a service file line that is not key=value before any credential is installed', () => {
+  const f = fixture();
+  f.put('stage/service.conf', '[target]\nhost=db.commonswarm.internal\nsslmode=verify-full\nsslrootcert=/etc/ssl/yulan-internal-ca.pem\nuser=fixture\noptions=\n');
+  const result = f.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(result, 'FAIL ai-w2-issuer-credential: issuer-service.conf line expected key=value got other; STOP');
+  assert.ok(!result.calls.some(c => c[0] === 'install' || c[0] === 'docker' || c[0] === 'ai_db'), 'no ALTER ROLE, install or login after a refused service file');
+  assert.ok(!existsSync(join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
+  assert.ok(!existsSync(join(f.proof, 'issuer-credential.txt')));
+});
+test('admin-issuer-credential-provisioning / w2b-shared-issuer-block: W2b runs the same issuer block and rollback; any other window refuses', () => {
+  const missing = fixture(); const refused = missing.run(['ai-w2-issuer-credential'], 'W2b');
+  stopped(refused, 'FAIL ai-w2-issuer-credential: W2b w2b-preconditions.txt expected present got missing; STOP');
+  assert.ok(!refused.calls.some(c => c[0] === 'openssl'));
+  const good = fixture(); good.put('proof/w2b-preconditions.txt', 'PASS');
+  const positive = good.run(['ai-w2-issuer-credential'], 'W2b'); pass(positive);
+  assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
+  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /^user=commonswarm_admin_issuer$/m);
+  for (const window of ['W1', 'W3', 'W6']) {
+    const f = fixture(); f.put('proof/w2b-preconditions.txt', 'PASS');
+    stopped(f.run(['ai-w2-issuer-credential'], window), 'FAIL ai-w2-issuer-credential: window expected W2-or-W2b got other; STOP');
+    stopped(f.run(['ai-w2-issuer-rollback'], window), 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP');
+  }
+  const rollback = fixture(); rollback.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}');
+  pass(rollback.run(['ai-w2-issuer-rollback'], 'W2b'));
+  assert.ok(!existsSync(join(rollback.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
+  assert.ok(existsSync(join(rollback.proof, 'issuer-rollback.txt')));
+});
+test('release-plan-contract / w2b-preflight-bound-w2: W2b proceeds only after the bound W2 closed with its schema, probe and revoke proofs', () => {
+  const w2sha = 'e'.repeat(40), w2id = 'RGLqZX';
+  const setup = (change: (f: ReturnType<typeof fixture>, w2: string) => void = () => undefined, config: Record<string, unknown> = {}) => {
+    const f = fixture(config);
+    const inputs = JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')) as Record<string, unknown>;
+    f.put('inputs.json', { ...inputs, window: 'W2b', w2_release_sha: w2sha, w2_window_id: w2id });
+    f.put('proof/ordinary-before.json', liveReceipt('W2b', 'fixture', 'before', f.preText));
+    const w2 = `admin-issuance/release-proofs/${w2sha}-W2-${w2id}`;
+    mkdirSync(join(f.root, w2), { recursive: true, mode: 0o700 });
+    f.put(`${w2}/inputs.json`, { window: 'W2', release_sha: w2sha, window_id: w2id });
+    for (const name of ['closed.txt', 'schema-committed.txt', 'W2-probes.txt', 'dcr-probe-revoked.json', 'ordinary-recovery.json']) f.put(`${w2}/${name}`, name === 'closed.txt' ? '2026-10-04T09:00:00Z\n' : '{}');
+    change(f, w2);
+    return { f, result: f.run(['ai-w2b-preflight'], 'W2b') };
+  };
+  const good = setup(); pass(good.result);
+  assert.match(good.result.stdout, /PASS ai-w2b-preflight: W2 RGLqZX at e{40} closed recovered with schema-committed, W2-probes and DCR revoke proofs/);
+  assert.ok(existsSync(join(good.f.proof, 'w2b-preconditions.txt')));
+  assert.deepEqual(JSON.parse(readFileSync(join(good.f.proof, 'w2-binding.json'), 'utf8')), { w2_release_sha: w2sha, w2_window_id: w2id, w2_close: ['recovered'], w2_closed_at: '2026-10-04T09:00:00Z' });
+  assert.ok(good.result.calls.some(c => c[0] === 'ai_ro' && c.includes('/proof/w2b-preconditions.sql')));
+  const bad: Array<[string, (f: ReturnType<typeof fixture>, w2: string) => void, Record<string, unknown>, string]> = [
+    ['missing revoke proof', (f, w2) => rmSync(join(f.root, w2, 'dcr-probe-revoked.json')), {}, 'FAIL ai-w2b-preflight: W2 dcr-probe-revoked.json expected regular-file got missing-or-not-regular; STOP'],
+    ['missing schema proof', (f, w2) => rmSync(join(f.root, w2, 'schema-committed.txt')), {}, 'FAIL ai-w2b-preflight: W2 schema-committed.txt expected regular-file got missing-or-not-regular; STOP'],
+    ['missing probes proof', (f, w2) => rmSync(join(f.root, w2, 'W2-probes.txt')), {}, 'FAIL ai-w2b-preflight: W2 W2-probes.txt expected regular-file got missing-or-not-regular; STOP'],
+    ['not closed', (f, w2) => rmSync(join(f.root, w2, 'closed.txt')), {}, 'FAIL ai-w2b-preflight: W2 closed.txt expected regular-file got missing-or-not-regular; STOP'],
+    ['no close result', (f, w2) => rmSync(join(f.root, w2, 'ordinary-recovery.json')), {}, 'FAIL ai-w2b-preflight: W2 close result expected success-or-recovered got neither; STOP'],
+    ['other W2 window', (f, w2) => f.put(`${w2}/inputs.json`, { window: 'W2', release_sha: w2sha, window_id: 'Other1' }), {}, 'FAIL ai-w2b-preflight: W2 inputs.json binding expected window-W2-w2_release_sha-w2_window_id got mismatch; STOP'],
+    ['credential file present', f => f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}'), {}, 'FAIL ai-w2b-preflight: issuer credential file expected absent got present; STOP'],
+    ['database preconditions false', () => undefined, { w2b: 'f' }, 'FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP'],
+    ['issuance on', () => undefined, { readonly: 'f' }, 'FAIL ai-w2b-preflight: admin issuance expected OFF got other; STOP'],
+  ];
+  for (const [name, change, config, message] of bad) {
+    const { f, result } = setup(change, config);
+    assert.notEqual(result.status, 0, name); stopped(result, message);
+    assert.ok(!existsSync(join(f.proof, 'w2b-preconditions.txt')), name);
+  }
+  const unbound = fixture(); unbound.put('proof/ordinary-before.json', liveReceipt('W3', 'fixture', 'before', unbound.preText));
+  stopped(unbound.run(['ai-w2b-preflight'], 'W3'), 'FAIL ai-w2b-preflight: window expected W2b got other; STOP');
 });
 test('oauth-build-route / cpu-capped-build-once-source-label: fails closed on unsupported CPU caps or wrong source label', () => {
   const good = fixture(); const positive = good.run(['ai-w3-build']); pass(positive);
