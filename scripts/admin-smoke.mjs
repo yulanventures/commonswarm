@@ -301,6 +301,13 @@ async function run(o) {
   } finally { await receiptFd?.close(); }
 }
 
+// Test inputs never reach a production run: any ADMIN_SMOKE_FIXTURE_* / ADMIN_SMOKE_SECRET_ROOT variable or an active
+// test transport refuses unless the test harness set ADMIN_SMOKE_TEST_TRANSPORT=1.
+const testInputs = Object.keys(process.env).some(k => k.startsWith('ADMIN_SMOKE_FIXTURE_') || k === 'ADMIN_SMOKE_SECRET_ROOT') ||
+  globalThis[Symbol.for('commonswarm.admin-smoke.test-transport')] === true;
+if (testInputs && process.env.ADMIN_SMOKE_TEST_TRANSPORT !== '1') {
+  process.stderr.write('admin_smoke_fail step=options code=test_inputs_in_production\n'); process.exit(1);
+}
 try {
   const o = options(process.argv.slice(2));
   if (o.help) process.stdout.write('admin-smoke.mjs --authorize-url-file PATH --callback-file PATH --receipt-file PATH [--verify-fenced --fence-file PATH]\nPrivate handoffs: fresh 0700 /private/tmp/anvil-secret.* directory, files 0600. Callback: full redirect URL. Fence: receipt run_id, written only after human revoke commits. Caller removes the secret window with guarded rm.\n--print-client-metadata | --dry-run\nTimeouts may be shortened with --consent-timeout-ms, --fence-timeout-ms, --request-timeout-ms, --total-timeout-ms.\n');

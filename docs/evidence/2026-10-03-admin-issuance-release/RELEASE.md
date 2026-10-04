@@ -389,7 +389,7 @@ EDGE_QUERY_CLEANUP
  rm -r -- "$EDGE_QUERY_STAGE"
 }
 trap edge_query_cleanup EXIT
-unset SOURCE_DATABASE_URL TARGET_DATABASE_URL
+unset SOURCE_DATABASE_URL TARGET_DATABASE_URL NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT
 PG_SERVICE_OUTPUT="$EDGE_QUERY_STAGE/service.conf" PG_PASS_OUTPUT="$EDGE_QUERY_STAGE/pass" \
  COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
  node "/home/commonswarm/admin-issuance/releases/$1/deploy/supabase-stack/migrate/make-pg-service.mjs" >"$EDGE_QUERY_STAGE/session.log" 2>&1
@@ -434,8 +434,15 @@ block here: a CLOSED claim or a CLOSED marker exists ONLY right after a
 successful independent readback, and everything else is UNKNOWN; and for
 ai-edge-remeasure, ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish and
 ai-w6-activation-rollback, exit 1 means confirmed CLOSED, 2 means UNKNOWN and
-any other nonzero status is UNKNOWN (their EXIT traps turn an unconfirmed 1
-into 2). Any failure after the hooks start (a hook, the row read, the
+any other nonzero status is UNKNOWN. Each of these blocks installs its status
+trap as its first statement: an unconfirmed 1 becomes 2, and an exit before the
+block's last line (even one that leaves $? at 0) becomes 2. ai_run returns 2
+for any failure before it evaluates a block (allowlist, plan verification,
+lookup, syntax), so a dispatch failure can never read as a confirmed close.
+Every production node launch first unsets NODE_OPTIONS and the admin-smoke
+test-transport variables; scripts/admin-smoke.mjs refuses fixture inputs and
+the test transport refuses to load unless ADMIN_SMOKE_TEST_TRANSPORT=1, which
+only the test harness sets. Any failure after the hooks start (a hook, the row read, the
 receipt or its validation, possibly after a committed reopen) runs the hook's
 `close` mode (release role, close first, then invalidate, marker reason
 `remeasure-validation-failed`) before the step fails; a failed close is
@@ -453,9 +460,11 @@ set -euo pipefail
 # Status contract (also ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish, ai-w6-activation-rollback): 0 success;
 # 1 ONLY right after an independent readback confirmed issuance CLOSED; any other status (2 by convention) UNKNOWN.
 C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
 remeasure_exit() {
  local status=$?
  trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
  if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
@@ -531,6 +540,8 @@ env=dict(os.environ,EDGE_MEASUREMENT_FILE=out,INPUTS_FILE=inputs)
 need(subprocess.run(['/bin/bash'],input=receipt[0],text=True,env=env,stdout=subprocess.DEVNULL).returncode==0,'new edge-measurement.json','valid-edge-receipt','refused')
 print('PASS ai-edge-remeasure: hook pair measured generation '+str(gen)+'; fresh edge-measurement.json validated')
 PY
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 ```
 
 ```sh
@@ -539,21 +550,25 @@ PY
 # host: HezLead box root, before ai-open of W5/W6/W7 when ai-edge-receipt finds the receipt stale; owns the recycle timer for this step only
 # Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell (ai_run is eval).
 (
-set -euo pipefail
-: "${INPUTS_FILE:?}" "${PLAN_FILE:?}" "${EDGE_MEASUREMENT_OUT:?}"
-REFRESH_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-refresh: recycle timer name expected readable got failure; STOP\n' >&2; exit 1; }
-C1_CLOSED_CONFIRMED=0
+C1_CLOSED_CONFIRMED=0 REFRESH_TIMER=
+C1_BLOCK_DONE=0
 edge_refresh_rearm() {
  local status=$?
  trap - EXIT
- # Every exit re-arms the timer; a failed re-arm is reported and fails the step.
- systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
- systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
- # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Every exit re-arms the timer once its name is known; a failed re-arm is reported and fails the step.
+ if test -n "${REFRESH_TIMER:-}"; then
+  systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
  if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
 trap edge_refresh_rearm EXIT
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${PLAN_FILE:?}" "${EDGE_MEASUREMENT_OUT:?}"
+REFRESH_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { REFRESH_TIMER=; printf 'FAIL ai-edge-refresh: recycle timer name expected readable got failure; STOP\n' >&2; exit 2; }
 systemctl stop "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-edge-refresh "$EDGE_MEASUREMENT_OUT" <<'PY' || { REFRESH_STATUS=$?; printf 'FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$REFRESH_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL ai-edge-refresh: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' >&2; exit 1; fi; printf 'FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' >&2; exit 2; }
 import hashlib,json,os,re,stat,subprocess,sys
@@ -587,6 +602,8 @@ except BaseException as error:
 sys.exit(rc if rc in (0,1) else 2)
 PY
 printf 'PASS ai-edge-refresh: fresh edge-measurement.json at %s; recycle timer re-armed on exit\n' "$EDGE_MEASUREMENT_OUT"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 
@@ -771,6 +788,7 @@ printf 'PASS ai-open: %s; secret cleanup pointer retained\n' "$WINDOW"
 # step: ai-db-session
 # readonly: no
 # host: box root; task files only, database queries read-only until apply
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 test -f "$PROOF_DIR/open.txt" || { printf 'FAIL ai-db-session: open.txt expected present got missing; STOP\n' >&2; exit 1; }
 test ! -e "$PROOF_DIR/closed.txt" || { printf 'FAIL ai-db-session: closed.txt expected absent got present; STOP\n' >&2; exit 1; }
@@ -809,7 +827,9 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback|ai-edge-remeasure|ai-w6-audit|ai-w6-closed-gate-probe) ;; *) return 1;; esac
+ # A failure BEFORE the block runs (allowlist, plan verification, lookup, syntax) is 2: it confirms nothing, so it
+ # can never read as a status-contract block's confirmed-CLOSED 1.
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback|ai-edge-remeasure|ai-w6-audit|ai-w6-closed-gate-probe) ;; *) return 2;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -834,8 +854,8 @@ blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],
 found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
 if len(found)!=1: raise SystemExit("FAIL ai_run: block "+sys.argv[2]+" expected one got "+str(len(found))+"; STOP")
 sys.stdout.write(found[0])
-' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 1
- printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 1
+' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 2
+ printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 2
  eval "$AI_RUN_SOURCE"
 }
 ai_deadline() {
@@ -3125,7 +3145,7 @@ try:
     assert re.fullmatch(r'/tmp/admin-issuance-'+sha+r'-[A-Za-z0-9]{6}\.tar',str(archive))
     root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
     approved=sha; reason='database-session-failed'
-    env=dict(os.environ); env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
+    env={k:v for k,v in os.environ.items() if k!='NODE_OPTIONS' and not k.startswith('ADMIN_SMOKE_')}; env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
     with (stage/'session.log').open('w') as log:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
     for name in ['service.conf','pass']: (stage/name).chmod(0o600)
@@ -3467,6 +3487,7 @@ archive_sha256.
 # step: ai-w5-closed
 # readonly: probe
 # host: HezLead Mac; after referenced site manifest and browser ownership close
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${SITE_EVIDENCE:?}" "${INPUTS_FILE:?}"
 : "${LIVE_CONTROLS_FILE:?FAIL ai-w5-closed: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
@@ -3823,6 +3844,21 @@ printf 'PASS reviewed C1 verification row present, active and canonical-digest b
 # readonly: no
 # host: HezLead, box root; approved activation only
 (
+C1_CLOSED_CONFIRMED=0 W6_APPLY_TIMER_HELD=0
+C1_BLOCK_DONE=0
+w6_apply_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Recovery once this apply has stopped the timer (from just before its stop on).
+ if test "$status" != 0 && test "$W6_APPLY_TIMER_HELD" = 1; then
+  ( ai_run ai-w4-timer-recovery ) || printf 'FAIL ai-w6-activation-apply: recycle timer re-arm after a failed apply expected active got failure; STOP\n' >&2
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap w6_apply_exit EXIT
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
@@ -3868,18 +3904,7 @@ test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
 test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-activation-apply: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
 # HezLead ruling: the recycle timer stays STOPPED from here until ai-w6-finish re-arms it. A failed apply
 # re-arms it at once (the hooks are marked complete blocks installed in W4; no generated operator script).
-C1_CLOSED_CONFIRMED=0
-w6_apply_exit() {
- local status=$?
- trap - EXIT
- if test "$status" != 0; then
-  ( ai_run ai-w4-timer-recovery ) || printf 'FAIL ai-w6-activation-apply: recycle timer re-arm after a failed apply expected active got failure; STOP\n' >&2
- fi
- # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
- if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
- exit "$status"
-}
-trap w6_apply_exit EXIT
+W6_APPLY_TIMER_HELD=1
 systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-apply: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive || { printf 'FAIL ai-w6-activation-apply: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
 # The shared remeasure owns this fresh measurement; it writes the W6 receipt and validates it.
@@ -3927,6 +3952,8 @@ pathlib.Path(sys.argv[2]).write_text(sql)
 PY
 ai_db -q --file /proof/activate.sql >/dev/null
 printf 'Apply body completed; recycle timer HELD until ai-w6-finish: W6 overlay/env/cutover active; require outside gate probe before close\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 
@@ -3963,13 +3990,17 @@ printf 'PASS W6 measured release, overlay/env and public gate open\n' >"$PROOF_D
 # readonly: no
 # host: HezLead box root; remove activation env/overlay and close cutover
 (
-set -euo pipefail
-# Installed BEFORE the first rollback operation: any exit re-arms the held recycle timer; the original failure is
+# Installed as the FIRST statement, before set -u and the first rollback operation: any exit re-arms the held recycle timer; the original failure is
 # kept and a failed re-arm is reported (and fails a successful rollback).
+C1_BLOCK_DONE=0
 w6_rollback_exit() {
  local status=$?
  trap - EXIT
- if ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-activation-rollback: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+  test "$status" != 0 || status=3
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
   systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
   systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active on exit got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
  fi
@@ -3978,6 +4009,7 @@ w6_rollback_exit() {
  exit "$status"
 }
 trap w6_rollback_exit EXIT
+set -euo pipefail
 # guard_cutover_state refuses a generation change while issuance is open: close first, then invalidate, one transaction.
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 OAUTH_TARGET=$(readlink -f /home/commonswarm/oauth/current)
@@ -4006,6 +4038,8 @@ test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_
 systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer start expected success got failure; STOP\n' >&2; exit 1; }
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active got inactive; STOP\n' >&2; exit 1; }
 printf 'PASS W6 env/overlay removed; DB closed; recycle timer active; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 
@@ -4101,6 +4135,7 @@ RELEASE_SHA.
 # step: ai-w6-c1-inputs
 # readonly: no
 # host: HezLead Mac, clean checkout at RELEASE_SHA with dependencies installed; owner file-store session; writes C1_INPUTS_FILE once
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?FAIL ai-w6-c1-inputs: C1_INPUTS_FILE expected absolute-new-file got unset; STOP}"
 : "${C1_SMOKE_WORKSPACE_ID:?}" "${C1_SMOKE_WORKSPACE_NAME:?}" "${C1_VERIFICATION_VERSION:?}"
@@ -4274,6 +4309,7 @@ printf 'PASS exact C1 version/canonical digest/reviewed ceiling and smoke worksp
 # step: ai-w6-owner-client-command
 # readonly: no
 # host: HezLead Mac owner file-store CLI session; approve or withdraw only
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_CLIENT_ACTION:?approve or withdraw}"
 case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
@@ -4319,6 +4355,7 @@ JS
 # step: ai-w6-start
 # readonly: no
 # host: HezLead Mac, after preflight/client-check; owner approval follows pointer publication; no browser launch
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${C1_PROOF_DIR:?}"
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
@@ -4342,6 +4379,7 @@ printf '%s\n' "$C1_RUNNER_PID" >"$C1_PROOF_DIR/runner.pid"
 # step: ai-w6-pointer
 # readonly: no
 # host: HezLead Mac; runner underway, before owner approval/consent
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${C1_INPUTS_FILE:?}"
 # F10: the stage and pointer are recorded by ai-w6-start; a later shell derives them from C1_PROOF_DIR.
@@ -4570,6 +4608,7 @@ printf 'PASS ai-w6-fence-driver: fence chain completed in %s s (runner budget 24
 # step: ai-w6-human-revoke
 # readonly: no
 # host: HezLead Mac, OWNER's file-store CLI session; human revoke verb D6
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${C1_PROOF_DIR:?}" "${C1_INPUTS_FILE:?}"
 C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
@@ -4679,6 +4718,7 @@ and keep the callback free of secrets. Never leave a long-lived approved client.
 # step: ai-w6-report
 # readonly: no
 # host: HezLead Mac; redacted report and machine receipt
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 node --input-type=module - "$C1_PROOF_DIR" "$INPUTS_FILE" <<'JS'
 import { readFile,writeFile } from 'node:fs/promises';
@@ -4754,22 +4794,26 @@ PY
 # host: HezLead box root; after the human revoke, the refused follow-up and the approval withdrawal
 # Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell and ai-close.
 (
-set -euo pipefail
-test "$WINDOW" = W6 || { printf 'FAIL ai-w6-finish: window expected W6 got other; STOP\n' >&2; exit 1; }
 # HezLead ruling: every exit re-arms the recycle timer W6 has held since ai-w6-activation-apply.
 C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
 w6_finish_exit() {
  local status=$?
  trap - EXIT
- if ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-finish: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
   systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
   systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
  fi
- # Status contract: 1 only after a confirmed CLOSED readback; every other failure is UNKNOWN.
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
  if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
  exit "$status"
 }
 trap w6_finish_exit EXIT
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-finish: window expected W6 got other; STOP\n' >&2; exit 2; }
 ai_run ai-inputs
 test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
 test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
@@ -4801,6 +4845,8 @@ else
 fi
 unset EDGE_MEASUREMENT_OUT
 printf 'PASS ai-w6-finish: final state recorded; edge-measurement-final.json is W7 EDGE_MEASUREMENT_FILE; recycle timer re-armed on exit\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 

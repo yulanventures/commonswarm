@@ -741,9 +741,9 @@ ai_ro() { printf 't\\n'; }\n`;
   assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-edge-remeasure inactive','ai-w6-activation-probes','systemctl start']);
   assert.equal(readFileSync(timer,'utf8'),'active');
   // Control: the same block WITHOUT its own subshell (the 04d09c3d form) leaves the timer stopped for the close.
-  const body=block('ai-w6-finish'), open=body.indexOf('\n(\nset -euo pipefail\n');
+  const body=block('ai-w6-finish'), open=body.indexOf('\n(\n');
   assert.ok(open>0 && body.trimEnd().endsWith('\n)'));
-  const unwrapped=body.slice(0,open)+'\nset -euo pipefail\n'+body.slice(open+'\n(\nset -euo pipefail\n'.length,body.trimEnd().length-1);
+  const unwrapped=body.slice(0,open)+'\n'+body.slice(open+'\n(\n'.length,body.trimEnd().length-1);
   writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
   const old=run(harness+`set +e\n( eval "$UNWRAPPED"\n${closeLine}\nprintf 'close-timer-ok\\n' )`,{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',UNWRAPPED:unwrapped,CLOSED_PROBE:block('ai-w6-closed-gate-probe'),INPUTS_FILE:inputFile({...base(),keep_open:true}),PATH:shim+':'+process.env.PATH});
   assert.notEqual(old.status,0); assert.doesNotMatch(old.stdout,/close-timer-ok/); assert.match(old.stderr,/FAIL ai-close: recycle timer expected active got inactive/);
@@ -1468,7 +1468,9 @@ subprocess.check_output = observe
       SITE_STEP: 'site2-01', SITE_RELEASE_REPO: root, PREP_DIR: root, SITE_RELEASE_SHA: sha };
     writeFileSync(receipt, JSON.stringify(current)); writeFileSync(queries, '');
     const positive = run(harness+block(step), env);
-    assert.equal(positive.status, 0, `${name}: ${positive.stderr}`);
+    // The stub stops right after admission. A status-contract block (ai-w6-activation-apply) did not run to its end,
+    // so its trap reports that stop as UNKNOWN (2), never as success.
+    assert.equal(positive.status, step === 'ai-w6-activation-apply' ? 2 : 0, `${name}: ${positive.stderr}`);
     assert.match(positive.stdout+positive.stderr, /ADMITTED/, name);
     assert.equal(readFileSync(queries,'utf8').trim(), step === 'ai-w5-reference' ? 'remote' : 'box', `${name} must re-read the box`);
     for (const [change, field] of [

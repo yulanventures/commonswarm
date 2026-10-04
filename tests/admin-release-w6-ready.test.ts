@@ -167,16 +167,24 @@ function timerStub() {
     state: () => readFileSync(join(dir, 'state'), 'utf8'), calls: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').filter(l => l && l !== 'show') };
 }
 
+/** The apply's first statement (status/failure trap) plus its timer-hold section; its preflights need the box. */
+function applyCore(apply: string) {
+  const a = apply.indexOf('C1_CLOSED_CONFIRMED=0 W6_APPLY_TIMER_HELD=0\n'), b = apply.indexOf(': "${INPUTS_FILE:?}"\n');
+  const c = apply.indexOf('W6_APPLY_TIMER_HELD=1\n'), d = apply.indexOf('unset EDGE_MEASUREMENT_OUT\n') + 'unset EDGE_MEASUREMENT_OUT\n'.length;
+  assert.ok(a > 0 && b > a && c > b && d > c, 'apply trap first, hold section later');
+  assert.equal(apply.slice(apply.indexOf('\n(\n') + 3, a), '', 'the status trap is the first statement of the apply subshell');
+  // The hold section is the end of this composite, so it carries the block's own completion flag.
+  return apply.slice(a, b) + apply.slice(c, d) + 'C1_BLOCK_DONE=1\n';
+}
+
 test('W6 apply holds the recycle timer after success and re-arms it at once when the apply fails', () => {
   const apply = block('ai-w6-activation-apply');
-  const start = apply.indexOf('w6_apply_exit() {'), end = apply.indexOf('unset EDGE_MEASUREMENT_OUT\n') + 'unset EDGE_MEASUREMENT_OUT\n'.length;
-  assert.ok(start > 0 && end > start);
   const recovery = block('ai-w4-timer-recovery');
   for (const [name, remeasureOk] of [['success', true], ['failed remeasure', false]] as const) {
     const t = timerStub(); const proof = join(t.dir, 'proof'); mkdirSync(proof);
     writeFileSync(join(t.dir, 'recovery.sh'), recovery);
     const harness = `ai_run() { case "$1" in ai-w4-timer-recovery) eval "$(cat '${join(t.dir, 'recovery.sh')}')";; ai-edge-remeasure) ${remeasureOk ? 'printf "{}\\n" >"$EDGE_MEASUREMENT_OUT"' : 'return 1'};; *) return 1;; esac; }\n`;
-    const r = run(`(\nset -euo pipefail\n${harness}${apply.slice(start, end)})`, { ...t.env, PROOF_DIR: proof });
+    const r = run(`(\n${harness}${applyCore(apply)})`, { ...t.env, PROOF_DIR: proof });
     if (remeasureOk) {
       assert.equal(r.status, 0, r.stderr); assert.equal(t.state(), 'inactive', 'timer HELD until ai-w6-finish');
       assert.deepEqual(t.calls(), ['stop']);
@@ -547,8 +555,6 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${call
 // ---------------- remeasure failure results reach every caller unchanged (production shape: eval, continuing shell) ----------------
 test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close result: CLOSED only when confirmed, else UNKNOWN', () => {
   const finish = block('ai-w6-finish'), apply = block('ai-w6-activation-apply');
-  const applyStart = apply.indexOf('w6_apply_exit() {'), applyEnd = apply.indexOf('unset EDGE_MEASUREMENT_OUT\n') + 'unset EDGE_MEASUREMENT_OUT\n'.length;
-  assert.ok(applyStart > 0 && applyEnd > applyStart);
   for (const [status, expected] of [[1, /issuance CLOSED \(remeasure failure close confirmed by readback\)/], [2, /issuance state UNKNOWN after the remeasure failure \(may be OPEN\); run ai-emergency-close/]] as const) {
     for (const keep of [true, false]) {
       const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'inactive'); const proof = join(t.dir, 'proof'); mkdirSync(proof);
@@ -565,7 +571,79 @@ test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close
     const t = timerStub(); const proof = join(t.dir, 'proof'); mkdirSync(proof);
     writeFileSync(join(t.dir, 'recovery.sh'), block('ai-w4-timer-recovery'));
     const harness = `ai_run() { case "$1" in ai-w4-timer-recovery) eval "$(cat '${join(t.dir, 'recovery.sh')}')";; ai-edge-remeasure) return ${status};; *) return 1;; esac; }\n`;
-    const r = run(`${harness}( set -euo pipefail\n${apply.slice(applyStart, applyEnd)})\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, PROOF_DIR: proof });
+    const r = run(`${harness}(\n${applyCore(apply)})\nprintf 'shell-continues %s\\n' "$?"\n`, { ...t.env, PROOF_DIR: proof });
     assert.match(r.stdout, new RegExp(`shell-continues ${status}\\b`)); assert.match(r.stderr, expected, `apply ${status}`); assert.equal(t.state(), 'active');
   }
+});
+
+// ---------------- the status contract across the REAL dispatcher and from block entry ----------------
+test('status contract: the real ai_run returns 2 before evaluation; finish via the real dispatcher reports 1 only for a confirmed close', () => {
+  const session = block('ai-db-session');
+  const dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
+  assert.ok(dispatcher.startsWith('ai_run() {') && dispatcher.includes('eval "$AI_RUN_SOURCE"'));
+  const finish = block('ai-w6-finish');
+  const stub = (step: string, body: string) => `\`\`\`sh\n# step: ${step}\n# readonly: no\n# host: fixture\n${body}\n\`\`\`\n`;
+  const fixture = (remeasure: string | null) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'dispatch-'))), rel = join(dir, 'docs/evidence/2026-10-03-admin-issuance-release');
+    mkdirSync(rel, { recursive: true });
+    const text = stub('ai-inputs', ':') + stub('ai-w6-activation-probes', ':') + stub('ai-w6-closed-gate-probe', ':') +
+      stub('ai-w6-activation-rollback', 'systemctl start "$EDGE_RECYCLE_TIMER"') + (remeasure === null ? '' : stub('ai-edge-remeasure', remeasure));
+    writeFileSync(join(rel, 'RELEASE.md'), text);
+    return { dir, digest: digest(text) };
+  };
+  const go = (remeasure: string | null, keep: boolean, planDigest?: string) => {
+    const f = fixture(remeasure); const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'inactive');
+    const proof = join(t.dir, 'proof'); mkdirSync(proof);
+    writeFileSync(join(proof, 'C1-fence.txt'), 'PASS'); writeFileSync(join(proof, 'client-withdraw.json'), JSON.stringify({ status: 'PASS', withdrawn_at: 'x' }));
+    writeFileSync(join(proof, 'agent-final.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403, refusal_code: 'grant_revoked' } }));
+    const inputs = inputFile({ ...base(), window: 'W6', keep_open: keep, plan_sha256: planDigest ?? f.digest });
+    const r = run(`${dispatcher}\nai_ro() { printf 't\\n'; }\neval "$FINISH"\nprintf 'shell-continues %s\\n' "$?"\n`,
+      { ...t.env, WINDOW: 'W6', PROOF_DIR: proof, FINISH: finish, RELEASE_ROOT: f.dir, INPUTS_FILE: inputs });
+    return { r, timer: t.state(), status: /shell-continues (\d+)/.exec(r.stdout)?.[1] };
+  };
+  for (const keep of [true, false]) {
+    // A remeasure block that ran and confirmed CLOSED (its exit 1) is the only way to 1.
+    const closed = go('exit 1', keep); assert.equal(closed.status, '1', closed.r.stderr);
+    assert.match(closed.r.stderr, /issuance CLOSED \(remeasure failure close confirmed by readback\)/); assert.equal(closed.timer, 'active');
+    const unknown = go('exit 2', keep); assert.equal(unknown.status, '2'); assert.doesNotMatch(unknown.r.stderr, /issuance CLOSED/);
+    // Dispatch failure: the block is missing from the verified plan; nothing ran, so UNKNOWN, never CLOSED.
+    const missing = go(null, keep); assert.equal(missing.status, '2', missing.r.stderr);
+    assert.match(missing.r.stderr, /issuance state UNKNOWN after the remeasure failure/); assert.doesNotMatch(missing.r.stderr, /issuance CLOSED/);
+    assert.equal(missing.timer, 'active');
+  }
+  // Dispatch failure at plan verification (changed plan bytes): the first ai_run already returns 2.
+  const changed = go('exit 1', true, 'f'.repeat(64)); assert.equal(changed.status, '2'); assert.doesNotMatch(changed.r.stderr, /issuance CLOSED/);
+  assert.equal(changed.timer, 'active');
+  // The dispatcher's own pre-eval exits.
+  const r = run(`${dispatcher}\nai_run not-on-the-allowlist; printf 'allowlist %s\\n' "$?"\n`, { RELEASE_ROOT: root, INPUTS_FILE: '/dev/null' });
+  assert.match(r.stdout, /allowlist 2/);
+});
+
+test('status contract from block entry: early refresh, apply, finish and rollback failures are UNKNOWN (2), never 1', () => {
+  const continuing = (source: string, env: Record<string, string>) => {
+    const r = run(`eval "$BLOCK"\nprintf 'shell-continues %s\\n' "$?"\n`, { ...env, BLOCK: source });
+    return { r, status: /shell-continues (\d+)/.exec(r.stdout)?.[1] };
+  };
+  // Refresh: the timer name cannot be read.
+  const t1 = timerStub(); const bad = join(root, 'not-json.json'); writeFileSync(bad, 'x');
+  const refresh = continuing(block('ai-edge-refresh'), { ...t1.env, INPUTS_FILE: bad, PLAN_FILE: planPath, EDGE_MEASUREMENT_OUT: join(t1.dir, 'out.json') });
+  assert.equal(refresh.status, '2', refresh.r.stderr); assert.match(refresh.r.stderr, /recycle timer name expected readable got failure/);
+  assert.deepEqual(t1.calls(), [], 'no timer name, no timer operation');
+  // Apply: the first approval check fails (no approval in the inputs).
+  const t2 = timerStub();
+  const apply = continuing(block('ai-w6-activation-apply'), { ...t2.env, INPUTS_FILE: inputFile({ ...base(), window: 'W6' }), PROOF_DIR: t2.dir });
+  assert.equal(apply.status, '2', apply.r.stderr); assert.match(apply.r.stderr, /FAIL W6 activation approval required/); assert.deepEqual(t2.calls(), []);
+  // Apply: INPUTS_FILE unset entirely.
+  const unset = continuing(block('ai-w6-activation-apply'), { ...t2.env });
+  assert.equal(unset.status, '2', unset.r.stderr);
+  // Finish: the wrong window, with the timer held: UNKNOWN, and the timer is still re-armed.
+  const t3 = timerStub(); writeFileSync(join(t3.dir, 'state'), 'inactive');
+  const finish = continuing(block('ai-w6-finish'), { ...t3.env, WINDOW: 'W5', PROOF_DIR: t3.dir });
+  assert.equal(finish.status, '2', finish.r.stderr); assert.match(finish.r.stderr, /window expected W6 got other/); assert.equal(t3.state(), 'active');
+  // Finish with no timer name: UNKNOWN and a by-hand re-arm instruction, never an unbound-variable 1.
+  const noTimer = continuing(block('ai-w6-finish'), { PATH: t3.env.PATH, WINDOW: 'W5', PROOF_DIR: t3.dir });
+  assert.equal(noTimer.status, '2', noTimer.r.stderr); assert.match(noTimer.r.stderr, /recycle timer name unknown at exit; re-arm it by hand/);
+  // Rollback: the first DB close fails with 1 and no timer name is known: 2, not 1.
+  const rb = continuing(`ai_db() { return 1; }\n${block('ai-w6-activation-rollback')}`, { PATH: t3.env.PATH, PROOF_DIR: t3.dir });
+  assert.equal(rb.status, '2', rb.r.stderr); assert.match(rb.r.stderr, /recycle timer name unknown at exit/);
 });

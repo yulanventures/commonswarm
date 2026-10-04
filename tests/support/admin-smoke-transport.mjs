@@ -6,6 +6,10 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, sep } from 'node:path';
 
+// Test-only: activates ONLY when the test harness sets ADMIN_SMOKE_TEST_TRANSPORT=1. An inherited NODE_OPTIONS
+// preload in a production shell refuses to load, so node does not start at all.
+if (process.env.ADMIN_SMOKE_TEST_TRANSPORT !== '1') throw new Error('test_transport_requires_ADMIN_SMOKE_TEST_TRANSPORT');
+globalThis[Symbol.for('commonswarm.admin-smoke.test-transport')] = true;
 const originalFetch = globalThis.fetch;
 const origin = new URL(process.env.ADMIN_SMOKE_FIXTURE_ORIGIN);
 if (origin.protocol !== 'http:' || origin.hostname !== '127.0.0.1' || origin.pathname !== '/' || !origin.port) {

@@ -176,7 +176,7 @@ async function exercise(config = {}) {
       '--consent-timeout-ms', '2000', '--fence-timeout-ms', '2000', '--request-timeout-ms', '1000', '--total-timeout-ms', '6000',
       ...(config.fence ? ['--verify-fenced', '--fence-file', paths.fence] : [])];
     let handoff = Promise.resolve(), handledConsent = false, handledFence = false;
-    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot, ...(config.slowFenceOpenMs ? { ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: String(config.slowFenceOpenMs) } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot, ...(config.slowFenceOpenMs ? { ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: String(config.slowFenceOpenMs) } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', chunk => {
       out += chunk;
       if (!handledConsent && out.includes('consent_handoff_ready')) {
@@ -370,16 +370,35 @@ test('secret window: the preload refuses a fixture parent that is not a private 
     for (const [root, mode] of [[loose, 0o755], [temporaryRoot, null], [realHome, null]]) {
       if (mode !== null) execFileSync('chmod', [mode.toString(8), root]);
       const r = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
-        env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: root } });
+        env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: root } });
       assert.notEqual(r.status, 0, `preload accepted ${root}`); assert.match(r.stderr, /invalid_fixture_secret_root/);
     }
     const control = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: secretRoot } });
+      env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: secretRoot } });
     assert.equal(control.status, 0, control.stderr);
   } finally {
     assert.ok(dirname(loose) === temporaryRoot && /^admin-smoke-loose-root\.[A-Za-z0-9]{6}$/.test(basename(loose)));
     rmSync(loose, { recursive: true });
   }
+});
+
+test('production launch: an inherited test preload and fixture variables cannot activate the test transport', () => {
+  const inherited = { ...process.env, NODE_OPTIONS: `--import=${preload}`, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: '5', ADMIN_SMOKE_SECRET_ROOT: secretRoot };
+  delete inherited.ADMIN_SMOKE_TEST_TRANSPORT;
+  // Plain node with the inherited preload (ai-w6-start without its unset line): the preload refuses, node never runs the runner.
+  const viaPreload = spawnSync(process.execPath, [script, '--dry-run'], { encoding: 'utf8', timeout: 5000, env: inherited });
+  assert.notEqual(viaPreload.status, 0); assert.match(viaPreload.stderr, /test_transport_requires_ADMIN_SMOKE_TEST_TRANSPORT/); assert.equal(viaPreload.stdout, '');
+  // Fixture variables without the preload: the runner itself refuses.
+  const { NODE_OPTIONS: _drop, ...noPreload } = inherited;
+  const viaEnv = spawnSync(process.execPath, [script, '--dry-run'], { encoding: 'utf8', timeout: 5000, env: noPreload });
+  assert.equal(viaEnv.status, 1); assert.equal(viaEnv.stderr, 'admin_smoke_fail step=options code=test_inputs_in_production\n'); assert.equal(viaEnv.stdout, '');
+  // The plan's own production launch line clears them first: native fetch and fs, the runner's plan prints.
+  const plan = readFileSync(new URL('../docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md', import.meta.url), 'utf8');
+  const start = plan.split('\n```sh\n').find(b => b.startsWith('# step: ai-w6-start\n'));
+  const unset = start.split('\n').find(l => l.startsWith('unset NODE_OPTIONS '));
+  assert.ok(unset, 'ai-w6-start clears the preload inputs');
+  const cleared = spawnSync('/bin/bash', ['-c', `${unset}\nexec "$NODE" "$SCRIPT" --dry-run`], { encoding: 'utf8', timeout: 5000, env: { ...inherited, NODE: process.execPath, SCRIPT: script } });
+  assert.equal(cleared.status, 0, cleared.stderr); assert.ok(Array.isArray(JSON.parse(cleared.stdout).steps), 'the runner ran with native transport');
 });
 
 // The production default is macOS-specific: /private/tmp exists only there.

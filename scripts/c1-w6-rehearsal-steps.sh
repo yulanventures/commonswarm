@@ -212,8 +212,8 @@ x ai-w7-preflight block >"$T/blocks/w6-ai-w7-preflight.sh"
 x ai-w4-timer-recovery block >"$T/blocks/w6-ai-w4-timer-recovery.sh"
 # The rollback's own subshell and re-arm trap, its DB close, then its readback and timer tail; env/compose omitted.
 x ai-w6-activation-rollback block >"$T/blocks/w6-rollback-full.sh"
-if test "$(sed -n 4p "$T/blocks/w6-rollback-full.sh")" = '(' && test "$(sed -n 5p "$T/blocks/w6-rollback-full.sh")" = 'set -euo pipefail'; then
-  { sed -n 4,5p "$T/blocks/w6-rollback-full.sh"
+if test "$(sed -n 4p "$T/blocks/w6-rollback-full.sh")" = '(' && grep -qx 'w6_rollback_exit() {' "$T/blocks/w6-rollback-full.sh"; then
+  { sed -n 4p "$T/blocks/w6-rollback-full.sh"
     x ai-w6-activation-rollback lines 'w6_rollback_exit() {' 'OAUTH_TARGET=$(readlink -f '
     x ai-w6-activation-rollback from "test \"\$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL"; } >"$T/blocks/w6-rollback-db.sh"
 else # a C1_W6_PLAN_FROM plan before the rollback had its own subshell
@@ -337,11 +337,13 @@ PROOF_DIR=$W6_PROOF expect_fail guard_verified_client:delete "$T/blocks/neg-dele
 # ---------------- W6 activation: held timer, remeasure, activate.sql, readback ----------------
 x ai-w6-activation-apply lines 'python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql" "$PROOF_DIR/edge-measurement.json" <<' "printf 'Apply body completed; recycle timer HELD" >"$T/blocks/w6-activate.sh"
 x ai-w6-activation-readback block >"$T/blocks/w6-readback.sh"
-# The apply's own failure trap, timer stop, service check and remeasure; then activation-attempted and activate.sql.
-{ printf 'set -euo pipefail\n'
-  x ai-w6-activation-apply lines 'w6_apply_exit() {' 'python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'
+# The apply's own status/failure trap (its first statement), then its timer stop, service check and remeasure; then
+# activation-attempted and activate.sql. Its approval/readiness/gate preflights are not run here.
+{ x ai-w6-activation-apply lines 'C1_CLOSED_CONFIRMED=0 W6_APPLY_TIMER_HELD=0' ': "${INPUTS_FILE:?}"'
+  x ai-w6-activation-apply lines 'W6_APPLY_TIMER_HELD=1' 'python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'
   x ai-w6-activation-apply line 'date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/activation-attempted.txt"'
-  cat "$T/blocks/w6-activate.sh"; } >"$T/blocks/w6-apply-head.sh"
+  cat "$T/blocks/w6-activate.sh"
+  x ai-w6-activation-apply line 'C1_BLOCK_DONE=1'; } >"$T/blocks/w6-apply-head.sh"
 /bin/bash -n "$T/blocks/w6-apply-head.sh" || die w6-extract 'W6 apply slice is not valid bash'
 say "EMUL ai-w6-activation-apply: approval, readiness, gates, oauth env/overlay and compose not run; failure trap, timer stop, remeasure and activate.sql run"
 # Ruling 3, failure path on the real database: a failed remeasure fails the apply and its trap re-arms the timer.
