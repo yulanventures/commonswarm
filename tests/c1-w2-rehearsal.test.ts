@@ -347,6 +347,7 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS ai-w6-client-verification:issuance-open: refused \(C1 verification requires issuance closed\)$/m,
     /^PASS ai-w6-client-check$/m, /^PASS ai-w6-audit$/m, /^PASS ai-w6-audit:counts: \{"action": 1, "init": 1, "list": 1, "read": 1\}$/m,
     /^PASS g3-wrong-order \(rolled back\): withdrawal first fences the family itself/m, /^PASS ai-w6-fence-readback$/m, /^PASS g3-right-order: /m,
+    /^EMUL ai-w6-human-revoke: /m, /^EMUL ai-w6-owner-client-command withdraw: /m,
     /^PASS ai-w6-finish:default-closed$/m, /^PASS w6-finish-default: closed and measured/m, /^PASS ai-edge-receipt:W6-default-final$/m,
     /^PASS ai-w6-finish:keep-open$/m, /^PASS w6-finish-keep-open: reopened only through the measured hook path/m, /^PASS ai-edge-receipt:W6-keep-open-final-for-W7$/m,
     /^PASS ai-w7-proof:binding-and-sql$/m, /^PASS ai-w7-preflight:other-w6: refused /m,
@@ -355,7 +356,10 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS recycle-bad-stays-closed: hook after refused the wrong image; one marker \(journal \+ 0644 log, unit rehearsal-edge-recycle\.service, reason edge-measurement-failed\); before \[true [^\]]*\] after \[false gen=\d+ measured=\d+ invalidated=true\]$/m,
     /^PASS recycle-after-bad-stays-closed: no new marker; .* after \[false gen=\d+ measured=\d+ invalidated=false\]$/m,
     /^PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and issuance stays closed; /m,
+    /^PASS remeasure-postfail-closes: the hook pair reopened, the row read then failed, and the hook close mode closed and invalidated issuance with one marker/m,
     /^PASS emergency-close-rearms: /m, /^PASS rehearsal: W4, recycle hook, W6 activation/m, /^PASS cleanup: /m]) assert.match(r.stdout, line);
+  // ai-close's timer line runs after ai-w6-finish in the same shell, for both finish paths.
+  assert.equal(r.stdout.match(/^PASS ai-close:timer-line after ai-w6-finish in the same shell$/gm)?.length, 2);
   assert.doesNotMatch(r.stdout, /^FAIL /m);
 });
 
@@ -373,7 +377,7 @@ test('c1 W6 rehearsal: negative controls: the release-role checksum gate (plan a
   // guard_cutover_state refuses a generation bump in the same update that closes OPEN issuance.
   const fault = run(args, { PG_BIN: PG(), C1_W2_REHEARSAL_FAULT: 'one-statement-close' });
   assert.notEqual(fault.status, 0);
-  assert.match(fault.stdout, /^FAULT injected: ai-recycle-hook before and ai-w6-activation-rollback close and bump the generation in one update/m);
+  assert.match(fault.stdout, /^FAULT injected: ai-recycle-hook before\/close and ai-w6-activation-rollback close and bump the generation in one update/m);
   assert.match(fault.stdout, /^PASS ai-w6-activation-readback$/m);
   assert.match(fault.stdout, /^FAIL ai-w6-finish:default-closed: .*ERROR: {2}close issuance before release measurement changes/m);
   assert.match(fault.stdout, /^PASS cleanup: /m);

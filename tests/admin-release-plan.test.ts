@@ -722,21 +722,31 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
   // Fixture systemctl: the recycle timer W6 holds since apply (inactive at finish start).
   writeFileSync(join(shim,'systemctl'),`#!/bin/bash\nprintf 'systemctl %s\\n' "$1" >>"$PROOF_DIR/calls"\ncase "$1" in stop) printf inactive >"$TIMER";; start) printf active >"$TIMER";; is-active) test "$(cat "$TIMER")" = active;; *) exit 64;; esac\n`,{mode:0o700});
   const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback) printf '%s\\n' "$1" >>"$PROOF_DIR/calls"; systemctl start; printf active >"$TIMER";;
- ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; ai-edge-remeasure) printf 'ai-edge-remeasure %s\\n' "$(cat "$TIMER")" >>"$PROOF_DIR/calls"; printf '{}\\n' >"$EDGE_MEASUREMENT_OUT";; *) return 1;; esac; }
+ ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; ai-w6-closed-gate-probe) printf '%s\\n' "$1" >>"$PROOF_DIR/calls"; eval "$CLOSED_PROBE";; ai-edge-remeasure) printf 'ai-edge-remeasure %s\\n' "$(cat "$TIMER")" >>"$PROOF_DIR/calls"; printf '{}\\n' >"$EDGE_MEASUREMENT_OUT";; *) return 1;; esac; }
 ai_ro() { printf 't\\n'; }\n`;
-  const finish=(keep:boolean|undefined)=>{ writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
-    return run(harness+block('ai-w6-finish'),{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH}); };
+  const finish=(keep:boolean|undefined,after='')=>{ writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
+    return run(harness+block('ai-w6-finish')+after,{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',CLOSED_PROBE:block('ai-w6-closed-gate-probe'),INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH}); };
+  // ai-close's timer line runs next IN THE SAME SHELL (ai_run is eval): the finish's own subshell re-armed it already.
+  const closeLine=block('ai-close').split('\n').find(l=>l.startsWith('systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||'))!;
+  assert.ok(closeLine); const sameShellClose=`\n${closeLine}\nprintf 'close-timer-ok\\n'\n`;
   const trace=()=>readFileSync(calls,'utf8').trim().split('\n');
-  let result=finish(undefined); assert.equal(result.status,0,result.stderr);
+  let result=finish(undefined,sameShellClose); assert.equal(result.status,0,result.stderr); assert.match(result.stdout,/close-timer-ok/);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'closed',explicit_keep_open:false});
   // Default: rollback (re-arms), stop again, remeasure the closed state with the timer held, then re-arm on exit.
-  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-w6-activation-rollback','systemctl start','systemctl stop','ai-edge-remeasure inactive','systemctl start']);
+  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-w6-activation-rollback','systemctl start','systemctl stop','ai-edge-remeasure inactive','ai-w6-closed-gate-probe','systemctl start']);
   assert.equal(readFileSync(timer,'utf8'),'active'); assert.ok(existsSync(join(proof,'edge-measurement-final.json')));
-  result=finish(true); assert.equal(result.status,0,result.stderr);
+  result=finish(true,sameShellClose); assert.equal(result.status,0,result.stderr); assert.match(result.stdout,/close-timer-ok/);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
   // Keep open: remeasure with the timer still held (reopens only through the measured path), probe OPEN, re-arm on exit.
   assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-edge-remeasure inactive','ai-w6-activation-probes','systemctl start']);
   assert.equal(readFileSync(timer,'utf8'),'active');
+  // Control: the same block WITHOUT its own subshell (the 04d09c3d form) leaves the timer stopped for the close.
+  const body=block('ai-w6-finish'), open=body.indexOf('\n(\nset -euo pipefail\n');
+  assert.ok(open>0 && body.trimEnd().endsWith('\n)'));
+  const unwrapped=body.slice(0,open)+'\nset -euo pipefail\n'+body.slice(open+'\n(\nset -euo pipefail\n'.length,body.trimEnd().length-1);
+  writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
+  const old=run(harness+`set +e\n( eval "$UNWRAPPED"\n${closeLine}\nprintf 'close-timer-ok\\n' )`,{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',UNWRAPPED:unwrapped,CLOSED_PROBE:block('ai-w6-closed-gate-probe'),INPUTS_FILE:inputFile({...base(),keep_open:true}),PATH:shim+':'+process.env.PATH});
+  assert.notEqual(old.status,0); assert.doesNotMatch(old.stdout,/close-timer-ok/); assert.match(old.stderr,/FAIL ai-close: recycle timer expected active got inactive/);
   // Former `A && B` guard: each receipt now refuses on its own line before any probe.
   for(const file of ['C1-fence.txt','client-withdraw.json']) {
     const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));

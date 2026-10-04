@@ -71,7 +71,7 @@ test('W6 inputs: the window may last 90 minutes (W6 only); W7 requires w6_window
 
 // ---------------- shared edge remeasure / refresh ----------------
 /** A plan copy whose box paths point into one fixture root, with matching INPUTS. */
-function edgeFixture(opts: { row?: Record<string, unknown>; hookAfterFails?: boolean; timerActive?: boolean } = {}) {
+function edgeFixture(opts: { row?: Record<string, unknown>; hookAfterFails?: boolean; hookCloseFails?: boolean; timerActive?: boolean } = {}) {
   const dir = realpathSync(mkdtempSync(join(root, 'edge-')));
   const bin = join(dir, 'bin'), etc = join(dir, 'etc'), home = join(dir, 'home'), secret = join(dir, 'secret'), hook = join(dir, 'hook');
   for (const d of [bin, etc, home, secret]) mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -90,7 +90,7 @@ function edgeFixture(opts: { row?: Record<string, unknown>; hookAfterFails?: boo
   stub('systemctl', `printf 'systemctl %s\\n' "$1" >>"${dir}/calls"\ncase "$1" in stop) printf inactive >"${dir}/timer";; start) printf active >"${dir}/timer";; is-active) test "$(cat "${dir}/timer")" = active;; show) printf 'inactive\\n';; *) exit 64;; esac`);
   stub('docker', `cat "${dir}/row.json"`);
   stub('node', `: >"$PG_SERVICE_OUTPUT"; : >"$PG_PASS_OUTPUT"`);
-  writeFileSync(hook, `#!/bin/bash\nprintf 'hook %s\\n' "$1" >>"${dir}/calls"\n${opts.hookAfterFails ? 'test "$1" != after || exit 3' : ''}\nexit 0\n`, { mode: 0o700 });
+  writeFileSync(hook, `#!/bin/bash\nprintf 'hook %s\\n' "$1" >>"${dir}/calls"\n${opts.hookAfterFails ? 'test "$1" != after || exit 3' : ''}\n${opts.hookCloseFails ? 'test "$1" != close || exit 4' : ''}\nexit 0\n`, { mode: 0o700 });
   const inputs = inputFile({ ...base(), window: 'W6', plan_sha256: digest(copy) });
   const env = { PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs };
   return { dir, planCopy, copy, inputs, env, target, trace: () => readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').filter(Boolean),
@@ -118,9 +118,23 @@ test('ai-edge-remeasure: hook pair, row read with the receipt query bytes, a fre
   for (const [name, opts, message] of cases) {
     const g = edgeFixture(opts); const r = remeasure(g);
     assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`);
+    // Every failure after the hooks start may follow a committed reopen: the hook close mode runs before the failure.
+    const hooks = g.trace().filter(c => c.startsWith('hook'));
+    assert.deepEqual(hooks, opts?.timerActive ? [] : ['hook before', 'hook after', 'hook close'], name);
     assert.ok(!existsSync(join(g.dir, 'edge-measurement.json')), `${name}: no receipt`);
   }
   const again = remeasure(f); assert.notEqual(again.status, 0); assert.match(again.stderr, /EDGE_MEASUREMENT_OUT expected absent got present/);
+  // A failed failure-close is reported separately: issuance may be OPEN.
+  const unclosed = edgeFixture({ row: { measured_generation: 6 }, hookCloseFails: true }); const u = remeasure(unclosed);
+  assert.notEqual(u.status, 0);
+  assert.match(u.stderr, /FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance may be OPEN; run ai-emergency-close; STOP/);
+});
+
+test('ai-edge-refresh: plain (non-exported) shell variables reach the child remeasure', () => {
+  const f = edgeFixture({ timerActive: true }); const out = join(f.dir, 'refreshed-plain.json');
+  const source = `PLAN_FILE='${f.planCopy}'\nINPUTS_FILE='${f.inputs}'\nEDGE_MEASUREMENT_OUT='${out}'\n` + block('ai-edge-refresh', [...f.copy.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!));
+  const r = spawnSync('/bin/bash', [], { input: source, encoding: 'utf8', env: { PATH: f.env.PATH }, timeout: 20_000 });
+  assert.equal(r.status, 0, r.stderr); assert.ok(existsSync(out)); assert.equal(f.timer(), 'active');
 });
 
 test('ai-edge-refresh: stops the recycle timer for the remeasure and re-arms it on success and on failure', () => {
@@ -168,7 +182,9 @@ test('W6 apply holds the recycle timer after success and re-arms it at once when
 
 test('W6 emergency path: the activation rollback re-arms the timer and fails explicitly when it cannot; every close checks it', () => {
   const rollback = block('ai-w6-activation-rollback');
-  const tail = rollback.slice(rollback.indexOf('# Re-arm the recycle timer W6 held'));
+  // The block is one subshell; the tail is its last lines before the closing parenthesis.
+  assert.ok(rollback.trimEnd().endsWith('\n)'));
+  const tail = rollback.slice(rollback.indexOf('# Re-arm the recycle timer W6 held'), rollback.trimEnd().length - 1);
   for (const [name, failStart] of [['re-armed', false], ['start fails', true]] as const) {
     const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'inactive'); const proof = join(t.dir, 'proof'); mkdirSync(proof);
     // Modelled errexit-ignored context (emergency close runs it under ai_run): the failure must still be explicit.
@@ -180,6 +196,16 @@ test('W6 emergency path: the activation rollback re-arms the timer and fails exp
       assert.equal(r.status, 0, r.stderr); assert.equal(t.state(), 'active');
       assert.match(readFileSync(join(proof, 'activation-rollback.txt'), 'utf8'), /recycle timer active/);
     }
+  }
+  // A failure at the FIRST rollback operation (the DB close) still re-arms the held timer and keeps the original status.
+  for (const [name, failStart] of [['re-armed', false], ['re-arm fails too', true]] as const) {
+    const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'inactive'); const proof = join(t.dir, 'proof'); mkdirSync(proof);
+    const r = run(`ai_db() { printf 'ai_db\\n' >>"${join(t.dir, 'calls')}"; return 42; }\n${rollback}`, { ...t.env, PROOF_DIR: proof, FAIL_START: failStart ? '1' : '0' });
+    assert.equal(r.status, 42, `${name}: the original failure is kept: ${r.stderr}`);
+    assert.deepEqual(t.calls().slice(0, 3), ['ai_db', 'is-active', 'start'], name);
+    if (failStart) assert.match(r.stderr, /FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP/);
+    else assert.equal(t.state(), 'active', `${name}: timer re-armed after the first-operation failure`);
+    assert.ok(!existsSync(join(proof, 'activation-rollback.txt')));
   }
   assert.match(block('ai-emergency-close'), /ai_run ai-w6-activation-rollback/);
   const close = block('ai-close');
@@ -282,8 +308,7 @@ test('ai-w6-audit-watch runs the audit once agent.json arrives and refuses at th
   assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP/);
 });
 
-test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revoke inside the fence budget (R7, stubbed latency)', { timeout: 120_000 }, async () => {
-  const LATENCY = Number(process.env.C1_FENCE_LATENCY_SECONDS ?? '1.5'); // conservative per ssh/scp round trip
+async function fenceRun(LATENCY: number, stallUpload = false, budget = 0) {
   const dir = realpathSync(mkdtempSync(join(root, 'fence-')));
   const bin = join(dir, 'bin'), secret = join(dir, 'secret'), boxRoot = join(dir, 'box'), proof = join(dir, 'c1-proof');
   for (const d of [bin, secret, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -298,6 +323,7 @@ test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revok
   // is installed, the box audit watcher (modelled) writes C1-audit.json after AUDIT_SECONDS.
   writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 sleep ${LATENCY}; cmd="\${@: -1}"; printf 'ssh %s\\n' "$cmd" >>"${calls}"
+${stallUpload ? 'case "$cmd" in "test ! -e "*agent.json) exec sleep 600;; esac' : ''}
 cmd="\${cmd//\\/home\\/commonswarm/${boxRoot.replace(/\//g, '\\/')}\\/home\\/commonswarm}"; cmd="\${cmd//\\/tmp\\//${boxRoot.replace(/\//g, '\\/')}\\/tmp\\/}"
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
 case "$cmd" in install*agent.json) eval "$cmd" || exit 1; ( sleep 2; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","provider_grant_id":"family","audit_counts":{"init":1,"list":1,"read":1,"action":1}}\\n' >"${boxProof}/C1-audit.json" ) & exit 0;; esac
@@ -321,15 +347,22 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
   const started = Date.now();
   const r = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
     const child = spawn('/bin/bash', [], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs, C1_PROOF_DIR: proof,
-      C1_INPUTS_FILE: join(proof, 'C1-inputs.json') } });
+      C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), ...(budget ? { C1_FENCE_BUDGET_SECONDS: String(budget) } : {}) } });
     let stdout = '', stderr = ''; child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
     child.on('close', status => done({ status, stdout, stderr }));
     child.stdin.end(block('ai-w6-fence-driver', [...copy.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!)));
   });
   const elapsed = (Date.now() - started) / 1000;
+  try { runner.kill(); } catch { /* exited */ }
+  const trace = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : [];
+  return { r, elapsed, trace, proof, stage, runId, calls };
+}
+
+test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revoke inside the fence budget (R7, stubbed latency)', { timeout: 120_000 }, async () => {
+  const LATENCY = Number(process.env.C1_FENCE_LATENCY_SECONDS ?? '1.5'); // conservative per ssh/scp round trip
+  const { r, elapsed, trace, proof, stage, runId } = await fenceRun(LATENCY);
   assert.equal(r.status, 0, r.stderr + r.stdout);
   const seconds = Number(readFileSync(join(proof, 'fence-seconds.txt'), 'utf8'));
-  const trace = readFileSync(calls, 'utf8').trim().split('\n');
   const roundTrips = trace.filter(l => l.startsWith('ssh') || l === 'scp').length;
   process.stdout.write(`R7 fence chain: ${seconds} s (wall ${elapsed.toFixed(1)} s) with ${roundTrips} ssh/scp round trips at ${LATENCY} s each; budget 240 s, target < 200 s\n`);
   assert.ok(seconds < 200 && elapsed < 200, `fence chain ${seconds} s`);
@@ -343,6 +376,28 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
   assert.equal(JSON.parse(readFileSync(join(proof, 'human-revoke.json'), 'utf8')).state, 'revoked');
   assert.equal(readFileSync(join(stage, 'fenced'), 'utf8'), `${runId}\n`);
   assert.equal(JSON.parse(readFileSync(join(proof, 'agent.json'), 'utf8')).ok, false, 'the fence-window receipt precedes the runner result');
+});
+
+test('ai-w6-fence-driver: a stalled transport is cut at the absolute fence deadline; no revoke is attempted', { timeout: 120_000 }, async () => {
+  const { r, elapsed, trace } = await fenceRun(0, true, 5);
+  assert.notEqual(r.status, 0);
+  assert.ok(elapsed < 30, `the stalled upload must end at the deadline, not after 600 s: ${elapsed} s`);
+  assert.match(r.stderr, /FAIL ai-w6-fence-driver: ai-w6-transfer expected PASS got failure; STOP/);
+  assert.ok(!trace.includes('node revoke'), trace.join('\n'));
+});
+
+test('ai-w6-fence-driver: with less than 45 s of fence budget left it refuses BEFORE the human revoke', { timeout: 120_000 }, async () => {
+  const { r, trace } = await fenceRun(0, false, 40);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /FAIL ai-w6-fence-driver: fence budget before the human revoke expected at-least-45-s got \d+ s; revoke NOT attempted;/);
+  assert.ok(trace.some(l => l.includes('cat') && l.includes('C1-audit.json')), 'the audit was downloaded first');
+  assert.ok(!trace.includes('node revoke'), trace.join('\n'));
+  const bd = realpathSync(mkdtempSync(join(root, 'budget-')));
+  writeFileSync(join(bd, 'secret-stage.path'), bd + '\n'); writeFileSync(join(bd, 'runner.pid'), '2147483646\n');
+  for (const budget of ['0', '221', 'x']) {
+    const bad = run(block('ai-w6-fence-driver'), { PLAN_FILE: planPath, INPUTS_FILE: inputFile(base()), C1_PROOF_DIR: bd, C1_INPUTS_FILE: bd, C1_FENCE_BUDGET_SECONDS: budget });
+    assert.notEqual(bad.status, 0, budget); assert.match(bad.stderr, /FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP/, budget);
+  }
 });
 
 test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdrawal itself fences the family)', () => {
@@ -376,4 +431,29 @@ test('W6 activation checks require the retained recycle archive with its digest 
   ] as const) {
     const r = make(change as Parameters<typeof make>[0]); assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`);
   }
+});
+
+// ---------------- W7 close: success compares the retained retirement state; recovered proves the emergency close ----------------
+test('ai-close W7: success compares the retained retirement gate state; a recovered close needs the emergency close and a CLOSED row, not that file', () => {
+  const close = block('ai-close');
+  const start = close.indexOf('if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6');
+  const end = close.indexOf('if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered');
+  assert.ok(start > 0 && end > start);
+  const states = close.slice(start, end);
+  const check = (result: string, enabled: 't' | 'f', files: Record<string, string>) => {
+    const proof = realpathSync(mkdtempSync(join(root, 'w7close-')));
+    for (const [name, body] of Object.entries(files)) writeFileSync(join(proof, name), body);
+    const harness = `ai_run() { :; }\nai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) test ${enabled} = t && echo f || echo t;; *'SELECT admin_issuance_enabled'*) echo ${enabled};; *) return 9;; esac; }\nset -euo pipefail\n`;
+    return run(harness + states + 'echo state-ok\n', { WINDOW: 'W7', CLOSE_RESULT: result, PROOF_DIR: proof, INPUTS_FILE: inputFile(base()) });
+  };
+  const ok = (r: ReturnType<typeof run>) => { assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /state-ok/); };
+  const refused = (r: ReturnType<typeof run>, m: RegExp) => { assert.notEqual(r.status, 0); assert.doesNotMatch(r.stdout, /state-ok/); assert.match(r.stderr, m); };
+  ok(check('success', 't', { 'retirement-gate-state.txt': 't\n' }));
+  refused(check('success', 'f', { 'retirement-gate-state.txt': 't\n' }), /W7 gate state expected retained-retirement-state got other/);
+  refused(check('success', 't', {}), /W7 retirement-gate-state\.txt expected present got missing/);
+  // Recovered after an OPEN retirement proof and an emergency close: accepted, with or without the retained file.
+  ok(check('recovered', 'f', { 'retirement-gate-state.txt': 't\n', 'activation-rollback.txt': 'PASS\n' }));
+  ok(check('recovered', 'f', { 'activation-rollback.txt': 'PASS\n' }));
+  refused(check('recovered', 't', { 'activation-rollback.txt': 'PASS\n' }), /recovered W7 issuance expected closed got open/);
+  refused(check('recovered', 'f', {}), /recovered W7 activation-rollback\.txt \(ai-emergency-close\) expected present got missing/);
 });

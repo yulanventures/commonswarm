@@ -34,15 +34,15 @@ if test -n "${C1_W6_PLAN_FROM:-}"; then
 fi
 if test "${C1_W2_REHEARSAL_FAULT:-}" = one-statement-close; then
   # Test control: the open-state close as ONE update (generation bump with the close), as before this fix.
-  python3 - "$W6_PLAN_SRC" "$W6R/plan-fault.md" <<'PY' || die fault 'two-statement close expected twice got other'
+  python3 - "$W6_PLAN_SRC" "$W6R/plan-fault.md" <<'PY' || die fault 'two-statement close expected three times got other'
 import sys
 s=open(sys.argv[1],encoding='utf-8',newline='').read()
 new='admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1'
-assert s.count(new)==2
+assert s.count(new)==3
 open(sys.argv[2],'w',encoding='utf-8',newline='').write(s.replace(new,'admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1'))
 PY
   W6_PLAN_SRC=$W6R/plan-fault.md
-  say "FAULT injected: ai-recycle-hook before and ai-w6-activation-rollback close and bump the generation in one update (test control)"
+  say "FAULT injected: ai-recycle-hook before/close and ai-w6-activation-rollback close and bump the generation in one update (test control)"
 fi
 python3 - "$W6_PLAN_SRC" "$PLANC" "$W6R" <<'PY' || die w6-plan-copy 'remapped plan copy could not be made or verified'
 import re,sys
@@ -112,7 +112,7 @@ root,pg,t,port=sys.argv[1:5]; q=shlex.quote; assert '#' not in root and ' ' not 
 def stub(name,body):
     p=b/name; p.write_text('#!/bin/bash\n# c1 W6 rehearsal stub (test fixture), never a real '+name+'\n'+body); p.chmod(0o700)
 stub('systemctl',"printf 'systemctl %s\\n' \"$*\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n stop) printf inactive >"+q(root+'/timer')+" ;;\n start) test ! -e "+q(root+'/timer-start-fails')+" || exit 1; printf active >"+q(root+'/timer')+" ;;\n is-active) test \"$(cat "+q(root+'/timer')+")\" = active ;;\n show) printf 'inactive\\n' ;;\n *) exit 64 ;;\nesac\n")
-stub('docker',"printf 'docker %s\\n' \"$1\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n inspect)\n  if test \"$2\" = --format; then printf 'healthy\\n'; exit 0; fi\n  if test \"$(cat "+q(root+'/docker-mode')+")\" = bad-image; then exec cat "+q(root+'/container-bad.json')+"; fi\n  exec cat "+q(root+'/container.json')+" ;;\n run)\n  shift; while test $# -gt 0; do if test \"$1\" = --entrypoint; then shift 3; break; fi; shift; done\n  set -o pipefail; stdin=0; prev=\n  for a in \"$@\"; do if test \"$prev\" = --file && test \"$a\" = -; then stdin=1; fi; prev=$a; done\n  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).\n  if test \"$stdin\" = 1; then sed \"s#"+root+"/home#/home/commonswarm#g\" | "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"\n  else "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"; fi\n  exit $? ;;\nesac\nexit 64\n")
+stub('docker',"printf 'docker %s\\n' \"$1\" >>"+q(root+'/calls')+"\ncase \"$1\" in\n inspect)\n  if test \"$2\" = --format; then printf 'healthy\\n'; exit 0; fi\n  if test \"$(cat "+q(root+'/docker-mode')+")\" = bad-image; then exec cat "+q(root+'/container-bad.json')+"; fi\n  exec cat "+q(root+'/container.json')+" ;;\n run)\n  shift; while test $# -gt 0; do if test \"$1\" = --entrypoint; then shift 3; break; fi; shift; done\n  set -o pipefail; stdin=0; prev=\n  for a in \"$@\"; do if test \"$prev\" = --file && test \"$a\" = -; then stdin=1; fi; prev=$a; done\n  if test \"$stdin\" = 0 && test \"$(cat "+q(root+'/docker-mode')+")\" = query-fails; then exit 1; fi\n  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).\n  if test \"$stdin\" = 1; then sed \"s#"+root+"/home#/home/commonswarm#g\" | "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"\n  else "+q(pg+'/psql')+" -h "+q(t)+" -p "+q(port)+" -U supabase_admin -d postgres \"$@\" | sed \"s#/home/commonswarm#"+root+"/home#g\"; fi\n  exit $? ;;\nesac\nexit 64\n")
 stub('logger',"test \"$(cat "+q(root+'/logger-mode')+")\" = ok || exit 1\nprintf '%s\\n' \"${@: -1}\" >>"+q(root+'/journal.log')+"\n")
 stub('node',': >"$PG_SERVICE_OUTPUT"; : >"$PG_PASS_OUTPUT"\n')
 PY
@@ -183,15 +183,24 @@ x ai-edge-remeasure block >"$T/blocks/w6-ai-edge-remeasure.sh"
 x ai-edge-receipt block >"$T/blocks/w6-ai-edge-receipt.sh"
 x ai-w7-preflight block >"$T/blocks/w6-ai-w7-preflight.sh"
 x ai-w4-timer-recovery block >"$T/blocks/w6-ai-w4-timer-recovery.sh"
-x ai-w6-activation-rollback line 'ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE' >"$T/blocks/w6-rollback-db.sh"
-x ai-w6-activation-rollback from "test \"\$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL" >>"$T/blocks/w6-rollback-db.sh"
+# The rollback's own subshell and re-arm trap, its DB close, then its readback and timer tail; env/compose omitted.
+x ai-w6-activation-rollback block >"$T/blocks/w6-rollback-full.sh"
+if test "$(sed -n 4p "$T/blocks/w6-rollback-full.sh")" = '(' && test "$(sed -n 5p "$T/blocks/w6-rollback-full.sh")" = 'set -euo pipefail'; then
+  { sed -n 4,5p "$T/blocks/w6-rollback-full.sh"
+    x ai-w6-activation-rollback lines 'w6_rollback_exit() {' 'OAUTH_TARGET=$(readlink -f '
+    x ai-w6-activation-rollback from "test \"\$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL"; } >"$T/blocks/w6-rollback-db.sh"
+else # a C1_W6_PLAN_FROM plan before the rollback had its own subshell
+  { x ai-w6-activation-rollback line 'ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE'
+    x ai-w6-activation-rollback from "test \"\$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL"; } >"$T/blocks/w6-rollback-db.sh"
+fi
+grep -q '^FAIL' "$T/blocks/w6-rollback-db.sh" && die w6-extract "$(grep -m1 '^FAIL' "$T/blocks/w6-rollback-db.sh")"
 ai_run() {
   case "$1" in
     ai-edge-remeasure|ai-edge-receipt|ai-w7-preflight|ai-w4-timer-recovery) eval "$(cat "$T/blocks/w6-$1.sh")" ;;
     ai-w6-activation-rollback)
       printf 'EMUL ai-w6-activation-rollback: oauth env/overlay removal and compose recreate not run; DB close and timer re-arm run\n' >&2
       eval "$(cat "$T/blocks/w6-rollback-db.sh")" ;;
-    ai-inputs|ai-gates|ai-w7-approval|ai-w6-activation-probes) printf 'EMUL %s: not run in the database rehearsal\n' "$1" >&2 ;;
+    ai-inputs|ai-gates|ai-w7-approval|ai-w6-activation-probes|ai-w6-closed-gate-probe) printf 'EMUL %s: not run in the database rehearsal\n' "$1" >&2 ;;
     *) printf 'FAIL rehearsal ai_run: %s is not dispatched\n' "$1" >&2; return 1 ;;
   esac
 }
@@ -420,23 +429,24 @@ G3_WRONG=$(pgx -Atq -v ON_ERROR_STOP=1 -f "$T/g3-wrong-order.sql" 2>"$PSQL_LOG")
 G3_WRONG=$(printf '%s' "$G3_WRONG" | tr '\n' ' ')
 case "$G3_WRONG" in 'revoked|smoke_cleanup 1') ;; *) die g3-wrong-order "withdraw-first expected the withdrawal to fence (revoked|smoke_cleanup) got $G3_WRONG" ;; esac
 say "PASS g3-wrong-order (rolled back): withdrawal first fences the family itself (grant revoked|smoke_cleanup, family tombstoned); a human revoke after it finds no active grant to fence, so it would prove nothing"
+say "EMUL ai-w6-human-revoke: revoke_admin_delegation as the command path's SQL (event + grant upsert as swarm_command); the CLI, HTTP, reducer and the Mac fence driver are not run"
 run_sql_file ai-w6-human-revoke:command-path "$T/revoke.sql"
 test "$(pgx -Atq -f "$T/g3-state.sql" 2>"$PSQL_LOG" | tr '\n' ' ')" = 'revoked|human_revoked 1 ' || die g3-right-order 'human revoke expected revoked|human_revoked with tombstone got other'
 x ai-w6-fence-readback block >"$T/blocks/w6-fence-readback.sh"
 PROOF_DIR=$W6_PROOF step ai-w6-fence-readback "$T/blocks/w6-fence-readback.sh"
+say "EMUL ai-w6-owner-client-command withdraw: AdminClientApprovalWithdrawn event and approval update as swarm_command; the owner CLI, HTTP and reducer are not run"
 run_sql_file ai-w6-owner-client-command:withdraw "$T/withdraw.sql"
 test "$(pgx -Atq -f "$T/g3-state.sql" 2>"$PSQL_LOG" | tr '\n' ' ')" = 'revoked|human_revoked 1 ' || die g3-right-order 'withdrawal after the revoke expected no change got other'
 test "$(q1 "SELECT withdrawn_at IS NOT NULL AND withdrawal_reason='smoke_cleanup' FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id='$OWNER';")" = t || die g3-right-order 'approval withdrawn expected got other'
 say "PASS g3-right-order: human revoke fenced the grant (revoked|human_revoked, family tombstoned, fence readback t); the later withdrawal is recorded and changes no grant"
 
 # ---------------- W6 finish: default (closed) and keep_open (open) ----------------
-x ai-w6-finish lines 'w6_finish_exit() {' 'keep_open'  >"$T/blocks/w6-finish-head.sh"
-x ai-w6-finish lines ' ( ai_run ai-edge-remeasure ) || { printf '"'"'FAIL ai-w6-finish: keep-open remeasure' 'else' >"$T/blocks/w6-finish-keep.sh"
-x ai-w6-finish lines ' ai_run ai-w6-activation-rollback' " python3 - <<'PY'" >"$T/blocks/w6-finish-default.sh"
-x ai-w6-finish line " printf '{\"state\":\"closed\"" >>"$T/blocks/w6-finish-default.sh"
-x ai-w6-finish from 'unset EDGE_MEASUREMENT_OUT' >"$T/blocks/w6-finish-tail.sh"
-{ printf 'set -euo pipefail\n'; cat "$T/blocks/w6-finish-head.sh" "$T/blocks/w6-finish-default.sh" "$T/blocks/w6-finish-tail.sh"; } >"$T/blocks/w6-finish-default-run.sh"
-{ printf 'set -euo pipefail\n'; cat "$T/blocks/w6-finish-head.sh" "$T/blocks/w6-finish-keep.sh" "$T/blocks/w6-finish-tail.sh"; } >"$T/blocks/w6-finish-keep-run.sh"
+# The WHOLE finish block, then ai-close's timer line, in one shell: ai_run is eval, so the finish block's own
+# subshell must have re-armed the timer before the close looks (no extra harness boundary between them).
+x ai-w6-finish block >"$T/blocks/w6-finish.sh"
+x ai-close line 'systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||' >"$T/blocks/w6-close-timer.sh"
+{ printf 'set -euo pipefail\n'; cat "$T/blocks/w6-finish.sh" "$T/blocks/w6-close-timer.sh"; printf 'say "PASS ai-close:timer-line after ai-w6-finish in the same shell" >&3\n'; } >"$T/blocks/w6-finish-default-run.sh"
+cp "$T/blocks/w6-finish-default-run.sh" "$T/blocks/w6-finish-keep-run.sh" || exit 1
 for f in "$T"/blocks/w6-finish-*-run.sh; do /bin/bash -n "$f" || die w6-extract "$(basename "$f") is not valid bash"; done
 python3 - "$W6_PROOF" <<'PY' || exit 1
 import json,sys
@@ -524,6 +534,19 @@ test "$HOOK_AFTER" = fail && grep -q 'FAIL recycle closed-marker not fully writt
   || die recycle-marker-failure 'marker failure expected reported with the hook failure got other'
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die recycle-marker-failure 'closed and invalidated expected got other'
 say "PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and issuance stays closed; $RECYCLE_LINE"
+
+# ---------------- a shared remeasure that fails AFTER a committed reopen closes issuance (from OPEN) ----------------
+W6Q_PROOF=$T/proof-W6-postfail; mkdir -p "$W6Q_PROOF" || exit 1
+PROOF_DIR=$W6Q_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 step ai-w6-activation-apply:reopen-before-postfail "$T/blocks/w6-apply-head.sh"
+test "$(q1 "$OPEN_MEASURED")" = t || die remeasure-postfail 'open and measured expected got other'
+printf '%s\n' 'set -euo pipefail' "EDGE_MEASUREMENT_OUT=$W6Q_PROOF/edge-measurement-postfail.json" 'ai_run ai-edge-remeasure' >"$T/blocks/remeasure-postfail.sh"
+MARKERS_BEFORE=$(marker_count) BEFORE_POSTFAIL=$(state)
+printf 'query-fails' >"$W6R/docker-mode"
+PROOF_DIR=$W6Q_PROOF INPUTS_FILE=$W6K_INPUTS expect_fail ai-edge-remeasure:row-read-fails-after-reopen "$T/blocks/remeasure-postfail.sh" 'cutover row expected readable got failure'
+printf 'good' >"$W6R/docker-mode"
+test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die remeasure-postfail "closed and invalidated expected got $(state)"
+test "$(( $(marker_count) - MARKERS_BEFORE ))" = 1 && marker_last ai-edge-remeasure remeasure-validation-failed || die remeasure-postfail 'one remeasure-validation-failed marker expected got other'
+say "PASS remeasure-postfail-closes: the hook pair reopened, the row read then failed, and the hook close mode closed and invalidated issuance with one marker (reason remeasure-validation-failed); before [$BEFORE_POSTFAIL] after [$(state)]"
 
 # ---------------- ruling 3: emergency close of an OPEN W6 re-arms the held timer ----------------
 # Issuance returns only through a W6 activation (new proof directory), which holds the timer; then the emergency path.
