@@ -1,7 +1,8 @@
 # Admin issuance release: W2–W7
 
 Prepared, not executed. This plan releases one reviewed `RELEASE_SHA`, landed on
-main, in seven separately authorized windows. The preparation worker has made
+main, in seven separately authorized windows, plus the issuer-only W2b window
+when W2 committed the schema but not the issuer credential. The preparation worker has made
 no box measurements. Neither this document nor a PASS receipt grants approval.
 Admin issuance remains OFF until HezLead executes W6 after a fresh browser-readiness marker: the reviewed issuer
 coordinator, activation-only overlay, exact `MCP_OAUTH_ADMIN_ISSUANCE_ENABLED=1`,
@@ -39,7 +40,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | Input | Source and validation |
 | --- | --- |
 | release_sha, plan_sha256, archive_sha256 | Reviewed landed main commit; SHA-256 of this exact RELEASE.md and exact `git archive` tar; no abbreviated identities |
-| window, window_id, window_end_utc | W2…W7, six alphanumeric characters, UTC end within 30 minutes on box clock |
+| window, window_id, window_end_utc | W1…W7 or W2b, six alphanumeric characters, UTC end within 30 minutes on box clock (W6: within 90 minutes, HezLead ruling; beyond its end only ai-emergency-close and a recovered close remain) |
 | baseline_oauth_sha, baseline_oauth_image | Live OAuth `current`/RELEASE_SHA + container source/image measurement; full SHA/digest |
 | baseline_edge_sha, baseline_edge_image | Live edge `current`/RELEASE_SHA, image and immutable bind mounts |
 | baseline_stack_sha, baseline_postgres_image | Live stack `current`/RELEASE_SHA and PostgreSQL container image |
@@ -48,9 +49,13 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | edge_recycle_service, edge_recycle_timer, edge_recycle_sha256 | Exact recycle units discovered from box timer/service inventory and systemctl cat byte digest, remeasured per window |
 | baseline_ledger_sha256 | SHA-256 of sorted version lines from live migration ledger, including final newline |
 | gate_receipt_sha256 | Independent checker's receipt digest; see GATES.json; exact combined build, no stale lane receipts |
-| rollback_decision | `retain-additive` W1–W2; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
+| rollback_decision | `retain-additive` W1–W2 and W2b; `restore-service` W3–W5; `close-and-reconcile` W6–W7 |
 | approval | `null` W1–W5; W6/W7 explicit Tom/HezLead approval object tied to window ID, release, plan digest, action and a nonempty prompt reference; W6 authorizes activation and assigned human consent |
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
+| probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
+| w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
+| w6_window_id | W7 only, REQUIRED there: the window ID of the W6 of this release that closed success. W7 reads that W6's C1.json and close-result.json from its box proof directory and measures the digest itself |
+| w2b_window_id | W6 only, REQUIRED there (absent in every other window): the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. W2 RGLqZX ran at 5f64fab4 and its issuer credential was rolled back, so at the W3–W7 release the credential exists only through W2b. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt and issuer-credential.txt |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
@@ -108,13 +113,14 @@ separately derived from RELEASE_SHA. A mismatch STOPs activation.
 
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
-| W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
-| W2 SCHEMA | common preflight/open/session; ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (five separate transactions, probes after each), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
+| W1 BACKUP GATE | common preflight/open/session; ai-w1-backup-gate (shared with W2b and W4) verifies the fresh backup and restore receipt, ordinary probes/live controls, ai-close. HezLead takes the backup before this window; this plan never starts backup or restore services. |
+| W2 SCHEMA | common preflight/open/session; ai-w2-stage-probes (Mac), ai-w2-preflight (includes ai-w2-measure), ai-w2-apply (pre-fence probe, five separate transactions, probes after each, DCR probe grant revoke), ai-w2-reconcile, ai-w2-probes, issuer credential, ordinary controls, ai-close. Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve. |
+| W2b ISSUER | Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back. common preflight/open/session (ordinary probes and ai-live-controls before, pre-W1 consent receipt as for W1–W4); ai-w1-backup-gate (fresh backup, as W1); ai-w2b-preflight (bound W2 proof, ledger, NOLOGIN role without password, credential file absent); ai-w2-issuer-credential; ai-w2b-forward-catalogs (all five forward catalogs true, unmodified; a false one runs ai-w2-issuer-rollback and STOPs); ordinary probes, ai-live-controls after, ai-close. No DCR probe grant and no backfill. Failure: ai-w2-issuer-rollback, then recovered close. The order is W2b, W3, then W4, W5, W6, W7; nothing in W2b or in the W6 binding assumes which window ran just before or after it. |
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
-| W4 EDGE/CADDY | common preflight/open/session; ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
+| W4 EDGE/CADDY | common preflight/open/session; ai-w1-backup-gate (fresh backup, as W1); ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight (runs ai-live-controls phase before with the pre-W1 consent receipt), ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
-| W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
-| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
+| W6 ACTIVATION + C1 | ai-w6-c1-inputs (Mac producer), ai-w6-preflight (readiness + activation/consent approval); ai-edge-refresh first if the edge receipt is stale; common preflight/open/session; ai-w6-prepare and upload C1-inputs.json; ai-w6-activation-checks (includes the retained recycle archive); ai-w6-client-document, ai-w6-client-verification (reviewed C1 row, issuance still CLOSED); ai-w6-activation-apply (shared remeasure; recycle timer HELD until finish), probes, readback; ai-w6-client-check, download C1-client-check.txt; ai-w6-start, ai-w6-pointer; owner approve immediately before consent; box ai-w6-audit-watch; Mac ai-w6-fence-driver (agent receipt, upload, audit, download, human revoke inside the 240 s fence); agent receipt again, owner withdrawal, upload client-withdraw.json and agent-final.json, fence readback, ai-w6-finish (both paths remeasure into edge-measurement-final.json and re-arm the timer), secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input retains OPEN (HezLead ruling at this release: keep open). W6 may last 90 minutes. Failure stops forward work; withdraw/revoke any committed grant, ai-emergency-close (re-arms the timer) before the recovered close; every close STOPs while the timer is inactive. |
+| W7 RETIRE | ai-w7-approval; EDGE_MEASUREMENT_FILE = W6's edge-measurement-final.json, or ai-edge-refresh first if a recycle made it stale; common preflight/open/session, ai-w7-preflight (the W6 named by w6_window_id closed success with an exact C1 report), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged and works with issuance OPEN (keep-open) or CLOSED; never restore opaque authentication. |
 
 After any failure STOP forward work and record the step and fixed failure code in
 LOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,
@@ -152,7 +158,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval'}, 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_window_id','w6_window_id'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -162,15 +168,16 @@ for k in keys:
         need(isinstance(d[k],str) and re.fullmatch('sha256:[0-9a-f]{64}',d[k]), k)
 for k,suffix in [('edge_recycle_service','.service'),('edge_recycle_timer','.timer')]:
     need(isinstance(d[k],str) and re.fullmatch(r'[A-Za-z0-9_-]+'+re.escape(suffix),d[k]), k)
-need(d['window'] in ['W'+str(x) for x in range(1,8)], 'window')
+need(d['window'] in ['W'+str(x) for x in range(1,8)]+['W2b'], 'window')
 need(isinstance(d['window_id'],str) and re.fullmatch('[A-Za-z0-9]{6}',d['window_id']), 'window_id')
 need(isinstance(d['window_end_utc'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',d['window_end_utc']), 'window_end_utc')
 end=datetime.datetime.strptime(d['window_end_utc'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800, 'fresh deadline')
+# HezLead ruling: W6 (activation, consent and C1 smoke in one window) may last 90 minutes; every other window 30.
+need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=(5400 if d['window']=='W6' else 1800), 'fresh deadline')
 need(re.fullmatch(r'/srv/commonswarm/site/releases/[A-Za-z0-9._-]+',d['baseline_site_target']) is not None, 'site target')
 need(hashlib.sha256(plan.read_bytes()).hexdigest()==d['plan_sha256'], 'plan bytes')
 need(hashlib.sha256(receipt.read_bytes()).hexdigest()==d['gate_receipt_sha256'], 'checker receipt bytes')
-decision={'W1':'retain-additive','W2':'retain-additive','W3':'restore-service','W4':'restore-service','W5':'restore-service','W6':'close-and-reconcile','W7':'close-and-reconcile'}
+decision={'W1':'retain-additive','W2':'retain-additive','W2b':'retain-additive','W3':'restore-service','W4':'restore-service','W5':'restore-service','W6':'close-and-reconcile','W7':'close-and-reconcile'}
 need(d['rollback_decision']==decision[d['window']], 'rollback decision')
 def approval(v,action):
     need(isinstance(v,dict) and set(v)=={'approver','action','release_sha','window_id','plan_sha256','prompt_ref'}, action+' approval required')
@@ -185,6 +192,16 @@ if d.get('keep_open',False):
     need(d['window']=='W6','keep-open window')
     approval(d.get('keep_open_approval'),'keep-admin-issuance-open')
 else: need(d.get('keep_open_approval') is None,'no unused keep-open approval')
+if d['window']=='W2': need(isinstance(d.get('probe_workspace_id'),str) and re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',d['probe_workspace_id']) is not None, 'W2 probe_workspace_id')
+else: need('probe_workspace_id' not in d, 'probe_workspace_id is W2-only')
+if d['window']=='W2b':
+    need(isinstance(d.get('w2_release_sha'),str) and re.fullmatch('[0-9a-f]{40}',d['w2_release_sha']) is not None, 'W2b w2_release_sha')
+    need(isinstance(d.get('w2_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2_window_id']) is not None, 'W2b w2_window_id')
+else: need('w2_release_sha' not in d and 'w2_window_id' not in d, 'w2_release_sha/w2_window_id are W2b-only')
+if d['window']=='W6': need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
+else: need('w2b_window_id' not in d, 'w2b_window_id is W6-only')
+if d['window']=='W7': need(isinstance(d.get('w6_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w6_window_id']) is not None, 'W7 w6_window_id')
+else: need('w6_window_id' not in d, 'w6_window_id is W7-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
@@ -372,7 +389,7 @@ EDGE_QUERY_CLEANUP
  rm -r -- "$EDGE_QUERY_STAGE"
 }
 trap edge_query_cleanup EXIT
-unset SOURCE_DATABASE_URL TARGET_DATABASE_URL
+unset SOURCE_DATABASE_URL TARGET_DATABASE_URL NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT
 PG_SERVICE_OUTPUT="$EDGE_QUERY_STAGE/service.conf" PG_PASS_OUTPUT="$EDGE_QUERY_STAGE/pass" \
  COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
  node "/home/commonswarm/admin-issuance/releases/$1/deploy/supabase-stack/migrate/make-pg-service.mjs" >"$EDGE_QUERY_STAGE/session.log" 2>&1
@@ -401,6 +418,195 @@ need(m['target']==m['mount']=='/home/commonswarm/edge/releases/'+sha,'target/mou
 print('PASS current edge-measurement.json generation/invalidated_at/release_sha/target/mount/image_digest/artifact_digest')
 PY
 ```
+
+## Edge remeasure (shared by W5/W6/W7 opens, W6 apply and W6 finish)
+
+A recycle (the six-hour timer or any hook run) increments `release_generation`,
+so an older `edge-measurement.json` no longer matches the live row and
+ai-edge-receipt STOPs. `ai-edge-remeasure` is the ONE producer of a fresh
+receipt: with the recycle timer already stopped by its caller, it runs the
+installed hook pair (before closes issuance and invalidates; after measures the
+live edge against the root-owned recycle.json and reopens only a previously open,
+still-approved release), reads the row with the exact query bytes of
+ai-edge-receipt, writes the new receipt from recycle.json and that generation,
+and then validates it with ai-edge-receipt itself. Two rules hold for every
+block here: a CLOSED claim or a CLOSED marker exists ONLY right after a
+successful independent readback, and everything else is UNKNOWN; and for
+ai-edge-remeasure, ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish and
+ai-w6-activation-rollback, exit 1 means confirmed CLOSED, 2 means UNKNOWN and
+any other nonzero status is UNKNOWN. Each of these blocks installs its status
+trap as its first statement: an unconfirmed 1 becomes 2, and an exit before the
+block's last line (even one that leaves $? at 0) becomes 2. ai_run returns 2
+for any failure before it evaluates a block (allowlist, plan verification,
+lookup, syntax), so a dispatch failure can never read as a confirmed close.
+Every production node launch first unsets NODE_OPTIONS and the admin-smoke
+test-transport variables; scripts/admin-smoke.mjs refuses fixture inputs and
+the test transport refuses to load unless ADMIN_SMOKE_TEST_TRANSPORT=1, which
+only the test harness sets. Any failure after the hooks start (a hook, the row read, the
+receipt or its validation, possibly after a committed reopen) runs the hook's
+`close` mode (release role, close first, then invalidate, marker reason
+`remeasure-validation-failed`) before the step fails; a failed close is
+reported separately ("issuance may be OPEN"). ai-edge-refresh, ai-w6-finish and
+ai-w6-activation-rollback each run in their own subshell, so their EXIT traps
+re-arm the recycle timer before control returns to the window shell and its
+ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs
+`ai-edge-refresh`, which owns the timer for that step only and always re-arms it.
+
+```sh
+# step: ai-edge-remeasure
+# readonly: no
+# host: box root; the CALLER has stopped the recycle timer and re-arms it afterwards
+set -euo pipefail
+# Status contract (also ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish, ai-w6-activation-rollback): 0 success;
+# 1 ONLY right after an independent readback confirmed issuance CLOSED; any other status (2 by convention) UNKNOWN.
+C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
+remeasure_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap remeasure_exit EXIT
+: "${INPUTS_FILE:?FAIL ai-edge-remeasure: INPUTS_FILE expected absolute-file got unset; STOP}" "${PLAN_FILE:?FAIL ai-edge-remeasure: PLAN_FILE expected absolute-file got unset; STOP}"
+: "${EDGE_MEASUREMENT_OUT:?FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-new-file got unset; STOP}"
+case "$EDGE_MEASUREMENT_OUT" in /*) ;; *) printf 'FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-path got relative; STOP\n' >&2; exit 1;; esac
+if test -e "$EDGE_MEASUREMENT_OUT" || test -L "$EDGE_MEASUREMENT_OUT"; then printf 'FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absent got present; STOP\n' >&2; exit 1; fi
+REMEASURE_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-remeasure: recycle timer name expected readable got failure; STOP\n' >&2; exit 1; }
+REMEASURE_SERVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_service"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-remeasure: recycle service name expected readable got failure; STOP\n' >&2; exit 1; }
+if systemctl is-active --quiet "$REMEASURE_TIMER"; then printf 'FAIL ai-edge-remeasure: recycle timer expected stopped-by-caller got active; STOP\n' >&2; exit 1; fi
+test "$(systemctl show -p ActiveState --value "$REMEASURE_SERVICE")" = inactive || { printf 'FAIL ai-edge-remeasure: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
+# Any failure from here on may follow a committed reopen: close and invalidate (hook close mode, release role,
+# close first) before returning failure, and report a failed close separately.
+# Exit 1: failed, issuance CLOSED (confirmed by the close mode's readback). Exit 2: failed, state UNKNOWN.
+remeasure_fail() {
+ if COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle close; then
+  C1_CLOSED_CONFIRMED=1
+  printf 'FAIL ai-edge-remeasure: failure close confirmed issuance CLOSED by readback; STOP\n' >&2; exit 1
+ fi
+ printf 'FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; STOP\n' >&2
+ exit 2
+}
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; STOP\n' >&2; remeasure_fail; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; STOP\n' >&2; remeasure_fail; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_OUT" <<'PY' || { printf 'FAIL ai-edge-remeasure: receipt validation after the hook pair expected PASS got failure; STOP\n' >&2; remeasure_fail; }
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,out=sys.argv[1:4]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-edge-remeasure: '+what+' expected '+expected+' got '+got+'; STOP')
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+d=json.load(open(inputs)); sha=d['release_sha']
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,'ai-edge-remeasure').decode(),re.M|re.S)
+receipt=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]
+need(len(receipt)==1,'ai-edge-receipt block','one','other')
+query=re.findall(r"^query=r'''\n(.*?)\n'''$",receipt[0],re.M|re.S)
+need(len(query)==1,'ai-edge-receipt row query','one','other')
+# The recycle input is the hook's own reference (the hook pair above already required it root-owned 0600).
+r_raw=read_regular('/etc/commonswarm-admin-release/recycle.json')
+need(r_raw is not None,'recycle.json','regular-file','missing-or-not-regular')
+need(stat.S_IMODE(os.stat('/etc/commonswarm-admin-release/recycle.json').st_mode)==0o600,'recycle.json mode','0600','other')
+r=json.loads(r_raw)
+need(r.get('release_sha')==sha and r.get('target')=='/home/commonswarm/edge/releases/'+sha,'recycle.json release','this-release','other')
+try:
+    row=json.loads(subprocess.check_output(['/bin/bash','-s','--',sha,d['baseline_postgres_image']],input=query[0]+'\n',text=True,stderr=subprocess.DEVNULL))
+except Exception:
+    raise SystemExit('FAIL ai-edge-remeasure: cutover row expected readable got failure; STOP') from None
+gen=row.get('release_generation')
+need(type(gen) is int and gen>0 and gen==row.get('measured_generation') and row.get('invalidated_at','missing') is None,'measured generation','measured-and-not-invalidated','stale-or-invalidated')
+need(row.get('approved_edge_release_sha')==sha and row.get('measured_edge_release_sha')==sha,'approved/measured edge release','this-release','other')
+for field,observed in (('target','measured_edge_target'),('target','measured_mount'),('image_digest','measured_image_digest'),('artifact_digest','measured_artifact_digest')):
+    need(r.get(field)==row.get(observed),observed,'recycle.json '+field,'other')
+m={'release_sha':sha,'target':r['target'],'mount':r['target'],'image_digest':r['image_digest'],'artifact_digest':r['artifact_digest'],'generation':gen,'invalidated_at':None}
+fd=os.open(out,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as f: f.write(json.dumps(m,sort_keys=True)+'\n')
+# The new receipt passes the same validator every open uses.
+env=dict(os.environ,EDGE_MEASUREMENT_FILE=out,INPUTS_FILE=inputs)
+need(subprocess.run(['/bin/bash'],input=receipt[0],text=True,env=env,stdout=subprocess.DEVNULL).returncode==0,'new edge-measurement.json','valid-edge-receipt','refused')
+print('PASS ai-edge-remeasure: hook pair measured generation '+str(gen)+'; fresh edge-measurement.json validated')
+PY
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+```
+
+```sh
+# step: ai-edge-refresh
+# readonly: no
+# host: HezLead box root, before ai-open of W5/W6/W7 when ai-edge-receipt finds the receipt stale; owns the recycle timer for this step only
+# Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell (ai_run is eval).
+(
+C1_CLOSED_CONFIRMED=0 REFRESH_TIMER=
+C1_BLOCK_DONE=0
+edge_refresh_rearm() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Every exit re-arms the timer once its name is known; a failed re-arm is reported and fails the step.
+ if test -n "${REFRESH_TIMER:-}"; then
+  systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap edge_refresh_rearm EXIT
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${PLAN_FILE:?}" "${EDGE_MEASUREMENT_OUT:?}"
+REFRESH_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { REFRESH_TIMER=; printf 'FAIL ai-edge-refresh: recycle timer name expected readable got failure; STOP\n' >&2; exit 2; }
+systemctl stop "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-edge-refresh "$EDGE_MEASUREMENT_OUT" <<'PY' || { REFRESH_STATUS=$?; printf 'FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$REFRESH_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL ai-edge-refresh: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' >&2; exit 1; fi; printf 'FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' >&2; exit 2; }
+import hashlib,json,os,re,stat,subprocess,sys
+# The child's 0 or 1 passes through; anything else, including this script's own failure, is 2 (UNKNOWN).
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+rc=2
+try:
+    blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
+    found=[b for b in blocks if b.startswith('# step: ai-edge-remeasure\n')]
+    if len(found)!=1: raise SystemExit('FAIL ai-edge-refresh: ai-edge-remeasure block expected one got other; STOP')
+    # The child bash gets its inputs explicitly; shell variables need not be exported.
+    rc=(subprocess.run(['/bin/bash'],input=found[0],text=True,env=dict(os.environ,PLAN_FILE=sys.argv[1],INPUTS_FILE=sys.argv[2],EDGE_MEASUREMENT_OUT=sys.argv[4])).returncode)
+except BaseException as error:
+    if isinstance(error,SystemExit) and isinstance(error.code,str): print(error.code,file=sys.stderr)
+    rc=2
+sys.exit(rc if rc in (0,1) else 2)
+PY
+printf 'PASS ai-edge-refresh: fresh edge-measurement.json at %s; recycle timer re-armed on exit\n' "$EDGE_MEASUREMENT_OUT"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
+```
+
 
 ```sh
 # step: ai-open
@@ -504,7 +710,7 @@ need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}
 try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
 except ValueError: measured=None
 need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
-phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+phase='pre-W1' if r['window'] in ('W1','W2','W2b','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
 need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
 if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
@@ -582,6 +788,7 @@ printf 'PASS ai-open: %s; secret cleanup pointer retained\n' "$WINDOW"
 # step: ai-db-session
 # readonly: no
 # host: box root; task files only, database queries read-only until apply
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 test -f "$PROOF_DIR/open.txt" || { printf 'FAIL ai-db-session: open.txt expected present got missing; STOP\n' >&2; exit 1; }
 test ! -e "$PROOF_DIR/closed.txt" || { printf 'FAIL ai-db-session: closed.txt expected absent got present; STOP\n' >&2; exit 1; }
@@ -620,7 +827,9 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill) ;; *) return 1;; esac
+ # A failure BEFORE the block runs (allowlist, plan verification, lookup, syntax) is 2: it confirms nothing, so it
+ # can never read as a status-contract block's confirmed-CLOSED 1.
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback|ai-edge-remeasure|ai-w6-audit|ai-w6-closed-gate-probe) ;; *) return 2;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -645,8 +854,8 @@ blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],
 found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
 if len(found)!=1: raise SystemExit("FAIL ai_run: block "+sys.argv[2]+" expected one got "+str(len(found))+"; STOP")
 sys.stdout.write(found[0])
-' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 1
- printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 1
+' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 2
+ printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 2
  eval "$AI_RUN_SOURCE"
 }
 ai_deadline() {
@@ -811,7 +1020,7 @@ need(isinstance(c['measured_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}
 try: measured=datetime.datetime.fromisoformat(c['measured_at'].replace('Z','+00:00'))
 except ValueError: measured=None
 need(measured is not None,'consent measured_at','valid-UTC-time','invalid')
-phase='pre-W1' if r['window'] in ('W1','W2','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
+phase='pre-W1' if r['window'] in ('W1','W2','W2b','W3','W4') or (r['window']=='W5' and r['phase']=='before') else 'post-W5'
 need(c['consent_phase']==phase,'consent_phase for '+r['window']+' '+r['phase'],phase,c['consent_phase'] if c['consent_phase'] in ('pre-W1','post-W5') else 'other')
 if phase=='pre-W1':
     need(c['cleanup'] is None,'pre-W1 consent cleanup','null','non-null')
@@ -839,7 +1048,7 @@ PY
 
 HezLead supplies the controls worker's LIVE_CONTROLS_FILE before open and after
 each window, together with the CONSENT_RECEIPT_FILE it is bound to: `pre-W1`
-for W1–W4 and W5 before, `post-W5` for W5 after/recovery, W6 and W7. This plan
+for W1–W4, W2b and W5 before, `post-W5` for W5 after/recovery, W6 and W7. This plan
 only validates that external input and retains `ordinary-<phase>.json` and
 `consent-<consent_phase>.json` in PROOF_DIR; no operator-authored probe is
 permitted during the release window.
@@ -849,26 +1058,91 @@ permitted during the release window.
 HezLead takes a fresh verified database/object backup before W1. The existing
 isolated restore drill must have a complete successful receipt; no live restore
 or service dispatch is authorized here. W2 consumes this exact W1 close.
+The same block is W2b's and W4's backup gate (HezLead ruling): it runs right
+after their common open/session, as in W1, and their success close requires its
+backup-gate.json. W1 is not rerun at a later release.
 
 ```sh
 # step: ai-w1-backup-gate
 # readonly: no
-# host: HezLead box root; status reads and nonsecret proof only
+# host: HezLead box root; status reads and nonsecret proof only; W1, W2b and W4
 set -euo pipefail
-test "$WINDOW" = W1
+case "$WINDOW" in W1|W2b|W4) ;; *) printf 'FAIL ai-w1-backup-gate: window expected W1-W2b-or-W4 got other; STOP\n' >&2; exit 1;; esac
 ai_deadline
-python3 - "$PROOF_DIR/backup-gate.json" <<'PY'
+python3 - "$PROOF_DIR/backup-gate.json" "$INPUTS_FILE" "$WINDOW" <<'PY'
 import datetime,json,pathlib,sys
 now=datetime.datetime.now(datetime.timezone.utc)
-b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
-r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
+try:
+    b=json.load(open('/var/backups/commonswarm-postgres/status.json'))
+    r=json.load(open('/var/backups/commonswarm-postgres/restore-status.json'))
+except (OSError,ValueError): raise SystemExit('FAIL backup and restore status files; STOP') from None
 assert all(b.get(k) is True for k in ('ok','database_bytes_verified','object_bytes_verified')), 'FAIL verified backup; STOP'
 age=(now-datetime.datetime.fromisoformat(b['verified_at'].replace('Z','+00:00'))).total_seconds()
 assert 0<=age<=1800 and b['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL fresh backup; STOP'
 assert r.get('ok') is True and r.get('state')=='complete', 'FAIL complete restore drill; STOP'
 age=(now-datetime.datetime.fromisoformat(r['at'].replace('Z','+00:00'))).total_seconds()
 assert 0<=age<=8*86400, 'FAIL restore freshness; STOP'
-pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','backup_verified_at':b['verified_at'],'restore_at':r['at']})+'\n')
+d=json.load(open(sys.argv[2])); assert d['window']==sys.argv[3], 'FAIL backup gate window binding; STOP'
+# A bound receipt: release, window and window ID, the measured times, the destination and the gate time.
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'status':'PASS','release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],
+    'backup_verified_at':b['verified_at'],'restore_completed_at':r['at'],'destination':b['destination'],
+    'gate_at':now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')},sort_keys=True)+'\n')
+PY
+BACKUP_GATE_DIR="$PROOF_DIR"
+ai_run ai-backup-gate-check
+```
+
+Every consumer of a backup-gate.json (W2 preflight for W1, W2b preflight and
+issuer credential, W4 preflight and apply, and the W1/W2b/W4 success close)
+validates it with this ONE block, never by file presence: exact keys, the
+receipt bound to its own window directory's inputs.json (release, window,
+window ID), the backup verified at most 1800 s and the restore drill completed
+at most 8 days before the gate time, the gate time inside that window
+(open.txt <= gate_at < window_end_utc, and not in the future) and the reviewed
+backup destination.
+
+```sh
+# step: ai-backup-gate-check
+# readonly: yes
+# host: box root; run through ai_run by every backup-gate consumer with BACKUP_GATE_DIR set to that window's proof directory
+set -euo pipefail
+: "${BACKUP_GATE_DIR:?FAIL ai-backup-gate-check: BACKUP_GATE_DIR expected window-proof-directory got unset; STOP}"
+python3 - "$BACKUP_GATE_DIR" <<'PY'
+import datetime,json,os,pathlib,re,stat,sys
+w=pathlib.Path(sys.argv[1])
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-backup-gate-check: '+what+' expected '+expected+' got '+got+'; STOP')
+def read(name):
+    try: fd=os.open(str(w/name),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except OSError: return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        return os.read(fd,65537)
+    finally: os.close(fd)
+def when(value,what):
+    ok=isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z',value) is not None
+    try: t=datetime.datetime.fromisoformat(value.replace('Z','+00:00')) if ok else None
+    except ValueError: t=None
+    need(t is not None,what,'UTC-ISO-8601-Z-time','other'); return t
+need(w.is_absolute() and w.is_dir() and not w.is_symlink(),'backup gate directory','absolute-directory','missing-or-symlink')
+raw=read('backup-gate.json'); need(raw is not None and len(raw)<=65536,'backup-gate.json','regular-file','missing-or-not-regular')
+try: g=json.loads(raw)
+except ValueError: g=None
+need(isinstance(g,dict),'backup-gate.json','JSON-object','malformed')
+need(set(g)=={'status','release_sha','window','window_id','backup_verified_at','restore_completed_at','destination','gate_at'} and g['status']=='PASS','backup-gate.json keys','exact-PASS-receipt','other')
+try: i=json.loads(read('inputs.json') or b'')
+except ValueError: i=None
+need(isinstance(i,dict),'window inputs.json','JSON-object','missing-or-malformed')
+need(g['window'] in ('W1','W2b','W4') and all(g[k]==i.get(k) for k in ('release_sha','window','window_id')),'backup-gate.json binding','same-release-window-and-window-id-as-inputs','other')
+gate=when(g['gate_at'],'gate_at'); backup=when(g['backup_verified_at'],'backup_verified_at'); restore=when(g['restore_completed_at'],'restore_completed_at')
+need(0<=(gate-backup).total_seconds()<=1800,'backup verified_at at gate time','at-most-1800s-old','stale-or-future')
+need(0<=(gate-restore).total_seconds()<=8*86400,'restore drill completed_at at gate time','at-most-8-days-old','stale-or-future')
+need(isinstance(g['destination'],str) and g['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'),'backup destination','reviewed-r2-prefix','other')
+opened=read('open.txt'); need(opened is not None,'window open.txt','regular-file','missing')
+start=when(opened.decode(errors='replace').strip(),'open.txt')
+end=when(i.get('window_end_utc'),'window inputs window_end_utc')
+need(start<=gate<end and gate<=datetime.datetime.now(datetime.timezone.utc),'gate_at','inside-this-window','before-open-after-end-or-future')
+print('PASS ai-backup-gate-check: '+g['window']+' '+g['window_id']+' backup and restore fresh at gate '+g['gate_at'])
 PY
 ```
 
@@ -938,12 +1212,87 @@ pass. M4 refuses checksum evidence; M1 refuses provider artifacts/bindings.
 Never erase ordinary or historical data to pass a reserve. No automatic or
 post-COMMIT production schema rollback is authorized.
 
-Between-probe credentials: HezLead stages ordinary-probes.json ONLY in
-SECRET_STAGE (0700 /private/tmp/anvil-secret.XXXXXX, file 0600), containing
-mcp_access_token, human_access_token and workspace_id for his authorized
-ordinary smoke workspace. Values never enter argv/env/proof or output. Missing,
-expired or refused credentials STOP. Refresh through the reviewed ordinary
-client procedure before W2; this plan does not invent issuance or refresh.
+Between-probe credentials (binding probe contract, lead and release owner,
+2026-10-04). MCP access tokens live 300 s and refresh tokens rotate, and the
+probes run inside ai-w2-apply after its no-rerun fence, so no staged access
+token is used. The producer (`scripts/live-ordinary-controls.mjs
+probe-credentials`) hands off a DEDICATED DCR grant (the pre-W1 consent
+receipt's `dcr_client_ids[0]`) and a fresh human GoTrue access token in
+`/Users/yulanbot/work/c1-run/probe-credentials-W2-<window_id>.json` (0600),
+with exactly: release_sha, window_id, workspace_id, mcp_client_id,
+mcp_refresh_token, mcp_resource (`https://mcp.commonswarm.com/mcp`),
+human_access_token and human_token_exp (integer JWT exp). ai-w2-stage-probes
+validates it on the Mac (0600, exact keys, release/window/workspace equal to
+INPUTS, human_token_exp >= window_end_utc + 300 s; otherwise STOP before any W2
+write), uploads its bytes on stdin in ONE ssh call to
+`$SECRET_STAGE/ordinary-probes.json` (0600), compares only digests, then
+deletes the local file with the guarded rm and proves it is gone. Values never
+enter argv, env, proof or output.
+
+Every probe (ai-w2-between-probes) refreshes first: grant_type=refresh_token
+with mcp_client_id and mcp_resource at the discovered token_endpoint; on 200 it
+writes the rotated refresh token back atomically (temp file in SECRET_STAGE,
+fsync, rename, 0600) BEFORE it uses the new access token for MCP initialize,
+then reads pending_access with human_access_token. Discovery, initialize and the
+human read may retry ONCE on a transport timeout or connection error, never on
+an HTTP status; the refresh grant is NEVER retried. Any failure STOPs before the
+next migration. Every probe also requires rotation: a 200 refresh must return a
+NEW refresh token. The same probe runs once immediately BEFORE ai-w2-apply
+writes apply-started.txt (`between-prefence.json`), and so proves the revoke
+PRECONDITIONS before the fence: a refresh_token grant with the staged token
+returns 200 with a new refresh token (rotation is on, which the replay
+revocation depends on), persisted atomically before use, and MCP initialize
+succeeds with the new access token. A failure there applies nothing. The replay
+itself cannot be exercised before the fence without revoking the grant the
+between-probes need, so it runs after the loop and on every exit and is proven
+there.
+
+The live issuer advertises no revocation_endpoint (the oidc-provider revocation
+feature is off), so the plan revokes WITHOUT RFC 7009, by oidc-provider 9.12.2
+replay revocation (`lib/actions/grants/refresh_token.js`: a refresh with an
+already consumed refresh token destroys it, revokes the whole grant and returns
+invalid_grant). After the loop, and on every W2 exit path that reached the
+stage (the EXIT guards and ai-close), ai-w2-revoke-probes makes three refresh
+requests at the issuer-origin token_endpoint, each exactly once: (1) with the
+current token, which must return 200 with a new refresh token (persisted
+atomically, never retried); (2) with the old, now consumed token, which must
+return 400 invalid_grant (this is the revocation); (3) with the new token, which
+must return 400 invalid_grant, the PROOF that the family is revoked
+(`dcr-probe-revoked.json`). This is the ONLY accepted proof: a NEW token that
+step (1) issued, the replay of the OLD one rejected, and the NEW one rejected.
+Two rejections of the same token never count. If step (1) returns invalid_grant
+(the held token is unknown, expired, destroyed or already consumed, for example
+after a lost refresh response), nothing proves the grant is gone, because
+oidc-provider revokes a grant only for a consumed token that still exists: that
+is REVOKE-UNPROVEN, STOP, no proof file. Discovery need not advertise a revocation_endpoint anywhere; the
+token_endpoint must be on the issuer origin. An unproven revoke is
+REVOKE-UNPROVEN with a STOP report, never a partial apply.
+If ai-w2-stage-probes fails anywhere after the local file validated, it
+revokes the grant the same way by replay (from the local copy, or from the box copy when
+the local one is gone), deletes the local file with the guarded rm, proves
+absence and STOPs; a retry needs a new DCR grant (a new consent run). The upload
+writes `probe-staged.txt` in PROOF_DIR, a durable revoke obligation: the EXIT
+guards of ai-w2-preflight and ai-w2-apply and every ai-close run
+ai-w2-revoke-probes while it exists without `dcr-probe-revoked.json`, and
+ai-open-abort refuses. Each revoke is ONE attempt: `dcr-probe-revoke-attempted.txt`
+is written before the first grant request, a started revoke is never re-run, and
+an unproven one is recorded as REVOKE-UNPROVEN (`dcr-probe-revoke-unproven.json`)
+and STOPs for HezLead. ai-close then refuses to close (naming the client_id) until
+HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<absolute path>` to a ruling file
+(regular, not a symlink, mode 0600 or 0644) with exactly `action`
+(`accept-unproven-dcr-revoke`), `approver` (`HezLead`), `release_sha`,
+`window_id`, `plan_sha256`, `client_id` and `at`; each is bound to INPUTS and to
+the client_id in the nonsecret `dcr-probe-revoke-unproven.json`. The file is read
+completely (at most 64 KiB) and parsed and hashed as those exact bytes. ai-close
+validates it before any other close check and again, finally, before the secret
+stage is removed (a refusal there leaves the window retryable); the validated
+payload is kept in memory and written with its sha256 to
+`dcr-probe-revoke-accepted.json` only in the successful close commit, just before
+closed.txt, so a window is never stuck open. A W2 that
+stopped before its fence (no apply-started.txt) closes by proving the ledger
+holds no 20261003 version; admin_cutover_state does not exist before W2 applies.
+This plan does not invent issuance; the producer's final cleanup relies on this
+revoke proof.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
 `<released_sha>.tar` archives from the historical release inputs (release-record
@@ -953,20 +1302,199 @@ It also checks the current files: if historical and reviewed hashes disagree,
 STOP rather than changing observed evidence to fit a new build.
 
 ```sh
+# step: ai-w2-stage-probes
+# readonly: no
+# host: Mac /bin/bash 3.2; after ai-open, before ai-w2-preflight; one ssh upload on stdin, secrets never in argv/env/output
+set -euo pipefail
+: "${INPUTS_FILE:?FAIL ai-w2-stage-probes: INPUTS_FILE expected absolute-regular-file got unset; STOP}"
+test "$(command -v rm)" = /Users/yulanbot/.local/bin/rm || { printf 'FAIL ai-w2-stage-probes: rm expected guarded /Users/yulanbot/.local/bin/rm got other; STOP\n' >&2; exit 1; }
+W2_RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+W2_WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
+PROBE_CREDENTIALS_FILE=/Users/yulanbot/work/c1-run/probe-credentials-W2-$W2_WINDOW_ID.json
+test ! -e "$PROBE_CREDENTIALS_FILE.revoke-attempted" || { printf 'REVOKE-UNPROVEN ai-w2-stage-probes: an earlier local revoke attempt exists; never retried automatically; STOP\n' >&2; exit 1; }
+# Validation reads the file once by a non-following fd and prints only its sha256; nothing is written before it passes.
+PROBE_SHA256=$(python3 -c '
+import calendar,hashlib,json,os,re,stat,sys,time
+inputs,name=sys.argv[1:3]
+def fail(what,expected,got): raise SystemExit("FAIL ai-w2-stage-probes: "+what+" expected "+expected+" got "+got+"; STOP before any W2 write")
+d=json.load(open(inputs))
+if d.get("window")!="W2": fail("INPUTS window","W2","other")
+try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except OSError: fail("probe credentials file","regular-file","missing-or-symlink")
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=os.getuid(): fail("probe credentials file","0600-regular-file-owned-by-caller","other-mode-or-owner")
+    chunks=[]
+    while True:
+        chunk=os.read(fd,65536)
+        if not chunk: break
+        chunks.append(chunk)
+finally: os.close(fd)
+raw=b"".join(chunks)
+try: c=json.loads(raw)
+except ValueError: c=None
+keys={"release_sha","window_id","workspace_id","mcp_client_id","mcp_refresh_token","mcp_resource","human_access_token","human_token_exp"}
+if not (isinstance(c,dict) and set(c)==keys): fail("probe credentials keys","probe-contract-keys","other-set")
+if c["release_sha"]!=d["release_sha"]: fail("probe credentials release_sha","input-release-sha","mismatch")
+if c["window_id"]!=d["window_id"]: fail("probe credentials window_id","input-window-id","mismatch")
+if c["workspace_id"]!=d.get("probe_workspace_id"): fail("probe credentials workspace_id","input-probe-workspace-id","mismatch")
+if c["mcp_resource"]!="https://mcp.commonswarm.com/mcp": fail("probe credentials mcp_resource","https://mcp.commonswarm.com/mcp","other")
+if not (isinstance(c["mcp_client_id"],str) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,512}",c["mcp_client_id"])): fail("probe credentials mcp_client_id","bounded-id","other")
+if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ("mcp_refresh_token","human_access_token")): fail("probe credentials tokens","bounded-strings","other")
+end=calendar.timegm(time.strptime(d["window_end_utc"],"%Y-%m-%dT%H:%M:%SZ"))
+if type(c["human_token_exp"]) is not int or c["human_token_exp"]<end+300: fail("human_token_exp","window_end_utc-plus-300s","shorter")
+print(hashlib.sha256(raw).hexdigest())
+' "$INPUTS_FILE" "$PROBE_CREDENTIALS_FILE")
+W2_PROOF_DIR=/home/commonswarm/admin-issuance/release-proofs/$W2_RELEASE_SHA-W2-$W2_WINDOW_ID
+# One ssh call: the box resolves the window's retained secret-stage pointer, installs stdin as 0600 and reports mode and digest only.
+W2_REMOTE_SCRIPT='set -euo pipefail; stage=$(cat "$1/secret-stage.path"); case "$stage" in /private/tmp/anvil-secret.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) exit 65;; esac; test -d "$stage"; test ! -L "$stage"; test "$(stat -c %a "$stage")" = 700; f=$stage/ordinary-probes.json; test ! -e "$f"; test ! -L "$f"; install -o root -g root -m 600 /dev/stdin "$f"; date -u +%Y-%m-%dT%H:%M:%SZ >"$1/probe-staged.txt"; mode=$(stat -c %a "$f"); digest=$(sha256sum "$f" | cut -d " " -f 1); printf "%s %s\n" "$mode" "$digest"'
+printf -v W2_REMOTE 'sudo -n /bin/bash -c %q _ %q' "$W2_REMOTE_SCRIPT" "$W2_PROOF_DIR"
+# After validation, EVERY failure revokes the grant by replay (one attempt): from the local copy when it is
+# still there, otherwise from the box copy through the verified plan's ai-w2-revoke-probes; then the
+# local copy is removed with the guarded rm and its absence proven, and the block STOPs.
+W2_SSH_ATTEMPTED=0
+w2_local_revoke() {
+ python3 -c '
+import json,os,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+name=sys.argv[1]; marker=name+".revoke-attempted"; I="https://mcp.commonswarm.com"
+def fail(what): raise SystemExit("FAIL ai-w2-stage-probes: local revoke "+what+"; STOP")
+def unproven(what): raise SystemExit("REVOKE-UNPROVEN ai-w2-stage-probes: local revoke "+what+"; local file retained 0600 for HezLead; never retried automatically; STOP")
+fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): fail("expected regular file")
+    raw=os.read(fd,1048576)
+finally: os.close(fd)
+c=json.loads(raw)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+TRANSPORT=(urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError)
+def send(url,form=None):
+    data=None if form is None else urllib.parse.urlencode(form).encode()
+    req=urllib.request.Request(url,data=data,headers={"Accept":"application/json","User-Agent":"curl/8.7.1"})
+    try:
+        with opener.open(req,timeout=15) as r: return r.status,r.read(1048577)
+    except urllib.error.HTTPError as e: return e.code,e.read(1048577)
+# Only a transport error may retry discovery once; a malformed or non-200 response never retries.
+reply=None
+for attempt in (1,2):
+    try: reply=send(I+"/.well-known/oauth-authorization-server"); break
+    except TRANSPORT:
+        if attempt==2: fail("discovery expected response got transport-error-after-one-retry")
+status,body=reply
+try: d=json.loads(body) if status==200 else None
+except ValueError: d=None
+if not isinstance(d,dict) or d.get("issuer")!=I: fail("discovery expected HTTP-200-issuer-metadata got other")
+token=d.get("token_endpoint")
+if not (isinstance(token,str) and token.startswith(I+"/")): fail("discovery expected issuer-origin token endpoint")
+mfd=os.open(marker,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+os.close(mfd)
+# Replay revocation (no RFC 7009): rotate, replay the consumed token, prove the new token is rejected; each once.
+def grant(rt,step):
+    try: status,body=send(token,{"grant_type":"refresh_token","client_id":c["mcp_client_id"],"refresh_token":rt,"resource":c["mcp_resource"]})
+    except TRANSPORT: unproven(step+" got transport-error-not-retried")
+    try: return status,json.loads(body)
+    except ValueError: return status,None
+def rejected(status,t): return status==400 and isinstance(t,dict) and t.get("error")=="invalid_grant"
+def keep(t):
+    if isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384:
+        c["mcp_refresh_token"]=t["refresh_token"]; tmp=name+"."+secrets.token_hex(6)+".tmp"
+        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+        finally: os.close(fd)
+        os.rename(tmp,name)
+status,t=grant(c["mcp_refresh_token"],"step 1 rotation refresh")
+if rejected(status,t): unproven("step 1 rotation refresh got HTTP-400-invalid_grant; the held token cannot prove the family revoked")
+elif status==200 and isinstance(t,dict) and isinstance(t.get("refresh_token"),str) and 0<len(t["refresh_token"])<=16384 and t["refresh_token"]!=c["mcp_refresh_token"]:
+    old=c["mcp_refresh_token"]; keep(t)
+    status,t=grant(old,"step 2 consumed-token replay")
+    if not rejected(status,t): keep(t); unproven("step 2 consumed-token replay expected HTTP-400-invalid_grant got HTTP-"+str(status))
+else:
+    keep(t); unproven("step 1 rotation refresh expected HTTP-200-new-token-or-400-invalid_grant got HTTP-"+str(status))
+status,t=grant(c["mcp_refresh_token"],"step 3 proof refresh")
+if not rejected(status,t): keep(t); unproven("step 3 proof refresh expected HTTP-400-invalid_grant got HTTP-"+str(status))
+print(json.dumps({"client_id":c["mcp_client_id"],"revoked":True,"proof":"refresh rejected"},sort_keys=True))
+' "$PROBE_CREDENTIALS_FILE"
+}
+w2_stage_fail() {
+ printf 'FAIL ai-w2-stage-probes: %s; revoking the probe grant; STOP\n' "$1" >&2
+ if test -f "$PROBE_CREDENTIALS_FILE" && test ! -L "$PROBE_CREDENTIALS_FILE"; then
+  W2_REVOKE_PROOF=$(w2_local_revoke) || exit 1
+  if test "$W2_SSH_ATTEMPTED" = 1; then
+   # The box copy holds the same, now revoked, token: record the proof there so no later step re-proves it.
+   printf -v W2_PROOF_REMOTE 'sudo -n /bin/bash -c %q _ %q %q' 'set -euo pipefail; test -f "$1/probe-staged.txt" || exit 0; set -C; printf "%s\n" "$2" >"$1/dcr-probe-revoked.json"' "$W2_PROOF_DIR" "$W2_REVOKE_PROOF"
+   ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_PROOF_REMOTE" </dev/null || printf 'FAIL ai-w2-stage-probes: box revoke proof write failed; the recovered ai-close re-proves on the box; STOP\n' >&2
+  fi
+ else
+  # No local copy left: revoke from the box copy with the verified plan's single-attempt revoke block.
+  W2_REVOKE_BLOCK=$(python3 -c '
+import hashlib,json,os,re,stat,sys
+plan,inputs=sys.argv[1:3]
+fd=os.open(plan,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode): raise SystemExit("FAIL ai-w2-stage-probes: PLAN_FILE expected regular-file got other; STOP")
+    chunks=[]
+    while True:
+        chunk=os.read(fd,1048576)
+        if not chunk: break
+        chunks.append(chunk)
+finally: os.close(fd)
+raw=b"".join(chunks)
+if hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get("plan_sha256"): raise SystemExit("FAIL ai-w2-stage-probes: PLAN_FILE expected input-plan_sha256 got digest-mismatch; STOP")
+found=[b for b in re.findall(r"^`{3}sh\n(.*?)^`{3}$",raw.decode(),re.M|re.S) if b.startswith("# step: ai-w2-revoke-probes\n")]
+if len(found)!=1: raise SystemExit("FAIL ai-w2-stage-probes: ai-w2-revoke-probes block expected one got other; STOP")
+sys.stdout.write(found[0])
+' "$PLAN_FILE" "$INPUTS_FILE") || exit 1
+  printf -v W2_BOX_REVOKE 'sudo -n /bin/bash -c %q _ %q %q' 'stage=$(cat "$1/secret-stage.path"); exec env WINDOW=W2 PROOF_DIR="$1" SECRET_STAGE="$stage" RELEASE_SHA="$2" /bin/bash -s' "$W2_PROOF_DIR" "$W2_RELEASE_SHA"
+  printf '%s\n' "$W2_REVOKE_BLOCK" | ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_BOX_REVOKE" || { printf 'REVOKE-UNPROVEN ai-w2-stage-probes: box revoke not proven; the box probe-staged.txt marker keeps the obligation for ai-close; STOP\n' >&2; exit 1; }
+ fi
+ if test -e "$PROBE_CREDENTIALS_FILE" || test -L "$PROBE_CREDENTIALS_FILE"; then
+  rm -- "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: guarded rm of the (revoked) local probe credentials refused; retain path and guard message; STOP\n' >&2; exit 1; }
+ fi
+ test ! -e "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials (revoked) expected absent got present; STOP\n' >&2; exit 1; }
+ test ! -L "$PROBE_CREDENTIALS_FILE" || { printf 'FAIL ai-w2-stage-probes: local probe credentials (revoked) expected absent got symlink; STOP\n' >&2; exit 1; }
+ printf 'STOP ai-w2-stage-probes: probe grant revoked and local copy removed; a retry needs a new DCR grant (new consent run)\n' >&2
+ exit 1
+}
+W2_SSH_ATTEMPTED=1
+W2_UPLOAD=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ops@100.115.66.74 "$W2_REMOTE" <"$PROBE_CREDENTIALS_FILE") || w2_stage_fail 'ssh upload expected success got failure'
+test "$W2_UPLOAD" = "600 $PROBE_SHA256" || w2_stage_fail 'box ordinary-probes.json expected 0600-and-same-sha256 got mismatch'
+rm -- "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'guarded rm of local probe credentials refused'
+test ! -e "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'local probe credentials expected absent got present'
+test ! -L "$PROBE_CREDENTIALS_FILE" || w2_stage_fail 'local probe credentials expected absent got symlink'
+printf 'PASS ai-w2-stage-probes: box ordinary-probes.json 0600 with matching digest; local copy removed\n'
+```
+
+```sh
 # step: ai-w2-preflight
 # readonly: no
 # host: box root; database read-only, writes proof files
 set -euo pipefail
 test "$WINDOW" = W2
+# Every exit from here revokes a staged DCR probe grant (the block itself skips when nothing is staged,
+# and never re-runs a started revoke).
+w2_probe_exit() {
+ local status=$?
+ trap - EXIT
+ # The guard runs only on an unfinished block; bash reports 0 for a ${VAR:?} exit, so force a failure status.
+ test "$status" != 0 || status=1
+ # Subshell: a failing revoke must reach this message even though the block re-enables set -e.
+ ( ai_run ai-w2-revoke-probes ) || printf 'FAIL %s: DCR probe grant revoke on exit expected proven got failed; STOP\n' "$W2_GUARD_STEP" >&2
+ exit "$status"
+}
+W2_GUARD_STEP=ai-w2-preflight
+trap w2_probe_exit EXIT
 ai_deadline
 : "${BACKFILL_FILE:?}" "${HISTORICAL_ARCHIVES_DIR:?}" "${W1_CLOSED_FILE:?}"
 python3 - "$W1_CLOSED_FILE" "$RELEASE_SHA" <<'PY'
 import datetime,json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
 d=json.load(open(p.parent/"inputs.json")); assert d["window"]=="W1" and d["release_sha"]==sys.argv[2]
-assert json.load(open(p.parent/"backup-gate.json"))["status"]=="PASS"
 assert 0<=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(p.read_text().strip().replace("Z","+00:00"))).total_seconds()<=1800, "FAIL fresh W1 close; STOP"
 PY
+BACKUP_GATE_DIR="${W1_CLOSED_FILE%/*}"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2-preflight: W1: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2-preflight <<'PY' || { printf 'FAIL ai-w2-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
@@ -1026,15 +1554,24 @@ assert all(r.get(k) is True for k in ('ok','database_bytes_verified','object_byt
 age=(datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r['verified_at'].replace('Z','+00:00'))).total_seconds()
 assert -300<=age<86400 and r['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/'), 'FAIL backup gate; STOP'
 PY
-# Before proofs: all reverse catalogs must be true, without invoking a reserve.
+# Before proofs: one reviewed before-apply catalog per version, read from the verified release
+# archive, without invoking a reserve. The reverse catalogs also assert what each reserve KEEPS
+# (0002: the issuer and policy roles; 0005: the six private tables), so they cannot hold before
+# apply. Each <version>-before-catalog.sql keeps every other reverse row byte for byte and adds
+# absence rows instead; every row is NULL-safe on a pre-W2 database (no name casts and no
+# name-based privilege calls on objects or roles W2 creates). The full reverse catalogs remain
+# the post-reserve proof.
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
- printf '\\i /release/deploy/release-proofs/item-ai/%s-rollback-catalog.sql\nSELECT :\x27rollback_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
- test "$(ai_ro -Atq --file /proof/catalog.sql)" = t
+ BEFORE_CATALOG=/release/deploy/release-proofs/item-ai/$VERSION-before-catalog.sql
+ printf '\\i %s\nSELECT :\x27before_ok\x27::boolean;\n' "$BEFORE_CATALOG" >"$PROOF_DIR/catalog.sql"
+ BEFORE_OK=$(ai_ro -Atq --file /proof/catalog.sql)
+ test "$BEFORE_OK" = t || { printf 'FAIL ai-w2-preflight: before-apply catalog for %s expected t got other; STOP\n' "$VERSION" >&2; exit 1; }
 done
 ai_ro -Atq --command "SELECT n.nspname,p.proname,p.prosecdef,p.proconfig::text,pg_get_userbyid(p.proowner),p.proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2,p.oid;" >"$PROOF_DIR/functions-before.txt"
 ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerowsecurity,pg_get_userbyid(c.relowner),c.relacl::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('swarm','swarm_read','commonswarm_oauth','commonswarm_ops') ORDER BY 1,2;" >"$PROOF_DIR/relations-before.txt"
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-before.txt"
 ai_run ai-w2-measure
+trap - EXIT
 printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs/bounds; backup fresh\n'
 ```
 
@@ -1211,41 +1748,236 @@ printf 'PASS W2 measured every locked live table within row/size bounds\n'
 ```sh
 # step: ai-w2-between-probes
 # readonly: probe
-# host: box root; public ingress read-only probes; secrets never output
+# host: box root; refresh-per-probe of the dedicated DCR grant and public/authenticated reads; secrets never output
 set -euo pipefail
 ai_deadline
-python3 - "$SECRET_STAGE" "$PROOF_DIR" "$VERSION" "$RELEASE_SHA" <<'PY'
-import datetime,json,pathlib,re,stat,sys,urllib.request
-try:
-    stage,proof=map(pathlib.Path,sys.argv[1:3]); version,sha=sys.argv[3:]
-    assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink()
-    assert stat.S_IMODE(stage.stat().st_mode)==0o700
-    f=stage/'ordinary-probes.json'; assert f.is_file() and not f.is_symlink() and stat.S_IMODE(f.stat().st_mode)==0o600
-    c=json.loads(f.read_text()); assert set(c)=={'mcp_access_token','human_access_token','workspace_id'}
-    assert re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',c['workspace_id'])
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self,*args,**kwargs): return None
-    opener=urllib.request.build_opener(NoRedirect())
-    def call(url,body=None,token=None):
-        headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
-        if token: headers['Authorization']='Bearer '+token
-        req=urllib.request.Request(url,data=None if body is None else json.dumps(body).encode(),headers=headers)
-        with opener.open(req,timeout=15) as response:
-            raw=response.read(1048577); assert response.status==200 and len(raw)<=1048576
-            return json.loads(raw)
-    call('https://mcp.commonswarm.com/health')
-    discovery=call('https://mcp.commonswarm.com/.well-known/oauth-authorization-server')
-    assert discovery['issuer']=='https://mcp.commonswarm.com'
-    resource=call('https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp')
-    assert resource['resource']=='https://mcp.commonswarm.com/mcp'
-    # Authenticated ordinary initialize checks the live token/grant/family path.
-    mcp=call('https://mcp.commonswarm.com/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},c['mcp_access_token'])
-    assert mcp.get('id')==1 and 'error' not in mcp and 'serverInfo' in mcp['result']
-    human=call('https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
-    assert isinstance(human['pending'],list) and 'error' not in human
-    (proof/('between-'+version+'.json')).write_text(json.dumps(dict(release_sha=sha,version=version,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,token_health=True,human_read=True))+'\n')
-except Exception:
-    raise SystemExit('FAIL W2 ordinary discovery/token health/human read; STOP before next migration') from None
+python3 - "$SECRET_STAGE" "$PROOF_DIR" "${PROBE_POINT:-$VERSION}" "$RELEASE_SHA" <<'PY'
+import datetime,json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+stage,proof=map(pathlib.Path,sys.argv[1:3]); label,sha=sys.argv[3:]
+if not re.fullmatch(r'prefence|2026100300000[1-5]',label): raise SystemExit('FAIL ai-w2-between-probes: probe point expected prefence-or-W2-version got other; STOP')
+after='the apply-started fence' if label=='prefence' else 'next migration'
+def fail(what,expected,got): raise SystemExit('FAIL ai-w2-between-probes: '+label+' '+what+' expected '+expected+' got '+got+'; STOP before '+after)
+def read_with_info(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None,None
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode): return None,None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks),info
+            chunks.append(chunk)
+    finally: os.close(fd)
+KEYS={'release_sha','window_id','workspace_id','mcp_client_id','mcp_refresh_token','mcp_resource','human_access_token','human_token_exp'}
+ISSUER='https://mcp.commonswarm.com'
+def credentials():
+    if not (re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink() and stat.S_IMODE(stage.stat().st_mode)==0o700): fail('SECRET_STAGE','0700-anvil-secret','other')
+    raw,info=read_with_info(str(stage/'ordinary-probes.json'))
+    if raw is None or stat.S_IMODE(info.st_mode)!=0o600: fail('ordinary-probes.json','0600-regular-file','missing-or-mode')
+    try: c=json.loads(raw)
+    except ValueError: c=None
+    if not (isinstance(c,dict) and set(c)==KEYS): fail('ordinary-probes.json keys','probe-contract-keys','other-set')
+    if c['release_sha']!=sha or c['mcp_resource']!=ISSUER+'/mcp': fail('ordinary-probes.json binding','release-and-resource','mismatch')
+    if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ('mcp_client_id','mcp_refresh_token','human_access_token')): fail('ordinary-probes.json values','bounded-strings','other')
+    return c
+def persist(c):
+    # Rotated refresh token reaches the file atomically before any use of the new access token.
+    tmp=stage/('.ordinary-probes.'+secrets.token_hex(6)+'.tmp')
+    fd=os.open(str(tmp),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(str(tmp),str(stage/'ordinary-probes.json'))
+    dfd=os.open(str(stage),os.O_RDONLY)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+class Transport(Exception): pass
+def send(url,body=None,token=None,form=None):
+    headers={'Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
+    data=None
+    if form is not None: data=urllib.parse.urlencode(form).encode(); headers['Content-Type']='application/x-www-form-urlencoded'
+    elif body is not None: data=json.dumps(body).encode(); headers['Content-Type']='application/json'
+    if token: headers['Authorization']='Bearer '+token
+    req=urllib.request.Request(url,data=data,headers=headers)
+    try:
+        with opener.open(req,timeout=15) as response: status,raw=response.status,response.read(1048577)
+    except urllib.error.HTTPError as error: status,raw=error.code,error.read(1048577)
+    except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): raise Transport() from None
+    if len(raw)>1048576: return status,None
+    try: return status,json.loads(raw) if raw else {}
+    except ValueError: return status,None
+def idempotent(what,url,body=None,token=None):
+    # Retry ONCE on a transport error only; an HTTP status is never retried.
+    for attempt in (1,2):
+        try: status,value=send(url,body,token)
+        except Transport:
+            if attempt==2: fail(what,'response','transport-error-after-one-retry')
+            continue
+        if status!=200 or not isinstance(value,dict): fail(what,'HTTP-200-JSON','HTTP-'+str(status))
+        return value
+def endpoint(value,what):
+    if not (isinstance(value,str) and value.startswith(ISSUER+'/')): fail('discovery '+what,'issuer-origin-endpoint','missing-or-foreign')
+    return value
+def discover():
+    idempotent('health',ISSUER+'/health')
+    d=idempotent('authorization server discovery',ISSUER+'/.well-known/oauth-authorization-server')
+    if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
+    r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
+    if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
+    return endpoint(d.get('token_endpoint'),'token_endpoint')
+def refresh(c,token_url):
+    # The refresh grant is NEVER retried: a lost response may already have rotated the family.
+    try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
+    except Transport: fail('refresh grant','HTTP-200','transport-error-not-retried')
+    return status,t
+c=credentials()
+if not (type(c['human_token_exp']) is int and c['human_token_exp']>=datetime.datetime.now(datetime.timezone.utc).timestamp()+60): fail('human_token_exp','at-least-60s-left','expired')
+token_url=discover()
+status,t=refresh(c,token_url)
+if status!=200 or not (isinstance(t,dict) and str(t.get('token_type','')).lower()=='bearer' and all(isinstance(t.get(k),str) and 0<len(t[k])<=16384 for k in ('access_token','refresh_token'))): fail('refresh grant','HTTP-200-Bearer-rotation','HTTP-'+str(status))
+# Rotation is the precondition of the replay revocation: the 200 must carry a NEW refresh token.
+if t['refresh_token']==c['mcp_refresh_token']: fail('refresh rotation','new-refresh-token','same-refresh-token')
+c['mcp_refresh_token']=t['refresh_token']; persist(c)
+mcp=idempotent('MCP initialize',ISSUER+'/mcp',{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25','capabilities':{},'clientInfo':{'name':'w2-ordinary-control','version':'1'}}},t['access_token'])
+if mcp.get('id')!=1 or 'error' in mcp or 'serverInfo' not in mcp.get('result',{}): fail('MCP initialize','serverInfo','error')
+human=idempotent('human pending_access read','https://api.commonswarm.com/functions/v1/read',{'resource':'pending_access','workspace_id':c['workspace_id']},c['human_access_token'])
+if not isinstance(human.get('pending'),list) or 'error' in human: fail('human pending_access read','pending-list','error')
+(proof/('between-'+label+'.json')).write_text(json.dumps(dict(release_sha=sha,version=label,at=datetime.datetime.now(datetime.timezone.utc).isoformat(),discovery=True,rotation=True,refreshed=True,token_health=True,human_read=True))+'\n')
+PY
+```
+
+```sh
+# step: ai-w2-revoke-probes
+# readonly: no
+# host: box root; replay revocation of the W2 probe DCR grant family (no RFC 7009) with a rejected-refresh proof; secrets never output
+set -euo pipefail
+# Runs as ( ai_run ai-w2-revoke-probes ) || ... in the W2 exit guards, where bash ignores errexit: fail explicitly.
+test "$WINDOW" = W2 || { printf 'FAIL ai-w2-revoke-probes: window expected W2 got other; STOP\n' >&2; exit 1; }
+python3 - "$SECRET_STAGE" "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
+import json,os,pathlib,re,secrets,socket,stat,sys,urllib.error,urllib.parse,urllib.request
+stage,proof=map(pathlib.Path,sys.argv[1:3]); sha=sys.argv[3]
+def fail(what,expected,got): raise SystemExit('FAIL ai-w2-revoke-probes: '+what+' expected '+expected+' got '+got+'; STOP')
+def unproven(reason,client_id=None):
+    # One attempt only: an unproven revoke is reported, never retried automatically.
+    record=proof/'dcr-probe-revoke-unproven.json'
+    if not record.exists(): record.write_text(json.dumps({'client_id':client_id,'revoked':False,'status':'REVOKE-UNPROVEN','reason':reason},sort_keys=True)+'\n')
+    raise SystemExit('REVOKE-UNPROVEN ai-w2-revoke-probes: '+reason+'; STOP; HezLead revokes the DCR probe grant by client_id; never retried automatically')
+if (proof/'dcr-probe-revoked.json').exists():
+    print('PASS ai-w2-revoke-probes: DCR probe grant already revoked'); raise SystemExit(0)
+if (proof/'dcr-probe-revoke-attempted.txt').exists(): unproven('a started revoke is never re-run')
+if not (proof/'probe-staged.txt').exists():
+    print('PASS ai-w2-revoke-probes: no DCR probe grant was staged'); raise SystemExit(0)
+def read_with_info(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None,None
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode): return None,None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks),info
+            chunks.append(chunk)
+    finally: os.close(fd)
+KEYS={'release_sha','window_id','workspace_id','mcp_client_id','mcp_refresh_token','mcp_resource','human_access_token','human_token_exp'}
+ISSUER='https://mcp.commonswarm.com'
+def credentials():
+    if not (re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and not stage.is_symlink() and stat.S_IMODE(stage.stat().st_mode)==0o700): fail('SECRET_STAGE','0700-anvil-secret','other')
+    raw,info=read_with_info(str(stage/'ordinary-probes.json'))
+    if raw is None or stat.S_IMODE(info.st_mode)!=0o600: fail('ordinary-probes.json','0600-regular-file','missing-or-mode')
+    try: c=json.loads(raw)
+    except ValueError: c=None
+    if not (isinstance(c,dict) and set(c)==KEYS): fail('ordinary-probes.json keys','probe-contract-keys','other-set')
+    if c['release_sha']!=sha or c['mcp_resource']!=ISSUER+'/mcp': fail('ordinary-probes.json binding','release-and-resource','mismatch')
+    if not all(isinstance(c[k],str) and 0<len(c[k])<=16384 for k in ('mcp_client_id','mcp_refresh_token','human_access_token')): fail('ordinary-probes.json values','bounded-strings','other')
+    return c
+def persist(c):
+    # Rotated refresh token reaches the file atomically before any use of the new access token.
+    tmp=stage/('.ordinary-probes.'+secrets.token_hex(6)+'.tmp')
+    fd=os.open(str(tmp),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try: os.write(fd,json.dumps(c).encode()); os.fsync(fd)
+    finally: os.close(fd)
+    os.rename(str(tmp),str(stage/'ordinary-probes.json'))
+    dfd=os.open(str(stage),os.O_RDONLY)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+opener=urllib.request.build_opener(NoRedirect())
+class Transport(Exception): pass
+def send(url,body=None,token=None,form=None):
+    headers={'Accept':'application/json, text/event-stream','User-Agent':'curl/8.7.1'}
+    data=None
+    if form is not None: data=urllib.parse.urlencode(form).encode(); headers['Content-Type']='application/x-www-form-urlencoded'
+    elif body is not None: data=json.dumps(body).encode(); headers['Content-Type']='application/json'
+    if token: headers['Authorization']='Bearer '+token
+    req=urllib.request.Request(url,data=data,headers=headers)
+    try:
+        with opener.open(req,timeout=15) as response: status,raw=response.status,response.read(1048577)
+    except urllib.error.HTTPError as error: status,raw=error.code,error.read(1048577)
+    except (urllib.error.URLError,socket.timeout,TimeoutError,ConnectionError,OSError): raise Transport() from None
+    if len(raw)>1048576: return status,None
+    try: return status,json.loads(raw) if raw else {}
+    except ValueError: return status,None
+def idempotent(what,url,body=None,token=None):
+    # Retry ONCE on a transport error only; an HTTP status is never retried.
+    for attempt in (1,2):
+        try: status,value=send(url,body,token)
+        except Transport:
+            if attempt==2: fail(what,'response','transport-error-after-one-retry')
+            continue
+        if status!=200 or not isinstance(value,dict): fail(what,'HTTP-200-JSON','HTTP-'+str(status))
+        return value
+def endpoint(value,what):
+    if not (isinstance(value,str) and value.startswith(ISSUER+'/')): fail('discovery '+what,'issuer-origin-endpoint','missing-or-foreign')
+    return value
+def discover():
+    idempotent('health',ISSUER+'/health')
+    d=idempotent('authorization server discovery',ISSUER+'/.well-known/oauth-authorization-server')
+    if d.get('issuer')!=ISSUER: fail('discovery issuer',ISSUER,'other')
+    r=idempotent('protected resource discovery',ISSUER+'/.well-known/oauth-protected-resource/mcp')
+    if r.get('resource')!=ISSUER+'/mcp': fail('protected resource',ISSUER+'/mcp','other')
+    return endpoint(d.get('token_endpoint'),'token_endpoint')
+def refresh(c,token_url):
+    # The refresh grant is NEVER retried: a lost response may already have rotated the family.
+    try: status,t=send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':c['mcp_refresh_token'],'resource':c['mcp_resource']})
+    except Transport: fail('refresh grant','HTTP-200','transport-error-not-retried')
+    return status,t
+c=credentials()
+token_url=discover()
+# Durable single-attempt marker BEFORE the first grant request: no guard or close re-runs a started revoke.
+fd=os.open(str(proof/'dcr-probe-revoke-attempted.txt'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+try: os.write(fd,b'started\n'); os.fsync(fd)
+finally: os.close(fd)
+# Replay revocation (oidc-provider 9.12.2): each request exactly once, never retried.
+def grant(token,step):
+    try: return send(token_url,form={'grant_type':'refresh_token','client_id':c['mcp_client_id'],'refresh_token':token,'resource':c['mcp_resource']})
+    except Transport: unproven(step+' got transport-error-not-retried',c['mcp_client_id'])
+def rejected(status,t): return status==400 and isinstance(t,dict) and t.get('error')=='invalid_grant'
+def keep(t):
+    # Any token the server still issues is persisted atomically for HezLead before reporting.
+    if isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384:
+        c['mcp_refresh_token']=t['refresh_token']; persist(c)
+status,t=grant(c['mcp_refresh_token'],'step 1 rotation refresh')
+if rejected(status,t):
+    # An unknown, expired or destroyed held token is rejected without revoking a surviving grant:
+    # two rejections of the same token never prove anything.
+    unproven('step 1 rotation refresh got HTTP-400-invalid_grant; the held token cannot prove the family revoked',c['mcp_client_id'])
+elif status==200 and isinstance(t,dict) and isinstance(t.get('refresh_token'),str) and 0<len(t['refresh_token'])<=16384 and t['refresh_token']!=c['mcp_refresh_token']:
+    old=c['mcp_refresh_token']; keep(t)
+    status,t=grant(old,'step 2 consumed-token replay')
+    if not rejected(status,t):
+        keep(t); unproven('step 2 consumed-token replay expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+else:
+    keep(t); unproven('step 1 rotation refresh expected HTTP-200-new-token-or-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+status,t=grant(c['mcp_refresh_token'],'step 3 proof refresh')
+if not rejected(status,t):
+    keep(t); unproven('step 3 proof refresh expected HTTP-400-invalid_grant got HTTP-'+str(status),c['mcp_client_id'])
+(proof/'dcr-probe-revoked.json').write_text(json.dumps({'client_id':c['mcp_client_id'],'revoked':True,'proof':'refresh rejected'},sort_keys=True)+'\n')
+print('PASS ai-w2-revoke-probes: DCR probe grant family revoked; refresh rejected')
 PY
 ```
 
@@ -1255,9 +1987,26 @@ PY
 # host: box root; one transaction per unchanged migration, no retries
 set -euo pipefail
 test "$WINDOW" = W2
+# Every exit from here revokes a staged DCR probe grant (the block itself skips when nothing is staged,
+# and never re-runs a started revoke).
+w2_probe_exit() {
+ local status=$?
+ trap - EXIT
+ # The guard runs only on an unfinished block; bash reports 0 for a ${VAR:?} exit, so force a failure status.
+ test "$status" != 0 || status=1
+ # Subshell: a failing revoke must reach this message even though the block re-enables set -e.
+ ( ai_run ai-w2-revoke-probes ) || printf 'FAIL %s: DCR probe grant revoke on exit expected proven got failed; STOP\n' "$W2_GUARD_STEP" >&2
+ exit "$status"
+}
+W2_GUARD_STEP=ai-w2-apply
+trap w2_probe_exit EXIT
 ai_deadline
 test -f "$PROOF_DIR/lock-measurements.json"
 test -f "$SECRET_STAGE/ordinary-probes.json"
+# Pre-fence probe: the same routine once, BEFORE the durable fence; a failure applies nothing.
+PROBE_POINT=prefence
+ai_run ai-w2-between-probes
+PROBE_POINT=
 # Durable no-rerun fence BEFORE the first attempt (including unknown COMMIT).
 ( set -C; date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/apply-started.txt" )
 for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
@@ -1326,6 +2075,8 @@ assert int(sys.argv[2])<=json.load(open(sys.argv[1]))['expected_hold_seconds'], 
 PY
  ai_run ai-w2-between-probes
 done
+ai_run ai-w2-revoke-probes
+trap - EXIT
 ai_run ai-w2-reconcile
 ```
 
@@ -1374,6 +2125,10 @@ test -f "$PROOF_DIR/schema-committed.txt"
 python3 - "$PROOF_DIR" "$RELEASE_SHA" <<'PY'
 import datetime,json,pathlib,sys
 p=pathlib.Path(sys.argv[1]); sha=sys.argv[2]
+pre=json.loads((p/'between-prefence.json').read_text())
+assert pre['version']=='prefence' and pre['release_sha']==sha and all(pre[k] is True for k in ('discovery','rotation','refreshed','token_health','human_read')), 'FAIL missing pre-fence probe; STOP'
+revoked=json.loads((p/'dcr-probe-revoked.json').read_text())
+assert set(revoked)=={'client_id','revoked','proof'} and revoked['revoked'] is True and revoked['proof']=='refresh rejected', 'FAIL missing DCR probe revoke proof; STOP'
 for i in range(1,6):
     v='2026100300000'+str(i); r=json.loads((p/('between-'+v+'.json')).read_text())
     assert r['version']==v and r['release_sha']==sha and all(r[k] is True for k in ('discovery','token_health','human_read')), 'FAIL missing between-migration controls; STOP'
@@ -1402,25 +2157,38 @@ ai-gates enforces these named controls before any schema apply.
 
 ## HezLead box block: W2 issuer credential
 
-Run after ai-w2-reconcile/ai-w2-probes, before W2 close. The password is
+Run after ai-w2-reconcile/ai-w2-probes, before W2 close, or in W2b after
+ai-w2b-preflight (the same two blocks; see W2b). The password is
 created on the box, never printed and never copied to the Mac or 1Password
 this window (HezLead's ruling). The AS format is JSON `{user,password}`.
 The fresh role has no existing credential; an existing file stops this initial
 provisioning. Rotation is a separate credential window alongside management.
 Rollback disables login and clears the new password; it retains additive schema.
+libpq's service-file parser accepts only `key=value` with no space around `=`
+(release 5f64fab4 W2 RGLqZX failed its login on configparser's default
+`key = value`). The block writes the issuer service file with
+`space_around_delimiters=False` and byte-checks every line before use.
 
 ```sh
 # step: ai-w2-issuer-credential
 # readonly: no
-# host: HezLead ONLY, box root, W2 schema window
+# host: HezLead ONLY, box root, W2 schema window or W2b issuer-only window
 set -euo pipefail
-test "$WINDOW" = W2
+case "$WINDOW" in
+ W2) test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-w2-issuer-credential: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; };;
+ W2b)
+  test -f "$PROOF_DIR/w2b-preconditions.txt" || { printf 'FAIL ai-w2-issuer-credential: W2b w2b-preconditions.txt expected present got missing; STOP\n' >&2; exit 1; }
+  # Backup admission at the mutation boundary (the issuer LOGIN and credential are the W2b mutation).
+  BACKUP_GATE_DIR="$PROOF_DIR"
+  ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2-issuer-credential: W2b backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+  unset BACKUP_GATE_DIR;;
+ *) printf 'FAIL ai-w2-issuer-credential: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;;
+esac
 ai_deadline
-test -f "$PROOF_DIR/schema-committed.txt"
-test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials
-test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
-openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"
-chmod 0600 "$SECRET_STAGE/issuer-password"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+openssl rand -hex 32 >"$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password generation expected success got failure; STOP\n' >&2; exit 1; }
+chmod 0600 "$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password file mode expected 0600 got failure; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" <<'PY'
 import configparser,json,pathlib,re,sys
 try:
@@ -1431,7 +2199,11 @@ try:
     (p/'issuer.sql').write_text("SET password_encryption='scram-sha-256'; ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"+value+"';\n")
     c=configparser.ConfigParser(interpolation=None); c.read(p/'service.conf')
     assert c.has_section('target'); c['target']['user']='commonswarm_admin_issuer'
-    with (p/'issuer-service.conf').open('w') as f: c.write(f)
+    # libpq service files take key=value only: no space around the delimiter.
+    with (p/'issuer-service.conf').open('w') as f: c.write(f,space_around_delimiters=False)
+    for line in (p/'issuer-service.conf').read_text().splitlines():
+        if line and not re.fullmatch(r'\[[a-z_]+\]',line) and not re.fullmatch(r'[a-z_]+=[^ ].*',line):
+            raise SystemExit('FAIL ai-w2-issuer-credential: issuer-service.conf line expected key=value got other; STOP')
     rows=(p/'pass').read_text().splitlines(); assert len(rows)==1
     parts=rows[0].split(':'); assert len(parts)==5
     (p/'issuer-pass').write_text(':'.join(parts[:3]+['commonswarm_admin_issuer',value])+'\n')
@@ -1439,9 +2211,9 @@ try:
 except Exception:
     raise SystemExit('FAIL issuer credential preparation; STOP') from None
 PY
-ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log"
-install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials
-test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
+ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log" || { printf 'FAIL ai-w2-issuer-credential: issuer ALTER ROLE LOGIN expected success got failure; STOP\n' >&2; exit 1; }
+install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: credential install expected success got failure; STOP\n' >&2; exit 1; }
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986' || { printf 'FAIL ai-w2-issuer-credential: credential mode expected 440-0-986 got other; STOP\n' >&2; exit 1; }
 docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
  --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
  --volume "$SECRET_STAGE/issuer-service.conf:/run/service.conf:ro" \
@@ -1459,15 +2231,261 @@ printf 'PASS issuer login; credential 0440 root:986; password stays on box\n' >"
 # readonly: no
 # host: HezLead ONLY, box root; failed initial provisioning, not a rotation
 set -euo pipefail
-test "$WINDOW" = W2
-ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null
+case "$WINDOW" in W2|W2b) ;; *) printf 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP\n' >&2; exit 1;; esac
+# Every step fails explicitly: this block also runs as ( ai_run ai-w2-issuer-rollback ) || ..., where bash
+# ignores errexit, so no step may rely on set -e (Codex round 3).
+ai_db -q --command 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;' >/dev/null || { printf 'FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP\n' >&2; exit 1; }
+if test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected not-symlink got symlink; STOP\n' >&2; exit 1; fi
 if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials; then
- test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials
+ test -f /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected regular-file got other; STOP\n' >&2; exit 1; }
  rm -- /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL guarded issuer cleanup refused; STOP\n' >&2; exit 1; }
 fi
-test "$(ai_ro -Atq --command "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';")" = t
-printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt"
+if test -e /etc/commonswarm-oauth/admin-issuer-database-credentials || test -L /etc/commonswarm-oauth/admin-issuer-database-credentials; then printf 'FAIL ai-w2-issuer-rollback: issuer credential file expected absent got present; STOP\n' >&2; exit 1; fi
+ROLLBACK_ROLE=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
+test "$ROLLBACK_ROLE" = t || { printf 'FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP\n' >&2; exit 1; }
+printf 'PASS issuer login disabled; additive roles/grants retained\n' >"$PROOF_DIR/issuer-rollback.txt" || { printf 'FAIL ai-w2-issuer-rollback: issuer-rollback.txt expected written got failure; STOP\n' >&2; exit 1; }
 ```
+
+W2b runs the five forward catalogs UNMODIFIED after the credential exists: the
+issuer LOGIN is back, so every row must hold, with no accepted failure. A false
+or failed catalog runs ai-w2-issuer-rollback (LOGIN off, password cleared,
+credential file removed) and STOPs; the window can then only close recovered.
+
+```sh
+# step: ai-w2b-forward-catalogs
+# readonly: no
+# host: HezLead box root, W2b after ai-w2-issuer-credential; database read-only; on failure runs ai-w2-issuer-rollback
+set -euo pipefail
+test "$WINDOW" = W2b || { printf 'FAIL ai-w2b-forward-catalogs: window expected W2b got other; STOP\n' >&2; exit 1; }
+ai_deadline
+test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-w2b-forward-catalogs: issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/w2b-forward-catalogs.txt" || { printf 'FAIL ai-w2b-forward-catalogs: w2b-forward-catalogs.txt expected absent got present; STOP\n' >&2; exit 1; }
+W2B_FORWARD_FAILED=
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
+ W2B_FORWARD=$(ai_ro -Atq --file /proof/catalog.sql) || W2B_FORWARD=error
+ if test "$W2B_FORWARD" != t; then W2B_FORWARD_FAILED=$VERSION; break; fi
+done
+if test -n "$W2B_FORWARD_FAILED"; then
+ printf 'FAIL ai-w2b-forward-catalogs: forward catalog %s expected t got other; running ai-w2-issuer-rollback; STOP\n' "$W2B_FORWARD_FAILED" >&2
+ ( ai_run ai-w2-issuer-rollback ) || printf 'FAIL ai-w2b-forward-catalogs: issuer rollback expected PASS got failure; STOP\n' >&2
+ exit 1
+fi
+printf 'PASS W2b forward catalogs: all five true after the issuer credential\n' >"$PROOF_DIR/w2b-forward-catalogs.txt"
+printf 'PASS ai-w2b-forward-catalogs: all five forward catalogs true\n'
+```
+
+
+## W2b: issuer-only window after a W2 issuer failure
+
+Release 5f64fab4 W2 RGLqZX committed and reconciled all five migrations, then
+ai-w2-issuer-credential failed (libpq rejected the `key = value` issuer service
+file) and ai-w2-issuer-rollback passed: LOGIN disabled, password cleared,
+credential file removed. W2 cannot run again (apply fence). W2b provisions only
+the issuer credential, at the release that W3–W7 will use. It has no DCR probe
+grant, no backfill and no schema write; ai-db-session's ledger baseline is the
+post-W2 ledger. INPUTS binds the W2 proof directory by `w2_release_sha` and
+`w2_window_id` (W2 may have run at an earlier release). Read-only
+preconditions, each FAIL...STOP: a fresh backup gate in this window; the bound
+W2 window's retained proofs are valid by CONTENT (ai-w2b-proof-check below:
+inputs.json binding, closed.txt and its close receipt validated by
+ai-live-controls, the exact schema-committed.txt, W2-probes.txt and
+dcr-probe-revoked.json bytes); every ledger version has its checksum row and the
+five 20261003 rows equal the migration files of THIS release archive; the five
+forward catalogs hold (20261003000002-001 only for the issuer LOGIN, which the W2
+rollback removed; its other role attributes are a precondition row);
+the ledger holds all five 20261003 versions and nothing later
+(`deploy/release-proofs/item-ai/w2b-preconditions.sql`); the issuer role exists,
+NOLOGIN, without a password; the credential file is absent. Then the SAME
+ai-w2-issuer-credential block runs with the W2b PROOF_DIR; on failure,
+ai-w2-issuer-rollback and a recovered close. After the credential,
+ai-w2b-forward-catalogs runs the five forward catalogs unmodified against the
+live database; each must be true (no accepted failure), or it runs the issuer
+rollback and STOPs. A successful close requires issuer-credential.txt and
+w2b-forward-catalogs.txt. The order is W2b, W3, then W4, W5, W6 and W7; W2b checks
+no state of any later or earlier code window. W6 binds this proof by its
+required `w2b_window_id` input at the same release.
+
+```sh
+# step: ai-w2b-preflight
+# readonly: no
+# host: HezLead box root; database read-only, writes proof files only
+set -euo pipefail
+test "$WINDOW" = W2b || { printf 'FAIL ai-w2b-preflight: window expected W2b got other; STOP\n' >&2; exit 1; }
+ai_deadline
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
+test -f "$PROOF_DIR/ordinary-before.json"
+test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w2b-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w2b-preflight <<'PY' || { printf 'FAIL ai-w2b-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,archive,proof,live,consent,phase,retain,step=sys.argv[1:10]
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,step).decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expected one got '+str(len(found))+'; STOP')
+env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
+raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
+PY
+# The bound W2's retained proofs, by CONTENT, through the shared validator.
+PROOF_CHECK_KIND=W2
+W2_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w2b-preflight: bound W2 proofs expected valid got refused; STOP\n' >&2; exit 1; }
+unset PROOF_CHECK_KIND
+printf '%s\n' "$W2_BINDING" >"$PROOF_DIR/w2-binding.json"
+printf 'PASS ai-w2b-preflight: bound W2 proofs valid: %s\n' "$W2_BINDING"
+test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2b-preflight: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2b-preflight: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+printf '\\i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql\nSELECT :\x27w2b_ok\x27::boolean;\n' >"$PROOF_DIR/w2b-preconditions.sql"
+W2B_OK=$(ai_ro -Atq --file /proof/w2b-preconditions.sql) || { printf 'FAIL ai-w2b-preflight: preconditions query expected success got failure; STOP\n' >&2; exit 1; }
+test "$W2B_OK" = t || { printf 'FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP\n' >&2; exit 1; }
+# Checksums, read-only: every ledger version has exactly one checksum row, and the five 20261003 rows equal the
+# migration files of THIS release archive (M1-M3 backfill, M4-M5 release, recorded at the bound W2's release).
+ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/w2b-ledger.txt" || { printf 'FAIL ai-w2b-preflight: ledger read expected success got failure; STOP\n' >&2; exit 1; }
+ai_ro -Atq --command 'SELECT version,sha256,source,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version;' >"$PROOF_DIR/w2b-checksums.txt" || { printf 'FAIL ai-w2b-preflight: checksum read expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$INPUTS_FILE" <<'PY'
+import hashlib,json,pathlib,sys
+root,proof=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]); w2sha=json.load(open(sys.argv[3]))['w2_release_sha']
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w2b-preflight: '+what+' expected '+expected+' got '+got+'; STOP')
+ledger=(proof/'w2b-ledger.txt').read_text().splitlines()
+rows=[r.split('|') for r in (proof/'w2b-checksums.txt').read_text().splitlines()]
+need(all(len(r)==4 for r in rows) and [r[0] for r in rows]==ledger,'checksum rows','one-per-ledger-version','other')
+for i in range(1,6):
+    v='2026100300000'+str(i); files=list((root/'supabase/migrations').glob(v+'_*.sql'))
+    need(len(files)==1,v+' migration file in this release','one','other')
+    expected=[v,hashlib.sha256(files[0].read_bytes()).hexdigest(),'backfill' if i<=3 else 'release',w2sha]
+    need(expected in rows,v+' checksum row','release-file-sha256-'+expected[2]+'-at-w2_release_sha','other')
+print('PASS ai-w2b-preflight: '+str(len(rows))+' checksum rows match the ledger; five W2 rows equal this release archive')
+PY
+# Forward catalogs by failed-check label. Every row holds, except one: 20261003000002-001 also requires the issuer
+# LOGIN that the W2 issuer rollback removed and W2b restores (its other attributes are w2b-preconditions.sql rows).
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok_failed_checks\x27;\n' "$VERSION" >"$PROOF_DIR/catalog.sql"
+ W2B_CATALOG_FAILED=$(ai_ro -Atq --file /proof/catalog.sql) || { printf 'FAIL ai-w2b-preflight: forward catalog %s query expected success got failure; STOP\n' "$VERSION" >&2; exit 1; }
+ case "$VERSION:$W2B_CATALOG_FAILED" in
+  *:|20261003000002:20261003000002-001-commonswarm_admin_issuer) ;;
+  *) printf 'FAIL ai-w2b-preflight: forward catalog %s expected all-rows-true (0002: only the issuer LOGIN row) got failed checks %s; STOP\n' "$VERSION" "$W2B_CATALOG_FAILED" >&2; exit 1;;
+ esac
+done
+W2B_ISSUANCE_OFF=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w2b-preflight: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+test "$W2B_ISSUANCE_OFF" = t || { printf 'FAIL ai-w2b-preflight: admin issuance expected OFF got other; STOP\n' >&2; exit 1; }
+printf 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n' >"$PROOF_DIR/w2b-preconditions.txt"
+printf 'PASS ai-w2b-preflight\n'
+```
+
+The shared proof validator below is the ONE reader of a retained window's proof
+files for W2b. ai-w2b-preflight runs it on the bound W2 (`PROOF_CHECK_KIND=W2`);
+ai-w6-activation-checks runs it on the bound W2b (`PROOF_CHECK_KIND=W2b`). It
+checks CONTENTS, never presence alone: the exact bytes each plan writer writes,
+the window's own inputs.json binding, the close record, and the retained
+ordinary receipt through the plan's own ai-live-controls validator with that
+window's inputs, consent copy and verified release archive
+(`/tmp/admin-issuance-<release_sha>-<window_id>.tar`, retained on the box). A
+W2 closed before `close-result.json` existed derives its result from its single
+retained after/recovery receipt; a W2b must carry `close-result.json` with result
+success, the exact preconditions and issuer-credential lines, and no
+`issuer-rollback.txt`.
+
+```sh
+# step: ai-w2b-proof-check
+# readonly: yes
+# host: box root; run through ai_run by ai-w2b-preflight (bound W2) and ai-w6-activation-checks (bound W2b); prints one JSON binding line
+set -euo pipefail
+: "${PROOF_CHECK_KIND:?FAIL ai-w2b-proof-check: PROOF_CHECK_KIND expected W2-or-W2b got unset; STOP}"
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$PROOF_CHECK_KIND" <<'PY'
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,kind=sys.argv[1:4]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w2b-proof-check: '+what+' expected '+expected+' got '+got+'; STOP')
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+def strict_json(raw,label):
+    try: value=json.loads(raw)
+    except ValueError: value=None
+    need(isinstance(value,dict),label,'JSON-object','other')
+    need(raw==(json.dumps(value,sort_keys=True)+'\n').encode(),label+' bytes','exact-sorted-JSON-line','other')
+    return value
+need(kind in ('W2','W2b'),'PROOF_CHECK_KIND','W2-or-W2b','other')
+d=json.load(open(inputs))
+if kind=='W2':
+    need(d.get('window')=='W2b','checking window for a W2 proof','W2b','other'); sha,wid=d.get('w2_release_sha'),d.get('w2_window_id')
+else:
+    need(d.get('window')=='W6','checking window for a W2b proof','W6','other'); sha,wid=d.get('release_sha'),d.get('w2b_window_id')
+need(isinstance(sha,str) and re.fullmatch('[0-9a-f]{40}',sha) is not None and isinstance(wid,str) and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'INPUTS '+kind+' binding','full-sha-and-window-id','missing-or-other')
+w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+sha+'-'+kind+'-'+wid)
+need(w.is_dir() and not w.is_symlink() and w.resolve()==w,kind+' proof directory','directory','missing-or-symlink')
+def raw(name):
+    data=read_regular(str(w/name)); need(data is not None,kind+' '+name,'regular-file','missing-or-not-regular'); return data
+try: i=json.loads(raw('inputs.json'))
+except ValueError: i=None
+need(isinstance(i,dict) and i.get('window')==kind and i.get('release_sha')==sha and i.get('window_id')==wid,kind+' inputs.json','window-'+kind+'-bound-release-and-window-id','mismatch')
+closed=raw('closed.txt')
+need(re.fullmatch(rb'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\n',closed) is not None,kind+' closed.txt','one-UTC-close-time-line','other')
+record=read_regular(str(w/'close-result.json'))
+if record is not None:
+    r=strict_json(record,kind+' close-result.json')
+    need(set(r)=={'release_sha','window','window_id','result','closed_at'} and r['release_sha']==sha and r['window']==kind and r['window_id']==wid,kind+' close-result.json binding','exact-keys-bound-to-inputs','other')
+    need(r['closed_at']+'\n'==closed.decode() and r['result'] in ('success','recovered'),kind+' close-result.json result','success-or-recovered-at-closed.txt','other')
+    result=r['result']
+else:
+    # A W2 that closed before close-result.json existed: its single retained close receipt is its result.
+    need(kind=='W2',kind+' close-result.json','regular-file','missing-or-not-regular')
+    found=[res for res,f in (('success','ordinary-after.json'),('recovered','ordinary-recovery.json')) if read_regular(str(w/f)) is not None]
+    need(len(found)==1,'W2 close receipt','exactly-one-of-after-or-recovery',str(len(found)))
+    result=found[0]
+if kind=='W2b': need(result=='success','W2b close result','success',result)
+phase='after' if result=='success' else 'recovery'
+raw('ordinary-'+phase+'.json'); raw('consent-pre-W1.json')
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,'ai-w2b-proof-check').decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith('# step: ai-live-controls\n')]
+need(len(found)==1,'ai-live-controls block','one','other')
+env=dict(os.environ,INPUTS_FILE=str(w/'inputs.json'),BOX_ARCHIVE_PATH='/tmp/admin-issuance-'+sha+'-'+wid+'.tar',PROOF_DIR=str(w),
+         LIVE_CONTROLS_FILE=str(w/('ordinary-'+phase+'.json')),CONSENT_RECEIPT_FILE=str(w/'consent-pre-W1.json'),LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN='no')
+need(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env,stdout=subprocess.DEVNULL).returncode==0,kind+' ordinary-'+phase+'.json','valid-bound-live-controls-receipt','refused')
+if kind=='W2':
+    need(raw('schema-committed.txt')==b'all five ledger rows, M4/M5 checksums and complete backfills exact\n','W2 schema-committed.txt','exact-reconcile-line','other')
+    need(raw('W2-probes.txt')==b'PASS\n','W2 W2-probes.txt','exact-PASS-line','other')
+    v=strict_json(raw('dcr-probe-revoked.json'),'W2 dcr-probe-revoked.json')
+    need(set(v)=={'client_id','proof','revoked'} and isinstance(v['client_id'],str) and bool(v['client_id']) and v['proof']=='refresh rejected' and v['revoked'] is True,'W2 dcr-probe-revoked.json','client_id-refresh-rejected-revoked-true','other')
+else:
+    need(raw('w2b-preconditions.txt')==b'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n','W2b w2b-preconditions.txt','exact-preconditions-line','other')
+    need(raw('issuer-credential.txt')==b'PASS issuer login; credential 0440 root:986; password stays on box\n','W2b issuer-credential.txt','exact-issuer-login-line','other')
+    need(raw('w2b-forward-catalogs.txt')==b'PASS W2b forward catalogs: all five true after the issuer credential\n','W2b w2b-forward-catalogs.txt','exact-forward-catalogs-line','other')
+    need(not (w/'issuer-rollback.txt').exists() and not (w/'issuer-rollback.txt').is_symlink(),'W2b issuer-rollback.txt','absent','present')
+print(json.dumps({'kind':kind,'release_sha':sha,'window_id':wid,'result':result,'closed_at':closed.decode().strip()},sort_keys=True))
+PY
+```
+
 
 ## W3: OAuth code release, ordinary MCP ON, issuance admin activation OFF
 
@@ -1678,6 +2696,9 @@ issuance closed. Other edge release paths must use the same marked hooks. Readin
 set -euo pipefail
 test "$WINDOW" = W4
 ai_deadline
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w4-preflight: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 test -f "$PROOF_DIR/ordinary-before.json"
 test -f "$PROOF_DIR/consent-pre-W1.json" || { printf 'FAIL ai-w4-preflight: retained consent receipt expected consent-pre-W1.json got missing; STOP\n' >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-before.json" "$PROOF_DIR/consent-pre-W1.json" before no ai-w4-preflight <<'PY' || { printf 'FAIL ai-w4-preflight: retained before receipts expected valid got refused; STOP\n' >&2; exit 1; }
@@ -1833,6 +2854,10 @@ ai_run ai-inputs
 ai_run ai-gates
 test -f "$SECRET_STAGE/mcp.new.caddy" || { printf 'FAIL ai-w4-apply: mcp.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
 test -f "$SECRET_STAGE/api.new.caddy" || { printf 'FAIL ai-w4-apply: api.new.caddy candidate expected present got missing; STOP\n' >&2; exit 1; }
+# Backup admission at the mutation boundary: the bound, fresh receipt of THIS window.
+BACKUP_GATE_DIR="$PROOF_DIR"
+( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-w4-apply: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+unset BACKUP_GATE_DIR
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-attempted.txt"
@@ -2006,14 +3031,20 @@ trap 'exit 143' TERM
 # readonly: no
 # host: box root; also available after a failed rollback; not a close receipt
 set -euo pipefail
-systemctl start "$EDGE_RECYCLE_TIMER"
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+# Also runs as ( ai_run ai-w4-timer-recovery ) || ..., where errexit is ignored: every step fails explicitly.
+systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w4-timer-recovery: recycle timer start expected success got failure; STOP\n' >&2; exit 1; }
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w4-timer-recovery: recycle timer expected active got inactive; STOP\n' >&2; exit 1; }
 printf 'Timer restored; window remains open until service recovery is verified\n'
 ```
 
-The only timer-stopping blocks are ai-w4-apply, ai-w4-rollback and
-ai-w6-activation-apply. Each installs ai-timer-guard **before** the stop in its
-own subshell, so nested sourced blocks cannot remove the caller's EXIT trap.
+The timer-stopping blocks are ai-w4-apply, ai-w4-rollback, ai-edge-refresh,
+ai-w6-activation-apply and ai-w6-finish. ai-w4-apply and ai-w4-rollback install
+ai-timer-guard **before** the stop in their own subshell, so nested sourced
+blocks cannot remove the caller's EXIT trap. ai-edge-refresh re-arms on every
+exit. W6 (HezLead ruling) keeps the timer STOPPED from ai-w6-activation-apply
+until ai-w6-finish: a failed apply re-arms it at once; ai-w6-finish re-arms it
+on every exit; ai-w6-activation-rollback (and so ai-emergency-close) re-arms it;
+and every ai-close STOPs with a report while the timer is inactive.
 On success, command failure, explicit exit, INT or TERM the trap invokes the
 complete ai-w4-timer-recovery block and preserves the failure status. Recovery
 failure is an open incident, never a close receipt. SIGKILL or loss of the host
@@ -2035,7 +3066,30 @@ drop-in. Install in W4 while the timer is stopped, before restoring it.
 The hook closes issuance/increments generation in ExecStartPre, before the
 existing restart, then remeasures target, image, health, immutable mounts and
 all archive bytes in ExecStartPost. Only a previously open, still-approved
-release can reopen. Failed restart/measurement stays closed. HezLead executes
+release can reopen. When the after hook fails it reads the row back: only a
+confirmed CLOSED row gives "issuance CLOSED" and a NONSECRET watch marker for HezLead: one journal line with tag
+`commonswarm-admin-recycle` and one appended line in the root-owned 0644
+`/var/lib/commonswarm-release/admin-issuance-closed.log`, both the JSON
+`{"at","unit","event":"admin-issuance-closed-needs-reactivation","approved_edge_release_sha","measured_edge_release_sha"|null,"reason"}`
+(reason: recycle-config-invalid, database-session-failed, recycle-intent-invalid,
+edge-measurement-failed, database-measurement-refused, or
+remeasure-validation-failed from the `close` mode when it shut OPEN issuance; the unit comes from
+the drop-in's `Environment=COMMONSWARM_RECYCLE_UNIT=%n`, or is
+`ai-edge-remeasure`). A marker failure is reported on stderr; the close
+stands. If the after hook fails once its reopen may have COMMITTED, it closes
+and invalidates again (release role) and writes the CLOSED marker only when an
+independent readback confirms CLOSED; otherwise it writes the same JSON with
+`"event":"admin-issuance-state-unknown"` and reports "may be OPEN" (scheduled
+recycle and remeasure alike). The `close` mode runs its database close before
+any bookkeeping and confirms it the same way. ai-edge-remeasure exits 1 when its
+failure close is confirmed CLOSED and 2 when the state is unknown; every caller
+reports that result and no step claims CLOSED without it. A failure before a
+readback is possible (configuration, session) or a failed before hook gives
+the state-unknown line. A good recycle writes no marker. Issuance closed this
+way stays closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
+measured-reopen procedure under HezLead approval (remeasure, then reopen only
+through the measured path) replaces that W6 rerun; it is not part of this
+release. HezLead executes
 these blocks; this preparation worker never installs or invokes a hook.
 
 ```sh
@@ -2044,7 +3098,7 @@ these blocks; this preparation worker never installs or invokes a hook.
 # host: box root, installed by HezLead; systemd invokes before/after
 set -euo pipefail
 : "${1:?before or after}"
-case "$1" in before|after) ;; *) exit 1;; esac
+case "$1" in before|after|close) ;; *) exit 1;; esac
 umask 077
 HOOK_SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$HOOK_SECRET_STAGE"
@@ -2058,8 +3112,29 @@ PY
 }
 trap ai_hook_cleanup EXIT
 python3 - "$1" "$HOOK_SECRET_STAGE" <<'PY'
-import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time
+import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time
 stage=pathlib.Path(sys.argv[2]); mode=sys.argv[1]
+reason='recycle-config-invalid'; approved=None; measured=None; reopen_attempted=False; close_confirmed=False
+def closed_marker(event='admin-issuance-closed-needs-reactivation'):
+    # NONSECRET watch marker, written only AFTER the failure left issuance closed: one journal line and one
+    # appended JSON line. No token, credential, connection value or database row beyond the two release SHAs.
+    unit=os.environ.get('COMMONSWARM_RECYCLE_UNIT','')
+    line=json.dumps({'at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'unit':unit if re.fullmatch(r'[A-Za-z0-9@._:-]{1,256}',unit) else 'unknown',
+        'event':event,'approved_edge_release_sha':approved,'measured_edge_release_sha':measured,'reason':reason},sort_keys=True)
+    ok=True
+    try: subprocess.run(['logger','-t','commonswarm-admin-recycle','--',line],check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except Exception: ok=False
+    try:
+        d='/var/lib/commonswarm-release'
+        if not os.path.lexists(d): os.mkdir(d,0o755); os.chmod(d,0o755)
+        assert os.path.isdir(d) and not os.path.islink(d)
+        fd=os.open(d+'/admin-issuance-closed.log',os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o644)
+        try:
+            st=os.fstat(fd); assert stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid()
+            os.fchmod(fd,0o644); assert os.write(fd,(line+'\n').encode())==len(line)+1
+        finally: os.close(fd)
+    except Exception: ok=False
+    if not ok: print('FAIL recycle closed-marker not fully written (journal or admin-issuance-closed.log); the close decision above stands; HezLead must check the database',file=sys.stderr)
 try:
     path=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
     assert path.is_file() and not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode & 0o777==0o600
@@ -2069,7 +3144,8 @@ try:
     archive=pathlib.Path(r['archive']); assert archive.is_file() and not archive.is_symlink()
     assert re.fullmatch(r'/tmp/admin-issuance-'+sha+r'-[A-Za-z0-9]{6}\.tar',str(archive))
     root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
-    env=dict(os.environ); env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
+    approved=sha; reason='database-session-failed'
+    env={k:v for k,v in os.environ.items() if k!='NODE_OPTIONS' and not k.startswith('ADMIN_SMOKE_')}; env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
     with (stage/'session.log').open('w') as log:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
     for name in ['service.conf','pass']: (stage/name).chmod(0o600)
@@ -2079,14 +3155,36 @@ try:
         with (stage/'db.log').open('w') as log:
             return subprocess.check_output(args,input=sql,text=True,stderr=log).strip()
     intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
-    if mode=='before':
+    def confirm_closed():
+        # Independent readback: CLOSED is claimed only when the database says so.
+        try: return db('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        except Exception: return False
+    def failure_close():
+        # Release-role close (close first, then invalidate), then the readback; never a recursive hook run.
+        try: was=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;")
+        except Exception: was=None
+        return was,confirm_closed()
+    if mode=='close':
+        # ai-edge-remeasure's failure close: the safety transaction first, bookkeeping only after it.
+        reason='remeasure-validation-failed'
+        was,close_confirmed=failure_close()
+        if not close_confirmed:
+            closed_marker('admin-issuance-state-unknown')
+            raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (close not confirmed by readback; may be OPEN); run ai-emergency-close; HezLead recovery required')
+        # A CLOSED marker only when this close shut OPEN issuance; a failed after hook has already marked its own close.
+        if was=='t': closed_marker()
+        intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
+    elif mode=='before':
         # Stale intent can never be used after a failed/unknown pre-hook.
         intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
-        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
+        # guard_cutover_state refuses a generation change while issuance is open: close, then invalidate.
+        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
         assert len(result)==2 and result[0] in ('t','f') and result[1].isdigit()
         intent.write_text(json.dumps({'reopen':result[0]=='t','generation':int(result[1])})+'\n')
     else:
+        reason='recycle-intent-invalid'
         state=json.loads(intent.read_text()); assert isinstance(state['generation'],int) and type(state['reopen']) is bool
+        reason='edge-measurement-failed'
         live=pathlib.Path('/home/commonswarm/edge/current').resolve(strict=True); assert str(live)==target
         for attempt in range(46):
             c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],stderr=subprocess.DEVNULL))[0]
@@ -2106,13 +3204,40 @@ try:
                 assert not pathlib.PurePosixPath(member.name).is_absolute() and '..' not in pathlib.PurePosixPath(member.name).parts
                 if member.isfile(): assert not dest.is_symlink() and dest.read_bytes()==tar.extractfile(member).read()
                 elif member.issym(): assert dest.is_symlink() and dest.readlink().as_posix()==member.linkname
+        measured=sha; reason='database-measurement-refused'
         gen=str(state['generation']); enabled='true' if state['reopen'] else 'false'
-        sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; "
+        # M4 grants migration_checksum_failures() to the runtime and command roles only, never to the release
+        # role: the gate runs as the session's admin user, then the same transaction takes the release role.
+        sql="BEGIN; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
         sql+="UPDATE commonswarm_oauth.admin_cutover_state SET measured_edge_release_sha='"+sha+"',measured_edge_target='"+target+"',measured_mount='"+target+"',measured_image_digest='"+r['image_digest']+"',measured_artifact_digest='"+r['artifact_digest']+"',measured_generation=release_generation,measured_at=statement_timestamp(),measurement_evidence_ref='systemd/recycle/"+gen+"',invalidated_at=NULL,admin_issuance_enabled="+enabled+" WHERE singleton; COMMIT;"
         if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        # From here the reopen may COMMIT even if this process sees a failure (lost response, psql exit).
+        reopen_attempted=bool(state['reopen'])
         db(sql)
 except Exception:
-    raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
+    if mode=='close':
+        if close_confirmed: raise SystemExit('FAIL recycle hook close: bookkeeping failed after a close CONFIRMED by readback; issuance closed; HezLead must check recycle-intent.json') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='after' and reopen_attempted:
+        # The reopen may have committed: close it again, and claim CLOSED only after the readback confirms it.
+        was,close_confirmed=failure_close()
+        if close_confirmed:
+            closed_marker()
+            raise SystemExit('FAIL recycle hook; reopen not confirmed; issuance closed again (confirmed by readback); HezLead recovery required') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='before':
+        # The close may not have committed: never claim CLOSED here.
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook before; issuance state UNKNOWN (close not confirmed; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    # No reopen was attempted, but CLOSED is still claimed only after an independent readback; a failure before the
+    # database session exists (no readback possible) is UNKNOWN. Nonrecursive: one readback, no close, no hook run.
+    if 'confirm_closed' in globals() and confirm_closed():
+        closed_marker()
+        raise SystemExit('FAIL recycle hook; issuance CLOSED (confirmed by readback); HezLead recovery required') from None
+    closed_marker('admin-issuance-state-unknown')
+    raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (no confirming readback; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
 PY
 ```
 
@@ -2162,7 +3287,7 @@ if installed is None or installed!=hook: raise SystemExit('FAIL ai-recycle-insta
 d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
 p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json'); p.write_text(json.dumps(r)+'\n'); p.chmod(0o600)
 PY
-printf '[Service]\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
+printf '[Service]\nEnvironment=COMMONSWARM_RECYCLE_UNIT=%%n\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
 chmod 0644 "$RECYCLE_DROPIN"
 systemctl daemon-reload
 systemctl cat "$EDGE_RECYCLE_SERVICE" >"$PROOF_DIR/recycle-unit-after.txt"
@@ -2183,7 +3308,8 @@ if test -e "$RECYCLE_DROPIN"; then
 fi
 systemctl daemon-reload
 test ! -e "$RECYCLE_DROPIN"
-printf 'PASS recycle drop-in removed; issuance closed; caller EXIT guard restores/verifies timer\n'
+test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t || { printf 'FAIL ai-recycle-rollback: issuance expected closed-by-readback got other-or-unreadable; state UNKNOWN; STOP\n' >&2; exit 2; }
+printf 'PASS recycle drop-in removed; issuance closed (readback); caller EXIT guard restores/verifies timer\n'
 ```
 
 ## W5: /app site release
@@ -2361,6 +3487,7 @@ archive_sha256.
 # step: ai-w5-closed
 # readonly: probe
 # host: HezLead Mac; after referenced site manifest and browser ownership close
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${SITE_EVIDENCE:?}" "${INPUTS_FILE:?}"
 : "${LIVE_CONTROLS_FILE:?FAIL ai-w5-closed: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
@@ -2571,6 +3698,12 @@ PY
 ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
+# Issuer credential provenance: the W2b of THIS release, named by w2b_window_id, closed success and
+# provisioned it; validated by CONTENT through the shared validator (ai-w2b-proof-check).
+PROOF_CHECK_KIND=W2b
+W2B_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w6-activation-checks: issuer credential provenance expected closed-success W2b at this release got refused; STOP\n' >&2; exit 1; }
+unset PROOF_CHECK_KIND
+printf '%s\n' "$W2B_BINDING" >"$PROOF_DIR/issuer-provenance.json"
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)")" = "$RELEASE_SHA"
@@ -2605,14 +3738,127 @@ with tarfile.open(archive) as t:
     for member in t.getmembers():
         if member.isfile(): assert (pathlib.Path(target)/member.name).read_bytes()==t.extractfile(member).read()
 PY
+# The recycle hook re-verifies W4's retained archive on every run (and W6 runs it): it must exist with its digest now.
+python3 - "$RELEASE_SHA" "$INPUTS_FILE" <<'PY'
+import hashlib,json,os,pathlib,re,stat,sys
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w6-activation-checks: '+what+' expected '+expected+' got '+got+'; STOP')
+p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
+# Ownership is the hook's own check at every run; here: present, regular, 0600.
+need(p.is_file() and not p.is_symlink() and stat.S_IMODE(p.stat().st_mode)==0o600,'recycle.json','0600-regular-file','other')
+r=json.loads(p.read_text()); d=json.load(open(sys.argv[2]))
+need(r.get('release_sha')==sys.argv[1] and r.get('artifact_digest')==d['archive_sha256'],'recycle.json release/artifact','this-release-archive','other')
+archive=pathlib.Path(r.get('archive',''))
+need(re.fullmatch(r'/tmp/admin-issuance-'+sys.argv[1]+r'-[A-Za-z0-9]{6}\.tar',str(archive)) is not None and archive.is_file() and not archive.is_symlink(),'recycle archive','retained-regular-file','missing')
+need(hashlib.sha256(archive.read_bytes()).hexdigest()==r['artifact_digest'],'recycle archive digest','recycle.json artifact_digest','mismatch')
+PY
 printf 'PASS W6 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W6-checks.txt"
 ```
+
+The C1 verification row is created here, by the release role, after the
+activation checks and BEFORE activation (issuance CLOSED). It is reviewed data
+in this plan: the exact client, callback, four-scope ceiling, full-account
+eligibility, no delegation and the four tested flags (their evidence is the
+admin-c1-smoke and admin-consent-client-policy gates of this window's receipt).
+The box fetches the public client document once, pins the canonical JSON digest
+(sorted keys, no whitespace; ASCII documents only, so Python's canonical form is
+byte-identical to `canonicalAdminJson`) and requires it to equal the reviewed
+`metadata_digest` from C1_INPUTS_FILE. An identical existing row is accepted (a
+recovered rerun); a different row for this version, or another active version,
+STOPs. The trigger `guard_verified_client` enforces public HTTPS redirects and
+immutability.
+
+```sh
+# step: ai-w6-client-document
+# readonly: yes
+# host: HezLead box root, W6, before ai-w6-client-verification; public fetch only
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-client-document: window expected W6 got other; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/c1-client-document.json" || { printf 'FAIL ai-w6-client-document: c1-client-document.json expected absent got present; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/c1-client-document.json" <<'PY'
+import os,sys,urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+try:
+    with urllib.request.build_opener(NoRedirect()).open(urllib.request.Request('https://commonswarm.com/oauth/c1-smoke/client.json',headers={'User-Agent':'curl/8.7.1'}),timeout=15) as r:
+        body=r.read(4097); ok=r.status==200 and r.headers.get('Content-Type','').split(';')[0]=='application/json' and len(body)<=4096
+except Exception: ok=False
+if not ok: raise SystemExit('FAIL ai-w6-client-document: public C1 client document expected 200-application/json-at-most-4096-bytes got other; STOP')
+fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'wb') as f: f.write(body)
+print('PASS ai-w6-client-document: public C1 client document retained')
+PY
+```
+
+```sh
+# step: ai-w6-client-verification
+# readonly: no
+# host: HezLead box root, W6 after ai-w6-activation-checks and before ai-w6-activation-apply (issuance CLOSED)
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-client-verification: window expected W6 got other; STOP\n' >&2; exit 1; }
+ai_deadline
+test -f "$PROOF_DIR/W6-checks.txt" || { printf 'FAIL ai-w6-client-verification: W6-checks.txt expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/activation-attempted.txt" || { printf 'FAIL ai-w6-client-verification: issuance expected not-yet-activated got activation-attempted; STOP\n' >&2; exit 1; }
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-client-verification: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
+python3 - "$C1_INPUTS_FILE" "$INPUTS_FILE" "$PROOF_DIR/c1-client-document.json" "$PROOF_DIR/client-verification.sql" <<'PY'
+import hashlib,json,pathlib,re,sys
+cfile,inputs,docfile,out=sys.argv[1:5]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w6-client-verification: '+what+' expected '+expected+' got '+got+'; STOP')
+c=json.load(open(cfile)); d=json.load(open(inputs))
+need(all(c.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')),'C1 inputs binding','this-window','other')
+v=c.get('verification_version'); h=c.get('metadata_digest')
+need(type(v) is int and 0<v<1000000 and isinstance(h,str) and re.fullmatch('[0-9a-f]{64}',h) is not None,'C1 verification_version/metadata_digest','positive-integer-and-64-hex','other')
+raw=pathlib.Path(docfile).read_bytes()
+need(all(b<128 for b in raw),'client document','ASCII','non-ASCII')
+doc=json.loads(raw)
+def canonical(x):
+    if isinstance(x,float): raise SystemExit('FAIL ai-w6-client-verification: client document expected no-floats got float; STOP')
+    if isinstance(x,list): return '['+','.join(canonical(i) for i in x)+']'
+    if isinstance(x,dict): return '{'+','.join(json.dumps(k)+':'+canonical(x[k]) for k in sorted(x))+'}'
+    return json.dumps(x)
+CLIENT='https://commonswarm.com/oauth/c1-smoke/client.json'; REDIRECT='https://commonswarm.com/oauth/c1-smoke/callback'
+need(doc.get('client_id')==CLIENT and doc.get('application_type')=='web' and doc.get('redirect_uris')==[REDIRECT] and doc.get('token_endpoint_auth_method')=='none' and doc.get('dpop_bound_access_tokens') is True,'client document fields','reviewed-C1-client','other')
+need(hashlib.sha256(canonical(doc).encode()).hexdigest()==h,'canonical document digest','C1 metadata_digest','other')
+evidence='gates:'+d['gate_receipt_sha256']+':admin-c1-smoke+admin-consent-client-policy'
+cols="client_id,verification_version,application_type,registration_source,publisher_identity,publisher_contact,metadata_digest,redirect_uris,scope_ceiling,full_account_eligible,delegation_eligible,native_loopback_eligible,pkce_s256_tested,dpop_tested,redirect_tested,origin_control_verified,review_evidence_ref,reviewed_by,active"
+vals="'"+CLIENT+"',"+str(v)+",'web','cimd','Yulan Ventures (CommonSwarm C1 smoke)','https://commonswarm.com','"+h+"',ARRAY['"+REDIRECT+"']::text[],ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[],true,false,false,true,true,true,true,'"+evidence+"','HezLead',true"
+same="v.application_type='web' AND v.registration_source='cimd' AND v.metadata_digest='"+h+"' AND v.redirect_uris=ARRAY['"+REDIRECT+"']::text[] AND v.scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND v.full_account_eligible AND NOT v.delegation_eligible AND NOT v.native_loopback_eligible AND v.pkce_s256_tested AND v.dpop_tested AND v.redirect_tested AND v.origin_control_verified AND v.active AND v.withdrawn_at IS NULL"
+sql=("BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $c1$ DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE; BEGIN "
+ "PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled FOR UPDATE; "
+ "IF NOT FOUND THEN RAISE EXCEPTION 'C1 verification requires issuance closed'; END IF; "
+ "SELECT * INTO v FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND verification_version="+str(v)+"; "
+ "IF FOUND THEN IF NOT ("+same+") THEN RAISE EXCEPTION 'existing C1 verification differs'; END IF; "
+ "ELSE IF EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND active) THEN RAISE EXCEPTION 'another active C1 verification version'; END IF; "
+ "INSERT INTO commonswarm_oauth.admin_verified_clients("+cols+") VALUES ("+vals+"); END IF; END $c1$; COMMIT;\n")
+pathlib.Path(out).write_text(sql)
+PY
+ai_db -q --file /proof/client-verification.sql >/dev/null || { printf 'FAIL ai-w6-client-verification: release-role insert of the reviewed C1 verification expected committed got refused; STOP\n' >&2; exit 1; }
+printf 'PASS reviewed C1 verification row present, active and canonical-digest bound\n' >"$PROOF_DIR/C1-client-verification.txt"
+```
+
 
 ```sh
 # step: ai-w6-activation-apply
 # readonly: no
 # host: HezLead, box root; approved activation only
 (
+C1_CLOSED_CONFIRMED=0 W6_APPLY_TIMER_HELD=0
+C1_BLOCK_DONE=0
+w6_apply_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Recovery once this apply has stopped the timer (from just before its stop on).
+ if test "$status" != 0 && test "$W6_APPLY_TIMER_HELD" = 1; then
+  ( ai_run ai-w4-timer-recovery ) || printf 'FAIL ai-w6-activation-apply: recycle timer re-arm after a failed apply expected active got failure; STOP\n' >&2
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap w6_apply_exit EXIT
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
@@ -2655,19 +3901,16 @@ OAUTH_TARGET=/home/commonswarm/oauth/releases/$RELEASE_SHA
 test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_TARGET"
 test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
 test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
-# Both hooks are marked complete blocks installed in W4; no generated operator script.
-ai_run ai-timer-guard
-systemctl stop "$EDGE_RECYCLE_TIMER"
-test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
-/usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
-/usr/local/libexec/commonswarm-admin-edge-recycle after >"$SECRET_STAGE/measure-after.log" 2>&1
-# The just-completed hook owns this fresh measurement; retain a new W6 receipt.
-ACTIVATION_GENERATION=$(ai_ro -Atq --command 'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;')
-python3 - "$EDGE_MEASUREMENT_FILE" "$PROOF_DIR/edge-measurement.json" "$ACTIVATION_GENERATION" <<'PY'
-import json,pathlib,sys
-m=json.load(open(sys.argv[1])); assert sys.argv[3].isdigit() and int(sys.argv[3])>0, 'FAIL release_generation/measured_generation/invalidated_at; STOP'
-m.update(generation=int(sys.argv[3]),invalidated_at=None); pathlib.Path(sys.argv[2]).write_text(json.dumps(m,sort_keys=True)+'\n')
-PY
+test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-activation-apply: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
+# HezLead ruling: the recycle timer stays STOPPED from here until ai-w6-finish re-arms it. A failed apply
+# re-arms it at once (the hooks are marked complete blocks installed in W4; no generated operator script).
+W6_APPLY_TIMER_HELD=1
+systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-apply: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive || { printf 'FAIL ai-w6-activation-apply: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
+# The shared remeasure owns this fresh measurement; it writes the W6 receipt and validates it.
+EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json
+( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-activation-apply; printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+unset EDGE_MEASUREMENT_OUT
 python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
 import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
@@ -2701,12 +3944,16 @@ d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']
 assert type(m.get('generation')) is int and m['generation']>0 and m.get('invalidated_at','missing') is None, 'FAIL generation/invalidated_at; STOP'
 gen=str(m['generation'])
 assert re.fullmatch('[0-9a-f]{40}',sha) and re.fullmatch('[0-9a-f]{64}',h)
-sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; "
+# M4 grants migration_checksum_failures() to the runtime and command roles only: the locked gate runs as the
+# session's admin user, then the same transaction takes the release role for the switch.
+sql="BEGIN; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
 sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+h+"',admin_issuance_enabled=true WHERE singleton; COMMIT;\n"
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY
 ai_db -q --file /proof/activate.sql >/dev/null
-printf 'Apply body completed; timer recovery still required: W6 overlay/env/cutover active; require outside gate probe before close\n'
+printf 'Apply body completed; recycle timer HELD until ai-w6-finish: W6 overlay/env/cutover active; require outside gate probe before close\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 
@@ -2742,8 +3989,29 @@ printf 'PASS W6 measured release, overlay/env and public gate open\n' >"$PROOF_D
 # step: ai-w6-activation-rollback
 # readonly: no
 # host: HezLead box root; remove activation env/overlay and close cutover
+(
+# Installed as the FIRST statement, before set -u and the first rollback operation: any exit re-arms the held recycle timer; the original failure is
+# kept and a failed re-arm is reported (and fails a successful rollback).
+C1_BLOCK_DONE=0
+w6_rollback_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-activation-rollback: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+  test "$status" != 0 || status=3
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active on exit got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract: a failed rollback never claims CLOSED (1 becomes 2, UNKNOWN); other codes are kept.
+ if test "$status" = 1; then status=2; fi
+ exit "$status"
+}
+trap w6_rollback_exit EXIT
 set -euo pipefail
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+# guard_cutover_state refuses a generation change while issuance is open: close first, then invalidate, one transaction.
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 OAUTH_TARGET=$(readlink -f /home/commonswarm/oauth/current)
 python3 - "$OAUTH_TARGET" "$SECRET_STAGE/service.closed.env" <<'PY'
 import pathlib,re,sys
@@ -2766,8 +4034,13 @@ assert not any(m['Destination']=='/run/commonswarm-oauth/admin-issuer-database-c
 with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r: assert json.loads(r.read(4096))=={'state':'closed'}
 PY
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-systemctl start "$EDGE_RECYCLE_TIMER"
-printf 'PASS W6 env/overlay removed; DB closed; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+# Re-arm the recycle timer W6 held; also the emergency-close path.
+systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer start expected success got failure; STOP\n' >&2; exit 1; }
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active got inactive; STOP\n' >&2; exit 1; }
+printf 'PASS W6 env/overlay removed; DB closed; recycle timer active; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
 ```
 
 ```sh
@@ -2823,6 +4096,82 @@ role, not created by owner approval. PASS10 pins lowercase SHA-256 of
 Never hash provider-normalized defaults or confuse the document's byte digest
 with its canonical JSON digest. Approval uses the exact version after the
 published document, reviewed digest and DB row are reconciled.
+
+### W6 producers (contracts; each is produced fresh for THIS release and W6 window)
+
+Nothing from an earlier release or window is reused. The 2026-10-03 pointer,
+callback, consent receipts and BROWSER-READY marker belong to other releases or
+windows; every one is replaced: the pointer is created exclusively per W6
+window with that window's expiry, and the consent receipts are bound to
+RELEASE_SHA.
+
+- **BROWSER-READY** (`/Users/yulanbot/work/BROWSER-READY`, Mac). Producer: HezLead
+  on Tom's unlocked Mac, by `touch` AFTER the W5 close at this release and
+  shortly before the W6 open. Contract: a regular non-symlink file; only its
+  modification time matters (newer than the W5 `closed.txt` time and not in the
+  future: ai-w6-readiness, ai-w6-preflight, ai-open). Content is ignored. A file
+  touched before the W5 close STOPs W6; touch it again after the close.
+- **Smoke pointer** (`/Users/yulanbot/work/dcr-rt/c1-smoke.pointer`, Mac). Producer:
+  the plan's own ai-w6-pointer, after ai-w6-start, once per W6 window (exclusive
+  create; it must not exist). Format: one JSON line, 0600, sorted keys
+  `authorize_url_file`, `callback_file` (absolute paths in this run's
+  `/private/tmp/anvil-secret.*` stage), `consent_choices` {`workspace_name` (the
+  C1 smoke workspace), `scopes`, `home`: false, `full_account`}, `expires_at`
+  = INPUTS `window_end_utc`. Consumer: HezLead's assigned browser consent worker
+  (the existing consent autorun, pointed at this pointer path): it waits for the
+  0600 authorize file, refuses an expired pointer, follows consent_choices
+  exactly with a fresh full-account second confirmation, and atomically writes
+  the full callback URL (0600) to `callback_file` without logging it.
+  ai-w6-secret-close removes the stage and the pointer.
+- **C1_INPUTS_FILE**: produced by ai-w6-c1-inputs below (Mac, owner session).
+  HezLead supplies only the existing smoke workspace (`C1_SMOKE_WORKSPACE_ID`,
+  exact `C1_SMOKE_WORKSPACE_NAME`) and `C1_VERIFICATION_VERSION`. The
+  block derives the rest: owner_user_id from the owner's refreshed file-store
+  session, state_directory = `defaultCredentialStateDirectory()`, target_file =
+  its `current-target.json` (keys url, anonKey), and metadata_digest from the
+  fetched public client document.
+
+```sh
+# step: ai-w6-c1-inputs
+# readonly: no
+# host: HezLead Mac, clean checkout at RELEASE_SHA with dependencies installed; owner file-store session; writes C1_INPUTS_FILE once
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?FAIL ai-w6-c1-inputs: C1_INPUTS_FILE expected absolute-new-file got unset; STOP}"
+: "${C1_SMOKE_WORKSPACE_ID:?}" "${C1_SMOKE_WORKSPACE_NAME:?}" "${C1_VERIFICATION_VERSION:?}"
+C1_INPUTS_RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE") || { printf 'FAIL ai-w6-c1-inputs: INPUTS release_sha expected readable got failure; STOP\n' >&2; exit 1; }
+test "$(git rev-parse HEAD)" = "$C1_INPUTS_RELEASE" || { printf 'FAIL ai-w6-c1-inputs: checkout HEAD expected release-sha got mismatch; STOP\n' >&2; exit 1; }
+node --import tsx --input-type=module - "$INPUTS_FILE" "$C1_INPUTS_FILE" "$C1_SMOKE_WORKSPACE_ID" "$C1_SMOKE_WORKSPACE_NAME" "$C1_VERIFICATION_VERSION" <<'JS'
+import { open, readFile } from 'node:fs/promises';
+import { join, isAbsolute } from 'node:path';
+import { createHash } from 'node:crypto';
+import { credentialStore, defaultCredentialStateDirectory } from './src/cloud/storage.ts';
+import { readCurrentTarget } from './src/cloud/current-target.ts';
+import { refreshedCredential } from './src/cloud/auth.ts';
+import { canonicalAdminJson } from './src/protocol/admin-policy.ts';
+const [inputs,out,workspaceId,workspaceName,version]=process.argv.slice(2);
+try {
+ const d=JSON.parse(await readFile(inputs,'utf8'));
+ if(d.window!=='W6' || !isAbsolute(out)) throw Error('window/output');
+ if(!/^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/.test(workspaceId)) throw Error('workspace id');
+ if(workspaceName.length<1 || workspaceName.length>200 || /[\u0000-\u001f]/.test(workspaceName) || /bearer|https?:\/\/|eyJ[A-Za-z0-9_-]+\.|(?:token|secret|password)=/i.test(workspaceName)) throw Error('workspace name');
+ if(!/^[1-9][0-9]{0,5}$/.test(version)) throw Error('verification version');
+ const stateDirectory=defaultCredentialStateDirectory();
+ const target=await readCurrentTarget(); if(target?.url!=='https://api.commonswarm.com') throw Error('target');
+ const store=await credentialStore({target,stateDirectory,forceFile:true,warn:()=>{}});
+ const human=await refreshedCredential(target,store);
+ const response=await fetch('https://commonswarm.com/oauth/c1-smoke/client.json',{redirect:'error',signal:AbortSignal.timeout(10000)});
+ if(!response.ok || response.headers.get('content-type')?.split(';')[0]!=='application/json') throw Error('document');
+ const text=await response.text(); if(Buffer.byteLength(text)>4096) throw Error('document size');
+ const doc=JSON.parse(text); if(doc.client_id!=='https://commonswarm.com/oauth/c1-smoke/client.json') throw Error('client id');
+ const c={release_sha:d.release_sha,window_id:d.window_id,plan_sha256:d.plan_sha256,owner_user_id:human.userId,smoke_workspace_id:workspaceId,
+   smoke_workspace_name:workspaceName,verification_version:Number(version),metadata_digest:createHash('sha256').update(canonicalAdminJson(doc)).digest('hex'),
+   target_file:join(stateDirectory,'current-target.json'),state_directory:stateDirectory};
+ const fd=await open(out,'wx',0o600); await fd.writeFile(JSON.stringify(c)+'\n'); await fd.close();
+ console.log('PASS ai-w6-c1-inputs: C1 inputs written; owner, target and digest derived; no credentials emitted');
+} catch { console.error('FAIL ai-w6-c1-inputs: C1 inputs expected derived got refused; STOP'); process.exitCode=1; }
+JS
+```
 
 ```sh
 # step: ai-w6-preflight
@@ -2890,6 +4239,17 @@ install -m 0600 "$C1_INPUTS_FILE" "$C1_PROOF_DIR/C1-inputs.json"
 # host: HezLead Mac; nonsecret receipts only, whole block per selected file
 set -euo pipefail
 : "${C1_TRANSFER_DIRECTION:?upload or download}" "${C1_TRANSFER_FILE:?}" "${C1_PROOF_DIR:?}"
+# Inside the fence window (C1_FENCE_DEADLINE, set by ai-w6-fence-driver) every transport is bounded by the
+# remaining deadline, a stalled established session included; ssh keepalives bound it everywhere.
+c1_transport() {
+ if test -n "${C1_FENCE_DEADLINE:-}"; then
+  C1_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+  test "$C1_LEFT" -gt 0 || { printf 'FAIL ai-w6-transfer: fence deadline expected remaining got expired; STOP\n' >&2; return 1; }
+  perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$C1_LEFT" "$@"
+ else
+  "$@"
+ fi
+}
 C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
 case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
  upload:C1-inputs.json|upload:agent.json|upload:agent-final.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
@@ -2897,16 +4257,16 @@ case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
   test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected regular-file got missing; STOP\n' >&2; exit 1; }
   test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'test ! -e %q' "$C1_UPLOAD"
-  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
-  scp -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
+  c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE"
+  c1_transport scp -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
   printf -v C1_REMOTE 'sudo -n install -o root -g root -m 0600 %q %q' "$C1_UPLOAD" "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
-  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
+  c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE"
   ;;
  download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt|download:C1-finish.json)
   test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected absent got present; STOP\n' >&2; exit 1; }
   test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'sudo -n cat %q' "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
-  ( set -C; umask 077; ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
+  ( set -C; umask 077; c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
   ;;
  *) printf 'FAIL nonsecret C1 transfer allowlist; STOP\n' >&2; exit 1;;
 esac
@@ -2917,7 +4277,7 @@ C1_INPUTS_FILE to that derived proof path), download C1-client-check.txt before
 owner approval, upload agent.json before SQL audit (C1_AGENT_RECEIPT on box),
 download C1-audit.json before human revoke, and download C1-fence.txt and C1-finish.json before
 reporting. Upload client-withdraw.json before revoke and agent-final.json after the same runner completes, before finish; after report/cleanup, upload C1.json and C1-cleanup.txt for W6 close.
-The immutable C1.json and its measured digest become W7's C1_REPORT_FILE input.
+The immutable box C1.json, bound by W7's `w6_window_id` with that W6's close-result.json, is W7's C1 input; ai-w7-preflight measures its digest.
 This allowlist excludes private authorize/callback/key/token/session files.
 
 ```sh
@@ -2926,7 +4286,9 @@ This allowlist excludes private authorize/callback/key/token/session files.
 # host: HezLead box root, W6 read-only SQL; before owner approval
 set -euo pipefail
 test "$WINDOW" = W6
-: "${C1_INPUTS_FILE:?}"
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-client-check: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
+test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-client-check: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
 test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
@@ -2947,12 +4309,14 @@ printf 'PASS exact C1 version/canonical digest/reviewed ceiling and smoke worksp
 # step: ai-w6-owner-client-command
 # readonly: no
 # host: HezLead Mac owner file-store CLI session; approve or withdraw only
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_CLIENT_ACTION:?approve or withdraw}"
 case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
 # Execute ai-w6-preflight and retain box C1-client-check.txt first.
 # approve: only after ai-w6-start/ai-w6-pointer, immediately before consent.
-# withdraw: after audit, immediately before human revoke in this same W6.
+# withdraw: AFTER ai-w6-fence-driver (human revoke + refused follow-up) and the runner's exit, in this same W6;
+# withdrawal itself fences every family of this owner/client/version, so it never precedes the human revoke.
 if test "$C1_CLIENT_ACTION" = approve; then test -f /Users/yulanbot/work/dcr-rt/c1-smoke.pointer; fi
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
 node --import tsx --input-type=module - "$C1_INPUTS_FILE" "$C1_PROOF_DIR" "$C1_CLIENT_ACTION" <<'JS'
@@ -2991,6 +4355,7 @@ JS
 # step: ai-w6-start
 # readonly: no
 # host: HezLead Mac, after preflight/client-check; owner approval follows pointer publication; no browser launch
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${C1_PROOF_DIR:?}"
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
@@ -3014,8 +4379,12 @@ printf '%s\n' "$C1_RUNNER_PID" >"$C1_PROOF_DIR/runner.pid"
 # step: ai-w6-pointer
 # readonly: no
 # host: HezLead Mac; runner underway, before owner approval/consent
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
-: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_INPUTS_FILE:?}"
+: "${C1_INPUTS_FILE:?}"
+# F10: the stage and pointer are recorded by ai-w6-start; a later shell derives them from C1_PROOF_DIR.
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "${C1_PROOF_DIR:?}/secret-stage.path")}
+C1_POINTER=${C1_POINTER:-/Users/yulanbot/work/dcr-rt/c1-smoke.pointer}
 node scripts/admin-smoke.mjs --dry-run >"$C1_SECRET_STAGE/request-plan.json"
 python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_INPUTS_FILE" "$INPUTS_FILE" docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md <<'PY'
 import datetime,json,os,pathlib,re,sys
@@ -3045,6 +4414,8 @@ PY
 # readonly: no
 # host: HezLead Mac; export only redacted receipt from runner secret directory
 set -euo pipefail
+: "${C1_PROOF_DIR:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
 python3 - "$C1_SECRET_STAGE/agent.json" "$C1_PROOF_DIR/agent.json" <<'PY'
 import json,pathlib,re,sys
 source,out=map(pathlib.Path,sys.argv[1:]); r=json.loads(source.read_text())
@@ -3055,6 +4426,7 @@ keys=['ok','run_id','workspace','steps','refused_after_fence','failed_step','fai
 public={k:r[k] for k in keys}
 assert not re.search(r'(?i)access_token|refresh_token|code_verifier|authorization|eyJ[A-Za-z0-9_-]+\.',json.dumps(public)), 'FAIL private receipt data; STOP'
 assert not out.is_symlink()
+# The first export (fence window) may be replaced by the final one after the runner exits.
 out.write_text(json.dumps(public)+'\n'); out.chmod(0o600)
 if r['ok'] is True:
     final=out.parent/'agent-final.json'; assert not final.exists() and not final.is_symlink()
@@ -3077,7 +4449,10 @@ most-recent-grant guess. Copy only agent.json (redacted command IDs) to the box.
 # readonly: no
 # host: HezLead box root; READ-ONLY SQL, smoke grant/family only
 set -euo pipefail
-: "${C1_AGENT_RECEIPT:?}" "${C1_INPUTS_FILE:?}"
+C1_AGENT_RECEIPT=${C1_AGENT_RECEIPT:-$PROOF_DIR/agent.json}
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_AGENT_RECEIPT" = "$PROOF_DIR/agent.json" || { printf 'FAIL ai-w6-audit: C1_AGENT_RECEIPT expected the box proof copy got other; STOP\n' >&2; exit 1; }
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-audit: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
 python3 - "$C1_AGENT_RECEIPT" "$C1_INPUTS_FILE" "$PROOF_DIR/c1-audit.sql" <<'PY'
 import json,pathlib,re,sys
 r=json.load(open(sys.argv[1])); c=json.load(open(sys.argv[2])); run=r['run_id']; owner=c['owner_user_id']
@@ -3091,27 +4466,184 @@ sql="BEGIN READ ONLY; SELECT count(*)=1 AS c1_one FROM ("+base+") s \\gset\n\\if
 sql+="WITH smoke AS ("+base+") SELECT json_build_object('grant_id',s.admin_grant_id,'provider_grant_id',s.provider_grant_id,'audit_counts',(SELECT json_object_agg(k.kind,k.n) FROM (SELECT kinds.kind,count(a.audit_id) AS n FROM (VALUES ('init'),('list'),('read'),('action')) kinds(kind) LEFT JOIN commonswarm_oauth.admin_oauth_audit a ON a.admin_grant_id=s.admin_grant_id AND a.provider_grant_id=s.provider_grant_id AND a.event_kind=kinds.kind AND a.outcome='committed' GROUP BY kinds.kind) k)) FROM smoke s; COMMIT;\n"
 pathlib.Path(sys.argv[3]).write_text(sql)
 PY
-ai_ro -Atq --file /proof/c1-audit.sql >"$PROOF_DIR/C1-audit.json"
-python3 - "$PROOF_DIR/C1-audit.json" <<'PY'
+ai_ro -Atq --file /proof/c1-audit.sql >"$PROOF_DIR/C1-audit.json" || { printf 'FAIL ai-w6-audit: smoke audit query expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/C1-audit.json" <<'PY' || { printf 'FAIL ai-w6-audit: audit counts expected four committed kinds got other; STOP\n' >&2; exit 1; }
 import json,sys
 r=json.load(open(sys.argv[1])); assert set(r['audit_counts'])=={'init','list','read','action'} and all(type(n) is int and n>0 for n in r['audit_counts'].values())
 PY
 ```
 
+The fence window is short: after its post-refresh read the runner waits at most
+240 s (and at most until its 300 s access token is 20 s from expiry) for the
+fence file. Inside that window only four things happen, in this order, driven by
+ONE Mac step (ai-w6-fence-driver) that runs the reviewed blocks verbatim from the
+verified plan bytes: ai-w6-agent-receipt, upload of agent.json, the box audit
+(ai-w6-audit-watch, already waiting in the box root shell, runs ai-w6-audit as
+soon as agent.json arrives), download of C1-audit.json, and ai-w6-human-revoke.
+The runner prints its actual nonsecret fence cutoff (`fence_cutoff_epoch_ms`,
+the minimum of its fence wait, token expiry and total deadline) just before its
+ready line. The driver's absolute deadline is that cutoff less 5 s, never a
+fresh interval from when the driver noticed the line; it refuses normal
+revocation when the runner has exited or the cutoff has passed. Every ssh/scp
+call is bounded by what remains, a stalled session included; with less than
+45 s left it does NOT revoke. Inside ai-w6-human-revoke both owner credential
+refreshes (the preflight and the CLI's own) and the revoke request run under one
+alarm at the revoke cutoff (deadline less 20 s): no revoke is dispatched after
+it, and a timeout leaves the outcome unknown, never C1 proof. After the window
+only `C1_RECOVERY_REVOKE=1` runs, as cleanup recorded in
+human-revoke-recovery.json, never as C1 refusal proof. In ai-w6-human-revoke the human revoke verb fences the grant,
+then the fence file is written and the runner proves the refused follow-up. The owner's approval withdrawal comes
+AFTER the runner exits: withdrawal itself fences every family of that
+owner/client/version (guard_owner_approval), so it must not precede the human
+revoke it is meant to follow. Report order: approval_at <= revoked_at <=
+withdrawn_at.
+
+```sh
+# step: ai-w6-audit-watch
+# readonly: no
+# host: HezLead box root shell (W6 session), started right after the owner approval and before consent; waits for agent.json, then runs ai-w6-audit
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-audit-watch: window expected W6 got other; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/C1-audit.json" || { printf 'FAIL ai-w6-audit-watch: C1-audit.json expected absent got present; STOP\n' >&2; exit 1; }
+until test -f "$PROOF_DIR/agent.json"; do
+ ai_deadline || { printf 'FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+test ! -L "$PROOF_DIR/agent.json" || { printf 'FAIL ai-w6-audit-watch: agent.json expected regular-file got symlink; STOP\n' >&2; exit 1; }
+C1_AGENT_RECEIPT=$PROOF_DIR/agent.json
+( ai_run ai-w6-audit ) || { printf 'FAIL ai-w6-audit-watch: smoke grant audit expected PASS got failure; STOP\n' >&2; exit 1; }
+printf 'PASS ai-w6-audit-watch: C1-audit.json ready for download\n'
+```
+
+```sh
+# step: ai-w6-fence-driver
+# readonly: no
+# host: HezLead Mac shell of ai-w6-start, after the owner approval; runs the fence-window blocks verbatim; nothing else may use the owner session meanwhile
+set -euo pipefail
+: "${PLAN_FILE:?}" "${INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_INPUTS_FILE:?}"
+C1_SECRET_STAGE=$(cat "$C1_PROOF_DIR/secret-stage.path") || { printf 'FAIL ai-w6-fence-driver: secret-stage.path expected readable got failure; STOP\n' >&2; exit 1; }
+C1_RUNNER_PID=$(cat "$C1_PROOF_DIR/runner.pid") || { printf 'FAIL ai-w6-fence-driver: runner.pid expected readable got failure; STOP\n' >&2; exit 1; }
+C1_POINTER=/Users/yulanbot/work/dcr-rt/c1-smoke.pointer
+RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
+C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
+# The deadline comes from the RUNNER's own nonsecret fence cutoff (min of its fence wait, token expiry and total
+# deadline), printed with its ready line, less 5 s; never from when this driver noticed the line. A budget
+# (at most 220 s from that moment) may only shorten it (tests). Every transport below and in ai-w6-transfer is
+# bounded by what remains.
+test "${C1_RECOVERY_REVOKE:-0}" != 1 || { printf 'FAIL ai-w6-fence-driver: C1_RECOVERY_REVOKE expected unset in the fence window got 1; STOP\n' >&2; exit 1; }
+C1_FENCE_BUDGET=${C1_FENCE_BUDGET_SECONDS:-220}
+[[ "$C1_FENCE_BUDGET" =~ ^[1-9][0-9]{0,2}$ ]] && test "$C1_FENCE_BUDGET" -le 220 || { printf 'FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP\n' >&2; exit 1; }
+fence_block() {
+ python3 -c '
+import hashlib,json,os,re,stat,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b"".join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get("plan_sha256"):
+        raise SystemExit("FAIL "+step+": PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got "+("missing-or-not-regular" if raw is None else "digest-mismatch")+"; STOP")
+    return raw
+blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],"ai-w6-fence-driver").decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
+if len(found)!=1: raise SystemExit("FAIL ai-w6-fence-driver: block "+sys.argv[2]+" expected one got other; STOP")
+sys.stdout.write(found[0])
+' "$PLAN_FILE" "$1" "$INPUTS_FILE"
+}
+# Each block runs in its own bash process, so its own set -e holds (no errexit-ignoring context).
+export PLAN_FILE INPUTS_FILE C1_PROOF_DIR C1_INPUTS_FILE C1_SECRET_STAGE C1_RUNNER_PID C1_POINTER RELEASE_SHA WINDOW_ID
+fence_run() {
+ local FENCE_SOURCE
+ FENCE_SOURCE=$(fence_block "$1") || return 1
+ /bin/bash -c "$FENCE_SOURCE" || { printf 'FAIL ai-w6-fence-driver: %s expected PASS got failure; STOP\n' "$1" >&2; return 1; }
+}
+# Wait for the runner's fence-ready line; consent may take up to 25 minutes.
+until grep -qx 'agent_steps_complete_awaiting_human_fence' "$C1_SECRET_STAGE/agent-status.log" 2>/dev/null; do
+ kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected awaiting fence got exited; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+FENCE_START=$(date +%s)
+C1_RUNNER_CUTOFF_MS=$(grep -E '^fence_cutoff_epoch_ms=[0-9]{13}$' "$C1_SECRET_STAGE/agent-status.log" 2>/dev/null) || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected printed got missing; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$(printf '%s\n' "$C1_RUNNER_CUTOFF_MS" | wc -l | tr -d ' ')" = 1 || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected one line got several; STOP\n' >&2; exit 1; }
+C1_FENCE_DEADLINE=$(( ${C1_RUNNER_CUTOFF_MS#fence_cutoff_epoch_ms=} / 1000 - 5 ))
+test "$C1_FENCE_DEADLINE" -le "$(( FENCE_START + C1_FENCE_BUDGET ))" || C1_FENCE_DEADLINE=$(( FENCE_START + C1_FENCE_BUDGET ))
+export C1_FENCE_DEADLINE
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive at the fence got exited; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$C1_FENCE_DEADLINE" -gt "$FENCE_START" || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected ahead got passed; normal revoke refused; run ai-emergency-close, then a recovery revoke; STOP\n' >&2; exit 1; }
+fence_run ai-w6-agent-receipt || exit 1
+export C1_TRANSFER_DIRECTION=upload C1_TRANSFER_FILE=agent.json
+fence_run ai-w6-transfer || exit 1
+printf -v FENCE_PROBE 'sudo -n test -f %q' "$C1_BOX_PROOF/C1-audit.json"
+while :; do
+ FENCE_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+ test "$FENCE_LEFT" -gt 0 || { printf 'FAIL ai-w6-fence-driver: box C1-audit.json expected before the fence deadline got none; STOP\n' >&2; exit 1; }
+ test "$(( $(date +%s) - FENCE_START ))" -lt 150 || { printf 'FAIL ai-w6-fence-driver: box C1-audit.json expected within 150 s got none; STOP\n' >&2; exit 1; }
+ if perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$FENCE_LEFT" ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$FENCE_PROBE"; then break; fi
+ sleep 1
+done
+export C1_TRANSFER_DIRECTION=download C1_TRANSFER_FILE=C1-audit.json
+fence_run ai-w6-transfer || exit 1
+unset C1_TRANSFER_DIRECTION C1_TRANSFER_FILE
+# The revoke needs live-token budget left for the runner's refused follow-up; otherwise do not revoke here.
+FENCE_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive before the human revoke got exited; revoke NOT attempted; STOP\n' >&2; exit 1; }
+test "$FENCE_LEFT" -ge 45 || { printf 'FAIL ai-w6-fence-driver: fence budget before the human revoke expected at-least-45-s got %s s; revoke NOT attempted; run ai-emergency-close, then the human revoke as recovery; STOP\n' "$FENCE_LEFT" >&2; exit 1; }
+fence_run ai-w6-human-revoke || exit 1
+FENCE_SECONDS=$(( $(date +%s) - FENCE_START ))
+printf '%s\n' "$FENCE_SECONDS" >"$C1_PROOF_DIR/fence-seconds.txt"
+printf 'PASS ai-w6-fence-driver: fence chain completed in %s s (runner budget 240 s)\n' "$FENCE_SECONDS"
+```
+
+
 ```sh
 # step: ai-w6-human-revoke
 # readonly: no
 # host: HezLead Mac, OWNER's file-store CLI session; human revoke verb D6
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
-: "${C1_PROOF_DIR:?}" "${C1_SECRET_STAGE:?}"
-# Withdraw owner client approval first, then revoke this grant/family.
-test -f "$C1_PROOF_DIR/client-withdraw.json"
-# Copy the nonsecret C1-audit.json from the box into C1_PROOF_DIR first.
+: "${C1_PROOF_DIR:?}" "${C1_INPUTS_FILE:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
+C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
+# The human revoke verb fences this grant/family FIRST; the approval withdrawal follows after the runner exits.
+test ! -e "$C1_PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-human-revoke: client-withdraw.json expected absent-before-revoke got present; STOP\n' >&2; exit 1; }
+# Normal revoke only inside the fence window ai-w6-fence-driver sets (C1_FENCE_DEADLINE). After it, only a labelled
+# cleanup revoke (C1_RECOVERY_REVOKE=1), recorded as human-revoke-recovery.json and never as C1 refusal proof.
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
+ # The recovery flag ALWAYS selects cleanup, even with a retained deadline: never the receipt or the fence file.
+ unset C1_FENCE_DEADLINE
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke-recovery.json
+elif test -z "${C1_FENCE_DEADLINE:-}"; then
+ printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 (never C1 proof); STOP\n' >&2; exit 1
+else
+ [[ "$C1_FENCE_DEADLINE" =~ ^[0-9]{10}$ ]] || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected epoch-seconds got other; STOP\n' >&2; exit 1; }
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke.json
+fi
+# Inside the fence window both owner refreshes and the revoke request run under one alarm at the revoke cutoff (20 s
+# before the fence deadline): no refresh can outlast it, and the revoke can be dispatched only before it.
+c1_revoke_bounded() {
+ if test -n "${C1_FENCE_DEADLINE:-}"; then
+  C1_LEFT=$(( C1_FENCE_DEADLINE - 20 - $(date +%s) ))
+  test "$C1_LEFT" -gt 0 || { printf 'FAIL ai-w6-human-revoke: revoke cutoff (fence deadline - 20 s) expected ahead got passed; revoke NOT dispatched; STOP\n' >&2; return 1; }
+  perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$C1_LEFT" "$@"
+ else
+  "$@"
+ fi
+}
+# The nonsecret C1-audit.json from the box is in C1_PROOF_DIR (ai-w6-fence-driver downloads it).
 C1_GRANT_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["grant_id"])' "$C1_PROOF_DIR/C1-audit.json")
 C1_REVOKE_REQUEST_ID=$(node -e 'console.log(require("node:crypto").randomUUID())')
 ( set -C; printf '%s\n' "$C1_REVOKE_REQUEST_ID" >"$C1_PROOF_DIR/revoke-request-id" )
 # Saved default CLI target/session must be the owner and production API; preflight checks below.
-node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS'
+c1_revoke_bounded node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS' || { printf 'FAIL ai-w6-human-revoke: owner preflight expected verified-before-the-revoke-cutoff got failure-or-timeout; revoke NOT dispatched; STOP\n' >&2; exit 1; }
 import { readFile } from 'node:fs/promises';
 import { credentialStore,defaultCredentialStateDirectory } from './src/cloud/storage.ts';
 import { cloudTarget } from './src/cloud/config.ts';
@@ -3124,9 +4656,14 @@ try {
  if(human.userId!==c.owner_user_id) throw Error();
 } catch { console.error('FAIL owner CLI target/session mismatch; STOP'); process.exitCode=1; }
 JS
-node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
+c1_revoke_bounded node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
  --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
- >"$C1_PROOF_DIR/human-revoke.json" 2>"$C1_PROOF_DIR/human-revoke-status.log"
+ >"$C1_REVOKE_OUT" 2>"$C1_PROOF_DIR/human-revoke-status.log" || { printf 'FAIL ai-w6-human-revoke: revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown; reconcile request ID %s; a later revoke is recovery only, never C1 proof; STOP\n' "$C1_REVOKE_REQUEST_ID" >&2; exit 1; }
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
+ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["state"]=="revoked"' "$C1_REVOKE_OUT" || { printf 'FAIL ai-w6-human-revoke: recovery revoke expected revoked got other; STOP\n' >&2; exit 1; }
+ printf 'RECOVERY ai-w6-human-revoke: grant revoked after the fence window; human-revoke-recovery.json is cleanup, NOT C1 refusal proof\n'
+ exit 0
+fi
 python3 - "$C1_PROOF_DIR/human-revoke.json" "$C1_PROOF_DIR/agent.json" "$C1_SECRET_STAGE/fenced" <<'PY'
 import datetime,json,os,pathlib,sys
 r=json.load(open(sys.argv[1])); assert r['state']=='revoked'
@@ -3136,9 +4673,18 @@ a=json.load(open(sys.argv[2])); p=pathlib.Path(sys.argv[3]); assert not p.exists
 fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as f: f.write(a['run_id']+'\n')
 PY
-# Same runner performs --verify-fenced with a still-live token. Never restart it.
-wait "$C1_RUNNER_PID"
-# Execute ai-w6-agent-receipt again after wait, before final report.
+# Same runner performs --verify-fenced with a still-live token. Never restart it. Its exit is awaited by
+# polling (this step may run in a child shell of ai-w6-fence-driver), bounded by the runner's own deadline.
+C1_WAIT_START=$(date +%s)
+while kill -0 "$C1_RUNNER_PID" 2>/dev/null; do
+ test "$(( $(date +%s) - C1_WAIT_START ))" -lt 330 || { printf 'FAIL ai-w6-human-revoke: runner exit expected within 330 s got still-running; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+python3 - "$C1_SECRET_STAGE/agent.json" <<'PY' || { printf 'FAIL ai-w6-human-revoke: runner receipt expected ok-with-refused-follow-up got other; STOP\n' >&2; exit 1; }
+import json,sys
+r=json.load(open(sys.argv[1])); assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403)
+PY
+# Execute ai-w6-agent-receipt again after the runner exits, before the withdrawal and the final report.
 ```
 
 ```sh
@@ -3158,8 +4704,8 @@ test "$(ai_ro -Atq --file /proof/c1-fence.sql)" = t
 printf 'PASS grant revoked and refresh family tombstoned; live follow-up refusal recorded by runner\n' >"$PROOF_DIR/C1-fence.txt"
 ```
 
-After the fence, execute ai-w6-owner-client-command with
-`C1_CLIENT_ACTION=withdraw`; copy its redacted receipt and C1-fence.txt to the
+After the fence and the runner's exit, execute ai-w6-owner-client-command with
+`C1_CLIENT_ACTION=withdraw`; upload its redacted receipt and download C1-fence.txt to the
 Mac proof directory. Do not edit the runner receipt to invent human results.
 The receipt below combines independently observed audit, human and agent proof.
 The workspace remains **`c1-smoke-<runid> (test, archive me)`**, accepted residue
@@ -3172,6 +4718,7 @@ and keep the callback free of secrets. Never leave a long-lived approved client.
 # step: ai-w6-report
 # readonly: no
 # host: HezLead Mac; redacted report and machine receipt
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 node --input-type=module - "$C1_PROOF_DIR" "$INPUTS_FILE" <<'JS'
 import { readFile,writeFile } from 'node:fs/promises';
@@ -3187,11 +4734,11 @@ try {
  const withdrawal=JSON.parse(await readFile(`${root}/client-withdraw.json`,'utf8'));
  const fence=await readFile(`${root}/C1-fence.txt`,'utf8');
  if(!a.ok || a.refused_after_fence?.refusal_code==null || ![401,403].includes(a.refused_after_fence.http_status) || revoke.state!=='revoked' || withdrawal.status!=='PASS' || !fence.startsWith('PASS') || !a.workspace.accepted_residue || !Object.values(audit.audit_counts).every(n=>Number.isSafeInteger(n)&&n>0)) throw Error();
- if(!approval.approval_at || !withdrawal.withdrawn_at || !revoke.revoked_at || !(Date.parse(approval.approval_at)<=Date.parse(withdrawal.withdrawn_at) && Date.parse(withdrawal.withdrawn_at)<=Date.parse(revoke.revoked_at))) throw Error();
+ if(!approval.approval_at || !withdrawal.withdrawn_at || !revoke.revoked_at || !(Date.parse(approval.approval_at)<=Date.parse(revoke.revoked_at) && Date.parse(revoke.revoked_at)<=Date.parse(withdrawal.withdrawn_at))) throw Error();
  if(finish.state!==(d.keep_open===true?'open':'closed') || finish.explicit_keep_open!==(d.keep_open===true)) throw Error();
  const r={approval_at:approval.approval_at,withdrawn_at:withdrawal.withdrawn_at,revoked_at:revoke.revoked_at,refused_follow_up:a.refused_after_fence,final_gate:finish.state,release_sha:d.release_sha,status:'PASS',cleanup:true,audit_kinds:['init','list','read','action'],audit_counts:audit.audit_counts,grant_revoked:true,refresh_family_tombstoned:true,live_access_refused:true,client_approval_withdrawn:true,accepted_residue:a.workspace.name,approval_scope:'account-wide owner/client/version',site_document_removal:'W7/W5b next reviewed site release'};
  await writeFile(`${root}/C1.json`,JSON.stringify(r,null,2)+'\n',{flag:'wx',mode:0o600});
- const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nApproval scope: account-wide owner/client/version. Approval at ${approval.approval_at}; withdrawn at ${withdrawal.withdrawn_at}; revoked at ${revoke.revoked_at}.\n\nRefused follow-up: HTTP ${a.refused_after_fence.http_status}, ${a.refused_after_fence.refusal_code}. Final gate: ${finish.state}.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W5b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
+ const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nApproval scope: account-wide owner/client/version. Approval at ${approval.approval_at}; revoked at ${revoke.revoked_at}; withdrawn at ${withdrawal.withdrawn_at}.\n\nRefused follow-up: HTTP ${a.refused_after_fence.http_status}, ${a.refused_after_fence.refusal_code}. Final gate: ${finish.state}.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W5b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
  await writeFile(`${root}/C1-SMOKE-REPORT.md`,text,{flag:'wx',mode:0o600});
 } catch { console.error('FAIL C1 report evidence incomplete; STOP'); process.exitCode=1; }
 JS
@@ -3202,7 +4749,10 @@ JS
 # readonly: no
 # host: HezLead Mac; success or stopped runner, guarded private cleanup
 set -euo pipefail
-: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_PROOF_DIR:?}" "${C1_RUNNER_PID:?}"
+: "${C1_PROOF_DIR:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
+C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
+C1_POINTER=${C1_POINTER:-/Users/yulanbot/work/dcr-rt/c1-smoke.pointer}
 if kill -0 "$C1_RUNNER_PID" 2>/dev/null; then printf 'FAIL runner still active; STOP before cleanup\n' >&2; exit 1; fi
 python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
@@ -3222,26 +4772,11 @@ printf 'PASS private handoffs removed; redacted receipts and accepted residue re
 ```
 
 ```sh
-# step: ai-w6-finish
-# readonly: no
-# host: HezLead box root; after approval withdrawal, grant/family revoke and refused follow-up
+# step: ai-w6-closed-gate-probe
+# readonly: probe
+# host: HezLead box root; outside public gate after the W6 default deactivation (called by ai-w6-finish)
 set -euo pipefail
-test "$WINDOW" = W6
-ai_run ai-inputs
-test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
-test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
-python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
-import json,sys
-r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
-assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403) and r['refused_after_fence']['refusal_code'], 'FAIL actual refused follow-up; STOP'
-assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STOP'
-PY
-if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
- ai_run ai-w6-activation-probes
- printf '{"state":"open","explicit_keep_open":true}\n' >"$PROOF_DIR/C1-finish.json"
-else
- ai_run ai-w6-activation-rollback
- python3 - <<'PY'
+python3 - <<'PY'
 import json,urllib.request
 for method in ('GET','HEAD'):
     req=urllib.request.Request('https://mcp.commonswarm.com/admin/gate',method=method,headers={'Origin':'https://commonswarm.com','User-Agent':'curl/8.7.1'})
@@ -3251,8 +4786,68 @@ for method in ('GET','HEAD'):
         assert (json.loads(body)=={'state':'closed'}) if method=='GET' else body==b''
 print('PASS W6 default deactivation: public GET/HEAD gate CLOSED')
 PY
+```
+
+```sh
+# step: ai-w6-finish
+# readonly: no
+# host: HezLead box root; after the human revoke, the refused follow-up and the approval withdrawal
+# Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell and ai-close.
+(
+# HezLead ruling: every exit re-arms the recycle timer W6 has held since ai-w6-activation-apply.
+C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
+w6_finish_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-finish: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap w6_finish_exit EXIT
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-finish: window expected W6 got other; STOP\n' >&2; exit 2; }
+ai_run ai-inputs
+test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
+test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/edge-measurement-final.json" || { printf 'FAIL ai-w6-finish: edge-measurement-final.json expected absent got present; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
+assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403) and r['refused_after_fence']['refusal_code'], 'FAIL actual refused follow-up; STOP'
+assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STOP'
+PY
+EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement-final.json
+if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
+ # Keep open: the remeasure closes, measures and reopens ONLY through the measured path; on failure this
+ # step reports the remeasure's own result (1 confirmed CLOSED, otherwise UNKNOWN).
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+ W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: keep-open state expected open-and-measured got other; STOP\n' >&2; exit 1; }
+ ai_run ai-w6-activation-probes
+ printf '{"state":"open","explicit_keep_open":true}\n' >"$PROOF_DIR/C1-finish.json"
+else
+ ai_run ai-w6-activation-rollback
+ # The closed state is measured too, so W7 opens on a fresh receipt; hold the timer for the hook pair.
+ systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+ W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: default state expected closed-and-measured got other; STOP\n' >&2; exit 1; }
+ ai_run ai-w6-closed-gate-probe
  printf '{"state":"closed","explicit_keep_open":false}\n' >"$PROOF_DIR/C1-finish.json"
 fi
+unset EDGE_MEASUREMENT_OUT
+printf 'PASS ai-w6-finish: final state recorded; edge-measurement-final.json is W7 EDGE_MEASUREMENT_FILE; recycle timer re-armed on exit\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
 ```
 
 
@@ -3283,16 +4878,35 @@ PY
 ```sh
 # step: ai-w7-preflight
 # readonly: yes
-# host: box root; no mutation
+# host: box root; no mutation; binds the W6 of this release named by w6_window_id and prints the C1 report binding
 set -euo pipefail
-: "${C1_REPORT_FILE:?}" "${C1_REPORT_SHA256:?}"
-python3 - "$C1_REPORT_FILE" "$C1_REPORT_SHA256" "$RELEASE_SHA" <<'PY'
-import hashlib,json,pathlib,re,sys
-p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-assert re.fullmatch('[0-9a-f]{64}',sys.argv[2]) and hashlib.sha256(p.read_bytes()).hexdigest()==sys.argv[2]
-r=json.loads(p.read_text())
-assert r.get('release_sha')==sys.argv[3] and r.get('status')=='PASS' and r.get('cleanup') is True
-assert r.get('audit_kinds')==['init','list','read','action'] and r.get('grant_revoked') is True and r.get('refresh_family_tombstoned') is True and r.get('live_access_refused') is True and r.get('client_approval_withdrawn') is True, 'FAIL W7 C1 incomplete; STOP'
+: "${INPUTS_FILE:?}"
+python3 - "$INPUTS_FILE" <<'PY'
+import hashlib,json,os,pathlib,re,stat,sys
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w7-preflight: '+what+' expected '+expected+' got '+got+'; STOP')
+def read(path):
+    try: fd=os.open(str(path),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except OSError: return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        return os.read(fd,1048577)
+    finally: os.close(fd)
+d=json.load(open(sys.argv[1])); sha=d.get('release_sha'); wid=d.get('w6_window_id')
+need(d.get('window')=='W7' and isinstance(wid,str) and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'W7 w6_window_id','six-alphanumeric-window-id','missing-or-other')
+w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+sha+'-W6-'+wid)
+need(w.is_dir() and not w.is_symlink() and w.resolve()==w,'W6 proof directory','directory','missing-or-symlink')
+i=read(w/'inputs.json'); closed=read(w/'closed.txt'); record=read(w/'close-result.json'); report=read(w/'C1.json')
+need(None not in (i,closed,record,report),'W6 inputs.json/closed.txt/close-result.json/C1.json','regular-files','missing-or-not-regular')
+i=json.loads(i)
+need(i.get('window')=='W6' and i.get('release_sha')==sha and i.get('window_id')==wid,'W6 inputs.json binding','W6-same-release-and-id','mismatch')
+r=json.loads(record)
+need(record==(json.dumps(r,sort_keys=True)+'\n').encode() and set(r)=={'release_sha','window','window_id','result','closed_at'},'W6 close-result.json','exact-sorted-record','other')
+need(r['release_sha']==sha and r['window']=='W6' and r['window_id']==wid and r['result']=='success' and (r['closed_at']+'\n').encode()==closed,'W6 close result','success-at-closed.txt','other')
+c=json.loads(report)
+need(c.get('release_sha')==sha and c.get('status')=='PASS' and c.get('cleanup') is True,'W6 C1.json release/status/cleanup','this-release-PASS-cleanup','other')
+need(c.get('audit_kinds')==['init','list','read','action'] and c.get('grant_revoked') is True and c.get('refresh_family_tombstoned') is True and c.get('live_access_refused') is True and c.get('client_approval_withdrawn') is True,'W6 C1.json evidence','complete','incomplete')
+print(json.dumps({'w6_window_id':wid,'c1_report':str(w/'C1.json'),'c1_report_sha256':hashlib.sha256(report).hexdigest(),'final_gate':c.get('final_gate')},sort_keys=True))
 PY
 ```
 
@@ -3304,7 +4918,8 @@ set -euo pipefail
 test "$WINDOW" = W7
 ai_run ai-w7-approval
 ai_run ai-gates
-ai_run ai-w7-preflight
+W7_C1_BINDING=$(ai_run ai-w7-preflight) || { printf 'FAIL ai-w7-proof: W6 C1 binding expected valid got refused; STOP\n' >&2; exit 1; }
+printf '%s\n' "$W7_C1_BINDING" >"$PROOF_DIR/c1-report-binding.json"
 ai_deadline
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(ai_ro -Atq --command "SELECT legacy_closed AND legacy_fence_evidence_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active') AND NOT has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE') FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t
@@ -3338,10 +4953,68 @@ Recovered close requires emergency env/overlay/DB close and ordinary controls.
 # readonly: no
 # host: box root; verified success/recovery only
 set -euo pipefail
+# W2: once probe-staged.txt exists, every close attempt revokes the DCR probe grant FIRST, before
+# CLOSE_RESULT or any receipt is checked (a withheld CLOSE_RESULT still revokes); an unproven
+# revoke STOPs the close.
+if test "$WINDOW" = W2 && test -f "$PROOF_DIR/probe-staged.txt" && test ! -f "$PROOF_DIR/dcr-probe-revoked.json"; then
+ if test -f "$PROOF_DIR/dcr-probe-revoke-attempted.txt"; then
+  # A started revoke is never re-run. The close reports REVOKE-UNPROVEN and continues only with an
+  # explicit HezLead ruling input, which it records; the window is never stuck open.
+  w2_unproven_ruling() {
+  python3 - "$PROOF_DIR" "$INPUTS_FILE" "${W2_REVOKE_UNPROVEN_ACCEPTED:-}" "$1" <<'PY'
+import datetime,hashlib,json,os,pathlib,re,stat,sys
+proof=pathlib.Path(sys.argv[1]); inputs=json.load(open(sys.argv[2])); ruling_path=sys.argv[3]; mode=sys.argv[4]
+record=proof/'dcr-probe-revoke-unproven.json'
+# The staged client_id comes from the nonsecret proof record, never from the secret file.
+client=json.loads(record.read_text()).get('client_id') if record.exists() else None
+if not record.exists() and mode=='check': record.write_text(json.dumps({'client_id':None,'revoked':False,'status':'REVOKE-UNPROVEN','reason':'a started revoke was not proven'},sort_keys=True)+'\n')
+def refuse(what): raise SystemExit('REVOKE-UNPROVEN ai-close: DCR probe grant client_id '+str(client)+' is not proven revoked; ruling '+what+'; HezLead revokes it and supplies W2_REVOKE_UNPROVEN_ACCEPTED=<absolute ruling file> to close; STOP')
+if not (isinstance(client,str) and client): refuse('cannot bind: no staged client_id recorded')
+if not os.path.isabs(ruling_path): refuse('file expected absolute-path got missing')
+try: fd=os.open(ruling_path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+except OSError: refuse('file expected regular-non-symlink got missing-or-symlink')
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) not in (0o600,0o644): refuse('file expected regular-0600-or-0644 got other')
+    # Read the COMPLETE file with an enforced bound: parse and hash exactly those bytes.
+    chunks,size=[],0
+    while True:
+        chunk=os.read(fd,65537-size)
+        if not chunk: break
+        chunks.append(chunk); size+=len(chunk)
+        if size>65536: refuse('file expected at-most-65536-bytes got larger')
+finally: os.close(fd)
+raw=b''.join(chunks)
+try: r=json.loads(raw)
+except ValueError: r=None
+keys={'action','approver','release_sha','window_id','plan_sha256','client_id','at'}
+if not (isinstance(r,dict) and set(r)==keys): refuse('keys expected exact-ruling-keys got other-set')
+if r['action']!='accept-unproven-dcr-revoke': refuse('action expected accept-unproven-dcr-revoke got other')
+if r['approver']!='HezLead': refuse('approver expected HezLead got other')
+if r['release_sha']!=inputs['release_sha']: refuse('release_sha expected input-release-sha got mismatch')
+if r['window_id']!=inputs['window_id']: refuse('window_id expected input-window-id got mismatch')
+if r['plan_sha256']!=inputs['plan_sha256']: refuse('plan_sha256 expected input-plan-sha256 got mismatch')
+if r['client_id']!=client: refuse('client_id expected staged-client-id got mismatch')
+try: when=datetime.datetime.strptime(r['at'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc) if isinstance(r['at'],str) else None
+except ValueError: when=None
+if when is None or when>datetime.datetime.now(datetime.timezone.utc): refuse('at expected UTC-Z-not-future got other')
+if mode=='final':
+    # Final validation, before the stage is removed: print the exact acceptance payload; the shell
+    # keeps it in memory and writes it just before closed.txt (no further read of the ruling file).
+    sys.stdout.write(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True))
+else: print('REVOKE-UNPROVEN ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+' validated; recorded only if the close succeeds')
+PY
+  }
+  w2_unproven_ruling check
+  W2_UNPROVEN_RULING=1
+ else
+  ai_run ai-w2-revoke-probes
+ fi
+fi
 : "${CLOSE_RESULT:?}"
 case "$CLOSE_RESULT" in success) test -f "$PROOF_DIR/ordinary-after.json";; recovered) test -f "$PROOF_DIR/ordinary-recovery.json";; *) exit 1;; esac
 case "$CLOSE_RESULT" in success) CLOSE_PHASE=after;; *) CLOSE_PHASE=recovery;; esac
-case "$WINDOW" in W1|W2|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
+case "$WINDOW" in W1|W2|W2b|W3|W4) CONSENT_PHASE=pre-W1;; *) CONSENT_PHASE=post-W5;; esac
 test -f "$PROOF_DIR/consent-$CONSENT_PHASE.json" || { printf 'FAIL ai-close: retained consent receipt expected consent-%s.json got missing; STOP\n' "$CONSENT_PHASE" >&2; exit 1; }
 python3 - "$PLAN_FILE" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$PROOF_DIR" "$PROOF_DIR/ordinary-$CLOSE_PHASE.json" "$PROOF_DIR/consent-$CONSENT_PHASE.json" "$CLOSE_PHASE" no ai-close <<'PY' || { printf 'FAIL ai-close: retained close receipts expected valid got refused; STOP\n' >&2; exit 1; }
 import hashlib,json,os,pathlib,re,stat,subprocess,sys
@@ -3370,13 +5043,29 @@ raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).
 PY
 if test "$CLOSE_RESULT" = success; then
  case "$WINDOW" in
-  W1) test -f "$PROOF_DIR/backup-gate.json";;
+  W1)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W1: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   ;;
   W2)
    test -f "$PROOF_DIR/schema-committed.txt" || { printf 'FAIL ai-close: W2 schema-committed.txt expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/W2-probes.txt" || { printf 'FAIL ai-close: W2 W2-probes.txt expected present got missing; STOP\n' >&2; exit 1; }
-   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; };;
+   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2 issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/dcr-probe-revoked.json" || { printf 'FAIL ai-close: W2 dcr-probe-revoked.json expected present got missing; STOP\n' >&2; exit 1; };;
+  W2b)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   test "$(cat "$PROOF_DIR/w2b-forward-catalogs.txt" 2>/dev/null)" = 'PASS W2b forward catalogs: all five true after the issuer credential' || { printf 'FAIL ai-close: W2b w2b-forward-catalogs.txt expected exact-PASS-line got missing-or-other; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/w2b-preconditions.txt" || { printf 'FAIL ai-close: W2b w2b-preconditions.txt expected present got missing; STOP\n' >&2; exit 1; }
+   test -f "$PROOF_DIR/issuer-credential.txt" || { printf 'FAIL ai-close: W2b issuer-credential.txt expected present got missing; STOP\n' >&2; exit 1; };;
   W3) test -f "$PROOF_DIR/W3-probes.txt";;
-  W4) test -f "$PROOF_DIR/W4-readback.txt";;
+  W4)
+   BACKUP_GATE_DIR="$PROOF_DIR"
+   ( ai_run ai-backup-gate-check ) >/dev/null || { printf 'FAIL ai-close: W4: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP\n' >&2; exit 1; }
+   unset BACKUP_GATE_DIR
+   test -f "$PROOF_DIR/W4-readback.txt" || { printf 'FAIL ai-close: W4 W4-readback.txt expected present got missing; STOP\n' >&2; exit 1; };;
   W6)
    test -f "$PROOF_DIR/C1.json" || { printf 'FAIL ai-close: W6 C1.json expected present got missing; STOP\n' >&2; exit 1; }
    test -f "$PROOF_DIR/C1-cleanup.txt" || { printf 'FAIL ai-close: W6 C1-cleanup.txt expected present got missing; STOP\n' >&2; exit 1; }
@@ -3386,17 +5075,36 @@ if test "$CLOSE_RESULT" = success; then
  esac
 fi
 test ! -e "$PROOF_DIR/closed.txt"
+test ! -e "$PROOF_DIR/close-result.json"
 if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6 && test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
  ai_run ai-inputs
  test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+elif test "$WINDOW" = W7 && test "$CLOSE_RESULT" = success; then
+ W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-close: W7 gate state query expected success got failure; STOP\n' >&2; exit 1; }
+ W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt") || { printf 'FAIL ai-close: W7 retirement-gate-state.txt expected present got missing; STOP\n' >&2; exit 1; }
+ test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE" || { printf 'FAIL ai-close: W7 gate state expected retained-retirement-state got other; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" = W7; then
- W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')
- W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt")
- test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE"
+ # Recovered W7: the emergency close is the evidence, independent of any retirement proof file.
+ test -f "$PROOF_DIR/activation-rollback.txt" || { printf 'FAIL ai-close: recovered W7 activation-rollback.txt (ai-emergency-close) expected present got missing; STOP\n' >&2; exit 1; }
+ W7_RECOVERED_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-close: recovered W7 gate state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W7_RECOVERED_STATE" = t || { printf 'FAIL ai-close: recovered W7 issuance expected closed got open; STOP\n' >&2; exit 1; }
+elif test "$WINDOW" = W2 && test ! -e "$PROOF_DIR/apply-started.txt"; then
+ # W2 stopped before its fence: admin_cutover_state does not exist yet; prove nothing was applied.
+ W2_APPLIED=$(ai_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '20261003%';")
+ test "$W2_APPLIED" = 0 || { printf 'FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 fi
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered; then
+ # A recovered W2b leaves no issuer login: no credential file and a NOLOGIN role without a password.
+ test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-close: recovered W2b credential file expected absent got present; STOP\n' >&2; exit 1; }
+ test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-close: recovered W2b credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+ W2B_RECOVERED=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-close: recovered W2b issuer role query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W2B_RECOVERED" = t || { printf 'FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP\n' >&2; exit 1; }
+fi
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery and report to HezLead; STOP\n' >&2; exit 1; }
+# Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.
+if test "${W2_UNPROVEN_RULING:-0}" = 1; then W2_ACCEPT_PAYLOAD=$(w2_unproven_ruling final); fi
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); assert pathlib.Path(sys.argv[2]).read_text().strip()==str(p)
@@ -3409,7 +5117,19 @@ PY
 rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 test ! -e "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected not-symlink got symlink; STOP\n' >&2; exit 1; }
-date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
+if test "${W2_UNPROVEN_RULING:-0}" = 1; then
+ # Exactly the validated payload, from memory; the ruling file is not read again.
+ printf '%s\n' "$W2_ACCEPT_PAYLOAD" >"$PROOF_DIR/dcr-probe-revoke-accepted.json"
+ printf 'REVOKE-UNPROVEN accepted by HezLead ruling; recorded with the close\n'
+fi
+# The explicit terminal record (result and time) is written with closed.txt; later windows read it.
+CLOSED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+python3 - "$INPUTS_FILE" "$CLOSE_RESULT" "$CLOSED_AT" "$PROOF_DIR/close-result.json" <<'PY'
+import json,pathlib,sys
+d=json.load(open(sys.argv[1]))
+pathlib.Path(sys.argv[4]).write_text(json.dumps({'release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],'result':sys.argv[2],'closed_at':sys.argv[3]},sort_keys=True)+'\n')
+PY
+printf '%s\n' "$CLOSED_AT" >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 ```
 
@@ -3419,6 +5139,7 @@ printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 # host: box root; no production operation occurred before failed open
 set -euo pipefail
 : "${PROOF_DIR:?}"
+test ! -e "$PROOF_DIR/probe-staged.txt" || { printf 'FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP\n' >&2; exit 1; }
 SECRET_STAGE=$(cat "$PROOF_DIR/secret-stage.path")
 python3 - "$SECRET_STAGE" <<'PY'
 import pathlib,re,sys

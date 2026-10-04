@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -25,7 +25,7 @@ const producerSource = 'export const fixtureProducer = "live-ordinary-controls";
 // Each command records argv before returning independent fixture observations.
 // PATH contains only these stubs; unmodelled invocations fail, never reach a daemon.
 const dispatcher = String.raw`
-import builtins,hashlib,io,json,os,pathlib,random,shutil,string,subprocess,sys,urllib.request
+import builtins,hashlib,io,json,os,pathlib,random,re,shutil,string,subprocess,sys,urllib.request
 root=pathlib.Path(os.environ['FIXTURE_ROOT']); cfg=json.loads((root/'commands.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'argv.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
@@ -55,13 +55,29 @@ elif name=='python3':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_ro':
+    if args==['-Atq','--command','SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;']:
+        output(cfg['w2b_ledger']); raise SystemExit(0)
+    if args==['-Atq','--command','SELECT version,sha256,source,released_sha FROM commonswarm_ops.migration_checksums ORDER BY version;']:
+        output(cfg['w2b_checksums']); raise SystemExit(0)
+    if args==['-Atq','--file','/proof/catalog.sql']:
+        text=(root/'proof/catalog.sql').read_text()
+        m=re.fullmatch(re.escape(chr(92))+r"i /release/deploy/release-proofs/item-ai/(2026100300000[1-5])-catalog\.sql\nSELECT :'catalog_ok_failed_checks';\n",text)
+        if not m: refuse()
+        output(cfg.get('catalog_failed',{}).get(m.group(1),'')); raise SystemExit(0)
+    if args==['-Atq','--file','/proof/w2b-preconditions.sql']:
+        if not (root/'proof/w2b-preconditions.sql').read_text().startswith(chr(92)+'i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql'): refuse()
+        output(cfg.get('w2b','t')); raise SystemExit(0)
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
-    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='commonswarm_admin_issuer';"]: refuse()
+    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
+    if 'pg_authid' in args[2]:
+        if cfg.get('readback_failed'): raise SystemExit(1)
+        output(cfg.get('readback','t')); raise SystemExit(0)
     output(cfg.get('readonly','t'))
 elif name=='ai_db':
     if args==['-q','--file','-']:
         (root/'applied.sql').write_text(sys.stdin.read())
     elif args==['-q','--command','ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;']:
+        if cfg.get('alter_failed'): raise SystemExit(1)
         (root/'applied.sql').write_text(args[2])
     else: refuse()
 elif name=='openssl':
@@ -193,7 +209,8 @@ function fixture(config: Record<string, unknown> = {}) {
     BOX_ARCHIVE_PATH: archive, PLAN_FILE: resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'),
     RELEASE_ROOT: join(root, 'release'), NEW_OAUTH: join(root, 'oauth/releases', sha), PSQL_IMAGE: 'fixture-postgres' };
   function run(steps: string[], window = 'W3', extra: Record<string, string | undefined> = {}) {
-    let source = steps.map(block).join('\n');
+    // A step beginning with '#' is raw test source (a modelled shell function), not a plan block.
+    let source = steps.map(step => step.startsWith('#') ? step : block(step)).join('\n');
     // Remap filesystem boundaries only. SQL, shell guards and Python assertions stay verbatim.
     for (const [from, to] of [
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
@@ -228,9 +245,27 @@ function stopped(result: ReturnType<ReturnType<typeof fixture>['run']>, text: st
 }
 const backup = () => ({ ok: true, database_bytes_verified: true, object_bytes_verified: true, verified_at: new Date().toISOString(), destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture' });
 const restore = () => ({ ok: true, state: 'complete', at: new Date().toISOString() });
-function backupRun(b = backup(), r = restore()) {
-  const f = fixture(); f.put('backup/status.json', b); f.put('backup/restore-status.json', r);
-  return { f, result: f.run(['ai-w1-backup-gate'], 'W1') };
+// The shared backup receipt validator, executed from plan bytes through a test ai_run (the box's ai_run evals it the same way).
+const gateShim = `# test shim: ai_run runs the plan's own ai-backup-gate-check block
+ai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat "$FIXTURE_ROOT/gate-check.sh")"; }`;
+function gateWindow(f: ReturnType<typeof fixture>, window: string) {
+  const inputs = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window,
+    window_end_utc: new Date(Date.now() + 1_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') };
+  f.put('inputs.json', inputs); f.put('proof/inputs.json', inputs);
+  f.put('proof/open.txt', new Date(Date.now() - 120_000).toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
+  f.put('gate-check.sh', block('ai-backup-gate-check'));
+  return inputs as Record<string, string>;
+}
+// A bound receipt as ai-w1-backup-gate writes it (python json.dumps sort_keys).
+function validGate(f: ReturnType<typeof fixture>, window: string, change: Record<string, unknown> = {}) {
+  const inputs = gateWindow(f, window), now = Date.now(), at = (ms: number) => new Date(now - ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const receipt: Record<string, unknown> = { status: 'PASS', release_sha: inputs.release_sha, window, window_id: inputs.window_id,
+    backup_verified_at: at(600_000), restore_completed_at: at(86400_000), destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture', gate_at: at(60_000), ...change };
+  f.put('proof/backup-gate.json', '{' + Object.keys(receipt).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(receipt[k])).join(', ') + '}\n');
+}
+function backupRun(b = backup(), r = restore(), window = 'W1') {
+  const f = fixture(); f.put('backup/status.json', b); f.put('backup/restore-status.json', r); gateWindow(f, window);
+  return { f, result: f.run([gateShim, 'ai-w1-backup-gate'], window) };
 }
 function backupBad(b: ReturnType<typeof backup>, r: ReturnType<typeof restore>, message: string) {
   const { f, result } = backupRun(b, r);
@@ -238,8 +273,38 @@ function backupBad(b: ReturnType<typeof backup>, r: ReturnType<typeof restore>, 
   stopped(result, message);
 }
 
+test('backup-restore-gate / shared-w1-w2b-w4: W2b and W4 run the same backup gate; stale, unverified or missing backups STOP', () => {
+  for (const window of ['W2b', 'W4']) {
+    const good = backupRun(backup(), restore(), window); pass(good.result);
+    assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).status, 'PASS', window);
+    const bad: Array<[ReturnType<typeof backup>, ReturnType<typeof restore>, string]> = [
+      [{ ...backup(), verified_at: new Date(Date.now() - 3600_000).toISOString() }, restore(), 'FAIL fresh backup; STOP'],
+      [{ ...backup(), database_bytes_verified: false }, restore(), 'FAIL verified backup; STOP'],
+      [{ ...backup(), object_bytes_verified: false }, restore(), 'FAIL verified backup; STOP'],
+      [{ ...backup(), destination: 'r2:other-bucket/x' }, restore(), 'FAIL fresh backup; STOP'],
+      [backup(), { ...restore(), at: new Date(Date.now() - 9 * 86400_000).toISOString() }, 'FAIL restore freshness; STOP'],
+      [backup(), { ...restore(), state: 'running' }, 'FAIL complete restore drill; STOP'],
+    ];
+    for (const [b, r, message] of bad) {
+      const { f, result } = backupRun(b, r, window); stopped(result, message);
+      assert.ok(!existsSync(join(f.proof, 'backup-gate.json')), `${window}: no receipt after refusal`);
+    }
+    const missing = fixture(); gateWindow(missing, window); const gone = missing.run([gateShim, 'ai-w1-backup-gate'], window);
+    stopped(gone, 'FAIL backup and restore status files; STOP'); assert.ok(!existsSync(join(missing.proof, 'backup-gate.json')));
+  }
+  for (const window of ['W2', 'W3', 'W5', 'W6']) {
+    const { f, result } = backupRun(backup(), restore(), window);
+    stopped(result, 'FAIL ai-w1-backup-gate: window expected W1-W2b-or-W4 got other; STOP'); assert.ok(!existsSync(join(f.proof, 'backup-gate.json')));
+  }
+});
+
 test('backup-restore-gate / fresh-verified-database-and-object-backup: fails closed on unverified bytes or wrong destination', () => {
   const good = backupRun(); pass(good.result); assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).status, 'PASS');
+  // The receipt is bound to its window and carries the measured times, the destination and the gate time.
+  const receipt = JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8'));
+  assert.deepEqual(Object.keys(receipt).sort(), ['backup_verified_at', 'destination', 'gate_at', 'release_sha', 'restore_completed_at', 'status', 'window', 'window_id']);
+  assert.equal(receipt.window, 'W1'); assert.equal(receipt.release_sha, sha); assert.equal(receipt.window_id, 'fixture');
+  assert.match(good.result.stdout, /PASS ai-backup-gate-check: W1 fixture backup and restore fresh at gate /);
   for (const key of ['ok', 'database_bytes_verified', 'object_bytes_verified']) backupBad({ ...backup(), [key]: false }, restore(), 'FAIL verified backup; STOP');
   backupBad({ ...backup(), destination: 'r2:wrong/fixture' }, restore(), 'FAIL fresh backup; STOP');
 });
@@ -556,6 +621,34 @@ test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-p
   assert.equal(readFileSync(target, 'utf8'), 'must survive');
 });
 
+test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every rollback step fails on its own, also where errexit is ignored', () => {
+  const C = 'etc/commonswarm-oauth/admin-issuer-database-credentials';
+  // bash ignores errexit for ( ai_run ai-w2-issuer-rollback ) || ... (Ubuntu bash 5 even inside the block's own set -e).
+  // The mini's /bin/bash is 3.2, so that context is MODELLED here: the block runs with errexit off, under ||.
+  const modelled = '# modelled ignored errexit (left side of ||)\n( ' + block('ai-w2-issuer-rollback').replace('set -euo pipefail', 'set +e') + '\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+  const cases: Array<[string, Record<string, unknown>, (f: ReturnType<typeof fixture>) => void, string]> = [
+    ['ALTER ROLE fails', { alter_failed: true }, f => f.put(C, 'synthetic fixture'), 'FAIL ai-w2-issuer-rollback: issuer ALTER ROLE expected success got failure; STOP'],
+    ['readback false', { readback: 'f' }, f => f.put(C, 'synthetic fixture'), 'FAIL ai-w2-issuer-rollback: issuer role readback expected no-login-and-no-password got other; STOP'],
+    ['readback query fails', { readback_failed: true }, () => undefined, 'FAIL ai-w2-issuer-rollback: issuer role readback expected success got failure; STOP'],
+    ['credential is a directory', {}, f => mkdirSync(join(f.root, C)), 'FAIL ai-w2-issuer-rollback: issuer credential file expected regular-file got other; STOP'],
+    ['credential is a symlink', {}, f => symlinkSync(join(f.root, 'etc/commonswarm-oauth/protected-sibling'), join(f.root, C)), 'FAIL ai-w2-issuer-rollback: issuer credential file expected not-symlink got symlink; STOP'],
+  ];
+  for (const [name, config, setup, message] of cases) for (const [mode, steps] of [['as written', ['ai-w2-issuer-rollback']], ['modelled ignored errexit', [modelled]]] as const) {
+    const f = fixture(config); setup(f);
+    const result = f.run([...steps], 'W2b');
+    assert.notEqual(result.status, 0, `${name} ${mode}`); stopped(result, message);
+    if (mode !== 'as written') assert.match(result.stderr, /CALLER: rollback failure seen/, name);
+    assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')), `${name} ${mode}: no PASS receipt`);
+    assert.equal(readFileSync(join(f.root, 'etc/commonswarm-oauth/protected-sibling'), 'utf8'), 'must survive');
+    if (name === 'ALTER ROLE fails') assert.ok(!result.calls.some(c => c[0] === 'rm' || c[0] === 'ai_ro'), `${name} ${mode}: nothing after the failed ALTER`);
+  }
+  // Positive control in both modes.
+  for (const steps of [['ai-w2-issuer-rollback'], [modelled]]) {
+    const f = fixture(); f.put(C, 'synthetic fixture'); pass(f.run(steps, 'W2b'));
+    assert.equal(readFileSync(join(f.proof, 'issuer-rollback.txt'), 'utf8'), 'PASS issuer login disabled; additive roles/grants retained\n');
+  }
+});
+
 // Complete-block diagnostics must identify the failed measurement without
 // printing protected values. Each positive control still runs first.
 test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set admin keys or active issuer overlay', () => {
@@ -575,8 +668,11 @@ test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set a
 test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', () => {
   const good = fixture(); const positive = good.run(['ai-w2-issuer-credential'], 'W2'); pass(positive);
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
-  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /sslmode = verify-full/);
-  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /user = commonswarm_admin_issuer/);
+  // libpq's service-file parser takes key=value only (5f64fab4 W2 RGLqZX failed on configparser's "key = value").
+  const service = readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8');
+  assert.match(service, /^sslmode=verify-full$/m);
+  assert.match(service, /^user=commonswarm_admin_issuer$/m);
+  assert.doesNotMatch(service, / = | =|= /);
   for (const [config, message] of [
     [{ login: 'f' }, 'FAIL ai-w2-issuer-credential: dedicated-role measurement expected t got non-t; STOP'],
     [{ tls_failed: true }, 'FAIL ai-w2-issuer-credential: TLS psql login exit status expected 0 got 1; STOP'],
@@ -586,6 +682,103 @@ test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: 
     assert.ok(result.calls.some(c => c[0] === 'docker' && c.includes('psql')));
     stopped(result, message);
   }
+});
+test('admin-issuer-credential-provisioning / libpq-service-file-bytes: refuses a service file line that is not key=value before any credential is installed', () => {
+  const f = fixture();
+  f.put('stage/service.conf', '[target]\nhost=db.commonswarm.internal\nsslmode=verify-full\nsslrootcert=/etc/ssl/yulan-internal-ca.pem\nuser=fixture\noptions=\n');
+  const result = f.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(result, 'FAIL ai-w2-issuer-credential: issuer-service.conf line expected key=value got other; STOP');
+  assert.ok(!result.calls.some(c => c[0] === 'install' || c[0] === 'docker' || c[0] === 'ai_db'), 'no ALTER ROLE, install or login after a refused service file');
+  assert.ok(!existsSync(join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
+  assert.ok(!existsSync(join(f.proof, 'issuer-credential.txt')));
+});
+test('admin-issuer-credential-provisioning / w2b-shared-issuer-block: W2b runs the same issuer block and rollback; any other window refuses', () => {
+  const missing = fixture(); const refused = missing.run(['ai-w2-issuer-credential'], 'W2b');
+  stopped(refused, 'FAIL ai-w2-issuer-credential: W2b w2b-preconditions.txt expected present got missing; STOP');
+  assert.ok(!refused.calls.some(c => c[0] === 'openssl'));
+  const good = fixture(); good.put('proof/w2b-preconditions.txt', 'PASS'); validGate(good, 'W2b');
+  const positive = good.run([gateShim, 'ai-w2-issuer-credential'], 'W2b'); pass(positive);
+  // Backup admission at the W2b mutation boundary: a malformed, stale, wrong-window or missing receipt STOPs before any credential.
+  for (const [name, mutate] of [
+    ['malformed', (f: ReturnType<typeof fixture>) => f.put('proof/backup-gate.json', 'PASS')],
+    ['missing', (f: ReturnType<typeof fixture>) => rmSync(join(f.root, 'proof/backup-gate.json'))],
+    ['stale backup', (f: ReturnType<typeof fixture>) => validGate(f, 'W2b', { backup_verified_at: new Date(Date.now() - 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z') })],
+    ['wrong window', (f: ReturnType<typeof fixture>) => validGate(f, 'W2b', { window: 'W4' })],
+  ] as const) {
+    const f = fixture(); f.put('proof/w2b-preconditions.txt', 'PASS'); validGate(f, 'W2b'); mutate(f);
+    const r = f.run([gateShim, 'ai-w2-issuer-credential'], 'W2b');
+    stopped(r, 'FAIL ai-w2-issuer-credential: W2b backup-gate.json expected valid-bound-fresh-receipt got refused; STOP');
+    assert.ok(!r.calls.some(c => ['openssl', 'ai_db', 'install', 'docker'].includes(c[0]!)), name);
+  }
+  assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
+  assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /^user=commonswarm_admin_issuer$/m);
+  for (const window of ['W1', 'W3', 'W6']) {
+    const f = fixture(); f.put('proof/w2b-preconditions.txt', 'PASS');
+    stopped(f.run(['ai-w2-issuer-credential'], window), 'FAIL ai-w2-issuer-credential: window expected W2-or-W2b got other; STOP');
+    stopped(f.run(['ai-w2-issuer-rollback'], window), 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP');
+  }
+  const rollback = fixture(); rollback.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}');
+  pass(rollback.run(['ai-w2-issuer-rollback'], 'W2b'));
+  assert.ok(!existsSync(join(rollback.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
+  assert.ok(existsSync(join(rollback.proof, 'issuer-rollback.txt')));
+});
+test('release-plan-contract / w2b-preflight-bound-w2: W2b needs its backup gate, the validated W2 proofs, exact checksums and forward catalogs', () => {
+  const w2sha = 'e'.repeat(40), w2id = 'RGLqZX';
+  const old = ['20260928000003', '20261001000001', '20261002000001'];
+  const five = [1, 2, 3, 4, 5].map(i => `2026100300000${i}`);
+  // ai_run models only the shared validator's verdict here; its content checks run from plan bytes in admin-release-plan.test.ts.
+  const shim = `# test shim: the shared W2 proof validator's verdict
+ai_run() { if test "$1" = ai-backup-gate-check; then eval "$(cat "$FIXTURE_ROOT/gate-check.sh")"; return; fi
+  test "$1" = ai-w2b-proof-check || return 1; test "$PROOF_CHECK_KIND" = W2 || return 1; cat "$FIXTURE_ROOT/proof-check.out"; return "$(cat "$FIXTURE_ROOT/proof-check.status")"; }`;
+  const setup = (change: (f: ReturnType<typeof fixture>, rows: string[], ledger: string[]) => void = () => undefined, config: Record<string, unknown> = {}) => {
+    const rows: string[] = [], ledger = [...old, ...five];
+    for (const v of old) rows.push(`${v}|${'1'.repeat(64)}|backfill|${'c'.repeat(40)}`);
+    const files: Record<string, string> = {};
+    five.forEach((v, i) => { const body = `-- migration ${v}\n`; files[v] = body; rows.push(`${v}|${digest(body)}|${i < 3 ? 'backfill' : 'release'}|${w2sha}`); });
+    const f = fixture({ catalog_failed: {}, ...config });
+    for (const v of five) { mkdirSync(join(f.root, 'release/supabase/migrations'), { recursive: true }); f.put(`release/supabase/migrations/${v}_m.sql`, files[v]!); }
+    const inputs = JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')) as Record<string, unknown>;
+    f.put('inputs.json', { ...inputs, window: 'W2b', w2_release_sha: w2sha, w2_window_id: w2id });
+    f.put('proof/ordinary-before.json', liveReceipt('W2b', 'fixture', 'before', f.preText));
+    validGate(f, 'W2b');
+    f.put('proof-check.out', JSON.stringify({ closed_at: '2026-10-04T09:00:00Z', kind: 'W2', release_sha: w2sha, result: 'recovered', window_id: w2id }) + '\n');
+    f.put('proof-check.status', '0');
+    change(f, rows, ledger);
+    const cfg = JSON.parse(readFileSync(join(f.root, 'commands.json'), 'utf8'));
+    f.put('commands.json', { ...cfg, w2b_ledger: ledger.join('\n'), w2b_checksums: rows.join('\n') });
+    return { f, result: f.run([shim, 'ai-w2b-preflight'], 'W2b') };
+  };
+  const good = setup(); pass(good.result);
+  assert.match(good.result.stdout, /PASS ai-w2b-preflight: bound W2 proofs valid: \{"closed_at":"2026-10-04T09:00:00Z","kind":"W2"/);
+  assert.match(good.result.stdout, /PASS ai-w2b-preflight: 8 checksum rows match the ledger; five W2 rows equal this release archive/);
+  assert.equal(readFileSync(join(good.f.proof, 'w2b-preconditions.txt'), 'utf8'), 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n');
+  assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'w2-binding.json'), 'utf8')).window_id, w2id);
+  for (const v of five) assert.ok(good.result.calls.some(c => c[0] === 'ai_ro' && c.join(' ').includes('/proof/catalog.sql')), v);
+  // 0002's only failing forward row may be the issuer LOGIN the W2 rollback removed.
+  pass(setup(() => undefined, { catalog_failed: { '20261003000002': '20261003000002-001-commonswarm_admin_issuer' } }).result);
+  const bad: Array<[string, (f: ReturnType<typeof fixture>, rows: string[], ledger: string[]) => void, Record<string, unknown>, string]> = [
+    ['no backup gate', f => rmSync(join(f.root, 'proof/backup-gate.json')), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
+    ['backup receipt not JSON', f => f.put('proof/backup-gate.json', 'PASS'), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
+    ['backup receipt of another release', f => validGate(f, 'W2b', { release_sha: 'f'.repeat(40) }), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
+    ['W2 proofs refused', f => f.put('proof-check.status', '1'), {}, 'FAIL ai-w2b-preflight: bound W2 proofs expected valid got refused; STOP'],
+    ['credential file present', f => f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}'), {}, 'FAIL ai-w2b-preflight: issuer credential file expected absent got present; STOP'],
+    ['database preconditions false', () => undefined, { w2b: 'f' }, 'FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP'],
+    ['wrong checksum', (_f, rows) => { rows[5] = rows[5]!.replace(/\|[0-9a-f]{64}\|/, '|' + '9'.repeat(64) + '|'); }, {}, 'FAIL ai-w2b-preflight: 20261003000003 checksum row expected release-file-sha256-backfill-at-w2_release_sha got other; STOP'],
+    ['checksum at another release', (_f, rows) => { rows[7] = rows[7]!.replace(w2sha, 'f'.repeat(40)); }, {}, 'FAIL ai-w2b-preflight: 20261003000005 checksum row expected release-file-sha256-release-at-w2_release_sha got other; STOP'],
+    ['wrong checksum source', (_f, rows) => { rows[3] = rows[3]!.replace('|backfill|', '|release|'); }, {}, 'FAIL ai-w2b-preflight: 20261003000001 checksum row expected release-file-sha256-backfill-at-w2_release_sha got other; STOP'],
+    ['ledger version without checksum', (_f, _rows, ledger) => { ledger.splice(1, 0, '20260930000001'); }, {}, 'FAIL ai-w2b-preflight: checksum rows expected one-per-ledger-version got other; STOP'],
+    ['changed migration file', f => f.put('release/supabase/migrations/20261003000004_m.sql', '-- changed\n'), {}, 'FAIL ai-w2b-preflight: 20261003000004 checksum row expected release-file-sha256-release-at-w2_release_sha got other; STOP'],
+    ['forward catalog row false', () => undefined, { catalog_failed: { '20261003000001': '20261003000001-003-anything' } }, 'FAIL ai-w2b-preflight: forward catalog 20261003000001 expected all-rows-true (0002: only the issuer LOGIN row) got failed checks 20261003000001-003-anything; STOP'],
+    ['0002 other row false', () => undefined, { catalog_failed: { '20261003000002': '20261003000002-001-commonswarm_admin_issuer,20261003000002-002-issuer-memberships' } }, 'FAIL ai-w2b-preflight: forward catalog 20261003000002 expected all-rows-true (0002: only the issuer LOGIN row) got failed checks 20261003000002-001-commonswarm_admin_issuer,20261003000002-002-issuer-memberships; STOP'],
+    ['issuance on', () => undefined, { readonly: 'f' }, 'FAIL ai-w2b-preflight: admin issuance expected OFF got other; STOP'],
+  ];
+  for (const [name, change, config, message] of bad) {
+    const { f, result } = setup(change, config);
+    assert.notEqual(result.status, 0, name); stopped(result, message);
+    assert.ok(!existsSync(join(f.proof, 'w2b-preconditions.txt')), name);
+  }
+  const unbound = fixture(); unbound.put('proof/ordinary-before.json', liveReceipt('W3', 'fixture', 'before', unbound.preText));
+  stopped(unbound.run(['ai-w2b-preflight'], 'W3'), 'FAIL ai-w2b-preflight: window expected W2b got other; STOP');
 });
 test('oauth-build-route / cpu-capped-build-once-source-label: fails closed on unsupported CPU caps or wrong source label', () => {
   const good = fixture(); const positive = good.run(['ai-w3-build']); pass(positive);

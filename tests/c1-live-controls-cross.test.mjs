@@ -4,13 +4,14 @@ import test from 'node:test';
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 const temporaryRoot = realpathSync(tmpdir());
 const secretParent = mkdtempSync(join(temporaryRoot, 'anvil-secret-root-'));
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
@@ -30,6 +31,8 @@ const block = id => {
 const digest = value => createHash('sha256').update(value).digest('hex');
 const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
 assert.ok(python.startsWith('/'), 'absolute Python runtime');
+const guardedRm = spawnSync('/bin/sh', ['-c', 'command -v rm'], { encoding: 'utf8' }).stdout.trim();
+assert.ok(guardedRm.startsWith('/'), 'absolute installed rm runtime');
 
 const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com';
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
@@ -129,8 +132,13 @@ async function liveFixture(t) {
         return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
       }
       if (url.pathname === '/auth/v1/token') {
+        assert.equal(url.searchParams.get('grant_type'), 'refresh_token');
+        assert.equal(body.refresh_token, humanRefresh); assert.equal(req.headers.apikey, anon);
         const now = new Date().toISOString(); humanRefresh = secret();
-        return emit(res, 200, { access_token: secret(), refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
+        const humanAccess = [Buffer.from('{"alg":"HS256"}').toString('base64url'),
+          Buffer.from(JSON.stringify({ sub: uid, exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url'), secret()].join('.');
+        secrets.push(humanAccess);
+        return emit(res, 200, { access_token: humanAccess, refresh_token: humanRefresh, token_type: 'bearer', expires_in: 3600,
           user: { id: uid, aud: 'authenticated', role: 'authenticated', email: 'fixture@example.test', app_metadata: {}, user_metadata: {}, identities: [], created_at: now } });
       }
       if (url.pathname === '/rest/v1/workspaces') {
@@ -173,6 +181,7 @@ async function liveFixture(t) {
     const out = outName ?? join(root, `receipt${sequence}.json`);
     const args = command === 'consent' ? ['consent', '--phase', 'pre-W1', '--pointer-dir', pointer] :
       command === 'final-cleanup' ? ['final-cleanup', '--consent-receipt', f.consent] :
+        command === 'probe-credentials' ? ['probe-credentials', '--window', 'W2', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human] :
         ['window', '--phase', 'before', '--window', 'W1', '--window-id', windowId, '--consent-receipt', f.consent, '--human-profile', human, '--seat-profile', seat];
     for (let i = 0; i < extra.length; i++) {
       const arg = extra[i]; const n = args.indexOf(arg);
@@ -209,6 +218,7 @@ async function liveFixture(t) {
     return { exit, output, receipt, bytes, out };
   }
   f.run = run;
+  f.events = events;
   return f;
 }
 
@@ -219,6 +229,8 @@ async function produceReceipts(t) {
   assert.equal(w1.exit, 0, w1.output);
   const w2 = await f.run('window', ['--window', 'W2', '--phase', 'before']);
   assert.equal(w2.exit, 0, w2.output);
+  const w2b = await f.run('window', ['--window', 'W2b', '--phase', 'before']);
+  assert.equal(w2b.exit, 0, w2b.output);
   for (const window of ['W3', 'W4', 'W5']) {
     const w = await f.run('window', ['--window', window]);
     assert.equal(w.exit, 0, w.output);
@@ -235,6 +247,7 @@ async function produceReceipts(t) {
     preW1: { bytes: pre.bytes, path: pre.out },
     w1Before: { bytes: w1.bytes, path: w1.out },
     w2Before: { bytes: w2.bytes, path: w2.out },
+    w2bBefore: { bytes: w2b.bytes, path: w2b.out },
     postW5: { bytes: post.bytes, path: post.out },
     w5After: { bytes: w5after.bytes, path: w5after.out },
   };
@@ -242,7 +255,7 @@ async function produceReceipts(t) {
 
 // --- plan block fixture (stubs as tests/admin-release-live-failclosed-w123.test.ts) ---
 const dispatcher = String.raw`
-import builtins,hashlib,io,json,os,pathlib,random,shutil,string,subprocess,sys,urllib.request
+import builtins,hashlib,io,json,os,pathlib,random,shlex,shutil,string,subprocess,sys,urllib.error,urllib.parse,urllib.request
 root=pathlib.Path(os.environ['FIXTURE_ROOT']); cfg=json.loads((root/'commands.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'argv.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
@@ -260,7 +273,65 @@ if name=='python3':
     import socket
     def no_network(*a,**kw): raise RuntimeError('UNMODELLED network')
     socket.socket.connect=no_network; socket.create_connection=no_network
+    if cfg.get('probe'):
+        class Response(io.BytesIO):
+            status=200
+            def __init__(self,body): super().__init__(json.dumps(body).encode())
+        class Issuer:
+            def open(self,req,timeout):
+                if timeout!=15 or req.get_header('User-agent')!='curl/8.7.1': refuse()
+                statepath=root/'probe-state.json'; state=json.loads(statepath.read_text())
+                url=req.full_url; issuer='https://mcp.commonswarm.com'
+                state['calls'].append(url)
+                with statepath.open('w') as f: json.dump(state,f)
+                if url==issuer+'/health': return Response({'ok':True})
+                if url==issuer+'/.well-known/oauth-authorization-server':
+                    return Response({'issuer':issuer,'token_endpoint':issuer+'/token'})  # like the live issuer: no revocation_endpoint
+                if url==issuer+'/.well-known/oauth-protected-resource/mcp': return Response({'resource':issuer+'/mcp'})
+                if url==issuer+'/token':
+                    form=dict(urllib.parse.parse_qsl(req.data.decode()))
+                    if req.get_method()!='POST' or form!={'grant_type':'refresh_token','client_id':state['client'],
+                        'refresh_token':state['current'],'resource':issuer+'/mcp'}: refuse()
+                    if cfg.get('refresh_status')==400:
+                        raise urllib.error.HTTPError(url,400,'fixture rejection',{},io.BytesIO(b'{"error":"invalid_grant"}'))
+                    state['current']=state['rotated']
+                    with statepath.open('w') as f: json.dump(state,f)
+                    return Response({'token_type':'Bearer','access_token':state['access'],'refresh_token':state['rotated']})
+                body=json.loads(req.data)
+                if url==issuer+'/mcp':
+                    if req.get_method()!='POST' or req.get_header('Authorization')!='Bearer '+state['access'] or body.get('method')!='initialize': refuse()
+                    stored=pathlib.Path(os.environ['SECRET_STAGE'])/'ordinary-probes.json'
+                    state['persisted_before_initialize']=json.loads(stored.read_text())['mcp_refresh_token']==state['rotated']
+                    state['initialize_file_mode']=stored.stat().st_mode & 0o777
+                    state['initialize_saw_replacement']=stored.stat().st_ino!=state['original_inode']
+                    with statepath.open('w') as f: json.dump(state,f)
+                    return Response({'jsonrpc':'2.0','id':body['id'],'result':{'serverInfo':{'name':'fixture'}}})
+                if url=='https://api.commonswarm.com/functions/v1/read':
+                    if req.get_method()!='POST' or req.get_header('Authorization')!='Bearer '+state['human'] or body!={'resource':'pending_access','workspace_id':state['workspace']}: refuse()
+                    return Response({'pending':[]})
+                refuse()
+        urllib.request.build_opener=lambda *a: Issuer()
     exec(compile(source,'<complete-plan-block>','exec'))
+elif name=='ai_deadline' and cfg.get('probe'):
+    if args: refuse()
+elif name=='ssh' and cfg.get('probe'):
+    if len(args)!=6 or args[:5]!=['-o','BatchMode=yes','-o','ConnectTimeout=10','ops@100.115.66.74']: refuse()
+    remote=shlex.split(args[5])
+    if len(remote)!=7 or remote[:4]!=['sudo','-n','/bin/bash','-c']: refuse()
+    # Execute the extracted remote shell, including its real mode/digest checks.
+    result=subprocess.run(['/bin/bash','-c']+remote[4:],input=sys.stdin.buffer.read())
+    raise SystemExit(result.returncode)
+elif name=='install' and cfg.get('probe') and len(args)==8 and args[:7]==['-o','root','-g','root','-m','600','/dev/stdin']:
+    target=owned(args[7])
+    with target.open('xb') as f: f.write(sys.stdin.buffer.read())
+    target.chmod(0o600)
+elif name=='rm' and cfg.get('probe'):
+    if len(args)!=2 or args[0]!='--' or owned(args[1])!=root/'c1-run'/('probe-credentials-W2-'+cfg['window_id']+'.json'): refuse()
+    # Delegate to the installed guard on the Mac; do not bypass it in a test shim.
+    raise SystemExit(subprocess.run([cfg['guarded_rm']]+args).returncode)
+elif name=='cut' and cfg.get('probe'):
+    if args!=['-d',' ','-f','1']: refuse()
+    for line in sys.stdin: output(line.split(' ')[0])
 elif name in ('ai_deadline','ai_ro','ai_db','openssl','nice','timeout','docker','node'): refuse()
 elif name=='chmod':
     if len(args)<2 or args[0] not in ('0600','0700'): refuse()
@@ -300,14 +371,15 @@ mkdirSync(planScratch, { recursive: true, mode: 0o700 });
 function planFixture(config = {}) {
   const root = mkdtempSync(join(scratch, 'case-'));
   const bin = join(root, 'bin'), proof = join(root, 'proof');
-  for (const dir of [bin, proof, join(root, 'etc/commonswarm-oauth'), join(root, 'admin-issuance/release-proofs'), join(root, 'archive'), join(root, 'release/scripts'), join(root, 'tmp'), join(root, 'caddy'), join(root, 'stage')]) {
+  const stage = config.probe ? join(root, 'tmp/anvil-secret.ABC123') : join(root, 'stage');
+  for (const dir of [bin, proof, join(root, 'etc/commonswarm-oauth'), join(root, 'admin-issuance/release-proofs'), join(root, 'archive'), join(root, 'release/scripts'), join(root, 'tmp'), join(root, 'caddy'), stage, join(root, 'c1-run')]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const put = (path, value) => writeFileSync(join(root, path), Buffer.isBuffer(value) ? value : typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
-  put('commands.json', { sha: release, ...config });
+  put('commands.json', { sha: release, guarded_rm: guardedRm, window_id: windowId, ...config });
   put('argv.jsonl', '');
   put('release/scripts/live-ordinary-controls.mjs', config.producerBytes ?? scriptBytes);
-  for (const name of ['python3', 'chmod', 'install', 'stat', 'sha256sum', 'awk', 'mktemp', 'mkdir', 'cp', 'date', 'cat']) {
+  for (const name of ['python3', 'chmod', 'install', 'stat', 'sha256sum', 'awk', 'mktemp', 'mkdir', 'cp', 'date', 'cat', ...(config.probe ? ['ssh', 'rm', 'cut', 'ai_deadline'] : [])]) {
     writeFileSync(join(bin, name), '#!' + python + '\n' + dispatcher, { mode: 0o700 });
   }
   const releaseRoot = join(root, 'admin-issuance/releases', release);
@@ -320,10 +392,18 @@ function planFixture(config = {}) {
   for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) put(`caddy/${name}`, `fixture ${name}\n`);
   const env = {
     ...process.env, PATH: bin, FIXTURE_ROOT: root, RELEASE_SHA: release, RELEASE_ROOT: releaseRoot,
-    PROOF_DIR: proof, SECRET_STAGE: join(root, 'stage'), PSQL_IMAGE: 'fixture-postgres',
+    PROOF_DIR: proof, SECRET_STAGE: stage, PSQL_IMAGE: 'fixture-postgres',
   };
   function remap(source) {
     assert.ok(root.startsWith(`${scratch}${sep}`), 'plan fixture is inside the test-owned tmpdir root');
+    // Discover host paths from the plan so Ubuntu needs no Mac path literals.
+    if (config.probe) {
+      const stageSource = block('ai-w2-stage-probes');
+      const guardPath = stageSource.match(/command -v rm\)" = (\/\S+)/)?.[1];
+      const producerDir = stageSource.match(/^PROBE_CREDENTIALS_FILE=(\/.*)\/probe-credentials-W2-/m)?.[1];
+      assert.ok(guardPath && producerDir, 'stage block declares guard and producer paths');
+      source = source.split(guardPath).join(join(bin, 'rm')).split(producerDir).join(join(root, 'c1-run'));
+    }
     for (const [from, to] of [
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
       ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
@@ -344,7 +424,7 @@ function planFixture(config = {}) {
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
     return result;
   }
-  return { root, proof, put, run, releaseRoot };
+  return { root, proof, stage, put, run, releaseRoot };
 }
 
 function stageReceipt(f, name, bytes) {
@@ -448,6 +528,26 @@ test('cross-live-controls / ai-live-controls W2 before passes with real producer
   assert.deepEqual(JSON.parse(ordinary), JSON.parse(produced.w2Before.bytes.toString()));
 });
 
+test('cross-live-controls / W2b before: ai-open and ai-live-controls pass with the real producer bound to the pre-W1 consent', () => {
+  assert.equal(JSON.parse(produced.w2bBefore.bytes.toString()).window, 'W2b');
+  assert.equal(JSON.parse(produced.w2bBefore.bytes.toString()).producer_sha256, producerSha);
+  const opened = planFixture();
+  const proofDir = join(opened.root, 'admin-issuance/release-proofs', `${release}-W2b-${windowId}`);
+  pass(openRun(opened, 'W2b', produced.preW1.bytes, produced.w2bBefore.bytes), /PASS ai-open/);
+  assert.equal(readFileSync(join(proofDir, 'consent-pre-W1.json'), 'utf8'), produced.preW1.bytes.toString());
+  const f = planFixture();
+  pass(liveControlsRun(f, 'W2b', 'before', produced.preW1.bytes, produced.w2bBefore.bytes), /PASS live authenticated ordinary controls bound to consent pre-W1 and released producer/);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.proof, 'ordinary-before.json'), 'utf8')), JSON.parse(produced.w2bBefore.bytes.toString()));
+});
+
+test('cross-live-controls / negative post-W5 consent at W2b refuses ai-live-controls', () => {
+  const f = planFixture();
+  const live = JSON.parse(produced.w2bBefore.bytes.toString());
+  live.consent_receipt_sha256 = digest(produced.postW5.bytes);
+  stopped(liveControlsRun(f, 'W2b', 'before', produced.postW5.bytes, Buffer.from(JSON.stringify(live, null, 2) + '\n')),
+    'FAIL ai-live-controls: consent_phase for W2b before expected pre-W1 got post-W5; STOP');
+});
+
 test('cross-live-controls / ai-live-controls W5 after passes with real producer and receipts', () => {
   const f = planFixture();
   const result = liveControlsRun(f, 'W5', 'after', produced.postW5.bytes, produced.w5After.bytes);
@@ -485,4 +585,134 @@ test('cross-live-controls / negative post-W5 consent at W2 refuses ai-live-contr
   live.consent_receipt_sha256 = digest(produced.postW5.bytes);
   stopped(liveControlsRun(f, 'W2', 'before', produced.postW5.bytes, Buffer.from(JSON.stringify(live, null, 2) + '\n')),
     'FAIL ai-live-controls: consent_phase for W2 before expected pre-W1 got post-W5; STOP');
+});
+
+// Cross the secret handoff boundary with actual producer bytes, not hand-built credentials.
+function probeFixture(t, config = {}) {
+  const f = planFixture({ probe: true, ...config });
+  t.after(() => {
+    assert.ok(f.root.startsWith(`${scratch}${sep}`), 'cleanup stays inside the test-owned tmpdir');
+    assert.equal(realpathSync(f.root), f.root);
+    const result = spawnSync(guardedRm, ['-rf', f.root], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!existsSync(f.root), 'probe fixture removed through the installed rm');
+  });
+  return f;
+}
+
+function probeInputs(f) {
+  const end = Math.floor(Date.now() / 1000) + 600;
+  f.put('probe-inputs.json', { release_sha: release, window: 'W2', window_id: windowId,
+    probe_workspace_id: wid, window_end_utc: new Date(end * 1000).toISOString().replace('.000Z', 'Z') });
+  const proof = join(f.root, 'admin-issuance/release-proofs', `${release}-W2-${windowId}`);
+  mkdirSync(proof, { recursive: true, mode: 0o700 });
+  writeFileSync(join(proof, 'secret-stage.path'), f.stage + '\n', { mode: 0o600 });
+  return { INPUTS_FILE: join(f.root, 'probe-inputs.json') };
+}
+
+const probeLocal = f => join(f.root, 'c1-run', `probe-credentials-W2-${windowId}.json`);
+const commandCalls = f => readFileSync(join(f.root, 'argv.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+const probeState = f => JSON.parse(readFileSync(join(f.root, 'probe-state.json'), 'utf8'));
+function prepareIssuer(f, credentials) {
+  f.put('probe-state.json', { calls: [], current: credentials.mcp_refresh_token, client: credentials.mcp_client_id,
+    human: credentials.human_access_token, workspace: credentials.workspace_id,
+    rotated: randomBytes(32).toString('base64url'), access: randomBytes(32).toString('base64url'),
+    original_inode: lstatSync(join(f.stage, 'ordinary-probes.json')).ino });
+}
+function noProbeSecrets(f, credentials, result) {
+  const visible = result.stdout + result.stderr + readFileSync(join(f.root, 'argv.jsonl'), 'utf8');
+  const secrets = [credentials.mcp_refresh_token, credentials.human_access_token];
+  if (existsSync(join(f.root, 'probe-state.json'))) {
+    const state = probeState(f); secrets.push(state.rotated, state.access);
+  }
+  for (const secret of secrets) assert.ok(!visible.includes(secret), 'probe secrets stay out of argv and output');
+}
+
+test('cross-live-controls / real probe-credentials through W2 stage and between-probes', async t => {
+  const f = probeFixture(t);
+  const live = await liveFixture(t);
+  const consent = await live.run('consent'); assert.equal(consent.exit, 0, consent.output); live.consent = consent.out;
+  const before = live.events.length;
+  // The producer writes the very path the extracted stage block will consume.
+  const produced = await live.run('probe-credentials', [], { outName: probeLocal(f) });
+  assert.equal(produced.exit, 0, produced.output);
+  assert.equal(produced.output, 'PASS probe-credentials written; DCR grant handed off to W2-probes\n');
+  assert.equal(lstatSync(produced.out).mode & 0o777, 0o600);
+  assert.equal(produced.receipt.mcp_client_id, consent.receipt.dcr_client_ids[0]);
+  const producerCalls = live.events.slice(before);
+  assert.equal(producerCalls.filter(e => e.path === '/auth/v1/token').length, 1, 'producer refreshes the human store once');
+  assert.equal(producerCalls.filter(e => e.grant === 'refresh_token').length, 0, 'producer does not consume the handed-off MCP refresh token');
+
+  await t.test('positive: exact upload, absence proof and durable rotation before initialize', () => {
+    const stage = f.run(['ai-w2-stage-probes'], 'W2', probeInputs(f));
+    pass(stage, /PASS ai-w2-stage-probes: box ordinary-probes.json 0600 with matching digest; local copy removed/);
+    const staged = join(f.stage, 'ordinary-probes.json');
+    assert.equal(lstatSync(staged).mode & 0o777, 0o600);
+    assert.equal(digest(readFileSync(staged)), digest(produced.bytes), 'the real producer bytes reach SECRET_STAGE unchanged');
+    assert.throws(() => lstatSync(produced.out), { code: 'ENOENT' }, 'local copy is absent, including symlinks');
+    const calls = commandCalls(f);
+    assert.equal(calls.filter(c => c[0] === 'ssh').length, 1, 'one stdin upload');
+    assert.deepEqual(calls.filter(c => c[0] === 'rm'), [['rm', '--', produced.out]], 'guarded deletion targets the producer output');
+    noProbeSecrets(f, produced.receipt, stage);
+
+    prepareIssuer(f, produced.receipt);
+    const between = f.run(['ai-w2-between-probes'], 'W2', { VERSION: '20261003000001' });
+    assert.equal(between.status, 0, between.stderr);
+    const state = probeState(f);
+    assert.deepEqual(state.calls, [issuer + '/health', issuer + '/.well-known/oauth-authorization-server',
+      issuer + '/.well-known/oauth-protected-resource/mcp', issuer + '/token', resource, api + '/functions/v1/read']);
+    assert.equal(state.calls.filter(url => url === issuer + '/token').length, 1, 'between-probes refreshes exactly once');
+    assert.equal(state.persisted_before_initialize, true, 'initialize sees the rotated token on disk');
+    assert.equal(state.initialize_saw_replacement, true, 'rotation replaces the original file atomically');
+    assert.equal(state.initialize_file_mode, 0o600);
+    const retained = JSON.parse(readFileSync(staged, 'utf8'));
+    assert.ok(retained.mcp_refresh_token === state.rotated && retained.mcp_refresh_token !== produced.receipt.mcp_refresh_token,
+      'the new refresh token is retained');
+    delete retained.mcp_refresh_token;
+    const original = { ...produced.receipt }; delete original.mcp_refresh_token;
+    assert.ok(isDeepStrictEqual(retained, original), 'rotation preserves the other producer fields');
+    assert.deepEqual(readdirSync(f.stage), ['ordinary-probes.json'], 'no temporary rotation file remains');
+    const proof = readFileSync(join(f.proof, 'between-20261003000001.json'), 'utf8');
+    const receipt = JSON.parse(proof);
+    assert.equal(receipt.release_sha, release); assert.equal(receipt.version, '20261003000001');
+    for (const key of ['discovery', 'rotation', 'refreshed', 'token_health', 'human_read']) assert.equal(receipt[key], true, key);
+    noProbeSecrets(f, produced.receipt, { ...between, stdout: between.stdout + proof });
+  });
+
+  for (const [name, mutate, refusal] of [
+    ['one key removed', c => { delete c.mcp_resource; }, 'probe credentials keys expected probe-contract-keys got other-set'],
+    ['wrong window_id', c => { c.window_id = 'XYZ789'; }, 'probe credentials window_id expected input-window-id got mismatch'],
+    ['human expiry below window end plus 300', (c, inputs) => {
+      c.human_token_exp = Math.floor(Date.parse(inputs.window_end_utc) / 1000) + 299;
+    }, 'human_token_exp expected window_end_utc-plus-300s got shorter'],
+  ]) await t.test(`negative: ${name}`, child => {
+    const bad = probeFixture(child);
+    const env = probeInputs(bad), credentials = JSON.parse(produced.bytes.toString());
+    mutate(credentials, JSON.parse(readFileSync(env.INPUTS_FILE, 'utf8')));
+    writeFileSync(probeLocal(bad), JSON.stringify(credentials), { mode: 0o600 });
+    const result = bad.run(['ai-w2-stage-probes'], 'W2', env);
+    stopped(result, `FAIL ai-w2-stage-probes: ${refusal}; STOP before any W2 write`);
+    const calls = commandCalls(bad);
+    assert.equal(calls.filter(c => ['ssh', 'install', 'rm'].includes(c[0])).length, 0, 'validation stops before upload or deletion');
+    assert.ok(!existsSync(join(bad.stage, 'ordinary-probes.json')), 'no box credential file');
+    assert.equal(lstatSync(probeLocal(bad)).mode & 0o777, 0o600, 'local file retained privately');
+    noProbeSecrets(bad, produced.receipt, result);
+  });
+
+  await t.test('negative: issuer refresh 400 stops without a retry or initialize', child => {
+    const bad = probeFixture(child, { refresh_status: 400 });
+    writeFileSync(probeLocal(bad), produced.bytes, { mode: 0o600 });
+    pass(bad.run(['ai-w2-stage-probes'], 'W2', probeInputs(bad)), /PASS ai-w2-stage-probes/);
+    prepareIssuer(bad, produced.receipt);
+    const result = bad.run(['ai-w2-between-probes'], 'W2', { VERSION: '20261003000001' });
+    stopped(result, 'FAIL ai-w2-between-probes: 20261003000001 refresh grant expected HTTP-200-Bearer-rotation got HTTP-400; STOP before next migration');
+    const calls = probeState(bad).calls;
+    assert.deepEqual(calls, [issuer + '/health', issuer + '/.well-known/oauth-authorization-server',
+      issuer + '/.well-known/oauth-protected-resource/mcp', issuer + '/token']);
+    assert.equal(calls.filter(url => url === issuer + '/token').length, 1, 'failed refresh is attempted exactly once');
+    assert.ok(!existsSync(join(bad.proof, 'between-20261003000001.json')), 'no success proof after failed refresh');
+    assert.equal(digest(readFileSync(join(bad.stage, 'ordinary-probes.json'))), digest(produced.bytes), 'failed refresh leaves the original file intact');
+    assert.throws(() => lstatSync(probeLocal(bad)), { code: 'ENOENT' });
+    noProbeSecrets(bad, produced.receipt, result);
+  });
 });
