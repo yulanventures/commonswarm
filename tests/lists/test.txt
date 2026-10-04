@@ -4,6 +4,7 @@ tests/admin-release-live-failclosed-w123.test.ts
 tests/admin-release-live-failclosed-w45.test.ts
 tests/live-ordinary-controls.test.mjs
 tests/c1-live-controls-cross.test.mjs
+tests/c1-w2-rehearsal.test.ts
 tests/box-dry-run.test.ts
 tests/box-window-plans.test.ts
 tests/hm37-plan-live-replay.test.ts
