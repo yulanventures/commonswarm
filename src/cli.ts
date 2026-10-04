@@ -701,7 +701,6 @@ export class Arguments {
   private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
   expandedProfilePath?: string;
-  expandedProfileWorkspaceName?: string;
   expandedProfileHostSessionId?: string;
   constructor(values: string[]) {
     let positionalOnly = false;
@@ -818,7 +817,6 @@ export class Arguments {
     const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
     this.expandedProfilePath = path;
-    this.expandedProfileWorkspaceName = profile.workspace_name;
     this.expandedProfileHostSessionId = this.optional("host-session-id");
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
@@ -3814,7 +3812,9 @@ async function runPostSignal(
     try {
       recipient = resolveSignalRecipient(toSelector, directory, {
         workspaceId: credential.selectedWorkspace,
-        workspaceName: workspaceLabel(directory) ?? args.expandedProfileWorkspaceName,
+        workspaceName: workspaceLabel(directory) ?? (args.expandedProfilePath === undefined
+          ? undefined
+          : (await readAgentProfile(args.expandedProfilePath, args.expandedProfileHostSessionId)).workspace_name),
       });
     } catch (error) {
       const failure = signalRecipientCheckFailure(error, "cli");
