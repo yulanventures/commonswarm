@@ -3046,7 +3046,8 @@ try:
     if mode=='before':
         # Stale intent can never be used after a failed/unknown pre-hook.
         intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
-        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
+        # guard_cutover_state refuses a generation change while issuance is open: close, then invalidate.
+        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
         assert len(result)==2 and result[0] in ('t','f') and result[1].isdigit()
         intent.write_text(json.dumps({'reopen':result[0]=='t','generation':int(result[1])})+'\n')
     else:
@@ -3071,7 +3072,9 @@ try:
                 if member.isfile(): assert not dest.is_symlink() and dest.read_bytes()==tar.extractfile(member).read()
                 elif member.issym(): assert dest.is_symlink() and dest.readlink().as_posix()==member.linkname
         gen=str(state['generation']); enabled='true' if state['reopen'] else 'false'
-        sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; "
+        # M4 grants migration_checksum_failures() to the runtime and command roles only, never to the release
+        # role: the gate runs as the session's admin user, then the same transaction takes the release role.
+        sql="BEGIN; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
         sql+="UPDATE commonswarm_oauth.admin_cutover_state SET measured_edge_release_sha='"+sha+"',measured_edge_target='"+target+"',measured_mount='"+target+"',measured_image_digest='"+r['image_digest']+"',measured_artifact_digest='"+r['artifact_digest']+"',measured_generation=release_generation,measured_at=statement_timestamp(),measurement_evidence_ref='systemd/recycle/"+gen+"',invalidated_at=NULL,admin_issuance_enabled="+enabled+" WHERE singleton; COMMIT;"
         if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
         db(sql)
@@ -3774,7 +3777,9 @@ d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']
 assert type(m.get('generation')) is int and m['generation']>0 and m.get('invalidated_at','missing') is None, 'FAIL generation/invalidated_at; STOP'
 gen=str(m['generation'])
 assert re.fullmatch('[0-9a-f]{40}',sha) and re.fullmatch('[0-9a-f]{64}',h)
-sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; "
+# M4 grants migration_checksum_failures() to the runtime and command roles only: the locked gate runs as the
+# session's admin user, then the same transaction takes the release role for the switch.
+sql="BEGIN; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
 sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+h+"',admin_issuance_enabled=true WHERE singleton; COMMIT;\n"
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY
@@ -3816,7 +3821,8 @@ printf 'PASS W6 measured release, overlay/env and public gate open\n' >"$PROOF_D
 # readonly: no
 # host: HezLead box root; remove activation env/overlay and close cutover
 set -euo pipefail
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+# guard_cutover_state refuses a generation change while issuance is open: close first, then invalidate, one transaction.
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 OAUTH_TARGET=$(readlink -f /home/commonswarm/oauth/current)
 python3 - "$OAUTH_TARGET" "$SECRET_STAGE/service.closed.env" <<'PY'
 import pathlib,re,sys
