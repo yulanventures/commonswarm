@@ -1,7 +1,7 @@
 import { AgentSetupError, profilePathRemedy } from "../cloud/agent-profile.js";
 import { AgentCredentialInputError } from "../cloud/agent-credential-input.js";
 import { CommandHttpError } from "../cloud/command-client.js";
-import { classifySignalReadFailure, followErrorEnvelope, followHttpDetails, LocalCredentialSecretAbsentError, SignalRecipientError } from "../cloud/signals.js";
+import { classifySignalReadFailure, followErrorEnvelope, followHttpDetails, LocalCredentialSecretAbsentError, SignalRecipientError, signalRecipientCheckFailure } from "../cloud/signals.js";
 import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisationRequired, RenewalRefused, RenewalRetryError, RenewalRevoked, RenewalSuperseded, RenewalSuspended, RenewalUnsupported } from "../cloud/renewal.js";
 import { SessionContextError } from "../cloud/session-context.js";
 import { AGENT_SESSION_PROOF_REFUSAL_CODES } from "../cloud/session-wire.js";
@@ -24,7 +24,7 @@ const WAIT_AND_RETRY: Action = "wait, then retry the same call with the same req
 const FILE_RETRY: Action = "retry this call with the same request_id";
 const entry = (message: string, next_step: Action): Sentence => ({ message, next_step });
 
-/** The only model-visible error prose. No producer message is copied here. */
+/** Fallback model-visible error prose. No producer message is copied here. */
 export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   profile_path_invalid: entry("The profile path is invalid.", PERSON),
   profile_registry_invalid: entry("The saved profile inventory is damaged.", PERSON),
@@ -60,7 +60,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   setup_host_session_required: entry("Setup needs this session's ID or an intentional manual choice.", PERSON),
   host_session_invalid: entry("The host session is invalid.", PERSON),
   until_invalid: entry("The until argument is invalid.", FIX),
-  recipient_unknown: entry("The to argument does not name a live recipient.", FIX),
+  recipient_unknown: entry("The to argument does not name a member or agent of this workspace. Select the workspace where the recipient is a member, or ask a workspace admin to invite the recipient.", FIX),
   recipient_ambiguous: entry("The to argument names more than one recipient; use a unique identifier.", FIX),
   recipient_invalid: entry("The to argument is invalid.", FIX),
   command_id_conflict: entry("This request id was used for different arguments.", STOP),
@@ -148,6 +148,8 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
 };
 
 export function mapMcpError(error: unknown): { code: string; message: string; next_step: string; status?: number } {
+  const recipientFailure = signalRecipientCheckFailure(error, "mcp");
+  if (recipientFailure !== null) return { code: "recipient_unknown", ...recipientFailure };
   const readHttp = followHttpDetails(error);
   const readCode = followErrorEnvelope(error).error;
   const readFailure = classifySignalReadFailure(error);

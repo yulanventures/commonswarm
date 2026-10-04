@@ -135,12 +135,12 @@ test("typed recipient resolution prefers exact UUID and unique name across membe
   );
   assert.throws(
     () => resolveSignalRecipient("Nobody", directory),
-    /not a live member or agent/,
+    /not a member or agent/,
   );
   assert.throws(
     () =>
       resolveSignalRecipient("77777777-7777-4777-8777-777777777777", directory),
-    /not a live member or agent/,
+    /not a member or agent/,
   );
 });
 

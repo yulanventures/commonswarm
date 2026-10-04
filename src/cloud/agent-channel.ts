@@ -20,7 +20,7 @@ import { AgentSessionClient } from "./session-client.js";
 import { AgentSessionManager } from "./session-manager.js";
 import { bindSessionProof } from "./session-proof.js";
 import { managedAckInput } from "./session-ack.js";
-import { parseSignalRecord, readAgentSignalDirectory, resolveSignalRecipient, signalAddressesAgent } from "./signals.js";
+import { parseSignalRecord, readAgentSignalDirectory, resolveSignalRecipient, signalAddressesAgent, signalRecipientCheckFailure } from "./signals.js";
 import { assertProfileIdentity } from "./agent-check.js";
 import { boundProfileCommands } from "./agent-onboarding-contract.js";
 import { isReplyStatus, REPLY_STATUSES } from "./reply-status.js";
@@ -350,7 +350,10 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
       const token = await credential.bearer();
       const directory = await readAgentSignalDirectory(target, token, profile.workspace_id, authenticatedFetch);
       assertProfileIdentity(profile, directory);
-      const recipient = resolveSignalRecipient(args.to as string, directory);
+      const recipient = resolveSignalRecipient(args.to as string, directory, {
+        workspaceId: profile.workspace_id,
+        workspaceName: directory.identity?.workspace_name?.trim() || profile.workspace_name,
+      });
       const command: PostSignalCommand = {
         kind: "post_signal", signal_kind: "ask", body,
         to_user_id: recipient.kind === "user" ? recipient.id : null,
@@ -363,6 +366,10 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
       }, profile.workspace_id, command);
       return { content: [{ type: "text" as const, text: `Ask shared: ${result.response.signal!.id}.${parentContextSentence === undefined ? "" : ` ${parentContextSentence}`}` }] };
     } catch (error) {
+      const recipientFailure = signalRecipientCheckFailure(error, "mcp");
+      if (recipientFailure !== null) {
+        return { isError: true, content: [{ type: "text" as const, text: recipientFailure.message }] };
+      }
       if (error instanceof CommandTransportError || (error instanceof CommandHttpError && error.status >= 500)) {
         return { isError: true, content: [{ type: "text" as const, text: "Ask outcome unknown: ask_outcome_unknown. Retry the same ask." }] };
       }

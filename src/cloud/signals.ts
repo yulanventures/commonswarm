@@ -31,6 +31,7 @@ import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 import { parseServerSessionStatus, type ServerSessionStatus } from "./session-client.js";
 import { isReplyStatus } from "./reply-status.js";
 import { CHAIN_MAX_HOPS } from "./ask-chain-constants.js";
+import { sanitizeDisplayLabel } from "./invite-link.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -241,9 +242,33 @@ export class SignalMalformedError extends Error {
 
 export class SignalRecipientError extends Error {
   readonly name = "SignalRecipientError";
-  constructor(readonly code: "recipient_unknown" | "recipient_ambiguous" | "recipient_invalid", message: string) {
+  constructor(
+    readonly code: "recipient_unknown" | "recipient_ambiguous" | "recipient_invalid",
+    message: string,
+    readonly context?: { recipient: string; workspaceId: string; workspaceName?: string | null },
+  ) {
     super(message);
   }
+}
+
+/** Render only a proven directory miss, never a broad server access refusal. */
+export function signalRecipientCheckFailure(
+  error: unknown,
+  surface: "cli" | "mcp",
+): { message: string; next_step: string } | null {
+  if (!(error instanceof SignalRecipientError) || error.code !== "recipient_unknown" || !error.context) return null;
+  const { recipient, workspaceId, workspaceName } = error.context;
+  const name = sanitizeDisplayLabel(workspaceName ?? "", "");
+  const workspace = name ? `${name} (${workspaceId})` : workspaceId;
+  // Quote display data without changing the selector used by the resolver.
+  const quotedRecipient = JSON.stringify(recipient).slice(1, -1);
+  const next_step = surface === "cli"
+    ? "use --profile for the workspace where the recipient is a member, or invite the recipient"
+    : "use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient";
+  return {
+    message: `BLOCKED by CommonSwarm (recipient check): '${quotedRecipient}' is not a member or agent of workspace ${workspace}. To resolve: ${next_step}.`,
+    next_step,
+  };
 }
 
 /** Retry-After attached to plain Errors thrown by the shared read path. */
@@ -1513,10 +1538,15 @@ export async function readAgentSignalMembers(
 export function resolveSignalRecipient(
   selector: string,
   directory: SignalDirectory | readonly SignalMember[],
+  workspace?: { workspaceId: string; workspaceName?: string | null },
 ): ResolvedSignalRecipient {
   const resolved: SignalDirectory = Array.isArray(directory)
     ? { members: directory, agents: [] }
     : directory as SignalDirectory;
+  const unknown = () => new SignalRecipientError(
+    "recipient_unknown", "signal recipient is not a member or agent of this workspace",
+    workspace === undefined ? undefined : { ...workspace, recipient: selector },
+  );
 
   if (UUID_RE.test(selector)) {
     const normalized = selector.toLowerCase();
@@ -1529,7 +1559,7 @@ export function resolveSignalRecipient(
     if (member && agent) {
       throw new SignalRecipientError("recipient_ambiguous", "signal recipient id matches both a member and an agent; use a unique id");
     }
-    throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
+    throw unknown();
   }
 
   const memberMatches = resolved.members.filter(
@@ -1552,7 +1582,7 @@ export function resolveSignalRecipient(
     ];
     throw new SignalRecipientError("recipient_ambiguous", `signal recipient name is ambiguous; use one of these ids: ${choices.join(", ")}`);
   }
-  throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
+  throw unknown();
 }
 
 /** Parse --wait as an integer number of seconds in 1..300. */

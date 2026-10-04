@@ -354,7 +354,7 @@ test("signal recipients resolve only among exact live member ids or names", () =
   );
   assert.throws(
     () => resolveSignalRecipient("Nobody", members),
-    /not a live member or agent/,
+    /not a member or agent/,
   );
 });
 
@@ -365,7 +365,7 @@ test("CLI recipient resolution accepts a full database text name", { timeout: 5_
   assert.deepEqual(resolveSignalRecipient(name, [{ user_id: USER, display_name: name }]), {
     kind: "user", id: USER,
   });
-  assert.throws(() => resolveSignalRecipient("", [{ user_id: USER, display_name: name }]), /not a live member or agent/);
+  assert.throws(() => resolveSignalRecipient("", [{ user_id: USER, display_name: name }]), /not a member or agent/);
 });
 
 test("supplementary signal failures degrade without hiding core status", async () => {
@@ -933,7 +933,7 @@ test("human-readable signal post states permanence and tenancy while its row own
   }
 });
 
-test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", { timeout: 20_000 }, async () => {
+test("CLI recipient checks, ask parent flag, turn default, ambiguity notice, and chain refusals", { timeout: 30_000 }, async () => {
   const home = await mkdtemp(join(tmpdir(), "cswarm-ask-parent-"));
   const profileDir = join(home, "profile");
   const profile = join(profileDir, "profile.json");
@@ -941,6 +941,7 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
   await mkdir(profileDir, { mode: 0o700 });
   const commands: Array<Record<string, unknown>> = [];
   let refusal: { status: number; code: string; message: string } | null = null;
+  let workspaceName: string | null | undefined = "Team workspace";
   const server = createServer((request, response) => {
     let raw = "";
     request.setEncoding("utf8");
@@ -952,7 +953,8 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
         response.end(JSON.stringify({
           members: [{ user_id: USER, display_name: "Owner" }],
           agents: [{ principal_id: AGENT, name: "Agent", owner_user_id: USER }],
-          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WORKSPACE, owner_user_id: USER },
+          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WORKSPACE, owner_user_id: USER,
+            ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }) },
         }));
         return;
       }
@@ -963,7 +965,7 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
         return;
       }
       response.end(JSON.stringify({ status: "accepted", ok: true, event_ids: [], signal: signal({
-        kind: "ask", body: envelope.command.body, from: AGENT, from_kind: "agent", to: USER,
+        kind: envelope.command.signal_kind, body: envelope.command.body, from: AGENT, from_kind: "agent", to: USER,
         until: "2099-01-01T00:00:00.000Z",
       }) }));
     });
@@ -982,6 +984,36 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
     assert.equal(explicit.code, 0, explicit.stderr);
     assert.equal(commands.at(-1)!.parent_signal_id, explicitParent);
     assert.doesNotMatch(explicit.stderr, /--parent/);
+
+    const registeredAgent = await runCli(["note", "hello", "--profile", profile, "--to", "Agent"], "", env);
+    assert.equal(registeredAgent.code, 0, registeredAgent.stderr);
+    assert.equal(commands.at(-1)!.to_agent_principal_id, AGENT, "a registered agent needs no online presence to receive a note");
+    const posted = commands.length;
+    for (const [kind, to, name] of [
+      ["ask", "Nobody", "Team workspace"],
+      ["note", "77777777-7777-4777-8777-777777777777", "Team workspace"],
+      ["note", "owner", null],
+      ["ask", "Nobody", undefined],
+      ["note", "Nobody", "   "],
+    ] as const) {
+      workspaceName = name;
+      const refused = await runCli([kind, "hello", "--profile", profile, "--to", to,
+        ...(kind === "ask" ? ["--parent", explicitParent] : [])], "", env);
+      assert.equal(refused.code, 1, refused.stderr);
+      const workspace = name?.trim() ? `${name} (${WORKSPACE})` : WORKSPACE;
+      assert.equal(refused.stderr, `cswarm: BLOCKED by CommonSwarm (recipient check): '${to}' is not a member or agent of workspace ${workspace}. To resolve: use --profile for the workspace where the recipient is a member, or invite the recipient.\n`);
+      assert.equal(refused.stdout, "");
+      assert.equal(commands.length, posted, "recipient refusal must not post a signal");
+    }
+
+    // An older response may omit the name; a saved profile can still supply it.
+    await writeFile(profile, JSON.stringify({ version: 1, url, anon_key: "anon", workspace_id: WORKSPACE,
+      workspace_name: "Saved workspace", principal_id: AGENT, credential_file: credential }), { mode: 0o600 });
+    workspaceName = undefined;
+    const savedName = await runCli(["note", "hello", "--profile", profile, "--to", "Nobody"], "", env);
+    assert.equal(savedName.code, 1, savedName.stderr);
+    assert.match(savedName.stderr, new RegExp(`workspace Saved workspace \\(${WORKSPACE}\\)`));
+    assert.equal(commands.length, posted);
 
     await replaceHandledAsks(profile, "session-a", [SIGNAL]);
     const automatic = await runCli(["ask", "automatic", "--profile", profile, "--host-session-id", "session-a", "--to", "Owner", "--json"], "", env);

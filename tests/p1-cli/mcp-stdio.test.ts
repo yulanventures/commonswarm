@@ -64,7 +64,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   let readRefusal = false, sendRefusal = false, readError: { status: number; code: string } | null = null;
   let sendError: { status: number; code: string; message?: string } | null = null;
   let serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
-  let workspaceName = "Test workspace";
+  let workspaceName: string | null | undefined = "Test workspace";
   let ambiguousRecipient = false, malformedRead = false, renewalReason: string | null = null;
   let incoming = [signal(incomingBody, "ask")];
   const edge = createServer((req, res) => {
@@ -218,7 +218,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setReadError: (value: typeof readError) => { readError = value; }, setSendError: (value: typeof sendError) => { sendError = value; },
     loseNextAnswer: () => { lostAttempts = 3; }, delayNextAnswer: () => { delayAnswer = true; }, malformedNextAnswer: () => { malformedAnswer = true; },
     setIncoming: (rows: ReturnType<typeof signal>[]) => { incoming = rows; },
-    setWorkspaceName: (name: string) => { workspaceName = name; },
+    setWorkspaceName: (name: string | null | undefined) => { workspaceName = name; },
     setAmbiguousRecipient: (value: boolean) => { ambiguousRecipient = value; },
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
@@ -762,7 +762,47 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
     f.refuseReads(true);
     for (const name of ["whoami", "members", "check"]) assertOwned((await f.call(name)).value);
     f.refuseReads(false);
-    assertOwned((await f.call("ask", { body: "hello", to: "Nobody", request_id: "unknown01" })).value);
+    const sent = (await f.call("note", { body: "hello", to: "Test agent", request_id: "known001" }));
+    assert.equal(sent.result.isError, undefined);
+    assert.equal(f.posts.at(-1)!.command.to_agent_principal_id, AGENT);
+    const posted = f.posts.length;
+    for (const [tool, to, name] of [
+      ["ask", "Nobody", "Test workspace"],
+      ["note", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", null],
+      ["ask", "Nobody", undefined],
+      ["note", "Nobody", ""],
+      ["ask", "Nobody", "   "],
+    ] as const) {
+      f.setWorkspaceName(name);
+      const refused = await f.call(tool, { body: "hello", to, request_id: "unknown01" });
+      assert.equal(refused.result.isError, true);
+      const workspace = name?.trim() ? `${name} (${WS})` : WS;
+      assert.deepEqual(refused.value, {
+        code: "recipient_unknown",
+        message: `BLOCKED by CommonSwarm (recipient check): '${to}' is not a member or agent of workspace ${workspace}. To resolve: use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient.`,
+        next_step: "use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient",
+      });
+      assert.equal(f.posts.length, posted, "a directory miss must not post a signal");
+    }
+    await writeFile(f.profile, JSON.stringify({ ...await readAgentProfile(f.profile), workspace_name: "Saved workspace" }), { mode: 0o600 });
+    await f.restart();
+    for (const [tool, name, label] of [
+      ["ask", "", "Saved workspace"],
+      ["note", "   ", "Saved workspace"],
+      ["ask", null, "Saved workspace"],
+      ["note", undefined, "Saved workspace"],
+      ["ask", "Directory workspace", "Directory workspace"],
+    ] as const) {
+      f.setWorkspaceName(name);
+      const refused = await f.call(tool, { body: "hello", to: "Nobody", request_id: "unknown01" });
+      assert.equal(refused.result.isError, true);
+      assert.deepEqual(refused.value, {
+        code: "recipient_unknown",
+        message: `BLOCKED by CommonSwarm (recipient check): 'Nobody' is not a member or agent of workspace ${label} (${WS}). To resolve: use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient.`,
+        next_step: "use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient",
+      });
+      assert.equal(f.posts.length, posted, "profile fallback must not post a refused signal");
+    }
     f.setAmbiguousRecipient(true);
     const ambiguous = (await f.call("ask", { body: "hello", to: "Owner", request_id: "unknown02" })).value;
     assert.equal(ambiguous.code, "recipient_ambiguous"); assertOwned(ambiguous);
@@ -866,6 +906,13 @@ test("MCP typed producer classes have owned sentences and truthful status", { ti
   assert.equal(mapMcpError(new RenewalRevoked("predecessor_superseded", "bad")).next_step, "retry the same call");
   assert.equal(mapMcpError(new RenewalRevoked("forbidden", "bad")).next_step, "a person must restore this agent's access outside this session");
   assert.equal(mapMcpError(new RenewalRefused(200, "malformed_successor", "bad")).next_step, "retry the same call");
+  const context = { recipient: "Nobody", workspaceId: WS, workspaceName: "Team" };
+  const contextual = mapMcpError(new SignalRecipientError("recipient_unknown", "cswarm --bad /path", context));
+  assert.equal(contextual.code, "recipient_unknown");
+  assert.match(contextual.message, new RegExp(`'Nobody'.*workspace Team \\(${WS}\\)`));
+  assert.doesNotMatch(contextual.message, /cswarm|--bad|\/path/);
+  assert.equal(mapMcpError(new SignalRecipientError("recipient_ambiguous", "missing member", context)).message,
+    MCP_ERROR_SENTENCES.recipient_ambiguous!.message, "context and producer prose must not change code classification");
 });
 
 test("MCP malformed accepted response is unknown after the signal was created", { timeout: 15_000 }, async () => {

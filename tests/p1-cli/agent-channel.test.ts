@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
-import { saveAgentProfile, parseAgentConnection } from "../../src/cloud/agent-profile.js";
+import { saveAgentProfile, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { configureAgentReceive, readReceiveBinding, receiveHookEvent, receiveStatus, requestReceiveCanary, type ReceiveBinding } from "../../src/cloud/agent-receive.js";
 import { CHANNEL_ASK_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
 import { SIGNAL_BODY_MAX } from "../../src/cloud/signal-limits.js";
@@ -106,6 +106,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
   let unreadableReplies = false;
   let stallReplies = false;
   let askRefusal: { status: number; code: string; message: string } | null = null;
+  let workspaceName: string | null | undefined = "Channel workspace";
   let stalledReplyStarted = false;
   const server = createServer((req, res) => {
     let raw = "";
@@ -117,7 +118,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       if (body.resource === "members") result = {
         members: [{ user_id: OWNER, display_name: "Owner" }],
         agents: [{ principal_id: AGENT, name: "Channel", owner_user_id: OWNER }],
-        identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER },
+        identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER, workspace_name: workspaceName },
       };
       else if (body.command.kind === "post_signal" && body.command.signal_kind === "ask") {
         askRequests.push(body.command);
@@ -213,6 +214,16 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       required: ["signal_id", "body"],
     });
     const rootAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "root ask" } });
+    const postedAsks = askRequests.length;
+    for (const name of ["Channel workspace", null, undefined, "", "   "]) {
+      workspaceName = name;
+      const unknown = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Nobody", body: "hello", parent_signal_id: SIGNAL } });
+      assert.equal(unknown.isError, true);
+      const workspace = name?.trim() ? `${name} (${WS})` : WS;
+      assert.deepEqual(unknown.content, [{ type: "text", text:
+        `BLOCKED by CommonSwarm (recipient check): 'Nobody' is not a member or agent of workspace ${workspace}. To resolve: use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient.` }]);
+      assert.equal(askRequests.length, postedAsks, "a recipient refusal must not send an ask");
+    }
     assert.match(JSON.stringify(rootAsk.content), /parent_signal_id/);
     assert.equal(Object.hasOwn(askRequests.at(-1)!, "parent_signal_id"), false);
     const explicitAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "explicit ask", parent_signal_id: SIGNAL } });
@@ -394,11 +405,27 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await client.close();
     await transport.close();
     await eventually(async () => !receiveStatus(await readReceiveBinding(profile, "host-session")).channel_running);
+    await writeFile(profile, JSON.stringify({ ...await readAgentProfile(profile), workspace_name: "Saved channel workspace" }), { mode: 0o600 });
     client = new Client({ name: "restarted-host-no-model", version: "1" });
     transport = new StdioClientTransport({ command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js")), "receive", "serve", "--profile", profile, "--host-session-id", "host-session"],
       env: { PATH: process.env.PATH ?? "", HOME: root, SWARM_AGENT_STATE_DIR: join(root, "renewal"), XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
     transport.stderr?.on("data", chunk => stderr += chunk);
     await client.connect(transport);
+    const postedBeforeFallback = askRequests.length;
+    for (const [name, label] of [
+      ["", "Saved channel workspace"],
+      ["   ", "Saved channel workspace"],
+      [null, "Saved channel workspace"],
+      [undefined, "Saved channel workspace"],
+      ["Directory workspace", "Directory workspace"],
+    ] as const) {
+      workspaceName = name;
+      const refused = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Nobody", body: "hello", parent_signal_id: SIGNAL } });
+      assert.equal(refused.isError, true);
+      assert.deepEqual(refused.content, [{ type: "text", text:
+        `BLOCKED by CommonSwarm (recipient check): 'Nobody' is not a member or agent of workspace ${label} (${WS}). To resolve: use a connection for the workspace where the recipient is a member, or ask a workspace admin to invite the recipient.` }]);
+      assert.equal(askRequests.length, postedBeforeFallback, "profile fallback must not post a refused ask");
+    }
     await receiveHookEvent(profile, "host-session", { session_id: "host-session", cwd, hook_event_name: "SessionStart" });
     await delay(150);
     const restarted = await readReceiveBinding(profile, "host-session");

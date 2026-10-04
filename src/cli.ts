@@ -269,6 +269,7 @@ import {
   renderSignals,
   resolveRefusalToleranceMs,
   resolveSignalRecipient,
+  signalRecipientCheckFailure,
   runInboxFollow,
   settleSignalAuthorLabels,
   settleSignalStatus,
@@ -700,6 +701,7 @@ export class Arguments {
   private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
   expandedProfilePath?: string;
+  expandedProfileWorkspaceName?: string;
   expandedProfileHostSessionId?: string;
   constructor(values: string[]) {
     let positionalOnly = false;
@@ -816,6 +818,7 @@ export class Arguments {
     const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
     this.expandedProfilePath = path;
+    this.expandedProfileWorkspaceName = profile.workspace_name;
     this.expandedProfileHostSessionId = this.optional("host-session-id");
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
@@ -3808,7 +3811,16 @@ async function runPostSignal(
       }
       throw error;
     }
-    recipient = resolveSignalRecipient(toSelector, directory);
+    try {
+      recipient = resolveSignalRecipient(toSelector, directory, {
+        workspaceId: credential.selectedWorkspace,
+        workspaceName: workspaceLabel(directory) ?? args.expandedProfileWorkspaceName,
+      });
+    } catch (error) {
+      const failure = signalRecipientCheckFailure(error, "cli");
+      if (failure !== null) throw new Error(failure.message);
+      throw error;
+    }
   }
   // Broadcast asks cannot receive authorized replies; waiting would never succeed.
   if (waitSeconds !== undefined && recipient === null) {

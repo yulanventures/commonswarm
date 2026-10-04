@@ -186,7 +186,11 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
           }
           let recipient: ReturnType<typeof resolveSignalRecipient> | null = null;
           if ((tool.name === "ask" || tool.name === "note") && args.to !== undefined) {
-            recipient = resolveSignalRecipient(args.to, await directory({ fetcher, token }));
+            const rows = await directory({ fetcher, token });
+            recipient = resolveSignalRecipient(args.to, rows, {
+              workspaceId: profile.workspace_id,
+              workspaceName: rows.identity?.workspace_name?.trim() || profile.workspace_name,
+            });
           }
           const command: PostSignalCommand = { kind: "post_signal", signal_kind: tool.name === "working_on" ? "working-on" : tool.name === "reply" ? "note" : tool.name,
             body: args.body!, to_user_id: recipient?.kind === "user" ? recipient.id : null,
