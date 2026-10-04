@@ -3705,7 +3705,7 @@ function householdAccessRefusal(facts, workspaceId, operation, now) {
     if (facts.actor.principal_id !== null) return "connection_access_refused";
   } else {
     const connection = facts.credential.connection;
-    if (!facts.actor.principal_id || facts.actor.principal_id !== connection.principal_id || connection.owner_user_id !== member.user_id || connection.workspace_id !== workspaceId || !connection.connection_id || !connection.grant_id || connection.revoked_at !== null || !Number.isFinite(connection.expires_at) || connection.expires_at <= now || connection.purpose !== facts.boundary.kind || !connection.operations.includes(operation)) {
+    if (!facts.actor.principal_id || facts.actor.principal_id !== connection.principal_id || connection.owner_user_id !== member.user_id || connection.workspace_id !== workspaceId || !connection.connection_id || !connection.grant_id || connection.revoked_at !== null || connection.expires_at !== null && (!Number.isFinite(connection.expires_at) || connection.expires_at <= now) || connection.purpose !== facts.boundary.kind || !connection.operations.includes(operation)) {
       return "connection_access_refused";
     }
   }

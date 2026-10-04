@@ -11,6 +11,8 @@ test('household permission writes require authenticated provenance and cannot co
   const inverse = repoSql('supabase/household-storage-reserve/20261004000005-rollback.sql');
   const rollbackCatalog = repoSql('deploy/release-proofs/household-storage/20261004000005-rollback-catalog.sql');
   runSql(`
+    -- This historical 005 inverse drill owns the 005 body inside its rollback transaction.
+    ${repoSql('supabase/household-approval-reserve/20261004000015-rollback.sql')}
     INSERT INTO auth.users(id,aud,role,email) VALUES ('${owner}','authenticated','authenticated','hh-owner-${owner}@example.test'),
       ('${other}','authenticated','authenticated','hh-other-${other}@example.test');
     INSERT INTO swarm.users(user_id,display_name) VALUES ('${owner}','Synthetic owner'),('${other}','Synthetic other');

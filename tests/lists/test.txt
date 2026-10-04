@@ -111,3 +111,4 @@ tests/household-integration.test.ts
 tests/household-feature-gates.test.ts
 tests/household-human-invitations.test.ts
 tests/hosted-name-reclaim.test.ts
+tests/household-approval.test.ts

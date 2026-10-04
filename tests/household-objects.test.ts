@@ -244,8 +244,13 @@ test('agents inherit their human ceiling and exact consented connection operatio
   assert.equal(decideHouseholdObject(command, state, context(state, command, prepared, { access: authorized, contents: [content] })).outcome.status, 'committed');
   assert.equal(authorized.credential.kind, 'agent');
   if (authorized.credential.kind !== 'agent') return;
+  authorized.credential.connection.expires_at = null;
+  assert.equal(decideHouseholdObject(command, state, context(state, command, prepared, { access: authorized, contents: [content] })).outcome.status, 'committed');
   for (const connection of [
     { ...authorized.credential.connection, revoked_at: 99 },
+    { ...authorized.credential.connection, expires_at: NaN },
+    { ...authorized.credential.connection, expires_at: Infinity },
+    { ...authorized.credential.connection, expires_at: 99 },
     { ...authorized.credential.connection, expires_at: 100 },
     { ...authorized.credential.connection, workspace_id: 'personal-blair' },
     { ...authorized.credential.connection, owner_user_id: 'alex' },

@@ -25,7 +25,8 @@ export interface HouseholdConnectionFacts {
     connection_id: string;
     grant_id: string;
     revoked_at: number | null;
-    expires_at: number;
+    /** NULL approvals last until withdrawn; local approvals retain token expiry. */
+    expires_at: number | null;
     operations: readonly HouseholdContentOperation[];
     /** Private/shared purposes use different connections and principals. */
     purpose: 'personal' | 'shared';

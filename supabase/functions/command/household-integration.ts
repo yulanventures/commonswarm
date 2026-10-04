@@ -3,12 +3,13 @@
 import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
+import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
 import * as transfers from './household-transfers.ts';
 import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
 import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections'] as const;
+export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
@@ -32,6 +33,8 @@ export function householdStore(recheckCredential: HouseholdCredentialRecheck, ne
 export async function executeHouseholdSurface(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
   requestId: string, value: Record<string, unknown>, recheckCredential: HouseholdCredentialRecheck,
   attachment?: Uint8Array): Promise<Record<string, unknown>> {
+  if (value.kind === 'household_approve_connection') return approveHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
+  if (value.kind === 'household_withdraw_connection') return withdrawHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   const store = householdStore(recheckCredential);
   if (value.kind === 'household_connections') {
     if (identity.principal_id !== null || !await recheckCredential(tx, identity)) return refused('human_confirmation_required');
@@ -50,8 +53,14 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       WHERE p.workspace_id=${workspaceId}::uuid AND p.owner_user_id=${identity.user_id}::uuid AND p.transport='local'
         AND t.revoked_at IS NULL AND NOT t.surrender_only AND t.expires_at>clock_timestamp() AND p.revoked_at IS NULL AND r.ended_at IS NULL AND d.revoked_at IS NULL
       ORDER BY t.issued_at DESC LIMIT 50`;
+    const approvals = await tx`SELECT connection_id, grant_id, principal_id, operations, expires_at
+      FROM swarm.household_content_connections WHERE workspace_id=${workspaceId}::uuid AND owner_user_id=${identity.user_id}::uuid
+        AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())`;
+    const key = (row: Record<string, unknown>) => JSON.stringify([row.connection_id, row.grant_id, row.principal_id]);
+    const byConnection = new Map(approvals.map(row => [key(row), { operations: row.operations,
+      expires_at: row.expires_at == null ? null : new Date(row.expires_at as string).toISOString() }]));
     return { status: 'ok', connections: [...hosted,...local].map(row => ({ kind: row.kind, connection_id: row.connection_id,
-      grant_id: row.grant_id, principal_id: row.principal_id, name: row.name })) };
+      grant_id: row.grant_id, principal_id: row.principal_id, name: row.name, approval: byConnection.get(key(row)) ?? null })) };
   }
   if (value.kind === 'household_access') {
     const access = await store.access(tx, workspaceId, identity);

@@ -88,7 +88,7 @@ export function createHouseholdObjectStore(dependencies: {
         connection_id: String(connection.connection_id), grant_id: String(connection.grant_id), workspace_id: workspaceId,
         principal_id: identity.principal_id, owner_user_id: identity.user_id,
         operations: connection.operations as HouseholdContentOperation[], purpose: connection.purpose as 'personal' | 'shared',
-        revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at)!,
+        revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at),
       } };
     } else if (identity.connection !== null || identity.run_id !== null) return null;
     const [clock] = await tx`SELECT clock_timestamp() AS now`;
