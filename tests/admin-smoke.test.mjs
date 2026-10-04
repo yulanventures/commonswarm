@@ -69,7 +69,7 @@ async function exercise(config = {}) {
   const code = secrets[0], attempts = [], seenProofs = new Set(), failures = [], commandRetries = new Map();
   let authorize, initialKey, currentToken, refreshToken, generation = 0, workspaceId, fenced = false, callbackMode, actionChallenged = false;
   let wireRunId = null, fencedRunId = null;
-  let out = '', err = '', child;
+  let out = '', err = '', child, readyAt = 0;
   const check = (value, reason) => { if (!value) throw new Error(reason); };
   const emit = (res, status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(data === null ? undefined : JSON.stringify(data)); };
   const event = (type, payload) => ({ type, event_id: randomUUID(), payload });
@@ -139,6 +139,7 @@ async function exercise(config = {}) {
       }
       if (fenced && config.fenceRefusal !== false) {
         if (config.fenceStatus === 500) return emit(res, 500, { error: secrets[1] });
+        if (config.slowRefusalMs) await new Promise(done => setTimeout(done, config.slowRefusalMs));
         return emit(res, 403, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: 'grant_inactive' } });
       }
       if (rpc.method === 'notifications/initialized') return emit(res, 204, null);
@@ -175,7 +176,7 @@ async function exercise(config = {}) {
       '--consent-timeout-ms', '2000', '--fence-timeout-ms', '2000', '--request-timeout-ms', '1000', '--total-timeout-ms', '6000',
       ...(config.fence ? ['--verify-fenced', '--fence-file', paths.fence] : [])];
     let handoff = Promise.resolve(), handledConsent = false, handledFence = false;
-    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot }, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(process.execPath, ['--import', preload, ...args], { env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: `http://127.0.0.1:${address.port}`, ADMIN_SMOKE_SECRET_ROOT: secretRoot, ...(config.slowFenceOpenMs ? { ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: String(config.slowFenceOpenMs) } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', chunk => {
       out += chunk;
       if (!handledConsent && out.includes('consent_handoff_ready')) {
@@ -196,7 +197,7 @@ async function exercise(config = {}) {
         }).catch(e => failures.push(e.message));
       }
       if (!handledFence && out.includes('agent_steps_complete_awaiting_human_fence')) {
-        handledFence = true;
+        handledFence = true; readyAt = Date.now();
         // The human writes the run id that this run sent on the wire. Do not
         // re-read the receipt here: a failing run may be rewriting it now.
         // After exit the final receipt must name the same run id.
@@ -225,7 +226,7 @@ async function exercise(config = {}) {
     }
     assert.ok(!/"(?:access_token|refresh_token|code_verifier|cookie|email|private_key)"/.test(text), 'secret receipt key');
     assert.deepEqual(failures, [], 'fake AS/MCP wire contract failed');
-    return { exitCode, receipt, attempts, modes, out, err };
+    return { exitCode, receipt, attempts, modes, out, err, readyAt };
   } finally {
     if (child?.exitCode === null) child.kill();
     server.closeAllConnections(); await new Promise(done => server.close(done));
@@ -289,16 +290,37 @@ test('post-human-fence admin call is refused with the code recorded and all huma
   assert.equal(r.receipt.refused_after_fence.http_status, 403); assert.equal(r.receipt.refused_after_fence.refusal_code, 'grant_inactive');
   assert.equal(r.receipt.refused_after_fence.rpc_code, -32000); assert.equal(r.receipt.steps.verify_fenced.result, 'pass');
   assert.equal(r.receipt.human_grant_state, null); assert.deepEqual(r.receipt.audit_counts, { init: null, list: null, read: null, action: null });
+  // The runner prints its actual fence cutoff right before the ready line: here the 2000 ms fence wait bounds it.
+  const cutoff = fenceCutoff(r.out);
+  assert.ok(cutoff > r.readyAt - 500 && cutoff <= r.readyAt + 2000, `cutoff ${cutoff - r.readyAt} ms after ready`);
 });
+function fenceCutoff(out) {
+  const lines = out.split('\n'), i = lines.indexOf('agent_steps_complete_awaiting_human_fence');
+  assert.ok(i > 0); const m = /^fence_cutoff_epoch_ms=(\d+)$/.exec(lines[i - 1]); assert.ok(m, 'cutoff line precedes the ready line');
+  assert.equal(lines.filter(l => l.startsWith('fence_cutoff_epoch_ms=')).length, 1); return Number(m[1]);
+}
 
 for (const config of [{ fenceRefusal: false }, { fenceStatus: 500 }]) test(`fence verification rejects ${config.fenceRefusal === false ? 'a successful follow-up call' : 'a server failure'}`, async () => {
   const r = await exercise({ fence: true, ...config }); assert.equal(r.exitCode, 1);
   assert.equal(r.receipt.failed_step, 'verify_fenced'); assert.equal(r.receipt.failure_code, 'fence_not_proven'); assert.equal(r.receipt.refused_after_fence, null);
 });
 
+// The published cutoff is enforced after the handoff read and around the follow-up request (2000 ms fence wait here).
+test('a fence read or a refused follow-up that crosses the published cutoff is not proof', async () => {
+  const slowRead = await exercise({ fence: true, slowFenceOpenMs: 2500 }); assert.equal(slowRead.exitCode, 1);
+  assert.equal(slowRead.receipt.failed_step, 'human_fence'); assert.equal(slowRead.receipt.failure_code, 'handoff_timeout');
+  assert.equal(slowRead.receipt.refused_after_fence, null); assert.equal(slowRead.receipt.ok, false);
+  const slowRefusal = await exercise({ fence: true, slowRefusalMs: 2500 }); assert.equal(slowRefusal.exitCode, 1);
+  assert.equal(slowRefusal.receipt.failed_step, 'verify_fenced'); assert.equal(slowRefusal.receipt.refused_after_fence, null); assert.equal(slowRefusal.receipt.ok, false);
+  // Control: the same refusal inside the cutoff is proof.
+  const inTime = await exercise({ fence: true, slowRefusalMs: 200 }); assert.equal(inTime.exitCode, 0); assert.equal(inTime.receipt.refused_after_fence.refusal_code, 'grant_inactive');
+});
+
 test('fence verification cannot pass solely because the access token expired', async () => {
   const r = await exercise({ fence: true, shortToken: true }); assert.equal(r.exitCode, 1);
   assert.equal(r.receipt.refused_after_fence, null); assert.equal(r.receipt.failed_step, 'human_fence');
+  // A shortened token moves the printed cutoff before the ready line itself: a fence driver must refuse at once.
+  assert.ok(fenceCutoff(r.out) < r.readyAt, 'token-bound cutoff is already past');
 });
 
 test('mid-run failure records accepted workspace residue and does not archive or revoke the human delegation', async () => {
@@ -348,16 +370,35 @@ test('secret window: the preload refuses a fixture parent that is not a private 
     for (const [root, mode] of [[loose, 0o755], [temporaryRoot, null], [realHome, null]]) {
       if (mode !== null) execFileSync('chmod', [mode.toString(8), root]);
       const r = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
-        env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: root } });
+        env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: root } });
       assert.notEqual(r.status, 0, `preload accepted ${root}`); assert.match(r.stderr, /invalid_fixture_secret_root/);
     }
     const control = spawnSync(process.execPath, ['--import', preload, script, '--dry-run'], { encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: secretRoot } });
+      env: { ...process.env, ADMIN_SMOKE_TEST_TRANSPORT: '1', ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_SECRET_ROOT: secretRoot } });
     assert.equal(control.status, 0, control.stderr);
   } finally {
     assert.ok(dirname(loose) === temporaryRoot && /^admin-smoke-loose-root\.[A-Za-z0-9]{6}$/.test(basename(loose)));
     rmSync(loose, { recursive: true });
   }
+});
+
+test('production launch: an inherited test preload and fixture variables cannot activate the test transport', () => {
+  const inherited = { ...process.env, NODE_OPTIONS: `--import=${preload}`, ADMIN_SMOKE_FIXTURE_ORIGIN: 'http://127.0.0.1:9', ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS: '5', ADMIN_SMOKE_SECRET_ROOT: secretRoot };
+  delete inherited.ADMIN_SMOKE_TEST_TRANSPORT;
+  // Plain node with the inherited preload (ai-w6-start without its unset line): the preload refuses, node never runs the runner.
+  const viaPreload = spawnSync(process.execPath, [script, '--dry-run'], { encoding: 'utf8', timeout: 5000, env: inherited });
+  assert.notEqual(viaPreload.status, 0); assert.match(viaPreload.stderr, /test_transport_requires_ADMIN_SMOKE_TEST_TRANSPORT/); assert.equal(viaPreload.stdout, '');
+  // Fixture variables without the preload: the runner itself refuses.
+  const { NODE_OPTIONS: _drop, ...noPreload } = inherited;
+  const viaEnv = spawnSync(process.execPath, [script, '--dry-run'], { encoding: 'utf8', timeout: 5000, env: noPreload });
+  assert.equal(viaEnv.status, 1); assert.equal(viaEnv.stderr, 'admin_smoke_fail step=options code=test_inputs_in_production\n'); assert.equal(viaEnv.stdout, '');
+  // The plan's own production launch line clears them first: native fetch and fs, the runner's plan prints.
+  const plan = readFileSync(new URL('../docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md', import.meta.url), 'utf8');
+  const start = plan.split('\n```sh\n').find(b => b.startsWith('# step: ai-w6-start\n'));
+  const unset = start.split('\n').find(l => l.startsWith('unset NODE_OPTIONS '));
+  assert.ok(unset, 'ai-w6-start clears the preload inputs');
+  const cleared = spawnSync('/bin/bash', ['-c', `${unset}\nexec "$NODE" "$SCRIPT" --dry-run`], { encoding: 'utf8', timeout: 5000, env: { ...inherited, NODE: process.execPath, SCRIPT: script } });
+  assert.equal(cleared.status, 0, cleared.stderr); assert.ok(Array.isArray(JSON.parse(cleared.stdout).steps), 'the runner ran with native transport');
 });
 
 // The production default is macOS-specific: /private/tmp exists only there.

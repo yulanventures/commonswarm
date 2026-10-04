@@ -5,6 +5,7 @@
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --issuer [--plan-from <git-sha>] <dump-dir>
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --w2b-preconditions <dump-dir>
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --from-post-w2 --w2-release-sha <sha> (--issuer | --w2b-preconditions) <post-W2-dump-dir>
+#   scripts/c1-w2-rehearsal.sh [--live-dump] --from-post-w2 --w2-release-sha <sha> --issuer --w6 <post-W2-dump-dir>
 #   scripts/c1-w2-rehearsal.sh [--live-dump] --dump-post-w2 <out-dir> <pre-W2-dump-dir>
 #   scripts/c1-w2-rehearsal.sh --build-fixture <out-dir>
 #   scripts/c1-w2-rehearsal.sh --cleanup-selftest <path> | --cleanup-run <path>   (test controls)
@@ -67,6 +68,13 @@
 # ledger-extra.sql (data of commonswarm_ops.migration_checksums and commonswarm_oauth.admin_cutover_state).
 # Every rehearsal restores <dump-dir>/ledger-extra.sql right after ledger.sql when it exists (SKIP line
 # otherwise). The W2b checksum precondition needs the checksum rows.
+#
+# --w6 continues the --from-post-w2 --issuer run (W2b) on the same cluster with scripts/c1-w6-rehearsal-steps.sh: W4 SQL
+# with the legacy fence, the recycle hook and edge receipt (stale-generation negative), W6 activation checks and G4,
+# the C1 verification row through its trigger (negatives), activate.sql/readback, client-check, owner approval and
+# withdrawal, smoke audit rows, G3 in both orders, fence readback, W6 finish on both keep_open paths, the W7 binding
+# and proof SQL, recycles after keep-open (good reopens, bad stays closed) and the timer re-arm on the apply failure
+# and emergency paths. That file's header lists what is emulated.
 #
 # The only delete is of the script's own mktemp directory, after a pattern check (--cleanup-selftest proves
 # the refusal), and only once the postmaster recorded in that directory has stopped: a failed or timed-out
@@ -131,7 +139,7 @@ if test "${1:-}" = --cleanup-selftest; then
   say "REFUSE cleanup-selftest: $2"; exit 3
 fi
 
-MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 ISSUER=0 PLAN_FROM= W2B_ONLY=0 POST_W2=0 W2_SHA= DUMP_POST= TARGET=
+W6=0 MODE=rehearse CATALOGS_FROM= RESERVE_CONTROL=0 LIVE_DUMP=0 ISSUER=0 PLAN_FROM= W2B_ONLY=0 POST_W2=0 W2_SHA= DUMP_POST= TARGET=
 while test $# -gt 0; do
   case "$1" in
     --build-fixture) MODE=build; shift; TARGET=${1:-}; shift || true ;;
@@ -139,6 +147,7 @@ while test $# -gt 0; do
     --reserve-control) RESERVE_CONTROL=1; shift ;;
     --live-dump) LIVE_DUMP=1; shift ;;
     --issuer) ISSUER=1; shift ;;
+    --w6) W6=1; shift ;;
     --plan-from) shift; PLAN_FROM=${1:-}; shift || true ;;
     --w2b-preconditions) W2B_ONLY=1; shift ;;
     --from-post-w2) POST_W2=1; shift ;;
@@ -158,6 +167,7 @@ fi
 if test "$ISSUER" = 1 && { test "$W2B_ONLY" = 1 || test "$RESERVE_CONTROL" = 1; }; then die usage '--issuer, --w2b-preconditions and --reserve-control are separate modes'; fi
 if test "$POST_W2" = 1 && { test "$MODE" = build || { test "$ISSUER" = 0 && test "$W2B_ONLY" = 0; }; }; then die usage '--from-post-w2 needs --issuer or --w2b-preconditions'; fi
 if test "$POST_W2" = 1; then [[ "$W2_SHA" =~ ^[0-9a-f]{40}$ ]] || die usage '--from-post-w2 needs --w2-release-sha <full 40-hex sha of the release W2 ran at>'; fi
+if test "$W6" = 1 && { test "$POST_W2" != 1 || test "$ISSUER" != 1 || test -n "$PLAN_FROM"; }; then die usage '--w6 needs --from-post-w2 --issuer (and no --plan-from)'; fi
 if test "$POST_W2" = 0 && test -n "$W2_SHA"; then die usage '--w2-release-sha is for --from-post-w2 (otherwise the W2 apply runs at HEAD)'; fi
 if test -n "$DUMP_POST"; then
   { test "$MODE" = rehearse && test "$POST_W2$ISSUER$W2B_ONLY$RESERVE_CONTROL" = 0000 && test -z "$CATALOGS_FROM"; } || die usage '--dump-post-w2 is a plain W2 rehearsal of a pre-W2 dump'
@@ -329,6 +339,10 @@ elif kind=='command-sql':
     m=re.search(r'--command "(.*)" \\$',lines[0])
     if not m: raise SystemExit('command SQL not found in '+step)
     out=m.group(1)
+elif kind=='from':
+    rows=b.split('\n'); a=[i for i,l in enumerate(rows) if sys.argv[4] in l]
+    if len(a)!=1: raise SystemExit('line expected once in '+step+': '+sys.argv[4])
+    out='\n'.join(rows[a[0]:])
 elif kind=='slice':
     a=one(b,sys.argv[4]); z=b.index(sys.argv[5],a)
     out=b[a:z]
@@ -637,4 +651,8 @@ PY
   fi
   WINDOW=W2b step ai-w2b-forward-catalogs "$T/blocks/ai-w2b-forward-catalogs.sh"
   say "PASS rehearsal: issuer credential provisioned and verified on the post-W2 database"
+fi
+if test "$W6" = 1; then
+  # shellcheck source=c1-w6-rehearsal-steps.sh
+  . "$REPO/scripts/c1-w6-rehearsal-steps.sh"
 fi

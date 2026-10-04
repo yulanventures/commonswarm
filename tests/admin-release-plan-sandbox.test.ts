@@ -42,8 +42,8 @@ const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
   'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
-  'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
-  'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-human-revoke',
+  'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
+  'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
   'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
@@ -158,6 +158,8 @@ function inputsFor(window: string) {
   if (window === 'W2') d.probe_workspace_id = probeWorkspace;
   // W6 names the same-release W2b that provisioned the issuer credential (required since lane/w2b-issuer).
   if (window === 'W6') d.w2b_window_id = 'W2bFx1';
+  // W7 names the same-release W6 whose C1 report it binds (lane/w6-ready).
+  if (window === 'W7') d.w6_window_id = 'W6win1';
   const action = { W6: 'activate-admin-issuance-and-smoke', W7: 'retire-legacy-admin-mint' }[window];
   if (action) d.approval = { approver: 'HezLead', action, release_sha: releaseSha, window_id: windowId, plan_sha256: digest(plan), prompt_ref: 'task/dry-run-fixture' };
   const path = join(scratch, `inputs-${window}.json`);

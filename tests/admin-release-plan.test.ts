@@ -204,7 +204,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
-    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : {}) };
+    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
     const noApproval = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.notEqual(noApproval.status, 0);
     assert.match(noApproval.stderr, /explicit .* approval required/);
@@ -418,7 +418,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 10, pointer: 5 }));
+  writeFileSync(planCopy, portable(plan, { stage: 10, pointer: 9 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -586,8 +586,12 @@ esac
   const dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
   // A failed database call in the real nested rollback stops before touching files/services.
   const harness = 'ai_db() { return 42; }\n' + dispatcher;
-  const owners = blocks.filter(source => /systemctl stop /.test(source));
-  assert.equal(owners.length, 3, 'unexpected unguarded stop owner');
+  // Every stop owner is known. W4's two use ai-timer-guard (tested here); ai-edge-refresh, ai-w6-activation-apply and
+  // ai-w6-finish own their own re-arm traps (tested in tests/admin-release-w6-ready.test.ts).
+  const stopOwners = blocks.filter(source => /systemctl stop /.test(source)).map(source => source.split('\n')[0]).sort();
+  assert.deepEqual(stopOwners, ['# step: ai-edge-refresh', '# step: ai-w4-apply', '# step: ai-w4-rollback', '# step: ai-w6-activation-apply', '# step: ai-w6-finish'], 'unexpected stop owner');
+  const owners = blocks.filter(source => /systemctl stop /.test(source) && source.includes('ai_run ai-timer-guard\n'));
+  assert.equal(owners.length, 2, 'unexpected unguarded stop owner');
   for (const source of owners) {
     assert.match(source, /^\(\nset -euo pipefail/m, 'guard lifetime must be a subshell');
     const start = source.indexOf('ai_run ai-timer-guard\n');
@@ -714,28 +718,50 @@ test('admin release plan: W6 default runs deactivation and proves CLOSED; explic
   const shim=join(scratch,'shims'); mkdirSync(shim);
   const pythonPath=spawnSync('which',['python3'],{encoding:'utf8'}).stdout.trim();
   writeFileSync(join(shim,'python3'),`#!/bin/bash\nif test "$#" = 1 && test "$1" = -; then\n exec '${pythonPath}' -c 'import sys,types; m=types.ModuleType("urllib.request"); R=type("R",(),{"__enter__":lambda s:s,"__exit__":lambda *a:None,"read":lambda s,n:b"{\\"state\\":\\"closed\\"}" if s.method=="GET" else b"","status":200,"headers":{"Access-Control-Allow-Origin":"*","Cache-Control":"no-store"}}); m.Request=lambda url,method,headers:method; m.urlopen=lambda method,timeout:type("Response",(R,),{"method":method})(); import urllib; urllib.request=m; sys.modules["urllib.request"]=m; exec(sys.stdin.read())'\nelse\n exec '${pythonPath}' "$@"\nfi\n`,{mode:0o700});
-  const calls=join(proof,'calls');
-  const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback|ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; *) return 1;; esac; }\n`;
-  const finish=(keep:boolean|undefined)=>run(harness+block('ai-w6-finish'),{WINDOW:'W6',PROOF_DIR:proof,INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH});
-  let result=finish(undefined); assert.equal(result.status,0,result.stderr);
+  const calls=join(proof,'calls'), timer=join(proof,'timer');
+  // Fixture systemctl: the recycle timer W6 holds since apply (inactive at finish start).
+  writeFileSync(join(shim,'systemctl'),`#!/bin/bash\nprintf 'systemctl %s\\n' "$1" >>"$PROOF_DIR/calls"\ncase "$1" in stop) printf inactive >"$TIMER";; start) printf active >"$TIMER";; is-active) test "$(cat "$TIMER")" = active;; *) exit 64;; esac\n`,{mode:0o700});
+  const harness=`ai_run() { case "$1" in ai-inputs) :;; ai-w6-activation-rollback) printf '%s\\n' "$1" >>"$PROOF_DIR/calls"; systemctl start; printf active >"$TIMER";;
+ ai-w6-activation-probes) printf '%s\\n' "$1" >>"$PROOF_DIR/calls";; ai-w6-closed-gate-probe) printf '%s\\n' "$1" >>"$PROOF_DIR/calls"; eval "$CLOSED_PROBE";; ai-edge-remeasure) printf 'ai-edge-remeasure %s\\n' "$(cat "$TIMER")" >>"$PROOF_DIR/calls"; printf '{}\\n' >"$EDGE_MEASUREMENT_OUT";; *) return 1;; esac; }
+ai_ro() { printf 't\\n'; }\n`;
+  const finish=(keep:boolean|undefined,after='')=>{ writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
+    return run(harness+block('ai-w6-finish')+after,{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',CLOSED_PROBE:block('ai-w6-closed-gate-probe'),INPUTS_FILE:inputFile({...base(),...(keep===undefined?{}:{keep_open:keep})}),PATH:shim+':'+process.env.PATH}); };
+  // ai-close's timer line runs next IN THE SAME SHELL (ai_run is eval): the finish's own subshell re-armed it already.
+  const closeLine=block('ai-close').split('\n').find(l=>l.startsWith('systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||'))!;
+  assert.ok(closeLine); const sameShellClose=`\n${closeLine}\nprintf 'close-timer-ok\\n'\n`;
+  const trace=()=>readFileSync(calls,'utf8').trim().split('\n');
+  let result=finish(undefined,sameShellClose); assert.equal(result.status,0,result.stderr); assert.match(result.stdout,/close-timer-ok/);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'closed',explicit_keep_open:false});
-  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-rollback');
-  writeFileSync(calls,''); result=finish(true); assert.equal(result.status,0,result.stderr);
+  // Default: rollback (re-arms), stop again, remeasure the closed state with the timer held, then re-arm on exit.
+  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-w6-activation-rollback','systemctl start','systemctl stop','ai-edge-remeasure inactive','ai-w6-closed-gate-probe','systemctl start']);
+  assert.equal(readFileSync(timer,'utf8'),'active'); assert.ok(existsSync(join(proof,'edge-measurement-final.json')));
+  result=finish(true,sameShellClose); assert.equal(result.status,0,result.stderr); assert.match(result.stdout,/close-timer-ok/);
   assert.deepEqual(JSON.parse(readFileSync(join(proof,'C1-finish.json'),'utf8')),{state:'open',explicit_keep_open:true});
-  assert.equal(readFileSync(calls,'utf8').trim(),'ai-w6-activation-probes');
+  // Keep open: remeasure with the timer still held (reopens only through the measured path), probe OPEN, re-arm on exit.
+  assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['ai-edge-remeasure inactive','ai-w6-activation-probes','systemctl start']);
+  assert.equal(readFileSync(timer,'utf8'),'active');
+  // Control: the same block WITHOUT its own subshell (the 04d09c3d form) leaves the timer stopped for the close.
+  const body=block('ai-w6-finish'), open=body.indexOf('\n(\n');
+  assert.ok(open>0 && body.trimEnd().endsWith('\n)'));
+  const unwrapped=body.slice(0,open)+'\n'+body.slice(open+'\n(\n'.length,body.trimEnd().length-1);
+  writeFileSync(timer,'inactive'); writeFileSync(calls,''); rmSync(join(proof,'edge-measurement-final.json'),{force:true});
+  const old=run(harness+`set +e\n( eval "$UNWRAPPED"\n${closeLine}\nprintf 'close-timer-ok\\n' )`,{WINDOW:'W6',PROOF_DIR:proof,TIMER:timer,EDGE_RECYCLE_TIMER:'fixture.timer',UNWRAPPED:unwrapped,CLOSED_PROBE:block('ai-w6-closed-gate-probe'),INPUTS_FILE:inputFile({...base(),keep_open:true}),PATH:shim+':'+process.env.PATH});
+  assert.notEqual(old.status,0); assert.doesNotMatch(old.stdout,/close-timer-ok/); assert.match(old.stderr,/FAIL ai-close: recycle timer expected active got inactive/);
   // Former `A && B` guard: each receipt now refuses on its own line before any probe.
   for(const file of ['C1-fence.txt','client-withdraw.json']) {
-    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); writeFileSync(calls,''); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
+    const saved=readFileSync(join(proof,file)); rmSync(join(proof,file)); if(existsSync(join(proof,'C1-finish.json'))) rmSync(join(proof,'C1-finish.json'));
     result=finish(undefined); assert.notEqual(result.status,0);
     assert.match(result.stderr,new RegExp(`FAIL ai-w6-finish: ${file.replace('.','\\.')} expected present got missing; STOP`));
-    assert.equal(readFileSync(calls,'utf8'),''); assert.ok(!existsSync(join(proof,'C1-finish.json')));
+    // A failed finish still re-arms the held timer (HezLead ruling); nothing else ran.
+    assert.deepEqual(trace().filter(l=>!l.startsWith('systemctl is-active')),['systemctl start']); assert.equal(readFileSync(timer,'utf8'),'active');
+    assert.ok(!existsSync(join(proof,'C1-finish.json')));
     writeFileSync(join(proof,file),saved);
   }
 });
 
 test('admin release plan: D8 pointer emits only paths, consent choices and UTC expiry; secret-shaped name refuses', () => {
   // Never the real Mac pointer: the fixture pointer is under this file's scratch.
-  const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:1});
+  const pointer=fixturePointer, source=portable(block('ai-w6-pointer'),{stage:1,pointer:2});
   assert.ok(!existsSync(pointer),'refuse to touch an existing smoke pointer'); assert.ok(outsideHome(pointer));
   const stage=makeStage();
   const c1=join(scratch,'pointer-input.json');
@@ -777,9 +803,9 @@ test('admin release plan: C1 report requires ordered approval/withdrawal/revoke 
     const files:Record<string,unknown>={
       'agent.json':{ok:true,refused_after_fence:{http_status:403,refusal_code:'grant_revoked'},workspace:{accepted_residue:true,name:'c1-smoke-fixture (test, archive me)'}},
       'C1-audit.json':{audit_counts:{init:1,list:1,read:1,action:1}},
-      'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:03:00Z'},
+      'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:02:00Z'},
       'client-approve.json':{approval_at:'2026-10-03T12:01:00Z'},
-      'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:02:00Z'},
+      'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:03:00Z'},
       'C1-finish.json':{state:'closed',explicit_keep_open:false}, ...changes,
     };
     for(const [name,value] of Object.entries(files)) writeFileSync(join(root,name),JSON.stringify(value));
@@ -790,11 +816,13 @@ test('admin release plan: C1 report requires ordered approval/withdrawal/revoke 
   const good=report(); assert.equal(good.result.status,0,good.result.stderr);
   const receipt=JSON.parse(readFileSync(join(good.root,'C1.json'),'utf8'));
   assert.equal(receipt.approval_scope,'account-wide owner/client/version');
-  assert.equal(receipt.approval_at,'2026-10-03T12:01:00Z'); assert.equal(receipt.withdrawn_at,'2026-10-03T12:02:00Z'); assert.equal(receipt.revoked_at,'2026-10-03T12:03:00Z');
+  // F3 order: the human revoke fences the grant first; the approval withdrawal follows it.
+  assert.equal(receipt.approval_at,'2026-10-03T12:01:00Z'); assert.equal(receipt.revoked_at,'2026-10-03T12:02:00Z'); assert.equal(receipt.withdrawn_at,'2026-10-03T12:03:00Z');
   assert.deepEqual(receipt.refused_follow_up,{http_status:403,refusal_code:'grant_revoked'}); assert.equal(receipt.final_gate,'closed');
   for(const changes of [
     {'client-approve.json':{}}, {'client-withdraw.json':{status:'PASS'}}, {'human-revoke.json':{state:'revoked'}},
-    {'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:00:00Z'}},
+    {'client-withdraw.json':{status:'PASS',withdrawn_at:'2026-10-03T12:01:30Z'}},
+    {'human-revoke.json':{state:'revoked',revoked_at:'2026-10-03T12:00:30Z'}},
     {'agent.json':{ok:true,refused_after_fence:{http_status:200,refusal_code:'grant_revoked'},workspace:{accepted_residue:true}}},
     {'C1-finish.json':{state:'open',explicit_keep_open:true}},
   ]) { const bad=report(changes); assert.notEqual(bad.result.status,0); assert.ok(!existsSync(join(bad.root,'C1.json'))); }
@@ -1274,6 +1302,9 @@ def fixture_stat(p, *args, **kwargs):
     return value
 pathlib.Path.stat = fixture_stat
 def fixture_run(args, **kwargs):
+    if args[:3] == ['logger', '-t', 'commonswarm-admin-recycle']:
+        with open(os.environ['RECYCLE_FIXTURE_JOURNAL'], 'a') as journal: journal.write(args[-1] + '\\n')
+        return SimpleNamespace(returncode=0)
     assert args[0] == 'node'
     env = kwargs['env']
     pathlib.Path(env['PG_SERVICE_OUTPUT']).write_text('synthetic service fixture')
@@ -1293,6 +1324,11 @@ def fixture_output(args, **kwargs):
     assert args[:2] == ['docker', 'run'] and args[-1] == '-'
     sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
     if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
+    if sql.startswith('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL'):
+        if os.environ.get('RECYCLE_FIXTURE_READBACK_FAILS') == '1': raise subprocess.CalledProcessError(2, ['docker', 'run'])
+        return 't' if not state['enabled'] and state['invalidated'] else 'f'
+    if os.environ.get('RECYCLE_FIXTURE_CLOSE_FAILS') == '1' and sql.endswith('release_generation=release_generation+1 WHERE singleton; COMMIT;'):
+        raise subprocess.CalledProcessError(3, ['docker', 'run'])
     enable = re.search(r'admin_issuance_enabled=(true|false)', sql)
     if enable: state['enabled'] = enable[1] == 'true'
     if 'release_generation=release_generation+1' in sql:
@@ -1300,6 +1336,8 @@ def fixture_output(args, **kwargs):
     if 'measured_generation=release_generation' in sql:
         state['measured_generation'] = state['generation']; state['invalidated'] = False
     fixture_state.write_text(json.dumps(state))
+    # The reopen COMMITS, then the response is lost.
+    if os.environ.get('RECYCLE_FIXTURE_LOSE_REOPEN') == '1' and 'admin_issuance_enabled=true' in sql: raise subprocess.CalledProcessError(1, ['docker', 'run'])
     return ('t' if prior else 'f')+'\\n'+str(state['generation']) if 'RETURNING release_generation' in sql else ''
 subprocess.run = fixture_run
 subprocess.check_output = fixture_output
@@ -1310,16 +1348,18 @@ subprocess.check_output = fixture_output
   for (const [from, to] of [
     ['/etc/commonswarm-admin-release', configDir], ['/home/commonswarm/edge', edgeRoot],
     ['/home/commonswarm/admin-issuance/releases', join(root, 'release')],
-    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')],
+    ['/tmp/admin-issuance-', join(root, 'admin-issuance-')], ['/var/lib/commonswarm-release', join(root, 'var-lib')],
     ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
   ]) source = source.split(from).join(to);
-  const imports = 'import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time\n';
+  const imports = 'import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
   assert.equal(source.split(imports).length - 1, 1);
   source = source.replace(imports, imports + boundary);
-  const hook = (mode: string, failed = false) => run(`set -- ${mode}\n${source}`, {
+  const hook = (mode: string, failed = false, extra: Record<string, string> = {}) => run(`set -- ${mode}\n${source}`, {
     PATH: `${shim}:${process.env.PATH}`, RECYCLE_FIXTURE_STATE: stateFile, RECYCLE_FIXTURE_CONFIG: config,
-    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0',
+    RECYCLE_FIXTURE_FAILURE: failed ? '1' : '0', RECYCLE_FIXTURE_JOURNAL: journalFile, COMMONSWARM_RECYCLE_UNIT: 'fixture-recycle.service', ...extra,
   });
+  const journalFile = join(root, 'journal.log'), markerFile = join(root, 'var-lib', 'admin-issuance-closed.log');
+  const lines = (file: string) => existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
   const state = () => JSON.parse(readFileSync(stateFile, 'utf8'));
   const initial = { enabled: true, generation: 7, measured_generation: 7, invalidated: false };
   for (const failed of [true, false]) {
@@ -1329,13 +1369,48 @@ subprocess.check_output = fixture_output
     assert.deepEqual(JSON.parse(readFileSync(join(configDir, 'recycle-intent.json'), 'utf8')), { reopen: true, generation: 8 });
     const after = hook('after', failed);
     if (failed) {
-      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance stays closed/);
+      assert.notEqual(after.status, 0); assert.match(after.stderr, /FAIL recycle hook; issuance CLOSED \(confirmed by readback\)/);
       assert.deepEqual(state(), { enabled: false, generation: 8, measured_generation: 7, invalidated: true });
+      // One NONSECRET marker line in the journal and in the 0644 append-only log, after the close.
+      const marker = lines(markerFile); assert.equal(marker.length, 1); assert.deepEqual(lines(journalFile), marker);
+      const m = JSON.parse(marker[0]!);
+      assert.deepEqual(Object.keys(m).sort(), ['approved_edge_release_sha', 'at', 'event', 'measured_edge_release_sha', 'reason', 'unit']);
+      assert.match(m.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      assert.deepEqual({ ...m, at: 'x' }, { at: 'x', unit: 'fixture-recycle.service', event: 'admin-issuance-closed-needs-reactivation',
+        approved_edge_release_sha: sha, measured_edge_release_sha: null, reason: 'edge-measurement-failed' });
+      assert.equal(statSync(markerFile).mode & 0o777, 0o644);
+      assert.doesNotMatch(marker[0]!, /pass|token|secret|postgres(?:ql)?:\/\//i);
     } else {
       assert.equal(after.status, 0, after.stderr);
+      assert.equal(lines(markerFile).length, 1, 'a good recycle writes no marker'); assert.equal(lines(journalFile).length, 1);
       assert.deepEqual(state(), { enabled: true, generation: 8, measured_generation: 8, invalidated: false });
     }
     assert.equal(readdirSync(secretRoot).length, 0, 'the complete shell hook cleans each private stage');
+  }
+  // An ordinary measurement failure whose readback is impossible is UNKNOWN, never CLOSED.
+  { writeFileSync(stateFile, JSON.stringify(initial)); const markersBefore = lines(markerFile).length;
+    assert.equal(hook('before').status, 0);
+    const after = hook('after', true, { RECYCLE_FIXTURE_READBACK_FAILS: '1' });
+    assert.notEqual(after.status, 0); assert.match(after.stderr, /issuance state UNKNOWN \(no confirming readback; may be OPEN\)/);
+    assert.doesNotMatch(after.stderr, /CLOSED|stays closed/);
+    const added = lines(markerFile).slice(markersBefore); assert.equal(added.length, 1); assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-state-unknown'); }
+  // The reopen COMMITS but its response is lost: the hook closes again and claims CLOSED only after the readback.
+  for (const closeFails of [false, true]) {
+    writeFileSync(stateFile, JSON.stringify(initial)); const markersBefore = lines(markerFile).length;
+    assert.equal(hook('before').status, 0);
+    const after = hook('after', false, { RECYCLE_FIXTURE_LOSE_REOPEN: '1', RECYCLE_FIXTURE_CLOSE_FAILS: closeFails ? '1' : '0' });
+    assert.notEqual(after.status, 0);
+    const added = lines(markerFile).slice(markersBefore); assert.equal(added.length, 1);
+    if (closeFails) {
+      assert.match(after.stderr, /FAIL recycle hook; issuance state UNKNOWN \(may be OPEN\); run ai-emergency-close/);
+      assert.doesNotMatch(after.stderr, /stays closed|closed again/);
+      assert.equal(state().enabled, true, 'the modelled refused close leaves the committed reopen OPEN');
+      assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-state-unknown');
+    } else {
+      assert.match(after.stderr, /FAIL recycle hook; reopen not confirmed; issuance closed again \(confirmed by readback\)/);
+      assert.deepEqual({ enabled: state().enabled, invalidated: state().invalidated }, { enabled: false, invalidated: true });
+      assert.equal(JSON.parse(added[0]!).event, 'admin-issuance-closed-needs-reactivation');
+    }
   }
 });
 
@@ -1393,7 +1468,9 @@ subprocess.check_output = observe
       SITE_STEP: 'site2-01', SITE_RELEASE_REPO: root, PREP_DIR: root, SITE_RELEASE_SHA: sha };
     writeFileSync(receipt, JSON.stringify(current)); writeFileSync(queries, '');
     const positive = run(harness+block(step), env);
-    assert.equal(positive.status, 0, `${name}: ${positive.stderr}`);
+    // The stub stops right after admission. A status-contract block (ai-w6-activation-apply) did not run to its end,
+    // so its trap reports that stop as UNKNOWN (2), never as success.
+    assert.equal(positive.status, step === 'ai-w6-activation-apply' ? 2 : 0, `${name}: ${positive.stderr}`);
     assert.match(positive.stdout+positive.stderr, /ADMITTED/, name);
     assert.equal(readFileSync(queries,'utf8').trim(), step === 'ai-w5-reference' ? 'remote' : 'box', `${name} must re-read the box`);
     for (const [change, field] of [
@@ -1455,13 +1532,17 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
   assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { ...measured, generation: 14, invalidated_at: null });
   assert.notEqual(run('set -euo pipefail\n'+read+source, { ...env, OBSERVED_GENERATION: '' }).status, 0);
   const apply = block('ai-w6-activation-apply');
-  const refreshStart = apply.indexOf('ACTIVATION_GENERATION=');
+  // W6 apply's receipt now comes only from the shared ai-edge-remeasure (tested in admin-release-w6-ready.test.ts).
+  const refreshStart = apply.indexOf('EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json');
   const refreshEnd = apply.indexOf('python3 - "$SECRET_STAGE/service.env"', refreshStart);
   const sqlStart = apply.indexOf('python3 - "$INPUTS_FILE" "$PROOF_DIR/activate.sql"');
   const sqlEnd = apply.indexOf('ai_db -q --file /proof/activate.sql', sqlStart);
   assert.ok(refreshStart > 0 && refreshEnd > refreshStart && sqlStart > refreshEnd && sqlEnd > sqlStart);
+  assert.doesNotMatch(apply, /commonswarm-admin-edge-recycle (?:before|after)/, 'W6 apply runs the hook only through ai-edge-remeasure');
   const supplied = join(root, 'supplied.json'); writeFileSync(supplied, readFileSync(receipt));
-  const result = run('set -euo pipefail\n'+read+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
+  rmSync(receipt);
+  const remeasure = `ai_run() { test "$1" = ai-edge-remeasure || return 1; python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); m.update(generation=int(sys.argv[3]),invalidated_at=None); open(sys.argv[2],"x").write(json.dumps(m,sort_keys=True)+"\\n")' "$EDGE_MEASUREMENT_FILE" "$EDGE_MEASUREMENT_OUT" "$OBSERVED_GENERATION"; }\n`;
+  const result = run('set -euo pipefail\n'+read+remeasure+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
     ...env, OBSERVED_GENERATION: '15', EDGE_MEASUREMENT_FILE: supplied, INPUTS_FILE: inputFile(base()),
   });
   assert.equal(result.status, 0, result.stderr);
@@ -1593,7 +1674,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 18, 'one shared reader at all 18 sites (17 plan-text sites, including ai-w2b-preflight and ai-w2b-proof-check, and ai-w2-backfill)');
+  assert.equal(readers.length, 21, 'one shared reader at all 21 sites (20 plan-text sites, including ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);

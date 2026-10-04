@@ -40,7 +40,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | Input | Source and validation |
 | --- | --- |
 | release_sha, plan_sha256, archive_sha256 | Reviewed landed main commit; SHA-256 of this exact RELEASE.md and exact `git archive` tar; no abbreviated identities |
-| window, window_id, window_end_utc | W1…W7 or W2b, six alphanumeric characters, UTC end within 30 minutes on box clock |
+| window, window_id, window_end_utc | W1…W7 or W2b, six alphanumeric characters, UTC end within 30 minutes on box clock (W6: within 90 minutes, HezLead ruling; beyond its end only ai-emergency-close and a recovered close remain) |
 | baseline_oauth_sha, baseline_oauth_image | Live OAuth `current`/RELEASE_SHA + container source/image measurement; full SHA/digest |
 | baseline_edge_sha, baseline_edge_image | Live edge `current`/RELEASE_SHA, image and immutable bind mounts |
 | baseline_stack_sha, baseline_postgres_image | Live stack `current`/RELEASE_SHA and PostgreSQL container image |
@@ -54,6 +54,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | legacy_fence_approval | `null` except W4, which requires separate explicit approval of irreversible legacy DB closure with the same release/window/plan binding |
 | probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
 | w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
+| w6_window_id | W7 only, REQUIRED there: the window ID of the W6 of this release that closed success. W7 reads that W6's C1.json and close-result.json from its box proof directory and measures the digest itself |
 | w2b_window_id | W6 only, REQUIRED there (absent in every other window): the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. W2 RGLqZX ran at 5f64fab4 and its issuer credential was rolled back, so at the W3–W7 release the credential exists only through W2b. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt and issuer-credential.txt |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
@@ -118,8 +119,8 @@ separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | W3 OAUTH | common preflight/open/session; ai-w3-preflight, ai-w3-build, ai-w3-apply, ai-w3-local-gate, ordinary controls, ai-close. Overlay absent, admin env unset, gate CLOSED. On failure ai-w3-rollback. |
 | W4 EDGE/CADDY | common preflight/open/session; ai-w1-backup-gate (fresh backup, as W1); ai-w4-preflight, ai-w4-caddy-candidate, ai-w4-apply, ai-w4-probes, ai-w4-readback, ordinary controls, ai-close. Includes /admin, GET/HEAD /admin/gate and recycle drop-in; terminal legacy fence needs its own approval. On failure ai-w4-rollback. Its EXIT guard restores/verifies the recycle timer on every outcome. |
 | W5 SITE | ai-w5-preflight (runs ai-live-controls phase before with the pre-W1 consent receipt), ai-w5-reference in the generalized site plan’s normal order, including its browser ownership close; ai-w5-closed runs ai-live-controls phase after with the post-W5 consent receipt, then records verified site close and GET/HEAD /admin/gate CLOSED. Publishes CIMD client document and callback page. W1–W5 may run before browser consent is ready. |
-| W6 ACTIVATION + C1 | ai-w6-preflight (readiness + activation/consent approval), common preflight/open/session; ai-w6-activation-checks/apply/probes/readback; prepare/transfer/client-check; ai-w6-start, ai-w6-pointer; owner approve immediately before browser consent; publish agent receipt, audit, owner withdrawal, human revoke, publish final runner receipt, fence readback, ai-w6-finish, secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input is required to retain OPEN. The activation EXIT guard restores/verifies the recycle timer on every outcome. Failure stops forward work; withdraw/revoke any committed grant before recovery close. |
-| W7 RETIRE | ai-w7-approval, common preflight/open/session, ai-w7-preflight (real C1 required), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged; never restore opaque authentication. |
+| W6 ACTIVATION + C1 | ai-w6-c1-inputs (Mac producer), ai-w6-preflight (readiness + activation/consent approval); ai-edge-refresh first if the edge receipt is stale; common preflight/open/session; ai-w6-prepare and upload C1-inputs.json; ai-w6-activation-checks (includes the retained recycle archive); ai-w6-client-document, ai-w6-client-verification (reviewed C1 row, issuance still CLOSED); ai-w6-activation-apply (shared remeasure; recycle timer HELD until finish), probes, readback; ai-w6-client-check, download C1-client-check.txt; ai-w6-start, ai-w6-pointer; owner approve immediately before consent; box ai-w6-audit-watch; Mac ai-w6-fence-driver (agent receipt, upload, audit, download, human revoke inside the 240 s fence); agent receipt again, owner withdrawal, upload client-withdraw.json and agent-final.json, fence readback, ai-w6-finish (both paths remeasure into edge-measurement-final.json and re-arm the timer), secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input retains OPEN (HezLead ruling at this release: keep open). W6 may last 90 minutes. Failure stops forward work; withdraw/revoke any committed grant, ai-emergency-close (re-arms the timer) before the recovered close; every close STOPs while the timer is inactive. |
+| W7 RETIRE | ai-w7-approval; EDGE_MEASUREMENT_FILE = W6's edge-measurement-final.json, or ai-edge-refresh first if a recycle made it stale; common preflight/open/session, ai-w7-preflight (the W6 named by w6_window_id closed success with an exact C1 report), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged and works with issuance OPEN (keep-open) or CLOSED; never restore opaque authentication. |
 
 After any failure STOP forward work and record the step and fixed failure code in
 LOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,
@@ -157,7 +158,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_window_id'}, 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_window_id','w6_window_id'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -171,7 +172,8 @@ need(d['window'] in ['W'+str(x) for x in range(1,8)]+['W2b'], 'window')
 need(isinstance(d['window_id'],str) and re.fullmatch('[A-Za-z0-9]{6}',d['window_id']), 'window_id')
 need(isinstance(d['window_end_utc'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',d['window_end_utc']), 'window_end_utc')
 end=datetime.datetime.strptime(d['window_end_utc'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=1800, 'fresh deadline')
+# HezLead ruling: W6 (activation, consent and C1 smoke in one window) may last 90 minutes; every other window 30.
+need(0<(end-datetime.datetime.now(datetime.timezone.utc)).total_seconds()<=(5400 if d['window']=='W6' else 1800), 'fresh deadline')
 need(re.fullmatch(r'/srv/commonswarm/site/releases/[A-Za-z0-9._-]+',d['baseline_site_target']) is not None, 'site target')
 need(hashlib.sha256(plan.read_bytes()).hexdigest()==d['plan_sha256'], 'plan bytes')
 need(hashlib.sha256(receipt.read_bytes()).hexdigest()==d['gate_receipt_sha256'], 'checker receipt bytes')
@@ -198,6 +200,8 @@ if d['window']=='W2b':
 else: need('w2_release_sha' not in d and 'w2_window_id' not in d, 'w2_release_sha/w2_window_id are W2b-only')
 if d['window']=='W6': need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
 else: need('w2b_window_id' not in d, 'w2b_window_id is W6-only')
+if d['window']=='W7': need(isinstance(d.get('w6_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w6_window_id']) is not None, 'W7 w6_window_id')
+else: need('w6_window_id' not in d, 'w6_window_id is W7-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
 else: need(d['legacy_fence_approval'] is None, 'legacy fence approval scope')
 print('PASS ai-inputs: exact identities, deadline, rollback and approval bindings')
@@ -385,7 +389,7 @@ EDGE_QUERY_CLEANUP
  rm -r -- "$EDGE_QUERY_STAGE"
 }
 trap edge_query_cleanup EXIT
-unset SOURCE_DATABASE_URL TARGET_DATABASE_URL
+unset SOURCE_DATABASE_URL TARGET_DATABASE_URL NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT
 PG_SERVICE_OUTPUT="$EDGE_QUERY_STAGE/service.conf" PG_PASS_OUTPUT="$EDGE_QUERY_STAGE/pass" \
  COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
  node "/home/commonswarm/admin-issuance/releases/$1/deploy/supabase-stack/migrate/make-pg-service.mjs" >"$EDGE_QUERY_STAGE/session.log" 2>&1
@@ -414,6 +418,195 @@ need(m['target']==m['mount']=='/home/commonswarm/edge/releases/'+sha,'target/mou
 print('PASS current edge-measurement.json generation/invalidated_at/release_sha/target/mount/image_digest/artifact_digest')
 PY
 ```
+
+## Edge remeasure (shared by W5/W6/W7 opens, W6 apply and W6 finish)
+
+A recycle (the six-hour timer or any hook run) increments `release_generation`,
+so an older `edge-measurement.json` no longer matches the live row and
+ai-edge-receipt STOPs. `ai-edge-remeasure` is the ONE producer of a fresh
+receipt: with the recycle timer already stopped by its caller, it runs the
+installed hook pair (before closes issuance and invalidates; after measures the
+live edge against the root-owned recycle.json and reopens only a previously open,
+still-approved release), reads the row with the exact query bytes of
+ai-edge-receipt, writes the new receipt from recycle.json and that generation,
+and then validates it with ai-edge-receipt itself. Two rules hold for every
+block here: a CLOSED claim or a CLOSED marker exists ONLY right after a
+successful independent readback, and everything else is UNKNOWN; and for
+ai-edge-remeasure, ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish and
+ai-w6-activation-rollback, exit 1 means confirmed CLOSED, 2 means UNKNOWN and
+any other nonzero status is UNKNOWN. Each of these blocks installs its status
+trap as its first statement: an unconfirmed 1 becomes 2, and an exit before the
+block's last line (even one that leaves $? at 0) becomes 2. ai_run returns 2
+for any failure before it evaluates a block (allowlist, plan verification,
+lookup, syntax), so a dispatch failure can never read as a confirmed close.
+Every production node launch first unsets NODE_OPTIONS and the admin-smoke
+test-transport variables; scripts/admin-smoke.mjs refuses fixture inputs and
+the test transport refuses to load unless ADMIN_SMOKE_TEST_TRANSPORT=1, which
+only the test harness sets. Any failure after the hooks start (a hook, the row read, the
+receipt or its validation, possibly after a committed reopen) runs the hook's
+`close` mode (release role, close first, then invalidate, marker reason
+`remeasure-validation-failed`) before the step fails; a failed close is
+reported separately ("issuance may be OPEN"). ai-edge-refresh, ai-w6-finish and
+ai-w6-activation-rollback each run in their own subshell, so their EXIT traps
+re-arm the recycle timer before control returns to the window shell and its
+ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs
+`ai-edge-refresh`, which owns the timer for that step only and always re-arms it.
+
+```sh
+# step: ai-edge-remeasure
+# readonly: no
+# host: box root; the CALLER has stopped the recycle timer and re-arms it afterwards
+set -euo pipefail
+# Status contract (also ai-edge-refresh, ai-w6-activation-apply, ai-w6-finish, ai-w6-activation-rollback): 0 success;
+# 1 ONLY right after an independent readback confirmed issuance CLOSED; any other status (2 by convention) UNKNOWN.
+C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
+remeasure_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap remeasure_exit EXIT
+: "${INPUTS_FILE:?FAIL ai-edge-remeasure: INPUTS_FILE expected absolute-file got unset; STOP}" "${PLAN_FILE:?FAIL ai-edge-remeasure: PLAN_FILE expected absolute-file got unset; STOP}"
+: "${EDGE_MEASUREMENT_OUT:?FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-new-file got unset; STOP}"
+case "$EDGE_MEASUREMENT_OUT" in /*) ;; *) printf 'FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absolute-path got relative; STOP\n' >&2; exit 1;; esac
+if test -e "$EDGE_MEASUREMENT_OUT" || test -L "$EDGE_MEASUREMENT_OUT"; then printf 'FAIL ai-edge-remeasure: EDGE_MEASUREMENT_OUT expected absent got present; STOP\n' >&2; exit 1; fi
+REMEASURE_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-remeasure: recycle timer name expected readable got failure; STOP\n' >&2; exit 1; }
+REMEASURE_SERVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_service"])' "$INPUTS_FILE") || { printf 'FAIL ai-edge-remeasure: recycle service name expected readable got failure; STOP\n' >&2; exit 1; }
+if systemctl is-active --quiet "$REMEASURE_TIMER"; then printf 'FAIL ai-edge-remeasure: recycle timer expected stopped-by-caller got active; STOP\n' >&2; exit 1; fi
+test "$(systemctl show -p ActiveState --value "$REMEASURE_SERVICE")" = inactive || { printf 'FAIL ai-edge-remeasure: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
+# Any failure from here on may follow a committed reopen: close and invalidate (hook close mode, release role,
+# close first) before returning failure, and report a failed close separately.
+# Exit 1: failed, issuance CLOSED (confirmed by the close mode's readback). Exit 2: failed, state UNKNOWN.
+remeasure_fail() {
+ if COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle close; then
+  C1_CLOSED_CONFIRMED=1
+  printf 'FAIL ai-edge-remeasure: failure close confirmed issuance CLOSED by readback; STOP\n' >&2; exit 1
+ fi
+ printf 'FAIL ai-edge-remeasure: failure close expected issuance closed got failure; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; STOP\n' >&2
+ exit 2
+}
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle before || { printf 'FAIL ai-edge-remeasure: recycle hook before expected success got failure; STOP\n' >&2; remeasure_fail; }
+COMMONSWARM_RECYCLE_UNIT=ai-edge-remeasure /usr/local/libexec/commonswarm-admin-edge-recycle after || { printf 'FAIL ai-edge-remeasure: recycle hook after expected measured got failure; STOP\n' >&2; remeasure_fail; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" "$EDGE_MEASUREMENT_OUT" <<'PY' || { printf 'FAIL ai-edge-remeasure: receipt validation after the hook pair expected PASS got failure; STOP\n' >&2; remeasure_fail; }
+import hashlib,json,os,pathlib,re,stat,subprocess,sys
+plan,inputs,out=sys.argv[1:4]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-edge-remeasure: '+what+' expected '+expected+' got '+got+'; STOP')
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+d=json.load(open(inputs)); sha=d['release_sha']
+blocks=re.findall(r'^`{3}sh\n(.*?)^`{3}$',verified_plan(plan,inputs,'ai-edge-remeasure').decode(),re.M|re.S)
+receipt=[b for b in blocks if b.startswith('# step: ai-edge-receipt\n')]
+need(len(receipt)==1,'ai-edge-receipt block','one','other')
+query=re.findall(r"^query=r'''\n(.*?)\n'''$",receipt[0],re.M|re.S)
+need(len(query)==1,'ai-edge-receipt row query','one','other')
+# The recycle input is the hook's own reference (the hook pair above already required it root-owned 0600).
+r_raw=read_regular('/etc/commonswarm-admin-release/recycle.json')
+need(r_raw is not None,'recycle.json','regular-file','missing-or-not-regular')
+need(stat.S_IMODE(os.stat('/etc/commonswarm-admin-release/recycle.json').st_mode)==0o600,'recycle.json mode','0600','other')
+r=json.loads(r_raw)
+need(r.get('release_sha')==sha and r.get('target')=='/home/commonswarm/edge/releases/'+sha,'recycle.json release','this-release','other')
+try:
+    row=json.loads(subprocess.check_output(['/bin/bash','-s','--',sha,d['baseline_postgres_image']],input=query[0]+'\n',text=True,stderr=subprocess.DEVNULL))
+except Exception:
+    raise SystemExit('FAIL ai-edge-remeasure: cutover row expected readable got failure; STOP') from None
+gen=row.get('release_generation')
+need(type(gen) is int and gen>0 and gen==row.get('measured_generation') and row.get('invalidated_at','missing') is None,'measured generation','measured-and-not-invalidated','stale-or-invalidated')
+need(row.get('approved_edge_release_sha')==sha and row.get('measured_edge_release_sha')==sha,'approved/measured edge release','this-release','other')
+for field,observed in (('target','measured_edge_target'),('target','measured_mount'),('image_digest','measured_image_digest'),('artifact_digest','measured_artifact_digest')):
+    need(r.get(field)==row.get(observed),observed,'recycle.json '+field,'other')
+m={'release_sha':sha,'target':r['target'],'mount':r['target'],'image_digest':r['image_digest'],'artifact_digest':r['artifact_digest'],'generation':gen,'invalidated_at':None}
+fd=os.open(out,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as f: f.write(json.dumps(m,sort_keys=True)+'\n')
+# The new receipt passes the same validator every open uses.
+env=dict(os.environ,EDGE_MEASUREMENT_FILE=out,INPUTS_FILE=inputs)
+need(subprocess.run(['/bin/bash'],input=receipt[0],text=True,env=env,stdout=subprocess.DEVNULL).returncode==0,'new edge-measurement.json','valid-edge-receipt','refused')
+print('PASS ai-edge-remeasure: hook pair measured generation '+str(gen)+'; fresh edge-measurement.json validated')
+PY
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+```
+
+```sh
+# step: ai-edge-refresh
+# readonly: no
+# host: HezLead box root, before ai-open of W5/W6/W7 when ai-edge-receipt finds the receipt stale; owns the recycle timer for this step only
+# Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell (ai_run is eval).
+(
+C1_CLOSED_CONFIRMED=0 REFRESH_TIMER=
+C1_BLOCK_DONE=0
+edge_refresh_rearm() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Every exit re-arms the timer once its name is known; a failed re-arm is reported and fails the step.
+ if test -n "${REFRESH_TIMER:-}"; then
+  systemctl start "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap edge_refresh_rearm EXIT
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${PLAN_FILE:?}" "${EDGE_MEASUREMENT_OUT:?}"
+REFRESH_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE") || { REFRESH_TIMER=; printf 'FAIL ai-edge-refresh: recycle timer name expected readable got failure; STOP\n' >&2; exit 2; }
+systemctl stop "$REFRESH_TIMER" || { printf 'FAIL ai-edge-refresh: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$PLAN_FILE" "$INPUTS_FILE" ai-edge-refresh "$EDGE_MEASUREMENT_OUT" <<'PY' || { REFRESH_STATUS=$?; printf 'FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$REFRESH_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL ai-edge-refresh: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' >&2; exit 1; fi; printf 'FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' >&2; exit 2; }
+import hashlib,json,os,re,stat,subprocess,sys
+# The child's 0 or 1 passes through; anything else, including this script's own failure, is 2 (UNKNOWN).
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get('plan_sha256'):
+        raise SystemExit('FAIL '+step+': PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got '+('missing-or-not-regular' if raw is None else 'digest-mismatch')+'; STOP')
+    return raw
+rc=2
+try:
+    blocks=re.findall(r'^```sh\n(.*?)^```$',verified_plan(sys.argv[1],sys.argv[2],sys.argv[3]).decode(),re.M|re.S)
+    found=[b for b in blocks if b.startswith('# step: ai-edge-remeasure\n')]
+    if len(found)!=1: raise SystemExit('FAIL ai-edge-refresh: ai-edge-remeasure block expected one got other; STOP')
+    # The child bash gets its inputs explicitly; shell variables need not be exported.
+    rc=(subprocess.run(['/bin/bash'],input=found[0],text=True,env=dict(os.environ,PLAN_FILE=sys.argv[1],INPUTS_FILE=sys.argv[2],EDGE_MEASUREMENT_OUT=sys.argv[4])).returncode)
+except BaseException as error:
+    if isinstance(error,SystemExit) and isinstance(error.code,str): print(error.code,file=sys.stderr)
+    rc=2
+sys.exit(rc if rc in (0,1) else 2)
+PY
+printf 'PASS ai-edge-refresh: fresh edge-measurement.json at %s; recycle timer re-armed on exit\n' "$EDGE_MEASUREMENT_OUT"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
+```
+
 
 ```sh
 # step: ai-open
@@ -595,6 +788,7 @@ printf 'PASS ai-open: %s; secret cleanup pointer retained\n' "$WINDOW"
 # step: ai-db-session
 # readonly: no
 # host: box root; task files only, database queries read-only until apply
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 test -f "$PROOF_DIR/open.txt" || { printf 'FAIL ai-db-session: open.txt expected present got missing; STOP\n' >&2; exit 1; }
 test ! -e "$PROOF_DIR/closed.txt" || { printf 'FAIL ai-db-session: closed.txt expected absent got present; STOP\n' >&2; exit 1; }
@@ -633,7 +827,9 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback) ;; *) return 1;; esac
+ # A failure BEFORE the block runs (allowlist, plan verification, lookup, syntax) is 2: it confirms nothing, so it
+ # can never read as a status-contract block's confirmed-CLOSED 1.
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill|ai-w2-revoke-probes|ai-w2b-proof-check|ai-backup-gate-check|ai-w2-issuer-rollback|ai-edge-remeasure|ai-w6-audit|ai-w6-closed-gate-probe) ;; *) return 2;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -658,8 +854,8 @@ blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],
 found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
 if len(found)!=1: raise SystemExit("FAIL ai_run: block "+sys.argv[2]+" expected one got "+str(len(found))+"; STOP")
 sys.stdout.write(found[0])
-' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 1
- printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 1
+' "$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md" "$STEP_NAME" "$INPUTS_FILE") || return 2
+ printf '%s\n' "$AI_RUN_SOURCE" | /bin/bash -n || return 2
  eval "$AI_RUN_SOURCE"
 }
 ai_deadline() {
@@ -2835,14 +3031,20 @@ trap 'exit 143' TERM
 # readonly: no
 # host: box root; also available after a failed rollback; not a close receipt
 set -euo pipefail
-systemctl start "$EDGE_RECYCLE_TIMER"
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+# Also runs as ( ai_run ai-w4-timer-recovery ) || ..., where errexit is ignored: every step fails explicitly.
+systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w4-timer-recovery: recycle timer start expected success got failure; STOP\n' >&2; exit 1; }
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w4-timer-recovery: recycle timer expected active got inactive; STOP\n' >&2; exit 1; }
 printf 'Timer restored; window remains open until service recovery is verified\n'
 ```
 
-The only timer-stopping blocks are ai-w4-apply, ai-w4-rollback and
-ai-w6-activation-apply. Each installs ai-timer-guard **before** the stop in its
-own subshell, so nested sourced blocks cannot remove the caller's EXIT trap.
+The timer-stopping blocks are ai-w4-apply, ai-w4-rollback, ai-edge-refresh,
+ai-w6-activation-apply and ai-w6-finish. ai-w4-apply and ai-w4-rollback install
+ai-timer-guard **before** the stop in their own subshell, so nested sourced
+blocks cannot remove the caller's EXIT trap. ai-edge-refresh re-arms on every
+exit. W6 (HezLead ruling) keeps the timer STOPPED from ai-w6-activation-apply
+until ai-w6-finish: a failed apply re-arms it at once; ai-w6-finish re-arms it
+on every exit; ai-w6-activation-rollback (and so ai-emergency-close) re-arms it;
+and every ai-close STOPs with a report while the timer is inactive.
 On success, command failure, explicit exit, INT or TERM the trap invokes the
 complete ai-w4-timer-recovery block and preserves the failure status. Recovery
 failure is an open incident, never a close receipt. SIGKILL or loss of the host
@@ -2864,7 +3066,30 @@ drop-in. Install in W4 while the timer is stopped, before restoring it.
 The hook closes issuance/increments generation in ExecStartPre, before the
 existing restart, then remeasures target, image, health, immutable mounts and
 all archive bytes in ExecStartPost. Only a previously open, still-approved
-release can reopen. Failed restart/measurement stays closed. HezLead executes
+release can reopen. When the after hook fails it reads the row back: only a
+confirmed CLOSED row gives "issuance CLOSED" and a NONSECRET watch marker for HezLead: one journal line with tag
+`commonswarm-admin-recycle` and one appended line in the root-owned 0644
+`/var/lib/commonswarm-release/admin-issuance-closed.log`, both the JSON
+`{"at","unit","event":"admin-issuance-closed-needs-reactivation","approved_edge_release_sha","measured_edge_release_sha"|null,"reason"}`
+(reason: recycle-config-invalid, database-session-failed, recycle-intent-invalid,
+edge-measurement-failed, database-measurement-refused, or
+remeasure-validation-failed from the `close` mode when it shut OPEN issuance; the unit comes from
+the drop-in's `Environment=COMMONSWARM_RECYCLE_UNIT=%n`, or is
+`ai-edge-remeasure`). A marker failure is reported on stderr; the close
+stands. If the after hook fails once its reopen may have COMMITTED, it closes
+and invalidates again (release role) and writes the CLOSED marker only when an
+independent readback confirms CLOSED; otherwise it writes the same JSON with
+`"event":"admin-issuance-state-unknown"` and reports "may be OPEN" (scheduled
+recycle and remeasure alike). The `close` mode runs its database close before
+any bookkeeping and confirms it the same way. ai-edge-remeasure exits 1 when its
+failure close is confirmed CLOSED and 2 when the state is unknown; every caller
+reports that result and no step claims CLOSED without it. A failure before a
+readback is possible (configuration, session) or a failed before hook gives
+the state-unknown line. A good recycle writes no marker. Issuance closed this
+way stays closed until a W6 activation reopens it. **Post-C1 follow-up:** a lightweight
+measured-reopen procedure under HezLead approval (remeasure, then reopen only
+through the measured path) replaces that W6 rerun; it is not part of this
+release. HezLead executes
 these blocks; this preparation worker never installs or invokes a hook.
 
 ```sh
@@ -2873,7 +3098,7 @@ these blocks; this preparation worker never installs or invokes a hook.
 # host: box root, installed by HezLead; systemd invokes before/after
 set -euo pipefail
 : "${1:?before or after}"
-case "$1" in before|after) ;; *) exit 1;; esac
+case "$1" in before|after|close) ;; *) exit 1;; esac
 umask 077
 HOOK_SECRET_STAGE=$(mktemp -d /private/tmp/anvil-secret.XXXXXX)
 chmod 0700 "$HOOK_SECRET_STAGE"
@@ -2887,8 +3112,29 @@ PY
 }
 trap ai_hook_cleanup EXIT
 python3 - "$1" "$HOOK_SECRET_STAGE" <<'PY'
-import hashlib,json,os,pathlib,re,subprocess,sys,tarfile,time
+import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time
 stage=pathlib.Path(sys.argv[2]); mode=sys.argv[1]
+reason='recycle-config-invalid'; approved=None; measured=None; reopen_attempted=False; close_confirmed=False
+def closed_marker(event='admin-issuance-closed-needs-reactivation'):
+    # NONSECRET watch marker, written only AFTER the failure left issuance closed: one journal line and one
+    # appended JSON line. No token, credential, connection value or database row beyond the two release SHAs.
+    unit=os.environ.get('COMMONSWARM_RECYCLE_UNIT','')
+    line=json.dumps({'at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'unit':unit if re.fullmatch(r'[A-Za-z0-9@._:-]{1,256}',unit) else 'unknown',
+        'event':event,'approved_edge_release_sha':approved,'measured_edge_release_sha':measured,'reason':reason},sort_keys=True)
+    ok=True
+    try: subprocess.run(['logger','-t','commonswarm-admin-recycle','--',line],check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except Exception: ok=False
+    try:
+        d='/var/lib/commonswarm-release'
+        if not os.path.lexists(d): os.mkdir(d,0o755); os.chmod(d,0o755)
+        assert os.path.isdir(d) and not os.path.islink(d)
+        fd=os.open(d+'/admin-issuance-closed.log',os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o644)
+        try:
+            st=os.fstat(fd); assert stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid()
+            os.fchmod(fd,0o644); assert os.write(fd,(line+'\n').encode())==len(line)+1
+        finally: os.close(fd)
+    except Exception: ok=False
+    if not ok: print('FAIL recycle closed-marker not fully written (journal or admin-issuance-closed.log); the close decision above stands; HezLead must check the database',file=sys.stderr)
 try:
     path=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
     assert path.is_file() and not path.is_symlink() and path.stat().st_uid==0 and path.stat().st_mode & 0o777==0o600
@@ -2898,7 +3144,8 @@ try:
     archive=pathlib.Path(r['archive']); assert archive.is_file() and not archive.is_symlink()
     assert re.fullmatch(r'/tmp/admin-issuance-'+sha+r'-[A-Za-z0-9]{6}\.tar',str(archive))
     root=pathlib.Path(r['release_root']); assert str(root)=='/home/commonswarm/admin-issuance/releases/'+sha and root.resolve()==root
-    env=dict(os.environ); env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
+    approved=sha; reason='database-session-failed'
+    env={k:v for k,v in os.environ.items() if k!='NODE_OPTIONS' and not k.startswith('ADMIN_SMOKE_')}; env.update(PG_SERVICE_OUTPUT=str(stage/'service.conf'),PG_PASS_OUTPUT=str(stage/'pass'),COMMONSWARM_ENV_FILE='/home/commonswarm/.env',COMMONSWARM_MIGRATION_ENV_FILE='/etc/commonswarm-release/target.env')
     with (stage/'session.log').open('w') as log:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
     for name in ['service.conf','pass']: (stage/name).chmod(0o600)
@@ -2908,14 +3155,36 @@ try:
         with (stage/'db.log').open('w') as log:
             return subprocess.check_output(args,input=sql,text=True,stderr=log).strip()
     intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
-    if mode=='before':
+    def confirm_closed():
+        # Independent readback: CLOSED is claimed only when the database says so.
+        try: return db('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        except Exception: return False
+    def failure_close():
+        # Release-role close (close first, then invalidate), then the readback; never a recursive hook run.
+        try: was=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;")
+        except Exception: was=None
+        return was,confirm_closed()
+    if mode=='close':
+        # ai-edge-remeasure's failure close: the safety transaction first, bookkeeping only after it.
+        reason='remeasure-validation-failed'
+        was,close_confirmed=failure_close()
+        if not close_confirmed:
+            closed_marker('admin-issuance-state-unknown')
+            raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (close not confirmed by readback; may be OPEN); run ai-emergency-close; HezLead recovery required')
+        # A CLOSED marker only when this close shut OPEN issuance; a failed after hook has already marked its own close.
+        if was=='t': closed_marker()
+        intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
+    elif mode=='before':
         # Stale intent can never be used after a failed/unknown pre-hook.
         intent.write_text(json.dumps({'reopen':False,'generation':None})+'\n'); intent.chmod(0o600)
-        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
+        # guard_cutover_state refuses a generation change while issuance is open: close, then invalidate.
+        result=db("BEGIN; SET LOCAL ROLE commonswarm_admin_release; SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton RETURNING release_generation; COMMIT;").splitlines()
         assert len(result)==2 and result[0] in ('t','f') and result[1].isdigit()
         intent.write_text(json.dumps({'reopen':result[0]=='t','generation':int(result[1])})+'\n')
     else:
+        reason='recycle-intent-invalid'
         state=json.loads(intent.read_text()); assert isinstance(state['generation'],int) and type(state['reopen']) is bool
+        reason='edge-measurement-failed'
         live=pathlib.Path('/home/commonswarm/edge/current').resolve(strict=True); assert str(live)==target
         for attempt in range(46):
             c=json.loads(subprocess.check_output(['docker','inspect','commonswarm-edge-edge-runtime-1'],stderr=subprocess.DEVNULL))[0]
@@ -2935,13 +3204,40 @@ try:
                 assert not pathlib.PurePosixPath(member.name).is_absolute() and '..' not in pathlib.PurePosixPath(member.name).parts
                 if member.isfile(): assert not dest.is_symlink() and dest.read_bytes()==tar.extractfile(member).read()
                 elif member.issym(): assert dest.is_symlink() and dest.readlink().as_posix()==member.linkname
+        measured=sha; reason='database-measurement-refused'
         gen=str(state['generation']); enabled='true' if state['reopen'] else 'false'
-        sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; "
+        # M4 grants migration_checksum_failures() to the runtime and command roles only, never to the release
+        # role: the gate runs as the session's admin user, then the same transaction takes the release role.
+        sql="BEGIN; DO $$ BEGIN IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND NOT admin_issuance_enabled AND invalidated_at IS NOT NULL) THEN RAISE EXCEPTION 'recycle measurement refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
         sql+="UPDATE commonswarm_oauth.admin_cutover_state SET measured_edge_release_sha='"+sha+"',measured_edge_target='"+target+"',measured_mount='"+target+"',measured_image_digest='"+r['image_digest']+"',measured_artifact_digest='"+r['artifact_digest']+"',measured_generation=release_generation,measured_at=statement_timestamp(),measurement_evidence_ref='systemd/recycle/"+gen+"',invalidated_at=NULL,admin_issuance_enabled="+enabled+" WHERE singleton; COMMIT;"
         if state['reopen']: assert db('SELECT lane8_evidence_digest IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')=='t'
+        # From here the reopen may COMMIT even if this process sees a failure (lost response, psql exit).
+        reopen_attempted=bool(state['reopen'])
         db(sql)
 except Exception:
-    raise SystemExit('FAIL recycle hook; issuance stays closed; HezLead recovery required') from None
+    if mode=='close':
+        if close_confirmed: raise SystemExit('FAIL recycle hook close: bookkeeping failed after a close CONFIRMED by readback; issuance closed; HezLead must check recycle-intent.json') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook close; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='after' and reopen_attempted:
+        # The reopen may have committed: close it again, and claim CLOSED only after the readback confirms it.
+        was,close_confirmed=failure_close()
+        if close_confirmed:
+            closed_marker()
+            raise SystemExit('FAIL recycle hook; reopen not confirmed; issuance closed again (confirmed by readback); HezLead recovery required') from None
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    if mode=='before':
+        # The close may not have committed: never claim CLOSED here.
+        closed_marker('admin-issuance-state-unknown')
+        raise SystemExit('FAIL recycle hook before; issuance state UNKNOWN (close not confirmed; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
+    # No reopen was attempted, but CLOSED is still claimed only after an independent readback; a failure before the
+    # database session exists (no readback possible) is UNKNOWN. Nonrecursive: one readback, no close, no hook run.
+    if 'confirm_closed' in globals() and confirm_closed():
+        closed_marker()
+        raise SystemExit('FAIL recycle hook; issuance CLOSED (confirmed by readback); HezLead recovery required') from None
+    closed_marker('admin-issuance-state-unknown')
+    raise SystemExit('FAIL recycle hook; issuance state UNKNOWN (no confirming readback; may be OPEN); run ai-emergency-close; HezLead recovery required') from None
 PY
 ```
 
@@ -2991,7 +3287,7 @@ if installed is None or installed!=hook: raise SystemExit('FAIL ai-recycle-insta
 d=json.load(open(sys.argv[3])); r={'release_sha':d['release_sha'],'target':'/home/commonswarm/edge/releases/'+d['release_sha'],'image_digest':d['baseline_edge_image'],'artifact_digest':d['archive_sha256'],'archive':'/tmp/admin-issuance-'+d['release_sha']+'-'+d['window_id']+'.tar','postgres_image':d['baseline_postgres_image'],'release_root':sys.argv[4]}
 p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json'); p.write_text(json.dumps(r)+'\n'); p.chmod(0o600)
 PY
-printf '[Service]\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
+printf '[Service]\nEnvironment=COMMONSWARM_RECYCLE_UNIT=%%n\nExecStartPre=/usr/local/libexec/commonswarm-admin-edge-recycle before\nExecStartPost=/usr/local/libexec/commonswarm-admin-edge-recycle after\n' >"$RECYCLE_DROPIN"
 chmod 0644 "$RECYCLE_DROPIN"
 systemctl daemon-reload
 systemctl cat "$EDGE_RECYCLE_SERVICE" >"$PROOF_DIR/recycle-unit-after.txt"
@@ -3012,7 +3308,8 @@ if test -e "$RECYCLE_DROPIN"; then
 fi
 systemctl daemon-reload
 test ! -e "$RECYCLE_DROPIN"
-printf 'PASS recycle drop-in removed; issuance closed; caller EXIT guard restores/verifies timer\n'
+test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t || { printf 'FAIL ai-recycle-rollback: issuance expected closed-by-readback got other-or-unreadable; state UNKNOWN; STOP\n' >&2; exit 2; }
+printf 'PASS recycle drop-in removed; issuance closed (readback); caller EXIT guard restores/verifies timer\n'
 ```
 
 ## W5: /app site release
@@ -3190,6 +3487,7 @@ archive_sha256.
 # step: ai-w5-closed
 # readonly: probe
 # host: HezLead Mac; after referenced site manifest and browser ownership close
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${SITE_EVIDENCE:?}" "${INPUTS_FILE:?}"
 : "${LIVE_CONTROLS_FILE:?FAIL ai-w5-closed: LIVE_CONTROLS_FILE expected absolute-regular-file got unset; STOP}"
@@ -3440,14 +3738,127 @@ with tarfile.open(archive) as t:
     for member in t.getmembers():
         if member.isfile(): assert (pathlib.Path(target)/member.name).read_bytes()==t.extractfile(member).read()
 PY
+# The recycle hook re-verifies W4's retained archive on every run (and W6 runs it): it must exist with its digest now.
+python3 - "$RELEASE_SHA" "$INPUTS_FILE" <<'PY'
+import hashlib,json,os,pathlib,re,stat,sys
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w6-activation-checks: '+what+' expected '+expected+' got '+got+'; STOP')
+p=pathlib.Path('/etc/commonswarm-admin-release/recycle.json')
+# Ownership is the hook's own check at every run; here: present, regular, 0600.
+need(p.is_file() and not p.is_symlink() and stat.S_IMODE(p.stat().st_mode)==0o600,'recycle.json','0600-regular-file','other')
+r=json.loads(p.read_text()); d=json.load(open(sys.argv[2]))
+need(r.get('release_sha')==sys.argv[1] and r.get('artifact_digest')==d['archive_sha256'],'recycle.json release/artifact','this-release-archive','other')
+archive=pathlib.Path(r.get('archive',''))
+need(re.fullmatch(r'/tmp/admin-issuance-'+sys.argv[1]+r'-[A-Za-z0-9]{6}\.tar',str(archive)) is not None and archive.is_file() and not archive.is_symlink(),'recycle archive','retained-regular-file','missing')
+need(hashlib.sha256(archive.read_bytes()).hexdigest()==r['artifact_digest'],'recycle archive digest','recycle.json artifact_digest','mismatch')
+PY
 printf 'PASS W6 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W6-checks.txt"
 ```
+
+The C1 verification row is created here, by the release role, after the
+activation checks and BEFORE activation (issuance CLOSED). It is reviewed data
+in this plan: the exact client, callback, four-scope ceiling, full-account
+eligibility, no delegation and the four tested flags (their evidence is the
+admin-c1-smoke and admin-consent-client-policy gates of this window's receipt).
+The box fetches the public client document once, pins the canonical JSON digest
+(sorted keys, no whitespace; ASCII documents only, so Python's canonical form is
+byte-identical to `canonicalAdminJson`) and requires it to equal the reviewed
+`metadata_digest` from C1_INPUTS_FILE. An identical existing row is accepted (a
+recovered rerun); a different row for this version, or another active version,
+STOPs. The trigger `guard_verified_client` enforces public HTTPS redirects and
+immutability.
+
+```sh
+# step: ai-w6-client-document
+# readonly: yes
+# host: HezLead box root, W6, before ai-w6-client-verification; public fetch only
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-client-document: window expected W6 got other; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/c1-client-document.json" || { printf 'FAIL ai-w6-client-document: c1-client-document.json expected absent got present; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/c1-client-document.json" <<'PY'
+import os,sys,urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs): return None
+try:
+    with urllib.request.build_opener(NoRedirect()).open(urllib.request.Request('https://commonswarm.com/oauth/c1-smoke/client.json',headers={'User-Agent':'curl/8.7.1'}),timeout=15) as r:
+        body=r.read(4097); ok=r.status==200 and r.headers.get('Content-Type','').split(';')[0]=='application/json' and len(body)<=4096
+except Exception: ok=False
+if not ok: raise SystemExit('FAIL ai-w6-client-document: public C1 client document expected 200-application/json-at-most-4096-bytes got other; STOP')
+fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'wb') as f: f.write(body)
+print('PASS ai-w6-client-document: public C1 client document retained')
+PY
+```
+
+```sh
+# step: ai-w6-client-verification
+# readonly: no
+# host: HezLead box root, W6 after ai-w6-activation-checks and before ai-w6-activation-apply (issuance CLOSED)
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-client-verification: window expected W6 got other; STOP\n' >&2; exit 1; }
+ai_deadline
+test -f "$PROOF_DIR/W6-checks.txt" || { printf 'FAIL ai-w6-client-verification: W6-checks.txt expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/activation-attempted.txt" || { printf 'FAIL ai-w6-client-verification: issuance expected not-yet-activated got activation-attempted; STOP\n' >&2; exit 1; }
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-client-verification: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
+python3 - "$C1_INPUTS_FILE" "$INPUTS_FILE" "$PROOF_DIR/c1-client-document.json" "$PROOF_DIR/client-verification.sql" <<'PY'
+import hashlib,json,pathlib,re,sys
+cfile,inputs,docfile,out=sys.argv[1:5]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w6-client-verification: '+what+' expected '+expected+' got '+got+'; STOP')
+c=json.load(open(cfile)); d=json.load(open(inputs))
+need(all(c.get(k)==d.get(k) for k in ('release_sha','window_id','plan_sha256')),'C1 inputs binding','this-window','other')
+v=c.get('verification_version'); h=c.get('metadata_digest')
+need(type(v) is int and 0<v<1000000 and isinstance(h,str) and re.fullmatch('[0-9a-f]{64}',h) is not None,'C1 verification_version/metadata_digest','positive-integer-and-64-hex','other')
+raw=pathlib.Path(docfile).read_bytes()
+need(all(b<128 for b in raw),'client document','ASCII','non-ASCII')
+doc=json.loads(raw)
+def canonical(x):
+    if isinstance(x,float): raise SystemExit('FAIL ai-w6-client-verification: client document expected no-floats got float; STOP')
+    if isinstance(x,list): return '['+','.join(canonical(i) for i in x)+']'
+    if isinstance(x,dict): return '{'+','.join(json.dumps(k)+':'+canonical(x[k]) for k in sorted(x))+'}'
+    return json.dumps(x)
+CLIENT='https://commonswarm.com/oauth/c1-smoke/client.json'; REDIRECT='https://commonswarm.com/oauth/c1-smoke/callback'
+need(doc.get('client_id')==CLIENT and doc.get('application_type')=='web' and doc.get('redirect_uris')==[REDIRECT] and doc.get('token_endpoint_auth_method')=='none' and doc.get('dpop_bound_access_tokens') is True,'client document fields','reviewed-C1-client','other')
+need(hashlib.sha256(canonical(doc).encode()).hexdigest()==h,'canonical document digest','C1 metadata_digest','other')
+evidence='gates:'+d['gate_receipt_sha256']+':admin-c1-smoke+admin-consent-client-policy'
+cols="client_id,verification_version,application_type,registration_source,publisher_identity,publisher_contact,metadata_digest,redirect_uris,scope_ceiling,full_account_eligible,delegation_eligible,native_loopback_eligible,pkce_s256_tested,dpop_tested,redirect_tested,origin_control_verified,review_evidence_ref,reviewed_by,active"
+vals="'"+CLIENT+"',"+str(v)+",'web','cimd','Yulan Ventures (CommonSwarm C1 smoke)','https://commonswarm.com','"+h+"',ARRAY['"+REDIRECT+"']::text[],ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[],true,false,false,true,true,true,true,'"+evidence+"','HezLead',true"
+same="v.application_type='web' AND v.registration_source='cimd' AND v.metadata_digest='"+h+"' AND v.redirect_uris=ARRAY['"+REDIRECT+"']::text[] AND v.scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND v.full_account_eligible AND NOT v.delegation_eligible AND NOT v.native_loopback_eligible AND v.pkce_s256_tested AND v.dpop_tested AND v.redirect_tested AND v.origin_control_verified AND v.active AND v.withdrawn_at IS NULL"
+sql=("BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $c1$ DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE; BEGIN "
+ "PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled FOR UPDATE; "
+ "IF NOT FOUND THEN RAISE EXCEPTION 'C1 verification requires issuance closed'; END IF; "
+ "SELECT * INTO v FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND verification_version="+str(v)+"; "
+ "IF FOUND THEN IF NOT ("+same+") THEN RAISE EXCEPTION 'existing C1 verification differs'; END IF; "
+ "ELSE IF EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND active) THEN RAISE EXCEPTION 'another active C1 verification version'; END IF; "
+ "INSERT INTO commonswarm_oauth.admin_verified_clients("+cols+") VALUES ("+vals+"); END IF; END $c1$; COMMIT;\n")
+pathlib.Path(out).write_text(sql)
+PY
+ai_db -q --file /proof/client-verification.sql >/dev/null || { printf 'FAIL ai-w6-client-verification: release-role insert of the reviewed C1 verification expected committed got refused; STOP\n' >&2; exit 1; }
+printf 'PASS reviewed C1 verification row present, active and canonical-digest bound\n' >"$PROOF_DIR/C1-client-verification.txt"
+```
+
 
 ```sh
 # step: ai-w6-activation-apply
 # readonly: no
 # host: HezLead, box root; approved activation only
 (
+C1_CLOSED_CONFIRMED=0 W6_APPLY_TIMER_HELD=0
+C1_BLOCK_DONE=0
+w6_apply_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ # Recovery once this apply has stopped the timer (from just before its stop on).
+ if test "$status" != 0 && test "$W6_APPLY_TIMER_HELD" = 1; then
+  ( ai_run ai-w4-timer-recovery ) || printf 'FAIL ai-w6-activation-apply: recycle timer re-arm after a failed apply expected active got failure; STOP\n' >&2
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap w6_apply_exit EXIT
 set -euo pipefail
 : "${INPUTS_FILE:?}"
 python3 - "$INPUTS_FILE" <<'PY'
@@ -3490,19 +3901,16 @@ OAUTH_TARGET=/home/commonswarm/oauth/releases/$RELEASE_SHA
 test "$(readlink -f /home/commonswarm/oauth/current)" = "$OAUTH_TARGET"
 test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986'
 test -f /etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf
-# Both hooks are marked complete blocks installed in W4; no generated operator script.
-ai_run ai-timer-guard
-systemctl stop "$EDGE_RECYCLE_TIMER"
-test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
-/usr/local/libexec/commonswarm-admin-edge-recycle before >"$SECRET_STAGE/measure-before.log" 2>&1
-/usr/local/libexec/commonswarm-admin-edge-recycle after >"$SECRET_STAGE/measure-after.log" 2>&1
-# The just-completed hook owns this fresh measurement; retain a new W6 receipt.
-ACTIVATION_GENERATION=$(ai_ro -Atq --command 'SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND invalidated_at IS NULL AND measured_generation=release_generation;')
-python3 - "$EDGE_MEASUREMENT_FILE" "$PROOF_DIR/edge-measurement.json" "$ACTIVATION_GENERATION" <<'PY'
-import json,pathlib,sys
-m=json.load(open(sys.argv[1])); assert sys.argv[3].isdigit() and int(sys.argv[3])>0, 'FAIL release_generation/measured_generation/invalidated_at; STOP'
-m.update(generation=int(sys.argv[3]),invalidated_at=None); pathlib.Path(sys.argv[2]).write_text(json.dumps(m,sort_keys=True)+'\n')
-PY
+test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-activation-apply: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
+# HezLead ruling: the recycle timer stays STOPPED from here until ai-w6-finish re-arms it. A failed apply
+# re-arms it at once (the hooks are marked complete blocks installed in W4; no generated operator script).
+W6_APPLY_TIMER_HELD=1
+systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-apply: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive || { printf 'FAIL ai-w6-activation-apply: recycle service expected inactive got other; STOP\n' >&2; exit 1; }
+# The shared remeasure owns this fresh measurement; it writes the W6 receipt and validates it.
+EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement.json
+( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-activation-apply; printf 'FAIL ai-w6-activation-apply: edge remeasure expected PASS got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+unset EDGE_MEASUREMENT_OUT
 python3 - "$SECRET_STAGE/service.env" "$SECRET_STAGE/service.active.env" <<'PY'
 import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
@@ -3536,12 +3944,16 @@ d=json.load(open(sys.argv[1])); sha=d['release_sha']; h=d['gate_receipt_sha256']
 assert type(m.get('generation')) is int and m['generation']>0 and m.get('invalidated_at','missing') is None, 'FAIL generation/invalidated_at; STOP'
 gen=str(m['generation'])
 assert re.fullmatch('[0-9a-f]{40}',sha) and re.fullmatch('[0-9a-f]{64}',h)
-sql="BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; "
+# M4 grants migration_checksum_failures() to the runtime and command roles only: the locked gate runs as the
+# session's admin user, then the same transaction takes the release role for the switch.
+sql="BEGIN; DO $$ BEGIN PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton FOR UPDATE; IF EXISTS(SELECT 1 FROM commonswarm_ops.migration_checksum_failures()) OR NOT EXISTS(SELECT 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled AND legacy_closed AND auth_contract_version=2 AND approved_edge_release_sha='"+sha+"' AND measured_edge_release_sha='"+sha+"' AND release_generation="+gen+" AND measured_generation=release_generation AND invalidated_at IS NULL AND measured_at IS NOT NULL) THEN RAISE EXCEPTION 'activation generation/invalidated_at checks refused'; END IF; END $$; SET LOCAL ROLE commonswarm_admin_release; "
 sql+="UPDATE commonswarm_oauth.admin_cutover_state SET lane8_evidence_digest='"+h+"',admin_issuance_enabled=true WHERE singleton; COMMIT;\n"
 pathlib.Path(sys.argv[2]).write_text(sql)
 PY
 ai_db -q --file /proof/activate.sql >/dev/null
-printf 'Apply body completed; timer recovery still required: W6 overlay/env/cutover active; require outside gate probe before close\n'
+printf 'Apply body completed; recycle timer HELD until ai-w6-finish: W6 overlay/env/cutover active; require outside gate probe before close\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
 )
 ```
 
@@ -3577,8 +3989,29 @@ printf 'PASS W6 measured release, overlay/env and public gate open\n' >"$PROOF_D
 # step: ai-w6-activation-rollback
 # readonly: no
 # host: HezLead box root; remove activation env/overlay and close cutover
+(
+# Installed as the FIRST statement, before set -u and the first rollback operation: any exit re-arms the held recycle timer; the original failure is
+# kept and a failed re-arm is reported (and fails a successful rollback).
+C1_BLOCK_DONE=0
+w6_rollback_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-activation-rollback: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+  test "$status" != 0 || status=3
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer re-arm on exit expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active on exit got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract: a failed rollback never claims CLOSED (1 becomes 2, UNKNOWN); other codes are kept.
+ if test "$status" = 1; then status=2; fi
+ exit "$status"
+}
+trap w6_rollback_exit EXIT
 set -euo pipefail
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
+# guard_cutover_state refuses a generation change while issuance is open: close first, then invalidate, one transaction.
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false WHERE singleton; UPDATE commonswarm_oauth.admin_cutover_state SET invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 OAUTH_TARGET=$(readlink -f /home/commonswarm/oauth/current)
 python3 - "$OAUTH_TARGET" "$SECRET_STAGE/service.closed.env" <<'PY'
 import pathlib,re,sys
@@ -3601,8 +4034,13 @@ assert not any(m['Destination']=='/run/commonswarm-oauth/admin-issuer-database-c
 with urllib.request.urlopen('http://127.0.0.1:3490/admin/gate',timeout=15) as r: assert json.loads(r.read(4096))=={'state':'closed'}
 PY
 test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
-systemctl start "$EDGE_RECYCLE_TIMER"
-printf 'PASS W6 env/overlay removed; DB closed; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+# Re-arm the recycle timer W6 held; also the emergency-close path.
+systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer start expected success got failure; STOP\n' >&2; exit 1; }
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-activation-rollback: recycle timer expected active got inactive; STOP\n' >&2; exit 1; }
+printf 'PASS W6 env/overlay removed; DB closed; recycle timer active; history and issuer credential retained\n' >"$PROOF_DIR/activation-rollback.txt"
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
 ```
 
 ```sh
@@ -3658,6 +4096,82 @@ role, not created by owner approval. PASS10 pins lowercase SHA-256 of
 Never hash provider-normalized defaults or confuse the document's byte digest
 with its canonical JSON digest. Approval uses the exact version after the
 published document, reviewed digest and DB row are reconciled.
+
+### W6 producers (contracts; each is produced fresh for THIS release and W6 window)
+
+Nothing from an earlier release or window is reused. The 2026-10-03 pointer,
+callback, consent receipts and BROWSER-READY marker belong to other releases or
+windows; every one is replaced: the pointer is created exclusively per W6
+window with that window's expiry, and the consent receipts are bound to
+RELEASE_SHA.
+
+- **BROWSER-READY** (`/Users/yulanbot/work/BROWSER-READY`, Mac). Producer: HezLead
+  on Tom's unlocked Mac, by `touch` AFTER the W5 close at this release and
+  shortly before the W6 open. Contract: a regular non-symlink file; only its
+  modification time matters (newer than the W5 `closed.txt` time and not in the
+  future: ai-w6-readiness, ai-w6-preflight, ai-open). Content is ignored. A file
+  touched before the W5 close STOPs W6; touch it again after the close.
+- **Smoke pointer** (`/Users/yulanbot/work/dcr-rt/c1-smoke.pointer`, Mac). Producer:
+  the plan's own ai-w6-pointer, after ai-w6-start, once per W6 window (exclusive
+  create; it must not exist). Format: one JSON line, 0600, sorted keys
+  `authorize_url_file`, `callback_file` (absolute paths in this run's
+  `/private/tmp/anvil-secret.*` stage), `consent_choices` {`workspace_name` (the
+  C1 smoke workspace), `scopes`, `home`: false, `full_account`}, `expires_at`
+  = INPUTS `window_end_utc`. Consumer: HezLead's assigned browser consent worker
+  (the existing consent autorun, pointed at this pointer path): it waits for the
+  0600 authorize file, refuses an expired pointer, follows consent_choices
+  exactly with a fresh full-account second confirmation, and atomically writes
+  the full callback URL (0600) to `callback_file` without logging it.
+  ai-w6-secret-close removes the stage and the pointer.
+- **C1_INPUTS_FILE**: produced by ai-w6-c1-inputs below (Mac, owner session).
+  HezLead supplies only the existing smoke workspace (`C1_SMOKE_WORKSPACE_ID`,
+  exact `C1_SMOKE_WORKSPACE_NAME`) and `C1_VERIFICATION_VERSION`. The
+  block derives the rest: owner_user_id from the owner's refreshed file-store
+  session, state_directory = `defaultCredentialStateDirectory()`, target_file =
+  its `current-target.json` (keys url, anonKey), and metadata_digest from the
+  fetched public client document.
+
+```sh
+# step: ai-w6-c1-inputs
+# readonly: no
+# host: HezLead Mac, clean checkout at RELEASE_SHA with dependencies installed; owner file-store session; writes C1_INPUTS_FILE once
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
+set -euo pipefail
+: "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?FAIL ai-w6-c1-inputs: C1_INPUTS_FILE expected absolute-new-file got unset; STOP}"
+: "${C1_SMOKE_WORKSPACE_ID:?}" "${C1_SMOKE_WORKSPACE_NAME:?}" "${C1_VERIFICATION_VERSION:?}"
+C1_INPUTS_RELEASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE") || { printf 'FAIL ai-w6-c1-inputs: INPUTS release_sha expected readable got failure; STOP\n' >&2; exit 1; }
+test "$(git rev-parse HEAD)" = "$C1_INPUTS_RELEASE" || { printf 'FAIL ai-w6-c1-inputs: checkout HEAD expected release-sha got mismatch; STOP\n' >&2; exit 1; }
+node --import tsx --input-type=module - "$INPUTS_FILE" "$C1_INPUTS_FILE" "$C1_SMOKE_WORKSPACE_ID" "$C1_SMOKE_WORKSPACE_NAME" "$C1_VERIFICATION_VERSION" <<'JS'
+import { open, readFile } from 'node:fs/promises';
+import { join, isAbsolute } from 'node:path';
+import { createHash } from 'node:crypto';
+import { credentialStore, defaultCredentialStateDirectory } from './src/cloud/storage.ts';
+import { readCurrentTarget } from './src/cloud/current-target.ts';
+import { refreshedCredential } from './src/cloud/auth.ts';
+import { canonicalAdminJson } from './src/protocol/admin-policy.ts';
+const [inputs,out,workspaceId,workspaceName,version]=process.argv.slice(2);
+try {
+ const d=JSON.parse(await readFile(inputs,'utf8'));
+ if(d.window!=='W6' || !isAbsolute(out)) throw Error('window/output');
+ if(!/^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/.test(workspaceId)) throw Error('workspace id');
+ if(workspaceName.length<1 || workspaceName.length>200 || /[\u0000-\u001f]/.test(workspaceName) || /bearer|https?:\/\/|eyJ[A-Za-z0-9_-]+\.|(?:token|secret|password)=/i.test(workspaceName)) throw Error('workspace name');
+ if(!/^[1-9][0-9]{0,5}$/.test(version)) throw Error('verification version');
+ const stateDirectory=defaultCredentialStateDirectory();
+ const target=await readCurrentTarget(); if(target?.url!=='https://api.commonswarm.com') throw Error('target');
+ const store=await credentialStore({target,stateDirectory,forceFile:true,warn:()=>{}});
+ const human=await refreshedCredential(target,store);
+ const response=await fetch('https://commonswarm.com/oauth/c1-smoke/client.json',{redirect:'error',signal:AbortSignal.timeout(10000)});
+ if(!response.ok || response.headers.get('content-type')?.split(';')[0]!=='application/json') throw Error('document');
+ const text=await response.text(); if(Buffer.byteLength(text)>4096) throw Error('document size');
+ const doc=JSON.parse(text); if(doc.client_id!=='https://commonswarm.com/oauth/c1-smoke/client.json') throw Error('client id');
+ const c={release_sha:d.release_sha,window_id:d.window_id,plan_sha256:d.plan_sha256,owner_user_id:human.userId,smoke_workspace_id:workspaceId,
+   smoke_workspace_name:workspaceName,verification_version:Number(version),metadata_digest:createHash('sha256').update(canonicalAdminJson(doc)).digest('hex'),
+   target_file:join(stateDirectory,'current-target.json'),state_directory:stateDirectory};
+ const fd=await open(out,'wx',0o600); await fd.writeFile(JSON.stringify(c)+'\n'); await fd.close();
+ console.log('PASS ai-w6-c1-inputs: C1 inputs written; owner, target and digest derived; no credentials emitted');
+} catch { console.error('FAIL ai-w6-c1-inputs: C1 inputs expected derived got refused; STOP'); process.exitCode=1; }
+JS
+```
 
 ```sh
 # step: ai-w6-preflight
@@ -3725,6 +4239,17 @@ install -m 0600 "$C1_INPUTS_FILE" "$C1_PROOF_DIR/C1-inputs.json"
 # host: HezLead Mac; nonsecret receipts only, whole block per selected file
 set -euo pipefail
 : "${C1_TRANSFER_DIRECTION:?upload or download}" "${C1_TRANSFER_FILE:?}" "${C1_PROOF_DIR:?}"
+# Inside the fence window (C1_FENCE_DEADLINE, set by ai-w6-fence-driver) every transport is bounded by the
+# remaining deadline, a stalled established session included; ssh keepalives bound it everywhere.
+c1_transport() {
+ if test -n "${C1_FENCE_DEADLINE:-}"; then
+  C1_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+  test "$C1_LEFT" -gt 0 || { printf 'FAIL ai-w6-transfer: fence deadline expected remaining got expired; STOP\n' >&2; return 1; }
+  perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$C1_LEFT" "$@"
+ else
+  "$@"
+ fi
+}
 C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
 case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
  upload:C1-inputs.json|upload:agent.json|upload:agent-final.json|upload:client-withdraw.json|upload:C1.json|upload:C1-cleanup.txt)
@@ -3732,16 +4257,16 @@ case "$C1_TRANSFER_DIRECTION:$C1_TRANSFER_FILE" in
   test -f "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected regular-file got missing; STOP\n' >&2; exit 1; }
   test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: upload file expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'test ! -e %q' "$C1_UPLOAD"
-  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
-  scp -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
+  c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE"
+  c1_transport scp -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p "$C1_PROOF_DIR/$C1_TRANSFER_FILE" "ops@100.115.66.74:$C1_UPLOAD"
   printf -v C1_REMOTE 'sudo -n install -o root -g root -m 0600 %q %q' "$C1_UPLOAD" "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
-  ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE"
+  c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE"
   ;;
  download:C1-client-check.txt|download:C1-audit.json|download:C1-fence.txt|download:C1-finish.json)
   test ! -e "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected absent got present; STOP\n' >&2; exit 1; }
   test ! -L "$C1_PROOF_DIR/$C1_TRANSFER_FILE" || { printf 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP\n' >&2; exit 1; }
   printf -v C1_REMOTE 'sudo -n cat %q' "$C1_BOX_PROOF/$C1_TRANSFER_FILE"
-  ( set -C; umask 077; ssh -o BatchMode=yes ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
+  ( set -C; umask 077; c1_transport ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$C1_REMOTE" >"$C1_PROOF_DIR/$C1_TRANSFER_FILE" )
   ;;
  *) printf 'FAIL nonsecret C1 transfer allowlist; STOP\n' >&2; exit 1;;
 esac
@@ -3752,7 +4277,7 @@ C1_INPUTS_FILE to that derived proof path), download C1-client-check.txt before
 owner approval, upload agent.json before SQL audit (C1_AGENT_RECEIPT on box),
 download C1-audit.json before human revoke, and download C1-fence.txt and C1-finish.json before
 reporting. Upload client-withdraw.json before revoke and agent-final.json after the same runner completes, before finish; after report/cleanup, upload C1.json and C1-cleanup.txt for W6 close.
-The immutable C1.json and its measured digest become W7's C1_REPORT_FILE input.
+The immutable box C1.json, bound by W7's `w6_window_id` with that W6's close-result.json, is W7's C1 input; ai-w7-preflight measures its digest.
 This allowlist excludes private authorize/callback/key/token/session files.
 
 ```sh
@@ -3761,7 +4286,9 @@ This allowlist excludes private authorize/callback/key/token/session files.
 # host: HezLead box root, W6 read-only SQL; before owner approval
 set -euo pipefail
 test "$WINDOW" = W6
-: "${C1_INPUTS_FILE:?}"
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-client-check: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
+test -f "$PROOF_DIR/C1-client-verification.txt" || { printf 'FAIL ai-w6-client-check: C1-client-verification.txt expected present got missing; STOP\n' >&2; exit 1; }
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
 test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND legacy_closed AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
@@ -3782,12 +4309,14 @@ printf 'PASS exact C1 version/canonical digest/reviewed ceiling and smoke worksp
 # step: ai-w6-owner-client-command
 # readonly: no
 # host: HezLead Mac owner file-store CLI session; approve or withdraw only
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${INPUTS_FILE:?}" "${C1_INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_CLIENT_ACTION:?approve or withdraw}"
 case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
 # Execute ai-w6-preflight and retain box C1-client-check.txt first.
 # approve: only after ai-w6-start/ai-w6-pointer, immediately before consent.
-# withdraw: after audit, immediately before human revoke in this same W6.
+# withdraw: AFTER ai-w6-fence-driver (human revoke + refused follow-up) and the runner's exit, in this same W6;
+# withdrawal itself fences every family of this owner/client/version, so it never precedes the human revoke.
 if test "$C1_CLIENT_ACTION" = approve; then test -f /Users/yulanbot/work/dcr-rt/c1-smoke.pointer; fi
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
 node --import tsx --input-type=module - "$C1_INPUTS_FILE" "$C1_PROOF_DIR" "$C1_CLIENT_ACTION" <<'JS'
@@ -3826,6 +4355,7 @@ JS
 # step: ai-w6-start
 # readonly: no
 # host: HezLead Mac, after preflight/client-check; owner approval follows pointer publication; no browser launch
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 : "${C1_PROOF_DIR:?}"
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
@@ -3849,8 +4379,12 @@ printf '%s\n' "$C1_RUNNER_PID" >"$C1_PROOF_DIR/runner.pid"
 # step: ai-w6-pointer
 # readonly: no
 # host: HezLead Mac; runner underway, before owner approval/consent
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
-: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_INPUTS_FILE:?}"
+: "${C1_INPUTS_FILE:?}"
+# F10: the stage and pointer are recorded by ai-w6-start; a later shell derives them from C1_PROOF_DIR.
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "${C1_PROOF_DIR:?}/secret-stage.path")}
+C1_POINTER=${C1_POINTER:-/Users/yulanbot/work/dcr-rt/c1-smoke.pointer}
 node scripts/admin-smoke.mjs --dry-run >"$C1_SECRET_STAGE/request-plan.json"
 python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_INPUTS_FILE" "$INPUTS_FILE" docs/design/2026-10-02-ADMIN-ISSUANCE-SPEC.md <<'PY'
 import datetime,json,os,pathlib,re,sys
@@ -3880,6 +4414,8 @@ PY
 # readonly: no
 # host: HezLead Mac; export only redacted receipt from runner secret directory
 set -euo pipefail
+: "${C1_PROOF_DIR:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
 python3 - "$C1_SECRET_STAGE/agent.json" "$C1_PROOF_DIR/agent.json" <<'PY'
 import json,pathlib,re,sys
 source,out=map(pathlib.Path,sys.argv[1:]); r=json.loads(source.read_text())
@@ -3890,6 +4426,7 @@ keys=['ok','run_id','workspace','steps','refused_after_fence','failed_step','fai
 public={k:r[k] for k in keys}
 assert not re.search(r'(?i)access_token|refresh_token|code_verifier|authorization|eyJ[A-Za-z0-9_-]+\.',json.dumps(public)), 'FAIL private receipt data; STOP'
 assert not out.is_symlink()
+# The first export (fence window) may be replaced by the final one after the runner exits.
 out.write_text(json.dumps(public)+'\n'); out.chmod(0o600)
 if r['ok'] is True:
     final=out.parent/'agent-final.json'; assert not final.exists() and not final.is_symlink()
@@ -3912,7 +4449,10 @@ most-recent-grant guess. Copy only agent.json (redacted command IDs) to the box.
 # readonly: no
 # host: HezLead box root; READ-ONLY SQL, smoke grant/family only
 set -euo pipefail
-: "${C1_AGENT_RECEIPT:?}" "${C1_INPUTS_FILE:?}"
+C1_AGENT_RECEIPT=${C1_AGENT_RECEIPT:-$PROOF_DIR/agent.json}
+C1_INPUTS_FILE=${C1_INPUTS_FILE:-$PROOF_DIR/C1-inputs.json}
+test "$C1_AGENT_RECEIPT" = "$PROOF_DIR/agent.json" || { printf 'FAIL ai-w6-audit: C1_AGENT_RECEIPT expected the box proof copy got other; STOP\n' >&2; exit 1; }
+test "$C1_INPUTS_FILE" = "$PROOF_DIR/C1-inputs.json" || { printf 'FAIL ai-w6-audit: C1_INPUTS_FILE expected the box proof copy got other; STOP\n' >&2; exit 1; }
 python3 - "$C1_AGENT_RECEIPT" "$C1_INPUTS_FILE" "$PROOF_DIR/c1-audit.sql" <<'PY'
 import json,pathlib,re,sys
 r=json.load(open(sys.argv[1])); c=json.load(open(sys.argv[2])); run=r['run_id']; owner=c['owner_user_id']
@@ -3926,27 +4466,184 @@ sql="BEGIN READ ONLY; SELECT count(*)=1 AS c1_one FROM ("+base+") s \\gset\n\\if
 sql+="WITH smoke AS ("+base+") SELECT json_build_object('grant_id',s.admin_grant_id,'provider_grant_id',s.provider_grant_id,'audit_counts',(SELECT json_object_agg(k.kind,k.n) FROM (SELECT kinds.kind,count(a.audit_id) AS n FROM (VALUES ('init'),('list'),('read'),('action')) kinds(kind) LEFT JOIN commonswarm_oauth.admin_oauth_audit a ON a.admin_grant_id=s.admin_grant_id AND a.provider_grant_id=s.provider_grant_id AND a.event_kind=kinds.kind AND a.outcome='committed' GROUP BY kinds.kind) k)) FROM smoke s; COMMIT;\n"
 pathlib.Path(sys.argv[3]).write_text(sql)
 PY
-ai_ro -Atq --file /proof/c1-audit.sql >"$PROOF_DIR/C1-audit.json"
-python3 - "$PROOF_DIR/C1-audit.json" <<'PY'
+ai_ro -Atq --file /proof/c1-audit.sql >"$PROOF_DIR/C1-audit.json" || { printf 'FAIL ai-w6-audit: smoke audit query expected success got failure; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/C1-audit.json" <<'PY' || { printf 'FAIL ai-w6-audit: audit counts expected four committed kinds got other; STOP\n' >&2; exit 1; }
 import json,sys
 r=json.load(open(sys.argv[1])); assert set(r['audit_counts'])=={'init','list','read','action'} and all(type(n) is int and n>0 for n in r['audit_counts'].values())
 PY
 ```
 
+The fence window is short: after its post-refresh read the runner waits at most
+240 s (and at most until its 300 s access token is 20 s from expiry) for the
+fence file. Inside that window only four things happen, in this order, driven by
+ONE Mac step (ai-w6-fence-driver) that runs the reviewed blocks verbatim from the
+verified plan bytes: ai-w6-agent-receipt, upload of agent.json, the box audit
+(ai-w6-audit-watch, already waiting in the box root shell, runs ai-w6-audit as
+soon as agent.json arrives), download of C1-audit.json, and ai-w6-human-revoke.
+The runner prints its actual nonsecret fence cutoff (`fence_cutoff_epoch_ms`,
+the minimum of its fence wait, token expiry and total deadline) just before its
+ready line. The driver's absolute deadline is that cutoff less 5 s, never a
+fresh interval from when the driver noticed the line; it refuses normal
+revocation when the runner has exited or the cutoff has passed. Every ssh/scp
+call is bounded by what remains, a stalled session included; with less than
+45 s left it does NOT revoke. Inside ai-w6-human-revoke both owner credential
+refreshes (the preflight and the CLI's own) and the revoke request run under one
+alarm at the revoke cutoff (deadline less 20 s): no revoke is dispatched after
+it, and a timeout leaves the outcome unknown, never C1 proof. After the window
+only `C1_RECOVERY_REVOKE=1` runs, as cleanup recorded in
+human-revoke-recovery.json, never as C1 refusal proof. In ai-w6-human-revoke the human revoke verb fences the grant,
+then the fence file is written and the runner proves the refused follow-up. The owner's approval withdrawal comes
+AFTER the runner exits: withdrawal itself fences every family of that
+owner/client/version (guard_owner_approval), so it must not precede the human
+revoke it is meant to follow. Report order: approval_at <= revoked_at <=
+withdrawn_at.
+
+```sh
+# step: ai-w6-audit-watch
+# readonly: no
+# host: HezLead box root shell (W6 session), started right after the owner approval and before consent; waits for agent.json, then runs ai-w6-audit
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-audit-watch: window expected W6 got other; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/C1-audit.json" || { printf 'FAIL ai-w6-audit-watch: C1-audit.json expected absent got present; STOP\n' >&2; exit 1; }
+until test -f "$PROOF_DIR/agent.json"; do
+ ai_deadline || { printf 'FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+test ! -L "$PROOF_DIR/agent.json" || { printf 'FAIL ai-w6-audit-watch: agent.json expected regular-file got symlink; STOP\n' >&2; exit 1; }
+C1_AGENT_RECEIPT=$PROOF_DIR/agent.json
+( ai_run ai-w6-audit ) || { printf 'FAIL ai-w6-audit-watch: smoke grant audit expected PASS got failure; STOP\n' >&2; exit 1; }
+printf 'PASS ai-w6-audit-watch: C1-audit.json ready for download\n'
+```
+
+```sh
+# step: ai-w6-fence-driver
+# readonly: no
+# host: HezLead Mac shell of ai-w6-start, after the owner approval; runs the fence-window blocks verbatim; nothing else may use the owner session meanwhile
+set -euo pipefail
+: "${PLAN_FILE:?}" "${INPUTS_FILE:?}" "${C1_PROOF_DIR:?}" "${C1_INPUTS_FILE:?}"
+C1_SECRET_STAGE=$(cat "$C1_PROOF_DIR/secret-stage.path") || { printf 'FAIL ai-w6-fence-driver: secret-stage.path expected readable got failure; STOP\n' >&2; exit 1; }
+C1_RUNNER_PID=$(cat "$C1_PROOF_DIR/runner.pid") || { printf 'FAIL ai-w6-fence-driver: runner.pid expected readable got failure; STOP\n' >&2; exit 1; }
+C1_POINTER=/Users/yulanbot/work/dcr-rt/c1-smoke.pointer
+RELEASE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_sha"])' "$INPUTS_FILE")
+WINDOW_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["window_id"])' "$INPUTS_FILE")
+C1_BOX_PROOF=/home/commonswarm/admin-issuance/release-proofs/${RELEASE_SHA}-W6-${WINDOW_ID}
+# The deadline comes from the RUNNER's own nonsecret fence cutoff (min of its fence wait, token expiry and total
+# deadline), printed with its ready line, less 5 s; never from when this driver noticed the line. A budget
+# (at most 220 s from that moment) may only shorten it (tests). Every transport below and in ai-w6-transfer is
+# bounded by what remains.
+test "${C1_RECOVERY_REVOKE:-0}" != 1 || { printf 'FAIL ai-w6-fence-driver: C1_RECOVERY_REVOKE expected unset in the fence window got 1; STOP\n' >&2; exit 1; }
+C1_FENCE_BUDGET=${C1_FENCE_BUDGET_SECONDS:-220}
+[[ "$C1_FENCE_BUDGET" =~ ^[1-9][0-9]{0,2}$ ]] && test "$C1_FENCE_BUDGET" -le 220 || { printf 'FAIL ai-w6-fence-driver: fence budget expected 1-220 s got other; STOP\n' >&2; exit 1; }
+fence_block() {
+ python3 -c '
+import hashlib,json,os,re,stat,sys
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b"".join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verified_plan(name,inputs,step):
+    raw=read_regular(name) if os.path.isabs(name) else None
+    if raw is None or hashlib.sha256(raw).hexdigest()!=json.load(open(inputs)).get("plan_sha256"):
+        raise SystemExit("FAIL "+step+": PLAN_FILE expected absolute-regular-file-with-input-plan_sha256 got "+("missing-or-not-regular" if raw is None else "digest-mismatch")+"; STOP")
+    return raw
+blocks=re.findall(r"^`{3}sh\n(.*?)^`{3}$",verified_plan(sys.argv[1],sys.argv[3],"ai-w6-fence-driver").decode(),re.M|re.S)
+found=[b for b in blocks if b.startswith("# step: "+sys.argv[2]+"\n")]
+if len(found)!=1: raise SystemExit("FAIL ai-w6-fence-driver: block "+sys.argv[2]+" expected one got other; STOP")
+sys.stdout.write(found[0])
+' "$PLAN_FILE" "$1" "$INPUTS_FILE"
+}
+# Each block runs in its own bash process, so its own set -e holds (no errexit-ignoring context).
+export PLAN_FILE INPUTS_FILE C1_PROOF_DIR C1_INPUTS_FILE C1_SECRET_STAGE C1_RUNNER_PID C1_POINTER RELEASE_SHA WINDOW_ID
+fence_run() {
+ local FENCE_SOURCE
+ FENCE_SOURCE=$(fence_block "$1") || return 1
+ /bin/bash -c "$FENCE_SOURCE" || { printf 'FAIL ai-w6-fence-driver: %s expected PASS got failure; STOP\n' "$1" >&2; return 1; }
+}
+# Wait for the runner's fence-ready line; consent may take up to 25 minutes.
+until grep -qx 'agent_steps_complete_awaiting_human_fence' "$C1_SECRET_STAGE/agent-status.log" 2>/dev/null; do
+ kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected awaiting fence got exited; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+FENCE_START=$(date +%s)
+C1_RUNNER_CUTOFF_MS=$(grep -E '^fence_cutoff_epoch_ms=[0-9]{13}$' "$C1_SECRET_STAGE/agent-status.log" 2>/dev/null) || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected printed got missing; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$(printf '%s\n' "$C1_RUNNER_CUTOFF_MS" | wc -l | tr -d ' ')" = 1 || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected one line got several; STOP\n' >&2; exit 1; }
+C1_FENCE_DEADLINE=$(( ${C1_RUNNER_CUTOFF_MS#fence_cutoff_epoch_ms=} / 1000 - 5 ))
+test "$C1_FENCE_DEADLINE" -le "$(( FENCE_START + C1_FENCE_BUDGET ))" || C1_FENCE_DEADLINE=$(( FENCE_START + C1_FENCE_BUDGET ))
+export C1_FENCE_DEADLINE
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive at the fence got exited; normal revoke refused; STOP\n' >&2; exit 1; }
+test "$C1_FENCE_DEADLINE" -gt "$FENCE_START" || { printf 'FAIL ai-w6-fence-driver: runner fence cutoff expected ahead got passed; normal revoke refused; run ai-emergency-close, then a recovery revoke; STOP\n' >&2; exit 1; }
+fence_run ai-w6-agent-receipt || exit 1
+export C1_TRANSFER_DIRECTION=upload C1_TRANSFER_FILE=agent.json
+fence_run ai-w6-transfer || exit 1
+printf -v FENCE_PROBE 'sudo -n test -f %q' "$C1_BOX_PROOF/C1-audit.json"
+while :; do
+ FENCE_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+ test "$FENCE_LEFT" -gt 0 || { printf 'FAIL ai-w6-fence-driver: box C1-audit.json expected before the fence deadline got none; STOP\n' >&2; exit 1; }
+ test "$(( $(date +%s) - FENCE_START ))" -lt 150 || { printf 'FAIL ai-w6-fence-driver: box C1-audit.json expected within 150 s got none; STOP\n' >&2; exit 1; }
+ if perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$FENCE_LEFT" ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 ops@100.115.66.74 "$FENCE_PROBE"; then break; fi
+ sleep 1
+done
+export C1_TRANSFER_DIRECTION=download C1_TRANSFER_FILE=C1-audit.json
+fence_run ai-w6-transfer || exit 1
+unset C1_TRANSFER_DIRECTION C1_TRANSFER_FILE
+# The revoke needs live-token budget left for the runner's refused follow-up; otherwise do not revoke here.
+FENCE_LEFT=$(( C1_FENCE_DEADLINE - $(date +%s) ))
+kill -0 "$C1_RUNNER_PID" 2>/dev/null || { printf 'FAIL ai-w6-fence-driver: runner expected alive before the human revoke got exited; revoke NOT attempted; STOP\n' >&2; exit 1; }
+test "$FENCE_LEFT" -ge 45 || { printf 'FAIL ai-w6-fence-driver: fence budget before the human revoke expected at-least-45-s got %s s; revoke NOT attempted; run ai-emergency-close, then the human revoke as recovery; STOP\n' "$FENCE_LEFT" >&2; exit 1; }
+fence_run ai-w6-human-revoke || exit 1
+FENCE_SECONDS=$(( $(date +%s) - FENCE_START ))
+printf '%s\n' "$FENCE_SECONDS" >"$C1_PROOF_DIR/fence-seconds.txt"
+printf 'PASS ai-w6-fence-driver: fence chain completed in %s s (runner budget 240 s)\n' "$FENCE_SECONDS"
+```
+
+
 ```sh
 # step: ai-w6-human-revoke
 # readonly: no
 # host: HezLead Mac, OWNER's file-store CLI session; human revoke verb D6
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
-: "${C1_PROOF_DIR:?}" "${C1_SECRET_STAGE:?}"
-# Withdraw owner client approval first, then revoke this grant/family.
-test -f "$C1_PROOF_DIR/client-withdraw.json"
-# Copy the nonsecret C1-audit.json from the box into C1_PROOF_DIR first.
+: "${C1_PROOF_DIR:?}" "${C1_INPUTS_FILE:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
+C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
+# The human revoke verb fences this grant/family FIRST; the approval withdrawal follows after the runner exits.
+test ! -e "$C1_PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-human-revoke: client-withdraw.json expected absent-before-revoke got present; STOP\n' >&2; exit 1; }
+# Normal revoke only inside the fence window ai-w6-fence-driver sets (C1_FENCE_DEADLINE). After it, only a labelled
+# cleanup revoke (C1_RECOVERY_REVOKE=1), recorded as human-revoke-recovery.json and never as C1 refusal proof.
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
+ # The recovery flag ALWAYS selects cleanup, even with a retained deadline: never the receipt or the fence file.
+ unset C1_FENCE_DEADLINE
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke-recovery.json
+elif test -z "${C1_FENCE_DEADLINE:-}"; then
+ printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected set-by-ai-w6-fence-driver got unset; for cleanup after the window set C1_RECOVERY_REVOKE=1 (never C1 proof); STOP\n' >&2; exit 1
+else
+ [[ "$C1_FENCE_DEADLINE" =~ ^[0-9]{10}$ ]] || { printf 'FAIL ai-w6-human-revoke: C1_FENCE_DEADLINE expected epoch-seconds got other; STOP\n' >&2; exit 1; }
+ C1_REVOKE_OUT=$C1_PROOF_DIR/human-revoke.json
+fi
+# Inside the fence window both owner refreshes and the revoke request run under one alarm at the revoke cutoff (20 s
+# before the fence deadline): no refresh can outlast it, and the revoke can be dispatched only before it.
+c1_revoke_bounded() {
+ if test -n "${C1_FENCE_DEADLINE:-}"; then
+  C1_LEFT=$(( C1_FENCE_DEADLINE - 20 - $(date +%s) ))
+  test "$C1_LEFT" -gt 0 || { printf 'FAIL ai-w6-human-revoke: revoke cutoff (fence deadline - 20 s) expected ahead got passed; revoke NOT dispatched; STOP\n' >&2; return 1; }
+  perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$C1_LEFT" "$@"
+ else
+  "$@"
+ fi
+}
+# The nonsecret C1-audit.json from the box is in C1_PROOF_DIR (ai-w6-fence-driver downloads it).
 C1_GRANT_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["grant_id"])' "$C1_PROOF_DIR/C1-audit.json")
 C1_REVOKE_REQUEST_ID=$(node -e 'console.log(require("node:crypto").randomUUID())')
 ( set -C; printf '%s\n' "$C1_REVOKE_REQUEST_ID" >"$C1_PROOF_DIR/revoke-request-id" )
 # Saved default CLI target/session must be the owner and production API; preflight checks below.
-node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS'
+c1_revoke_bounded node --import tsx --input-type=module - "$C1_INPUTS_FILE" <<'JS' || { printf 'FAIL ai-w6-human-revoke: owner preflight expected verified-before-the-revoke-cutoff got failure-or-timeout; revoke NOT dispatched; STOP\n' >&2; exit 1; }
 import { readFile } from 'node:fs/promises';
 import { credentialStore,defaultCredentialStateDirectory } from './src/cloud/storage.ts';
 import { cloudTarget } from './src/cloud/config.ts';
@@ -3959,9 +4656,14 @@ try {
  if(human.userId!==c.owner_user_id) throw Error();
 } catch { console.error('FAIL owner CLI target/session mismatch; STOP'); process.exitCode=1; }
 JS
-node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
+c1_revoke_bounded node --import tsx src/cli.ts admin revoke --grant-id "$C1_GRANT_ID" \
  --request-id "$C1_REVOKE_REQUEST_ID" --force-file-store --json \
- >"$C1_PROOF_DIR/human-revoke.json" 2>"$C1_PROOF_DIR/human-revoke-status.log"
+ >"$C1_REVOKE_OUT" 2>"$C1_PROOF_DIR/human-revoke-status.log" || { printf 'FAIL ai-w6-human-revoke: revoke expected confirmed-before-the-revoke-cutoff got failure-or-timeout; outcome unknown; reconcile request ID %s; a later revoke is recovery only, never C1 proof; STOP\n' "$C1_REVOKE_REQUEST_ID" >&2; exit 1; }
+if test "${C1_RECOVERY_REVOKE:-0}" = 1; then
+ python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["state"]=="revoked"' "$C1_REVOKE_OUT" || { printf 'FAIL ai-w6-human-revoke: recovery revoke expected revoked got other; STOP\n' >&2; exit 1; }
+ printf 'RECOVERY ai-w6-human-revoke: grant revoked after the fence window; human-revoke-recovery.json is cleanup, NOT C1 refusal proof\n'
+ exit 0
+fi
 python3 - "$C1_PROOF_DIR/human-revoke.json" "$C1_PROOF_DIR/agent.json" "$C1_SECRET_STAGE/fenced" <<'PY'
 import datetime,json,os,pathlib,sys
 r=json.load(open(sys.argv[1])); assert r['state']=='revoked'
@@ -3971,9 +4673,18 @@ a=json.load(open(sys.argv[2])); p=pathlib.Path(sys.argv[3]); assert not p.exists
 fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as f: f.write(a['run_id']+'\n')
 PY
-# Same runner performs --verify-fenced with a still-live token. Never restart it.
-wait "$C1_RUNNER_PID"
-# Execute ai-w6-agent-receipt again after wait, before final report.
+# Same runner performs --verify-fenced with a still-live token. Never restart it. Its exit is awaited by
+# polling (this step may run in a child shell of ai-w6-fence-driver), bounded by the runner's own deadline.
+C1_WAIT_START=$(date +%s)
+while kill -0 "$C1_RUNNER_PID" 2>/dev/null; do
+ test "$(( $(date +%s) - C1_WAIT_START ))" -lt 330 || { printf 'FAIL ai-w6-human-revoke: runner exit expected within 330 s got still-running; STOP\n' >&2; exit 1; }
+ sleep 1
+done
+python3 - "$C1_SECRET_STAGE/agent.json" <<'PY' || { printf 'FAIL ai-w6-human-revoke: runner receipt expected ok-with-refused-follow-up got other; STOP\n' >&2; exit 1; }
+import json,sys
+r=json.load(open(sys.argv[1])); assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403)
+PY
+# Execute ai-w6-agent-receipt again after the runner exits, before the withdrawal and the final report.
 ```
 
 ```sh
@@ -3993,8 +4704,8 @@ test "$(ai_ro -Atq --file /proof/c1-fence.sql)" = t
 printf 'PASS grant revoked and refresh family tombstoned; live follow-up refusal recorded by runner\n' >"$PROOF_DIR/C1-fence.txt"
 ```
 
-After the fence, execute ai-w6-owner-client-command with
-`C1_CLIENT_ACTION=withdraw`; copy its redacted receipt and C1-fence.txt to the
+After the fence and the runner's exit, execute ai-w6-owner-client-command with
+`C1_CLIENT_ACTION=withdraw`; upload its redacted receipt and download C1-fence.txt to the
 Mac proof directory. Do not edit the runner receipt to invent human results.
 The receipt below combines independently observed audit, human and agent proof.
 The workspace remains **`c1-smoke-<runid> (test, archive me)`**, accepted residue
@@ -4007,6 +4718,7 @@ and keep the callback free of secrets. Never leave a long-lived approved client.
 # step: ai-w6-report
 # readonly: no
 # host: HezLead Mac; redacted report and machine receipt
+unset NODE_OPTIONS ADMIN_SMOKE_TEST_TRANSPORT ADMIN_SMOKE_FIXTURE_ORIGIN ADMIN_SMOKE_FIXTURE_SLOW_FENCE_OPEN_MS ADMIN_SMOKE_SECRET_ROOT # production node: no inherited preload or test-transport input
 set -euo pipefail
 node --input-type=module - "$C1_PROOF_DIR" "$INPUTS_FILE" <<'JS'
 import { readFile,writeFile } from 'node:fs/promises';
@@ -4022,11 +4734,11 @@ try {
  const withdrawal=JSON.parse(await readFile(`${root}/client-withdraw.json`,'utf8'));
  const fence=await readFile(`${root}/C1-fence.txt`,'utf8');
  if(!a.ok || a.refused_after_fence?.refusal_code==null || ![401,403].includes(a.refused_after_fence.http_status) || revoke.state!=='revoked' || withdrawal.status!=='PASS' || !fence.startsWith('PASS') || !a.workspace.accepted_residue || !Object.values(audit.audit_counts).every(n=>Number.isSafeInteger(n)&&n>0)) throw Error();
- if(!approval.approval_at || !withdrawal.withdrawn_at || !revoke.revoked_at || !(Date.parse(approval.approval_at)<=Date.parse(withdrawal.withdrawn_at) && Date.parse(withdrawal.withdrawn_at)<=Date.parse(revoke.revoked_at))) throw Error();
+ if(!approval.approval_at || !withdrawal.withdrawn_at || !revoke.revoked_at || !(Date.parse(approval.approval_at)<=Date.parse(revoke.revoked_at) && Date.parse(revoke.revoked_at)<=Date.parse(withdrawal.withdrawn_at))) throw Error();
  if(finish.state!==(d.keep_open===true?'open':'closed') || finish.explicit_keep_open!==(d.keep_open===true)) throw Error();
  const r={approval_at:approval.approval_at,withdrawn_at:withdrawal.withdrawn_at,revoked_at:revoke.revoked_at,refused_follow_up:a.refused_after_fence,final_gate:finish.state,release_sha:d.release_sha,status:'PASS',cleanup:true,audit_kinds:['init','list','read','action'],audit_counts:audit.audit_counts,grant_revoked:true,refresh_family_tombstoned:true,live_access_refused:true,client_approval_withdrawn:true,accepted_residue:a.workspace.name,approval_scope:'account-wide owner/client/version',site_document_removal:'W7/W5b next reviewed site release'};
  await writeFile(`${root}/C1.json`,JSON.stringify(r,null,2)+'\n',{flag:'wx',mode:0o600});
- const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nApproval scope: account-wide owner/client/version. Approval at ${approval.approval_at}; withdrawn at ${withdrawal.withdrawn_at}; revoked at ${revoke.revoked_at}.\n\nRefused follow-up: HTTP ${a.refused_after_fence.http_status}, ${a.refused_after_fence.refusal_code}. Final gate: ${finish.state}.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W5b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
+ const text=`# C1 smoke\n\nRelease: ${d.release_sha}\n\nPASS hosted consent, PKCE/DPoP, init/list/read/action, create workspace/seat, revoke seat, refresh, human revoke, live access refusal and approval withdrawal.\n\nApproval scope: account-wide owner/client/version. Approval at ${approval.approval_at}; revoked at ${revoke.revoked_at}; withdrawn at ${withdrawal.withdrawn_at}.\n\nRefused follow-up: HTTP ${a.refused_after_fence.http_status}, ${a.refused_after_fence.refusal_code}. Final gate: ${finish.state}.\n\nAudit counts: ${JSON.stringify(audit.audit_counts)}\n\nAccepted residue: ${a.workspace.name}. Tom: archive in /app.\n\nRefresh family tombstone measured; no post-revoke refresh request was made.\n\nFollow-up W7/W5b: next site release removes oauth/c1-smoke/client.json and verifies 404.\n`;
  await writeFile(`${root}/C1-SMOKE-REPORT.md`,text,{flag:'wx',mode:0o600});
 } catch { console.error('FAIL C1 report evidence incomplete; STOP'); process.exitCode=1; }
 JS
@@ -4037,7 +4749,10 @@ JS
 # readonly: no
 # host: HezLead Mac; success or stopped runner, guarded private cleanup
 set -euo pipefail
-: "${C1_SECRET_STAGE:?}" "${C1_POINTER:?}" "${C1_PROOF_DIR:?}" "${C1_RUNNER_PID:?}"
+: "${C1_PROOF_DIR:?}"
+C1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat "$C1_PROOF_DIR/secret-stage.path")}
+C1_RUNNER_PID=${C1_RUNNER_PID:-$(cat "$C1_PROOF_DIR/runner.pid")}
+C1_POINTER=${C1_POINTER:-/Users/yulanbot/work/dcr-rt/c1-smoke.pointer}
 if kill -0 "$C1_RUNNER_PID" 2>/dev/null; then printf 'FAIL runner still active; STOP before cleanup\n' >&2; exit 1; fi
 python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
@@ -4057,26 +4772,11 @@ printf 'PASS private handoffs removed; redacted receipts and accepted residue re
 ```
 
 ```sh
-# step: ai-w6-finish
-# readonly: no
-# host: HezLead box root; after approval withdrawal, grant/family revoke and refused follow-up
+# step: ai-w6-closed-gate-probe
+# readonly: probe
+# host: HezLead box root; outside public gate after the W6 default deactivation (called by ai-w6-finish)
 set -euo pipefail
-test "$WINDOW" = W6
-ai_run ai-inputs
-test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
-test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
-python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
-import json,sys
-r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
-assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403) and r['refused_after_fence']['refusal_code'], 'FAIL actual refused follow-up; STOP'
-assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STOP'
-PY
-if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
- ai_run ai-w6-activation-probes
- printf '{"state":"open","explicit_keep_open":true}\n' >"$PROOF_DIR/C1-finish.json"
-else
- ai_run ai-w6-activation-rollback
- python3 - <<'PY'
+python3 - <<'PY'
 import json,urllib.request
 for method in ('GET','HEAD'):
     req=urllib.request.Request('https://mcp.commonswarm.com/admin/gate',method=method,headers={'Origin':'https://commonswarm.com','User-Agent':'curl/8.7.1'})
@@ -4086,8 +4786,68 @@ for method in ('GET','HEAD'):
         assert (json.loads(body)=={'state':'closed'}) if method=='GET' else body==b''
 print('PASS W6 default deactivation: public GET/HEAD gate CLOSED')
 PY
+```
+
+```sh
+# step: ai-w6-finish
+# readonly: no
+# host: HezLead box root; after the human revoke, the refused follow-up and the approval withdrawal
+# Own subshell: the EXIT trap re-arms the timer BEFORE control returns to the window shell and ai-close.
+(
+# HezLead ruling: every exit re-arms the recycle timer W6 has held since ai-w6-activation-apply.
+C1_CLOSED_CONFIRMED=0
+C1_BLOCK_DONE=0
+w6_finish_exit() {
+ local status=$?
+ trap - EXIT
+ if test "$status" = 0 && test "${C1_BLOCK_DONE:-0}" != 1; then status=2; fi
+ if test -z "${EDGE_RECYCLE_TIMER:-}"; then
+  test "$status" = 0 || printf 'FAIL ai-w6-finish: recycle timer name unknown at exit; re-arm it by hand with ai-w4-timer-recovery; STOP\n' >&2
+ elif ! systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"; then
+  systemctl start "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer start expected success got failure; STOP\n' >&2; test "$status" != 0 || status=3; }
+  systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer expected active got inactive; STOP\n' >&2; test "$status" != 0 || status=3; }
+ fi
+ # Status contract (first statement of the block): 1 only after a confirmed CLOSED readback; anything else UNKNOWN.
+ if test "$status" = 1 && test "${C1_CLOSED_CONFIRMED:-0}" != 1; then status=2; fi
+ exit "$status"
+}
+trap w6_finish_exit EXIT
+set -euo pipefail
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-finish: window expected W6 got other; STOP\n' >&2; exit 2; }
+ai_run ai-inputs
+test -f "$PROOF_DIR/C1-fence.txt" || { printf 'FAIL ai-w6-finish: C1-fence.txt expected present got missing; STOP\n' >&2; exit 1; }
+test -f "$PROOF_DIR/client-withdraw.json" || { printf 'FAIL ai-w6-finish: client-withdraw.json expected present got missing; STOP\n' >&2; exit 1; }
+test ! -e "$PROOF_DIR/edge-measurement-final.json" || { printf 'FAIL ai-w6-finish: edge-measurement-final.json expected absent got present; STOP\n' >&2; exit 1; }
+python3 - "$PROOF_DIR/agent-final.json" "$PROOF_DIR/client-withdraw.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1])); w=json.load(open(sys.argv[2]))
+assert r['ok'] is True and r['refused_after_fence']['http_status'] in (401,403) and r['refused_after_fence']['refusal_code'], 'FAIL actual refused follow-up; STOP'
+assert w['status']=='PASS' and w['withdrawn_at'], 'FAIL approval withdrawal; STOP'
+PY
+EDGE_MEASUREMENT_OUT=$PROOF_DIR/edge-measurement-final.json
+if test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
+ # Keep open: the remeasure closes, measures and reopens ONLY through the measured path; on failure this
+ # step reports the remeasure's own result (1 confirmed CLOSED, otherwise UNKNOWN).
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: keep-open remeasure expected measured-and-reopened got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+ W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: keep-open state expected open-and-measured got other; STOP\n' >&2; exit 1; }
+ ai_run ai-w6-activation-probes
+ printf '{"state":"open","explicit_keep_open":true}\n' >"$PROOF_DIR/C1-finish.json"
+else
+ ai_run ai-w6-activation-rollback
+ # The closed state is measured too, so W7 opens on a fresh receipt; hold the timer for the hook pair.
+ systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w6-finish: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+ ( ai_run ai-edge-remeasure ) || { W6_REMEASURE_STATUS=$? W6_REMEASURE_CALLER=ai-w6-finish; printf 'FAIL ai-w6-finish: closed-state remeasure expected measured got failure; STOP\n' >&2; if test "$W6_REMEASURE_STATUS" = 1; then C1_CLOSED_CONFIRMED=1; printf 'FAIL %s: issuance CLOSED (remeasure failure close confirmed by readback); STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 1; fi; printf 'FAIL %s: issuance state UNKNOWN after the remeasure failure (may be OPEN); run ai-emergency-close; STOP\n' "$W6_REMEASURE_CALLER" >&2; exit 2; }
+ W6_FINAL_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled AND invalidated_at IS NULL AND measured_generation=release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-w6-finish: cutover state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W6_FINAL_STATE" = t || { printf 'FAIL ai-w6-finish: default state expected closed-and-measured got other; STOP\n' >&2; exit 1; }
+ ai_run ai-w6-closed-gate-probe
  printf '{"state":"closed","explicit_keep_open":false}\n' >"$PROOF_DIR/C1-finish.json"
 fi
+unset EDGE_MEASUREMENT_OUT
+printf 'PASS ai-w6-finish: final state recorded; edge-measurement-final.json is W7 EDGE_MEASUREMENT_FILE; recycle timer re-armed on exit\n'
+# Reached only by running to the end: an early exit (an expansion error can leave $? at 0) is never success.
+C1_BLOCK_DONE=1
+)
 ```
 
 
@@ -4118,16 +4878,35 @@ PY
 ```sh
 # step: ai-w7-preflight
 # readonly: yes
-# host: box root; no mutation
+# host: box root; no mutation; binds the W6 of this release named by w6_window_id and prints the C1 report binding
 set -euo pipefail
-: "${C1_REPORT_FILE:?}" "${C1_REPORT_SHA256:?}"
-python3 - "$C1_REPORT_FILE" "$C1_REPORT_SHA256" "$RELEASE_SHA" <<'PY'
-import hashlib,json,pathlib,re,sys
-p=pathlib.Path(sys.argv[1]); assert p.is_absolute() and p.is_file() and not p.is_symlink()
-assert re.fullmatch('[0-9a-f]{64}',sys.argv[2]) and hashlib.sha256(p.read_bytes()).hexdigest()==sys.argv[2]
-r=json.loads(p.read_text())
-assert r.get('release_sha')==sys.argv[3] and r.get('status')=='PASS' and r.get('cleanup') is True
-assert r.get('audit_kinds')==['init','list','read','action'] and r.get('grant_revoked') is True and r.get('refresh_family_tombstoned') is True and r.get('live_access_refused') is True and r.get('client_approval_withdrawn') is True, 'FAIL W7 C1 incomplete; STOP'
+: "${INPUTS_FILE:?}"
+python3 - "$INPUTS_FILE" <<'PY'
+import hashlib,json,os,pathlib,re,stat,sys
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-w7-preflight: '+what+' expected '+expected+' got '+got+'; STOP')
+def read(path):
+    try: fd=os.open(str(path),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except OSError: return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        return os.read(fd,1048577)
+    finally: os.close(fd)
+d=json.load(open(sys.argv[1])); sha=d.get('release_sha'); wid=d.get('w6_window_id')
+need(d.get('window')=='W7' and isinstance(wid,str) and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'W7 w6_window_id','six-alphanumeric-window-id','missing-or-other')
+w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+sha+'-W6-'+wid)
+need(w.is_dir() and not w.is_symlink() and w.resolve()==w,'W6 proof directory','directory','missing-or-symlink')
+i=read(w/'inputs.json'); closed=read(w/'closed.txt'); record=read(w/'close-result.json'); report=read(w/'C1.json')
+need(None not in (i,closed,record,report),'W6 inputs.json/closed.txt/close-result.json/C1.json','regular-files','missing-or-not-regular')
+i=json.loads(i)
+need(i.get('window')=='W6' and i.get('release_sha')==sha and i.get('window_id')==wid,'W6 inputs.json binding','W6-same-release-and-id','mismatch')
+r=json.loads(record)
+need(record==(json.dumps(r,sort_keys=True)+'\n').encode() and set(r)=={'release_sha','window','window_id','result','closed_at'},'W6 close-result.json','exact-sorted-record','other')
+need(r['release_sha']==sha and r['window']=='W6' and r['window_id']==wid and r['result']=='success' and (r['closed_at']+'\n').encode()==closed,'W6 close result','success-at-closed.txt','other')
+c=json.loads(report)
+need(c.get('release_sha')==sha and c.get('status')=='PASS' and c.get('cleanup') is True,'W6 C1.json release/status/cleanup','this-release-PASS-cleanup','other')
+need(c.get('audit_kinds')==['init','list','read','action'] and c.get('grant_revoked') is True and c.get('refresh_family_tombstoned') is True and c.get('live_access_refused') is True and c.get('client_approval_withdrawn') is True,'W6 C1.json evidence','complete','incomplete')
+print(json.dumps({'w6_window_id':wid,'c1_report':str(w/'C1.json'),'c1_report_sha256':hashlib.sha256(report).hexdigest(),'final_gate':c.get('final_gate')},sort_keys=True))
 PY
 ```
 
@@ -4139,7 +4918,8 @@ set -euo pipefail
 test "$WINDOW" = W7
 ai_run ai-w7-approval
 ai_run ai-gates
-ai_run ai-w7-preflight
+W7_C1_BINDING=$(ai_run ai-w7-preflight) || { printf 'FAIL ai-w7-proof: W6 C1 binding expected valid got refused; STOP\n' >&2; exit 1; }
+printf '%s\n' "$W7_C1_BINDING" >"$PROOF_DIR/c1-report-binding.json"
 ai_deadline
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(ai_ro -Atq --command "SELECT legacy_closed AND legacy_fence_evidence_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM swarm.admin_grants WHERE registry_version=1 AND state='active') AND NOT has_table_privilege('swarm_command','swarm.admin_credentials','SELECT,INSERT,UPDATE') FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t
@@ -4299,10 +5079,15 @@ test ! -e "$PROOF_DIR/close-result.json"
 if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6 && test "$(python3 -c 'import json,sys; print("1" if json.load(open(sys.argv[1])).get("keep_open",False) else "0")' "$INPUTS_FILE")" = 1; then
  ai_run ai-inputs
  test "$(ai_ro -Atq --command 'SELECT admin_issuance_enabled AND invalidated_at IS NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
+elif test "$WINDOW" = W7 && test "$CLOSE_RESULT" = success; then
+ W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-close: W7 gate state query expected success got failure; STOP\n' >&2; exit 1; }
+ W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt") || { printf 'FAIL ai-close: W7 retirement-gate-state.txt expected present got missing; STOP\n' >&2; exit 1; }
+ test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE" || { printf 'FAIL ai-close: W7 gate state expected retained-retirement-state got other; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" = W7; then
- W7_GATE_STATE=$(ai_ro -Atq --command 'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')
- W7_RETAINED_GATE_STATE=$(cat "$PROOF_DIR/retirement-gate-state.txt")
- test "$W7_GATE_STATE" = "$W7_RETAINED_GATE_STATE"
+ # Recovered W7: the emergency close is the evidence, independent of any retirement proof file.
+ test -f "$PROOF_DIR/activation-rollback.txt" || { printf 'FAIL ai-close: recovered W7 activation-rollback.txt (ai-emergency-close) expected present got missing; STOP\n' >&2; exit 1; }
+ W7_RECOVERED_STATE=$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;') || { printf 'FAIL ai-close: recovered W7 gate state query expected success got failure; STOP\n' >&2; exit 1; }
+ test "$W7_RECOVERED_STATE" = t || { printf 'FAIL ai-close: recovered W7 issuance expected closed got open; STOP\n' >&2; exit 1; }
 elif test "$WINDOW" = W2 && test ! -e "$PROOF_DIR/apply-started.txt"; then
  # W2 stopped before its fence: admin_cutover_state does not exist yet; prove nothing was applied.
  W2_APPLIED=$(ai_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version LIKE '20261003%';")
@@ -4317,7 +5102,7 @@ if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered; then
  W2B_RECOVERED=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-close: recovered W2b issuer role query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W2B_RECOVERED" = t || { printf 'FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP\n' >&2; exit 1; }
 fi
-systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery and report to HezLead; STOP\n' >&2; exit 1; }
 # Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.
 if test "${W2_UNPROVEN_RULING:-0}" = 1; then W2_ACCEPT_PAYLOAD=$(w2_unproven_ruling final); fi
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'

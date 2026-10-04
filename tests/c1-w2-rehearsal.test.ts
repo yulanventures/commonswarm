@@ -303,3 +303,85 @@ test('c1 W2 rehearsal: a forward catalog made false after the credential STOPs a
   assert.doesNotMatch(r.stdout, /^PASS ai-w2b-forward-catalogs$/m);
   assert.match(r.stdout, /^PASS cleanup: /m);
 });
+
+// ---------------- --w6: W4, recycle hook, W6 activation/C1/G3/finish, W7, recycles (lane/w6-ready) ----------------
+const w6Steps = readFileSync(resolve('scripts/c1-w6-rehearsal-steps.sh'), 'utf8');
+
+test('c1 W6 rehearsal: the sourced steps are Bash 3.2 syntax, run plan slices from the remapped copy, and --w6 needs --from-post-w2 --issuer', () => {
+  const syntax = spawnSync('/bin/bash', ['-n', resolve('scripts/c1-w6-rehearsal-steps.sh')], { encoding: 'utf8' });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.doesNotMatch(w6Steps, /\$\([^)]*<</, 'no heredoc inside $(...)');
+  assert.doesNotMatch(w6Steps, /\bHOME=/, 'HOME is never assigned');
+  assert.doesNotMatch(w6Steps, /\brm\b/, 'the steps delete nothing; the main script removes only its own mktemp directory');
+  assert.match(source, /\. "\$REPO\/scripts\/c1-w6-rehearsal-steps\.sh"/);
+  // The copy differs from the plan only by the listed prefixes, and the reverse map must restore it byte for byte.
+  assert.match(w6Steps, /assert back==raw/);
+  for (const step of ['ai-w4-apply', 'ai-w4-readback', 'ai-recycle-hook', 'ai-edge-receipt', 'ai-edge-refresh', 'ai-edge-remeasure', 'ai-w6-activation-checks',
+    'ai-w6-client-verification', 'ai-w6-activation-apply', 'ai-w6-activation-readback', 'ai-w6-activation-rollback', 'ai-w6-client-check', 'ai-w6-audit',
+    'ai-w6-fence-readback', 'ai-w6-finish', 'ai-w7-preflight', 'ai-w7-proof', 'ai-w4-timer-recovery']) {
+    assert.match(w6Steps, new RegExp(`(?:\\bx|extract "\\$PLANC") ${step} (?:block|line|lines|from)\\b`), `${step} comes from the plan copy`);
+  }
+  for (const args of [['--w6', join(scratch, 'none')], ['--issuer', '--w6', join(scratch, 'none')], ['--from-post-w2', '--w2-release-sha', 'a'.repeat(40), '--w2b-preconditions', '--w6', join(scratch, 'none')],
+    ['--from-post-w2', '--w2-release-sha', 'a'.repeat(40), '--issuer', '--plan-from', '5f64fab4', '--w6', join(scratch, 'none')]]) {
+    const r = run(args); assert.notEqual(r.status, 0, args.join(' ')); assert.match(r.stdout, /^FAIL usage: /m, args.join(' '));
+  }
+});
+
+test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle hook, F2 trigger negatives, activation, G3 both orders, both keep_open finishes, W7, ruling-1 recycles, timer re-arm', { skip: skipDb }, () => {
+  for (const tool of ['openssl', 'lsof', 'node']) assert.equal(spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status, 0, `${tool} is required for --w6`);
+  const r = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--w6', postFixture()], { PG_BIN: PG() });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const line of [
+    /^REMAP plan copy: .*; the reverse map restores the plan bytes exactly$/m,
+    /^PASS ai-w4-apply:legacy-fence-and-measure$/m, /^PASS ai-w4-readback$/m, /^PASS w4-legacy-fence: legacy_closed false -> true by apply_legacy_admin_fence/m,
+    /^PASS ai-edge-receipt:W4-measurement$/m, /^PASS ai-edge-refresh:before-W6-open$/m,
+    /^PASS ai-edge-receipt:stale-generation: refused \(generation\/release_generation\/measured_generation\)$/m,
+    /^PASS ai-w6-activation-checks:db-measurement-g4$/m, /^PASS ai-w6-activation-checks:g4-archive-missing: refused /m,
+    /^PASS ai-w6-client-verification:digest-not-the-document: refused /m, /^PASS ai-w6-client-verification$/m, /^PASS c1-verification:idempotent: /m,
+    /^PASS ai-w6-client-verification:second-active-version: refused \(another active C1 verification version\)$/m,
+    /^PASS guard_verified_client:http-redirect: refused \(admin redirect must be public HTTPS\)$/m,
+    /^PASS ai-w6-client-verification:existing-row-differs: refused \(existing C1 verification differs\)$/m,
+    /^PASS guard_verified_client:update-reviewed-field: refused \(changed verification requires a new reviewed version\)$/m,
+    /^PASS guard_verified_client:delete: refused \(verification history is immutable\)$/m,
+    /^PASS w6-apply-failure-rearms: /m, /^PASS ai-w6-activation-apply:remeasure-and-activate$/m, /^PASS w6-timer-held: /m, /^PASS ai-w6-activation-readback$/m,
+    /^PASS ai-w6-client-verification:issuance-open: refused \(C1 verification requires issuance closed\)$/m,
+    /^PASS ai-w6-client-check$/m, /^PASS ai-w6-audit$/m, /^PASS ai-w6-audit:counts: \{"action": 1, "init": 1, "list": 1, "read": 1\}$/m,
+    /^PASS g3-wrong-order \(rolled back\): withdrawal first fences the family itself/m, /^PASS ai-w6-fence-readback$/m, /^PASS g3-right-order: /m,
+    /^EMUL ai-w6-human-revoke: /m, /^EMUL ai-w6-owner-client-command withdraw: /m,
+    /^PASS ai-w6-finish:default-closed$/m, /^PASS w6-finish-default: closed and measured/m, /^PASS ai-edge-receipt:W6-default-final$/m,
+    /^PASS ai-w6-finish:keep-open$/m, /^PASS w6-finish-keep-open: reopened only through the measured hook path/m, /^PASS ai-edge-receipt:W6-keep-open-final-for-W7$/m,
+    /^PASS ai-w7-proof:binding-and-sql$/m, /^PASS ai-w7-preflight:other-w6: refused /m,
+    /^PASS w6-apply-failure-marker: one journal line and one 0644 log line, unit ai-edge-remeasure, reason edge-measurement-failed, measured null$/m,
+    /^PASS recycle-good-reopens: no marker; before \[true gen=\d+ measured=\d+ invalidated=false\] after \[true gen=\d+ measured=\d+ invalidated=false\]$/m,
+    /^PASS recycle-bad-stays-closed: hook after refused the wrong image; one marker \(journal \+ 0644 log, unit rehearsal-edge-recycle\.service, reason edge-measurement-failed\); before \[true [^\]]*\] after \[false gen=\d+ measured=\d+ invalidated=true\]$/m,
+    /^PASS recycle-after-bad-stays-closed: no new marker; .* after \[false gen=\d+ measured=\d+ invalidated=false\]$/m,
+    /^PASS recycle-marker-failure-close-stands: journal and log refused; the failure is reported and the readback-confirmed CLOSED state stands; /m,
+    /^PASS remeasure-postfail-closes: the hook pair reopened, the row read then failed, and the hook close mode closed and invalidated issuance with one marker/m,
+    /^PASS recycle-lost-reopen-response: the reopen committed, its response was lost; the hook closed again and confirmed CLOSED by readback before one CLOSED marker; /m,
+    /^PASS ai-w6-finish:keep-open-close-refused: refused \(FAIL ai-w6-finish: issuance state UNKNOWN after the remeasure failure \(may be OPEN\)\)$/m,
+    /^PASS w6-finish-unknown-propagates: /m, /^PASS ai-emergency-close:recover-unknown$/m,
+    /^PASS emergency-close-rearms: /m, /^PASS rehearsal: W4, recycle hook, W6 activation/m, /^PASS cleanup: /m]) assert.match(r.stdout, line);
+  // ai-close's timer line runs after ai-w6-finish in the same shell, for both finish paths.
+  assert.equal(r.stdout.match(/^PASS ai-close:timer-line after ai-w6-finish in the same shell$/gm)?.length, 2);
+  assert.doesNotMatch(r.stdout, /^FAIL /m);
+});
+
+test('c1 W6 rehearsal: negative controls: the release-role checksum gate (plan at 13512a34) and a one-statement open close both FAIL', { skip: skipDb }, () => {
+  const present = spawnSync('git', ['cat-file', '-e', '13512a34^{commit}']);
+  assert.equal(present.status, 0, 'commit 13512a34 is absent from this clone: fetch it (fetch-depth: 0)');
+  const args = ['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--w6', postFixture()];
+  // 13512a34: the recycle hook ran migration_checksum_failures() as commonswarm_admin_release, which M4 does not grant.
+  const old = run(args, { PG_BIN: PG(), C1_W6_PLAN_FROM: '13512a34' });
+  assert.notEqual(old.status, 0);
+  assert.match(old.stdout, /^CONTROL w6-plan-from: W4\/W6\/W7 blocks from the plan at 13512a34$/m);
+  assert.match(old.stdout, /^PASS ai-edge-receipt:W4-measurement$/m);
+  assert.match(old.stdout, /^FAIL ai-edge-refresh:before-W6-open: FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP$/m);
+  assert.match(old.stdout, /^PASS cleanup: /m);
+  // guard_cutover_state refuses a generation bump in the same update that closes OPEN issuance.
+  const fault = run(args, { PG_BIN: PG(), C1_W2_REHEARSAL_FAULT: 'one-statement-close' });
+  assert.notEqual(fault.status, 0);
+  assert.match(fault.stdout, /^FAULT injected: ai-recycle-hook before\/close and ai-w6-activation-rollback close and bump the generation in one update/m);
+  assert.match(fault.stdout, /^PASS ai-w6-activation-readback$/m);
+  assert.match(fault.stdout, /^FAIL ai-w6-finish:default-closed: .*ERROR: {2}close issuance before release measurement changes/m);
+  assert.match(fault.stdout, /^PASS cleanup: /m);
+});
