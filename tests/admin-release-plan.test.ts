@@ -1831,7 +1831,7 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
     const shim = mkdtempSync(join(scratch, 'w2-close-shim-')); writeFileSync(join(shim, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     const calls = join(proof, '..', basename(proof) + '-ai-ro');
     // Read-only database boundary: only the ledger query is modelled; admin_cutover_state must not be queried.
-    const harness = `ai_ro() { printf '%s\\n' "$*" >>'${calls}'; case "$*" in *"version LIKE '20261003%'"*) printf '%s\\n' "\${LEDGER_COUNT:-0}";; *) printf 'UNEXPECTED\\n'; return 1;; esac; }\n`;
+    const harness = `ai_ro() { printf '%s\\n' "$*" >>'${calls}'; case "$*" in *"version LIKE '20261003%'"*) test -z "\${MUTATE_RULING:-}" || chmod 0666 "\${MUTATE_RULING}"; printf '%s\\n' "\${LEDGER_COUNT:-0}";; *) printf 'UNEXPECTED\\n'; return 1;; esac; }\n`;
     const env = { WINDOW: 'W2', CLOSE_RESULT: 'recovered', SECRET_STAGE: stage, PROOF_DIR: proof, EDGE_RECYCLE_TIMER: 'fixture.timer', INPUTS_FILE: inputs, PLAN_FILE: planPath,
       BOX_ARCHIVE_PATH: archive, PATH: shim + ':' + process.env.PATH };
     // A HezLead ruling file bound to this window, release, plan digest and staged client_id.
@@ -1878,6 +1878,29 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
       const withheld = run(c.harness + c.close, env);
       assert.notEqual(withheld.status, 0); assert.match(withheld.stderr, /CLOSE_RESULT/);
       assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
+  // The ruling changes between the first check and the final validation (the stub flips its mode
+  // during the ledger query): refused BEFORE the stage is removed; a retry with a valid ruling closes.
+  { const c = setup();
+    try {
+      const changing = c.ruling();
+      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: changing, MUTATE_RULING: changing });
+      assert.notEqual(out.status, 0); assert.ok(out.stderr.includes('ruling file expected regular-0600-or-0644 got other'), out.stderr);
+      assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
+      assert.ok(existsSync(c.stage), 'stage preserved: the close stays retryable');
+      const retry = c.ruling();
+      const again = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: retry });
+      assert.equal(again.status, 0, again.stderr);
+      assert.ok(existsSync(join(c.proof, 'closed.txt')) && !existsSync(c.stage));
+      assert.equal(JSON.parse(readFileSync(join(c.proof, 'dcr-probe-revoke-accepted.json'), 'utf8')).ruling_sha256, digest(readFileSync(retry)));
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
+  // Receipt-validation refusal control: a valid ruling with an invalid retained receipt records no acceptance.
+  { const c = setup();
+    try {
+      writeFileSync(join(c.proof, 'ordinary-recovery.json'), '{}');
+      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling() });
+      assert.notEqual(out.status, 0); assert.match(out.stderr, /FAIL ai-close: retained close receipts expected valid got refused; STOP/);
+      assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')) && existsSync(c.stage));
     } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
   // Every binding of the ruling is checked; each refusal leaves the window open with no acceptance record.
   { const c = setup();

@@ -1013,7 +1013,9 @@ HezLead supplies `W2_REVOKE_UNPROVEN_ACCEPTED=<absolute path>` to a ruling file
 `window_id`, `plan_sha256`, `client_id` and `at`; each is bound to INPUTS and to
 the client_id in the nonsecret `dcr-probe-revoke-unproven.json`. The file is read
 completely (at most 64 KiB) and parsed and hashed as those exact bytes. ai-close
-validates it before any other close check and records it with its sha256 in
+validates it before any other close check and again, finally, before the secret
+stage is removed (a refusal there leaves the window retryable); the validated
+payload is kept in memory and written with its sha256 to
 `dcr-probe-revoke-accepted.json` only in the successful close commit, just before
 closed.txt, so a window is never stuck open. A W2 that
 stopped before its fence (no apply-started.txt) closes by proving the ledger
@@ -3870,10 +3872,10 @@ if r['client_id']!=client: refuse('client_id expected staged-client-id got misma
 try: when=datetime.datetime.strptime(r['at'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc) if isinstance(r['at'],str) else None
 except ValueError: when=None
 if when is None or when>datetime.datetime.now(datetime.timezone.utc): refuse('at expected UTC-Z-not-future got other')
-if mode=='record':
-    # Written only in the successful close commit, after every close refusal check.
-    (proof/'dcr-probe-revoke-accepted.json').write_text(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True)+'\n')
-    print('REVOKE-UNPROVEN accepted by HezLead ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+'; recorded with the close')
+if mode=='final':
+    # Final validation, before the stage is removed: print the exact acceptance payload; the shell
+    # keeps it in memory and writes it just before closed.txt (no further read of the ruling file).
+    sys.stdout.write(json.dumps({'status':'REVOKE-UNPROVEN-ACCEPTED','ruling':r,'ruling_sha256':hashlib.sha256(raw).hexdigest()},sort_keys=True))
 else: print('REVOKE-UNPROVEN ruling for DCR probe grant client_id '+client+' in window '+r['window_id']+' validated; recorded only if the close succeeds')
 PY
   }
@@ -3947,6 +3949,8 @@ elif test "$WINDOW" != W1; then
  test "$(ai_ro -Atq --command 'SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;')" = t
 fi
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER"
+# Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.
+if test "${W2_UNPROVEN_RULING:-0}" = 1; then W2_ACCEPT_PAYLOAD=$(w2_unproven_ruling final); fi
 python3 - "$SECRET_STAGE" "$PROOF_DIR/secret-stage.path" <<'PY'
 import pathlib,re,sys
 p=pathlib.Path(sys.argv[1]); assert pathlib.Path(sys.argv[2]).read_text().strip()==str(p)
@@ -3959,7 +3963,11 @@ PY
 rm -r -- "$SECRET_STAGE" || { printf 'FAIL cleanup refused %s; retain path and exact guard message; STOP\n' "$SECRET_STAGE" >&2; exit 1; }
 test ! -e "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L "$SECRET_STAGE" || { printf 'FAIL ai-close: removed SECRET_STAGE expected not-symlink got symlink; STOP\n' >&2; exit 1; }
-if test "${W2_UNPROVEN_RULING:-0}" = 1; then w2_unproven_ruling record; fi
+if test "${W2_UNPROVEN_RULING:-0}" = 1; then
+ # Exactly the validated payload, from memory; the ruling file is not read again.
+ printf '%s\n' "$W2_ACCEPT_PAYLOAD" >"$PROOF_DIR/dcr-probe-revoke-accepted.json"
+ printf 'REVOKE-UNPROVEN accepted by HezLead ruling; recorded with the close\n'
+fi
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/closed.txt"
 printf 'PASS window closed %s; nonsecret proofs retained\n' "$CLOSE_RESULT"
 ```
