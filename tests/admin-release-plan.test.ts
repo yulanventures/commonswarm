@@ -919,12 +919,23 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   // Filesystem boundary remap only: the box credential path moves into this test's directory.
   const etc=join(root,'etc'); mkdirSync(etc);
   const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/etc/commonswarm-oauth/').join(etc+'/');
-  const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`;
-  const attempt=(outcome:string,files:string[],role='t',window='W2b')=>{
+  const gateFile=join(root,'gate-check.sh'); writeFileSync(gateFile,block('ai-backup-gate-check'));
+  const harness=(role:string)=>`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf '${role}\\n';; *) printf 'f\\n';; esac; }\n`
+    +`ai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat '${gateFile}')"; }\n`;
+  const stamp=(ms:number)=>new Date(Date.now()-ms).toISOString().replace(/\.\d{3}Z$/,'Z');
+  // backup-gate.json exactly as ai-w1-backup-gate writes it, bound to the window's inputs.json.
+  const gateReceipt=(window:string,change:Record<string,unknown>={})=>{
+    const receipt:Record<string,unknown>={status:'PASS',release_sha:sha,window,window_id:'Abc123',backup_verified_at:stamp(600_000),restore_completed_at:stamp(86400_000),
+      destination:'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture',gate_at:stamp(60_000),...change};
+    return '{'+Object.keys(receipt).sort().map(k=>JSON.stringify(k)+': '+JSON.stringify(receipt[k])).join(', ')+'}\n';
+  };
+  const FORWARD='PASS W2b forward catalogs: all five true after the issuer credential\n';
+  const attempt=(outcome:string,files:string[],role='t',window='W2b',gate?:string)=>{
     const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
     writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
     writeFileSync(join(proof,'ordinary-after.json'),liveFor('after',window)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('recovery',window));
-    for(const file of files) writeFileSync(join(proof,file),'PASS');
+    writeFileSync(join(proof,'inputs.json'),readFileSync(window==='W4'?w4Inputs:inputs)); writeFileSync(join(proof,'open.txt'),stamp(300_000)+'\n');
+    for(const file of files) writeFileSync(join(proof,file),file==='backup-gate.json'?(gate??gateReceipt(window)):file==='w2b-forward-catalogs.txt'?FORWARD:'PASS');
     const result=run(harness(role)+close,{WINDOW:window,SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:window==='W4'?w4Inputs:inputs,PLAN_FILE:planPath,
       BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:outcome,PATH:shim+':'+process.env.PATH});
     const closed=existsSync(join(proof,'closed.txt'));
@@ -933,15 +944,25 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
     if(existsSync(stage)) removeStage(stage);
     return {result,closed,record,closedAt};
   };
-  let r=attempt('success',['backup-gate.json','w2b-preconditions.txt','issuer-credential.txt']); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  const W2B_OK=['backup-gate.json','w2b-forward-catalogs.txt','w2b-preconditions.txt','issuer-credential.txt'];
+  let r=attempt('success',W2B_OK); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   // The explicit terminal record W6 reads: exact sorted JSON bound to the window, at the closed.txt time.
   assert.deepEqual(JSON.parse(r.record),{closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'});
   assert.equal(r.record,'{'+Object.entries({closed_at:r.closedAt,release_sha:sha,result:'success',window:'W2b',window_id:'Abc123'}).map(([k,v])=>JSON.stringify(k)+': '+JSON.stringify(v)).join(', ')+'}\n');
-  r=attempt('success',['w2b-preconditions.txt','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
-  assert.match(r.result.stderr,/FAIL ai-close: W2b backup-gate\.json expected present got missing; STOP/);
-  r=attempt('success',['backup-gate.json','w2b-preconditions.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  // Backup admission validates the receipt, not its presence: missing, not JSON, stale, other window or release STOP.
+  for(const [name,files,gate] of [['missing',W2B_OK.slice(1),undefined],['not JSON',W2B_OK,'PASS'],['PASS object only',W2B_OK,'{"status": "PASS"}\n'],
+    ['stale backup at gate',W2B_OK,gateReceipt('W2b',{backup_verified_at:stamp(3600_000)})],['old restore drill',W2B_OK,gateReceipt('W2b',{restore_completed_at:stamp(9*86400_000)})],
+    ['other window',W2B_OK,gateReceipt('W4')],['other release',W2B_OK,gateReceipt('W2b',{release_sha:'f'.repeat(40)})],['other window id',W2B_OK,gateReceipt('W2b',{window_id:'Other1'})],
+    ['gate before open',W2B_OK,gateReceipt('W2b',{gate_at:stamp(900_000),backup_verified_at:stamp(1000_000)})],['wrong destination',W2B_OK,gateReceipt('W2b',{destination:'r2:other/x'})]] as const) {
+    r=attempt('success',[...files],'t','W2b',gate); assert.notEqual(r.result.status,0,name); assert.ok(!r.closed,name);
+    assert.match(r.result.stderr,/FAIL ai-close: W2b: backup-gate\.json expected valid-bound-fresh-receipt got refused; STOP/,name);
+  }
+  // The post-credential forward catalogs proof is required with its exact line.
+  r=attempt('success',['backup-gate.json','w2b-preconditions.txt','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: W2b w2b-forward-catalogs\.txt expected exact-PASS-line got missing-or-other; STOP/);
+  r=attempt('success',['backup-gate.json','w2b-forward-catalogs.txt','w2b-preconditions.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W2b issuer-credential\.txt expected present got missing; STOP/);
-  r=attempt('success',['backup-gate.json','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  r=attempt('success',['backup-gate.json','w2b-forward-catalogs.txt','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W2b w2b-preconditions\.txt expected present got missing; STOP/);
   r=attempt('recovered',[]); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   r=attempt('recovered',[],'f'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
@@ -952,8 +973,10 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
   r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   assert.equal(JSON.parse(r.record).window,'W4');
-  r=attempt('success',['W4-readback.txt'],'t','W4'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
-  assert.match(r.result.stderr,/FAIL ai-close: W4 backup-gate\.json expected present got missing; STOP/);
+  for(const gate of [undefined,'PASS',gateReceipt('W2b'),gateReceipt('W4',{backup_verified_at:stamp(3600_000)})]) {
+    r=attempt('success',gate===undefined?['W4-readback.txt']:['backup-gate.json','W4-readback.txt'],'t','W4',gate); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+    assert.match(r.result.stderr,/FAIL ai-close: W4: backup-gate\.json expected valid-bound-fresh-receipt got refused; STOP/);
+  }
   r=attempt('success',['backup-gate.json'],'t','W4'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W4 W4-readback\.txt expected present got missing; STOP/);
 });
@@ -986,6 +1009,7 @@ function proofCheckFixture(kind: 'W2' | 'W2b') {
   } else {
     put('close-result.json', pyJson({ release_sha: target.sha, window: 'W2b', window_id: target.id, result: 'success', closed_at: '2026-10-04T09:00:00Z' }));
     put('ordinary-after.json', live('after')); put('w2b-preconditions.txt', W2B_PRECONDITIONS_LINE); put('issuer-credential.txt', ISSUER_CREDENTIAL_LINE);
+    put('w2b-forward-catalogs.txt', 'PASS W2b forward catalogs: all five true after the issuer credential\n');
   }
   const checking: Input = kind === 'W2' ? { ...base(), window: 'W2b', w2_release_sha: target.sha, w2_window_id: target.id }
     : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id };
@@ -1010,6 +1034,7 @@ test('admin release plan: the shared proof validator accepts exact W2 and W2b pr
   assert.ok(block('ai-w2-issuer-credential').includes(`printf '${ISSUER_CREDENTIAL_LINE.trimEnd()}\\n' >"$PROOF_DIR/issuer-credential.txt"`));
   assert.ok(block('ai-w2-reconcile').includes(`(p/'schema-committed.txt').write_text('all five ledger rows, M4/M5 checksums and complete backfills exact\\n')`));
   assert.ok(block('ai-w2-probes').includes(`printf 'PASS\\n' >"$PROOF_DIR/W2-probes.txt"`));
+  assert.ok(block('ai-w2b-forward-catalogs').includes(`printf 'PASS W2b forward catalogs: all five true after the issuer credential\\n' >"$PROOF_DIR/w2b-forward-catalogs.txt"`));
   assert.ok(block('ai-close').includes(`pathlib.Path(sys.argv[4]).write_text(json.dumps({'release_sha':d['release_sha'],'window':d['window'],'window_id':d['window_id'],'result':sys.argv[2],'closed_at':sys.argv[3]},sort_keys=True)+'\\n')`));
   // Both consumers call the one validator through ai_run.
   assert.match(block('ai-w2b-preflight'), /PROOF_CHECK_KIND=W2\nW2_BINDING=\$\(ai_run ai-w2b-proof-check\)/);
@@ -1070,6 +1095,8 @@ test('admin release plan: the shared proof validator refuses a W2b that did not 
     ['issuer credential object', f => f.put('issuer-credential.txt', '{}'), /W2b issuer-credential\.txt expected exact-issuer-login-line got other/],
     ['issuer credential missing', f => rmSync(join(f.dir, 'issuer-credential.txt')), /W2b issuer-credential\.txt expected regular-file got missing-or-not-regular/],
     ['issuer rollback ran', f => f.put('issuer-rollback.txt', 'PASS issuer login disabled; additive roles/grants retained\n'), /W2b issuer-rollback\.txt expected absent got present/],
+    ['forward catalogs object', f => f.put('w2b-forward-catalogs.txt', '{}'), /W2b w2b-forward-catalogs\.txt expected exact-forward-catalogs-line got other/],
+    ['forward catalogs missing', f => rmSync(join(f.dir, 'w2b-forward-catalogs.txt')), /W2b w2b-forward-catalogs\.txt expected regular-file got missing-or-not-regular/],
   ];
   for (const [name, change, message] of cases) {
     const f = proofCheckFixture('W2b'); change(f); const r = f.check();
@@ -1079,6 +1106,86 @@ test('admin release plan: the shared proof validator refuses a W2b that did not 
   const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input.w2b_window_id;
   writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
   assert.notEqual(r.status, 0); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/);
+});
+
+test('admin release plan: the shared backup receipt check accepts only a bound, fresh, well-formed receipt', () => {
+  const stamp = (ms: number) => new Date(Date.now() - ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const receipt = (window: string, change: Record<string, unknown> = {}) => {
+    const r: Record<string, unknown> = { status: 'PASS', release_sha: sha, window, window_id: 'Abc123', backup_verified_at: stamp(600_000), restore_completed_at: stamp(86400_000),
+      destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture', gate_at: stamp(60_000), ...change };
+    return '{' + Object.keys(r).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(r[k])).join(', ') + '}\n';
+  };
+  const check = (window: string, gate: string | null, change: (dir: string) => void = () => undefined) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'gate-check-')));
+    writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window }));
+    writeFileSync(join(dir, 'open.txt'), stamp(300_000) + '\n');
+    if (gate !== null) writeFileSync(join(dir, 'backup-gate.json'), gate);
+    change(dir);
+    return run(block('ai-backup-gate-check'), { BACKUP_GATE_DIR: dir });
+  };
+  for (const window of ['W1', 'W2b', 'W4']) {
+    const ok = check(window, receipt(window)); assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, new RegExp(`^PASS ai-backup-gate-check: ${window} Abc123 backup and restore fresh at gate `));
+  }
+  const cases: Array<[string, string | null, RegExp, (dir: string) => void]> = [
+    ['missing', null, /backup-gate\.json expected regular-file got missing-or-not-regular/, () => undefined],
+    ['not JSON', 'PASS', /backup-gate\.json expected JSON-object got malformed/, () => undefined],
+    ['status only', '{"status": "PASS"}\n', /backup-gate\.json keys expected exact-PASS-receipt got other/, () => undefined],
+    ['extra key', receipt('W4', { extra: 1 }), /backup-gate\.json keys expected exact-PASS-receipt got other/, () => undefined],
+    ['status FAIL', receipt('W4', { status: 'FAIL' }), /backup-gate\.json keys expected exact-PASS-receipt got other/, () => undefined],
+    ['other window', receipt('W2b'), /backup-gate\.json binding expected same-release-window-and-window-id-as-inputs got other/, () => undefined],
+    ['other release', receipt('W4', { release_sha: 'f'.repeat(40) }), /backup-gate\.json binding expected same-release-window-and-window-id-as-inputs got other/, () => undefined],
+    ['other window id', receipt('W4', { window_id: 'Other1' }), /backup-gate\.json binding expected same-release-window-and-window-id-as-inputs got other/, () => undefined],
+    ['W3 receipt', receipt('W3'), /backup-gate\.json binding expected same-release-window-and-window-id-as-inputs got other/, dir => writeFileSync(join(dir, 'inputs.json'), JSON.stringify({ ...base(), window: 'W3' }))],
+    ['stale backup', receipt('W4', { backup_verified_at: stamp(1900_000) }), /backup verified_at at gate time expected at-most-1800s-old got stale-or-future/, () => undefined],
+    ['backup after gate', receipt('W4', { backup_verified_at: stamp(0) }), /backup verified_at at gate time expected at-most-1800s-old got stale-or-future/, () => undefined],
+    ['old restore drill', receipt('W4', { restore_completed_at: stamp(9 * 86400_000) }), /restore drill completed_at at gate time expected at-most-8-days-old got stale-or-future/, () => undefined],
+    ['bad time', receipt('W4', { gate_at: 'yesterday' }), /gate_at expected UTC-ISO-8601-Z-time got other/, () => undefined],
+    ['wrong destination', receipt('W4', { destination: 'r2:other/x' }), /backup destination expected reviewed-r2-prefix got other/, () => undefined],
+    ['gate before open', receipt('W4', { gate_at: stamp(900_000), backup_verified_at: stamp(1000_000) }), /gate_at expected inside-this-window got before-open-or-future/, () => undefined],
+    ['gate in future', receipt('W4', { gate_at: stamp(-600_000), backup_verified_at: stamp(0) }), /gate_at expected inside-this-window got before-open-or-future/, () => undefined],
+    ['no open.txt', receipt('W4'), /window open\.txt expected regular-file got missing/, dir => rmSync(join(dir, 'open.txt'))],
+  ];
+  for (const [name, gate, message, change] of cases) {
+    const r = check('W4', gate, change); assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`); assert.equal(r.stdout, '', name);
+  }
+  const unset = run(block('ai-backup-gate-check'), {}); assert.notEqual(unset.status, 0); assert.match(unset.stderr, /BACKUP_GATE_DIR expected window-proof-directory got unset/);
+  // Every consumer runs the one check (in a subshell, so bash 3.2 cannot exit past the caller's STOP message).
+  for (const [id, n] of [['ai-w1-backup-gate', 1], ['ai-w2-preflight', 1], ['ai-w2b-preflight', 1], ['ai-w2-issuer-credential', 1], ['ai-w4-preflight', 1], ['ai-w4-apply', 1], ['ai-close', 3]] as const) {
+    assert.equal(block(id).split('ai_run ai-backup-gate-check').length - 1, n, id);
+  }
+  const apply = block('ai-w4-apply');
+  assert.ok(apply.indexOf('ai_run ai-backup-gate-check') < apply.indexOf('ai_db -q'), 'W4: the check precedes the first database mutation');
+  const issuer = block('ai-w2-issuer-credential');
+  assert.ok(issuer.indexOf('ai_run ai-backup-gate-check') < issuer.indexOf('openssl rand'), 'W2b: the check precedes the credential');
+});
+
+test('admin release plan: W2b post-credential forward catalogs: all five unmodified must be true; a false one runs the issuer rollback and STOPs', () => {
+  const source = block('ai-w2b-forward-catalogs');
+  const attempt = (answers: Record<string, string>) => {
+    const proof = mkdtempSync(join(scratch, 'w2b-forward-'));
+    writeFileSync(join(proof, 'issuer-credential.txt'), 'PASS issuer login; credential 0440 root:986; password stays on box\n');
+    const harness = `ai_deadline() { :; }
+ai_ro() { local v; v=$(sed -n 's#^\\\\i /release/deploy/release-proofs/item-ai/\\(2026100300000[1-5]\\)-catalog\\.sql$#\\1#p' "$PROOF_DIR/catalog.sql"); grep -qx "SELECT :'catalog_ok'::boolean;" "$PROOF_DIR/catalog.sql" || return 9; printf '%s\\n' "$v" >>"$PROOF_DIR/asked.txt"; case "$v" in ${Object.entries(answers).map(([k, a]) => `${k}) printf '${a}\\n';;`).join(' ')} *) printf 't\\n';; esac; }
+ai_run() { test "$1" = ai-w2-issuer-rollback || return 1; printf 'rollback\\n' >"$PROOF_DIR/rollback-ran.txt"; }
+`;
+    const result = run(harness + source, { WINDOW: 'W2b', PROOF_DIR: proof });
+    const read = (name: string) => existsSync(join(proof, name)) ? readFileSync(join(proof, name), 'utf8') : null;
+    return { result, proof: read('w2b-forward-catalogs.txt'), rollback: read('rollback-ran.txt'), asked: read('asked.txt') };
+  };
+  let r = attempt({}); assert.equal(r.result.status, 0, r.result.stderr);
+  assert.equal(r.proof, 'PASS W2b forward catalogs: all five true after the issuer credential\n'); assert.equal(r.rollback, null);
+  assert.equal(r.asked, [1, 2, 3, 4, 5].map(i => `2026100300000${i}\n`).join(''), 'all five unmodified catalogs, catalog_ok only');
+  // No accepted failure: the 0002 issuer row that W2b preflight tolerated must now be true.
+  for (const [version, answer] of [['20261003000002', 'f'], ['20261003000005', 'f'], ['20261003000003', '']] as const) {
+    r = attempt({ [version]: answer }); assert.notEqual(r.result.status, 0, version);
+    assert.match(r.result.stderr, new RegExp(`FAIL ai-w2b-forward-catalogs: forward catalog ${version} expected t got other; running ai-w2-issuer-rollback; STOP`));
+    assert.equal(r.rollback, 'rollback\n', `${version}: the issuer rollback ran`); assert.equal(r.proof, null, `${version}: no proof, so no success close`);
+  }
+  const wrong = run('ai_deadline() { :; }\n' + source, { WINDOW: 'W2', PROOF_DIR: mkdtempSync(join(scratch, 'w2b-forward-')) });
+  assert.notEqual(wrong.status, 0); assert.match(wrong.stderr, /FAIL ai-w2b-forward-catalogs: window expected W2b got other; STOP/);
+  const noCredential = run('ai_deadline() { :; }\n' + source, { WINDOW: 'W2b', PROOF_DIR: mkdtempSync(join(scratch, 'w2b-forward-')) });
+  assert.notEqual(noCredential.status, 0); assert.match(noCredential.stderr, /issuer-credential\.txt expected present got missing/);
 });
 
 test('admin release plan: W6 activation requires enabled env, issuer overlay and opened database cutover', () => {

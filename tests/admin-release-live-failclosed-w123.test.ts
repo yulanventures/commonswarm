@@ -241,9 +241,26 @@ function stopped(result: ReturnType<ReturnType<typeof fixture>['run']>, text: st
 }
 const backup = () => ({ ok: true, database_bytes_verified: true, object_bytes_verified: true, verified_at: new Date().toISOString(), destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture' });
 const restore = () => ({ ok: true, state: 'complete', at: new Date().toISOString() });
+// The shared backup receipt validator, executed from plan bytes through a test ai_run (the box's ai_run evals it the same way).
+const gateShim = `# test shim: ai_run runs the plan's own ai-backup-gate-check block
+ai_run() { test "$1" = ai-backup-gate-check || return 1; eval "$(cat "$FIXTURE_ROOT/gate-check.sh")"; }`;
+function gateWindow(f: ReturnType<typeof fixture>, window: string) {
+  const inputs = { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window };
+  f.put('inputs.json', inputs); f.put('proof/inputs.json', inputs);
+  f.put('proof/open.txt', new Date(Date.now() - 120_000).toISOString().replace(/\.\d{3}Z$/, 'Z') + '\n');
+  f.put('gate-check.sh', block('ai-backup-gate-check'));
+  return inputs as Record<string, string>;
+}
+// A bound receipt as ai-w1-backup-gate writes it (python json.dumps sort_keys).
+function validGate(f: ReturnType<typeof fixture>, window: string, change: Record<string, unknown> = {}) {
+  const inputs = gateWindow(f, window), now = Date.now(), at = (ms: number) => new Date(now - ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const receipt: Record<string, unknown> = { status: 'PASS', release_sha: inputs.release_sha, window, window_id: inputs.window_id,
+    backup_verified_at: at(600_000), restore_completed_at: at(86400_000), destination: 'r2:yulan-vps-1-backups/000-commonswarm-postgres/fixture', gate_at: at(60_000), ...change };
+  f.put('proof/backup-gate.json', '{' + Object.keys(receipt).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(receipt[k])).join(', ') + '}\n');
+}
 function backupRun(b = backup(), r = restore(), window = 'W1') {
-  const f = fixture(); f.put('backup/status.json', b); f.put('backup/restore-status.json', r);
-  return { f, result: f.run(['ai-w1-backup-gate'], window) };
+  const f = fixture(); f.put('backup/status.json', b); f.put('backup/restore-status.json', r); gateWindow(f, window);
+  return { f, result: f.run([gateShim, 'ai-w1-backup-gate'], window) };
 }
 function backupBad(b: ReturnType<typeof backup>, r: ReturnType<typeof restore>, message: string) {
   const { f, result } = backupRun(b, r);
@@ -267,7 +284,7 @@ test('backup-restore-gate / shared-w1-w2b-w4: W2b and W4 run the same backup gat
       const { f, result } = backupRun(b, r, window); stopped(result, message);
       assert.ok(!existsSync(join(f.proof, 'backup-gate.json')), `${window}: no receipt after refusal`);
     }
-    const missing = fixture(); const gone = missing.run(['ai-w1-backup-gate'], window);
+    const missing = fixture(); gateWindow(missing, window); const gone = missing.run([gateShim, 'ai-w1-backup-gate'], window);
     stopped(gone, 'FAIL backup and restore status files; STOP'); assert.ok(!existsSync(join(missing.proof, 'backup-gate.json')));
   }
   for (const window of ['W2', 'W3', 'W5', 'W6']) {
@@ -278,6 +295,11 @@ test('backup-restore-gate / shared-w1-w2b-w4: W2b and W4 run the same backup gat
 
 test('backup-restore-gate / fresh-verified-database-and-object-backup: fails closed on unverified bytes or wrong destination', () => {
   const good = backupRun(); pass(good.result); assert.equal(JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8')).status, 'PASS');
+  // The receipt is bound to its window and carries the measured times, the destination and the gate time.
+  const receipt = JSON.parse(readFileSync(join(good.f.proof, 'backup-gate.json'), 'utf8'));
+  assert.deepEqual(Object.keys(receipt).sort(), ['backup_verified_at', 'destination', 'gate_at', 'release_sha', 'restore_completed_at', 'status', 'window', 'window_id']);
+  assert.equal(receipt.window, 'W1'); assert.equal(receipt.release_sha, sha); assert.equal(receipt.window_id, 'fixture');
+  assert.match(good.result.stdout, /PASS ai-backup-gate-check: W1 fixture backup and restore fresh at gate /);
   for (const key of ['ok', 'database_bytes_verified', 'object_bytes_verified']) backupBad({ ...backup(), [key]: false }, restore(), 'FAIL verified backup; STOP');
   backupBad({ ...backup(), destination: 'r2:wrong/fixture' }, restore(), 'FAIL fresh backup; STOP');
 });
@@ -641,8 +663,20 @@ test('admin-issuer-credential-provisioning / w2b-shared-issuer-block: W2b runs t
   const missing = fixture(); const refused = missing.run(['ai-w2-issuer-credential'], 'W2b');
   stopped(refused, 'FAIL ai-w2-issuer-credential: W2b w2b-preconditions.txt expected present got missing; STOP');
   assert.ok(!refused.calls.some(c => c[0] === 'openssl'));
-  const good = fixture(); good.put('proof/w2b-preconditions.txt', 'PASS');
-  const positive = good.run(['ai-w2-issuer-credential'], 'W2b'); pass(positive);
+  const good = fixture(); good.put('proof/w2b-preconditions.txt', 'PASS'); validGate(good, 'W2b');
+  const positive = good.run([gateShim, 'ai-w2-issuer-credential'], 'W2b'); pass(positive);
+  // Backup admission at the W2b mutation boundary: a malformed, stale, wrong-window or missing receipt STOPs before any credential.
+  for (const [name, mutate] of [
+    ['malformed', (f: ReturnType<typeof fixture>) => f.put('proof/backup-gate.json', 'PASS')],
+    ['missing', (f: ReturnType<typeof fixture>) => rmSync(join(f.root, 'proof/backup-gate.json'))],
+    ['stale backup', (f: ReturnType<typeof fixture>) => validGate(f, 'W2b', { backup_verified_at: new Date(Date.now() - 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z') })],
+    ['wrong window', (f: ReturnType<typeof fixture>) => validGate(f, 'W2b', { window: 'W4' })],
+  ] as const) {
+    const f = fixture(); f.put('proof/w2b-preconditions.txt', 'PASS'); validGate(f, 'W2b'); mutate(f);
+    const r = f.run([gateShim, 'ai-w2-issuer-credential'], 'W2b');
+    stopped(r, 'FAIL ai-w2-issuer-credential: W2b backup-gate.json expected valid-bound-fresh-receipt got refused; STOP');
+    assert.ok(!r.calls.some(c => ['openssl', 'ai_db', 'install', 'docker'].includes(c[0]!)), name);
+  }
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
   assert.match(readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8'), /^user=commonswarm_admin_issuer$/m);
   for (const window of ['W1', 'W3', 'W6']) {
@@ -661,7 +695,8 @@ test('release-plan-contract / w2b-preflight-bound-w2: W2b needs its backup gate,
   const five = [1, 2, 3, 4, 5].map(i => `2026100300000${i}`);
   // ai_run models only the shared validator's verdict here; its content checks run from plan bytes in admin-release-plan.test.ts.
   const shim = `# test shim: the shared W2 proof validator's verdict
-ai_run() { test "$1" = ai-w2b-proof-check || return 1; test "$PROOF_CHECK_KIND" = W2 || return 1; cat "$FIXTURE_ROOT/proof-check.out"; return "$(cat "$FIXTURE_ROOT/proof-check.status")"; }`;
+ai_run() { if test "$1" = ai-backup-gate-check; then eval "$(cat "$FIXTURE_ROOT/gate-check.sh")"; return; fi
+  test "$1" = ai-w2b-proof-check || return 1; test "$PROOF_CHECK_KIND" = W2 || return 1; cat "$FIXTURE_ROOT/proof-check.out"; return "$(cat "$FIXTURE_ROOT/proof-check.status")"; }`;
   const setup = (change: (f: ReturnType<typeof fixture>, rows: string[], ledger: string[]) => void = () => undefined, config: Record<string, unknown> = {}) => {
     const rows: string[] = [], ledger = [...old, ...five];
     for (const v of old) rows.push(`${v}|${'1'.repeat(64)}|backfill|${'c'.repeat(40)}`);
@@ -672,7 +707,7 @@ ai_run() { test "$1" = ai-w2b-proof-check || return 1; test "$PROOF_CHECK_KIND" 
     const inputs = JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')) as Record<string, unknown>;
     f.put('inputs.json', { ...inputs, window: 'W2b', w2_release_sha: w2sha, w2_window_id: w2id });
     f.put('proof/ordinary-before.json', liveReceipt('W2b', 'fixture', 'before', f.preText));
-    f.put('proof/backup-gate.json', { status: 'PASS' });
+    validGate(f, 'W2b');
     f.put('proof-check.out', JSON.stringify({ closed_at: '2026-10-04T09:00:00Z', kind: 'W2', release_sha: w2sha, result: 'recovered', window_id: w2id }) + '\n');
     f.put('proof-check.status', '0');
     change(f, rows, ledger);
@@ -689,7 +724,9 @@ ai_run() { test "$1" = ai-w2b-proof-check || return 1; test "$PROOF_CHECK_KIND" 
   // 0002's only failing forward row may be the issuer LOGIN the W2 rollback removed.
   pass(setup(() => undefined, { catalog_failed: { '20261003000002': '20261003000002-001-commonswarm_admin_issuer' } }).result);
   const bad: Array<[string, (f: ReturnType<typeof fixture>, rows: string[], ledger: string[]) => void, Record<string, unknown>, string]> = [
-    ['no backup gate', f => rmSync(join(f.root, 'proof/backup-gate.json')), {}, 'FAIL ai-w2b-preflight: W2b backup-gate.json expected present got missing; STOP'],
+    ['no backup gate', f => rmSync(join(f.root, 'proof/backup-gate.json')), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
+    ['backup receipt not JSON', f => f.put('proof/backup-gate.json', 'PASS'), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
+    ['backup receipt of another release', f => validGate(f, 'W2b', { release_sha: 'f'.repeat(40) }), {}, 'FAIL ai-w2b-preflight: W2b: backup-gate.json expected valid-bound-fresh-receipt got refused; STOP'],
     ['W2 proofs refused', f => f.put('proof-check.status', '1'), {}, 'FAIL ai-w2b-preflight: bound W2 proofs expected valid got refused; STOP'],
     ['credential file present', f => f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}'), {}, 'FAIL ai-w2b-preflight: issuer credential file expected absent got present; STOP'],
     ['database preconditions false', () => undefined, { w2b: 'f' }, 'FAIL ai-w2b-preflight: ledger five-20261003-nothing-later and NOLOGIN issuer without password expected t got other; STOP'],

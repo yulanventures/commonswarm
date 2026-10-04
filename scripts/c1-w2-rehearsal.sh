@@ -361,6 +361,11 @@ if test "$ISSUER" = 1; then
   ISSUER_PLAN=$PLAN; test -z "$PLAN_FROM" || ISSUER_PLAN=$T/issuer-plan.md
   extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
   extract "$ISSUER_PLAN" ai-w2-issuer-credential line 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-alter.sh"
+  # The block's own proof line (its docker login is replaced by the real libpq login below), then the plan's
+  # post-credential forward catalogs block and the issuer rollback it runs on failure, all from this checkout.
+  extract "$PLAN" ai-w2-issuer-credential line '>"$PROOF_DIR/issuer-credential.txt"' >"$T/blocks/issuer-credential-proof.sh"
+  extract "$PLAN" ai-w2b-forward-catalogs block >"$T/blocks/ai-w2b-forward-catalogs.sh"
+  extract "$PLAN" ai-w2-issuer-rollback block >"$T/blocks/ai-w2-issuer-rollback.sh"
   extract "$ISSUER_PLAN" ai-w2-issuer-credential command-sql "--command \"SELECT current_user='commonswarm_admin_issuer'" >"$T/blocks/issuer-query.sql"
   say "PASS extract: issuer block from ${PLAN_FROM:-this checkout}; W2b preconditions and rollback from this checkout"
 fi
@@ -432,7 +437,7 @@ ai_run() {
       else say "PASS ai-w2-apply:$VERSION: migration and ledger row committed in one transaction" >&3; fi ;;
     ai-w2-revoke-probes)
       test -f "$PROOF_DIR/dcr-probe-revoked.json" || printf '{"client_id":"rehearsal","proof":"refresh rejected","revoked":true}\n' >"$PROOF_DIR/dcr-probe-revoked.json" ;;
-    ai-w2-reconcile|ai-w2-measure)
+    ai-w2-reconcile|ai-w2-measure|ai-w2-issuer-rollback)
       # As the plan's ai_run: plain eval, so the caller's errexit applies inside the block.
       eval "$(cat "$T/blocks/$1.sh")"
       say "PASS $1" >&3 ;;
@@ -615,12 +620,21 @@ PY
   say "PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer via issuer-service.conf and issuer-pass; plan measurement query t"
   if issuer_psql "service=target sslmode=disable" -X -Atq --command 'SELECT 1;' >/dev/null 2>&1; then die issuer-plaintext 'plaintext TCP login expected refused got accepted'; fi
   say "PASS issuer-plaintext: a non-TLS TCP login as the issuer is refused by pg_hba"
-  # With LOGIN restored, every forward catalog row holds again (0002-001 included).
-  for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
-    printf '\\i %s\nSELECT :%s::boolean;\n' "$RELEASE_ROOT/deploy/release-proofs/item-ai/$VERSION-catalog.sql" "'catalog_ok'" >"$T/forward.sql"
-    OK=$(pgx -Atq -v ON_ERROR_STOP=1 -f "$T/forward.sql" 2>"$PSQL_LOG") || die forward-catalogs "$VERSION: $(first_error "$PSQL_LOG")"
-    test "$OK" = t || die forward-catalogs "$VERSION expected t got $(grep -m1 -o 'failed checks: [a-z0-9,_-]*' "$PSQL_LOG")"
-  done
-  say "PASS forward-catalogs: all five forward catalogs true after the issuer credential"
+  step ai-w2-issuer-credential:proof "$T/blocks/issuer-credential-proof.sh"
+  if test "${C1_W2_REHEARSAL_FAULT:-}" = post-credential-catalog; then
+    # Test control: make one forward catalog row false AFTER provisioning (0002-001 requires NOT rolinherit).
+    pgx -q -v ON_ERROR_STOP=1 -c 'ALTER ROLE commonswarm_admin_issuer INHERIT;' >/dev/null 2>"$PSQL_LOG" || die fault "$(first_error "$PSQL_LOG")"
+    say "FAULT injected: the issuer role made INHERIT after the credential (forward catalog 0002 row 001 false)"
+    ( set -euo pipefail; export WINDOW=W2b; eval "$(cat "$T/blocks/ai-w2b-forward-catalogs.sh")" ) 3>&1 >"$T/step.out" 2>"$T/step.err"
+    FWD_STATUS=$?
+    test "$FWD_STATUS" != 0 || die ai-w2b-forward-catalogs 'a false forward catalog expected STOP got PASS'
+    say "FAIL ai-w2b-forward-catalogs: $(grep -m1 '^FAIL ai-w2b-forward-catalogs' "$T/step.err" | cut -c1-300)"
+    ROLLED=$(pgx -Atq -c "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_authid WHERE rolname='commonswarm_admin_issuer';" 2>"$PSQL_LOG") || ROLLED=
+    if test "$ROLLED" = t && test -f "$PROOF_DIR/issuer-rollback.txt" && test ! -e "$PROOF_DIR/w2b-forward-catalogs.txt"; then
+      say "PASS rollback-after-catalog-failure: ai-w2-issuer-rollback ran (issuer NOLOGIN without a password, issuer-rollback.txt); no w2b-forward-catalogs.txt"
+    else die rollback-after-catalog-failure 'issuer rollback expected applied got other'; fi
+    exit 1
+  fi
+  WINDOW=W2b step ai-w2b-forward-catalogs "$T/blocks/ai-w2b-forward-catalogs.sh"
   say "PASS rehearsal: issuer credential provisioned and verified on the post-W2 database"
 fi

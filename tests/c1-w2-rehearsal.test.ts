@@ -193,7 +193,7 @@ test('c1 W2 rehearsal: --issuer real libpq verify-full login PASSES; the 5f64fab
   for (const line of [/^PASS ai-w2-issuer-rollback:role$/m, /^PASS ai-w2b-preflight:preconditions$/m, /^PASS tls: cluster restarted with ssl=on on 127\.0\.0\.1:\d+;/m,
     /^PASS listener: postmaster \d+ listens on TCP 127\.0\.0\.1:\d+ only/m, /^PASS service-conf: /m, /^PASS ai-w2-issuer-credential:prepare$/m,
     /^PASS ai-w2-issuer-credential:alter-role$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer/m,
-    /^PASS issuer-plaintext: /m, /^PASS forward-catalogs: all five forward catalogs true after the issuer credential$/m,
+    /^PASS issuer-plaintext: /m, /^PASS ai-w2-issuer-credential:proof$/m, /^PASS ai-w2b-forward-catalogs$/m,
     /^PASS cleanup: cluster stopped; data, CA and secrets deleted; \S+ absent$/m]) assert.match(good.stdout, line);
   assert.doesNotMatch(good.stdout + good.stderr, /\b[0-9a-f]{48,64}\b/, 'no generated password is printed');
   const present = spawnSync('git', ['cat-file', '-e', '5f64fab4^{commit}']);
@@ -289,4 +289,17 @@ test('c1 W2 rehearsal: ledger-extra.sql is restored when present, SKIPped when a
   // A pre-W2 dump without the extra file still runs: SKIP, then the usual W2 rehearsal.
   const pre = run(['--w2b-preconditions', fixture()], env);
   assert.match(pre.stdout, /^SKIP restore-ledger-extra: /m);
+});
+
+// The plan's post-credential forward catalogs block on a real database: a false catalog after provisioning STOPs and
+// runs the plan's issuer rollback (control for the production step, not a harness loop).
+test('c1 W2 rehearsal: a forward catalog made false after the credential STOPs ai-w2b-forward-catalogs and rolls the issuer back', { skip: skipDb }, () => {
+  const r = run(['--issuer', fixture()], { PG_BIN: PG(), C1_W2_REHEARSAL_FAULT: 'post-credential-catalog' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stdout, /^PASS ai-w2-issuer-credential:login: /m);
+  assert.match(r.stdout, /^FAULT injected: the issuer role made INHERIT after the credential/m);
+  assert.match(r.stdout, /^FAIL ai-w2b-forward-catalogs: FAIL ai-w2b-forward-catalogs: forward catalog 20261003000002 expected t got other; running ai-w2-issuer-rollback; STOP$/m);
+  assert.match(r.stdout, /^PASS rollback-after-catalog-failure: ai-w2-issuer-rollback ran \(issuer NOLOGIN without a password, issuer-rollback\.txt\); no w2b-forward-catalogs\.txt$/m);
+  assert.doesNotMatch(r.stdout, /^PASS ai-w2b-forward-catalogs$/m);
+  assert.match(r.stdout, /^PASS cleanup: /m);
 });
