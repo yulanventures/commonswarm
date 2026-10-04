@@ -3,15 +3,15 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { transform } from '@astrojs/compiler-rs';
 import { experimental_AstroContainer as AstroContainer } from 'astro/container';
-import type { HouseholdContent, HouseholdOutcome } from '../../../src/protocol/household-object-events.js';
+import type { HouseholdContent, HouseholdOutcome } from '../../src/protocol/household-object-events.js';
 import { decideHouseholdObject, emptyHouseholdObjectState, reduceHouseholdObjectStream,
-  type DecideHouseholdObjectContext } from '../../../src/protocol/household-objects.js';
+  type DecideHouseholdObjectContext } from '../../src/protocol/household-objects.js';
 import {
   createHouseholdObjectsController, createHouseholdObjectsState, householdContentPatch,
   householdObjectsFixture, householdConflictFixture, renderHouseholdConflict, renderHouseholdContent,
   renderHouseholdObjectHistory, renderHouseholdObjects,
   type HouseholdActions, type HouseholdConflictView, type HouseholdSaveRequest,
-} from './household-objects-view.js';
+} from '../src/lib/household-objects-view.js';
 
 // New presentation boundary: tests protect observable permissions, rendered
 // content and async lifecycle. The server core cannot catch UI-only writes,
@@ -278,15 +278,15 @@ test('all three Astro components compile and server-render escaped, accessible r
     ['HouseholdObjectHistory', { object: fixture.doc }, /Retired · retained/],
     ['HouseholdConflict', { state }, /aria-label="Your proposed draft"/],
   ] as const) {
-    const source = await readFile(new URL(`../components/app/${name}.astro`, import.meta.url), 'utf8');
+    const source = await readFile(new URL(`../src/components/app/${name}.astro`, import.meta.url), 'utf8');
     const compiled = transform(source, { filename: `${name}.astro`, internalURL: 'astro/compiler-runtime',
       resultScopedSlot: true, resolvePath: (specifier) => specifier });
     assert.deepEqual(compiled.diagnostics.filter((diagnostic) => diagnostic.severity === 'error'), []);
     // Evaluate the real compiled component in memory. CSS imports are handled by
     // Vite in the product; this server-render harness tests markup without Vite.
     const code = compiled.code.replace(/import "[^"\n]+\?astro&type=style[^"\n]+";\n/gu, '')
-      .replaceAll('"astro/compiler-runtime"', JSON.stringify(new URL('../../node_modules/astro/dist/runtime/compiler/index.js', import.meta.url).href))
-      .replaceAll('"../../lib/household-objects-view"', JSON.stringify(new URL('./household-objects-view.ts', import.meta.url).href));
+      .replaceAll('"astro/compiler-runtime"', JSON.stringify(new URL('../node_modules/astro/dist/runtime/compiler/index.js', import.meta.url).href))
+      .replaceAll('"../../lib/household-objects-view"', JSON.stringify(new URL('../src/lib/household-objects-view.ts', import.meta.url).href));
     const component = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
     const html = await container.renderToString(component.default, { props });
     assert.match(html, expected);
