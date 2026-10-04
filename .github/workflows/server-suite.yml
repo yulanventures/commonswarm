@@ -207,6 +207,18 @@ jobs:
           node services/mcp-auth/build-management.mjs 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth test 2>&1 | tee -a server.log
           npm --prefix services/mcp-auth run test:postgres 2>&1 | tee -a server.log
+      - name: C1 W2 rehearsal (PostgreSQL 17)
+        if: ${{ !cancelled() && matrix.suite == 'server' }}
+        run: |
+          set -euo pipefail
+          # PGDG PostgreSQL 17 binaries only; no main cluster, so nothing listens on a TCP port.
+          sudo install -d /etc/postgresql-common
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.conf >/dev/null
+          sudo apt-get update -q 2>&1 | tee -a server.log
+          sudo apt-get install -y -q postgresql-common 2>&1 | tee -a server.log
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y 2>&1 | tee -a server.log
+          sudo apt-get install -y -q postgresql-17 2>&1 | tee -a server.log
+          RUN_PG_REHEARSAL=1 PG_BIN=/usr/lib/postgresql/17/bin node --import tsx --test tests/c1-w2-rehearsal.test.ts 2>&1 | tee -a server.log
       - name: p1-cli suite
         if: matrix.suite == 'p1-cli'
         run: |

@@ -1,7 +1,7 @@
 /*
  * Release proofs are consumed by the section-5 decision wrapper in deploy/RELEASE-TO-BOX.md, which reads the value
  * through psql `\gset`: a catalog proof must end with a query whose one Boolean column is aliased `catalog_ok`
- * (`rollback_ok` for a rollback catalog), with no semicolon, followed by its own `\gset` line. On 2026-09-26 the
+ * (`rollback_ok` for a rollback catalog, `before_ok` for a before-apply catalog), with no semicolon, followed by its own `\gset` line. On 2026-09-26 the
  * renewal proof ended with `AS catalog_ok;` and no `\gset`; the wrapper printed `f` twice and the window stopped.
  * This test checks every catalog proof in the repository, with controls that prove it rejects that shape.
  */
@@ -33,9 +33,14 @@ function catalogProofs(dir: string): string[] {
   });
 }
 
+function catalogAlias(name: string): "catalog_ok" | "rollback_ok" | "before_ok" {
+  if (name.endsWith("rollback-catalog.sql")) return "rollback_ok";
+  return name.endsWith("before-catalog.sql") ? "before_ok" : "catalog_ok";
+}
+
 function proofFormatProblem(name: string, text: string): string | null {
   const lines = text.split("\n").map(line => line.replace(/\s+$/, "")).filter(line => line.trim() !== "");
-  const alias = name.endsWith("rollback-catalog.sql") ? "rollback_ok" : "catalog_ok";
+  const alias = catalogAlias(name);
   const last = lines.at(-1);
   const beforeLast = lines.at(-2);
   if (last !== "\\gset") return `${name}: must end with its own \\gset line`;
@@ -60,10 +65,13 @@ test("controls: the check rejects a trailing semicolon, a missing \\gset and the
   assert.match(proofFormatProblem("x/1-catalog.sql", "SELECT true AS catalog_ok;\n\\gset\n")!, /no semicolon/);
   assert.match(proofFormatProblem("x/1-rollback-catalog.sql", good)!, /rollback_ok/);
   assert.equal(proofFormatProblem("x/1-rollback-catalog.sql", "SELECT true AS rollback_ok\n\\gset\n"), null);
+  assert.match(proofFormatProblem("x/1-before-catalog.sql", good)!, /before_ok/);
+  assert.match(proofFormatProblem("x/1-before-catalog.sql", "SELECT true AS rollback_ok\n\\gset\n")!, /before_ok/);
+  assert.equal(proofFormatProblem("x/1-before-catalog.sql", "SELECT true AS before_ok\n\\gset\n"), null);
 });
 
 test("postgres.js catalog queries preserve predicates and diagnostics without the psql variable round trip", () => {
-  for (const alias of ['catalog_ok', 'rollback_ok'] as const) {
+  for (const alias of ['catalog_ok', 'rollback_ok', 'before_ok'] as const) {
     const predicates = "WITH checks(label,ok) AS (VALUES ('positive',true),('negative',false))\n";
     const aggregate = "SELECT COALESCE(string_agg(label,',' ORDER BY label) FILTER (WHERE NOT ok),'') AS " + alias + "_failed_checks,\n"
       + "  COALESCE(bool_and(ok),false) AS ";
@@ -78,10 +86,10 @@ test("postgres.js catalog queries preserve predicates and diagnostics without th
   // Real release inputs exercise the wrapper consumed by the HM rollback drill,
   // including part 14's labelled admin proofs. No database or service is needed.
   for (const file of catalogProofs(ROOT).filter(file => /\/item-ai\/|\/item-hm\/20260928000002-/u.test(file))) {
-    const alias = file.endsWith('rollback-catalog.sql') ? 'rollback_ok' : 'catalog_ok';
+    const alias = catalogAlias(file);
     const query = releaseCatalogQuery(readFileSync(file, 'utf8'), alias);
     assert.doesNotMatch(query, /^\s*\\/m, file);
-    assert.doesNotMatch(query, /:'(?:catalog_ok|rollback_ok)_checks_ok'/, file);
+    assert.doesNotMatch(query, /:'(?:catalog_ok|rollback_ok|before_ok)_checks_ok'/, file);
   }
 });
 
