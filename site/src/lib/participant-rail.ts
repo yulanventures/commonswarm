@@ -1,5 +1,7 @@
 import { modelFamily, modelGlyphSvg } from './model-glyph.js';
 import { identityDisplayLabel } from './identity-label.js';
+import { agentStatus } from './agent-status.js';
+import type { AgentPresenceRow } from '../../../src/cloud/agent-presence.js';
 
 export interface RailMember {
   userId: string;
@@ -13,6 +15,9 @@ export interface RailAgent {
   ownerUserId: string;
   model?: string | null;
   transport?: "local" | "hosted_mcp";
+  turnOnly?: boolean;
+  /** undefined: the server gave no view; null: no row yet (see agent-status.ts). */
+  presence?: AgentPresenceRow | null;
 }
 
 export interface RosterAgent extends RailAgent {
@@ -117,11 +122,14 @@ export const renderSidebarParticipants = <
     name.textContent = label;
     name.title = label;
     copy.append(name);
-    const transport = document.createElement('span');
-    transport.textContent = agent.transport === 'hosted_mcp'
-      ? 'Hosted MCP'
-      : 'Local';
-    copy.append(transport);
+    /* One plain status instead of the wire transport (Tom's plain-words rule). The transport
+       stays in the profile panel for support. */
+    const status = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence });
+    const statusLine = document.createElement('span');
+    statusLine.className = 'dashboard__sidebar-agent-status';
+    statusLine.dataset.agentStatus = status.kind;
+    statusLine.textContent = status.chip;
+    copy.append(statusLine);
     if (agent.model) {
       const model = document.createElement('span');
       model.textContent = agent.model;

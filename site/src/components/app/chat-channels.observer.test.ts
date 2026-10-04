@@ -75,7 +75,8 @@ const sentKeys = (source: string): string[] => {
 
 test("the rail names channels, and `stream` is gone from the app's vocabulary", () => {
   const rail = between(dashboard, '<aside class="dashboard__rail"', '<section class="dashboard__channel"');
-  assert.match(rail, /<h2 id="dashboard-channels-label">CHANNELS<\/h2>/);
+  /* MESSAGES since the 2026-10-04 redesign (Tom's plain-words rule: a person sees messages). */
+  assert.match(rail, /<h2 id="dashboard-channels-label">MESSAGES<\/h2>/);
   /* ~~STREAMS (broadcast)~~ retired 2026-09-05. `stream` is the event log on the wire and in
      SWARM-CLOUD.md 2.1; this heading was the only place the app showed that word.
      The negative runs on the BUILT markup, because the source keeps the retired wording in
@@ -85,11 +86,12 @@ test("the rail names channels, and `stream` is gone from the app's vocabulary", 
   assert.doesNotMatch(builtRail, /\bstream\b/i);
   /* all-signals sits above the list because it is not one of them: it is the whole feed. */
   assert.match(rail, /data-channel-place=""[\s\S]*?aria-current="page"/);
-  /* Built from the constant, not typed: ~~`<span>all-signals</span>`~~ 2026-09-05. */
-  assert.match(rail, /<span>\{ALL_SIGNALS_SLUG\}<\/span>/);
+  /* Built from the constant, not typed: ~~`<span>all-signals</span>`~~ 2026-09-05. Since
+     2026-10-04 the label is channelLabel's ("All messages"), still generated from the slug. */
+  assert.match(rail, /<span>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
   assert.match(rail, /data-channel-list/);
   assert.match(rail, /data-channel-new[\s\S]*?aria-label="New channel"/);
-  assert.ok(appHtml.includes("CHANNELS"), "the built /app page must ship the rail heading");
+  assert.ok(appHtml.includes("MESSAGES"), "the built /app page must ship the rail heading");
   assert.ok(appHtml.includes("data-channel-list"), "the built /app page must ship the list");
 });
 
@@ -877,7 +879,7 @@ test("the name of the unfiltered view is typed in exactly one place, and that pl
   assert.equal(hits.length, 1, `all-signals is typed ${hits.length} times outside comments`);
   assert.match(code, /const COMPOSER_DRAFT_SCOPE = "all-signals";/);
   /* And the markup builds its three from the constant. */
-  assert.match(dashboard, /<span>\{ALL_SIGNALS_SLUG\}<\/span>/);
+  assert.match(dashboard, /<span>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
   assert.match(dashboard, /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h1>/);
   assert.match(dashboard, /<span data-channel-switch-label>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
   /* ~~COMPOSER_STREAM~~ renamed with the vocabulary: "stream" is the wire's word for the

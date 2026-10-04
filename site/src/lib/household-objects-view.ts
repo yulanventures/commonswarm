@@ -33,6 +33,12 @@ export interface HouseholdWorkspaceView {
   /** The consented connection ceiling, supplied by the authenticated caller. */
   operations: readonly HouseholdContentOperation[];
   objects: readonly HouseholdObjectView[];
+  /**
+   * Display names the dashboard already holds (people by user id, agents by principal id), so
+   * history reads "Muse, Mei's agent" instead of IDs. Optional: without it, attribution falls
+   * back to the ID form, which is still unambiguous.
+   */
+  names?: { people: Readonly<Record<string, string>>; agents: Readonly<Record<string, string>> };
 }
 export interface HouseholdConflictView {
   workspace_id: string;
@@ -58,6 +64,12 @@ export interface HouseholdActions {
   readHistory?(workspaceId: string, objectId: string, cursor: string): Promise<{
     revisions: readonly HouseholdVersionView[]; next_cursor: string | null;
   }>;
+  /**
+   * Read one object again after a committed save, so the list a person just changed stays on
+   * screen with its new revision (audit U7). Optional: without it, the object is dropped from
+   * the view until reload, which never shows content the server did not return.
+   */
+  reloadObject?(workspaceId: string, objectId: string): Promise<HouseholdObjectView>;
 }
 export type HouseholdSaveState = 'idle' | 'saving' | SaveOutcome['status'];
 export interface HouseholdObjectsState {
@@ -96,12 +108,23 @@ export function createHouseholdObjectsState(workspace: HouseholdWorkspaceView): 
 export function selectedHouseholdObject(state: HouseholdObjectsState): HouseholdObjectView | null {
   return state.workspace.objects.find((object) => object.object_id === state.selected_id) ?? null;
 }
-export function householdAttribution(author: HouseholdAttribution): string {
-  return author.principal_id === null ? `Person ${author.user_id}` : `Agent ${author.principal_id} for ${author.user_id}`;
+export function householdAttribution(author: HouseholdAttribution, names?: HouseholdWorkspaceView['names']): string {
+  const person = names?.people[author.user_id];
+  if (author.principal_id === null) return person ?? `Person ${author.user_id}`;
+  const agent = names?.agents[author.principal_id];
+  if (agent && person) return `${agent}, ${person}’s agent`;
+  return `Agent ${author.principal_id} for ${author.user_id}`;
 }
 function stamp(time: number): string {
   const date = new Date(time);
   return Number.isFinite(date.getTime()) ? date.toISOString() : 'Time unavailable';
+}
+/** The time a person reads; the machine-readable form stays in the datetime attribute. */
+function localStamp(time: number): string {
+  const date = new Date(time);
+  return Number.isFinite(date.getTime())
+    ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+    : 'Time unavailable';
 }
 /** Use the existing audited Markdown subset, but remove its generated links.
  * HTML, images, agent instructions and URLs remain inert text, with no fetches.
@@ -115,13 +138,14 @@ export function renderHouseholdContent(content: HouseholdContent | null): string
 }
 const button = (action: string, label: string, value = '', disabled = false): string =>
   `<button type="button" data-hh-action="${action}" data-hh-value="${esc(value)}"${disabled ? ' disabled' : ''}>${esc(label)}</button>`;
-export function renderHouseholdObjectHistory(object: HouseholdObjectView | null, busy = false): string {
-  if (!object) return '<p>Select an object to read its history.</p>';
+export function renderHouseholdObjectHistory(object: HouseholdObjectView | null, busy = false,
+  names?: HouseholdWorkspaceView['names']): string {
+  if (!object) return '<p>Select a list or doc to see its history.</p>';
   return `<section class="hh-history" aria-label="Object history"><h3>History</h3>
-    <p>Committed revisions remain readable, including retired revisions.</p>
+    <p>Every saved version stays readable, including older ones.</p>
     <ol>${object.history.map((version) => `<li>${button('revision', version.title, version.revision.token, busy)}
       <span>${sameRef(version.revision, object.current.revision) ? 'Current' : version.live ? 'Earlier revision' : 'Retired · retained'}</span>
-      <p>${esc(householdAttribution(version.author))} · <time datetime="${esc(stamp(version.occurred_at_server))}">${esc(stamp(version.occurred_at_server))}</time></p>
+      <p>${esc(householdAttribution(version.author, names))} · <time datetime="${esc(stamp(version.occurred_at_server))}">${esc(localStamp(version.occurred_at_server))}</time></p>
       <small>Revision ${esc(version.revision.token)}</small></li>`).join('')}</ol>
     ${object.next_history_cursor === null ? '<p>All returned history is shown.</p>' : button('history', 'Load more history', '', busy)}</section>`;
 }
@@ -152,15 +176,16 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
   const content = state.opened_version?.content ?? object?.current.content ?? null;
   const capabilities = HOUSEHOLD_CONTENT_OPERATIONS.filter((operation) => workspace.operations.includes(operation)
     && (operation === 'read' || workspace.content_role === 'editor'));
-  return `<header><p class="hh-eyebrow">Household objects</p><h2>${esc(workspace.name)}</h2>
-    <p>Audience: ${esc(workspace.audience.join(', ') || 'Audience has not been loaded')}.</p>
-    <p>Content role: <strong>${esc(workspace.content_role ?? 'Not confirmed')}</strong>. Approved operations: ${esc(capabilities.join(', ') || 'none')}.</p>
-    <p>Members can read shared objects and retained history. Administration is separate from your content role.</p></header>
+  return `<header><p class="hh-eyebrow">Lists &amp; docs</p><h2>${esc(workspace.name)}</h2>
+    <p>Shared with: ${esc(workspace.audience.join(', ') || 'the people in this workspace')}.</p>
+    <p>Content role: <strong>${esc(workspace.content_role === 'editor' ? 'Editor' : workspace.content_role === 'reader' ? 'Reader' : 'Not confirmed')}</strong>. You can ${esc(capabilities.length === 0 ? 'not open them yet'
+      : capabilities.length === 1 ? 'read lists and docs' : 'read and change lists and docs')}.</p>
+    <p>Everyone here can read what is shared and its history. In /app you can check list items and edit docs; ask an agent to create a list or add items.</p></header>
     <p role="status" aria-live="polite" aria-atomic="true" class="hh-status">${esc(state.notice)}</p>
     <div class="hh-layout"><nav aria-label="Household objects">${workspace.objects.length ? `<ul>${workspace.objects.map((item) =>
-      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy)}</li>`).join('')}</ul>` : '<p>No objects are loaded in this workspace.</p>'}</nav>
+      `<li>${button('select', `${item.current.title} · ${item.kind}`, item.object_id, busy)}</li>`).join('')}</ul>` : '<p>No lists or docs yet. Ask an agent: “Create a CommonSwarm list called Groceries.”</p>'}</nav>
     <article aria-label="Selected object">${object ? `<h3>${esc(object.current.title)}</h3>
-      <p>${esc(householdAttribution((state.opened_version ?? object.current).author))}</p>
+      <p>${esc(householdAttribution((state.opened_version ?? object.current).author, workspace.names))}</p>
       ${state.opened_version ? '<p>Reading an earlier revision.</p>' : '<p>Current revision</p>'}
       ${renderHouseholdContent(content)}
       ${!content ? button('revision', 'Open current revision', object.current.revision.token, busy) : ''}
@@ -172,7 +197,7 @@ export function renderHouseholdObjects(state: HouseholdObjectsState): string {
       ${renderHouseholdConflict(state)}
       ${busy && state.proposed ? `<section aria-label="Unsaved local changes"><h4>Your local changes</h4>${renderHouseholdContent(state.proposed)}</section>` : ''}
       ${state.save_state === 'unknown' || state.save_state === 'pending' ? button('check-save', 'Check this save') : ''}
-      ${renderHouseholdObjectHistory(object, busy)}` : '<p>Select a list, document or file to read it.</p>'}</article></div>`;
+      ${renderHouseholdObjectHistory(object, busy, workspace.names)}` : '<p>Select a list, doc or file to read it.</p>'}</article></div>`;
 }
 
 /** Produce an explicit before-value patch. This never silently replaces a newer revision. */
@@ -235,10 +260,22 @@ export function createHouseholdObjectsController(workspace: HouseholdWorkspaceVi
     state.save_state = outcome.status;
     if (outcome.status === 'committed') {
       // Do not manufacture attribution, content or a server timestamp from a receipt.
-      state.notice = 'Saved. Reload the object to read the committed revision.';
       state.proposed = null; state.conflict = null; state.draft_id = null; state.conflict_current = null;
-      state.workspace.objects = state.workspace.objects.filter((object) => object.object_id !== outgoing.object_id);
-      state.selected_id = null; request = null;
+      request = null;
+      const reloaded = actions.reloadObject
+        ? await actions.reloadObject(outgoing.workspace_id, outgoing.object_id).catch(() => null)
+        : null;
+      if (active !== generation) return false;
+      if (reloaded && reloaded.object_id === outgoing.object_id && bound(reloaded.current.revision, outgoing.workspace_id, outgoing.object_id)
+        && reloaded.history.every((version) => bound(version.revision, outgoing.workspace_id, outgoing.object_id))) {
+        // Keep the object on screen with the revision the server returned (audit U7).
+        state.workspace.objects = state.workspace.objects.map((object) => object.object_id === outgoing.object_id ? structuredClone(reloaded) : object);
+        state.notice = 'Saved.';
+      } else {
+        state.notice = 'Saved. Reload the object to read the committed revision.';
+        state.workspace.objects = state.workspace.objects.filter((object) => object.object_id !== outgoing.object_id);
+        state.selected_id = null;
+      }
     } else if (outcome.status === 'conflict') {
       state.draft_id = outcome.draft_id; state.conflict_current = outcome.current; state.conflict = null; request = null;
       state.notice = 'Another revision was saved first. Your draft was retained. Recover it and review the changes.';

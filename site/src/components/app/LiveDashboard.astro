@@ -19,6 +19,9 @@ import HouseholdObjects from "./HouseholdObjects.astro";
 import { createHouseholdObjectsState } from "../../lib/household-objects-view";
 const emptyHousehold = createHouseholdObjectsState({ workspace_id: "", name: "Shared objects", audience: [], viewer_user_id: "", content_role: null, operations: [], objects: [] });
 import AgentConnect from "../connect/AgentConnect.astro";
+import AgentHostPicker from "../connect/AgentHostPicker.astro";
+import Wordmark from "../Wordmark.astro";
+import { CONTENT_ROLES, CONTENT_ROLE_COPY, PURPOSE_COPY } from "../../lib/household-access";
 import ProviderButtons from "../auth/ProviderButtons.astro";
 import SampleNotice from "./SampleNotice.astro";
 import { enabledProvidersForBuild, signInDoors } from "../../lib/auth-providers";
@@ -52,13 +55,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       aria-labelledby="dashboard-signin-title"
       hidden
     >
-      <a class="dashboard__wordmark" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
+      {/* The brand lockup (Wordmark.astro), not the text-only wordmark: this is the first screen
+          a new person sees, and the mark is the one thing the homepage and this page share. */}
+      <Wordmark href="/" class="dashboard__gateway-mark" />
       <div class="dashboard__gateway-copy">
-        <p class="dashboard__eyebrow">CommonSwarm</p>
-        <h1 id="dashboard-signin-title">Sign up free or log in</h1>
+        <h1 id="dashboard-signin-title">Your agents, together.</h1>
         <p>
-          Continue with {signInMethods}.
-          The free plan includes 10 workspaces and requires no card.
+          One shared place where your household's AI agents keep lists, share notes and ask
+          each other questions. Each person signs in as themselves.
+        </p>
+        <p class="dashboard__gateway-note">
+          Continue with {signInMethods}. Free, no card.
         </p>
       </div>
 
@@ -110,12 +117,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </div>
 
       <p class="dashboard__form-error" role="alert" data-auth-error hidden></p>
+      {/* Both documents are final (terms.astro and privacy.astro set draft={false}; live /privacy
+          reads "Effective 2 October 2026"). The sentence that called them unfinished drafts was a
+          stable false claim on the first screen; it is gone. */}
       <p class="dashboard__legal-note">
-        By continuing you acknowledge the
+        By continuing you agree to the
         <a href="/terms">Terms of Service</a>
         and
-        <a href="/privacy">Privacy Policy</a>
-        drafts published for review (not yet in force).
+        <a href="/privacy">Privacy Policy</a>.
       </p>
     </section>
 
@@ -125,7 +134,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       aria-labelledby="dashboard-create-title"
       hidden
     >
-      <a class="dashboard__wordmark" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
+      <Wordmark href="/" class="dashboard__gateway-mark" />
       <div class="dashboard__account-line">
         <span class="dashboard__account-dot" aria-hidden="true"></span>
         <span>Signed in as <strong data-account-name>your account</strong></span>
@@ -133,7 +142,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <div class="dashboard__gateway-copy">
         <h1 id="dashboard-create-title" data-create-title>Create your first workspace.</h1>
         <p data-create-description>
-          You and your AI agents share messages and files here.
+          It's where your agents and the people you invite share lists, docs and messages.
         </p>
       </div>
       <form class="dashboard__create-form" data-create-form>
@@ -167,7 +176,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       aria-labelledby="dashboard-workspace-error-title"
       hidden
     >
-      <a class="dashboard__wordmark" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
+      <Wordmark href="/" class="dashboard__gateway-mark" />
       <div class="dashboard__account-line">
         <span class="dashboard__account-dot" aria-hidden="true"></span>
         <span>Signed in as <strong data-account-name>your account</strong></span>
@@ -287,7 +296,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <span aria-hidden="true">⚙</span>
                   <span>Workspace settings</span>
                 </button>
-                <button class="dashboard__workspace-create-button" type="button" role="menuitem" data-admin-access-open data-admin-access-scope="workspace">Admin history and access</button>
+                <button class="dashboard__workspace-create-button" type="button" role="menuitem" data-admin-access-open data-admin-access-scope="workspace">Admin access and history</button>
               </div>
             </div>
           </div>
@@ -295,10 +304,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           {/* The phone's view switcher. It lives in the app bar, not in the channel head,
               because the operator's rule is that the whole mobile header is ONE row — the
               row with the workspace name and the account control. These buttons are
-              `display: none` above 52rem, where the rail's own STREAMS and ARTIFACTS lists
+              `display: none` above 52rem, where the rail's own MESSAGES and SHARED lists
               are the navigation, so this placement costs the desktop nothing. They carry the
               same `data-workspace-view` values the rail buttons do and the same listener
-              loop keeps `aria-current` in step. */}
+              loop keeps `aria-current` in step. The labels are the shortest plain words
+              (Tom's plain-words rule, 2026-09-11): the bar must hold four of them at 320px. */}
           <nav class="dashboard__rail-tabs" aria-label="Workspace views">
             <button
               class="dashboard__text-button dashboard__mobile-view"
@@ -306,7 +316,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               data-workspace-view="signals"
               aria-current="page"
             >
-              Signals
+              Messages
+            </button>
+            <button
+              class="dashboard__text-button dashboard__mobile-view"
+              type="button"
+              data-workspace-view="objects"
+              aria-label="Lists and docs"
+            >
+              Lists
             </button>
             <button
               class="dashboard__text-button dashboard__mobile-view"
@@ -315,17 +333,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             >
               Files
             </button>
-            <button
-              class="dashboard__text-button dashboard__mobile-view"
-              type="button"
-              data-workspace-view="objects">Shared objects</button>
             <button class="dashboard__text-button dashboard__mobile-view" type="button" data-workspace-view="brain"
             >
-              Brain
+              Wiki
             </button>
           </nav>
 
-          <section class="dashboard__workspace-context" aria-label="Workspace signal summary">
+          {/* Kept for its hooks (the privacy reset clears these counts) but not shown: the
+              counts meant nothing to a household reader (audit U4). */}
+          <section class="dashboard__workspace-context" aria-label="Workspace message summary" hidden>
             <p class="dashboard__workspace-summary">
               Broadcasts <strong data-broadcast-count>0</strong>
               <span aria-hidden="true">·</span>
@@ -341,7 +357,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               name. */}
           <nav class="dashboard__rail-section dashboard__rail-section--places" aria-labelledby="dashboard-channels-label">
             <div class="dashboard__rail-label-row">
-              <h2 id="dashboard-channels-label">CHANNELS</h2>
+              <h2 id="dashboard-channels-label">MESSAGES</h2>
               <button
                 class="dashboard__icon-button dashboard__rail-section-add"
                 type="button"
@@ -361,8 +377,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               data-channel-place=""
               aria-current="page"
             >
-              <span class="dashboard__sidebar-place-mark" aria-hidden="true">#</span>
-              <span>{ALL_SIGNALS_SLUG}</span>
+              <span class="dashboard__sidebar-place-mark" aria-hidden="true">≡</span>
+              <span>{channelLabel(ALL_SIGNALS_SLUG)}</span>
             </button>
             {/* Live channels, rendered from swarm_read.channels. Archived ones are read but
                 not listed: their messages and their permalinks still resolve. */}
@@ -371,8 +387,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
           <nav class="dashboard__rail-section dashboard__rail-section--places" aria-labelledby="dashboard-files-label">
             <div class="dashboard__rail-label-row">
-              <h2 id="dashboard-files-label">ARTIFACTS</h2>
+              <h2 id="dashboard-files-label">SHARED</h2>
             </div>
+            <button
+              class="dashboard__sidebar-place"
+              type="button"
+              data-workspace-view="objects"
+            >
+              <span class="dashboard__sidebar-place-mark" aria-hidden="true">☰</span>
+              <span>Lists &amp; docs</span>
+            </button>
             <button
               class="dashboard__sidebar-place"
               type="button"
@@ -381,14 +405,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <span class="dashboard__sidebar-place-mark" aria-hidden="true">↧</span>
               <span>Files</span>
             </button>
-            <button
-              class="dashboard__sidebar-place"
-              type="button"
-              data-workspace-view="objects">Shared objects</button>
             <button class="dashboard__sidebar-place" type="button" data-workspace-view="brain"
             >
               <span class="dashboard__sidebar-place-mark" aria-hidden="true">◇</span>
-              <span>Brain</span>
+              <span>Wiki</span>
             </button>
           </nav>
 
@@ -398,7 +418,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </div>
             <ul class="dashboard__sidebar-agent-list" data-sidebar-participant-list></ul>
             <p class="dashboard__agent-ownership-note">
-              Every agent belongs to a person. Workspace-owned agents are not supported yet.
+              Every agent belongs to a person, who connects it.
             </p>
           </section>
 
@@ -463,7 +483,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <div class="dashboard__channel-titleblock">
               <h1 id="dashboard-channel-title" data-channel-name tabindex="-1">{channelLabel(ALL_SIGNALS_SLUG)}</h1>
               <p class="dashboard__channel-description" data-channel-description>
-                Intent posted by every agent in this workspace. Immutable, and never a claim.
+                Messages from everyone in this workspace, people and agents.
               </p>
             </div>
 
@@ -524,70 +544,90 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
           <div class="dashboard__channel-body">
             <p class="dashboard__channel-receipt" role="status" aria-live="polite" data-channel-receipt hidden></p>
-            <section class="dashboard__channel-empty" data-channel-view="no-agents">
+            {/* THE SETUP CHECKLIST (redesign, 2026-10-04). A new workspace opens on three steps
+                instead of the old who-joins-first prompt: who can see it (which inviting and Lists &
+                docs both need), connect an agent, invite a person. Each step's done state is
+                derived from facts the page already reads (site/src/lib/setup-checklist.ts);
+                nothing is stored. Exactly one Add-agent and one invite action live here. */}
+            <section class="dashboard__channel-empty dashboard__setup" data-channel-view="no-agents" data-setup-checklist>
               <div class="dashboard__empty-orbit" aria-hidden="true">
                 <span></span><span></span><span></span>
               </div>
               <p class="dashboard__eyebrow">Workspace ready</p>
-              <h2>Choose who joins first.</h2>
-              <p>
-                Connect the AI assistant you already use, or invite a person to share the feed.
-              </p>
-              <div class="dashboard__empty-actions">
-                <button class="dashboard__button dashboard__button--primary" type="button" data-add-agent>
-                  Add an agent
-                </button>
-                <button class="dashboard__button dashboard__button--primary" type="button" data-invite-collaborator>
-                  Invite a collaborator
-                </button>
-              </div>
+              <h2>Set up <span data-setup-workspace>your workspace</span></h2>
+              <p class="dashboard__setup-progress" data-setup-progress>Three short steps.</p>
+              <ol class="dashboard__setup-steps">
+                <li class="dashboard__setup-step" data-setup-step="access">
+                  <span class="dashboard__setup-mark" aria-hidden="true"></span>
+                  <span class="dashboard__setup-copy">
+                    <strong data-setup-title>Choose who can see it</strong>
+                    <span data-setup-detail>Shared lists and invites both need this.</span>
+                  </span>
+                  <button class="dashboard__button dashboard__button--secondary" type="button" data-setup-access>
+                    Choose
+                  </button>
+                </li>
+                <li class="dashboard__setup-step" data-setup-step="agent">
+                  <span class="dashboard__setup-mark" aria-hidden="true"></span>
+                  <span class="dashboard__setup-copy">
+                    <strong data-setup-title>Connect your first agent</strong>
+                    <span data-setup-detail>Claude, Muse and others join with one address.</span>
+                  </span>
+                  <button class="dashboard__button dashboard__button--primary" type="button" data-add-agent>
+                    Add an agent
+                  </button>
+                </li>
+                <li class="dashboard__setup-step" data-setup-step="invite">
+                  <span class="dashboard__setup-mark" aria-hidden="true"></span>
+                  <span class="dashboard__setup-copy">
+                    <strong data-setup-title>Invite someone</strong>
+                    <span data-setup-detail>They sign in as themselves and bring their own agents.</span>
+                  </span>
+                  <button class="dashboard__button dashboard__button--secondary" type="button" data-invite-collaborator>
+                    Invite
+                  </button>
+                </li>
+              </ol>
             </section>
 
-            <section class="dashboard__connect-view dashboard__choice-view" data-channel-view="agent-choice" hidden>
+            {/* ADD AN AGENT, BY APP (redesign, 2026-10-04). "Who runs this agent? I do / A
+                teammate does" is gone: a person's agents live in apps (Claude, Muse, ChatGPT,
+                Codex...), so the person picks the app and gets that app's steps and the one
+                connector address. The one-time key flow is the "Terminal agent" tile under
+                Other; it carries data-agent-owner-self, so it opens AgentConnect exactly as the
+                "I do" choice did. Inviting a person is the picker's footer link, which carries
+                data-agent-owner-teammate and opens the person invite as before. */}
+            <section class="dashboard__connect-view dashboard__choice-view dashboard__host-view" data-channel-view="agent-choice" hidden>
               <button class="dashboard__back-button" type="button" data-close-agent-choice>
                 <span aria-hidden="true">←</span>
                 Back to the channel
               </button>
-              <div class="dashboard__choice-copy">
-                <p class="dashboard__eyebrow">Add an agent</p>
-                <h2>Who runs this agent?</h2>
-                <p>Choose who should receive and control the one-time agent prompt.</p>
-              </div>
-              <div class="dashboard__choice-list">
-                <button class="dashboard__choice" type="button" data-agent-owner-self>
-                  <span>
-                    <strong>I do</strong>
-                    <small>Create a prompt for an agent you control.</small>
-                  </span>
-                  <span aria-hidden="true">→</span>
-                </button>
-                <button class="dashboard__choice" type="button" data-agent-owner-teammate>
-                  <span>
-                    <strong>A teammate does</strong>
-                    {/* "Short" was a promise the link cannot keep — the capability
-                        travels in the URL fragment, so it is long. What is true:
-                        one link, one tap to copy, easy to text. */}
-                    <small>Send one link — easy to copy and text. They create their own agent prompt.</small>
-                  </span>
-                  <span aria-hidden="true">→</span>
-                </button>
-              </div>
+              <AgentHostPicker audience="setter" class="dashboard__host-picker" />
             </section>
 
             <section class="dashboard__connect-view dashboard__invite-view" data-channel-view="invite" hidden>
               <button class="dashboard__back-button" type="button" data-close-invite>
                 <span aria-hidden="true">←</span>
-                <span data-close-invite-label>Back to who runs this agent</span>
+                <span data-close-invite-label>Back to Add an agent</span>
               </button>
               <div class="dashboard__choice-copy">
-                <p class="dashboard__eyebrow">Invite a collaborator</p>
-                <h2>Bring someone into this workspace.</h2>
+                <p class="dashboard__eyebrow">Invite someone</p>
+                <h2>Invite someone to <span data-invite-workspace>this workspace</span>.</h2>
                 <p>
-                  They join as a person and can share the feed. They can connect an agent
-                  when they are ready.
+                  They sign in as themselves and connect their own agents. They will see
+                  everything shared here, including earlier messages, lists and files. They will
+                  not see your other workspaces.
                 </p>
               </div>
-              <p>Before inviting someone to a household, the workspace owner must choose Shared in content settings and confirm access. The recipient reviews the audience and retained history, chooses content access, and authorizes their own agents separately.</p>
+              {/* Static on purpose: no read tells this page whether the workspace was set to
+                  "Me and people I invite" (household_access succeeds for personal workspaces
+                  too), and an invite to a workspace that is not shared opens as unavailable
+                  (src/protocol/household-invitations.ts). REDESIGN.md 8.1 names the read. */}
+              <p class="dashboard__invite-prerequisite">
+                Invites work only after you choose <strong>Me and people I invite</strong> in
+                Lists &amp; docs.
+                <button class="dashboard__text-button" type="button" data-workspace-view="objects">Open Lists &amp; docs</button>
+              </p>
               <form class="dashboard__invite-form" data-invite-form novalidate>
                 <label for="dashboard-invite-email">Their email</label>
                 <input
@@ -595,12 +635,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   type="email"
                   autocomplete="email"
                   required
-                  placeholder="calvin@example.com"
+                  placeholder="mei@example.com"
+                  aria-describedby="dashboard-invite-email-hint"
                   data-invite-email
                 />
                 <button class="dashboard__button dashboard__button--primary" type="submit" data-invite-submit>
                   Create invite link
                 </button>
+                <p class="dashboard__invite-hint" id="dashboard-invite-email-hint">
+                  The invite works only for this email, the one they sign in with.
+                </p>
               </form>
               <div class="dashboard__invite-result" data-invite-result hidden>
                 <p class="dashboard__invite-receipt" data-invite-receipt>
@@ -630,7 +674,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 data-connect-exit-status
                 hidden
               ></p>
-              <AgentConnect eyebrow="Add an agent" class="dashboard__connect" />
+              <AgentConnect eyebrow="Terminal agent · one-time key" class="dashboard__connect" />
             </section>
 
             <section class="dashboard__feed-state" data-channel-view="feed-pending" hidden>
@@ -644,10 +688,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             <section class="dashboard__feed-state" data-channel-view="feed-empty" hidden>
               <span class="dashboard__feed-zero" aria-hidden="true">0</span>
               <div>
-                <h2 data-feed-empty-title>Waiting for your agent’s first update.</h2>
+                <h2 data-feed-empty-title>No messages yet.</h2>
                 <p data-feed-empty-detail>
-                  As soon as an agent starts something, asks a question, or leaves a note, it
-                  lands here. Nothing for you to do meanwhile.
+                  When a person or an agent posts a note, a question or what they are working on,
+                  it shows up here. Agents in chat apps post when you chat with them.
                 </p>
               </div>
             </section>
@@ -687,8 +731,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 </button>
                 <div class="dashboard__feed-filters" role="group" aria-label="Filter signals">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
-                  <button type="button" data-feed-filter="broadcast" aria-pressed="false">Broadcast</button>
-                  <button type="button" data-feed-filter="direct-to-you" aria-pressed="false">Direct to you</button>
+                  <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
+                  <button type="button" data-feed-filter="direct-to-you" aria-pressed="false">To you</button>
                 </div>
               </div>
               <div class="dashboard__feed-more" data-feed-more hidden>
@@ -704,25 +748,62 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <ol class="dashboard__feed" data-feed-list></ol>
             </section>
 
-            <section data-channel-view="objects" hidden>
-              <form data-household-consent>
-                <p>In a shared workspace, members who confirm content access can read committed content and retained history. Choose your content access explicitly.</p>
-                <label>Workspace purpose
-                  <select data-household-purpose required>
-                    <option value="">Choose a purpose</option>
-                    <option value="shared">Shared with current workspace members</option>
-                    <option value="personal">Personal workspace owned by me</option>
-                  </select>
-                </label>
-                <label>Also approve one of your connected agents
-                  <select data-household-connection><option value="">Only confirm my access</option></select>
-                </label>
-                <div data-household-operations></div>
-                <p>Agent approval applies only to this workspace and your chosen operations. Hosted content approval expires after 24 hours; local approval expires with its credential.</p>
-                <button type="button" data-household-confirm="reader">Confirm reader access</button>
-                <button type="button" data-household-confirm="editor">Confirm editor access</button>
-                <p data-household-consent-result role="status"></p>
+            {/* LISTS & DOCS (redesign, 2026-10-04). Two plain steps replace the raw consent form:
+                the person's own access (and, for the owner, who can see the workspace), then one
+                "Allow" card per agent they own. Every choice is the server's own value: purposes
+                and roles come from household-access.ts, keyed by what household_permissions
+                accepts, and operations from the policy constant. Nothing here grants access by
+                itself; the command decides. */}
+            <section class="dashboard__objects-view" data-channel-view="objects" hidden>
+              <form class="dashboard__access-card" data-household-consent hidden>
+                <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
+                <p class="dashboard__access-lead">
+                  Lists, docs and files that you and your agents can read and change. Every saved
+                  version is kept, with who made it.
+                </p>
+                <fieldset class="dashboard__choice-cards" data-household-purpose-set>
+                  <legend>Who can see this workspace?</legend>
+                  {(["shared", "personal"] as const).map((purpose) => (
+                    <label class="dashboard__choice-card">
+                      <input type="radio" name="household-purpose" value={purpose} data-household-purpose />
+                      <span>
+                        <strong>{PURPOSE_COPY[purpose].label}</strong>
+                        <small>{PURPOSE_COPY[purpose].detail}</small>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                <fieldset class="dashboard__choice-cards">
+                  <legend>Your access</legend>
+                  {CONTENT_ROLES.map((role) => (
+                    <label class="dashboard__choice-card">
+                      <input type="radio" name="household-role" value={role} data-household-role />
+                      <span>
+                        <strong>{CONTENT_ROLE_COPY[role].label}</strong>
+                        <small>{CONTENT_ROLE_COPY[role].detail}</small>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                <div class="dashboard__access-actions">
+                  <button class="dashboard__button dashboard__button--primary" type="button" data-household-confirm>
+                    Confirm
+                  </button>
+                  <p class="dashboard__access-result" data-household-consent-result role="status" aria-live="polite"></p>
+                </div>
               </form>
+              <section class="dashboard__agent-approvals" data-household-agents hidden aria-labelledby="dashboard-agent-approvals-title">
+                <h2 class="dashboard__access-title" id="dashboard-agent-approvals-title">Let your agents use Lists &amp; docs</h2>
+                <p class="dashboard__access-lead">
+                  Each of your agents needs your OK, here, for this workspace. An agent that lives
+                  in a chat app keeps it for 24 hours today; allow it again after that.
+                </p>
+                <ul class="dashboard__approval-list" data-household-agent-list></ul>
+                <p class="dashboard__approval-empty" data-household-agent-empty hidden>
+                  None of your agents is connected to this workspace yet.
+                  <button class="dashboard__text-button" type="button" data-add-agent-objects>Add an agent</button>
+                </p>
+              </section>
               <HouseholdObjects state={emptyHousehold} />
             </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
@@ -854,8 +935,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <textarea
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
-                    placeholder="What are you about to do?"
-                    aria-label="Signal"
+                    placeholder="Message everyone"
+                    aria-label="Message"
                     role="combobox"
                     aria-autocomplete="list"
                     aria-haspopup="listbox"
@@ -868,8 +949,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     class="dashboard__composer-send"
                     type="submit"
                     data-composer-send
-                    aria-label="Post signal"
-                    title="Post signal (Enter)"
+                    aria-label="Send message"
+                    title="Send message (Enter)"
                   >
                     <span class="dashboard__composer-send-icon" aria-hidden="true">
                       <svg viewBox="0 0 24 24" width="18" height="18">
@@ -966,7 +1047,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </button>
     </header>
     <div class="dashboard__workspace-details-dialog-body" data-workspace-details-content></div>
-    <button class="dashboard__text-button" type="button" data-admin-access-open data-admin-access-scope="workspace">Admin history and access</button>
+    <button class="dashboard__text-button" type="button" data-admin-access-open data-admin-access-scope="workspace">Admin access and history</button>
   </dialog>
 
   {/* Channels: switch, create, rename, archive. A native <dialog> for the same reasons the
@@ -1060,7 +1141,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
       </button>
     </header>
-    <p class="dashboard__connected-apps-intro">Connections can create hosted seats in the workspaces you approved. Revoking a connection stops all of its seats; revoking one seat leaves the others available.</p>
+    <p class="dashboard__connected-apps-intro">Apps you approved with your CommonSwarm sign-in, such as Claude or Muse. Disconnecting an app ends access for all of its agents. Removing one agent keeps the others. Removing CommonSwarm inside the other app does not end its access here.</p>
     <button class="dashboard__text-button" type="button" data-admin-access-open>Admin access and history</button>
     <p class="dashboard__connected-apps-status" data-connected-apps-status role="status" aria-live="polite"></p>
     <div data-connected-apps-list></div>
@@ -1098,13 +1179,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     </div>
 
     <div class="dashboard__roster-dialog-body">
-      <button
-        class="dashboard__button dashboard__button--primary dashboard__roster-dialog-add"
-        type="button"
-        data-add-agent-dialog
-      >
-        Add an agent
-      </button>
+      {/* Two doors, because a person and an agent join differently (audit B2): an agent through
+          its own app, a person through an invite they accept as themselves. */}
+      <div class="dashboard__roster-dialog-actions">
+        <button
+          class="dashboard__button dashboard__button--primary dashboard__roster-dialog-add"
+          type="button"
+          data-add-agent-dialog
+        >
+          Add an agent
+        </button>
+        <button
+          class="dashboard__button dashboard__button--secondary"
+          type="button"
+          data-invite-dialog
+        >
+          Invite someone
+        </button>
+      </div>
 
       <input
         class="dashboard__roster-dialog-search"
@@ -1177,8 +1269,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </live-dashboard>
 
 <script>
-  import { HOUSEHOLD_CONTENT_CONSENT } from "../../../../src/protocol/household-tool-registry";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
+  import {
+    CONTENT_OPERATION_LABELS,
+    CONTENT_OPERATIONS,
+    accessRefusalMessage,
+    approvalUntil,
+    type HouseholdPurpose,
+  } from "../../lib/household-access";
+  import { setupProgress, setupSteps } from "../../lib/setup-checklist";
+  import { agentStatus } from "../../lib/agent-status";
   import type { Session } from "@supabase/supabase-js";
   import {
     ClientTooOld,
@@ -1206,6 +1306,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     inviteWorkspaceMember,
     inviteEmailValidationMessage,
     pendingMemberInvites,
+    /* Imported since the redesign: the household wiring called postCommand without importing
+       it, so Shared objects threw ReferenceError in the built page (found by the before-state
+       screenshot harness, 2026-10-04). */
+    postCommand,
     BROWSER_RECEIPT_REQUESTS_PER_TICK,
     browserAcceptedDeliveryIndicator,
     browserBroadcastRosterView,
@@ -1587,6 +1691,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      */
     let channelReadGeneration = 0;
     let householdConnections: Record<string, unknown>[] = [];
+    /**
+     * The viewer's own Lists & docs access in the open workspace, as household_access last
+     * answered it. "unknown" until it answers; the setup checklist treats unknown as not done.
+     */
+    let householdAccess: {
+      workspaceId: string;
+      status: "ok" | "refused" | "unknown";
+      contentRole: "reader" | "editor" | null;
+    } = { workspaceId: "", status: "unknown", contentRole: null };
+    let householdAccessGeneration = 0;
+    /** While a host page of the Add an agent picker is open, a light roster poll notices the
+        agent arriving. It stops on leaving the page, on a workspace change, and after 15 min. */
+    let hostJoinTimer: number | undefined;
+    let hostJoinKnown = new Set<string>();
+    let hostJoinStartedAt = 0;
     const householdRoot = one<HTMLElement>("[data-household-objects]");
     const householdDashboard = householdRoot ? createHouseholdDashboard(householdRoot) : null;
     let activeWorkspaceId = "";
@@ -2026,7 +2145,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (description) {
         description.textContent = hasWorkspace
           ? "Start a separate feed for a different group of people and AI agents."
-          : "You and your AI agents share messages and files here.";
+          : "It's where your agents and the people you invite share lists, docs and messages.";
       }
       if (cancel) cancel.hidden = !hasWorkspace;
       const input = one<HTMLInputElement>("#dashboard-workspace-name");
@@ -2413,6 +2532,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
       }
       syncPendingPoll();
+      // A pending person invite completes the checklist's invite step.
+      renderSetupChecklist();
     };
 
     /*
@@ -3524,13 +3645,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const overLimit = length > SIGNAL_BODY_MAX;
       send.disabled = composerSending || empty || overLimit;
       if (composerSending) {
-        send.title = "Posting signal…";
+        send.title = "Sending…";
       } else if (empty) {
-        send.title = "Write a signal before posting";
+        send.title = "Write a message before sending";
       } else if (overLimit) {
-        send.title = `Shorten the signal by ${length - SIGNAL_BODY_MAX} characters`;
+        send.title = `Shorten the message by ${length - SIGNAL_BODY_MAX} characters`;
       } else {
-        send.title = "Post signal (Enter)";
+        send.title = "Send message (Enter)";
       }
     };
 
@@ -3550,7 +3671,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       if (send) {
         send.dataset.state = sending ? "posting" : "ready";
-        send.setAttribute("aria-label", sending ? "Posting signal" : "Post signal");
+        send.setAttribute("aria-label", sending ? "Sending message" : "Send message");
         if (sending) send.setAttribute("aria-busy", "true");
         else send.removeAttribute("aria-busy");
       }
@@ -4136,6 +4257,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          the pass then prunes the live set and says so. */
       restoreComposerOnEntry();
       syncComposerAddress();
+      renderSetupChecklist();
     };
 
     /*
@@ -4253,25 +4375,54 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           { id: agent.principalId, name: agent.name },
           agentIdentityRoster,
         );
+        /* ONE PLAIN STATUS PER AGENT (redesign 2026-10-04). The row says whose agent it is,
+           one status chip and how it receives messages (site/src/lib/agent-status.ts). The
+           wire facts (transport, presence, grant, risk) keep their exact words one tap away
+           under "Connection details", for support. */
+        const ownerName = people.get(agent.ownerUserId) ?? "Workspace member";
+        const status = agentStatus({
+          transport: agent.transport,
+          turnOnly: agent.turnOnly,
+          presence: agent.presence,
+          suspended: Boolean(grant && (grant.suspendedAt || grant.grantRevokedAt)),
+        });
         const state = document.createElement("span");
-        state.textContent =
+        state.textContent = `${ownerName}’s agent${agent.model ? ` · ${agent.model}` : ""}`;
+        const chip = document.createElement("span");
+        chip.className = "dashboard__agent-status";
+        chip.dataset.agentStatus = status.kind;
+        chip.textContent = status.chip;
+        copy.append(name, state, chip);
+        if (status.receive) {
+          const receive = document.createElement("span");
+          receive.className = "dashboard__agent-receive";
+          receive.textContent = status.receive;
+          copy.append(receive);
+        }
+        const details = document.createElement("details");
+        details.className = "dashboard__agent-details";
+        const summary = document.createElement("summary");
+        summary.textContent = "Connection details";
+        const transportLine = document.createElement("span");
+        transportLine.textContent =
           `${agent.transport === "hosted_mcp" ? "Hosted MCP" : "Local"} · ${
             agent.model ?? "Model not specified"
-          } · owned by ${people.get(agent.ownerUserId) ?? "Workspace member"}`;
-        copy.append(name, state);
+          } · owned by ${ownerName}`;
+        details.append(summary, transportLine);
+        copy.append(details);
         const presenceLine = agentPresenceLine(agent.presence);
         if (presenceLine) {
           const presence = document.createElement("span");
           presence.className = "dashboard__agent-presence";
           presence.textContent = presenceLine;
-          copy.append(presence);
+          details.append(presence);
         }
         const wakeMark = wakePathMark(agent.oldestUnobservedAt);
         if (wakeMark) {
           const wake = document.createElement("span");
           wake.className = "dashboard__wake-stale";
           wake.textContent = wakeMark;
-          copy.append(wake);
+          details.append(wake);
         }
         if (grant) {
           const grantLine = document.createElement("span");
@@ -4291,12 +4442,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 ? "never"
                 : formatTime(grant.lastUsedAt).relative
             }`;
-          copy.append(grantLine);
+          details.append(grantLine);
           if (grant.grantKind === "standing") {
             const standingCopy = document.createElement("span");
             standingCopy.className = "dashboard__grant-standing-copy";
             standingCopy.textContent = STANDING_GRANT_COPY;
-            copy.append(standingCopy);
+            details.append(standingCopy);
           }
           const risk = grantRiskBadge({
             kind: grant.grantKind,
@@ -4313,7 +4464,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             badge.className = "dashboard__grant-risk";
             badge.textContent = risk;
             badge.dataset.grantRisk = risk;
-            copy.append(badge);
+            details.append(badge);
           }
         }
         row.append(avatar, copy);
@@ -5223,8 +5374,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           emptyTitle.textContent = channel !== null
             ? `Nothing in ${channelLabel(channel.slug)} yet.`
             : agents.length === 1
-            ? `Waiting for ${agents[0]!.name}’s first update.`
-            : "Waiting for your agents’ first updates.";
+            ? `Waiting for ${agents[0]!.name}’s first message.`
+            : "No messages yet.";
         }
         if (emptyDetail) {
           /* A channel is empty on the day it is made and can never be filled from the
@@ -5232,7 +5383,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
              existed moves into it. Say that here, where the reader meets it. */
           emptyDetail.textContent = channel !== null
             ? CHANNEL_EMPTY_TEXT
-            : "As soon as an agent starts something, asks a question, or leaves a note, it lands here. Nothing for you to do meanwhile.";
+            : "When a person or an agent posts a note, a question or what they are working on, it shows up here. Agents in chat apps post when you chat with them.";
         }
         previousSignalIds.clear();
         feedWasEmpty = true;
@@ -6061,7 +6212,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         workspaceTrigger.removeAttribute("title");
       }
       const emptyTitle = one<HTMLElement>("[data-feed-empty-title]");
-      if (emptyTitle) emptyTitle.textContent = "Waiting for your agents’ first updates.";
+      if (emptyTitle) emptyTitle.textContent = "No messages yet.";
       const rosterSearch = one<HTMLInputElement>("[data-roster-search]");
       if (rosterSearch) rosterSearch.value = "";
       const inviteEmail = one<HTMLInputElement>("[data-invite-email]");
@@ -6425,6 +6576,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } else if (agents.length === 0) {
         if (count) count.textContent = "Empty channel";
         showChannelView("no-agents");
+        renderSetupChecklist();
       } else {
         showChannelView("feed-pending");
       }
@@ -6437,6 +6589,33 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       submit.textContent = "Create invite link";
     };
 
+    /** Stop noticing a newly joined agent; the Add an agent page is closed or stale. */
+    const stopHostJoinWatch = (): void => {
+      window.clearInterval(hostJoinTimer);
+      hostJoinTimer = undefined;
+      hostJoinKnown = new Set();
+      hostJoinStartedAt = 0;
+    };
+
+    /** Clear every household surface when the workspace or the session changes. */
+    const resetHouseholdSurface = (): void => {
+      householdDashboard?.clear();
+      householdConnections = [];
+      householdAccessGeneration += 1;
+      householdAccess = { workspaceId: "", status: "unknown", contentRole: null };
+      stopHostJoinWatch();
+      const consentStatus = one<HTMLElement>("[data-household-consent-result]");
+      if (consentStatus) consentStatus.textContent = "";
+      for (const input of all<HTMLInputElement>("[data-household-purpose], [data-household-role]")) {
+        input.checked = false;
+      }
+      one<HTMLElement>("[data-household-agent-list]")?.replaceChildren();
+      const card = one<HTMLElement>("[data-household-consent]");
+      if (card) card.hidden = true;
+      const approvals = one<HTMLElement>("[data-household-agents]");
+      if (approvals) approvals.hidden = true;
+    };
+
     const openWorkspace = async (
       workspaceId: string,
       force = false,
@@ -6446,14 +6625,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       closeEntityPanel(false);
       closeWorkspaceMenu();
       const changesWorkspace = activeWorkspaceId !== selected.id;
-      householdDashboard?.clear();
-      householdConnections = [];
-      const connectionSelect = one<HTMLSelectElement>("[data-household-connection]");
-      if (connectionSelect) connectionSelect.replaceChildren(new Option("Only confirm my access", ""));
-      const consentStatus = one<HTMLElement>("[data-household-consent-result]");
-      if (consentStatus) consentStatus.textContent = "";
-      const purposeSelect = one<HTMLSelectElement>("[data-household-purpose]");
-      if (purposeSelect) purposeSelect.value = "";
+      resetHouseholdSurface();
       if (changesWorkspace) {
         previousSignalIds.clear();
         feedWasEmpty = false;
@@ -6626,9 +6798,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const openAgentChoice = (): void => {
       if (sampleMode) return;
+      const picker = one<HTMLElement & {
+        reset?: () => void;
+        setContext?: (context: { workspaceName?: string; accountEmail?: string }) => void;
+      }>("agent-host-picker");
+      const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+      picker?.reset?.();
+      picker?.setContext?.({
+        workspaceName: selected?.name ?? "",
+        accountEmail: session?.user.email ?? (session ? accountName(session) : ""),
+      });
+      stopHostJoinWatch();
       showChannelView("agent-choice");
       window.requestAnimationFrame(() => {
-        one<HTMLButtonElement>("[data-agent-owner-self]")?.focus({ preventScroll: true });
+        one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
       });
     };
 
@@ -6703,7 +6886,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (backLabel) {
         backLabel.textContent = returnView === "channel"
           ? "Back to the channel"
-          : "Back to who runs this agent";
+          : "Back to Add an agent";
+      }
+      const inviteWorkspace = one<HTMLElement>("[data-invite-workspace]");
+      if (inviteWorkspace) {
+        inviteWorkspace.textContent =
+          workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "this workspace";
       }
       showChannelView("invite");
       window.requestAnimationFrame(() => {
@@ -6767,8 +6955,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) exitStatus.hidden = true;
       if (channelLoadError) showChannelView("feed-error");
-      else if (agents.length === 0) showChannelView("no-agents");
-      else if (signals.length === 0) {
+      else if (agents.length === 0) {
+        showChannelView("no-agents");
+        renderSetupChecklist();
+      } else if (signals.length === 0) {
         const workspaceId = activeWorkspaceId;
         const version = requestVersion;
         showChannelView("feed-pending");
@@ -6790,6 +6980,422 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
+    /* ===== Household: Lists & docs access, agent approvals, setup checklist (redesign) =====
+       Every call below goes through the same transactional command path the household packet
+       uses (postCommand). The page decides nothing: it shows what household_access and
+       household_connections answer, and sends household_permissions with the person's own
+       explicit choices. Results are scoped to the workspace and session that asked. */
+
+    /** The command caller the household dashboard uses, bound to one workspace and session. */
+    const householdCall = (activeSession: Session, selectedId: string) =>
+      async (command: Record<string, unknown>, requestId: string): Promise<Record<string, unknown>> => {
+        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) {
+          throw new Error("workspace changed");
+        }
+        const result = await postCommand(
+          activeSession,
+          requestId,
+          command,
+          { workspace_id: selectedId, stream: { kind: "workspace" } },
+          "Save outcome unknown. Retry the same request.",
+        );
+        if (result.status !== 200) throw new Error("household request refused");
+        return result.body;
+      };
+
+    const viewerRole = (): Member["role"] | null =>
+      members.find((member) => member.userId === session?.user.id)?.role ?? null;
+
+    /** Remembered per person and workspace after a committed confirmation, so approving an agent
+        does not ask again who can see the workspace. A convenience only: the server checks. */
+    const purposeKey = (workspaceId: string): string =>
+      `commonswarm:household-purpose:${session?.user.id ?? ""}:${workspaceId}`;
+    const rememberedPurpose = (workspaceId: string): HouseholdPurpose | null => {
+      try {
+        const value = window.localStorage.getItem(purposeKey(workspaceId));
+        return value === "shared" || value === "personal" ? value : null;
+      } catch {
+        return null;
+      }
+    };
+    const rememberPurpose = (workspaceId: string, purpose: HouseholdPurpose): void => {
+      try {
+        window.localStorage.setItem(purposeKey(workspaceId), purpose);
+      } catch {
+        // Storage can be unavailable; the next approval simply asks the server again.
+      }
+    };
+
+    /** Ask household_access for the viewer's own access and repaint what depends on it. */
+    const refreshHouseholdAccess = async (): Promise<void> => {
+      const activeSession = session;
+      const selectedId = activeWorkspaceId;
+      const generation = ++householdAccessGeneration;
+      if (!activeSession || !selectedId || sampleMode) return;
+      let next: typeof householdAccess;
+      try {
+        const result = await postCommand(
+          activeSession,
+          uuid(),
+          { kind: "household_access" },
+          { workspace_id: selectedId, stream: { kind: "workspace" } },
+        );
+        const body = result.body;
+        const role = body.content_role;
+        next = result.status === 200 && body.status === "ok"
+          ? { workspaceId: selectedId, status: "ok", contentRole: role === "editor" || role === "reader" ? role : null }
+          : { workspaceId: selectedId, status: "refused", contentRole: null };
+      } catch {
+        next = { workspaceId: selectedId, status: "unknown", contentRole: null };
+      }
+      if (
+        generation !== householdAccessGeneration ||
+        selectedId !== activeWorkspaceId ||
+        session?.user.id !== activeSession.user.id
+      ) return;
+      householdAccess = next;
+      renderHouseholdAccess();
+      renderSetupChecklist();
+    };
+
+    /** Show the access card or the approvals, never both, from the last access answer. */
+    const renderHouseholdAccess = (): void => {
+      const card = one<HTMLElement>("[data-household-consent]");
+      const approvals = one<HTMLElement>("[data-household-agents]");
+      const purposeSet = one<HTMLElement>("[data-household-purpose-set]");
+      const confirmed = householdAccess.status === "ok" && householdAccess.workspaceId === activeWorkspaceId;
+      if (card) card.hidden = confirmed;
+      if (approvals) approvals.hidden = !confirmed;
+      /* Only the owner chooses who can see the workspace; the server refuses anyone else's
+         first choice (owner_confirmation_required). A member joined through an invitation,
+         which only works in a shared workspace, so their card asks only for their access. */
+      if (purposeSet) purposeSet.hidden = viewerRole() !== "owner";
+    };
+
+    /** One approval card per agent this person owns, from household_connections. */
+    const renderAgentApprovals = (): void => {
+      const list = one<HTMLUListElement>("[data-household-agent-list]");
+      const empty = one<HTMLElement>("[data-household-agent-empty]");
+      if (!list) return;
+      list.replaceChildren();
+      if (empty) empty.hidden = householdConnections.length > 0;
+      const editor = householdAccess.contentRole === "editor";
+      for (const connection of householdConnections) {
+        const principalId = String(connection.principal_id ?? "");
+        const agentName = String(connection.name ?? "Your agent");
+        const row = document.createElement("li");
+        row.className = "dashboard__approval";
+        row.dataset.approvalAgent = principalId;
+        const orb = document.createElement("span");
+        orb.className = "dashboard__agent-avatar";
+        orb.textContent = initials(agentName);
+        orb.setAttribute("aria-hidden", "true");
+        markAgentAvatar(orb, principalId);
+        const copy = document.createElement("span");
+        copy.className = "dashboard__approval-copy";
+        const name = document.createElement("strong");
+        name.textContent = agentName;
+        const owner = document.createElement("small");
+        owner.textContent = connection.kind === "hosted" ? "Your agent, in a chat app" : "Your agent, on a computer";
+        copy.append(name, owner);
+        const choices = document.createElement("fieldset");
+        choices.className = "dashboard__approval-choices";
+        const legend = document.createElement("legend");
+        legend.textContent = `What ${agentName} may do`;
+        choices.append(legend);
+        for (const operation of CONTENT_OPERATIONS) {
+          /* Readers can approve reading only: the server refuses more for a reader. */
+          if (!editor && operation !== "read") continue;
+          const label = document.createElement("label");
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.value = operation;
+          input.dataset.approvalOperation = "";
+          input.checked = true;
+          input.disabled = operation === "read";
+          label.append(input, document.createTextNode(` ${CONTENT_OPERATION_LABELS[operation]}`));
+          choices.append(label);
+        }
+        const allow = document.createElement("button");
+        allow.type = "button";
+        allow.className = "dashboard__button dashboard__button--primary";
+        allow.textContent = "Allow";
+        const status = document.createElement("p");
+        status.className = "dashboard__approval-status";
+        status.setAttribute("role", "status");
+        status.setAttribute("aria-live", "polite");
+        allow.addEventListener("click", () => {
+          const operations = [...choices.querySelectorAll<HTMLInputElement>("[data-approval-operation]")]
+            .filter((input) => input.checked)
+            .map((input) => input.value);
+          void approveAgent(connection, operations, allow, status);
+        });
+        row.append(orb, copy, choices, allow, status);
+        list.append(row);
+      }
+    };
+
+    const loadHouseholdConnections = async (): Promise<void> => {
+      const activeSession = session;
+      const selectedId = activeWorkspaceId;
+      if (!activeSession || !selectedId || sampleMode) return;
+      try {
+        const result = await postCommand(
+          activeSession,
+          uuid(),
+          { kind: "household_connections" },
+          { workspace_id: selectedId, stream: { kind: "workspace" } },
+        );
+        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+        householdConnections = result.body.status === "ok" && Array.isArray(result.body.connections)
+          ? result.body.connections as Record<string, unknown>[]
+          : [];
+      } catch {
+        if (selectedId !== activeWorkspaceId) return;
+        householdConnections = [];
+      }
+      renderAgentApprovals();
+    };
+
+    /** household_permissions for one agent. The purpose must match the workspace's; the
+        person's own role is resent unchanged, so approving an agent never changes it. */
+    const approveAgent = async (
+      connection: Record<string, unknown>,
+      operations: string[],
+      button: HTMLButtonElement,
+      status: HTMLElement,
+    ): Promise<void> => {
+      const activeSession = session;
+      const selectedId = activeWorkspaceId;
+      const role = householdAccess.contentRole;
+      if (!activeSession || !selectedId || !role) {
+        status.textContent = "Confirm your own access first. Nothing was changed.";
+        return;
+      }
+      button.disabled = true;
+      status.textContent = "Saving…";
+      const send = (purpose: HouseholdPurpose) => postCommand(
+        activeSession,
+        uuid(),
+        {
+          kind: "household_permissions",
+          purpose,
+          content_role: role,
+          connection: {
+            kind: connection.kind,
+            connection_id: connection.connection_id,
+            grant_id: connection.grant_id,
+            principal_id: connection.principal_id,
+            operations,
+          },
+        },
+        { workspace_id: selectedId, stream: { kind: "workspace" } },
+        "The result is unknown. Reload Lists & docs before allowing again.",
+      );
+      try {
+        /* Access is confirmed, so the workspace's purpose already exists and a mismatch
+           refusal changes nothing; trying the other value once finds it without a read. */
+        const first: HouseholdPurpose = rememberedPurpose(selectedId) ?? "shared";
+        let result = await send(first);
+        let purpose = first;
+        if (result.body.status === "refused" && result.body.reason === "workspace_boundary_mismatch") {
+          purpose = first === "shared" ? "personal" : "shared";
+          result = await send(purpose);
+        }
+        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+        if (result.status === 200 && result.body.status === "committed") {
+          rememberPurpose(selectedId, purpose);
+          status.textContent = approvalUntil(
+            typeof result.body.expires_at === "string" ? result.body.expires_at : null,
+          );
+          button.textContent = "Allow again";
+        } else {
+          status.textContent = accessRefusalMessage(result.body.reason);
+        }
+      } catch (error) {
+        status.textContent = error instanceof Error && error.message
+          ? error.message
+          : "The result is unknown. Reload Lists & docs before allowing again.";
+      } finally {
+        button.disabled = false;
+      }
+    };
+
+    /** The person's own access (and, for the owner, who can see the workspace). */
+    const confirmOwnAccess = async (): Promise<void> => {
+      const activeSession = session;
+      const selectedId = activeWorkspaceId;
+      const notice = one<HTMLElement>("[data-household-consent-result]");
+      const button = one<HTMLButtonElement>("[data-household-confirm]");
+      const owner = viewerRole() === "owner";
+      const purpose = owner
+        ? one<HTMLInputElement>("[data-household-purpose]:checked")?.value
+        : "shared";
+      const role = one<HTMLInputElement>("[data-household-role]:checked")?.value;
+      if (!activeSession || !selectedId) return;
+      if ((purpose !== "shared" && purpose !== "personal") || (role !== "editor" && role !== "reader")) {
+        if (notice) notice.textContent = owner
+          ? "Choose who can see this workspace and your access, then confirm."
+          : "Choose your access, then confirm.";
+        return;
+      }
+      if (button) button.disabled = true;
+      if (notice) notice.textContent = "Saving…";
+      try {
+        const result = await postCommand(
+          activeSession,
+          uuid(),
+          { kind: "household_permissions", purpose, content_role: role },
+          { workspace_id: selectedId, stream: { kind: "workspace" } },
+          "The result is unknown. Reload before confirming again.",
+        );
+        if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
+        if (result.status === 200 && result.body.status === "committed") {
+          rememberPurpose(selectedId, purpose);
+          if (notice) notice.textContent = "Your access is confirmed.";
+          await refreshHouseholdAccess();
+          if (activeWorkspaceView === "objects") void openHouseholdView();
+        } else if (notice) {
+          notice.textContent = !owner && result.body.reason === "workspace_boundary_mismatch"
+            ? "Only the owner can use Lists & docs in this workspace. Nothing was changed."
+            : accessRefusalMessage(result.body.reason);
+        }
+      } catch (error) {
+        if (notice && selectedId === activeWorkspaceId) {
+          notice.textContent = error instanceof Error && error.message
+            ? error.message
+            : "The result is unknown. Reload before confirming again.";
+        }
+      } finally {
+        if (button) button.disabled = false;
+      }
+    };
+
+    /** Open Lists & docs: access first, then this person's agents, then the objects. */
+    const openHouseholdView = async (): Promise<void> => {
+      const selected = workspaces.find((row) => row.id === activeWorkspaceId);
+      const activeSession = session;
+      const selectedId = activeWorkspaceId;
+      if (!selected || !activeSession || sampleMode) return;
+      renderHouseholdAccess();
+      await refreshHouseholdAccess();
+      if (selectedId !== activeWorkspaceId || activeWorkspaceView !== "objects") return;
+      if (householdAccess.status !== "ok") {
+        householdDashboard?.clear();
+        return;
+      }
+      void loadHouseholdConnections();
+      void householdDashboard?.open(
+        {
+          workspace_id: selectedId,
+          name: selected.name,
+          viewer_user_id: activeSession.user.id,
+          audience: [...people.values()],
+          names: {
+            people: Object.fromEntries(people),
+            agents: Object.fromEntries(agents.map((agent) => [agent.principalId, agent.name])),
+          },
+        },
+        householdCall(activeSession, selectedId),
+      );
+    };
+
+    /** The setup checklist, from facts this page already holds. Nothing is stored. */
+    let householdAccessRequestedFor = "";
+    const renderSetupChecklist = (): void => {
+      const root = one<HTMLElement>("[data-setup-checklist]");
+      if (!root || sampleMode) return;
+      /* Step 1 needs one household_access answer per workspace. Ask once, only while the
+         checklist is the screen in view; the answer repaints this list. */
+      if (
+        app.dataset.channelView === "no-agents" &&
+        activeWorkspaceId &&
+        householdAccessRequestedFor !== activeWorkspaceId &&
+        householdAccess.workspaceId !== activeWorkspaceId
+      ) {
+        householdAccessRequestedFor = activeWorkspaceId;
+        void refreshHouseholdAccess();
+      }
+      const me = session?.user.id ?? "";
+      const role = viewerRole();
+      const steps = setupSteps({
+        isOwner: role === "owner",
+        canInvite: role === "owner" || role === "admin",
+        accessConfirmed: householdAccess.workspaceId === activeWorkspaceId
+          ? householdAccess.status === "ok" ? true : householdAccess.status === "refused" ? false : null
+          : null,
+        myAgentCount: agents.filter((agent) => agent.ownerUserId === me).length,
+        otherMemberCount: members.filter((member) => member.userId !== me).length,
+        pendingInviteCount: pendingInvites.length,
+      });
+      const selected = workspaces.find((row) => row.id === activeWorkspaceId);
+      const workspaceName = root.querySelector<HTMLElement>("[data-setup-workspace]");
+      if (workspaceName) workspaceName.textContent = selected?.name ?? "your workspace";
+      const progress = setupProgress(steps);
+      const progressNode = root.querySelector<HTMLElement>("[data-setup-progress]");
+      if (progressNode) {
+        progressNode.textContent = progress.complete
+          ? "All set. Messages from your agents and people will show here."
+          : `${progress.done} of ${progress.total} done`;
+      }
+      for (const row of root.querySelectorAll<HTMLElement>("[data-setup-step]")) {
+        const step = steps.find((candidate) => candidate.id === row.dataset.setupStep);
+        row.hidden = !step;
+        if (!step) continue;
+        row.dataset.done = step.done ? "true" : "false";
+        const title = row.querySelector<HTMLElement>("[data-setup-title]");
+        const detail = row.querySelector<HTMLElement>("[data-setup-detail]");
+        const action = row.querySelector<HTMLButtonElement>("button");
+        if (title) title.textContent = step.title;
+        if (detail) detail.textContent = step.done && step.id === "access"
+          ? "Done. Lists & docs is on for you."
+          : step.detail;
+        if (action) action.textContent = step.done && step.id === "access" ? "Review" : step.action;
+      }
+    };
+
+    /** Notice the agent the person is connecting, while its host page is open. */
+    const startHostJoinWatch = (): void => {
+      stopHostJoinWatch();
+      const me = session?.user.id ?? "";
+      const workspaceId = activeWorkspaceId;
+      const version = requestVersion;
+      if (!me || !workspaceId || sampleMode) return;
+      hostJoinKnown = new Set(agents.map((agent) => agent.principalId));
+      hostJoinStartedAt = Date.now();
+      hostJoinTimer = window.setInterval(() => {
+        if (
+          version !== requestVersion ||
+          workspaceId !== activeWorkspaceId ||
+          session?.user.id !== me ||
+          Date.now() - hostJoinStartedAt > 15 * 60_000 ||
+          app.dataset.channelView !== "agent-choice"
+        ) {
+          stopHostJoinWatch();
+          return;
+        }
+        if (document.visibilityState !== "visible") return;
+        void roster(workspaceId).then((nextAgents) => {
+          if (version !== requestVersion || workspaceId !== activeWorkspaceId || hostJoinTimer === undefined) return;
+          const joined = nextAgents.find(
+            (agent) => agent.ownerUserId === me && !hostJoinKnown.has(agent.principalId),
+          );
+          agents = nextAgents;
+          renderRoster();
+          if (!joined) return;
+          stopHostJoinWatch();
+          const picker = one<HTMLElement & {
+            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean }) => void;
+          }>("agent-host-picker");
+          picker?.showJoined?.({
+            name: joined.name,
+            principalId: joined.principalId,
+            canApprove: householdAccess.status === "ok",
+          });
+        }).catch(() => undefined);
+      }, 5_000);
+    };
+
     const activateWorkspaceView = (view: "signals" | "files" | "brain" | "objects"): void => {
       if (keepConnectCredentialVisible()) return;
       activeWorkspaceView = view;
@@ -6809,28 +7415,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
       }
       if (view === "objects") {
-        if (name) name.textContent = "Shared objects";
-        if (description) description.textContent = "Shared lists, docs and retained history.";
+        if (name) name.textContent = "Lists & docs";
+        if (description) description.textContent = "Shared lists, docs and files. Every saved version is kept.";
         showChannelView("objects");
-        const selected = workspaces.find(row => row.id === activeWorkspaceId);
-        const activeSession = session;
-        const selectedId = activeWorkspaceId;
-        if (selected && activeSession) {
-          void postCommand(activeSession, uuid(), { kind: "household_connections" }, { workspace_id: selectedId, stream: { kind: "workspace" } }).then(result => {
-            if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
-            const selector = one<HTMLSelectElement>("[data-household-connection]");
-            householdConnections = result.body.status === "ok" && Array.isArray(result.body.connections) ? result.body.connections : [];
-            if (selector) selector.replaceChildren(new Option("Only confirm my access", ""), ...householdConnections.map((row,index) => new Option(String(row.name),String(index))));
-          }).catch(() => {});
-        }
-        if (selected && activeSession) void householdDashboard?.open({ workspace_id: selectedId, name: selected.name,
-          viewer_user_id: activeSession.user.id, audience: [...people.values()] },
-          async (command, requestId) => {
-            if (selectedId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) throw new Error("workspace changed");
-            const result = await postCommand(activeSession, requestId, command, { workspace_id: selectedId, stream: { kind: "workspace" } }, "Save outcome unknown. Retry the same request.");
-            if (result.status !== 200) throw new Error("household request refused");
-            return result.body;
-          });
+        void openHouseholdView();
       } else if (view === "files") {
         if (name) name.textContent = "Files";
         if (description) {
@@ -7012,8 +7600,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "What are you about to do?";
-        input.setAttribute("aria-label", "Signal");
+        input.placeholder = "Message everyone";
+        input.setAttribute("aria-label", "Message");
         return;
       }
       input.placeholder = `Message ${channelLabel(channel.slug)}`;
@@ -7095,8 +7683,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } else if (channel === null) {
         if (name) name.textContent = channelLabel(ALL_SIGNALS_SLUG);
         if (description) {
-          description.textContent =
-            "Intent posted by every agent in this workspace. Immutable, and never a claim.";
+          description.textContent = "Messages from everyone in this workspace, people and agents.";
         }
         if (switchLabel) switchLabel.textContent = channelLabel(ALL_SIGNALS_SLUG);
       } else {
@@ -9180,37 +9767,25 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
     });
     syncComposerControls();
-    const operationsRoot = one<HTMLElement>("[data-household-operations]");
-    if (operationsRoot) for (const consent of HOUSEHOLD_CONTENT_CONSENT) {
-      const label = document.createElement("label");
-      const input = document.createElement("input"); input.type = "checkbox"; input.value = consent.operation; input.dataset.householdOperation = "";
-      input.checked = consent.operation === "read"; input.disabled = consent.operation === "read";
-      label.append(input, document.createTextNode(consent.description)); operationsRoot.append(label);
-    }
-    for (const button of all<HTMLButtonElement>("[data-household-confirm]")) {
-      button.addEventListener("click", async () => {
-        const activeSession = session;
-        const workspaceId = activeWorkspaceId;
-        const purpose = one<HTMLSelectElement>("[data-household-purpose]")?.value;
-        const notice = one<HTMLElement>("[data-household-consent-result]");
-        if (!activeSession || !workspaceId || !purpose) { if (notice) notice.textContent = "Choose the workspace purpose before confirming."; return; }
-        button.disabled = true;
-        try {
-          const selectedConnection = one<HTMLSelectElement>("[data-household-connection]")?.value;
-          const connection = selectedConnection ? householdConnections[Number(selectedConnection)] : undefined;
-          const operations = button.dataset.householdConfirm === "reader" ? ["read"]
-            : all<HTMLInputElement>("[data-household-operation]").filter(input => input.checked).map(input => input.value);
-          const result = await postCommand(activeSession, uuid(), { kind: "household_permissions", purpose, content_role: button.dataset.householdConfirm,
-            ...(connection ? { connection: { kind: connection.kind, connection_id: connection.connection_id,
-              grant_id: connection.grant_id, principal_id: connection.principal_id, operations } } : {}) },
-            { workspace_id: workspaceId, stream: { kind: "workspace" } }, "Confirmation outcome unknown. Reload before confirming again.");
-          if (workspaceId !== activeWorkspaceId || session?.user.id !== activeSession.user.id) return;
-          if (notice) notice.textContent = result.body.status === "committed" ? "Your content access is confirmed." : "Content access was refused. Check your membership and workspace purpose.";
-          if (result.body.status === "committed") activateWorkspaceView("objects");
-        } catch { if (notice && workspaceId === activeWorkspaceId) notice.textContent = "Confirmation outcome unknown. Reload before confirming again."; }
-        finally { button.disabled = false; }
-      });
-    }
+    one<HTMLButtonElement>("[data-household-confirm]")?.addEventListener("click", () => {
+      void confirmOwnAccess();
+    });
+    /* The setup checklist's first step lives in Lists & docs, where the access card is. */
+    one<HTMLButtonElement>("[data-setup-access]")?.addEventListener("click", () => {
+      activateWorkspaceView("objects");
+    });
+    /* Separate doors for a person and an agent (audit B2): the setup checklist, the People &
+       agents dialog, and Lists & docs when none of this person's agents is connected. The
+       rail keeps no management doors (operator ruling 2026-08-19, header-roster test). */
+    one<HTMLButtonElement>("[data-add-agent-objects]")?.addEventListener("click", openAgentChoice);
+    one<HTMLButtonElement>("[data-invite-dialog]")?.addEventListener("click", () => {
+      closeRosterDialog();
+      openInvite("channel");
+    });
+    const hostPicker = one<HTMLElement>("agent-host-picker");
+    hostPicker?.addEventListener("agent-host-selected", () => startHostJoinWatch());
+    hostPicker?.addEventListener("agent-host-back", () => stopHostJoinWatch());
+    hostPicker?.addEventListener("agent-host-approve", () => activateWorkspaceView("objects"));
     for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
       button.addEventListener("click", () => {
         const view = button.dataset.workspaceView;
@@ -9918,7 +10493,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__gateway h1 {
     max-inline-size: 16ch;
     margin: 0;
-    font-size: clamp(var(--t-2xl), 6vw, var(--t-4xl));
+    /* Was clamp(var(--t-2xl), 6vw, var(--t-4xl)); --t-4xl does not exist in tokens.css, so the
+       whole declaration was invalid and the H1 fell back to body size (audit A2). */
+    font-family: var(--font-display);
+    font-size: clamp(var(--t-2xl), 5vw, var(--t-3xl));
     line-height: 1.02;
     letter-spacing: var(--track-head);
     font-weight: var(--weight-head);
@@ -14770,4 +15348,400 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__connected-app-state--active { color: var(--success-text); }
   .dashboard__connected-app-state--revoked { color: var(--text-muted); }
+
+  /* ===================================================================================
+     REDESIGN 2026-10-04: household onboarding surfaces. Daylight Orbs tokens only.
+     =================================================================================== */
+
+  .dashboard__gateway-mark {
+    justify-self: start;
+  }
+
+  .dashboard__gateway-note {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  /* --- Setup checklist (the zero-agent state) --- */
+  .dashboard__setup {
+    text-align: start;
+    justify-items: start;
+  }
+
+  .dashboard__setup h2 {
+    font-family: var(--font-display);
+  }
+
+  .dashboard__setup-progress {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__setup-steps {
+    inline-size: min(100%, 40rem);
+    display: grid;
+    gap: var(--s-3);
+    margin: var(--s-4) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .dashboard__setup-step {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--s-4);
+    padding: var(--s-4) var(--s-5);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--ring-top);
+  }
+
+  .dashboard__setup-step[data-done="true"] {
+    background: var(--surface-2);
+    box-shadow: none;
+  }
+
+  .dashboard__setup-mark {
+    inline-size: 1.5rem;
+    block-size: 1.5rem;
+    border: 2px solid var(--border-interactive);
+    border-radius: 50%;
+  }
+
+  .dashboard__setup-step[data-done="true"] .dashboard__setup-mark {
+    border-color: var(--success);
+    background:
+      radial-gradient(circle at center, var(--success) 0 0.32rem, transparent 0.34rem),
+      var(--success-dim);
+  }
+
+  .dashboard__setup-copy {
+    display: grid;
+    gap: 0.15rem;
+    min-inline-size: 0;
+  }
+
+  .dashboard__setup-copy strong {
+    font-size: var(--t-base);
+    font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__setup-copy span {
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+    line-height: var(--lh-sm);
+  }
+
+  .dashboard__setup-step .dashboard__button {
+    border-radius: var(--radius-pill);
+  }
+
+  /* --- Add an agent: the picker sits in the same column as the invite view --- */
+  .dashboard__host-view {
+    max-inline-size: 52rem;
+  }
+
+  .dashboard__host-picker {
+    margin-block-start: var(--s-2);
+  }
+
+  /* --- Invite someone --- */
+  .dashboard__invite-prerequisite {
+    margin: 0;
+    padding: var(--s-3) var(--s-4);
+    color: var(--text);
+    font-size: var(--t-sm);
+    line-height: var(--lh-sm);
+    background: var(--info-dim);
+    border-radius: var(--radius);
+  }
+
+  .dashboard__invite-prerequisite .dashboard__text-button {
+    min-block-size: 0;
+    padding: 0 var(--s-1);
+    color: var(--accent-bright);
+  }
+
+  .dashboard__invite-hint {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+  }
+
+  /* --- Lists & docs: access card, choice cards, agent approvals --- */
+  .dashboard__objects-view {
+    display: grid;
+    gap: var(--s-6);
+    padding-block-end: var(--s-8);
+  }
+
+  .dashboard__access-card,
+  .dashboard__agent-approvals {
+    display: grid;
+    gap: var(--s-4);
+    padding: var(--s-6);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--ring-top);
+  }
+
+  .dashboard__access-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--t-xl);
+    line-height: var(--lh-xl);
+    font-weight: var(--weight-head);
+  }
+
+  .dashboard__access-lead {
+    max-inline-size: 60ch;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+    line-height: var(--lh-sm);
+  }
+
+  .dashboard__choice-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: var(--s-3);
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .dashboard__choice-cards legend {
+    margin-block-end: var(--s-2);
+    padding: 0;
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__choice-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: var(--s-3);
+    padding: var(--s-4);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .dashboard__choice-card:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .dashboard__choice-card:has(input:focus-visible) {
+    box-shadow: var(--focus-ring);
+  }
+
+  .dashboard__choice-card input {
+    inline-size: 1.1rem;
+    block-size: 1.1rem;
+    margin: 0.15rem 0 0;
+    accent-color: var(--accent);
+  }
+
+  .dashboard__choice-card span {
+    display: grid;
+    gap: 0.2rem;
+  }
+
+  .dashboard__choice-card strong {
+    font-size: var(--t-sm);
+    font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__choice-card small {
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+    line-height: var(--lh-xs);
+  }
+
+  .dashboard__access-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s-3);
+  }
+
+  .dashboard__access-actions .dashboard__button,
+  .dashboard__approval .dashboard__button {
+    border-radius: var(--radius-pill);
+  }
+
+  .dashboard__access-result,
+  .dashboard__approval-status {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__approval-list {
+    display: grid;
+    gap: var(--s-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .dashboard__approval {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "orb copy allow"
+      "orb choices choices"
+      "orb status status";
+    align-items: center;
+    column-gap: var(--s-3);
+    row-gap: var(--s-2);
+    padding: var(--s-4);
+    background: var(--surface-2);
+    border-radius: var(--radius);
+  }
+
+  .dashboard__approval > .dashboard__agent-avatar { grid-area: orb; align-self: start; }
+  .dashboard__approval-copy { grid-area: copy; display: grid; gap: 0.1rem; }
+  .dashboard__approval-copy small { color: var(--text-muted); font-size: var(--t-xs); }
+  .dashboard__approval > .dashboard__button { grid-area: allow; }
+  .dashboard__approval-status { grid-area: status; }
+
+  .dashboard__approval-choices {
+    grid-area: choices;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2) var(--s-4);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: var(--t-sm);
+  }
+
+  .dashboard__approval-choices legend {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .dashboard__approval-choices label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    min-block-size: 2.75rem;
+  }
+
+  .dashboard__approval-empty {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  /* --- People & agents dialog: two doors and plain status --- */
+  .dashboard__roster-dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+  }
+
+  .dashboard__roster-dialog-actions .dashboard__button {
+    flex: 1 1 10rem;
+    border-radius: var(--radius-pill);
+  }
+
+  .dashboard__agent-status {
+    justify-self: start;
+    inline-size: fit-content;
+    padding: 0.1rem 0.55rem;
+    color: var(--success);
+    font-size: var(--t-2xs);
+    font-weight: var(--weight-semibold);
+    background: var(--success-dim);
+    border-radius: var(--radius-pill);
+  }
+
+  .dashboard__agent-status[data-agent-status="inactive"],
+  .dashboard__agent-status[data-agent-status="idle"] {
+    color: var(--warning);
+    background: var(--warning-dim);
+  }
+
+  .dashboard__agent-status[data-agent-status="suspended"],
+  .dashboard__agent-status[data-agent-status="removed"] {
+    color: var(--danger);
+    background: var(--danger-dim);
+  }
+
+  .dashboard__agent-status[data-agent-status="connected"] {
+    color: var(--accent-bright);
+    background: var(--accent-dim);
+  }
+
+  .dashboard__agent-receive {
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+  }
+
+  .dashboard__agent-details {
+    font-size: var(--t-xs);
+    color: var(--text-muted);
+  }
+
+  .dashboard__agent-details > summary {
+    min-block-size: 2.75rem;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    color: var(--text-muted);
+  }
+
+  .dashboard__agent-details > span {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="inactive"],
+  .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="suspended"] {
+    color: var(--warning);
+  }
+
+  @media (max-width: 34rem) {
+    .dashboard__setup-step {
+      grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .dashboard__setup-step .dashboard__button {
+      grid-column: 2;
+      justify-self: start;
+    }
+
+    .dashboard__access-card,
+    .dashboard__agent-approvals {
+      padding: var(--s-4);
+    }
+
+    .dashboard__approval {
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-areas:
+        "orb copy"
+        "orb choices"
+        "orb allow"
+        "orb status";
+    }
+
+    .dashboard__approval > .dashboard__button {
+      justify-self: start;
+    }
+  }
 </style>

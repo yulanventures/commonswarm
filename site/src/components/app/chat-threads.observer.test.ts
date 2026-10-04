@@ -843,7 +843,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     assert.deepEqual(measured.cancelled, {
       hidden: true,
       toChips: ["Orbit", "River"],
-      placeholder: "What are you about to do?",
+      placeholder: "Message everyone",
     }, "cancelled: the held pair comes back, and the body's own tag joins it");
 
     /* BROADCAST IS OFFERED ONLY WHERE THERE IS A CHANNEL TO BROADCAST TO. */
@@ -888,7 +888,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
       measured.sentReply.toChips.length > 0,
       "sentReply: the comparison above must not be two empty sets",
     );
-    assert.equal(measured.sentReply.placeholder, "What are you about to do?");
+    assert.equal(measured.sentReply.placeholder, "Message everyone");
 
     /* ── THE COMPOSITION CLAIM, MEASURED ───────────────────────────────────────────────
        The #mobile root and its replies read the same in the channel and in all-signals. The

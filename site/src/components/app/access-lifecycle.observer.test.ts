@@ -118,15 +118,28 @@ const agentConnect = await readFile(
   new URL("../../lib/agent-connect.ts", import.meta.url),
   "utf8",
 );
+const picker = await readFile(
+  new URL("../connect/AgentHostPicker.astro", import.meta.url),
+  "utf8",
+);
 const identityLabel = await readFile(
   new URL("../../lib/identity-label.ts", import.meta.url),
   "utf8",
 );
 
-test("Add an agent asks who controls it before minting", () => {
-  assert.match(dashboard, /Who runs this agent\?/);
-  assert.match(dashboard, /data-agent-owner-self/);
-  assert.match(dashboard, /data-agent-owner-teammate/);
+test("Add an agent asks which app the agent lives in; the key flow and the person invite keep their doors", () => {
+  /* Redesign 2026-10-04: "Who runs this agent? I do / A teammate does" became a picker of the
+     apps agents live in (AgentHostPicker). The two doors it used keep their hooks: the
+     "Terminal agent" tile carries data-agent-owner-self (opens the key flow) and the picker's
+     invite link carries data-agent-owner-teammate (opens the person invite). Comments are
+     stripped, because the source records the retired question in one. */
+  const markup = dashboard.replace(/\{\/\*[\s\S]*?\*\/\}/g, " ");
+  assert.doesNotMatch(markup, /Who runs this agent\?/);
+  assert.match(dashboard, /<AgentHostPicker audience="setter"/);
+  assert.match(picker, /data-agent-owner-self=\{host\.id === "terminal"/);
+  assert.match(picker, /data-agent-owner-teammate>Invite someone</);
+  assert.match(dashboard, /\[data-agent-owner-self\]"\)\?\.addEventListener\("click", openConnect\)/);
+  assert.match(dashboard, /\[data-agent-owner-teammate\]"\)\?\.addEventListener\(/);
   assert.match(dashboard, /data-add-agent\]"\)\?\.addEventListener\("click", openAgentChoice\)/);
   assert.match(dashboard, /inviteWorkspaceMember/);
   assert.match(dashboard, /memberInviteUrl/);

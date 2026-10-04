@@ -56,11 +56,21 @@ test("/app is provider-first, truthful about the free tier, and owns consent", (
   );
   assert.match(dashboard, /data-auth-view="choices"/);
   assert.match(dashboard, /No password\./);
-  assert.match(dashboard, /The free plan includes 10 workspaces and requires no card\./);
+  /* Redesign 2026-10-04: "Free, no card." The free-plan numbers are parked until Tom decides
+     the household limits, so the first screen no longer states one. */
+  assert.match(dashboard, /Free, no card\./);
+  assert.doesNotMatch(dashboard, /includes 10 workspaces/);
   assert.doesNotMatch(dashboard, /open the same account/);
   assert.match(dashboard, /href="\/terms"/);
   assert.match(dashboard, /href="\/privacy"/);
-  assert.match(dashboard, /drafts published for review \(not yet in force\)/);
+  /* The legal sentence must match the documents: both are final (draft={false}), so the old
+     "drafts published for review (not yet in force)" was a stable false claim. The control
+     reads the documents themselves, so the copy cannot go stale silently again. */
+  assert.match(dashboard, /By continuing you agree to the/);
+  assert.doesNotMatch(dashboard, /not yet in force/);
+  for (const page of ["src/pages/terms.astro", "src/pages/privacy.astro"]) {
+    assert.match(read(page), /draft=\{false\}/, `${page} must be final for this sentence to be true`);
+  }
   assert.doesNotMatch(dashboard, /Signing in means you accept/);
   assert.doesNotMatch(dashboard, /<main class="dashboard__root">/);
 });
@@ -82,10 +92,12 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
   assert.match(dashboard, /id="dashboard-roster-title">\s*People &amp; agents/);
   assert.match(dashboard, /class="dashboard__roster-dialog-members" data-member-details/);
   assert.doesNotMatch(dashboard, /data-member-count/);
-  assert.match(dashboard, /Choose who joins first\./);
+  /* The zero-agent state is the setup checklist (redesign 2026-10-04). */
+  assert.match(dashboard, /<h2>Set up <span data-setup-workspace>your workspace<\/span><\/h2>/);
+  assert.doesNotMatch(dashboard, /Choose who joins first\./);
   assert.match(dashboard, /data-add-agent/);
   assert.match(dashboard, /data-invite-collaborator/);
-  assert.match(dashboard, /Invite a collaborator/);
+  assert.match(dashboard, /<strong data-setup-title>Invite someone<\/strong>/);
   assert.doesNotMatch(dashboard, /data-add-agent-channel/);
   const noAgents = dashboard.match(
     /data-channel-view="no-agents"[\s\S]*?<\/section>/,
@@ -179,7 +191,7 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
      mobile-feed-layout.observer.test.ts, "the account menu paints in DOM order and stays on
      screen at phone widths"; its mutation is `order: 3` on the toggle. */
   assert.doesNotMatch(dashboard, /cswarm working-on|cswarm note|cswarm ask/);
-  assert.match(dashboard, /Waiting for your agent’s first update\./);
+  assert.match(dashboard, /<h2 data-feed-empty-title>No messages yet\.<\/h2>/);
   assert.doesNotMatch(connect, /commonswarm\.com\/start/);
   assert.match(prompt, /workspace_id: input.workspaceId/);
   assert.match(prompt, /never echo its contents/);

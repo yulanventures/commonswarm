@@ -146,7 +146,8 @@ test("the workspace shell groups people with their nested agents in one bounded 
        SWARM-CLOUD.md 2.1, and this heading was the only place the app showed that word to a
        reader. The rail now lists CHANNELS, with all-signals above them as the whole feed
        rather than a channel among them. */
-    "CHANNELS",
+    /* MESSAGES since the 2026-10-04 redesign (Tom's plain-words rule). */
+    "MESSAGES",
     "PEOPLE &amp; AGENTS",
     /* ~~"# all-signals"~~ retired 2026-09-05. The rail builds that name from
        ALL_SIGNALS_SLUG now, so the literal survived in ONE place: the comment recording the
@@ -154,8 +155,8 @@ test("the workspace shell groups people with their nested agents in one bounded 
        and started inventorying a comment, which would go red if the comment were deleted and
        stay green if the rail stopped showing the name. It is the generating expression now,
        the same move the header test one file down already made. */
-    "<span>{ALL_SIGNALS_SLUG}</span>",
-    "Every agent belongs to a person. Workspace-owned agents are not supported yet.",
+    "<span>{channelLabel(ALL_SIGNALS_SLUG)}</span>",
+    "Every agent belongs to a person, who connects it.",
     "data-sidebar-participant-list",
   ]) {
     assert.ok(dashboard.includes(token), `dashboard shell is missing ${token}`);
@@ -239,9 +240,13 @@ test("the channel header says what the immutable all-signals view is", () => {
     dashboard,
     /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h1>/,
   );
-  assert.ok(
-    dashboard.includes("Intent posted by every agent in this workspace. Immutable, and never a claim."),
+  /* Redesign 2026-10-04: plain words. The view is still the immutable whole feed; the head
+     now says so in a household reader's words, in the markup and in the script that repaints it. */
+  assert.equal(
+    [...dashboard.matchAll(/Messages from everyone in this workspace, people and agents\./g)].length,
+    2,
   );
+  assert.doesNotMatch(dashboard, /Intent posted by every agent/);
 });
 
 test("loaded-signal filters and counts classify person, agent, and broadcast targets", () => {
@@ -401,8 +406,11 @@ test("participant navigation uses human presence and agent model identity", asyn
   assert.match(rail.innerHtml, /dashboard__presence-dot/);
   assert.match(rail.innerHtml, /dashboard__sidebar-model-glyph/);
   assert.match(rail.innerHtml, />Claude Opus</);
-  assert.match(rail.innerHtml, />Local</);
-  assert.match(rail.innerHtml, />Hosted MCP</);
+  /* Plain status, not the wire transport (redesign 2026-10-04, Tom's plain-words rule). These
+     fixture rows carry no presence row, so the honest status for both is "Connected"; the
+     transport stays in the profile panel. */
+  assert.equal([...rail.innerHtml.matchAll(/data-agent-status="connected"[^>]*>Connected</g)].length, 2);
+  assert.doesNotMatch(rail.innerHtml, />Hosted MCP<|>Local</);
   assert.match(rail.innerHtml, />operated by Owner unavailable</);
   assert.doesNotMatch(rail.innerHtml, /dashboard__sidebar-agent-avatar/);
   assert.doesNotMatch(rail.innerHtml, />AGENT</);

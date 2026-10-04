@@ -652,7 +652,7 @@ const assertComposerSprint = (value: ComposerArtifact): void => {
      a tag is a word in the message, removed by editing the text — and the CSS is deleted, so a
      pin on its size measured nothing. */
   assert.doesNotMatch(dashboard, /dashboard__mention-remove/);
-  assert.match(markup, /data-composer-send[^>]*aria-label="Post signal"/,
+  assert.match(markup, /data-composer-send[^>]*aria-label="Send message"/,
     "send-name: send must have an accessible name");
 
   /* Draft identity includes all three ownership axes. Storage survives reset/error and is cleared
