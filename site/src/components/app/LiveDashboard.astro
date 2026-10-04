@@ -1278,6 +1278,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     type HouseholdPurpose,
   } from "../../lib/household-access";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
+  import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus } from "../../lib/agent-status";
   import type { Session } from "@supabase/supabase-js";
   import {
@@ -6616,6 +6617,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       householdAccessGeneration += 1;
       householdAccess = { workspaceId: "", status: "unknown", contentRole: null };
       householdAccessRequestedFor = "";
+      accessReads.invalidate();
+      connectionReads.invalidate();
       stopHostJoinWatch();
       const consentStatus = one<HTMLElement>("[data-household-consent-result]");
       if (consentStatus) consentStatus.textContent = "";
@@ -7059,13 +7062,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
-    /** Ask household_access for the viewer's own access and repaint what depends on it. */
-    let householdAccessReads = 0;
-    const refreshHouseholdAccess = async (): Promise<void> => {
-      const scope = householdScope();
-      if (!scope) return;
-      const read = ++householdAccessReads;
-      let next: typeof householdAccess;
+    /** One household_access read for a scope, without touching shared state. */
+    const readHouseholdAccess = async (scope: HouseholdScope): Promise<typeof householdAccess> => {
       try {
         const result = await postCommand(
           scope.session,
@@ -7075,14 +7073,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         );
         const body = result.body;
         const role = body.content_role;
-        next = result.status === 200 && body.status === "ok"
+        return result.status === 200 && body.status === "ok"
           ? { workspaceId: scope.workspaceId, status: "ok", contentRole: role === "editor" || role === "reader" ? role : null }
           : { workspaceId: scope.workspaceId, status: "refused", contentRole: null };
       } catch {
-        next = { workspaceId: scope.workspaceId, status: "unknown", contentRole: null };
+        return { workspaceId: scope.workspaceId, status: "unknown", contentRole: null };
       }
-      // A newer read, or any change of workspace, account or session, wins.
-      if (read !== householdAccessReads || !householdCurrent(scope)) return;
+    };
+
+    /** Ask household_access for the viewer's own access and repaint what depends on it. Only
+        the newest read paints (R2b review: an older reply must not replace a newer one). */
+    const accessReads = createLatestRead();
+    const refreshHouseholdAccess = async (): Promise<void> => {
+      const scope = householdScope();
+      if (!scope) return;
+      const ticket = accessReads.next();
+      const next = await readHouseholdAccess(scope);
+      if (!accessReads.isLatest(ticket) || !householdCurrent(scope)) return;
       householdAccess = next;
       renderHouseholdAccess();
       renderSetupChecklist();
@@ -7172,9 +7179,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
+    const connectionReads = createLatestRead();
     const loadHouseholdConnections = async (): Promise<void> => {
       const scope = householdScope();
       if (!scope) return;
+      const ticket = connectionReads.next();
       let next: Record<string, unknown>[] = [];
       try {
         const result = await postCommand(
@@ -7189,8 +7198,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch {
         next = [];
       }
-      // Success and failure are both dropped once the scope moved on.
-      if (!householdCurrent(scope)) return;
+      // Success and failure are both dropped once the scope moved on or a newer read started.
+      if (!connectionReads.isLatest(ticket) || !householdCurrent(scope)) return;
       householdConnections = next;
       renderAgentApprovals();
     };
@@ -7216,9 +7225,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         status.textContent = message;
       };
       try {
-        await refreshHouseholdAccess();
+        /* The approval's own read decides the role it sends; a concurrent read elsewhere on the
+           page cannot hand it a stale one (R2b review). */
+        const access = await readHouseholdAccess(scope);
         if (!householdCurrent(scope)) return;
-        const role = householdAccess.status === "ok" ? householdAccess.contentRole : null;
+        const role = access.status === "ok" ? access.contentRole : null;
         if (!role) {
           settle("Confirm your own access first. Nothing was changed.");
           return;

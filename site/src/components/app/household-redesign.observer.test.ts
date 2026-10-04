@@ -77,8 +77,10 @@ test("Lists & docs access is two described radio groups, generated from the enfo
 
 test("approving an agent sends the role a fresh access read returns, never a cached one", () => {
   const approve = section(script, "const approveAgent = async (", "const confirmOwnAccess = async");
-  /* R2 review: a cached role could restore Editor after another device chose Reader. */
-  assert.match(approve, /await refreshHouseholdAccess\(\);\s*if \(!householdCurrent\(scope\)\) return;\s*const role = householdAccess\.status === "ok" \? householdAccess\.contentRole : null;/);
+  /* R2 review: a cached role could restore Editor after another device chose Reader. R2b: the
+     approval's own read decides, so a concurrent read elsewhere cannot hand it a stale role. */
+  assert.match(approve, /const access = await readHouseholdAccess\(scope\);\s*if \(!householdCurrent\(scope\)\) return;\s*const role = access\.status === "ok" \? access\.contentRole : null;/);
+  assert.doesNotMatch(approve, /householdAccess\.contentRole/);
   assert.match(approve, /content_role: role,/);
   assert.doesNotMatch(approve, /content_role: "(?:editor|reader)"/);
   /* The mismatch retry is safe only because confirmed access implies the purpose exists. */
@@ -97,12 +99,17 @@ test("every household result is dropped once its workspace, account, version or 
     assert.ok(current.includes(fact), `householdCurrent must check ${fact}`);
   }
   const load = section(script, "const loadHouseholdConnections = async", "/** household_permissions for one agent.");
-  assert.match(load, /\} catch \{\s*next = \[\];\s*\}\s*\/\/ Success and failure are both dropped once the scope moved on\.\s*if \(!householdCurrent\(scope\)\) return;/);
+  assert.match(load, /const ticket = connectionReads\.next\(\);/);
+  assert.match(load, /\} catch \{\s*next = \[\];\s*\}\s*\/\/ Success and failure are both dropped once the scope moved on or a newer read started\.\s*if \(!connectionReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
   const confirm = section(script, "const confirmOwnAccess = async", "/** Open Lists & docs:");
   assert.match(confirm, /if \(button && token === householdConfirms\) button\.disabled = false;/);
   assert.match(confirm, /notice && householdCurrent\(scope\) && token === householdConfirms/);
   const refresh = section(script, "const refreshHouseholdAccess = async", "/** Show the access card");
-  assert.match(refresh, /if \(read !== householdAccessReads \|\| !householdCurrent\(scope\)\) return;/);
+  assert.match(refresh, /const ticket = accessReads\.next\(\);/);
+  assert.match(refresh, /if \(!accessReads\.isLatest\(ticket\) \|\| !householdCurrent\(scope\)\) return;/);
+  /* A workspace or account change retires every outstanding household read. */
+  const reset = section(script, "const resetHouseholdSurface = (): void => {", "    };\n");
+  assert.match(reset, /accessReads\.invalidate\(\);\s*connectionReads\.invalidate\(\);/);
 });
 
 test("the Add an agent poll runs only while its own host page is open, and stops on any change", () => {

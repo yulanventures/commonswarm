@@ -342,21 +342,6 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
 
   .human-invitations .human-invitations__result,
   .human-invitations__dialog .human-invitations__hint,
-  .human-invitations__failure {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .human-invitations__failure[hidden] {
-    display: none;
-  }
-
-  .human-invitations__failure-text {
-    margin: 0;
-    color: var(--text);
-    font-size: var(--t-sm);
-  }
-
   .human-invitations__dialog .human-invitations__result {
     font-size: var(--t-sm);
   }
@@ -369,6 +354,16 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
   }
 
   .human-invitations .human-invitations__result,
+  .human-invitations__dialog .human-invitations__result {
+    color: var(--text);
+  }
+
+  .human-invitations .human-invitations__result:empty,
+  .human-invitations__dialog .human-invitations__result:empty {
+    display: none;
+  }
+
+  /* A failed check (R2 review): its own block, so no other rule's display is touched. */
   .human-invitations__failure {
     display: grid;
     gap: var(--s-3);
@@ -382,15 +377,6 @@ import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
     margin: 0;
     color: var(--text);
     font-size: var(--t-sm);
-  }
-
-  .human-invitations__dialog .human-invitations__result {
-    color: var(--text);
-  }
-
-  .human-invitations .human-invitations__result:empty,
-  .human-invitations__dialog .human-invitations__result:empty {
-    display: none;
   }
 
   .human-invitations__dialog .human-invitations__fineprint {

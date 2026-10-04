@@ -461,3 +461,19 @@ test("every hook a page script reads exists in its template", async () => {
     }
   }
 });
+
+test("hidden hints and failure blocks really hide: no display rule overrides their [hidden]", async () => {
+  /* R2b review: a `display: grid` added to the validation hint beat the browser's [hidden], so an
+     old warning stayed on screen after valid choices. Any rule that sets display on these
+     elements must be paired with an explicit [hidden] rule. */
+  const page = await load("HumanInvitationInbox.astro");
+  const rules = [...page.style.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: m[1].trim(), body: m[2] }));
+  for (const name of ["human-invitations__hint", "human-invitations__failure"]) {
+    const displays = rules.filter((rule) => rule.selector.includes(name) && !rule.selector.includes("[hidden]")
+      && /(^|;|\s)display\s*:/.test(rule.body));
+    const hiddenRule = rules.some((rule) => rule.selector.includes(`${name}[hidden]`) && /display:\s*none/.test(rule.body));
+    assert.ok(displays.length === 0 || hiddenRule, `${name} sets display without a [hidden] rule`);
+  }
+  // Control: the failure block does set display, and has its [hidden] rule.
+  assert.ok(rules.some((rule) => rule.selector === ".human-invitations__failure" && /display:\s*grid/.test(rule.body)));
+});
