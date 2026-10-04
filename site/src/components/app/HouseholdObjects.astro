@@ -1,0 +1,44 @@
+---
+import { renderHouseholdObjects, type HouseholdObjectsState } from '../../lib/household-objects-view';
+
+interface Props { state: HouseholdObjectsState }
+const { state } = Astro.props;
+// Static preview until the caller explicitly injects actions with
+// createHouseholdObjectsController + mountHouseholdObjects from the view module.
+---
+<section class="household-objects" aria-label="Household workspace" data-household-objects>
+  <Fragment set:html={renderHouseholdObjects(state)} />
+</section>
+
+<style is:global>
+  .household-objects { color: var(--text, #252a35); background: var(--surface, #fff); border: 1px solid var(--border, #ccc9c2); border-radius: 12px; padding: clamp(16px, 3vw, 32px); font-family: var(--font-sans); line-height: 1.6; }
+  .household-objects h2 { font-family: var(--font-display); font-size: clamp(1.4rem, 3vw, 2rem); margin: 0 0 12px; }
+  .household-objects h3, .household-objects h4 { margin: 0 0 12px; }
+  .household-objects .hh-eyebrow { color: var(--text-muted, #626773); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px; }
+  .household-objects .hh-status { min-height: 1.6em; border-bottom: 1px solid var(--border, #ccc9c2); padding-bottom: 16px; }
+  .household-objects .hh-layout { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 3fr); gap: 32px; }
+  .household-objects nav ul { list-style: none; padding: 0; margin: 0; }
+  .household-objects nav li { margin-bottom: 8px; }
+  .household-objects nav button { width: 100%; text-align: left; }
+  .household-objects button { background: var(--surface, #fff); color: var(--text, #252a35); border: 1px solid var(--border-interactive, #767676); border-radius: 6px; padding: 10px 14px; min-height: 44px; font: inherit; cursor: pointer; margin: 0 8px 8px 0; overflow-wrap: anywhere; }
+  .household-objects button:hover:enabled { background: var(--surface-2, #f1efea); }
+  .household-objects button:disabled { cursor: default; opacity: .65; }
+  .household-objects :is(button, textarea, input):focus-visible { outline: 3px solid var(--focus, #315cff); outline-offset: 3px; }
+  .household-objects .hh-editor { display: grid; gap: 8px; font-weight: 600; margin: 24px 0 12px; }
+  .household-objects textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 12px; color: inherit; background: var(--surface, #fff); border: 1px solid var(--border-interactive, #767676); border-radius: 6px; font: inherit; font-weight: 400; }
+  .household-objects .hh-list { padding-left: 24px; }
+  .household-objects .hh-list li { padding: 6px 0; }
+  .household-objects .hh-markdown { overflow-wrap: anywhere; }
+  .household-objects .hh-markdown pre { white-space: pre-wrap; }
+  .household-objects .hh-markdown table { display: block; max-width: 100%; overflow-x: auto; }
+  .household-objects .hh-history { margin-top: 32px; border-top: 1px solid var(--border, #ccc9c2); padding-top: 24px; }
+  .household-objects .hh-history ol { padding-left: 24px; }
+  .household-objects .hh-history li { margin-bottom: 20px; }
+  .household-objects .hh-history p { margin: 0; }
+  .household-objects .hh-history small { overflow-wrap: anywhere; }
+  .household-objects .hh-conflict { background: var(--surface-2, #f1efea); border-left: 3px solid var(--accent, #315cff); padding: 20px; margin-top: 24px; }
+  .household-objects .hh-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .household-objects .hh-conflict label { display: flex; gap: 10px; align-items: baseline; margin: 20px 0; }
+  .household-objects .hh-conflict input { accent-color: var(--accent, #315cff); }
+  @media (max-width: 720px) { .household-objects .hh-layout, .household-objects .hh-comparison { grid-template-columns: 1fr; gap: 20px; } }
+</style>
