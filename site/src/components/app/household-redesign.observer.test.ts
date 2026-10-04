@@ -156,8 +156,12 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(dialog, /!sampleMode && agent.ownerUserId === session\?\.user.id/);
   assert.match(dialog, /withdraw.textContent = "Withdraw Lists & docs"/);
   assert.match(dialog, /withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw"/);
-  assert.match(dialog, /copy.append\(withdraw\)/, "withdrawal belongs under the copy, never in the third grid column");
+  assert.match(dialog, /row.append\(accessLine\)/);
+  assert.match(dialog, /row.append\(receipt\)/);
+  assert.match(dialog, /row.append\(withdraw\)/, "withdrawal spans the row below the copy");
+  assert.match(dashboard, /\.dashboard__roster-dialog-list \[data-agent-content-access\],\s*\.dashboard__roster-dialog-list \[data-agent-content-result\],\s*\.dashboard__roster-dialog-list \.dashboard__agent-content-withdraw\s*\{[^}]*grid-column: 2 \/ -1/);
   assert.match(dashboard, /\.dashboard__agent-content-withdraw\s*\{[^}]*justify-self: start/);
+  assert.ok(dialog.indexOf("row.append(promptButton)") < dialog.indexOf("row.append(accessLine)"), "Get prompt keeps column 3 before the full-width access line");
   assert.match(dialog, /"Can use Lists & docs"/);
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
   assert.match(withdraw, /window.confirm\(`/);
@@ -174,8 +178,8 @@ test("history reads removed identities separately and leaves the live roster unc
   assert.match(removed, /\.not\("revoked_at", "is", null\)/);
   assert.match(removed, /offset < 200/);
   const open = section(script, "const openWorkspace =", "const syncCreatePurposeWarning =");
-  assert.match(open, /nextRemovedAgents\] = await Promise.all/);
-  assert.match(open, /removedAgentNames\(selected.id\)/);
+  assert.match(open, /const removedAgentsRead = removedAgentNames\(selected.id\)/);
+  assert.match(open, /const nextRemovedAgents = await removedAgentsRead;/);
   assert.match(open, /removedAgents = nextRemovedAgents/);
   assert.match(script, /removedAgentLabel\(name\)/);
   assert.match(script, /historicalAgentName\(signal.from\)/);
@@ -412,6 +416,59 @@ function attachAccessFixture(f: ReturnType<typeof creationFixture>) {
   f.ctx.refreshHouseholdAccess = execute(`${section(script, "const refreshHouseholdAccess =", "/** Show the access card")}; refreshHouseholdAccess;`, f.ctx);
   return { rows, progress, succeed: () => { answer = "ok"; } };
 }
+
+function attachAgentReceiptFixture(f: ReturnType<typeof creationFixture>) {
+  let handler: (event: any) => void = () => {};
+  const timers: (() => void)[] = [];
+  const originalOne = f.ctx.one;
+  let receiptId = 0;
+  Object.assign(f.ctx, {
+    app: { ...f.ctx.app, addEventListener: (_name: string, callback: any) => { handler = callback; } },
+    one: (selector: string) => selector === "agent-connect" ? {} : originalOne(selector),
+    pendingWorkspaceId: "", pendingWorkspaceCreate: false, livePromptPrincipalId: "principal",
+    accessStatuses: [], pendingAgents: [], pendingAgentsLoadFailed: false,
+    syncConnectWorkspace: () => {}, returnToChannel: () => {},
+    agentAccessStatuses: async () => [], loadPendingAccess: async () => ({ rows: [], failed: false }),
+    pendingAgentAccess: async () => [], renderPendingAccess: () => {},
+    uuid: () => `receipt-${++receiptId}`,
+  });
+  Object.assign(f.ctx.window, { setTimeout: (callback: () => void) => { timers.push(callback); }, requestAnimationFrame: () => {} });
+  execute(section(script, 'app.addEventListener("commonswarm:agent-secret-cleared"', "const queueAuthReload ="), f.ctx);
+  return { consumed: () => handler({ detail: { reason: "consumed" } }), timers };
+}
+
+test("an ok access read preserves the newer agent-connected receipt after failed setup", async () => {
+  const f = creationFixture("unknown");
+  const access = attachAccessFixture(f);
+  const agent = attachAgentReceiptFixture(f);
+  await f.create(f.session, { ...createIntent });
+  assert.equal(f.receipt.dataset.setupWorkspaceId, "workspace");
+  agent.consumed();
+  access.succeed();
+  await f.ctx.refreshHouseholdAccess();
+  assert.equal(f.receipt.textContent, "Agent connected. Its one-time prompt has been cleared.");
+  assert.equal(f.receipt.hidden, false);
+  assert.equal(f.receipt.dataset.setupWorkspaceId, undefined);
+  agent.timers[0]();
+  assert.equal(f.receipt.hidden, true, "the timer still hides the receipt it owns");
+});
+
+test("an older agent receipt timer cannot hide a newer connection or creation setup receipt", async () => {
+  const f = creationFixture("unknown");
+  attachAccessFixture(f);
+  const agent = attachAgentReceiptFixture(f);
+  await f.create(f.session, { ...createIntent });
+  agent.consumed();
+  agent.consumed();
+  agent.timers[0]();
+  assert.equal(f.receipt.hidden, false, "the second connection owns its own six seconds");
+  await f.create(f.session, { ...createIntent });
+  assert.equal(f.receipt.dataset.setupWorkspaceId, "workspace");
+  const setupText = f.receipt.textContent;
+  agent.timers[1]();
+  assert.equal(f.receipt.textContent, setupText);
+  assert.equal(f.receipt.hidden, false, "setup remains visible after the older connection timer fires");
+});
 
 test("failed creation plus an unknown access read keeps Choose visible, then ok clears the step and receipt", async () => {
   for (const outcome of ["refused", "unknown"] as const) {

@@ -559,10 +559,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           <div class="dashboard__channel-body">
             <p class="dashboard__channel-receipt" role="status" aria-live="polite" data-channel-receipt hidden></p>
             {/* THE SETUP CHECKLIST (redesign, 2026-10-04). A new workspace opens on the needed steps:
-                connect an agent, invite a person (owners and admins), and choose access only
-                after a refused read. Each step's done state is
-                derived from facts the page already reads (site/src/lib/setup-checklist.ts);
-                nothing is stored. Exactly one Add-agent and one invite action live here. */}
+                connect an agent, invite a person (owners and admins), and choose access after
+                a refused read or an unsettled creation permissions step. A stored marker for
+                that account and workspace keeps access visible through unknown reads until
+                an ok read clears it. Other steps use facts the page already reads
+                (site/src/lib/setup-checklist.ts). Exactly one Add-agent and one invite action
+                live here. */}
             <section class="dashboard__channel-empty dashboard__setup" data-channel-view="no-agents" data-setup-checklist>
               <div class="dashboard__empty-orbit" aria-hidden="true">
                 <span></span><span></span><span></span>
@@ -4556,36 +4558,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           }
         }
         row.append(avatar, copy);
-        if (!sampleMode && agent.ownerUserId === session?.user.id) {
-          const connection = householdConnections.find((candidate) =>
-            candidate.principal_id === agent.principalId && connectionApproval(candidate));
-          const approval = connection ? connectionApproval(connection) : null;
-          if (approval) {
-            const accessLine = document.createElement("span");
-            accessLine.dataset.agentContentAccess = "";
-            accessLine.textContent = approval.expires_at === null
-              ? "Can use Lists & docs"
-              : `Can use Lists & docs. ${approvalUntil(approval.expires_at)}`;
-            copy.append(accessLine);
-          }
-          if (approval || householdReceipts.has(agent.principalId)) {
-            const receipt = document.createElement("p");
-            receipt.setAttribute("role", "status");
-            receipt.setAttribute("aria-live", "polite");
-            receipt.dataset.agentContentResult = "";
-            receipt.textContent = householdReceipts.get(agent.principalId) ?? "";
-            copy.append(receipt);
-            if (approval) {
-              const withdraw = document.createElement("button");
-              withdraw.type = "button";
-              withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw";
-              withdraw.textContent = "Withdraw Lists & docs";
-              withdraw.dataset.withdrawAgentAccess = agent.principalId;
-              withdraw.addEventListener("click", () => { void withdrawAgent(agent.principalId, agent.name, withdraw, receipt); });
-              copy.append(withdraw);
-            }
-          }
-        }
         /* A prompt carries a fresh credential for this identity, so it is narrower than
            the management gate: only the person who owns the agent gets this action.
            AgentConnect owns minting, dashboardAgentPrompt, one-time display, and copy. */
@@ -4755,6 +4727,36 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             }
           });
           row.append(button);
+        }
+        if (!sampleMode && agent.ownerUserId === session?.user.id) {
+          const connection = householdConnections.find((candidate) =>
+            candidate.principal_id === agent.principalId && connectionApproval(candidate));
+          const approval = connection ? connectionApproval(connection) : null;
+          if (approval) {
+            const accessLine = document.createElement("span");
+            accessLine.dataset.agentContentAccess = "";
+            accessLine.textContent = approval.expires_at === null
+              ? "Can use Lists & docs"
+              : `Can use Lists & docs. ${approvalUntil(approval.expires_at)}`;
+            row.append(accessLine);
+          }
+          if (approval || householdReceipts.has(agent.principalId)) {
+            const receipt = document.createElement("p");
+            receipt.setAttribute("role", "status");
+            receipt.setAttribute("aria-live", "polite");
+            receipt.dataset.agentContentResult = "";
+            receipt.textContent = householdReceipts.get(agent.principalId) ?? "";
+            row.append(receipt);
+            if (approval) {
+              const withdraw = document.createElement("button");
+              withdraw.type = "button";
+              withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw";
+              withdraw.textContent = "Withdraw Lists & docs";
+              withdraw.dataset.withdrawAgentAccess = agent.principalId;
+              withdraw.addEventListener("click", () => { void withdrawAgent(agent.principalId, agent.name, withdraw, receipt); });
+              row.append(withdraw);
+            }
+          }
         }
         list.append(row);
       }
@@ -6314,7 +6316,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         list.replaceChildren();
       }
       for (const target of all<HTMLElement>(
-        "[data-channel-name], [data-channel-id], [data-invite-link], [data-channel-receipt], " +
+        "[data-channel-name], [data-channel-id], [data-invite-link], " +
           "[data-sidebar-workspace-name], [data-file-warning], [data-file-empty]",
       )) {
         target.textContent = "";
@@ -6341,7 +6343,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const inviteResult = one<HTMLElement>("[data-invite-result]");
       if (inviteResult) inviteResult.hidden = true;
       const receipt = one<HTMLElement>("[data-channel-receipt]");
-      if (receipt) receipt.hidden = true;
+      if (receipt) {
+        delete receipt.dataset.setupWorkspaceId;
+        delete receipt.dataset.agentConnectedReceiptId;
+        receipt.textContent = "";
+        receipt.hidden = true;
+      }
       const accessDetails = one<HTMLDetailsElement>("[data-access-details]");
       if (accessDetails) {
         accessDetails.open = false;
@@ -6856,7 +6863,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          a review arm. */
       const channelGeneration = ++channelReadGeneration;
       try {
-        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels, nextRemovedAgents] = await Promise.all([
+        const removedAgentsRead = removedAgentNames(selected.id);
+        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
           pendingMemberInvites(selected.id),
@@ -6876,8 +6884,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             (value) => ({ value, failed: false }),
             () => ({ value: [] as WorkspaceChannel[], failed: true }),
           ),
-          removedAgentNames(selected.id),
         ]);
+        const nextRemovedAgents = await removedAgentsRead;
         if (version !== requestVersion) return;
         agents = nextAgents;
         removedAgents = nextRemovedAgents;
@@ -8261,38 +8269,40 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       setCreateError(null);
       try {
         const existing = workspaces.find((workspace) => workspace.id === intent.workspaceId);
-        const made = existing ? { workspaceId: existing.id, name: existing.name } : await createWorkspace(
-          value,
-          intent.commandId,
-          intent.workspaceId,
-          intent.name,
-        );
+        let madeWorkspace: Workspace;
+        if (existing) {
+          madeWorkspace = { id: existing.id, name: existing.name, archived: false };
+        } else {
+          const made = await createWorkspace(
+            value,
+            intent.commandId,
+            intent.workspaceId,
+            intent.name,
+          );
+          madeWorkspace = { id: made.workspaceId, name: made.name, archived: false };
+        }
         if (!isCurrent()) return;
         const permissions = await recordCreatePermissions(value, intent);
         if (!isCurrent()) return;
-        if (permissions === "committed" && intent.purpose) rememberPurpose(made.workspaceId, intent.purpose);
+        if (permissions === "committed" && intent.purpose) rememberPurpose(madeWorkspace.id, intent.purpose);
         // Boot consumes the saved intent after one permissions attempt, even during an outage.
         // A submit with an unknown result still saves the intent for that one reload attempt.
         if (resumeOnBoot || permissions !== "unknown") clearCreateIntent(value.user.id);
-        setHouseholdSetupNeeded(userId, made.workspaceId, permissions !== "committed");
-        const madeWorkspace = {
-          id: made.workspaceId,
-          name: made.name,
-          archived: false,
-        };
+        setHouseholdSetupNeeded(userId, madeWorkspace.id, permissions !== "committed");
         workspaces = [
           madeWorkspace,
-          ...workspaces.filter((workspace) => workspace.id !== made.workspaceId),
+          ...workspaces.filter((workspace) => workspace.id !== madeWorkspace.id),
         ];
         if (input) input.disabled = false;
-        const opening = openWorkspace(made.workspaceId);
+        const opening = openWorkspace(madeWorkspace.id);
         const openedVersion = requestVersion;
         const openedGeneration = householdAccessGeneration;
         await opening;
-        if (requestVersion === openedVersion && householdAccessGeneration === openedGeneration && session?.user.id === userId && activeWorkspaceId === made.workspaceId && permissions !== "committed" && needsHouseholdSetup(userId, made.workspaceId)) {
+        if (requestVersion === openedVersion && householdAccessGeneration === openedGeneration && session?.user.id === userId && activeWorkspaceId === madeWorkspace.id && permissions !== "committed" && needsHouseholdSetup(userId, madeWorkspace.id)) {
           const receipt = one<HTMLElement>("[data-channel-receipt]");
           if (receipt) {
-            receipt.dataset.setupWorkspaceId = made.workspaceId;
+            delete receipt.dataset.agentConnectedReceiptId;
+            receipt.dataset.setupWorkspaceId = madeWorkspace.id;
             receipt.textContent = "Your workspace is ready. Lists & docs is not set up yet. Choose who can use it in the steps below.";
             receipt.hidden = false;
           }
@@ -10428,9 +10438,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       returnToChannel();
       const receipt = one<HTMLElement>("[data-channel-receipt]");
       if (receipt && detail?.reason === "consumed") {
+        delete receipt.dataset.setupWorkspaceId;
+        const receiptId = uuid();
+        receipt.dataset.agentConnectedReceiptId = receiptId;
         receipt.textContent = "Agent connected. Its one-time prompt has been cleared.";
         receipt.hidden = false;
         window.setTimeout(() => {
+          if (receipt.dataset.agentConnectedReceiptId !== receiptId) return;
+          delete receipt.dataset.agentConnectedReceiptId;
           receipt.hidden = true;
         }, 6_000);
       }
@@ -12822,6 +12837,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__roster-dialog-list .dashboard__agent {
     grid-template-columns: auto minmax(0, 1fr) auto;
     border-radius: var(--radius-sm);
+  }
+
+  .dashboard__roster-dialog-list [data-agent-content-access],
+  .dashboard__roster-dialog-list [data-agent-content-result],
+  .dashboard__roster-dialog-list .dashboard__agent-content-withdraw {
+    grid-column: 2 / -1;
   }
 
   .dashboard__agent-content-withdraw {
