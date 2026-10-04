@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-04T04:48:05.055995+00:00",
+  "state": "complete",
+  "ok": true,
+  "database_verified": true,
+  "all_files_verified": true,
+  "destination": "r2:yulan-vps-1-backups/000-commonswarm-postgres/20261004T031501Z-fixture",
+  "evidence": "fixture",
+  "label": "fixture",
+  "objects": [],
+  "tables": [],
+  "invocation_id": "fixture-invocation"
+}

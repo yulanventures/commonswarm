@@ -334,6 +334,10 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
   for (const line of [
     /^REMAP plan copy: .*; the reverse map restores the plan bytes exactly$/m,
     /^PASS ai-w4-apply:legacy-fence-and-measure$/m, /^PASS ai-w4-readback$/m, /^PASS w4-legacy-fence: legacy_closed false -> true by apply_legacy_admin_fence/m,
+    /^PASS ai-w1-backup-gate:W4-exact-box-formats$/m,
+    /^PASS w4-backup-gate-receipt: backup_verified_at and restore_completed_at kept as the box wrote them \(\+00:00, microseconds\); gate_at written \.\.\.Z/m,
+    /^PASS plan-time-writers: open\.txt, ai-close closed\.txt, ai-w5-closed closed\.txt and gate_at, written by the plan's own code, all parse with box_utc: \S+Z \S+Z \S+Z 2026-10-04T22:20:00\.000000Z$/m,
+    /^PASS psql-time-render: no plan parser reads a psql-rendered time; /m, /^PASS marker-times: every closed-issuance marker 'at' written by the hook parses with box_utc/m,
     /^PASS ai-edge-receipt:W4-measurement$/m, /^PASS ai-edge-refresh:before-W6-open$/m,
     /^PASS ai-edge-receipt:stale-generation: refused \(generation\/release_generation\/measured_generation\)$/m,
     /^PASS ai-w6-activation-checks:db-measurement-g4$/m, /^PASS ai-w6-activation-checks:g4-archive-missing: refused /m,
