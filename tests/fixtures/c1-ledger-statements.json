@@ -1,0 +1,37 @@
+{
+ "source": "production supabase_migrations.schema_migrations.statements, measured read-only 2026-10-03 (ledger-statements-W2.raw.json); file text from git at matched_sha (the W2 RELEASE_SHA afd44012)",
+ "rows": [
+  {
+   "version": "20260724000001",
+   "matched_sha": "afd44012372c4287c4e23d1856e149466db5af7f",
+   "file": "supabase/migrations/20260724000001_connect_loop.sql",
+   "file_at_matched_sha": "-- Slice 2b-2 connect loop: retain the verified login email as bookkeeping so\n-- invite issuance can best-effort detect an already-present member. Invitation\n-- acceptance remains capability-only and MUST NOT authorize by email.\n\nALTER TABLE swarm.users\n  ADD COLUMN IF NOT EXISTS email text;\n\nCREATE INDEX IF NOT EXISTS users_by_normalized_email\n  ON swarm.users (lower(email))\n  WHERE email IS NOT NULL;\n\nCOMMENT ON COLUMN swarm.users.email IS\n  'Lowercase verified-login email for invite bookkeeping only; never an invitation acceptance authorization input.';\n",
+   "statements": [
+    "-- Slice 2b-2 connect loop: retain the verified login email as bookkeeping so\n-- invite issuance can best-effort detect an already-present member. Invitation\n-- acceptance remains capability-only and MUST NOT authorize by email.\n\nALTER TABLE swarm.users\n  ADD COLUMN IF NOT EXISTS email text",
+    "CREATE INDEX IF NOT EXISTS users_by_normalized_email\n  ON swarm.users (lower(email))\n  WHERE email IS NOT NULL",
+    "COMMENT ON COLUMN swarm.users.email IS\n  'Lowercase verified-login email for invite bookkeeping only; never an invitation acceptance authorization input.'"
+   ]
+  },
+  {
+   "version": "20260828000003",
+   "matched_sha": "afd44012372c4287c4e23d1856e149466db5af7f",
+   "file": "supabase/migrations/20260828000003_queue_before_observed.sql",
+   "file_at_matched_sha": "-- A routed interactive-session message is queued until the hook surfaces it.\n-- This is a forward-only correction to the original closed outcome vocabulary.\n\nALTER TABLE swarm.signal_deliveries\n  DROP CONSTRAINT signal_deliveries_ack_outcome_check;\n\nALTER TABLE swarm.signal_deliveries\n  ADD CONSTRAINT signal_deliveries_ack_outcome_check\n  CHECK (ack_outcome IS NULL OR ack_outcome IN\n    ('replied', 'observed', 'queued', 'expired', 'failed_terminal'));\n\nCOMMENT ON COLUMN swarm.signal_deliveries.ack_outcome IS\n  'queued means routed to an interactive session but not yet surfaced; observed means the agent actually saw it.';\n\nDO $$\nDECLARE\n  outcome_constraint text;\nBEGIN\n  SELECT pg_get_constraintdef(oid)\n  INTO outcome_constraint\n  FROM pg_catalog.pg_constraint\n  WHERE conrelid = 'swarm.signal_deliveries'::regclass\n    AND conname = 'signal_deliveries_ack_outcome_check';\n\n  IF outcome_constraint IS NULL\n     OR outcome_constraint NOT LIKE '%queued%'\n     OR outcome_constraint NOT LIKE '%observed%'\n     OR outcome_constraint NOT LIKE '%replied%'\n     OR outcome_constraint NOT LIKE '%expired%'\n     OR outcome_constraint NOT LIKE '%failed_terminal%'\n  THEN\n    RAISE EXCEPTION 'signal_deliveries outcome constraint did not install completely';\n  END IF;\nEND\n$$;\n",
+   "statements": [
+    "-- A routed interactive-session message is queued until the hook surfaces it.\n-- This is a forward-only correction to the original closed outcome vocabulary.\n\nALTER TABLE swarm.signal_deliveries\n  DROP CONSTRAINT signal_deliveries_ack_outcome_check",
+    "ALTER TABLE swarm.signal_deliveries\n  ADD CONSTRAINT signal_deliveries_ack_outcome_check\n  CHECK (ack_outcome IS NULL OR ack_outcome IN\n    ('replied', 'observed', 'queued', 'expired', 'failed_terminal'))",
+    "COMMENT ON COLUMN swarm.signal_deliveries.ack_outcome IS\n  'queued means routed to an interactive session but not yet surfaced; observed means the agent actually saw it.'",
+    "DO $$\nDECLARE\n  outcome_constraint text;\nBEGIN\n  SELECT pg_get_constraintdef(oid)\n  INTO outcome_constraint\n  FROM pg_catalog.pg_constraint\n  WHERE conrelid = 'swarm.signal_deliveries'::regclass\n    AND conname = 'signal_deliveries_ack_outcome_check';\n\n  IF outcome_constraint IS NULL\n     OR outcome_constraint NOT LIKE '%queued%'\n     OR outcome_constraint NOT LIKE '%observed%'\n     OR outcome_constraint NOT LIKE '%replied%'\n     OR outcome_constraint NOT LIKE '%expired%'\n     OR outcome_constraint NOT LIKE '%failed_terminal%'\n  THEN\n    RAISE EXCEPTION 'signal_deliveries outcome constraint did not install completely';\n  END IF;\nEND\n$$"
+   ]
+  },
+  {
+   "version": "20260913000001",
+   "matched_sha": "afd44012372c4287c4e23d1856e149466db5af7f",
+   "file": "supabase/migrations/20260913000001_file_bucket_size_limit.sql",
+   "file_at_matched_sha": "-- Outer upload size bound at storage layer (Item C — docs/design/SWARM-CLOUD.md §2.8).\n-- Supabase Storage itself refuses an upload exceeding the bucket limit (25 MiB = 26214400 bytes).\n-- Note: signed upload URLs do not bind per-URL size or digest; the bucket limit provides the\n-- outer maximum bound, while commit refuses an object larger than declared; an object smaller\n-- than its declaration is accepted rather than refused because the declaration gated quota.\n-- Bound against FILE_MAX_VERSION_BYTES in tests/p1-cli/file-create-rate-limit.test.ts.\n\nDO $$\nDECLARE\n  v_rows integer;\nBEGIN\n  UPDATE storage.buckets\n  SET file_size_limit = 26214400\n  WHERE id = 'swarm-files';\n\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RAISE EXCEPTION 'expected exactly 1 row updated in storage.buckets for id = swarm-files, got %', v_rows;\n  END IF;\nEND $$;\n",
+   "statements": [
+    "-- Outer upload size bound at storage layer (Item C — docs/design/SWARM-CLOUD.md §2.8).\n-- Supabase Storage itself refuses an upload exceeding the bucket limit (25 MiB = 26214400 bytes).\n-- Note: signed upload URLs do not bind per-URL size or digest; the bucket limit provides the\n-- outer maximum bound, while commit refuses an object larger than declared; an object smaller\n-- than its declaration is accepted rather than refused because the declaration gated quota.\n-- Bound against FILE_MAX_VERSION_BYTES in tests/p1-cli/file-create-rate-limit.test.ts.\n\nDO $$\nDECLARE\n  v_rows integer;\nBEGIN\n  UPDATE storage.buckets\n  SET file_size_limit = 26214400\n  WHERE id = 'swarm-files';\n\n  GET DIAGNOSTICS v_rows = ROW_COUNT;\n  IF v_rows <> 1 THEN\n    RAISE EXCEPTION 'expected exactly 1 row updated in storage.buckets for id = swarm-files, got %', v_rows;\n  END IF;\nEND $$"
+   ]
+  }
+ ]
+}

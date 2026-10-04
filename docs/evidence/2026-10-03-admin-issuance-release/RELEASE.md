@@ -72,14 +72,35 @@ database/provider/client proofs. The checker must refute the combined build.
 W1 needs backup/restore controls; W2 needs schema, reserve and ordinary-path controls; W6 needs **every** named
 gate. W3/W4/W5 also require their build/route/site receipts.
 
-`BACKFILL_FILE` W2 is an absolute regular nonsecret JSON list, one row per
-already-applied version: version, released_sha, sha256, file. `file` is exactly
-`supabase/migrations/<version>_<name>.sql`. Each row's released_sha is the SHA
-actually released when that migration was applied, supported by HezLead's
-historical release evidence. The worker reads that file from an immutable
-archive of THAT SHA. Do not hash the current checkout for historical backfills,
-or copy expected activation hashes into observed evidence. Expected activation
-hashes are separately derived from RELEASE_SHA. A mismatch STOPs activation.
+`BACKFILL_FILE` W2 is an absolute regular nonsecret JSON list, exactly one row
+per already-applied ledger version, and every row names its `evidence_kind`.
+`file` is always exactly `supabase/migrations/<version>_<name>.sql`. Nobody
+invents a released_sha. ai-w2-backfill refuses unknown kinds, duplicate rows,
+missing ledger versions and rows for versions that are not in the ledger, and
+retains the count per kind in `backfill-kinds.json`.
+
+| evidence_kind | Exact row keys | What ai-w2-backfill re-derives |
+| --- | --- | --- |
+| `release-record` | version, evidence_kind, released_sha, sha256, file | Today's rule, unchanged: released_sha is the SHA actually released when the migration was applied, supported by HezLead's historical release evidence. The file in the immutable `<released_sha>.tar` hashes to sha256 and equals the current file (drift STOPs). |
+| `ledger-statements` | version, evidence_kind, file, matched_sha, sha256 | The ledger's own recorded `statements` for the version are non-empty. matched_sha must equal RELEASE_SHA; the file is read from the verified release archive, hashes to sha256, and is an ordered verbatim cover of the recorded statements (below). matched_sha names the commit whose file covers what the ledger recorded; it is not a released_sha. |
+| `attested-baseline` | version, evidence_kind, file, sha256, attested_by, attested_at, reason | The ledger statements for the version are NULL or empty (non-empty STOPs: the row must be `ledger-statements`). The file in the verified release archive hashes to sha256. attested_by is exactly `HezLead`, attested_at is a UTC Z time and reason is exactly the release owner's statement: "no release record and no recorded statements exist; the file bytes at RELEASE_SHA are adopted as the UNVERIFIED drift baseline". That statement is the ONLY meaning of an attested-baseline row; it never proves that the applied SQL equals the file. |
+
+Ordered verbatim cover (`verbatim_cover` in ai-w2-backfill; no comment
+stripping and no normalization): every recorded statement is a non-empty string
+that appears byte-for-byte in the file, in ledger order and without overlap, and
+the text before the first, between any two and after the last consists only of
+whitespace and semicolons. A reordered, changed, missing or extra statement, or
+a comment or any other text in a gap, STOPs.
+
+The current M4 `migration_checksums` table has no provenance column and accepts
+only source `release`/`backfill` with a 40-hex released_sha, so a
+`ledger-statements` or `attested-baseline` row cannot be recorded there without
+inventing a released_sha. Until a separately reviewed schema decision exists,
+ai-w2-backfill writes its proof and counts and then STOPs W2 before apply when
+any such row is present; ai-w2-apply refuses them too.
+Do not hash the current checkout for historical backfills, or copy expected
+activation hashes into observed evidence. Expected activation hashes are
+separately derived from RELEASE_SHA. A mismatch STOPs activation.
 
 | Window | Preflight → open → apply → probes → close; rollback chosen before open |
 | --- | --- |
@@ -595,7 +616,7 @@ EXPECTED_LEDGER_SHA256=$(python3 -c 'import json,sys; print(json.load(open(sys.a
 test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256"
 ai_run() {
  local STEP_NAME=$1
- case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile) ;; *) return 1;; esac
+ case "$STEP_NAME" in ai-w6-readiness|ai-w6-activation-probes|ai-w6-finish|ai-inputs|ai-gates|ai-w6-activation-approval|ai-w7-approval|ai-w7-preflight|ai-recycle-install|ai-recycle-rollback|ai-timer-guard|ai-w4-timer-recovery|ai-w6-activation-rollback|ai-emergency-close|ai-w2-measure|ai-w2-between-probes|ai-w2-reconcile|ai-w2-backfill) ;; *) return 1;; esac
  local AI_RUN_SOURCE
  # The verified block reaches the shell only through this substitution: no staged path.
  AI_RUN_SOURCE=$(python3 -c '
@@ -855,7 +876,9 @@ in its own transaction, inserts its ledger/checksum and backfills M1–M3 plus
 EVERY previously applied ledger version. M5 commits its ledger and checksum in
 its own transaction. M1–M3 checksums are source=backfill at RELEASE_SHA;
 historical backfills retain their actual released_sha after byte equality with
-RELEASE_SHA is verified. No migration or reserve SQL is edited.
+RELEASE_SHA is verified. Only `release-record` backfill rows reach M4; the other
+evidence kinds stop W2 before apply (see BACKFILL_FILE). No migration or
+reserve SQL is edited.
 
 Before M1, ai-w2-measure counts rows and pg_total_relation_size (including
 indexes/TOAST) of every live table locked by M1–M5 and the release ledger.
@@ -919,8 +942,9 @@ expired or refused credentials STOP. Refresh through the reviewed ordinary
 client procedure before W2; this plan does not invent issuance or refresh.
 
 `HISTORICAL_ARCHIVES_DIR` is a root-owned directory of immutable reviewed
-`<released_sha>.tar` archives from the historical release inputs. The W2
-backfill verifier checks every archive's migration bytes against BACKFILL_FILE.
+`<released_sha>.tar` archives from the historical release inputs (release-record
+rows only). The W2 backfill verifier (ai-w2-backfill, run by ai-w2-preflight)
+checks every archive's migration bytes against BACKFILL_FILE.
 It also checks the current files: if historical and reviewed hashes disagree,
 STOP rather than changing observed evidence to fit a new build.
 
@@ -966,27 +990,14 @@ if len(found)!=1: raise SystemExit('FAIL '+step+': ai-live-controls block expect
 env=dict(os.environ,INPUTS_FILE=inputs,BOX_ARCHIVE_PATH=archive,PROOF_DIR=proof,LIVE_CONTROLS_FILE=live,CONSENT_RECEIPT_FILE=consent,LIVE_CONTROLS_EXPECT_PHASE=phase,LIVE_CONTROLS_RETAIN=retain)
 raise SystemExit(subprocess.run(['/bin/bash'],input=found[0],text=True,env=env).returncode)
 PY
-python3 - "$RELEASE_ROOT" "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA" <<'PY'
-import hashlib,json,pathlib,re,sys,tarfile
-root,proof,backfill,archives=map(pathlib.Path,sys.argv[1:5]); sha=sys.argv[5]
-assert backfill.is_absolute() and backfill.is_file() and not backfill.is_symlink()
-assert archives.is_absolute() and archives.is_dir() and not archives.is_symlink()
-rows=json.loads(backfill.read_text()); ledger=(proof/'ledger-before.txt').read_text().splitlines()
+ai_run ai-w2-backfill
+python3 - "$RELEASE_ROOT" "$PROOF_DIR" <<'PY'
+import hashlib,json,pathlib,sys
+root,proof=map(pathlib.Path,sys.argv[1:3])
+ledger=(proof/'ledger-before.txt').read_text().splitlines()
 versions=['2026100300000'+str(i) for i in range(1,6)]
 assert not any(v in ledger for v in versions), 'FAIL W2 unexpected applied prefix; STOP'
 assert all(v in ledger for v in ['2026100100000'+str(i) for i in range(1,6)]+['20260928000003','20261002000001']), 'FAIL prerequisites; STOP'
-assert isinstance(rows,list) and len(rows)==len(ledger) and sorted(r['version'] for r in rows)==ledger
-for r in rows:
-    assert set(r)=={'version','released_sha','sha256','file'}
-    assert re.fullmatch('[0-9]{14}',r['version']) and re.fullmatch('[0-9a-f]{40}',r['released_sha']) and re.fullmatch('[0-9a-f]{64}',r['sha256'])
-    assert re.fullmatch('supabase/migrations/'+r['version']+'_[a-z0-9_]+.sql',r['file'])
-    archive=archives/(r['released_sha']+'.tar')
-    assert archive.is_file() and not archive.is_symlink()
-    with tarfile.open(archive) as t:
-        member=t.getmember(r['file']); assert member.isfile()
-        original=t.extractfile(member).read()
-    assert hashlib.sha256(original).hexdigest()==r['sha256'], 'FAIL historical backfill hash; STOP'
-    assert (root/r['file']).read_bytes()==original, 'FAIL historical/current migration drift; STOP'
 records=[]
 for v in versions:
     files=list((root/'supabase/migrations').glob(v+'_*.sql')); assert len(files)==1
@@ -995,7 +1006,6 @@ for v in versions:
     assert reserve.read_bytes()==plan_reserve.read_bytes(), 'FAIL reserve bytes; STOP'
     records.append({'version':v,'file':files[0].name,'sha256':hashlib.sha256(files[0].read_bytes()).hexdigest()})
 (proof/'new-migrations.json').write_text(json.dumps(records,sort_keys=True)+'\n')
-(proof/'backfill.json').write_text(json.dumps(rows,sort_keys=True)+'\n')
 # Snapshot the reviewed expected set separately; never use this as historical evidence.
 required=['2026100100000'+str(i) for i in range(1,6)]+['20260928000003','20261002000001']+versions
 expected={}
@@ -1022,6 +1032,118 @@ ai_ro -Atq --command "SELECT n.nspname,c.relname,c.relrowsecurity,c.relforcerows
 ai_ro -Atq --command 'SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcanlogin,rolbypassrls FROM pg_roles ORDER BY rolname;' >"$PROOF_DIR/roles-before.txt"
 ai_run ai-w2-measure
 printf 'PASS W2 preflight: exact ledger/backfill/reserves/catalogs/bounds; backup fresh\n'
+```
+
+```sh
+# step: ai-w2-backfill
+# readonly: no
+# host: box root; run by ai-w2-preflight through ai_run; database read-only, writes proof files
+set -euo pipefail
+test "$WINDOW" = W2
+: "${BACKFILL_FILE:?FAIL ai-w2-backfill: BACKFILL_FILE expected absolute-regular-file got unset; STOP}"
+: "${HISTORICAL_ARCHIVES_DIR:?FAIL ai-w2-backfill: HISTORICAL_ARCHIVES_DIR expected absolute-directory got unset; STOP}"
+# The ledger's own recorded statements, read-only in the existing session: one JSON object per version.
+ai_ro -Atq --command "SELECT json_build_object('version',version,'statements',statements)::text FROM supabase_migrations.schema_migrations ORDER BY version;" >"$PROOF_DIR/ledger-statements.jsonl"
+python3 - "$PROOF_DIR" "$BACKFILL_FILE" "$HISTORICAL_ARCHIVES_DIR" "$RELEASE_SHA" "$BOX_ARCHIVE_PATH" "$INPUTS_FILE" "$RELEASE_ROOT" <<'PY'
+import datetime,hashlib,io,json,os,pathlib,re,stat,sys,tarfile
+proof,backfill,archives,sha,box_archive,inputs,root=sys.argv[1:8]
+proof,root=pathlib.Path(proof),pathlib.Path(root)
+ATTESTATION="no release record and no recorded statements exist; the file bytes at RELEASE_SHA are adopted as the UNVERIFIED drift baseline"
+KEYS={'release-record':{'version','evidence_kind','released_sha','sha256','file'},
+      'ledger-statements':{'version','evidence_kind','file','matched_sha','sha256'},
+      'attested-baseline':{'version','evidence_kind','file','sha256','attested_by','attested_at','reason'}}
+def fail(what,expected,got): raise SystemExit('FAIL ai-w2-backfill: '+what+' expected '+expected+' got '+got+'; STOP')
+def read_regular(name):
+    try: fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    except (OSError,TypeError,ValueError): return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode): return None
+        chunks=[]
+        while True:
+            chunk=os.read(fd,1048576)
+            if not chunk: return b''.join(chunks)
+            chunks.append(chunk)
+    finally: os.close(fd)
+def verbatim_cover(data,recorded):
+    """Ordered verbatim cover: each recorded statement occurs byte-for-byte in data,
+    in order and without overlap; every gap holds only whitespace and semicolons."""
+    gap=b' \t\r\n\f\v;'; pos=0
+    for statement in recorded:
+        part=statement.encode()
+        while pos<len(data) and data[pos] in gap: pos+=1
+        if not part or not data.startswith(part,pos): return False
+        pos+=len(part)
+    return all(c in gap for c in data[pos:])
+def tar_member(raw,member,what):
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+            m=tar.getmember(member); data=tar.extractfile(m).read() if m.isfile() else None
+    except (KeyError,OSError,tarfile.TarError): data=None
+    if data is None: fail(member+' in '+what,'regular-file','missing')
+    return data
+def historical(commit):
+    raw=read_regular(os.path.join(archives,commit+'.tar'))
+    if raw is None: fail('historical archive '+commit+'.tar','regular-file','missing-or-not-regular')
+    return raw
+if not (os.path.isabs(archives) and os.path.isdir(archives) and not os.path.islink(archives)): fail('HISTORICAL_ARCHIVES_DIR','absolute-directory','other')
+raw=read_regular(backfill) if os.path.isabs(backfill) else None
+if raw is None: fail('BACKFILL_FILE','absolute-regular-file','missing-or-not-regular')
+try: rows=json.loads(raw)
+except ValueError: rows=None
+if not isinstance(rows,list) or not all(isinstance(r,dict) for r in rows): fail('BACKFILL_FILE','list-of-objects','other')
+ledger=(proof/'ledger-before.txt').read_text().splitlines()
+statements={}
+for line in (proof/'ledger-statements.jsonl').read_text().splitlines():
+    item=json.loads(line); v=item['version']
+    if v in statements: fail('ledger statements version '+v,'one-row','duplicate')
+    statements[v]=item['statements']
+if sorted(statements)!=ledger: fail('ledger statements versions','ledger-before','different')
+release_raw=read_regular(box_archive) if os.path.isabs(box_archive) else None
+if release_raw is None or hashlib.sha256(release_raw).hexdigest()!=json.load(open(inputs)).get('archive_sha256'): fail('BOX_ARCHIVE_PATH','verified-release-archive','missing-or-mismatch')
+seen=set(); kinds={}; attested=[]
+for r in rows:
+    kind=r.get('evidence_kind'); v=r.get('version')
+    if kind not in KEYS: fail('evidence_kind for '+str(v),'release-record|ledger-statements|attested-baseline','unknown')
+    if set(r)!=KEYS[kind]: fail(kind+' row keys for '+str(v),'exact-kind-keys','other-set')
+    if not (isinstance(v,str) and re.fullmatch('[0-9]{14}',v)): fail('row version','14-digit-string','other')
+    if v in seen: fail('backfill row '+v,'one-row','duplicate')
+    seen.add(v)
+    if v not in statements: fail('backfill row '+v,'ledger-version','not-in-ledger')
+    if not (isinstance(r['sha256'],str) and re.fullmatch('[0-9a-f]{64}',r['sha256'])): fail('sha256 for '+v,'64-hex','other')
+    if not (isinstance(r['file'],str) and re.fullmatch('supabase/migrations/'+v+'_[a-z0-9_]+[.]sql',r['file'])): fail('file for '+v,'supabase/migrations/'+v+'_<name>.sql','other')
+    recorded=statements[v]
+    if kind=='release-record':
+        if not re.fullmatch('[0-9a-f]{40}',str(r['released_sha'])): fail('released_sha for '+v,'40-hex','other')
+        original=tar_member(historical(r['released_sha']),r['file'],r['released_sha']+'.tar')
+        if hashlib.sha256(original).hexdigest()!=r['sha256']: raise SystemExit('FAIL historical backfill hash; STOP')
+        if (root/r['file']).read_bytes()!=original: raise SystemExit('FAIL historical/current migration drift; STOP')
+    elif kind=='ledger-statements':
+        if not re.fullmatch('[0-9a-f]{40}',str(r['matched_sha'])): fail('matched_sha for '+v,'40-hex','other')
+        if not (isinstance(recorded,list) and recorded and all(isinstance(x,str) for x in recorded)): fail('ledger statements for '+v,'non-empty','null-or-empty')
+        if r['matched_sha']!=sha: fail('matched_sha for '+v,'RELEASE_SHA','other')
+        data=tar_member(release_raw,r['file'],'release archive')
+        if hashlib.sha256(data).hexdigest()!=r['sha256']: fail('sha256 of '+r['file']+' at matched_sha','row-sha256','mismatch')
+        if not verbatim_cover(data,recorded): fail('ledger statements for '+v,'ordered-verbatim-cover-by-file-at-RELEASE_SHA','mismatch')
+    else:
+        if recorded not in (None,[]): fail('ledger statements for attested-baseline '+v,'null-or-empty','non-empty; the row must be ledger-statements')
+        if r['attested_by']!='HezLead': fail('attested_by for '+v,'HezLead','other')
+        if not (isinstance(r['attested_at'],str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3}|\.\d{6})?Z',r['attested_at'])): fail('attested_at for '+v,'UTC-ISO-8601-Z','other')
+        if r['reason']!=ATTESTATION: fail('reason for '+v,'release-owner-attestation-verbatim','other')
+        data=tar_member(release_raw,r['file'],'release archive')
+        if hashlib.sha256(data).hexdigest()!=r['sha256']: fail('sha256 of '+r['file']+' at RELEASE_SHA','row-sha256','mismatch')
+        attested.append(v)
+    kinds[v]=kind
+missing=[v for v in ledger if v not in seen]
+if missing: fail('backfill rows','every-ledger-version','missing-'+str(len(missing)))
+counts={k:sum(1 for x in kinds.values() if x==k) for k in KEYS}
+(proof/'backfill.json').write_text(json.dumps(rows,sort_keys=True)+'\n')
+(proof/'backfill-kinds.json').write_text(json.dumps({'counts':counts,'kinds':kinds,'attestation':ATTESTATION if attested else None,'attested_versions':attested},sort_keys=True)+'\n')
+for v in attested: print('attested-baseline '+v+': '+ATTESTATION)
+print('backfill evidence kinds: '+', '.join(k+'='+str(counts[k]) for k in KEYS))
+other=counts['ledger-statements']+counts['attested-baseline']
+if other: fail('checksum provenance for '+str(other)+' ledger-statements/attested-baseline rows','recordable','needs-schema-decision')
+print('PASS ai-w2-backfill: every ledger version has release-record evidence')
+PY
 ```
 
 ```sh
@@ -1136,6 +1258,8 @@ import datetime,hashlib,json,pathlib,re,sys
 p,root=map(pathlib.Path,sys.argv[1:3]); sha,version=sys.argv[3:]
 assert re.fullmatch('[0-9a-f]{40}',sha)
 new=json.loads((p/'new-migrations.json').read_text()); old=json.loads((p/'backfill.json').read_text())
+# M4 can record only release-record provenance (source/released_sha); others stop before apply.
+assert all(r.get('evidence_kind')=='release-record' for r in old), 'FAIL ai-w2-apply: backfill evidence_kind expected release-record got other; STOP'
 i=int(version[-1]); assert version=='2026100300000'+str(i) and new[i-1]['version']==version
 measure=json.loads((p/'lock-measurements.json').read_text()); budget=measure['budgets'][i-1]
 assert budget['migration']==i and 0<budget['expected_hold_seconds']<=budget['timeout_seconds']<=60
