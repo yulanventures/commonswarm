@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogCanAct, peopleConfirmationCopy } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
-const agent = (id, ownerId, overrides = {}) => ({ id, ownerId, name: id, app: null, model: null, ownerName: ownerId === "tom" ? "Tom Langridge" : "Mei Langridge", own: false, mayManage: false, liveKey: false, access: null, status: { kind: "active", attention: false, fix: { allowed: false } }, ...overrides });
+const agent = (id, ownerId, overrides = {}) => ({ id, ownerId, name: id, app: null, model: null, ownerName: ownerId === "tom" ? "Tom Langridge" : "Mei Langridge", own: false, mayManage: false, liveKey: false, access: null, accessReadState: "succeeded", status: { kind: "active", attention: false, fix: { allowed: false } }, ...overrides });
 const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "invite", name: "friend@example.test", detail: "Invite sent · expires in 6 days", mayCancel: false }], sample: false });
 
 test("counts separate people, agents and attention without asserting health", () => {
@@ -27,12 +27,21 @@ test("grouping filters people, agents, invitations and matching attention by nam
   assert.deepEqual(peopleDialogGroups(data, "Mei").attention.map((agent) => agent.id), ["Muse"]);
   assert.deepEqual(peopleDialogGroups(data, "absent").attention, []);
 });
-test("Lists & docs duration names the person who can withdraw, or uses the returned date", () => {
-  const value = agent("Muse", "mei", { access: { until: null } });
-  assert.equal(peopleDialogAccessUntil(value), "Allowed until Mei withdraws it.");
-  assert.equal(peopleDialogAccessUntil({ ...value, own: true }), "Allowed until you withdraw it.");
+test("Lists & docs facts require ownership and a successful connections read", () => {
+  const value = agent("Muse", "mei", { own: true, access: { until: null } });
+  assert.equal(peopleDialogAccessUntil({ ...value, own: false }), null);
+  for (const accessReadState of ["pending", "failed"]) {
+    for (const access of [null, { until: null }]) {
+      const unknown = { ...value, accessReadState, access };
+      assert.equal(peopleDialogAccessUntil(unknown), null);
+      for (const action of ["allow", "withdraw"]) assert.equal(peopleDialogCanAct({ ...model(), agents: [unknown] }, action, value.id), false);
+    }
+  }
+  assert.equal(peopleDialogAccessUntil(value), "Allowed until you withdraw it.");
   assert.equal(peopleDialogAccessUntil({ ...value, access: { until: "Oct 9, 2026" } }), "Allowed until Oct 9, 2026.");
   assert.equal(peopleDialogAccessUntil({ ...value, access: null }), "Not allowed.");
+  assert.equal(peopleDialogCanAct({ ...model(), agents: [{ ...value, access: null }] }, "allow", value.id), true);
+  assert.equal(peopleDialogCanAct({ ...model(), agents: [value] }, "withdraw", value.id), true);
 });
 test("read-only, elevated, owner and sample action gates are distinct", () => {
   const data = model(); const value = data.agents[2];

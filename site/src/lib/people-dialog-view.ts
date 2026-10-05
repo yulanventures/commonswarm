@@ -7,7 +7,7 @@ export interface PeopleDialogAgent {
   id: string; name: string; ownerId: string; ownerName: string | null; model: string | null;
   app: string | null; hosted: boolean; status: PeopleAgentStatus; receive: string | null;
   lastActive: string; technical: string[]; grantRisk?: string | null; updateAvailable: boolean;
-  access: { until: string | null } | null; key: string | null; liveKey: boolean;
+  access: { until: string | null } | null; accessReadState: "pending" | "succeeded" | "failed"; key: string | null; liveKey: boolean;
   own: boolean; mayManage: boolean; receipt: string;
 }
 export interface PeopleDialogInvite { id: string; kind: "invite" | "agent" | "pending"; name: string; detail: string; mayCancel: boolean }
@@ -39,9 +39,10 @@ export function peopleDialogCounts(model: PeopleDialogModel): string {
   const attention = model.agents.filter((agent) => agent.status.attention).length;
   return `${model.people.length} ${model.people.length === 1 ? "person" : "people"} · ${model.agents.length} ${model.agents.length === 1 ? "agent" : "agents"}${attention ? ` · ${attention} need attention` : ""}`;
 }
-export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string {
+export function peopleDialogAccessUntil(agent: PeopleDialogAgent): string | null {
+  if (!agent.own || agent.accessReadState !== "succeeded") return null;
   if (!agent.access) return "Not allowed.";
-  return `Allowed until ${agent.access.until ?? (agent.own ? "you withdraw it" : agent.ownerName ? `${agent.ownerName.split(/\s+/)[0]} withdraws it` : "its owner withdraws it")}.`;
+  return `Allowed until ${agent.access.until ?? "you withdraw it"}.`;
 }
 export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialogAction, id: string): boolean {
   if (model.sample) return false;
@@ -49,9 +50,10 @@ export function peopleDialogCanAct(model: PeopleDialogModel, action: PeopleDialo
   if (action === "cancel-invite") return model.invites.some((invite) => invite.id === id && invite.mayCancel);
   const agent = model.agents.find((candidate) => candidate.id === id);
   if (!agent) return false;
-  if (action === "withdraw") return agent.own && !!agent.access;
+  if (action === "withdraw") return agent.own && agent.accessReadState === "succeeded" && !!agent.access;
   if (action === "resume") return agent.mayManage && agent.status.kind === "paused" && agent.status.fix.allowed;
-  if (action === "new-key" || action === "connected-apps" || action === "allow") return agent.own;
+  if (action === "allow") return agent.own && agent.accessReadState === "succeeded" && !agent.access;
+  if (action === "new-key" || action === "connected-apps") return agent.own;
   if (action === "turn-off-key") return agent.mayManage && agent.liveKey;
   return action === "remove-agent" && agent.mayManage;
 }
@@ -180,15 +182,16 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const result = node(doc, "p", "pd-muted", `${shown} of ${model.agents.length} agents shown · “${state.query.trim()}”`); result.setAttribute("role", "status"); root.append(result); }
   const grid = node(doc, "div", "pd-member-grid"); grid.dataset.memberList = "";
   const agentRow = (agent: PeopleDialogAgent) => {
+    const approved = peopleDialogAccessUntil(agent) !== null && !!agent.access;
     const row = node(doc, "li", "pd-agent"); row.dataset.agentRow = agent.id; row.dataset.attention = String(agent.status.attention);
     const disclosure = button(doc, "", () => select("agent", agent.id), "pd-agent-disclosure"); disclosure.id = `pd-agent-${agent.id}`;
     disclosure.dataset.pdFocus = `agent-${agent.id}`;
     disclosure.setAttribute("aria-expanded", String(state.selected?.type === "agent" && state.selected.id === agent.id)); disclosure.setAttribute("aria-controls", detail.id);
     const secondary = agent.model ?? (agent.hosted ? "In a chat app" : "On a computer");
-    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${agent.access ? ", Can use Lists & docs" : ""}`);
+    disclosure.setAttribute("aria-label", `${agent.name}, ${agent.ownerName ? `${agent.ownerName}’s agent` : "Other agent"}, ${agent.app ? `${agent.app}, ` : ""}${secondary}, ${agent.status.label}${approved ? ", Can use Lists & docs" : ""}`);
     const copy = node(doc, "span", "pd-agent-copy"); const nameLine = node(doc, "span", "pd-agent-name-line");
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
-    if (agent.access) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
+    if (approved) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
     copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
     disclosure.append(orb(doc, agent, model.agents.indexOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
     const notice = noticeFor(agent);
@@ -284,8 +287,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       }) : undefined;
       if (edit) { edit.dataset.editModel = agent.id; edit.dataset.pdFocus = `edit-${agent.id}`; }
       fact("Model", agent.model ?? "Not set", edit); fact("Messages", agent.receive ?? "Message checks have not been reported."); fact("Last active", agent.lastActive);
-      const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;
-      accessAction?.classList.add("pd-quiet-link"); fact("Lists & docs", peopleDialogAccessUntil(agent), accessAction);
+      const accessFact = peopleDialogAccessUntil(agent);
+      if (accessFact !== null) {
+        const accessAction = peopleDialogCanAct(model, "withdraw", agent.id) ? actionButton("withdraw", agent, "Withdraw", notice, "data-withdraw-agent-access") : peopleDialogCanAct(model, "allow", agent.id) ? actionButton("allow", agent, "Allow…", notice) : undefined;
+        accessAction?.classList.add("pd-quiet-link"); fact("Lists & docs", accessFact, accessAction);
+      }
       if (agent.key !== null) fact("Key", agent.key, peopleDialogCanAct(model, "new-key", agent.id) ? actionButton("new-key", agent, "New key", notice, "data-get-agent-prompt") : undefined);
       detail.append(facts);
       if (agent.updateAvailable) detail.append(node(doc, "p", "pd-muted", "Update available."));

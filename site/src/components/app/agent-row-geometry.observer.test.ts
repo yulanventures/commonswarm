@@ -38,7 +38,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const agent = { id: 'agent', name: 'Alexandria Montgomery-Sutherland '+hostile, ownerId: 'person', ownerName: 'Mei Langridge', model: hostile,
           app: 'Claude', hosted: true, own: true, mayManage: true, liveKey: true, key: 'Uses a key to connect.',
           status: { kind: 'paused', label: 'Paused: unused for 14 days', sentence: 'Resume it so it can connect again.', attention: true, fix: { action: 'resume', allowed: true } },
-          receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, receipt: '' };
+          receive: 'Checks messages when you chat with it.', lastActive: '15 days ago', technical: ['Agent ID: agent'], updateAvailable: false, access: { until: null }, accessReadState: 'succeeded', receipt: '' };
         const model = { people: [{ id: 'person', name: 'Mei Langridge', role: 'member', own: true, mayRemove: false }], agents: [agent], invites: [], sample: false, pendingFailed: false };
         const state = { selected: null, collapsed: new Set(), showAllAttention: false, query: '' };
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');

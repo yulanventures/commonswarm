@@ -1639,6 +1639,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      */
     let channelReadGeneration = 0;
     let householdConnections: Record<string, unknown>[] = [];
+    let householdConnectionsReadState: "pending" | "succeeded" | "failed" = "pending";
     const householdReceipts = new Map<string, string>();
     /** Failed creation permissions keep setup available for this account/workspace until an ok read. */
     const householdSetupNeeded = new Set<string>();
@@ -4264,8 +4265,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const own = Boolean(me && agent.ownerUserId === me.userId && !sampleMode);
           const mayManage = Boolean(me && (elevated || agent.ownerUserId === me.userId) && !sampleMode);
           const ownerName = people.get(agent.ownerUserId) ?? null;
-          const approval = householdConnections.filter((connection) => connection.principal_id === agent.principalId)
-            .map(connectionApproval).find((value) => value !== null) ?? null;
+          const approval = own && householdConnectionsReadState === "succeeded"
+            ? householdConnections.filter((connection) => connection.principal_id === agent.principalId)
+              .map(connectionApproval).find((value) => value !== null) ?? null : null;
           const status = peopleAgentStatus({ transport: agent.transport, turnOnly: agent.turnOnly,
             presence: agent.presence, oldestUnobservedAt: agent.oldestUnobservedAt, ownerName, own, mayManage, sample: sampleMode,
             grant: grant ? { kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
@@ -4290,7 +4292,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? formatTime(agent.presence.last_command_at).relative : "Not active yet",
             technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
             key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
-            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null), own, mayManage,
+            accessReadState: householdConnectionsReadState,
+            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null &&
+              (grant.grantKind !== "timeboxed" || (grant.horizonExpiresAt !== null && Date.parse(grant.horizonExpiresAt) > Date.now()))), own, mayManage,
             receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
         }),
         invites: currentPendingAccessRows().map((row) => {
@@ -6377,6 +6381,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const resetHouseholdSurface = (): void => {
       householdDashboard?.clear();
       householdConnections = [];
+      householdConnectionsReadState = "pending";
       householdReceipts.clear();
       const receipt = one<HTMLElement>("[data-channel-receipt]");
       if (receipt?.dataset.setupWorkspaceId) {
@@ -6981,7 +6986,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const scope = householdScope();
       if (!scope) return;
       const ticket = connectionReads.next();
+      householdConnectionsReadState = "pending";
+      renderDialogRoster();
       let next: Record<string, unknown>[] = [];
+      let nextReadState: "succeeded" | "failed" = "failed";
       try {
         const result = await postCommand(
           scope.session,
@@ -6989,15 +6997,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           { kind: "household_connections" },
           { workspace_id: scope.workspaceId, stream: { kind: "workspace" } },
         );
-        next = result.status === 200 && result.body.status === "ok" && Array.isArray(result.body.connections)
-          ? result.body.connections as Record<string, unknown>[]
-          : [];
+        if (result.status === 200 && result.body.status === "ok" && Array.isArray(result.body.connections)) {
+          next = result.body.connections as Record<string, unknown>[];
+          nextReadState = "succeeded";
+        }
       } catch {
         next = [];
       }
       // Success and failure are both dropped once the scope moved on or a newer read started.
       if (!connectionReads.isLatest(ticket) || !householdCurrent(scope)) return;
       householdConnections = next;
+      householdConnectionsReadState = nextReadState;
       renderAgentApprovals();
       renderDialogRoster();
     };

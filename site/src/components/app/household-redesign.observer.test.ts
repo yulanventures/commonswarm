@@ -6,6 +6,10 @@ import ts from "typescript";
 import { setupSteps, setupProgress } from "../../lib/setup-checklist";
 import { createLatestRead } from "../../lib/latest-read";
 import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_PURPOSE_WARNING } from "../../lib/household-access";
+import { peopleDialogAccessUntil, peopleDialogCanAct } from "../../lib/people-dialog-view";
+import { agentStatus, peopleAgentStatus } from "../../lib/agent-status";
+import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
+import { grantRiskBadge, STANDING_GRANT_COPY } from "../../lib/standing-grants";
 
 /*
  * Source-level guards for the 2026-10-04 household redesign of /app (setup checklist, Add an
@@ -160,7 +164,7 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(peopleView, /dataset.agentContentAccess/);
   assert.match(peopleView, /dataset.agentContentResult/);
   assert.match(peopleView, /"pd-quiet-link"/);
-  assert.match(peopleView, /fact\("Lists & docs", peopleDialogAccessUntil\(agent\), accessAction\)/,
+  assert.match(peopleView, /fact\("Lists & docs", accessFact, accessAction\)/,
     "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
   assert.match(peopleView, /"Can use Lists & docs"/);
   assert.match(script, /withdrawAgent\(id, agent.name, button, notice, true\)/,
@@ -193,6 +197,81 @@ test("history reads removed identities separately and leaves the live roster unc
 function execute(source: string, context: Record<string, unknown>): any {
   return runInNewContext(ts.transpile(source, { target: ts.ScriptTarget.ES2022 }), context);
 }
+
+// Run the actual read and dialog projection together; only transport and unrelated UI are stubbed.
+function dialogConnectionsFixture() {
+  const ctx: any = {
+    session: { user: { id: "person" } }, activeWorkspaceId: "workspace", sampleMode: false,
+    members: [{ userId: "person", name: "Tom", role: "owner" }],
+    agents: [{ principalId: "principal", name: "Muse", ownerUserId: "person", model: null, transport: "local" }],
+    accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
+    householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
+    peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
+    agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY,
+    agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
+    formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
+    householdScope: () => ({ workspaceId: ctx.activeWorkspaceId, session: ctx.session }),
+    householdCurrent: (scope: any) => scope.workspaceId === ctx.activeWorkspaceId && scope.session === ctx.session,
+    renderAgentApprovals: () => {}, renderDialogRoster: () => {},
+  };
+  const source = section(script, "const connectionApproval =", "const approvalDescription =")
+    + section(script, "const peopleDialogModel =", "const syncPeopleDialogLayout =")
+    + section(script, "const connectionReads =", "/** Approve only the agent;");
+  const funcs = execute(`${source}; ({ peopleDialogModel, loadHouseholdConnections });`, ctx);
+  return { ctx, model: funcs.peopleDialogModel, load: funcs.loadHouseholdConnections };
+}
+
+test("dialog connection facts stay unknown until a successful owner-scoped read, including retries", async () => {
+  const f = dialogConnectionsFixture();
+  const currentAgent = () => f.model().agents[0];
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null, "first render has no approval answer");
+  let answer: any = { status: 200, body: { status: "ok", connections: [] } };
+  f.ctx.postCommand = async () => answer;
+  await f.load();
+  assert.equal(peopleDialogAccessUntil(currentAgent()), "Not allowed.");
+  assert.equal(peopleDialogCanAct(f.model(), "allow", "principal"), true);
+  const approval = { principal_id: "principal", approval: { operations: ["read"], expires_at: null } };
+  answer = { status: 200, body: { status: "ok", connections: [approval] } };
+  await f.load();
+  assert.equal(peopleDialogAccessUntil(currentAgent()), "Allowed until you withdraw it.");
+  assert.equal(peopleDialogCanAct(f.model(), "withdraw", "principal"), true);
+  f.ctx.agents[0].ownerUserId = "someone-else";
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null);
+  assert.equal(currentAgent().access, null, "another owner's agent has no indicator even with a cached row");
+  f.ctx.agents[0].ownerUserId = "person";
+  let reject: (error: Error) => void = () => {};
+  f.ctx.postCommand = () => new Promise((_resolve, fail) => { reject = fail; });
+  const loading = f.load();
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null, "refresh cannot reuse the old approval");
+  assert.equal(currentAgent().access, null);
+  reject(new Error("read failed"));
+  await loading;
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null, "failed reads cannot assert denial");
+  assert.equal(currentAgent().accessReadState, "failed");
+  f.ctx.postCommand = async () => ({ status: 403, body: { status: "refused" } });
+  await f.load();
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null, "refused reads are also unknown");
+  f.ctx.postCommand = async () => ({ status: 200, body: { status: "ok" } });
+  await f.load();
+  assert.equal(peopleDialogAccessUntil(currentAgent()), null, "an incomplete response is not a successful empty read");
+});
+
+test("an ended timeboxed key offers removal and a new key but no turn-off alternative", () => {
+  const f = dialogConnectionsFixture();
+  const grant = { principalId: "principal", grantKind: "timeboxed", horizonExpiresAt: "2000-01-01T00:00:00Z", revokedAt: null, grantRevokedAt: null, lastUsedAt: null };
+  f.ctx.accessStatuses = [grant];
+  const ended = f.model();
+  assert.equal(ended.agents[0].status.kind, "key-ended");
+  assert.equal(ended.agents[0].liveKey, false, "Remove confirmation uses liveKey for its alternative");
+  assert.equal(peopleDialogCanAct(ended, "turn-off-key", "principal"), false);
+  assert.equal(peopleDialogCanAct(ended, "remove-agent", "principal"), true);
+  assert.equal(peopleDialogCanAct(ended, "new-key", "principal"), true);
+  grant.horizonExpiresAt = "2099-01-01T00:00:00Z";
+  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "a future key can still be turned off");
+  grant.grantKind = "standing";
+  grant.horizonExpiresAt = "2000-01-01T00:00:00Z";
+  assert.equal(peopleDialogCanAct(f.model(), "turn-off-key", "principal"), true, "standing keys have no horizon");
+});
 
 function creationFixture(outcome: "committed" | "refused" | "unknown", existing = false, storage = new Map<string, string>()) {
   const events: string[] = [], commands: any[] = [];
@@ -540,11 +619,12 @@ test("boot resumes permissions once with the saved id and clears failed intents;
   assert.deepEqual(old.events, ["clear"]);
 });
 
-test("workspace change clears only the creation setup receipt", () => {
+test("workspace change clears only the creation setup receipt and retires known connection facts", () => {
   const receipt = { dataset: { setupWorkspaceId: "workspace" }, textContent: "Your workspace is ready.", hidden: false };
   const ctx = {
     one: (selector: string) => selector === "[data-channel-receipt]" ? receipt : null,
     all: () => [], householdDashboard: null, householdConnections: [], householdReceipts: new Map(), removedAgents: new Map(),
+    householdConnectionsReadState: "succeeded",
     householdAccessGeneration: 1, householdAccessRequestedFor: "workspace", householdAccess: null,
     accessReads: createLatestRead(), connectionReads: createLatestRead(), stopHostJoinWatch: () => {},
   };
@@ -553,6 +633,7 @@ test("workspace change clears only the creation setup receipt", () => {
   assert.equal(receipt.textContent, "");
   assert.equal(receipt.hidden, true);
   assert.equal(receipt.dataset.setupWorkspaceId, undefined);
+  assert.equal(ctx.householdConnectionsReadState, "pending");
   receipt.textContent = "Agent connected."; receipt.hidden = false;
   reset();
   assert.equal(receipt.textContent, "Agent connected.");
