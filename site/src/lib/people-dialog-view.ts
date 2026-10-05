@@ -11,8 +11,24 @@ export interface PeopleDialogAgent {
   own: boolean; mayManage: boolean; receipt: string;
 }
 export interface PeopleDialogInvite { id: string; kind: "invite" | "agent" | "pending"; name: string; detail: string; mayCancel: boolean }
-export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean }
-export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string }
+/** `workspaceName` is the viewer's name for this workspace; it is used only in the role refusal copy. */
+export interface PeopleDialogModel { people: PeopleDialogPerson[]; agents: PeopleDialogAgent[]; invites: PeopleDialogInvite[]; sample: boolean; pendingFailed: boolean; workspaceName?: string }
+export type PeopleDialogRole = PeopleDialogPerson["role"];
+/** The role-change action the builder emits. Integration maps it to the `change_role` command. */
+export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; role: PeopleDialogRole }
+/** Open the dialog with one person or one agent selected. */
+export interface PeopleDialogFocus { kind: "person" | "agent"; id: string }
+/** `roleDraft`, `roleReceipt`, `rolePending` and `focusApplied` are builder-owned and optional, so a state literal without them stays valid. */
+export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string;
+  roleDraft?: { userId: string; role: PeopleDialogRole; confirming: boolean; error?: string } | null; roleReceipt?: { userId: string; text: string } | null;
+  /** One entry per person whose role change is in flight. The entry object is the save's identity. */
+  rolePending?: Map<string, { role: PeopleDialogRole }>; focusApplied?: string | null }
+export interface PeopleDialogOptions {
+  /** Applied once per state object and focus value; clear `state.focusApplied` to apply the same focus again. */
+  focus?: PeopleDialogFocus;
+  /** The tint used for an agent everywhere else in the app. Default: position in the agent list. */
+  tintFor?: (agentId: string) => 0 | 1 | 2 | 3;
+}
 export type PeopleDialogAction = "resume" | "new-key" | "remove-agent" | "turn-off-key" | "withdraw" | "remove-person" | "cancel-invite" | "connected-apps" | "allow";
 export type PeopleConfirmAction = "remove-agent" | "turn-off-key" | "withdraw" | "remove-person" | "cancel-invite";
 export interface PeopleDialogCallbacks {
@@ -20,6 +36,8 @@ export interface PeopleDialogCallbacks {
   action: (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement) => Promise<void> | void;
   saveModel: (id: string, model: string | null) => Promise<void>;
   confirm: (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement) => void;
+  /** Role change. Reject with an error that carries the server's stable code; the role control is hidden without this callback. */
+  changeRole?: (change: PeopleDialogRoleChange) => Promise<void>;
 }
 
 /** The filter includes a person's whole group when their name matches. Orphans stay separate. */
@@ -77,6 +95,66 @@ export function peopleConfirmationCopy(action: PeopleConfirmAction, item: { name
     stays: [item.kind === "invite" ? "You can send a new invitation later." : "You can create a new key later."] };
 }
 
+const ROLE_LABELS: Record<PeopleDialogRole, string> = { owner: "Owner", admin: "Admin", member: "Member" };
+const ROLE_RANK: Record<PeopleDialogRole, number> = { member: 0, admin: 1, owner: 2 };
+/** The refusal codes `change_role` can return (src/protocol/workspace-commands.ts); `peopleRoleRefusal` has copy for each. */
+export const PEOPLE_ROLE_REFUSAL_CODES = ["bad_state", "landing_authority_unresolved", "last_owner", "member_not_found", "role_forbidden"] as const;
+export const peopleFirstName = (name: string) => name.trim().split(/\s+/)[0] || name;
+/** The roles the viewer may give this person; empty means the control is not shown. The server still decides. */
+export function peopleDialogRoleOptions(model: PeopleDialogModel, personId: string): PeopleDialogRole[] {
+  if (model.sample) return [];
+  const viewer = model.people.find((person) => person.own); const target = model.people.find((person) => person.id === personId);
+  if (!viewer || !target || viewer.role === "member") return [];
+  if (viewer.role === "owner") return ["owner", "admin", "member"];
+  return target.role === "owner" ? [] : ["admin", "member"];
+}
+export const peopleDialogRoleLabel = (role: PeopleDialogRole) => ROLE_LABELS[role];
+/** A person asked to lower their own role confirms first; raising or keeping it needs no question. */
+export function peopleRoleSelfConfirmCopy(current: PeopleDialogRole, next: PeopleDialogRole): { question: string; button: string } | null {
+  if (ROLE_RANK[next] >= ROLE_RANK[current]) return null;
+  return next === "member" ? { question: "Make yourself a member? You will no longer manage people here.", button: "Make yourself a member" }
+    : { question: "Make yourself an admin? You will no longer be able to change an owner’s role.", button: "Make yourself an admin" };
+}
+export function peopleRoleReceipt(name: string, role: PeopleDialogRole): string {
+  return `${peopleFirstName(name)} is now ${role === "member" ? "a" : "an"} ${role}.`;
+}
+/** Reads the stable code a rejected change carries: the first of `code` and `reason` that names a known refusal, else `code`, else `reason`. Never the message. */
+export function peopleRoleErrorCode(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const { code, reason } = error as { code?: unknown; reason?: unknown };
+  const found = [code, reason].filter((value): value is string => typeof value === "string");
+  return found.find((value) => (PEOPLE_ROLE_REFUSAL_CODES as readonly string[]).includes(value)) ?? found[0] ?? null;
+}
+export function peopleRoleRefusal(code: string | null, name: string, workspaceName?: string): string {
+  const first = peopleFirstName(name);
+  if (code === "last_owner") return `${workspaceName?.trim() || "This workspace"} needs at least one owner. Make someone else an owner first.`;
+  if (code === "role_forbidden") return "Only an owner can change an owner’s role.";
+  if (code === "member_not_found") return `${first} is no longer a member. Reload to check.`;
+  if (code === "bad_state") return `${first} already has that role.`;
+  if (code === "landing_authority_unresolved") return `${first} approves code changes in this workspace. Hand that to someone else first.`;
+  return "The role change was not confirmed. Reload to check.";
+}
+/** Starts a save for one person. Returns its identity, or null while that person already has a save in flight. */
+export function peopleRoleBeginSave(state: PeopleDialogState, userId: string, role: PeopleDialogRole): { role: PeopleDialogRole } | null {
+  const pending = state.rolePending ??= new Map();
+  if (pending.has(userId)) return null;
+  const save = { role }; pending.set(userId, save); return save;
+}
+/** Ends a save. Returns false when it was superseded, so the caller drops its result. */
+export function peopleRoleFinishSave(state: PeopleDialogState, userId: string, save: { role: PeopleDialogRole }): boolean {
+  if (state.rolePending?.get(userId) !== save) return false;
+  state.rolePending.delete(userId); return true;
+}
+/** Selects the focus target when it exists. Returns whether a target was applied. */
+export function peopleDialogApplyFocus(model: PeopleDialogModel, state: PeopleDialogState, focus: PeopleDialogFocus): boolean {
+  const key = `${focus.kind}:${focus.id}`;
+  if (state.focusApplied === key) return false;
+  if (focus.kind === "person") { if (!model.people.some((person) => person.id === focus.id)) return false; state.collapsed.delete(focus.id); }
+  else { const agent = model.agents.find((candidate) => candidate.id === focus.id); if (!agent) return false; state.collapsed.delete(agent.ownerId); }
+  state.selected = { type: focus.kind, id: focus.id }; state.focusApplied = key; return true;
+}
+const validTint = (value: unknown): value is 0 | 1 | 2 | 3 => value === 0 || value === 1 || value === 2 || value === 3;
+
 const letters = (name: string) => name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toLocaleUpperCase() || "CS";
 const personLetters = (name: string) => name.trim().split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toLocaleUpperCase();
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string) {
@@ -99,9 +177,9 @@ function icon(doc: Document, kind: "close" | "back" | "invite") {
   path.setAttribute("d", kind === "close" ? "M6 6l12 12M18 6L6 18" : kind === "back" ? "M14 6l-6 6 6 6" : "M4 6h16v12H4zM4 7l8 6 8-6");
   svg.append(path); return svg;
 }
-function orb(doc: Document, agent: PeopleDialogAgent, index: number) {
+function orb(doc: Document, agent: PeopleDialogAgent, tint: number) {
   const element = node(doc, "span", "pd-orb", letters(agent.name));
-  element.dataset.tint = String(index % 4); element.setAttribute("aria-hidden", "true"); return element;
+  element.dataset.tint = String(tint); element.setAttribute("aria-hidden", "true"); return element;
 }
 function chip(doc: Document, status: PeopleAgentStatus) {
   const element = node(doc, "span", "pd-status", `${status.attention ? "⚠ " : ["active", "connected"].includes(status.kind) ? "✓ " : ""}${status.label}`);
@@ -109,8 +187,10 @@ function chip(doc: Document, status: PeopleAgentStatus) {
 }
 
 /** Real DOM builder. User text is always textContent or an input value, never HTML. */
-export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model: PeopleDialogModel, state: PeopleDialogState, callbacks: PeopleDialogCallbacks): void {
+export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model: PeopleDialogModel, state: PeopleDialogState, callbacks: PeopleDialogCallbacks, options: PeopleDialogOptions = {}): void {
   const doc = root.ownerDocument;
+  if (options.focus) peopleDialogApplyFocus(model, state, options.focus);
+  const tintOf = (agent: PeopleDialogAgent) => { const tint = options.tintFor?.(agent.id); return validTint(tint) ? tint : model.agents.indexOf(agent) % 4; };
   const active = doc.activeElement as HTMLElement | null;
   const refocusPrincipal = active?.closest<HTMLElement>("[data-agent-row]")?.dataset.agentRow;
   const focusKey = active && (root.contains(active) || detail.contains(active)) ? active.dataset.pdFocus : undefined;
@@ -147,6 +227,57 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         agent.status.fix.action === "new-key" ? "data-get-agent-prompt" : "data-resume-agent");
     return summary ? button(doc, "What to do", () => select("agent", agent.id)) : null;
   };
+  const refocusRole = (personId: string, key: string) => { if (state.selected?.type === "person" && state.selected.id === personId)
+    (detail.querySelector<HTMLElement>(`[data-pd-focus="${key}"]`) ?? detail.querySelector<HTMLElement>("h2"))?.focus({ preventScroll: true }); };
+  // Role: a native select and Save. Lowering your own role asks first, in a native alertdialog. A refusal is shown from its stable code.
+  const roleControl = (person: PeopleDialogPerson, roles: PeopleDialogRole[]) => {
+    const draft = state.roleDraft?.userId === person.id ? state.roleDraft : null;
+    const locked = !!state.rolePending?.has(person.id);
+    const holder = node(doc, "div", "hm-role");
+    const commit = async (next: PeopleDialogRole) => {
+      if (!callbacks.changeRole) return;
+      const save = peopleRoleBeginSave(state, person.id, next); if (!save) return;
+      state.roleDraft = { userId: person.id, role: next, confirming: draft?.confirming === true };
+      callbacks.render();
+      let refusal: string | null = null;
+      try { await callbacks.changeRole({ kind: "change-role", userId: person.id, role: next }); }
+      catch (error) { refusal = peopleRoleRefusal(peopleRoleErrorCode(error), person.name, model.workspaceName); }
+      if (!peopleRoleFinishSave(state, person.id, save)) return;
+      if (refusal === null) { state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
+      else state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
+      callbacks.render(); refocusRole(person.id, `role-${person.id}`);
+    };
+    const facts = node(doc, "dl", "pd-fact-sheet"); const row = node(doc, "div", "pd-fact-row");
+    const label = node(doc, "dt", "", "Role"); label.id = `pd-role-label-${person.id}`;
+    const choose = node(doc, "select", "hm-role-select"); choose.setAttribute("aria-labelledby", label.id); choose.dataset.roleSelect = person.id; choose.dataset.pdFocus = `role-${person.id}`;
+    for (const role of roles) { const option = node(doc, "option", "", ROLE_LABELS[role]); option.value = role; choose.append(option); }
+    const picked = () => roles.find((role) => role === choose.value) ?? person.role;
+    choose.value = draft && roles.includes(draft.role) ? draft.role : person.role; choose.disabled = locked;
+    const value = node(doc, "dd"); value.append(choose);
+    const error = node(doc, "p", "pd-error", draft?.error); error.dataset.roleError = person.id; error.setAttribute("role", "alert"); error.hidden = !draft?.error || locked;
+    const save = button(doc, locked ? "Saving…" : "Save", () => {
+      if (state.rolePending?.has(person.id)) return;
+      const next = picked(); if (next === person.role) return;
+      if (person.own && peopleRoleSelfConfirmCopy(person.role, next)) { state.roleDraft = { userId: person.id, role: next, confirming: true }; callbacks.render(); }
+      else void commit(next);
+    }, "pd-text-button"); save.dataset.changeRole = person.id; save.dataset.pdFocus = `save-role-${person.id}`; save.disabled = locked || picked() === person.role;
+    if (locked) save.setAttribute("aria-busy", "true");
+    choose.addEventListener("change", () => { save.disabled = locked || picked() === person.role; state.roleDraft = { userId: person.id, role: picked(), confirming: false }; error.hidden = true; });
+    const action = node(doc, "dd", "pd-fact-action"); action.append(save); row.append(label, value, action); facts.append(row); holder.append(facts, error);
+    const copy = draft?.confirming && person.own ? peopleRoleSelfConfirmCopy(person.role, draft.role) : null;
+    if (draft && copy) {
+      const dialog = node(doc, "dialog", "pd-confirm hm-role-confirm"); dialog.setAttribute("role", "alertdialog"); dialog.dataset.roleConfirm = person.id;
+      const question = node(doc, "p", "hm-role-question", copy.question); question.id = `pd-role-confirm-${person.id}`;
+      dialog.setAttribute("aria-labelledby", question.id); dialog.setAttribute("aria-describedby", question.id);
+      const goBack = () => { if (state.rolePending?.has(person.id)) return; state.roleDraft = { userId: person.id, role: draft.role, confirming: false }; callbacks.render(); refocusRole(person.id, `role-${person.id}`); };
+      const cancel = button(doc, "Go back", goBack, "dashboard__button dashboard__button--secondary"); cancel.disabled = locked; cancel.dataset.roleConfirmBack = person.id;
+      const accept = button(doc, copy.button, () => void commit(draft.role), "dashboard__button pd-danger-fill"); accept.disabled = locked; accept.dataset.confirmRole = person.id;
+      const actions = node(doc, "div", "pd-confirm-actions hm-role-actions"); actions.append(cancel, accept); dialog.append(question, actions);
+      dialog.oncancel = (event) => { event.preventDefault(); event.stopPropagation(); goBack(); };
+      holder.append(dialog);
+    }
+    return holder;
+  };
   const { groups, other, invites, attention } = peopleDialogGroups(model, state.query);
   if (attention.length) {
     const box = node(doc, "section", "pd-attention"); const heading = node(doc, "h3", "", "⚠ Needs attention");
@@ -181,8 +312,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         const mark = node(doc, "span", "pd-portrait-warning", "⚠"); mark.setAttribute("aria-hidden", "true"); face.append(mark);
         jump.append(node(doc, "span", "pd-sr-only", "Needs attention. "));
       }
-      jump.append(face, node(doc, "strong", "pd-ellipsis", person.name.split(/\s+/)[0] ?? person.name));
-      const orbs = node(doc, "span", "pd-portrait-orbs"); agents.slice(0, 4).forEach((agent) => orbs.append(orb(doc, agent, model.agents.indexOf(agent)))); jump.append(orbs);
+      jump.append(face, node(doc, "strong", "pd-ellipsis", peopleFirstName(person.name)));
+      const orbs = node(doc, "span", "pd-portrait-orbs"); agents.slice(0, 4).forEach((agent) => orbs.append(orb(doc, agent, tintOf(agent)))); jump.append(orbs);
       if (agents.length > 4) jump.append(node(doc, "span", "pd-muted", `+${agents.length - 4}`));
       jump.setAttribute("aria-label", `${person.name}, ${person.role}, ${agents.length} agents. ${needsAttention ? "Needs attention. " : ""}${agents.map((agent) => `${agent.name}: ${agent.status.label}`).join("; ")}`);
       entry.append(jump); strip.append(entry);
@@ -204,7 +335,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const name = node(doc, "strong", "pd-ellipsis", agent.name); name.title = agent.name; nameLine.append(name);
     if (approved) { const mark = node(doc, "span", "pd-access-mark", "▤"); mark.dataset.agentContentAccess = ""; mark.setAttribute("role", "img"); mark.setAttribute("aria-label", "Can use Lists & docs"); mark.title = "Can use Lists & docs"; nameLine.append(mark); }
     copy.append(nameLine, node(doc, "span", "pd-agent-app pd-ellipsis", secondary), chip(doc, agent.status));
-    disclosure.append(orb(doc, agent, model.agents.indexOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
+    disclosure.append(orb(doc, agent, tintOf(agent)), copy, node(doc, "span", "pd-row-arrow", "›")); row.append(disclosure);
     const notice = noticeFor(agent);
     if (agent.status.attention && !model.sample) { const help = node(doc, "div", "pd-row-help"); help.append(node(doc, "p", "", agent.status.sentence)); const next = fix(agent, notice); if (next) help.append(next); row.append(help); }
     if (state.selected?.id !== agent.id && agent.receipt) row.append(notice);
@@ -263,6 +394,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
   invited.append(invitedTitle, inviteList, load, inviteError); root.append(invited);
 
+  if (state.roleReceipt && (state.selected?.type !== "person" || state.roleReceipt.userId !== state.selected.id)) state.roleReceipt = null;
+  if (state.roleDraft && (state.selected?.type !== "person" || state.roleDraft.userId !== state.selected.id)) state.roleDraft = null;
   const selected = state.selected?.type === "agent" ? model.agents.find((agent) => agent.id === state.selected?.id) : model.people.find((person) => person.id === state.selected?.id);
   if (!selected) state.selected = null;
   detail.hidden = !state.selected; outer?.classList.toggle("has-detail", !!state.selected);
@@ -275,7 +408,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const title = node(doc, "h2", "", selected.name); title.id = "pd-detail-title"; title.tabIndex = -1;
     const identity = node(doc, "div", "pd-detail-identity");
     if (state.selected.type === "agent") {
-      const agent = selected as PeopleDialogAgent; identity.append(orb(doc, agent, model.agents.indexOf(agent)));
+      const agent = selected as PeopleDialogAgent; identity.append(orb(doc, agent, tintOf(agent)));
       const copy = node(doc, "div"); copy.append(title, node(doc, "p", "pd-muted", agent.ownerName ? `${agent.ownerName.split(/\s+/)[0]}’s agent` : "Other agent"), chip(doc, agent.status)); identity.append(copy); detail.append(identity);
       const notice = noticeFor(agent); detail.append(notice);
       if (!agent.mayManage && !model.sample) detail.append(node(doc, "p", "pd-permission-note", `${agent.ownerName?.split(/\s+/)[0] ?? "The space owner or an admin"} manages this agent.`));
@@ -325,6 +458,11 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const error = node(doc, "p", "pd-error"); error.dataset.agentError = ""; error.setAttribute("role", "alert"); error.hidden = true; detail.append(error);
     } else {
       const person = selected as PeopleDialogPerson; identity.append(node(doc, "span", "pd-initials", personLetters(person.name)), title, node(doc, "p", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`)); detail.append(identity);
+      if (state.roleReceipt?.userId === person.id) { const done = node(doc, "p", "pd-receipt", state.roleReceipt.text); done.dataset.roleReceipt = ""; done.setAttribute("role", "status"); detail.append(done); }
+      const roles = callbacks.changeRole ? peopleDialogRoleOptions(model, person.id) : [];
+      if (roles.length) { const control = roleControl(person, roles); detail.append(control);
+        const confirm = control.querySelector<HTMLDialogElement>("dialog[data-role-confirm]");
+        if (confirm && !confirm.open) { confirm.showModal(); (confirm.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? confirm).focus({ preventScroll: true }); } }
       detail.append(node(doc, "h3", "pd-section-title", "Agents in this space")); const agents = model.agents.filter((agent) => agent.ownerId === person.id);
       const list = node(doc, "ul", "pd-person-agents"); agents.forEach((agent) => { const entry = node(doc, "li"); entry.append(button(doc, agent.name, () => select("agent", agent.id))); list.append(entry); }); detail.append(list);
       if (!agents.length) detail.append(node(doc, "p", "pd-muted", "No agents added yet."));
@@ -338,7 +476,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (input && draft.value !== undefined) input.value = draft.value;
     if (active?.isConnected && !focusWithinDetail && !root.contains(active)) active.focus({ preventScroll: true });
   }
-  if (focusKey) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
+  if (focusKey && !detail.querySelector("dialog[open]")) { const target = [...(focusWithinDetail ? detail : root).querySelectorAll<HTMLElement>("[data-pd-focus]")].find((element) => element.dataset.pdFocus === focusKey);
     (target ?? (focusWithinDetail ? detail.querySelector<HTMLElement>("h2") : doc.getElementById(`pd-agent-${refocusPrincipal}`)) ?? outer?.querySelector<HTMLElement>("[data-add-agent-dialog]") ?? outer?.querySelector<HTMLElement>("#dashboard-roster-title"))?.focus({ preventScroll: true }); }
 }
 
