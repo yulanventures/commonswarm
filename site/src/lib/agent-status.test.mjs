@@ -122,9 +122,9 @@ test("home work needs recent server activity and an unexpired work claim or Doin
   for (const facts of [{ workingOn }, { doingTodo }, { workingOn, doingTodo }]) {
     assert.equal(homeAgentState(input(facts), NOW).word, "Working");
     assert.equal(homeAgentState(input({ ...facts, lastActionAt: at(WORK_RECENT_MS) }), NOW).word, "Working");
-    assert.equal(homeAgentState(input({ ...facts, lastActionAt: at(WORK_RECENT_MS + 1) }), NOW).word, "Idle");
-    assert.equal(homeAgentState(input({ ...facts, lastActionAt: "invalid" }), NOW).word, "Idle");
-    assert.equal(homeAgentState(input({ ...facts, lastActionAt: at(-1000) }), NOW).word, "Idle");
+    assert.equal(homeAgentState(input({ ...facts, workingOn: facts.workingOn ? { ...facts.workingOn, createdAt: at(WORK_RECENT_MS + 1) } : null, doingTodo: facts.doingTodo ? { ...facts.doingTodo, since: at(WORK_RECENT_MS + 1) } : null, presence: null, lastActionAt: at(WORK_RECENT_MS + 1) }), NOW).word, "Idle");
+    assert.equal(homeAgentState(input({ ...facts, workingOn: facts.workingOn ? { ...facts.workingOn, createdAt: "invalid" } : null, doingTodo: facts.doingTodo ? { ...facts.doingTodo, since: "invalid" } : null, presence: null, lastActionAt: "invalid" }), NOW).word, "Idle");
+    assert.equal(homeAgentState(input({ ...facts, workingOn: facts.workingOn ? { ...facts.workingOn, createdAt: "invalid" } : null, doingTodo: facts.doingTodo ? { ...facts.doingTodo, since: "invalid" } : null, presence: null, lastActionAt: at(-1000) }), NOW).word, "Idle");
   }
   assert.equal(homeAgentState(input({ workingOn: { ...workingOn, until: at(0) } }), NOW).word, "Idle");
   assert.equal(homeAgentState(input(), NOW).word, "Idle");
@@ -132,7 +132,7 @@ test("home work needs recent server activity and an unexpired work claim or Doin
   const clock = new Date(2026, 9, 5, 10, 0).getTime();
   const doing = homeAgentState(input({ doingTodo: { title: "Book plumber", since: new Date(2026, 9, 5, 9, 40).toISOString() }, lastActionAt: new Date(clock - 60000).toISOString() }), clock);
   assert.equal(doing.detail, "Doing ‘Book plumber’ since 9:40 am");
-  assert.equal(homeAgentState(input({ doingTodo, lastActionAt: at(3 * 3600000) }), NOW).detail, "Last active 3 hours ago; ‘Book plumber’ is still in Doing");
+  assert.equal(homeAgentState(input({ doingTodo: { ...doingTodo, since: at(3 * 3600000) }, presence: null, lastActionAt: at(3 * 3600000) }), NOW).detail, "Last active 3 hours ago; ‘Book plumber’ is still in Doing");
 });
 
 test("home disconnect and local message guidance reuse the dialog fixes", () => {
@@ -170,9 +170,9 @@ test("hosted waiting messages remain idle and describe the actual person who cha
   assert.equal(agentStatus({ transport: "hosted_mcp", own: false }, clock).receive, "Checks messages when its owner chats with it.");
 });
 
-test("server work wins over local derivation and sample mode never enables a fix", () => {
+test("server work wins over work derivation while credential faults still disconnect", () => {
   assert.equal(homeAgentState(input({ serverWork: "working", presence: null }), NOW).word, "Working");
-  assert.equal(homeAgentState(input({ serverWork: "idle", grant: key({ revokedAt: at(1) }) }), NOW).word, "Idle");
+  assert.equal(homeAgentState(input({ serverWork: "idle", grant: key({ revokedAt: at(1) }) }), NOW).word, "Disconnected");
   assert.equal(homeAgentState(input({ serverWork: "idle", grant: key({ revokedAt: at(1) }) }), NOW).attention, true);
   assert.equal(homeAgentState(input({ serverWork: "disconnected" }), NOW).word, "Disconnected");
   assert.equal(homeAgentState(input({ serverWork: "idle", doingTodo: { title: "Plumber" } }), NOW).word, "Idle");
@@ -190,8 +190,8 @@ test("server work classification preserves credential details and repair guidanc
     for (const presence of [row({ last_command_at: at(1000) }), null, undefined]) {
       for (const [facts, detail, action, sentence] of cases) {
         const status = homeAgentState(input({ ...facts, presence, serverWork }), NOW);
-        assert.equal(status.kind, serverWork);
-        assert.equal(status.word, { idle: "Idle", working: "Working", disconnected: "Disconnected" }[serverWork]);
+        assert.equal(status.kind, "disconnected");
+        assert.equal(status.word, "Disconnected");
         assert.equal(status.detail, detail);
         assert.equal(status.attention, true);
         assert.equal(status.fix.action, action);
@@ -220,4 +220,11 @@ test("server idle suppresses local stale-message status and its repair notice", 
   assert.equal(idle.detail, "Active now");
   assert.equal(idle.attention, false);
   assert.deepEqual(idle.fix, { action: null, allowed: false, askWho: null, sentence: "" });
+});
+
+test("AM12 fresh working-on and Doing timestamps are recent server actions", () => {
+  const quiet = input({ presence: null, lastActionAt: at(3 * 3600000) });
+  assert.equal(homeAgentState({ ...quiet, workingOn: { title: "Budget", createdAt: at(60000), until: at(-60000) } }, NOW).word, "Working");
+  assert.equal(homeAgentState({ ...quiet, doingTodo: { title: "Budget", since: at(60000) } }, NOW).word, "Working");
+  assert.equal(homeAgentState({ ...quiet, doingTodo: { title: "Budget", since: at(-1000) } }, NOW).word, "Idle");
 });

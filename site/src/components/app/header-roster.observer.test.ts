@@ -13,13 +13,17 @@ import { test } from "node:test";
  * not grow with agent count.
  */
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+const shell = await readFile(new URL("../../lib/home-shell.ts", import.meta.url), "utf8");
+const rail = await readFile(new URL("../../lib/home-rail.ts", import.meta.url), "utf8");
+const homeShellCss = await readFile(new URL("../../styles/home/shell.css", import.meta.url), "utf8");
+const integration = await readFile(new URL("../../styles/home/integration.css", import.meta.url), "utf8");
 const view = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const connect = await readFile(
   new URL("../connect/AgentConnect.astro", import.meta.url),
   "utf8",
 );
 
-test("the rail carries no agent roster: no list, no rail Add door, no collapse sync", () => {
+test("the rail carries the nested people list without management doors or legacy collapse sync", () => {
   assert.doesNotMatch(
     dashboard,
     /data-agent-list/,
@@ -37,59 +41,36 @@ test("the rail carries no agent roster: no list, no rail Add door, no collapse s
     /Workspace and agent navigation/,
     "the rail's accessible name went stale when agents moved to the header — it must not return",
   );
-  assert.match(dashboard, /aria-label="Workspace navigation and details"/);
+  assert.match(dashboard, /aria-label="Home navigation"/);
+  assert.match(rail, /peopleList.dataset.sidebarParticipantList/);
+  assert.doesNotMatch(rail, /data-add-agent|data-remove-agent|data-resume/);
 });
 
 test("the header control is one stack button with a dialog relationship", () => {
-  assert.match(dashboard, /data-header-roster/);
-  assert.match(
-    dashboard,
-    /data-roster-open[^>]*aria-haspopup="dialog"/,
-    "the single header control announces that it opens a dialog",
-  );
-  assert.match(dashboard, /aria-expanded/);
+  assert.match(dashboard, /buildWorkspaceHeader\(document, vm, callbacks\)/);
+  assert.match(shell, /people.dataset.rosterOpen/);
+  assert.match(shell, /people.setAttribute\("aria-haspopup", "dialog"\)/);
   assert.match(dashboard, /id="dashboard-roster-dialog"/);
-  assert.match(
-    dashboard,
-    /data-roster-open[^>]*aria-controls="dashboard-roster-dialog"/,
-    "aria-controls ties the button to the dialog it opens",
-  );
-  assert.match(dashboard, /data-header-agent-stack/);
-  assert.match(dashboard, /data-header-roster-summary/);
-  assert.match(
-    dashboard,
-    /view and manage agents/,
-    "the accessible name says what the button shows and what it does",
-  );
-  assert.match(
-    dashboard,
-    /\.dashboard__roster-stack[\s\S]*margin-inline-start:\s*-0\.5rem/,
-    "the stack overlaps its uniform circular initials",
-  );
+  assert.match(shell, /"People & agents"/);
+  assert.match(shell, /people.addEventListener\("click", \(\) => callbacks.openPeople\(\)\)/);
+  assert.match(shell, /compactCapsules\(doc, vm.people, 2\)/);
+  assert.match(shell, /buildPhoneTopBar/);
+  assert.match(dashboard, /button.setAttribute\("aria-controls", "dashboard-roster-dialog"\)/);
+  assert.match(dashboard, /button.setAttribute\("aria-expanded"/);
 });
 
 test("pending access keeps the header management door reachable before the first agent", () => {
-  const header = dashboard.slice(
-    dashboard.indexOf("const renderHeaderRoster ="),
-    dashboard.indexOf("const renderDialogRoster ="),
-  );
-  assert.match(
-    header,
-    /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed;/,
-    "a zero-agent workspace with a pending invite or failed pending read still exposes the only mobile door",
-  );
-  assert.match(header, /pendingTotal[^\n]*pending/);
-  assert.match(header, /pending access/);
-
-  const pending = dashboard.slice(
-    dashboard.indexOf("const renderPendingAccess ="),
-    dashboard.indexOf("const signalPage ="),
-  );
-  assert.match(
-    pending,
-    /renderHeaderRoster\(total\);/,
-    "every pending-state transition shows or hides the door without a workspace reopen",
-  );
+  // A real workspace always keeps the door, even with no agents or a failed pending read.
+  assert.match(shell, /people: !vm.sample/);
+  assert.match(shell, /if \(doors.people\)/);
+  assert.match(dashboard, /openPeople: openRosterDialog/);
+  assert.match(dashboard, /buildPhoneTopBar\(document, vm, callbacks\)/);
+  const header = dashboard.slice(dashboard.indexOf("const renderHeaderRoster ="), dashboard.indexOf("const renderDialogRoster ="));
+  assert.match(header, /pendingTotal[^\n]*pending access/);
+  assert.match(header, /button.textContent = `People & agents\$\{pendingTotal \? ` · \$\{pendingTotal\} pending` : ""\}`/);
+  assert.match(header, /all<HTMLButtonElement>\("\[data-roster-open\]"\)/);
+  const pending = dashboard.slice(dashboard.indexOf("const renderPendingAccess ="), dashboard.indexOf("const signalPage ="));
+  assert.match(pending, /renderHeaderRoster\(total\);/);
 });
 
 test("agent avatars keep one shape and one tint mechanism", () => {
@@ -203,62 +184,21 @@ test("the dialog is a bottom sheet at mobile widths", () => {
   );
 });
 
-/* RETIRED CLAIM (2026-09-03): "the actions get the row below". RETIRED AGAIN (2026-09-04):
-   "everything is on ONE row". One row of its own was still one row too many. Measured at
-   390x844 before this change: a 73px app bar, a 53px channel head and a 45px filter row —
-   171px of header on an 844px screen. The operator's rule is that the whole mobile header is
-   no taller than the app bar, so the head takes NO height at all now: it is positioned over
-   the transcript, carrying the live dot and the roster pill, and the channel name it used to
-   show is the view switcher in the bar above. */
-test("the narrow header takes no height from the transcript", () => {
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__channel-head\s*\{[^}]*position:\s*absolute/,
-    "the channel head is back in the flow, where it takes a row from the reading area",
-  );
-  /* The roster pill is the only door to agent management on a phone, so it must still take
-     pointer events even though its container does not. */
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__channel-actions,\s*\.dashboard__channel-roster\s*\{[^}]*pointer-events:\s*auto/,
-    "the floating roster and live chip must stay tappable inside a pointer-events:none head",
-  );
-  /* The head is the accessible name of the channel section through aria-labelledby, so the
-     title is clipped rather than removed. `display: none` would empty that name. */
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__channel-titleblock\s*\{[^}]*clip-path:\s*inset\(50%\)/,
-    "the hidden channel title must stay in the accessibility tree",
-  );
-  assert.doesNotMatch(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__channel-titleblock\s*\{[^}]*display:\s*none/,
-    "display:none on the titleblock empties the channel section's accessible name",
-  );
-  /* The filter row floats in the same band, by sticking to the top of the scroller and giving
-     its own height back with a negative margin. Without the margin it is a row again. */
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__feed-toolbar\s*\{[^}]*margin-block-end:\s*-2\.5rem/,
-    "the filter row takes its height back from the transcript",
-  );
-  /* The pill carries "0 · 3 pending" while access is waiting. Left alone it wrapped, which
-     took the floating cluster to two lines over the first message. */
-  assert.match(
-    dashboard,
-    /@media \(max-width: 34rem\)[\s\S]*\.dashboard__roster-count\s*\{[\s\S]*white-space:\s*nowrap;[\s\S]*text-overflow:\s*ellipsis/,
-    "the roster label stays on one line and truncates",
-  );
-  assert.match(
-    dashboard,
-    /@media \(max-width: 34rem\)[\s\S]*\.dashboard__roster-button\s*\{[\s\S]*max-inline-size:\s*100%/,
-    "the roster button cannot grow past its track",
-  );
-  assert.doesNotMatch(
-    dashboard,
-    /\.dashboard__channel(?:--roster)? \.dashboard__channel-body\s*\{[\s\S]*min-block-size:\s*calc\(100svh/,
-    "a viewport-derived body floor can push the composer below the bounded frame",
-  );
+/* UI-SPEC 1.1 uses a phone top bar, an in-flow channel menu and bottom navigation.
+   Preserve the compact header, tappable doors, accessible title and bounded composer. */
+test("the narrow shell keeps a top bar, channel menu and bottom links above the bounded composer", () => {
+  assert.match(dashboard, /buildPhoneTopBar\(document, vm, callbacks\)/);
+  assert.match(dashboard, /buildWorkspaceNav\(document, vm, callbacks, "phone"\)/);
+  assert.match(integration, /max-block-size: 100dvh/);
+  assert.match(integration, /\.hm-frame__main.*min-block-size: 0/);
+  assert.match(integration, /\[data-home-channel-menu\].*pointer-events: auto/);
+  assert.match(shell, /anchor.setAttribute\("aria-current", "page"\)/);
+  assert.match(integration, /clip-path: inset\(50%\)/);
+  assert.doesNotMatch(integration, /channel-menu[^}]*display: none/);
+  const shellCss = homeShellCss;
+  assert.match(shellCss, /\.hm-phone-bar__people.*max-inline-size: 40vw/);
+  assert.match(shellCss, /\.hm-channel-menu__label.*white-space: nowrap/);
+  assert.doesNotMatch(dashboard, /\.dashboard__channel(?:--roster)? \.dashboard__channel-body\s*\{[\s\S]*min-block-size:\s*calc\(100svh/);
 });
 
 test("unknown agent-authored signals trigger a bounded roster refresh", () => {

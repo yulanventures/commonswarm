@@ -163,20 +163,43 @@ export function queueRow(doc: Document, q: QueueRowVM, onAction: (action: QueueA
   ];
   if (!isSample(q)) for (const option of options.filter(item => item.allowed)) {
     const control = button(doc, option.label, () => {
+      const list = row.closest("ul, ol");
+      const lineage: { parent: Element; index: number }[] = [];
+      for (let child: Element | null = list; child?.parentElement; child = child.parentElement) {
+        lineage.push({ parent: child.parentElement, index: Array.from(child.parentElement.children).indexOf(child) });
+      }
+      const currentList = (): Element | null => {
+        if (list?.isConnected) return list;
+        const anchor = lineage.findIndex(step => step.parent.isConnected);
+        if (anchor < 0) return null;
+        let replacement: Element | undefined = lineage[anchor].parent;
+        for (let i = anchor; i >= 0; --i) replacement = replacement?.children[lineage[i].index];
+        return replacement?.matches("ul, ol") ? replacement : null;
+      };
       const completion = onAction(option.action, q);
       if (option.action !== "up" && option.action !== "down") return;
       // Read the rerendered row's actual position, never predict a successful move.
       const finishMove = () => {
-        const moved = Array.from(doc.querySelectorAll<HTMLElement>("[data-queue-id]")).find(item => item.dataset.queueId === q.todoId);
-        if (!moved || moved.dataset.position === String(q.position)) return;
+        const moved = Array.from(currentList()?.querySelectorAll<HTMLElement>("[data-queue-id]") ?? []).find(item => item.dataset.queueId === q.todoId);
+        if (!moved || moved.dataset.position === String(q.position)) return false;
         Array.from(moved.querySelectorAll<HTMLButtonElement>("[data-queue-action]")).find(item => item.dataset.queueAction === option.action)?.focus();
         const region = moved.querySelector<HTMLElement>("[data-queue-receipt]");
         const position = Number(moved.dataset.position);
         if (region && Number.isInteger(position) && position > 0) region.textContent = queueMoveReceipt(q.title, position);
+        return true;
       };
-      finishMove();
+      // Some page callbacks rebuild their entire section after an async command.
+      const Observer = doc.defaultView?.MutationObserver;
+      let timer: number | undefined;
+      const observer: MutationObserver | null = Observer ? new Observer(() => {
+        if (finishMove() || !currentList()) { observer?.disconnect(); doc.defaultView?.clearTimeout(timer); }
+      }) : null;
+      if (!finishMove() && observer) {
+        observer.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-position"] });
+        timer = doc.defaultView?.setTimeout(() => observer.disconnect(), 30_000);
+      }
       // Void callbacks may return an async command promise. Failed commands have no move receipt.
-      void Promise.resolve(completion).then(finishMove, () => {});
+      void Promise.resolve(completion).then(() => { if (finishMove()) { observer?.disconnect(); doc.defaultView?.clearTimeout(timer); } }, () => { observer?.disconnect(); doc.defaultView?.clearTimeout(timer); });
     });
     control.dataset.queueAction = option.action;
     if (option.action === "up" || option.action === "down") control.setAttribute("aria-label", `Move ‘${q.title}’ ${option.action}`);

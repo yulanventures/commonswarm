@@ -122,7 +122,8 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
     /<p class="dashboard__channel-id">/,
     "the primary channel header must not expose the workspace UUID",
   );
-  assert.match(dashboard, /aria-label="Workspace settings"/);
+  assert.match(read("src/lib/home-shell.ts"), /label: "Workspace settings"/);
+  assert.match(dashboard, /item === "settings"\) openWorkspaceDetailsDialog\(\)/);
   assert.match(dashboard, /renderWorkspaceSettings\(root,/);
   assert.match(settings, /id\.dataset\.channelId = ""/);
   assert.match(
@@ -165,11 +166,8 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
     /<button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out<\/button>/,
     "the account menu must carry Sign out",
   );
-  assert.match(
-    dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__rail-foot\s*\{[\s\S]*grid-column:\s*3;[\s\S]*grid-row:\s*1/,
-    "the account menu must move into the mobile top bar, which is what makes one Sign out enough",
-  );
+  assert.match(read("src/styles/home/integration.css"), /\[data-user-menu-root\].*position: absolute/,
+    "the account menu remains reachable on a phone");
   assert.doesNotMatch(
     dashboard,
     /dashboard__mobile-signout/,

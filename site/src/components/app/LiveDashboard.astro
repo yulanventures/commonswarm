@@ -32,6 +32,7 @@ import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-t
 import { ALL_SIGNALS_SLUG, channelLabel } from "../../lib/channels";
 import { THREAD_REPLY_CANCEL_LABEL } from "../../lib/thread-reply";
 import "../../styles/tokens.css";
+import "../../styles/home/index.css";
 
 const signInMethods = signInDoors(await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -242,205 +243,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         <SampleNotice />
       </div>
 
-      <div class="dashboard__frame">
-        <aside class="dashboard__rail" aria-label="Workspace navigation and details">
-          <div class="dashboard__workspace-control" data-workspace-menu-root>
-            <button
-              class="dashboard__workspace-trigger"
-              type="button"
-              data-workspace-menu-trigger
-              aria-haspopup="menu"
-              aria-expanded="false"
-              aria-controls="dashboard-workspace-menu"
-              aria-label="Current workspace: Workspace. Choose workspace"
-            >
-              <span class="dashboard__workspace-trigger-name" data-sidebar-workspace-name>Workspace</span>
-              <span class="dashboard__sample-chip" data-sample-chip hidden>Sample</span>
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-                <path d="m4 6 4 4 4-4"></path>
-              </svg>
-            </button>
-            {/* The settings trigger stays beside the workspace name. Its dialog lives
-                outside the scrolling rail so the rail cannot clip the settings surface. */}
-            <button
-              class="dashboard__gear-button"
-              type="button"
-              data-workspace-details-trigger
-              aria-haspopup="dialog"
-              aria-expanded="false"
-              aria-controls="dashboard-workspace-details"
-              aria-label="Workspace settings"
-              title="Workspace settings"
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-            </button>
-            <div
-              class="dashboard__workspace-menu"
-              id="dashboard-workspace-menu"
-              data-workspace-menu
-              role="menu"
-              aria-label="Choose a workspace"
-              hidden
-            >
-              <div class="dashboard__workspace-list" data-workspace-list></div>
-              <div class="dashboard__workspace-menu-create">
-                <button
-                  class="dashboard__workspace-create-button"
-                  type="button"
-                  role="menuitem"
-                  data-new-workspace
-                >
-                  <span aria-hidden="true">+</span>
-                  <span>New workspace</span>
-                </button>
-                {/* The phone's door to workspace settings. The gear beside the workspace name
-                    is 55px of a bar that has to hold the name, the view switcher and the
-                    account control on one line, so below 52rem the gear goes and this item
-                    opens the same dialog. It is display:none above that width, where the gear
-                    is still there. */}
-                <button
-                  class="dashboard__workspace-create-button dashboard__workspace-settings-item"
-                  type="button"
-                  role="menuitem"
-                  data-workspace-settings-item
-                >
-                  <span aria-hidden="true">⚙</span>
-                  <span>Workspace settings</span>
-                </button>
-                <button class="dashboard__workspace-create-button" type="button" role="menuitem" data-admin-access-open data-admin-access-scope="workspace">Admin access and history</button>
-              </div>
-            </div>
-          </div>
+      <div class="dashboard__frame hm-frame">
+        <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
+          <template data-home-wordmark><Wordmark href="/" /></template>
+          <div class="hm-frame__rail-content" data-home-rail-slot></div>
 
-          {/* The phone's view switcher. It lives in the app bar, not in the channel head,
-              because the operator's rule is that the whole mobile header is ONE row — the
-              row with the workspace name and the account control. These buttons are
-              `display: none` above 52rem, where the rail's own MESSAGES and SHARED lists
-              are the navigation, so this placement costs the desktop nothing. They carry the
-              same `data-workspace-view` values the rail buttons do and the same listener
-              loop keeps `aria-current` in step. The labels are the shortest plain words
-              (Tom's plain-words rule, 2026-09-11): the bar must hold four of them at 320px. */}
-          <nav class="dashboard__rail-tabs" aria-label="Workspace views">
-            <button
-              class="dashboard__text-button dashboard__mobile-view"
-              type="button"
-              data-workspace-view="signals"
-              aria-current="page"
-            >
-              Messages
-            </button>
-            <button
-              class="dashboard__text-button dashboard__mobile-view"
-              type="button"
-              data-workspace-view="objects"
-              aria-label="Lists and docs"
-            >
-              Lists
-            </button>
-            <button
-              class="dashboard__text-button dashboard__mobile-view"
-              type="button"
-              data-workspace-view="files"
-            >
-              Files
-            </button>
-            <button class="dashboard__text-button dashboard__mobile-view" type="button" data-workspace-view="brain"
-            >
-              Wiki
-            </button>
-          </nav>
-
-          {/* Kept for its hooks (the privacy reset clears these counts) but not shown: the
-              counts meant nothing to a household reader (audit U4). */}
-          <section class="dashboard__workspace-context" aria-label="Workspace message summary" hidden>
-            <p class="dashboard__workspace-summary">
-              Broadcasts <strong data-broadcast-count>0</strong>
-              <span aria-hidden="true">·</span>
-              Direct signals <strong data-direct-count>0</strong>
-            </p>
-          </section>
-
-          {/* ~~STREAMS (broadcast)~~ retired 2026-09-05. "stream" is the event log on the
-              wire and in SWARM-CLOUD.md 2.1, and this was the only place the app showed that
-              word to a reader. A channel is the ADDRESS of a message, never a scope on who
-              may read it: every member reads every channel, and all-signals is the whole
-              feed rather than a channel among them, which is why the edge reserves its
-              name. */}
-          <nav class="dashboard__rail-section dashboard__rail-section--places" aria-labelledby="dashboard-channels-label">
-            <div class="dashboard__rail-label-row">
-              <h2 id="dashboard-channels-label">MESSAGES</h2>
-              <button
-                class="dashboard__icon-button dashboard__rail-section-add"
-                type="button"
-                data-channel-new
-                aria-label="New channel"
-                title="New channel"
-              >
-                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14"></path>
-                </svg>
-              </button>
-            </div>
-            <button
-              class="dashboard__sidebar-place"
-              type="button"
-              data-workspace-view="signals"
-              data-channel-place=""
-              aria-current="page"
-            >
-              <span class="dashboard__sidebar-place-mark" aria-hidden="true">≡</span>
-              <span>{channelLabel(ALL_SIGNALS_SLUG)}</span>
-            </button>
-            {/* Live channels, rendered from swarm_read.channels. Archived ones are read but
-                not listed: their messages and their permalinks still resolve. */}
-            <div data-channel-list></div>
-          </nav>
-
-          <nav class="dashboard__rail-section dashboard__rail-section--places" aria-labelledby="dashboard-files-label">
-            <div class="dashboard__rail-label-row">
-              <h2 id="dashboard-files-label">SHARED</h2>
-            </div>
-            <button
-              class="dashboard__sidebar-place"
-              type="button"
-              data-workspace-view="objects"
-            >
-              <span class="dashboard__sidebar-place-mark" aria-hidden="true">☰</span>
-              <span>Lists &amp; docs</span>
-            </button>
-            <button
-              class="dashboard__sidebar-place"
-              type="button"
-              data-workspace-view="files"
-            >
-              <span class="dashboard__sidebar-place-mark" aria-hidden="true">↧</span>
-              <span>Files</span>
-            </button>
-            <button class="dashboard__sidebar-place" type="button" data-workspace-view="brain"
-            >
-              <span class="dashboard__sidebar-place-mark" aria-hidden="true">◇</span>
-              <span>Wiki</span>
-            </button>
-          </nav>
-
-          <section class="dashboard__rail-section dashboard__rail-section--participants" aria-labelledby="dashboard-participants-label">
-            <div class="dashboard__rail-label-row">
-              <h2 id="dashboard-participants-label">PEOPLE &amp; AGENTS</h2>
-            </div>
-            <ul class="dashboard__sidebar-agent-list" data-sidebar-participant-list></ul>
-            <p class="dashboard__agent-ownership-note">
-              Every agent belongs to a person, who connects it.
-            </p>
-          </section>
-
-          {/* Manage people, Pending access, and Workspace details left the rail
-              (operator direction 2026-08-19): member management folded into the
-              header People & agents dialog, pending access already mirrored there,
-              workspace details into the gear dialog outside the rail. The rail bottom is now
-              just the user-menu button. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -485,41 +292,24 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 <span data-theme-toggle-label>System</span>
               </button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
-              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-admin-access-open>Admin access and history</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
           </div>
         </aside>
 
-        <section class="dashboard__channel" aria-labelledby="dashboard-channel-title">
+        <div class="hm-frame__main">
+          <section data-home-catchup hidden></section>
+          <section class="hm-route-pane" data-home-route-pane hidden></section>
+          <div data-home-workspace-shell></div>
+        <section class="dashboard__channel hm-frame__channel" aria-labelledby="dashboard-channel-title">
           <header class="dashboard__channel-head">
+            <div data-home-channel-menu></div>
             <div class="dashboard__channel-titleblock">
-              <h1 id="dashboard-channel-title" data-channel-name tabindex="-1">{channelLabel(ALL_SIGNALS_SLUG)}</h1>
+              <h2 id="dashboard-channel-title" data-channel-name tabindex="-1">{channelLabel(ALL_SIGNALS_SLUG)}</h2>
               <p class="dashboard__channel-description" data-channel-description>
                 Messages from everyone in this workspace, people and agents.
               </p>
-            </div>
-
-            {/* The header agent roster: ONE control, the Slack-style members stack.
-                Activating it opens the management dialog (Add an agent first, then the
-                full roster with Remove and any pending access). It remains reachable when
-                access is pending even before the first agent arrives; that is the only
-                mobile door to review or cancel an invite. The stack initials are
-                decorative; the accessible name carries both active and pending counts. */}
-            <div class="dashboard__channel-roster" data-header-roster hidden>
-              <button
-                class="dashboard__roster-button"
-                type="button"
-                data-roster-open
-                aria-haspopup="dialog"
-                aria-expanded="false"
-                aria-controls="dashboard-roster-dialog"
-                aria-label="0 agents — view and manage agents"
-              >
-                <span class="dashboard__roster-stack" data-header-agent-stack aria-hidden="true"></span>
-                <span class="dashboard__roster-count" data-header-roster-summary aria-hidden="true"><span data-agent-count>0</span><span data-header-pending-count></span></span>
-              </button>
             </div>
 
             <div class="dashboard__channel-actions">
@@ -729,21 +519,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
             <section class="dashboard__feed-view" data-channel-view="feed" hidden>
               <div class="dashboard__feed-toolbar">
-                {/* The phone's channel control. Above 52rem the rail lists the channels and
-                    this is `display: none`, the same split the view switcher uses. It rides
-                    in the toolbar band, which floats over the transcript on a phone, so it
-                    costs the reading area no height: the 2026-09-04 ruling leaves the 73px
-                    app bar as the only standing header. */}
-                <button
-                  class="dashboard__channel-switch"
-                  type="button"
-                  data-channel-switch
-                  aria-haspopup="dialog"
-                  aria-expanded="false"
-                  aria-controls="dashboard-channel-dialog"
-                >
-                  <span data-channel-switch-label>{channelLabel(ALL_SIGNALS_SLUG)}</span>
-                </button>
                 <div class="dashboard__feed-filters" role="group" aria-label="Filter signals">
                   <button type="button" data-feed-filter="all" aria-pressed="true">All</button>
                   <button type="button" data-feed-filter="broadcast" aria-pressed="false">To everyone</button>
@@ -1012,8 +787,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           </div>
         </section>
 
+          <div data-home-phone-nav></div>
+        </div>
+        <aside class="hm-frame__side" data-home-side-slot aria-label="Workspace cards"></aside>
+
         <aside
-          class="dashboard__entity-panel"
+          class="dashboard__entity-panel hm-frame__profile"
           data-entity-panel
           aria-labelledby="dashboard-entity-panel-title"
           hidden
@@ -1207,6 +986,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 </live-dashboard>
 
 <script>
+  import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
+  import { buildHomeRail } from "../../lib/home-rail";
+  import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
+    type WorkspaceShellVM, type ShellCallbacks } from "../../lib/home-shell";
+  import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
+  import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
+  import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
+    overviewCatchUpData, catchUpDetailFromOverview, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+  import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
+  import { statusLine } from "../../lib/home-primitives";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import {
     CONTENT_OPERATION_LABELS,
@@ -1378,7 +1167,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
   import {
-    renderSidebarParticipants,
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
   import {
@@ -1530,6 +1318,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let connectedApps: ConnectedApp[] = [];
     let connectedAppsGeneration = 0;
     let workspaces: Workspace[] = [];
+    let homeRoute: HomeRoute = { view: "catchup" };
+    let homeNavigation = 0;
+    let catchUpGeneration = 0;
+    let catchUpData: CatchUpData[] = [];
+    let catchUpExpanded = false;
+    let railExpanded = false;
+    let homeShellKey = "";
+    let homeRailKey = "";
+    let homeCatchUpKey = "";
+    let homeWorkClaims: Signal[] = [];
+    let homePeopleReadState: HomeReadState = "pending";
+    const homeScroll = new Map<string, number>();
+    const homeOverviewCounts = new Map<string, number | null>();
+
     let agents: Agent[] = [];
     let members: Member[] = [];
     let pendingInvites: PendingMemberInvite[] = [];
@@ -2109,9 +1911,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       for (const target of all<HTMLElement>("[data-account-name], [data-rail-account]")) {
         target.textContent = who;
       }
-      const hasWorkspace = Boolean(
-        activeWorkspaceId && workspaces.some((workspace) => workspace.id === activeWorkspaceId),
-      );
+      const hasWorkspace = workspaces.length > 0;
       const title = one<HTMLElement>("[data-create-title]");
       const description = one<HTMLElement>("[data-create-description]");
       const cancel = one<HTMLButtonElement>("[data-create-cancel]");
@@ -2158,31 +1958,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const workspaceMemberships = async (): Promise<Workspace[]> => {
-      const api = client();
-      if (!api) throw new NoDeployment();
-      const pageSize = 200;
-      const result: Workspace[] = [];
-      for (let offset = 0; ; offset += pageSize) {
-        const { data, error } = await api
-          .schema("swarm_read")
-          .from("workspaces")
-          .select("workspace_id,name,archived_at")
-          .is("archived_at", null)
-          .order("name", { ascending: true })
-          .order("workspace_id", { ascending: true })
-          .range(offset, offset + pageSize - 1);
-        if (error) throw new Error(error.message);
-        const page = data ?? [];
-        result.push(...page
-          .filter((row) => row.archived_at === null)
-          .map((row) => ({
-            id: String(row.workspace_id ?? ""),
-            name: String(row.name ?? row.workspace_id ?? ""),
-            archived: false,
-          }))
-          .filter((workspace) => workspace.id.length > 0));
-        if (page.length < pageSize) return result;
-      }
+      return (await myWorkspaces()).map(workspace => ({ ...workspace, archived: false }));
     };
 
     const removedAgentNames = async (workspaceId: string): Promise<Map<string, string>> => {
@@ -4006,50 +3782,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /* The rail mirrors participants as presence/navigation only. Its shared renderer keeps
        ownership structural and names unresolved owners instead of hiding their agents. */
-    /* Two ways an item in this menu is not on offer, and the list has to know both. The
-       `hidden` attribute is one. The other is CSS: "Workspace settings" exists only below
-       52rem, where the gear leaves the app bar, and above that width it is `display: none`.
-       Filtering on `hidden` alone left it in this roving-focus list, so arrowing through the
-       desktop menu stopped on an item nobody could see. A box is the test that covers both. */
-    const workspaceMenuItems = (): HTMLButtonElement[] =>
-      all<HTMLButtonElement>("[data-workspace-menu] [role='menuitemradio'], [data-workspace-menu] [role='menuitem']")
-        .filter((item) => !item.hidden && item.getClientRects().length > 0);
-
-    const closeWorkspaceMenu = (restoreFocus = false): void => {
-      const menu = one<HTMLElement>("[data-workspace-menu]");
-      const trigger = one<HTMLButtonElement>("[data-workspace-menu-trigger]");
-      if (!menu || menu.hidden) return;
-      menu.hidden = true;
-      trigger?.setAttribute("aria-expanded", "false");
-      if (restoreFocus) trigger?.focus({ preventScroll: true });
-    };
-
-    const openWorkspaceMenu = (edge: "current" | "first" | "last" = "current"): void => {
-      const menu = one<HTMLElement>("[data-workspace-menu]");
-      const trigger = one<HTMLButtonElement>("[data-workspace-menu-trigger]");
-      if (!menu || !trigger || !menu.hidden) return;
-      menu.hidden = false;
-      trigger.setAttribute("aria-expanded", "true");
-      const items = workspaceMenuItems();
-      const current = items.find((item) => item.getAttribute("aria-checked") === "true");
-      const target = edge === "last"
-        ? items.at(-1)
-        : edge === "first"
-        ? items[0]
-        : current ?? items[0];
-      window.requestAnimationFrame(() => target?.focus({ preventScroll: true }));
-    };
-
-    const toggleWorkspaceMenu = (): void => {
-      const menu = one<HTMLElement>("[data-workspace-menu]");
-      if (!menu) return;
-      if (menu.hidden) openWorkspaceMenu();
-      else closeWorkspaceMenu(true);
-    };
-
     const openNewWorkspace = (): void => {
       if (!session || sampleMode) return;
-      closeWorkspaceMenu();
       const connect = one<SecretHoldingAgentConnect>("agent-connect");
       if (connect?.dataset.state === "done") {
         pendingWorkspaceCreate = true;
@@ -4109,58 +3843,289 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }, 0);
     };
 
-    const renderWorkspaceList = (selected: Workspace): void => {
-      const list = one<HTMLElement>("[data-workspace-list]");
-      const trigger = one<HTMLButtonElement>("[data-workspace-menu-trigger]");
-      const create = one<HTMLButtonElement>("[data-new-workspace]");
-      if (trigger) {
-        trigger.setAttribute(
-          "aria-label",
-          `Current workspace: ${selected.name}. Choose workspace`,
-        );
-        trigger.title = selected.name;
+    const homeViewerId = (): string | null => session?.user.id ?? (sampleMode ? "sample-owner" : null);
+    const currentHomePeople = (): HomePeople => mapHomePeople({ viewerId: homeViewerId(), members, agents,
+      access: accessStatuses, signals: homeWorkClaims, now: Date.now(), sample: sampleMode });
+    const navigateHomeHref = (href: string): void => {
+      void navigateHome(parseRoute(new URL(href, window.location.origin).search), "push");
+    };
+    const homeBack = (): void => {
+      if (window.history.state?.homePrevious) window.history.back();
+      else void navigateHome(parentRoute(homeRoute), "push");
+    };
+    const selectHomePerson = async (id: string): Promise<void> => {
+      if (homeRoute.view === "catchup") {
+        const entry = catchUpData.find(entry => entry.detail?.people.groups.some(group => group.person.id === id));
+        if (!entry) return;
+        await navigateHome({ view: "chat", workspaceId: entry.workspace.id }, "push");
       }
-      if (create) create.hidden = sampleMode;
-      if (!list) return;
-      list.replaceChildren();
-      for (const workspace of workspaces) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "dashboard__workspace-button";
-        button.dataset.workspaceId = workspace.id;
-        button.setAttribute("role", "menuitemradio");
-        button.setAttribute("aria-checked", String(workspace.id === selected.id));
-        const label = document.createElement("span");
-        label.textContent = workspace.name;
-        /* The ID beside the name, because an agent names a workspace by id and a person names
-         * it by name, and the two have to be matchable by eye. An operator asked whether to add
-         * a bot to "the CommonSwarm Build workspace" and no agent surface could answer, because
-         * nothing printed both facts together. `cswarm whoami` now prints `Name (id)`; this is
-         * the other half of that pair. Muted and secondary so the name still reads first. */
-        const identifier = document.createElement("span");
-        identifier.className = "dashboard__workspace-id";
-        identifier.textContent = workspace.id;
-        identifier.title = workspace.id;
-        label.append(identifier);
-        const check = document.createElement("span");
-        check.className = "dashboard__workspace-check";
-        check.textContent = "✓";
-        check.setAttribute("aria-hidden", "true");
-        button.append(label, check);
-        button.addEventListener("click", () => {
-          closeWorkspaceMenu(true);
-          if (sampleMode) {
-            openSampleWorkspace(workspace);
-            return;
+      openRosterDialog();
+      peopleDialogState.selected = { kind: "person", id };
+      renderDialogRoster();
+    };
+    const renderHomeRail = (): void => {
+      const slot = one<HTMLElement>("[data-home-rail-slot]");
+      if (!slot) return;
+      let railPeople = currentHomePeople();
+      if (homeRoute.view === "catchup") {
+        const own = catchUpData.flatMap(entry => entry.detail?.people.groups.filter(group => group.person.you) ?? []);
+        const first = own[0];
+        railPeople = { title: "You and your agents", other: [], groups: first ? [{ person: first.person,
+          agents: [...new Map(own.flatMap(group => group.agents).map(agent => [agent.id, agent])).values()] }] : [] };
+      }
+      const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
+      const key = homeStructureKey(vm);
+      if (key === homeRailKey && slot.childElementCount) {
+        refreshHomeRailTimes(slot, vm); return;
+      }
+      const template = one<HTMLTemplateElement>("[data-home-wordmark]");
+      const wordmark = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | undefined;
+      replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
+        navigate: href => navigateHomeHref(href),
+        openPerson: id => { void selectHomePerson(id); },
+        openAgent: id => {
+          const workspaceId = homeRoute.view === "catchup"
+            ? catchUpData.find(entry => entry.detail?.people.groups.some(group => group.agents.some(agent => agent.id === id)))?.workspace.id
+            : activeWorkspaceId;
+          if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
+        },
+        toggleWorkspaces: expanded => { railExpanded = expanded; },
+      }, { wordmark, workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }) })]);
+      homeRailKey = key;
+    };
+    const renderHomeShell = (): void => {
+      const slot = one<HTMLElement>("[data-home-workspace-shell]");
+      const bottom = one<HTMLElement>("[data-home-phone-nav]");
+      const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
+      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") {
+        homeShellKey = "";
+        slot?.replaceChildren(); bottom?.replaceChildren(); return;
+      }
+      const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
+      const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
+        people: currentHomePeople().groups, pane, todosAvailable: false,
+        hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
+          lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
+          wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
+        menu: { settings: true, adminAccess: true } };
+      const key = homeStructureKey(vm);
+      if (key === homeShellKey && slot.childElementCount) return;
+      const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: openRosterDialog,
+        menu: item => {
+          if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
+          else if (item === "settings") openWorkspaceDetailsDialog();
+          // AdminDelegations owns the data-admin-access-open click through its delegated listener.
+        } };
+      replaceHomeRegion(slot, "shell", [buildPhoneTopBar(document, vm, callbacks), buildWorkspaceHeader(document, vm, callbacks),
+        buildWorkspaceNav(document, vm, callbacks, "tablet")]);
+      for (const button of slot.querySelectorAll<HTMLButtonElement>("[data-roster-open], .hm-phone-bar__people")) {
+        if (button.tagName !== "BUTTON") continue;
+        button.dataset.rosterOpen = "";
+        button.setAttribute("aria-controls", "dashboard-roster-dialog");
+        button.setAttribute("aria-expanded", String(one<HTMLDialogElement>("[data-roster-dialog]")?.open ?? false));
+      }
+      if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
+        Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
+      homeShellKey = key;
+    };
+    const renderHomeCatchUp = (): void => {
+      if (homeRoute.view !== "catchup") return;
+      const slot = one<HTMLElement>("[data-home-catchup]");
+      if (!slot) return;
+      const vm = mapCatchUp(catchUpData, homeViewerId(), session ? accountName(session) : Object.values(SAMPLE_ROSTERS)[0]?.members.find(member => member.userId === homeViewerId())?.name ?? "there", Date.now(), sampleMode, catchUpExpanded);
+      const key = homeStructureKey(vm);
+      if (key === homeCatchUpKey && slot.childElementCount) {
+        refreshHomeCatchUpTimes(slot, vm); renderHomeRail(); return;
+      }
+      const view = buildCatchUp(document, vm, {
+        onNeedsYouAction: (_action, item) => { if (item.primary.href) navigateHomeHref(item.primary.href); },
+        onShowMoreNeedsYou: () => { catchUpExpanded = true; renderHomeCatchUp(); },
+      });
+      // A chat/roster fallback has no complete to-do/ask read, so it cannot claim all is clear.
+      if (vm.needsYou.length === 0 && vm.emptySummary) {
+        const summary = view.querySelector<HTMLElement>(".hm-catchup-subline");
+        if (summary) summary.textContent = vm.emptySummary;
+      }
+      replaceHomeRegion(slot, "catchup", [view]);
+      homeCatchUpKey = key;
+      renderHomeRail();
+    };
+    const loadHomeCatchUp = async (): Promise<void> => {
+      const generation = ++catchUpGeneration;
+      const viewer = homeViewerId();
+      const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
+      catchUpExpanded = false;
+      catchUpData = initialCatchUpData(workspaces);
+      renderHomeCatchUp(); // Membership cards appear before any detail read.
+      if (sampleMode) {
+        catchUpData = catchUpData.map(entry => ({ ...entry, state: "open" })); renderHomeCatchUp(); return;
+      }
+      let overview;
+      try { overview = await homeOverview(); }
+      catch {
+        if (!live()) return;
+        catchUpData = catchUpData.map((entry, index) => index < 8 ? { ...entry, state: "failed" } : entry);
+        renderHomeCatchUp(); return;
+      }
+      if (!live()) return;
+      if (overview) {
+        catchUpData = overviewCatchUpData(catchUpData, overview, sampleMode);
+        for (const entry of catchUpData) {
+          const row = overview.workspaces.find(row => row.workspace_id === entry.workspace.id);
+          if (row && entry.detail) {
+            const measured = new Set([...row.needs_you.asks.filter(ask => Date.parse(ask.until) > Date.parse(overview.generated_at)).map(ask => ask.signal_id),
+              ...row.needs_you.assigned.map(todo => todo.todo_id), ...row.needs_you.waiting.map(todo => todo.todo_id)]);
+            const fixes = mapCatchUp([entry], viewer, "", Date.now(), sampleMode).needsYou.filter(item => item.kind === "agent-fix").length;
+            homeOverviewCounts.set(entry.workspace.id, measured.size + fixes);
           }
-          void openWorkspace(workspace.id);
-        });
-        list.append(button);
+        }
+        renderHomeCatchUp();
+      }
+      await fillCatchUpDetails(catchUpData, async workspace => {
+        const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
+        if (overview && previous) {
+          const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
+          // Missing previews leave Needs you incomplete; the loaded overview still holds.
+          const asks = await homeOverviewAsks(workspace.id, row.needs_you.asks.map(ask => ask.signal_id)).catch(() => [] as Signal[]);
+          const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
+          return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks), signals: latest };
+        }
+        const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
+          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, 50),
+          homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
+        ]);
+        return { people: mapHomePeople({ viewerId: viewer, members: nextMembers.members, agents: nextAgents,
+          access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
+          openTodos: null, lists: null, files: nextFiles, newMessages: null };
+      }, entry => {
+        if (!live()) return;
+        catchUpData = catchUpData.map(previous => previous.workspace.id === entry.workspace.id ? entry : previous);
+        renderHomeCatchUp();
+      });
+    };
+    const homePaneMessage = (heading: string, detail: string, homeLink?: { label: string; href: string }): void => {
+      const slot = one<HTMLElement>("[data-home-route-pane]");
+      if (!slot) return;
+      const title = document.createElement("h1"); title.tabIndex = -1; title.textContent = heading;
+      const text = document.createElement("p"); text.textContent = detail;
+      const workspace = workspaces.find(workspace => workspace.id === activeWorkspaceId);
+      const back = document.createElement("a"); back.href = homeLink?.href ?? routeHref({ view: "chat", workspaceId: activeWorkspaceId }); back.textContent = homeLink?.label ?? workspace?.name ?? "Workspace";
+      back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
+      slot.replaceChildren(title, text, back); slot.hidden = false;
+    };
+    const applyHomePane = (): void => {
+      const catchUp = one<HTMLElement>("[data-home-catchup]");
+      const routePane = one<HTMLElement>("[data-home-route-pane]");
+      const channel = one<HTMLElement>(".dashboard__channel");
+      const home = homeRoute.view === "catchup";
+      if (catchUp) catchUp.hidden = !home;
+      if (routePane) routePane.hidden = true;
+      if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos";
+      const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
+      if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
+      const frame = one<HTMLElement>(".hm-frame");
+      frame?.classList.toggle("hm-frame--catchup", home);
+      if (home) { renderHomeCatchUp(); return; }
+      if (homeRoute.view === "agent") {
+        const candidates = [...currentHomePeople().groups.flatMap(group => group.agents), ...currentHomePeople().other];
+        const linkedId = homeRoute.agentId;
+        const state = homeObjectState(linkedId, candidates.map(agent => agent.id), homePeopleReadState);
+        const agent = candidates.find(agent => agent.id === linkedId);
+        const workspaceName = workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name ?? "this workspace";
+        if (state === "checking") homePaneMessage("Checking agents…", "");
+        else if (state === "failed") {
+          homePaneMessage(`Couldn't load ${workspaceName}.`, "Open it to try again.");
+          const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Try again";
+          retry.addEventListener("click", () => { void openWorkspace(activeWorkspaceId).then(focusHomeView); });
+          routePane?.append(retry);
+        } else if (state === "missing" || !agent) {
+          const missing = homeNotFound();
+          homePaneMessage(missing.heading, "", missing);
+        }
+        else {
+          const mayManage = agent.yours || members.some(member => member.userId === homeViewerId() && member.role !== "member");
+          homePaneMessage(agent.label, mayManage ? "Open People & agents to manage this agent." : "");
+          routePane?.append(statusLine(document, agent.state, { form: "line" }));
+          const manage = document.createElement("button"); manage.type = "button"; manage.textContent = "Manage in People & agents";
+          manage.addEventListener("click", () => { openRosterDialog(); peopleDialogState.selected = { kind: "agent", id: agent.id }; renderDialogRoster(); });
+          if (!sampleMode && mayManage) routePane?.append(manage);
+        }
+      } else if (homeRoute.view === "todo" || homeRoute.view === "todos") {
+        homePaneMessage("To-dos are not available here yet.", "");
+      } else if (homeRoute.view === "add-agent") openAgentChoice();
+      else if (homeRoute.view === "lists") activateWorkspaceView("objects");
+      else if (homeRoute.view === "files") activateWorkspaceView("files");
+      else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
+      else activateWorkspaceView("signals");
+    };
+    const focusHomeView = (): void => {
+      const route = homeRoute;
+      const workspace = "workspaceId" in route ? workspaces.find(workspace => workspace.id === route.workspaceId) : undefined;
+      document.title = homeViewTitle(homeRoute, workspace?.name);
+      window.requestAnimationFrame(() => {
+        const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
+          : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
+          : homeRoute.view === "new" ? "[data-panel=create]"
+          : "[data-home-workspace-shell]";
+        all<HTMLElement>(`${scope} h1`).find(heading => heading.getClientRects().length > 0)?.focus({ preventScroll: true });
+      });
+    };
+    const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
+      if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
+      const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
+      const previous = window.history.state?.home === true;
+      const scroll = one<HTMLElement>(".dashboard__feed-view");
+      if (activeWorkspaceId && scroll) homeScroll.set(activeWorkspaceId, scroll.scrollTop);
+      homeRoute = route;
+      const navigation = ++homeNavigation;
+      if (historyMode !== "pop") window.history[historyMode === "push" ? "pushState" : "replaceState"](
+        { home: true, homePrevious: historyMode === "push" ? previous : window.history.state?.homePrevious === true }, "", routeHref(route));
+      catchUpGeneration += 1;
+      closeEntityPanel(false); closeRosterDialog(); closeWorkspaceDetailsDialog();
+      if (route.view === "new") { openNewWorkspace(); focusHomeView(); return; }
+      if (route.view === "catchup") {
+        // The old workspace cannot repaint while cross-workspace reads are in flight.
+        const memberships = workspaces;
+        const positions = new Map(homeScroll);
+        resetComposer(); ++requestVersion; resetWorkspaceSessionState();
+        workspaces = memberships; homeRoute = route;
+        for (const target of all<HTMLElement>("[data-account-name], [data-rail-account]")) {
+          target.textContent = session ? accountName(session) : "Sample account";
+        }
+        for (const [id, position] of positions) homeScroll.set(id, position);
+        showPanel("channel"); renderHomeShell(); applyHomePane(); focusHomeView();
+        void loadHomeCatchUp(); return;
+      }
+      if (!("workspaceId" in route) || !route.workspaceId) return;
+      if (activeWorkspaceId !== route.workspaceId) {
+        if (sampleMode) openSampleWorkspace(workspaces.find(workspace => workspace.id === route.workspaceId)!);
+        else await openWorkspace(route.workspaceId);
+      } else if (route.view === "chat") {
+        applyChannelFromUrl(route.workspaceId);
+        syncChannelUrl();
+        if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
+      }
+      if (navigation !== homeNavigation) return;
+      renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
+      renderChannelRail();
+      if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
+      if (route.view === "chat" && route.messageId) {
+        expandedThreadIds.add(route.messageId); renderFeed();
       }
     };
+    window.addEventListener("popstate", () => {
+      void navigateHome(parseRoute(window.location.search), "pop");
+    });
+    one<HTMLElement>("[data-home-catchup]")?.addEventListener("click", event => {
+      const link = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");
+      if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault(); navigateHomeHref(link.href);
+    });
+
+    const renderWorkspaceList = (_selected: Workspace): void => { renderHomeRail(); };
 
     /*
-     * One roster in memory, three surfaces: rail presence, the header stack summary, and the
+     * One roster in memory, three surfaces: the nested rail, the workspace header, and the
      * management dialog. All render here from `agents`, so the surfaces cannot disagree.
      */
     const wakeMarkKey = (): string => agents
@@ -4168,10 +4133,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       .map(agent => agent.principalId).join("|");
     let renderedWakeMarkKey = "";
     const renderRoster = (): void => {
-      const participantList = one<HTMLUListElement>("[data-sidebar-participant-list]");
-      if (participantList) {
-        renderSidebarParticipants(participantList, members, agents, initials);
-      }
+      renderHomeRail();
+      renderHomeShell();
       renderHeaderRoster();
       renderDialogRoster();
       renderedWakeMarkKey = wakeMarkKey();
@@ -4192,51 +4155,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /*
-     * The header stack is a summary, not a second management surface: up to three uniform
-     * circular initials and the agents-only count. The dialog has its own people,
-     * agents and attention counts; its two-noun title carries no bare count.
+     * The workspace shell keeps a People & agents door on desktop and a capsule door on
+     * phones. Pending access is named on either door; the dialog owns the detailed counts.
      */
-    const HEADER_STACK_LIMIT = 3;
-
     const renderHeaderRoster = (pendingTotal = currentPendingAccessRows().length): void => {
-      const wrap = one<HTMLElement>("[data-header-roster]");
-      const stack = one<HTMLElement>("[data-header-agent-stack]");
-      const button = one<HTMLButtonElement>("[data-roster-open]");
-      const summary = one<HTMLElement>("[data-header-roster-summary]");
-      const show = agents.length > 0 || pendingTotal > 0 || pendingAgentsLoadFailed;
-      if (wrap) wrap.hidden = !show;
-      one<HTMLElement>(".dashboard__channel")?.classList.toggle(
-        "dashboard__channel--roster",
-        show,
-      );
-      for (const count of all<HTMLElement>("[data-agent-count]")) {
-        count.textContent = String(agents.length);
-      }
-      const pendingCount = summary?.querySelector<HTMLElement>("[data-header-pending-count]");
-      if (pendingCount) pendingCount.textContent = pendingTotal > 0 ? ` · ${pendingTotal} pending` : "";
-      if (button) {
-        button.classList.toggle("dashboard__roster-button--pending", pendingTotal > 0);
-        const agentLabel = `${agents.length} ${agents.length === 1 ? "agent" : "agents"}`;
-        const pendingLabel = pendingTotal > 0
-          ? ` and ${pendingTotal} pending access ${pendingTotal === 1 ? "item" : "items"}`
-          : "";
-        button.setAttribute(
-          "aria-label",
-          `${agentLabel}${pendingLabel} — view and manage agents`,
-        );
-      }
-      if (!stack) return;
-      stack.replaceChildren();
-      for (const agent of agents.slice(0, HEADER_STACK_LIMIT)) {
-        const avatar = document.createElement("span");
-        avatar.className = "dashboard__agent-avatar";
-        avatar.textContent = initials(agent.name);
-        markAgentAvatar(avatar, agent.principalId);
-        if (wakePathMark(agent.oldestUnobservedAt)) {
-          avatar.classList.add("dashboard__agent-avatar--wake-stale");
-          avatar.title = "Wake path stale";
-        }
-        stack.append(avatar);
+      renderHomeShell();
+      for (const button of all<HTMLButtonElement>("[data-roster-open]")) {
+        button.setAttribute("aria-label", `People & agents${pendingTotal ? ` · ${pendingTotal} pending access` : ""}`);
+        if (button.classList.contains("hm-ws-header__people")) button.textContent = `People & agents${pendingTotal ? ` · ${pendingTotal} pending` : ""}`;
       }
     };
 
@@ -4443,7 +4369,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!sampleMode) void loadHouseholdConnections();
       const firstStop = one<HTMLElement>("#dashboard-roster-title");
       window.requestAnimationFrame(() => firstStop?.focus({ preventScroll: true }));
-      one<HTMLButtonElement>("[data-roster-open]")?.setAttribute("aria-expanded", "true");
+      for (const button of all<HTMLButtonElement>("[data-roster-open]")) button.setAttribute("aria-expanded", "true");
     };
 
     const closeRosterDialog = (): void => {
@@ -5872,10 +5798,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /** Clear every workspace-scoped value when auth identity or availability changes. */
     const resetWorkspaceSessionState = (): void => {
+      catchUpGeneration += 1;
+      catchUpData = [];
+      homeScroll.clear();
+      homeWorkClaims = [];
+      homePeopleReadState = "pending";
+      homeShellKey = "";
+      homeRailKey = "";
+      homeCatchUpKey = "";
+      homeOverviewCounts.clear();
+      for (const slot of all<HTMLElement>("[data-home-catchup], [data-home-route-pane], [data-home-workspace-shell], [data-home-phone-nav], [data-home-rail-slot]")) slot.replaceChildren();
       stopFeedPush();
       stopAgentActivity();
       closeEntityPanel(false);
-      closeWorkspaceMenu();
       closeRosterDialog();
       closeWorkspaceDetailsDialog();
       const connectedDialog = one<HTMLDialogElement>("[data-connected-apps-dialog]");
@@ -5973,7 +5908,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       for (const target of all<HTMLElement>(
         "[data-channel-name], [data-channel-id], [data-invite-link], " +
-          "[data-sidebar-workspace-name], [data-file-warning], [data-file-empty]",
+          "[data-file-warning], [data-file-empty]",
       )) {
         target.textContent = "";
       }
@@ -5982,11 +5917,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       for (const target of all<HTMLElement>("[data-account-name], [data-rail-account]")) {
         target.textContent = "Your account";
-      }
-      const workspaceTrigger = one<HTMLButtonElement>("[data-workspace-menu-trigger]");
-      if (workspaceTrigger) {
-        workspaceTrigger.setAttribute("aria-label", "Choose workspace");
-        workspaceTrigger.removeAttribute("title");
       }
       const emptyTitle = one<HTMLElement>("[data-feed-empty-title]");
       if (emptyTitle) emptyTitle.textContent = "No messages yet.";
@@ -6334,9 +6264,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       renderChannelRail();
       renderChannelHead();
-      for (const target of all<HTMLElement>("[data-sidebar-workspace-name]")) {
-        target.textContent = workspace.name;
-      }
       if (id) id.textContent = workspace.id;
       renderSignalCounts();
       const refresh = one<HTMLButtonElement>("[data-refresh]");
@@ -6417,8 +6344,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     ): Promise<void> => {
       const selected = workspaces.find((workspace) => workspace.id === workspaceId);
       if (!selected) return;
+      if (!("workspaceId" in homeRoute) || homeRoute.workspaceId !== selected.id) {
+        homeRoute = { view: "chat", workspaceId: selected.id };
+        window.history.replaceState({ home: true }, "", routeHref(homeRoute));
+      }
       closeEntityPanel(false);
-      closeWorkspaceMenu();
       const changesWorkspace = activeWorkspaceId !== selected.id;
       resetHouseholdSurface();
       if (changesWorkspace) {
@@ -6472,6 +6402,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const keepShell = app.dataset.state === "channel";
       stopPendingPoll();
       activeWorkspaceId = selected.id;
+      homeWorkClaims = [];
+      homePeopleReadState = "pending";
       app.dataset.adminWorkspace = selected.id;
       window.dispatchEvent(new CustomEvent("commonswarm:workspace-selected", { detail: { workspaceId: selected.id } }));
       syncConnectWorkspace(selected);
@@ -6545,6 +6477,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const nextRemovedAgents = await removedAgentsRead;
         if (version !== requestVersion) return;
         agents = nextAgents;
+        homePeopleReadState = "ready";
         removedAgents = nextRemovedAgents;
         people = nextRoster.names;
         members = nextRoster.members;
@@ -6582,9 +6515,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (agents.length > 0) {
           await loadSignals(selected.id, true, version);
         }
+        const claims = await homeWorkingOn(selected.id);
+        if (version !== requestVersion) return;
+        homeWorkClaims = claims;
+        renderHomeRail();
+        renderHomeShell();
+        applyHomePane();
       } catch (error) {
         if (version !== requestVersion) return;
         signalHasMore = false;
+        if (homePeopleReadState === "pending") homePeopleReadState = "failed";
         channelLoadError = `${readableError(error)} Nothing was changed.`;
         const target = one<HTMLElement>("[data-feed-error]");
         if (target) target.textContent = channelLoadError;
@@ -6596,6 +6536,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const openAgentChoice = (): void => {
       if (sampleMode) return;
+      if (homeRoute.view !== "add-agent" && activeWorkspaceId) {
+        void navigateHome({ view: "add-agent", workspaceId: activeWorkspaceId }, "push");
+        return;
+      }
       const picker = one<HTMLElement & {
         reset?: () => void;
         setContext?: (context: { workspaceName?: string; accountEmail?: string }) => void;
@@ -6749,6 +6693,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const returnToChannel = (): void => {
+      if (homeRoute.view === "add-agent" && activeWorkspaceId) {
+        void navigateHome({ view: "chat", workspaceId: activeWorkspaceId,
+          ...(activeChannelId ? { channelId: activeChannelId } : {}) }, "push");
+        return;
+      }
       pendingWorkspaceId = "";
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) exitStatus.hidden = true;
@@ -7287,6 +7236,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const activateWorkspaceView = (view: "signals" | "files" | "brain" | "objects"): void => {
       if (keepConnectCredentialVisible()) return;
+      const nextView = view === "signals" ? "chat" : view === "objects" ? "lists" : view === "brain" ? "wiki" : "files";
+      if (homeRoute.view !== nextView && activeWorkspaceId) {
+        void navigateHome({ view: nextView, workspaceId: activeWorkspaceId,
+          ...(nextView === "chat" && activeChannelId ? { channelId: activeChannelId } : {}) }, "push");
+        return;
+      }
       activeWorkspaceView = view;
       const name = one<HTMLElement>("[data-channel-name]");
       const description = one<HTMLElement>("[data-channel-description]");
@@ -7565,18 +7520,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const name = one<HTMLElement>("[data-channel-name]");
       const description = one<HTMLElement>("[data-channel-description]");
-      const switchLabel = one<HTMLElement>("[data-channel-switch-label]");
       const channel = activeChannel();
       if (unknownChannelId !== null) {
         if (name) name.textContent = "Channel not found";
         if (description) description.textContent = unknownChannelHeadText(channelListFailed);
-        if (switchLabel) switchLabel.textContent = "Channel not found";
       } else if (channel === null) {
         if (name) name.textContent = channelLabel(ALL_SIGNALS_SLUG);
         if (description) {
           description.textContent = "Messages from everyone in this workspace, people and agents.";
         }
-        if (switchLabel) switchLabel.textContent = channelLabel(ALL_SIGNALS_SLUG);
       } else {
         if (name) name.textContent = channelLabel(channel.slug);
         if (description) {
@@ -7584,34 +7536,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             ? CHANNEL_ARCHIVED_TEXT
             : channel.purpose ?? CHANNEL_REACH_TEXT;
         }
-        if (switchLabel) switchLabel.textContent = channelLabel(channel.slug);
       }
       syncChannelCurrent();
       syncComposerPlacement();
     };
 
     const renderChannelRail = (): void => {
-      const add = one<HTMLButtonElement>("[data-channel-new]");
-      if (add) add.hidden = sampleMode;
+      const slot = one<HTMLElement>("[data-home-channel-menu]");
+      if (!slot) return;
+      slot.replaceChildren(buildChannelMenu(document, { sample: sampleMode,
+        label: unknownChannelId !== null ? "Channel not found" : channelLabel(activeChannel()?.slug ?? ALL_SIGNALS_SLUG) }));
+      one<HTMLButtonElement>("[data-channel-place='']")?.addEventListener("click", () => selectChannel(null));
+      one<HTMLButtonElement>("[data-channel-new]")?.addEventListener("click", () => openChannelDialog());
       const list = one<HTMLElement>("[data-channel-list]");
       if (!list) return;
-      list.replaceChildren();
       for (const channel of liveChannels(channels)) {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "dashboard__sidebar-place";
-        /* NOT data-workspace-view: activateWorkspaceView marks every signals-view button
-           aria-current, which would mark every channel current at once. These buttons
-           switch the view through selectChannel instead, and syncChannelCurrent owns
-           which one is marked. */
+        button.className = "hm-channel-menu__item";
         button.dataset.channelPlace = channel.channelId;
-        const mark = document.createElement("span");
-        mark.className = "dashboard__sidebar-place-mark";
-        mark.setAttribute("aria-hidden", "true");
-        mark.textContent = "#";
-        const label = document.createElement("span");
-        label.textContent = channel.slug;
-        button.append(mark, label);
+        button.textContent = channel.slug;
         if (channel.purpose !== null) button.title = channel.purpose;
         button.addEventListener("click", () => selectChannel(channel.channelId));
         list.append(button);
@@ -7631,7 +7575,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channelId = unknownChannelId ?? activeChannelId;
       if (channelId === null) url.searchParams.delete("c");
       else url.searchParams.set("c", channelId);
-      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
     };
 
     /**
@@ -8034,6 +7978,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const applySampleRoster = (workspaceId: string): void => {
+      homePeopleReadState = "ready";
       const roster = SAMPLE_ROSTERS[workspaceId] ?? { agents: [], members: [] };
       members = [...roster.members];
       agents = [...roster.agents];
@@ -8268,7 +8213,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const refresh = one<HTMLButtonElement>("[data-refresh]");
       if (refresh) refresh.hidden = true;
       for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = true;
+      homeRoute = { view: "chat", workspaceId: activeWorkspaceId };
       renderChannel(workspaces[0]!);
+      applyHomePane();
     };
 
     const boot = async (): Promise<void> => {
@@ -8315,11 +8262,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         /* ?w= names the workspace to open. It is honoured only when it is in this
            reader's own memberships, so a stale or foreign id opens the default one rather
            than an error: the address bar is a convenience, never an authorization. */
-        const requestedWorkspaceId = new URL(window.location.href).searchParams.get("w");
-        const bootWorkspace =
-          workspaces.find((workspace) => workspace.id === requestedWorkspaceId) ??
-            workspaces[0]!;
-        await openWorkspace(bootWorkspace.id);
+        await navigateHome(resolveHomeRoute(window.location.search, workspaces), "replace");
       } catch (error) {
         if (version !== requestVersion) return;
         if (error instanceof SessionExpired) {
@@ -8668,50 +8611,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       "click",
       () => openInvite("channel"),
     );
-    one<HTMLButtonElement>("[data-workspace-menu-trigger]")?.addEventListener(
-      "click",
-      toggleWorkspaceMenu,
-    );
-    one<HTMLButtonElement>("[data-workspace-menu-trigger]")?.addEventListener(
-      "keydown",
-      (event) => {
-        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-        event.preventDefault();
-        openWorkspaceMenu(event.key === "ArrowDown" ? "first" : "last");
-      },
-    );
-    one<HTMLElement>("[data-workspace-menu]")?.addEventListener("keydown", (event) => {
-      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-      const items = workspaceMenuItems();
-      if (items.length === 0) return;
-      event.preventDefault();
-      const activeIndex = items.indexOf(document.activeElement as HTMLButtonElement);
-      const nextIndex = event.key === "Home"
-        ? 0
-        : event.key === "End"
-        ? items.length - 1
-        : event.key === "ArrowDown"
-        ? (activeIndex + 1 + items.length) % items.length
-        : (activeIndex - 1 + items.length) % items.length;
-      items[nextIndex]?.focus({ preventScroll: true });
-    });
-    document.addEventListener("keydown", (event) => {
-      const menu = one<HTMLElement>("[data-workspace-menu]");
-      if (event.key !== "Escape" || !menu || menu.hidden) return;
-      event.preventDefault();
-      closeWorkspaceMenu(true);
-    });
-    document.addEventListener("pointerdown", (event) => {
-      const root = one<HTMLElement>("[data-workspace-menu-root]");
-      if (!root || root.contains(event.target as Node)) return;
-      closeWorkspaceMenu();
-    });
-    document.addEventListener("focusin", (event) => {
-      const root = one<HTMLElement>("[data-workspace-menu-root]");
-      if (!root || root.contains(event.target as Node)) return;
-      closeWorkspaceMenu();
-    });
-
     /* The account menu keeps the switcher's show/hide + aria-expanded + Escape +
        outside-click contract. Workspace settings uses native <dialog> below. */
     const wirePopover = (triggerSel: string, popoverSel: string): void => {
@@ -8766,19 +8665,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       });
     }
 
-    one<HTMLButtonElement>("[data-new-workspace]")?.addEventListener(
-      "click",
-      openNewWorkspace,
-    );
-    one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", () => {
-      const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
-      if (!selected) return;
-      showPanel("channel");
-      returnToChannel();
-      window.requestAnimationFrame(() => {
-        one<HTMLButtonElement>("[data-workspace-menu-trigger]")?.focus({ preventScroll: true });
-      });
-    });
+    one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", homeBack);
     one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", openRosterDialog);
     one<HTMLButtonElement>("[data-roster-close]")?.addEventListener("click", closeRosterDialog);
     one<HTMLButtonElement>("[data-workspace-details-trigger]")?.addEventListener(
@@ -8786,7 +8673,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       openWorkspaceDetailsDialog,
     );
     one<HTMLButtonElement>("[data-workspace-settings-item]")?.addEventListener("click", () => {
-      closeWorkspaceMenu();
       openWorkspaceDetailsDialog();
     });
     one<HTMLButtonElement>("[data-workspace-details-close]")?.addEventListener(
@@ -9963,7 +9849,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const list = one<HTMLElement>("[data-dialog-agent-list]"), detail = one<HTMLElement>("[data-people-detail]");
       if (list) observer.observe(list); if (detail) observer.observe(detail);
       dialog?.addEventListener("close", () => {
-        one<HTMLButtonElement>("[data-roster-open]")?.setAttribute("aria-expanded", "false");
+        for (const button of all<HTMLButtonElement>("[data-roster-open]")) button.setAttribute("aria-expanded", "false");
       });
     }
     one<HTMLButtonElement>("[data-close-agent-choice]")?.addEventListener("click", returnToChannel);
