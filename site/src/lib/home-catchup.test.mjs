@@ -3,21 +3,20 @@ import { test } from "node:test";
 import {
   catchUpAgentAttentionLine,
   catchUpGreeting,
-  catchUpLatestGroups,
-  catchUpLatestHeading,
   catchUpLatestVisible,
   catchUpNeedsYouMoreCount,
   catchUpNeedsYouVisible,
+  catchUpNewMessagesSinceLastLookedLine,
   catchUpPeopleSummary,
   catchUpSubline,
   catchUpWorkspaceCheckTotals,
   catchUpWorkspaceCountsLine,
 } from "./home-catchup.ts";
 
-const person = (id, firstName, you = false) => ({ id, name: firstName, firstName, initials: firstName[0], you, role: "member" });
+const person = (id, firstName, you = false, name = firstName) => ({ id, name, firstName, initials: firstName[0], you, role: "member" });
 const workspace = (id, state, overrides = {}) => ({
   id, name: id, href: `?w=${id}`, peopleSummary: "Just you", capsules: [], openTodos: null, lists: null, files: null,
-  agentsNeedingAttention: 0, state, ...overrides,
+  agentsNeedingAttention: null, newMessagesSinceLastLooked: null, state, ...overrides,
 });
 const needsYou = (id, workspaceId) => ({
   id, kind: "ask", workspace: { id: workspaceId, name: workspaceId, href: `?w=${workspaceId}` },
@@ -40,6 +39,15 @@ test("people summaries match the possessive naming table", () => {
   assert.equal(catchUpPeopleSummary([
     person("t", "Tom", true), person("n", "Nikki"), person("p", "Priya"), person("m", "Marcus"), person("a", "Alex"),
   ]), "You, Nikki and 3 others");
+  assert.equal(catchUpPeopleSummary([
+    person("t", "Tom", true),
+    person("n1", "Nikki", false, "Nikki Smith"),
+    person("n2", "Nikki", false, "Nikki Jones"),
+  ]), "You, Nikki Smith and Nikki Jones");
+  assert.equal(catchUpPeopleSummary([
+    person("v", "Nikki", true, "Nikki Smith"),
+    person("n2", "Nikki", false, "Nikki Jones"),
+  ]), "You and Nikki Jones");
 });
 
 test("subline prefers partial failure over the empty state", () => {
@@ -63,7 +71,7 @@ test("subline prefers partial failure over the empty state", () => {
   assert.equal(catchUpSubline(oneNeed), "1 thing needs you across 2 workspaces.");
   const clear = vm({ workspaces: [workspace("home", "ready"), workspace("trip", "ready")] });
   assert.equal(catchUpSubline(clear), "Nothing needs you right now.");
-  assert.equal(catchUpSubline(vm({ workspaces: [workspace("home", "loading")] })), "Checked 0 of 1 workspaces.");
+  assert.equal(catchUpSubline(vm({ workspaces: [workspace("home", "loading")] })), "Checked 0 of 1 workspace.");
 });
 
 test("workspace counts omit unknown reads and never invent zero", () => {
@@ -83,23 +91,25 @@ test("needs-you preview and latest caps are independent of the builder", () => {
     id: String(index), authorLabel: "Your Claude", workspace: { name: "Home", href: "?w=home" }, excerpt: "Hi", when: "now",
   }));
   assert.equal(catchUpLatestVisible(rows).length, 8);
-});
-
-test("latest heading follows ruling R9 per workspace", () => {
-  assert.equal(catchUpLatestHeading(), "Latest");
-  assert.equal(catchUpLatestHeading({ newMessages: 5, lastSeenAt: "2026-10-04T20:00:00" }), "5 new since you last looked");
-  assert.equal(catchUpLatestHeading({ newMessages: 0, lastSeenAt: "2026-10-04T20:00:00" }), "Latest");
-  const rows = [
-    { id: "1", authorLabel: "Claude", workspace: { name: "Home", href: "?w=home", sinceLastLooked: { newMessages: 3, lastSeenAt: "2026-10-04T22:00:00" } }, excerpt: "Hi", when: "8:12 am" },
-    { id: "2", authorLabel: "Muse", workspace: { name: "Summer trip", href: "?w=trip" }, excerpt: "Plans?", when: "7:40 am" },
+  const interleaved = [
+    { id: "a", authorLabel: "A", workspace: { name: "Home", href: "?w=home" }, excerpt: "one", when: "9:03" },
+    { id: "b", authorLabel: "B", workspace: { name: "Trip", href: "?w=trip" }, excerpt: "two", when: "9:02" },
+    { id: "c", authorLabel: "C", workspace: { name: "Home", href: "?w=home" }, excerpt: "three", when: "9:01" },
   ];
-  const groups = catchUpLatestGroups(rows);
-  assert.equal(groups.length, 2);
-  assert.equal(groups[0].heading, "3 new since you last looked");
-  assert.equal(groups[1].heading, "Latest");
+  const visible = catchUpLatestVisible(interleaved);
+  assert.deepEqual(visible.map((row) => row.id), ["a", "b", "c"]);
+  assert.deepEqual(visible.map((row) => row.workspace.name), ["Home", "Trip", "Home"]);
 });
 
-test("agent attention line pluralises independently", () => {
+test("new messages since you last looked stays on workspace cards", () => {
+  assert.equal(catchUpNewMessagesSinceLastLookedLine(null), null);
+  assert.equal(catchUpNewMessagesSinceLastLookedLine(0), null);
+  assert.equal(catchUpNewMessagesSinceLastLookedLine(1), "1 new message since you last looked");
+  assert.equal(catchUpNewMessagesSinceLastLookedLine(5), "5 new messages since you last looked");
+});
+
+test("agent attention line prints nothing when unknown", () => {
+  assert.equal(catchUpAgentAttentionLine(null), null);
   assert.equal(catchUpAgentAttentionLine(0), null);
   assert.equal(catchUpAgentAttentionLine(1), "1 agent needs attention");
   assert.equal(catchUpAgentAttentionLine(2), "2 agents need attention");

@@ -12,7 +12,8 @@ export interface CatchUpWorkspaceCardVM {
   openTodos: number | null;
   lists: number | null;
   files: number | null;
-  agentsNeedingAttention: number;
+  agentsNeedingAttention: number | null;
+  newMessagesSinceLastLooked: number | null;
   state: "loading" | "ready" | "failed" | "open";
 }
 
@@ -22,15 +23,9 @@ export interface CatchUpLatestRowVM {
   workspace: {
     name: string;
     href: string;
-    sinceLastLooked?: { newMessages: number; lastSeenAt: string };
   };
   excerpt: string;
   when: string;
-}
-
-export interface CatchUpLatestGroupVM {
-  heading: string;
-  rows: CatchUpLatestRowVM[];
 }
 
 export interface CatchUpVM {
@@ -58,13 +53,22 @@ export function catchUpGreeting(now: string, firstName: string): string {
   return `Good ${period}, ${firstName}.`;
 }
 
+function catchUpMemberLabel(member: PersonVM, duplicateFirstNames: Set<string>): string {
+  return duplicateFirstNames.has(member.firstName) ? member.name : member.firstName;
+}
+
 /** People summary for a workspace card (UI-SPEC.md section 2.3). */
 export function catchUpPeopleSummary(members: PersonVM[]): string {
   const others = members.filter((member) => !member.you);
   if (others.length === 0) return "Just you";
-  if (others.length === 1) return `You and ${others[0].firstName}`;
-  if (others.length === 2) return `You, ${others[0].firstName} and ${others[1].firstName}`;
-  return `You, ${others[0].firstName} and ${others.length - 1} others`;
+  const firstNameCounts = new Map<string, number>();
+  for (const member of members) firstNameCounts.set(member.firstName, (firstNameCounts.get(member.firstName) ?? 0) + 1);
+  const duplicateFirstNames = new Set(members.filter((member) => (firstNameCounts.get(member.firstName) ?? 0) > 1).map((member) => member.firstName));
+  if (others.length === 1) return `You and ${catchUpMemberLabel(others[0], duplicateFirstNames)}`;
+  if (others.length === 2) {
+    return `You, ${catchUpMemberLabel(others[0], duplicateFirstNames)} and ${catchUpMemberLabel(others[1], duplicateFirstNames)}`;
+  }
+  return `You, ${catchUpMemberLabel(others[0], duplicateFirstNames)} and ${others.length - 1} others`;
 }
 
 function plural(count: number, singular: string, pluralWord = `${singular}s`): string {
@@ -86,14 +90,14 @@ export function catchUpWorkspaceCheckTotals(workspaces: CatchUpWorkspaceCardVM[]
 /** Measured subline copy (UI-SPEC.md section 3.2). Partial failure wins over the empty state. */
 export function catchUpSubline(vm: CatchUpVM): string {
   const { checked, total, anyFailed, anyPending } = catchUpWorkspaceCheckTotals(vm.workspaces);
-  if (anyFailed) return `Checked ${checked} of ${total} workspaces.`;
+  if (anyFailed) return `Checked ${checked} of ${total} ${plural(total, "workspace")}.`;
   const count = vm.needsYou.length;
   if (count > 0) {
     const workspaces = vm.workspaces.length;
     const verb = count === 1 ? "needs" : "need";
     return `${count} ${plural(count, "thing")} ${verb} you across ${workspaces} ${plural(workspaces, "workspace")}.`;
   }
-  if (anyPending || checked < total) return `Checked ${checked} of ${total} workspaces.`;
+  if (anyPending || checked < total) return `Checked ${checked} of ${total} ${plural(total, "workspace")}.`;
   return "Nothing needs you right now.";
 }
 
@@ -106,33 +110,15 @@ export function catchUpWorkspaceCountsLine(card: CatchUpWorkspaceCardVM): string
   return parts.length ? parts.join(" · ") : null;
 }
 
-export function catchUpAgentAttentionLine(count: number): string | null {
-  if (count <= 0) return null;
+export function catchUpAgentAttentionLine(count: number | null): string | null {
+  if (count === null || count <= 0) return null;
   return count === 1 ? "1 agent needs attention" : `${count} agents need attention`;
 }
 
-/** Per-workspace Latest heading (DECISIONS R9). */
-export function catchUpLatestHeading(sinceLastLooked?: { newMessages: number; lastSeenAt: string }): string {
-  if (sinceLastLooked && sinceLastLooked.newMessages > 0) {
-    return `${sinceLastLooked.newMessages} new since you last looked`;
-  }
-  return "Latest";
-}
-
-export function catchUpLatestGroups(rows: CatchUpLatestRowVM[]): CatchUpLatestGroupVM[] {
-  const groups: CatchUpLatestGroupVM[] = [];
-  const seen = new Map<string, CatchUpLatestGroupVM>();
-  for (const row of catchUpLatestVisible(rows)) {
-    const key = row.workspace.href;
-    let group = seen.get(key);
-    if (!group) {
-      group = { heading: catchUpLatestHeading(row.workspace.sinceLastLooked), rows: [] };
-      seen.set(key, group);
-      groups.push(group);
-    }
-    group.rows.push(row);
-  }
-  return groups;
+/** Workspace-card copy when the overview read measured new messages (DECISIONS R9). */
+export function catchUpNewMessagesSinceLastLookedLine(count: number | null): string | null {
+  if (count === null || count <= 0) return null;
+  return count === 1 ? "1 new message since you last looked" : `${count} new messages since you last looked`;
 }
 
 export function catchUpNeedsYouVisible(items: NeedsYouVM[], expanded: boolean): NeedsYouVM[] {
@@ -143,6 +129,7 @@ export function catchUpNeedsYouMoreCount(items: NeedsYouVM[], expanded: boolean)
   return expanded ? 0 : Math.max(0, items.length - NEEDS_YOU_PREVIEW);
 }
 
+/** Integration supplies `latest` newest-first across all workspaces; this only caps length. */
 export function catchUpLatestVisible(rows: CatchUpLatestRowVM[]): CatchUpLatestRowVM[] {
   return rows.slice(0, LATEST_MAX);
 }
@@ -204,6 +191,8 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
   head.append(title, summary);
   const capsules = node(doc, "div", "hm-catchup-card-capsules");
   for (const group of card.capsules) capsules.append(capsule(doc, group, { compact: true }));
+  const sinceLastLooked = catchUpNewMessagesSinceLastLookedLine(card.newMessagesSinceLastLooked);
+  if (sinceLastLooked) head.append(node(doc, "p", "hm-catchup-card-since", sinceLastLooked));
   const foot = node(doc, "div", "hm-catchup-card-foot");
   const counts = catchUpWorkspaceCountsLine(card);
   if (counts) foot.append(node(doc, "p", "hm-catchup-card-counts", counts));
@@ -211,7 +200,7 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
   if (attention) foot.append(node(doc, "p", "hm-catchup-card-attention", attention));
   element.append(head, capsules, foot);
   element.title = card.name;
-  element.setAttribute("aria-label", [card.name, card.peopleSummary, counts, attention].filter(Boolean).join(". "));
+  element.setAttribute("aria-label", [card.name, card.peopleSummary, sinceLastLooked, counts, attention].filter(Boolean).join(". "));
   return element;
 }
 
@@ -260,6 +249,7 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
     needsTitle.id = "hm-catchup-needs-title";
     section.append(needsTitle);
     const list = node(doc, "div", "hm-catchup-needs-list");
+    list.id = "hm-catchup-needs-list";
     for (const item of visibleNeedsYou) {
       list.append(vm.sample
         ? needsYouPreview(doc, item)
@@ -270,6 +260,8 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
     if (more > 0 && !vm.sample) {
       const button = node(doc, "button", "hm-catchup-show-more", `Show ${more} more`);
       button.type = "button";
+      button.setAttribute("aria-expanded", "false");
+      button.setAttribute("aria-controls", list.id);
       button.addEventListener("click", () => callbacks.onShowMoreNeedsYou());
       section.append(button);
     }
@@ -286,20 +278,16 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
   workspaces.append(grid);
   root.append(workspaces);
 
-  const latestGroups = catchUpLatestGroups(vm.latest);
-  if (latestGroups.length) {
+  const visibleLatest = catchUpLatestVisible(vm.latest);
+  if (visibleLatest.length) {
     const latest = node(doc, "section", "hm-catchup-latest");
-    latestGroups.forEach((group, index) => {
-      const groupEl = node(doc, "div", "hm-catchup-latest-group");
-      const groupTitle = node(doc, "h2", "hm-catchup-section-title", group.heading);
-      groupTitle.id = `hm-catchup-latest-title-${index}`;
-      if (index === 0) latest.setAttribute("aria-labelledby", groupTitle.id);
-      groupEl.append(groupTitle);
-      const list = node(doc, "div", "hm-catchup-latest-list");
-      for (const row of group.rows) list.append(latestRow(doc, row, vm.sample));
-      groupEl.append(list);
-      latest.append(groupEl);
-    });
+    latest.setAttribute("aria-labelledby", "hm-catchup-latest-title");
+    const latestTitle = node(doc, "h2", "hm-catchup-section-title", "Latest");
+    latestTitle.id = "hm-catchup-latest-title";
+    latest.append(latestTitle);
+    const list = node(doc, "div", "hm-catchup-latest-list");
+    for (const row of visibleLatest) list.append(latestRow(doc, row, vm.sample));
+    latest.append(list);
     root.append(latest);
   }
 
