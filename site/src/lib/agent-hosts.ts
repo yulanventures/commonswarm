@@ -95,6 +95,17 @@ export function joinSentence(agentName: string): string {
   return `Use CommonSwarm to join my workspace as ${agentName}, then list who is there.`;
 }
 
+/** A measured join time is optional; missing or invalid metadata stays unknown. */
+export function agentJoinedSentence(agentName: string, workspaceName: string, joinedAt?: string): string {
+  const joined = joinedAt ? new Date(joinedAt) : null;
+  const time = joined && Number.isFinite(joined.getTime())
+    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(joined)
+    : null;
+  return time
+    ? `${agentName} joined ${workspaceName} at ${time}.`
+    : `${agentName} joined ${workspaceName}.`;
+}
+
 const SIGN_IN_STEP: AgentHostStep = Object.freeze({
   text:
     "Sign in to CommonSwarm with the same account you use here ({email}). Tick {workspace} and choose Allow connection.",
@@ -319,9 +330,11 @@ export function agentHostsFor(audience: "setter" | "joiner"): AgentHost[] {
   return AGENT_HOSTS.filter((host) => host.joiner !== "hidden");
 }
 
-/** The shared line for apps whose desktop sign-in returns to this computer. */
-export const DESKTOP_SIGN_IN_NOTE =
-  "Sign-in from desktop apps may not work yet. If it fails, use Terminal agent under Other.";
+/** Desktop sign-in guidance names a route available on that audience's screen. */
+export const DESKTOP_SIGN_IN_NOTE: Readonly<Record<"setter" | "joiner", string>> = Object.freeze({
+  setter: "Sign-in from desktop apps may not work yet. If it fails, go back to Which app? and choose Terminal agent under More apps.",
+  joiner: "Sign-in from desktop apps may not work yet. If it fails, choose Open the workspace and add an agent later.",
+});
 
 /**
  * Said once on every connector host page. Every chat that uses one connection can use the agents
@@ -338,3 +351,12 @@ export const TURN_ONLY_NOTE =
 
 /** Said once on every host page; menu names are the vendors' documented ones. */
 export const MENU_LABELS_NOTE = "Menu names come from each app's help pages and can differ in your version.";
+
+/** /invite connect step footnote (UI-SPEC 3.9; directed messages stay private per SECURITY.md). */
+export const INVITE_CONNECT_FOOTNOTE =
+  "Only you can connect it: it signs in with your account. Its messages show its own name, with yours beside it. What it posts to the shared channel is visible to everyone in Home. Owners and admins can remove any agent from Home.";
+
+/** Assistants a joiner may preset for step 2 (chat apps first, then more). */
+export function inviteAssistantHosts(): AgentHost[] {
+  return agentHostsFor("joiner").filter((host) => host.id !== "terminal");
+}

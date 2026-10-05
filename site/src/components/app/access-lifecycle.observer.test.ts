@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import ts from "typescript";
+import { runInNewContext } from "node:vm";
+import * as hostCatalog from "../../lib/agent-hosts";
 import { PendingRefreshGate } from "../../lib/pending-refresh";
 import { isInviteSubmitCurrent } from "../../lib/invite-submit";
 import {
@@ -130,6 +132,42 @@ const identityLabel = await readFile(
   "utf8",
 );
 
+interface PickerNode {
+  tag: string;
+  props: Record<string, unknown>;
+  children: unknown[];
+}
+
+/** Evaluate the actual template's lists and attributes as a tree, without Astro or a DOM. */
+function pickerElements(audience: "setter" | "joiner", tag = "button"): PickerNode[] {
+  const frontmatter = picker.match(/^---\n([\s\S]*?)\n---/)?.[1];
+  assert.ok(frontmatter);
+  const ast = ts.createSourceFile("picker.ts", frontmatter, ts.ScriptTarget.Latest, true);
+  const declarations = ast.statements.filter((node) => !ts.isImportDeclaration(node))
+    .map((node) => node.getText(ast)).join("\n");
+  const template = picker.replace(/^---[\s\S]*?\n---\n/, "").split("<script>")[0];
+  const js = ts.transpileModule(`${declarations}\n(${template.trim()});`, {
+    fileName: "picker.tsx",
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React, jsxFactory: "element" },
+  }).outputText;
+  const tree = runInNewContext(js, {
+    ...hostCatalog,
+    Astro: { props: { audience } },
+    element: (tag: string, props: Record<string, unknown> | null, ...children: unknown[]) =>
+      ({ tag, props: props ?? {}, children }),
+  });
+  const buttons: PickerNode[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (!node || typeof node !== "object" || !("tag" in node)) return;
+    const element = node as PickerNode;
+    if (element.tag === tag) buttons.push(element);
+    element.children.forEach(visit);
+  };
+  visit(tree);
+  return buttons;
+}
+
 test("Add an agent asks which app the agent lives in; the key flow and the person invite keep their doors", () => {
   /* Redesign 2026-10-04: "Who runs this agent? I do / A teammate does" became a picker of the
      apps agents live in (AgentHostPicker). The two doors it used keep their hooks: the
@@ -139,13 +177,39 @@ test("Add an agent asks which app the agent lives in; the key flow and the perso
   const markup = dashboard.replace(/\{\/\*[\s\S]*?\*\/\}/g, " ");
   assert.doesNotMatch(markup, /Who runs this agent\?/);
   assert.match(dashboard, /<AgentHostPicker audience="setter"/);
-  assert.match(picker, /data-agent-owner-self=\{host\.id === "terminal"/);
+  const buttons = pickerElements("setter");
+  const terminal = buttons.filter((button) => button.props["data-ahp-host"] === "terminal");
+  assert.equal(terminal.length, 1, "the setter renders one Terminal agent chip");
+  assert.equal(terminal[0]!.props["data-agent-owner-self"], "",
+    "the actual Terminal chip must expose the key-flow hook, including in More apps");
+  assert.deepEqual(buttons.filter((button) => button.props["data-agent-owner-self"] !== undefined)
+    .map((button) => button.props["data-ahp-host"]), ["terminal"]);
+  assert.ok(buttons.some((button) => button.props["data-ahp-host"] === "claude"));
+  assert.equal(pickerElements("joiner").some((button) => button.props["data-ahp-host"] === "terminal"), false);
   assert.match(picker, /data-agent-owner-teammate>Invite someone</);
   assert.match(dashboard, /\[data-agent-owner-self\]"\)\?\.addEventListener\("click", openConnect\)/);
   assert.match(dashboard, /\[data-agent-owner-teammate\]"\)\?\.addEventListener\(/);
   assert.match(dashboard, /data-add-agent\]"\)\?\.addEventListener\("click", openAgentChoice\)/);
   assert.match(dashboard, /inviteWorkspaceMember/);
   assert.match(dashboard, /memberInviteUrl/);
+});
+
+test("desktop sign-in fallback in the picker names the rendered Terminal route", () => {
+  const expected = "Sign-in from desktop apps may not work yet. If it fails, go back to Which app? and choose Terminal agent under More apps.";
+  const text = (node: unknown): string => {
+    if (Array.isArray(node)) return node.map(text).join("");
+    if (node && typeof node === "object" && "children" in node) return text((node as PickerNode).children);
+    return typeof node === "string" ? node : "";
+  };
+  const notes = pickerElements("setter", "li").map(text);
+  assert.equal(notes.filter((note) => note === expected).length, 3,
+    "Claude Code, Codex and Cursor must each show the usable fallback");
+  assert.ok(pickerElements("setter", "summary").some((node) => text(node) === "More apps"));
+  assert.ok(pickerElements("setter").some((node) => text(node).trim() === "← Which app?"));
+  assert.ok(pickerElements("setter").some((node) => node.props["data-ahp-host"] === "terminal"
+    && node.props["data-agent-owner-self"] === ""));
+  assert.equal(pickerElements("joiner", "li").map(text).includes(expected), false,
+    "an audience with no Terminal chip must not get the Terminal shortcut");
 });
 
 /*

@@ -104,9 +104,10 @@ test("/invite retains fragment hygiene and requires independent human consent", 
   );
   assert.match(source, /data-view="join-error"/);
   assert.match(source, /data-retry-join/);
-  // After joining she connects her own agents through the shared host picker. The one-time-key
-  // flow is not on the joiner's path, and no protocol word is in anything she reads.
-  assert.match(source, /<AgentHostPicker audience="joiner"/);
+  // After joining she connects her own agents on the connect step. The one-time-key flow is not
+  // on the joiner's path, and no protocol word is in anything she reads.
+  assert.match(source, /data-connect-title/);
+  assert.match(source, /data-assistant-host/);
   assert.doesNotMatch(source, /AgentConnect/);
   assert.doesNotMatch(visibleMarkup(source), PROTOCOL_WORDS);
   assert.doesNotMatch(source, /searchParams\.set\([^,]+,\s*payload\.invitation_token/);

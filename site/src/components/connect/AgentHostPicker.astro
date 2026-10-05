@@ -1,30 +1,13 @@
 ---
 /*
- * ADD AN AGENT, BY THE APP IT LIVES IN.
+ * ADD AN AGENT, BY THE APP IT LIVES IN (UI-SPEC 3.7).
  *
- * The person picks the app their agent already lives in (Claude, Muse, ChatGPT, Codex...) and
- * gets that app's steps, the one connector address and one sentence to say to the agent. Every
- * host, step and status comes from site/src/lib/agent-hosts.ts; this file only lays them out.
- *
- * Two audiences. "setter" is the person setting up a workspace in /app: every host, plus the
- * terminal key flow under Other and a way to invite a person instead. "joiner" is the person who
- * just accepted an invitation on /invite: chat apps first, coding tools folded under "More apps",
- * no key flow, no invite link. The joiner never sees a command she has to run unless she opens
- * "More apps" herself.
- *
- * NO STATE IN THE MARKUP. Every view (the grid, each host, the joined receipt) is rendered here at
- * build time and switched with `hidden`, for the same reason AgentConnect does it: Astro scopes
- * styles to elements present in this template. Script writes only text.
- *
- * HOOKS THE HOST PAGE USES. The terminal tile carries `data-agent-owner-self` and the invite link
- * `data-agent-owner-teammate`, so /app's existing listeners open the key flow and the person
- * invite exactly as before. The element also emits `agent-host-selected`, `agent-host-back`,
- * `agent-host-approve` and `agent-host-another` (bubbling), and exposes `reset()`,
- * `showJoined(agent)` and `setContext({ workspaceName, accountEmail })`.
+ * Setter: /app add-agent pane. Joiner: legacy embed; /invite uses its own connect step.
+ * Host copy and steps come from agent-hosts.ts. Styles live in styles/home/onboarding.css.
  */
+import "../../styles/home/onboarding.css";
 import {
   AGENT_CONNECTOR_ADDRESS,
-  AGENT_HOST_GROUP_LABELS,
   AGENT_HOST_STATUS_LABELS,
   DESKTOP_SIGN_IN_NOTE,
   MENU_LABELS_NOTE,
@@ -43,15 +26,12 @@ interface Props {
 
 const { audience = "setter", class: className } = Astro.props;
 const hosts = agentHostsFor(audience);
-const groupOrder: AgentHostGroup[] = ["chat", "coding", "other"];
-const primary = (host: AgentHost) => audience === "setter" || host.joiner === "primary";
-const groups = groupOrder
-  .map((group) => ({ group, label: AGENT_HOST_GROUP_LABELS[group], hosts: hosts.filter((host) => host.group === group && primary(host)) }))
-  .filter((entry) => entry.hosts.length > 0);
-const more = audience === "joiner" ? hosts.filter((host) => !primary(host)) : [];
+const primaryHosts = hosts.filter((host) => host.joiner === "primary");
+const more = hosts.filter(
+  (host) => host.joiner === "more" || (audience === "setter" && host.id === "terminal"),
+);
 const detailHosts = hosts.filter((host) => host.id !== "terminal");
 
-/** Split step text on its two live slots so the template can render them as elements. */
 const pieces = (text: string): Array<{ kind: "text" | "workspace" | "email"; value: string }> =>
   text.split(/(\{workspace\}|\{email\})/u).filter(Boolean).map((part) =>
     part === "{workspace}" ? { kind: "workspace", value: "this workspace" }
@@ -71,118 +51,107 @@ const orbHue: Record<string, string> = {
 };
 
 const stepsOf = (host: AgentHost): readonly AgentHostStep[] => host.steps;
-/* Any page that leads to a connection, including a waiting host's testing route, carries the
-   turn-only and shared-connection notes (R2 review: ChatGPT's developer-mode route lost them). */
 const connects = (host: AgentHost): boolean => (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
 const notesOf = (host: AgentHost): string[] => [
   ...(connects(host) ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
-  ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE] : []),
+  ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE[audience]] : []),
   ...host.notes,
   MENU_LABELS_NOTE,
 ];
 ---
 
-<agent-host-picker class:list={["ahp", className]} data-audience={audience}>
-  <div class="ahp__view" data-ahp-view="grid">
-    <header class="ahp__head">
-      <p class="ahp__eyebrow">{audience === "joiner" ? "Your agents" : "Add an agent"}</p>
-      <h2 class="ahp__title" tabindex="-1" data-ahp-grid-title>
-        {audience === "joiner" ? "Connect your own agents." : "Which app does your agent live in?"}
-      </h2>
-      <p class="ahp__lead">
-        {audience === "joiner"
-          ? "Each one asks you to sign in as yourself and approve. No keys and no commands."
-          : "Each person connects their own agents. Pick the app, follow its steps, then say one sentence to the agent."}
-      </p>
+<agent-host-picker class:list={["hm-ahp", className]} data-audience={audience}>
+  <div class="hm-ahp__view" data-ahp-view="grid">
+    <button class="hm-ahp__back" type="button" data-ahp-home-back hidden={audience === "joiner"}>
+      <span aria-hidden="true">←</span> Home
+    </button>
+    <header class="hm-ahp__head">
+      <h1 class="hm-ahp__title" tabindex="-1" data-ahp-grid-title>
+        Add one of your agents to Home
+      </h1>
+      <p class="hm-ahp__lead" data-ahp-ownership-line></p>
     </header>
 
-    {groups.map(({ group, label, hosts: groupHosts }) => (
-      <section class="ahp__group" aria-labelledby={`ahp-${audience}-group-${group}`}>
-        <h3 class="ahp__group-title" id={`ahp-${audience}-group-${group}`}>{label}</h3>
-        <ul class="ahp__tiles" role="list">
-          {groupHosts.map((host) => (
-            <li>
-              <button
-                class="ahp__tile"
-                type="button"
-                data-ahp-host={host.id}
-                data-agent-owner-self={host.id === "terminal" ? "" : undefined}
-              >
-                <span class:list={["ahp__orb", host.logo ? "ahp__orb--logo" : `ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                  {host.logo
-                    ? <img src={host.logo.src} alt="" width="22" height="22" loading="lazy" class:list={[{ "ahp__logo--tile": host.logo.tile }]} />
-                    : <span>{orbLetters(host)}</span>}
-                </span>
-                <span class="ahp__tile-copy">
-                  <strong>{host.name}</strong>
-                  <small>{host.maker}</small>
-                  {host.status && (
-                    <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-                  )}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-    ))}
-
-    {more.length > 0 && (
-      <details class="ahp__more">
-        <summary>More apps</summary>
-        <ul class="ahp__tiles" role="list">
-          {more.map((host) => (
-            <li>
-              <button class="ahp__tile" type="button" data-ahp-host={host.id}>
-                <span class:list={["ahp__orb", host.logo ? "ahp__orb--logo" : `ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                  {host.logo
-                    ? <img src={host.logo.src} alt="" width="22" height="22" loading="lazy" class:list={[{ "ahp__logo--tile": host.logo.tile }]} />
-                    : <span>{orbLetters(host)}</span>}
-                </span>
-                <span class="ahp__tile-copy">
-                  <strong>{host.name}</strong>
-                  <small>{host.maker}</small>
-                  {host.status && (
-                    <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
-                  )}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </details>
-    )}
+    <section aria-labelledby="hm-ahp-step-which">
+      <h2 class="hm-ahp__step-title" id="hm-ahp-step-which">1. Which app?</h2>
+      <ul class="hm-ahp__chips" role="list">
+        {primaryHosts.map((host) => (
+          <li>
+            <button
+              class="hm-ahp__chip-btn"
+              type="button"
+              data-ahp-host={host.id}
+              data-agent-owner-self={host.id === "terminal" ? "" : undefined}
+              aria-pressed="false"
+            >
+              <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
+                {host.logo
+                  ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
+                  : <span>{orbLetters(host)}</span>}
+              </span>
+              <span>{host.name}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {more.length > 0 && (
+        <details class="hm-ahp__more">
+          <summary>More apps</summary>
+          <ul class="hm-ahp__chips" role="list">
+            {more.map((host) => (
+              <li>
+                <button
+                  class="hm-ahp__chip-btn"
+                  type="button"
+                  data-ahp-host={host.id}
+                  data-agent-owner-self={host.id === "terminal" ? "" : undefined}
+                  aria-pressed="false"
+                >
+                  <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
+                    {host.logo
+                      ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
+                      : <span>{orbLetters(host)}</span>}
+                  </span>
+                  <span>{host.name}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
 
     {audience === "setter" && (
-      <p class="ahp__footer">
+      <p class="hm-ahp__footer">
         Someone else's agent? Invite the person; they connect it themselves.
-        <button class="ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
+        <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
       </p>
     )}
   </div>
 
   {detailHosts.map((host) => (
-    <section class="ahp__view ahp__detail" data-ahp-detail={host.id} aria-labelledby={`ahp-${audience}-${host.id}-title`} hidden>
-      <button class="ahp__back" type="button" data-ahp-back>
-        <span aria-hidden="true">←</span> All apps
+    <section class="hm-ahp__view" data-ahp-detail={host.id} aria-labelledby={`ahp-${audience}-${host.id}-title`} hidden>
+      <button class="hm-ahp__back" type="button" data-ahp-back>
+        <span aria-hidden="true">←</span> Which app?
       </button>
-      <header class="ahp__detail-head">
-        <span class:list={["ahp__orb", "ahp__orb--large", host.logo ? "ahp__orb--logo" : `ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
+      <h2 class="hm-ahp__step-title">2. Connect it</h2>
+      <header class="hm-ahp__detail-head">
+        <span class:list={["hm-ahp__orb", "hm-ahp__orb--large", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
           {host.logo
-            ? <img src={host.logo.src} alt="" width="28" height="28" loading="lazy" class:list={[{ "ahp__logo--tile": host.logo.tile }]} />
+            ? <img src={host.logo.src} alt="" width="28" height="28" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
             : <span>{orbLetters(host)}</span>}
         </span>
         <div>
-          <h2 class="ahp__title" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">Connect {host.name}</h2>
+          <h1 class="hm-ahp__title" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">Connect {host.name}</h1>
           {host.status && (
-            <span class="ahp__chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+            <span class="hm-ahp__status-chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
           )}
         </div>
       </header>
 
-      <ol class="ahp__steps">
+      <ol class="hm-ahp__steps">
         {stepsOf(host).map((step) => (
-          <li class="ahp__step">
+          <li class="hm-ahp__step">
             <p>
               {pieces(step.text).map((piece) =>
                 piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
@@ -190,36 +159,36 @@ const notesOf = (host: AgentHost): string[] => [
                     : piece.value)}
             </p>
             {step.address && (
-              <div class="ahp__copyable">
-                <code class="ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
-                <button class="ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
+              <div class="hm-ahp__copyable">
+                <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
+                <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
               </div>
             )}
             {step.code && (
-              <div class="ahp__copyable ahp__copyable--code">
-                <pre class="ahp__value">{step.code}</pre>
-                <button class="ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
+              <div class="hm-ahp__copyable">
+                <pre class="hm-ahp__value">{step.code}</pre>
+                <button class="hm-ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
               </div>
             )}
             {step.say && (
-              <div class="ahp__copyable ahp__copyable--say">
-                <q class="ahp__value">{step.say}</q>
-                <button class="ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+              <div class="hm-ahp__copyable hm-ahp__copyable--say">
+                <q class="hm-ahp__value">{step.say}</q>
+                <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
               </div>
             )}
             {step.link && (
-              <a class="ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
+              <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
             )}
           </li>
         ))}
       </ol>
 
       {host.testing && (
-        <details class="ahp__testing">
+        <details class="hm-ahp__testing">
           <summary>{host.testing.heading}</summary>
-          <ol class="ahp__steps">
+          <ol class="hm-ahp__steps">
             {host.testing.steps.map((step) => (
-              <li class="ahp__step">
+              <li class="hm-ahp__step">
                 <p>
                   {pieces(step.text).map((piece) =>
                     piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
@@ -227,15 +196,15 @@ const notesOf = (host: AgentHost): string[] => [
                         : piece.value)}
                 </p>
                 {step.address && (
-                  <div class="ahp__copyable">
-                    <code class="ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
-                    <button class="ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
+                  <div class="hm-ahp__copyable">
+                    <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
                   </div>
                 )}
                 {step.say && (
-                  <div class="ahp__copyable ahp__copyable--say">
-                    <q class="ahp__value">{step.say}</q>
-                    <button class="ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+                  <div class="hm-ahp__copyable hm-ahp__copyable--say">
+                    <q class="hm-ahp__value">{step.say}</q>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
                   </div>
                 )}
               </li>
@@ -244,45 +213,41 @@ const notesOf = (host: AgentHost): string[] => [
         </details>
       )}
 
-      <ul class="ahp__notes" role="list">
+      <ul class="hm-ahp__notes" role="list">
         {notesOf(host).map((note) => <li>{note}</li>)}
       </ul>
 
-      {/* Only /app watches the roster while a host page is open, so only the setter sees a
-          live "waiting" line; on /invite nothing polls, and a pulse there would never end. */}
       {host.status && host.status !== "waiting" && audience === "setter" && (
-        <p class="ahp__waiting" data-ahp-waiting role="status" aria-live="polite">
-          <span class="ahp__pulse" aria-hidden="true"></span>
-          <span data-ahp-waiting-text>Waiting for {host.name} to join <span data-ahp-slot="workspace-plain">this workspace</span>.</span>
+        <p class="hm-ahp__waiting" data-ahp-waiting role="status" aria-live="polite" hidden>
+          <span class="hm-ahp__pulse" aria-hidden="true"></span>
+          <span data-ahp-waiting-text></span>
         </p>
       )}
-      {host.status && host.status !== "waiting" && audience === "joiner" && (
-        <p class="ahp__waiting">
-          When {host.name} has joined, it shows up in <span data-ahp-slot="workspace-plain">this workspace</span> under your name.
-        </p>
-      )}
+      <p class="hm-ahp__waiting" data-ahp-joined-line role="status" aria-live="polite" hidden></p>
     </section>
   ))}
 
-  <section class="ahp__view ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
-    <span class="ahp__orb ahp__orb--large ahp__orb--sage" aria-hidden="true"><span>✓</span></span>
-    <h2 class="ahp__title" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title>Your agent joined.</h2>
-    <p class="ahp__lead" data-ahp-joined-lead>It checks messages when you chat with it.</p>
-    <div class="ahp__actions">
-      <button class="ahp__button" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
-      <button class="ahp__button ahp__button--quiet" type="button" data-ahp-another>Add another agent</button>
+  <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
+    <h2 class="hm-ahp__step-title">3. What it can use in Home</h2>
+    <span class="hm-ahp__orb hm-ahp__orb--large hm-ahp__orb--sage" aria-hidden="true"><span>✓</span></span>
+    <h1 class="hm-ahp__title" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h1>
+    <p class="hm-ahp__lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
+    <div class="hm-ahp__actions">
+      <button class="hm-ahp__button" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
+      <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-another>Add another agent</button>
     </div>
   </section>
 
-  <p class="ahp__status" role="status" aria-live="polite" data-ahp-status></p>
+  <p class="hm-ahp__status" role="status" aria-live="polite" data-ahp-status></p>
 </agent-host-picker>
 
 <script>
-  /** How long the waiting line stays plain before it adds the "not there yet" hint. */
+  import { agentJoinedSentence } from "../../lib/agent-hosts";
   const WAITING_HINT_MS = 120_000;
+  const JOIN_POLL_MS = 5_000;
 
   class AgentHostPickerElement extends HTMLElement {
-    static observedAttributes = ["workspace-name", "account-email"];
+    static observedAttributes = ["workspace-name", "account-email", "viewer-first-name"];
 
     #hostId = "";
     #joinedPrincipalId = "";
@@ -294,7 +259,6 @@ const notesOf = (host: AgentHost): string[] => [
       this.dataset.wired = "true";
       for (const tile of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
         const id = tile.dataset.ahpHost ?? "";
-        // The terminal tile belongs to the host page's key flow (data-agent-owner-self).
         if (id === "terminal") continue;
         tile.addEventListener("click", () => this.showHost(id));
       }
@@ -306,6 +270,9 @@ const notesOf = (host: AgentHost): string[] => [
           this.dispatchEvent(new CustomEvent("agent-host-back", { bubbles: true }));
         });
       }
+      this.querySelector<HTMLButtonElement>("[data-ahp-home-back]")?.addEventListener("click", () => {
+        this.dispatchEvent(new CustomEvent("agent-host-home", { bubbles: true }));
+      });
       for (const button of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy]")) {
         button.addEventListener("click", () => void this.#copy(button));
       }
@@ -332,56 +299,70 @@ const notesOf = (host: AgentHost): string[] => [
       this.#render();
     }
 
-    /** The host currently shown, or "" on the grid and the joined receipt. */
     get hostId(): string {
       return this.#hostId;
     }
 
-    setContext(context: { workspaceName?: string; accountEmail?: string }): void {
+    setContext(context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }): void {
       if (context.workspaceName !== undefined) this.setAttribute("workspace-name", context.workspaceName);
       if (context.accountEmail !== undefined) this.setAttribute("account-email", context.accountEmail);
+      if (context.viewerFirstName !== undefined) this.setAttribute("viewer-first-name", context.viewerFirstName);
     }
 
-    /** Back to the grid. Clears the waiting line and any copy status. */
     reset(): void {
       this.#hostId = "";
       this.#joinedPrincipalId = "";
       window.clearTimeout(this.#waitingTimer);
       this.#show("grid");
       this.#status("");
+      for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
+        chip.setAttribute("aria-pressed", "false");
+      }
+      for (const line of this.querySelectorAll<HTMLElement>("[data-ahp-waiting], [data-ahp-joined-line]")) {
+        line.hidden = true;
+      }
     }
 
     showHost(id: string): void {
       const panel = this.querySelector<HTMLElement>(`[data-ahp-detail="${CSS.escape(id)}"]`);
       if (!panel) return;
       this.#hostId = id;
+      for (const chip of this.querySelectorAll<HTMLButtonElement>("[data-ahp-host]")) {
+        chip.setAttribute("aria-pressed", chip.dataset.ahpHost === id ? "true" : "false");
+      }
       this.#show(id);
-      this.#resetWaiting(panel);
-      panel.querySelector<HTMLElement>(".ahp__title")?.focus({ preventScroll: true });
+      this.#resetWaiting(panel, id);
+      this.#render();
+      panel.querySelector<HTMLElement>(".hm-ahp__title")?.focus({ preventScroll: true });
       this.#scrollToTop(panel);
       this.dispatchEvent(new CustomEvent("agent-host-selected", { bubbles: true, detail: { host: id } }));
     }
 
-    /** Called by the host page when an agent owned by this person appears in the workspace. */
-    showJoined(agent: { name: string; principalId: string; canApprove: boolean }): void {
+    showJoined(agent: { name: string; principalId: string; canApprove: boolean; joinedAt?: string }): void {
       window.clearTimeout(this.#waitingTimer);
       this.#joinedPrincipalId = agent.principalId;
-      const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
+      const workspace = this.getAttribute("workspace-name")?.trim() || "Home";
+      const joinedText = agentJoinedSentence(agent.name, workspace, agent.joinedAt);
       const title = this.querySelector<HTMLElement>("[data-ahp-joined-title]");
       const lead = this.querySelector<HTMLElement>("[data-ahp-joined-lead]");
       const approve = this.querySelector<HTMLButtonElement>("[data-ahp-approve]");
-      if (title) title.textContent = `${agent.name} joined ${workspace}.`;
-      if (lead) lead.textContent = `${agent.name} checks messages when you chat with it.`;
+      const joinedLine = this.querySelector<HTMLElement>("[data-ahp-joined-line]");
+      if (title) title.textContent = joinedText;
+      if (lead) lead.textContent = "Let it use Lists & docs here, or skip for now.";
       if (approve) {
         approve.textContent = `Let ${agent.name} use Lists & docs`;
         approve.hidden = !agent.canApprove;
       }
+      if (joinedLine) {
+        joinedLine.textContent = joinedText;
+        joinedLine.hidden = false;
+      }
+      for (const waiting of this.querySelectorAll<HTMLElement>("[data-ahp-waiting]")) waiting.hidden = true;
       this.#hostId = "";
       this.#show("joined");
       title?.focus({ preventScroll: true });
     }
 
-    /** Back on the grid, focus the tile the person came from, or the grid's heading. */
     #focusGrid(fromHost: string): void {
       const tile = fromHost
         ? this.querySelector<HTMLElement>(`[data-ahp-host="${CSS.escape(fromHost)}"]`)
@@ -393,11 +374,6 @@ const notesOf = (host: AgentHost): string[] => [
       if (target) this.#scrollToTop(target === tile ? tile : this);
     }
 
-    /**
-     * Bring a view's top into sight by scrolling only the nearest scrolling ancestor (the
-     * dashboard's channel body), or the window when the page itself scrolls (/invite).
-     * scrollIntoView would also scroll every outer box and push /app's one-row bar away.
-     */
     #scrollToTop(node: HTMLElement): void {
       let scroller: HTMLElement | null = this.parentElement;
       while (scroller) {
@@ -423,17 +399,29 @@ const notesOf = (host: AgentHost): string[] => [
       if (joined) joined.hidden = view !== "joined";
     }
 
-    #resetWaiting(panel: HTMLElement): void {
+    #hostName(id: string): string {
+      const chip = this.querySelector<HTMLButtonElement>(`[data-ahp-host="${CSS.escape(id)}"]`);
+      const label = chip?.querySelector("span:last-child")?.textContent?.trim();
+      return label && label.length > 0 ? label : "your agent";
+    }
+
+    #resetWaiting(panel: HTMLElement, hostId: string): void {
       window.clearTimeout(this.#waitingTimer);
+      const waiting = panel.querySelector<HTMLElement>("[data-ahp-waiting]");
       const text = panel.querySelector<HTMLElement>("[data-ahp-waiting-text]");
-      const hint = panel.querySelector<HTMLElement>("[data-ahp-waiting-hint]");
-      hint?.remove();
-      if (!text) return;
+      const joinedLine = panel.querySelector<HTMLElement>("[data-ahp-joined-line]");
+      panel.querySelector<HTMLElement>("[data-ahp-waiting-hint]")?.remove();
+      if (joinedLine) joinedLine.hidden = true;
+      if (!waiting || !text) return;
+      const hostName = this.#hostName(hostId);
+      const workspace = this.getAttribute("workspace-name")?.trim() || "Home";
+      text.textContent =
+        `Waiting for an agent from ${hostName} to join ${workspace}. Checking every ${JOIN_POLL_MS / 1000} seconds.`;
+      waiting.hidden = false;
       this.#waitingTimer = window.setTimeout(() => {
-        const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
         const extra = document.createElement("span");
         extra.dataset.ahpWaitingHint = "";
-        extra.className = "ahp__waiting-hint";
+        extra.className = "hm-ahp__waiting-hint";
         extra.textContent =
           ` Not there yet? Check that you allowed ${workspace} on the approval page, then say the sentence again.`;
         text.after(extra);
@@ -443,11 +431,19 @@ const notesOf = (host: AgentHost): string[] => [
     #render(): void {
       const workspace = this.getAttribute("workspace-name")?.trim() || "this workspace";
       const email = this.getAttribute("account-email")?.trim() || "your account";
+      const first = this.getAttribute("viewer-first-name")?.trim() || "";
       for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='workspace'], [data-ahp-slot='workspace-plain']")) {
         node.textContent = workspace;
       }
       for (const node of this.querySelectorAll<HTMLElement>("[data-ahp-slot='email']")) {
         node.textContent = email;
+      }
+      const ownership = this.querySelector<HTMLElement>("[data-ahp-ownership-line]");
+      if (ownership) {
+        const agentName = this.#hostId ? this.#hostName(this.#hostId) : "agent";
+        ownership.textContent = first.length > 0
+          ? `It joins as yours. People in Home see it as ${first}'s ${agentName}.`
+          : `It joins as yours. People in Home see it as your ${agentName}.`;
       }
     }
 
@@ -463,7 +459,6 @@ const notesOf = (host: AgentHost): string[] => [
         await navigator.clipboard.writeText(value);
         copied = true;
       } catch {
-        // Clipboard access can be refused; select the visible value so the person can copy it.
         const target = button.previousElementSibling;
         if (target) {
           const range = document.createRange();
@@ -487,448 +482,3 @@ const notesOf = (host: AgentHost): string[] => [
     customElements.define("agent-host-picker", AgentHostPickerElement);
   }
 </script>
-
-<style>
-  .ahp {
-    display: block;
-    color: var(--text);
-  }
-
-  .ahp__view {
-    display: grid;
-    gap: var(--s-6);
-  }
-
-  .ahp__view[hidden] {
-    display: none;
-  }
-
-  .ahp__head {
-    display: grid;
-    gap: var(--s-2);
-  }
-
-  .ahp__eyebrow {
-    margin: 0;
-    color: var(--accent-bright);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
-
-  .ahp__title {
-    margin: 0;
-    font-family: var(--font-display);
-    font-size: var(--t-2xl);
-    line-height: var(--lh-2xl);
-    letter-spacing: var(--track-head);
-    font-weight: var(--weight-head);
-    text-wrap: balance;
-  }
-
-  .ahp__title:focus {
-    outline: none;
-  }
-
-  .ahp__lead {
-    max-inline-size: 58ch;
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-  }
-
-  .ahp__group {
-    display: grid;
-    gap: var(--s-3);
-  }
-
-  .ahp__group-title {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
-  }
-
-  .ahp__tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 13.5rem), 1fr));
-    gap: var(--s-3);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .ahp__tile {
-    inline-size: 100%;
-    min-block-size: 4.25rem;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    gap: var(--s-3);
-    padding: var(--s-3) var(--s-4);
-    color: var(--text);
-    font: inherit;
-    text-align: start;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--ring-top);
-    cursor: pointer;
-    transition:
-      border-color var(--dur-2) var(--ease-standard),
-      box-shadow var(--dur-2) var(--ease-standard),
-      transform var(--dur-2) var(--ease-standard);
-  }
-
-  .ahp__tile:hover {
-    border-color: var(--border-strong);
-    box-shadow: var(--shadow-md);
-    transform: translateY(-1px);
-  }
-
-  .ahp__tile:focus-visible,
-  .ahp__copy:focus-visible,
-  .ahp__back:focus-visible,
-  .ahp__link:focus-visible,
-  .ahp__button:focus-visible,
-  .ahp__more > summary:focus-visible,
-  .ahp__testing > summary:focus-visible {
-    outline: none;
-    box-shadow: var(--focus-ring);
-  }
-
-  .ahp__tile-copy {
-    display: grid;
-    justify-items: start;
-    gap: 0.1rem;
-    min-inline-size: 0;
-  }
-
-  .ahp__tile-copy strong {
-    font-weight: var(--weight-semibold);
-    font-size: var(--t-base);
-    line-height: 1.3;
-  }
-
-  .ahp__tile-copy small {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-  }
-
-  .ahp__tile-copy .ahp__chip {
-    margin-block-start: 0.3rem;
-  }
-
-  .ahp__orb {
-    inline-size: 2.5rem;
-    block-size: 2.5rem;
-    display: grid;
-    place-items: center;
-    flex: none;
-    border-radius: 50%;
-    color: var(--text);
-    font-family: var(--font-display);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-    background: radial-gradient(circle at 32% 28%, #ffffff 0, var(--ahp-orb, #b8adf2) 62%);
-    box-shadow: 0 10px 18px -12px rgba(37, 42, 50, 0.35);
-  }
-
-  .ahp__orb--large {
-    inline-size: 3.25rem;
-    block-size: 3.25rem;
-    font-size: var(--t-base);
-  }
-
-  .ahp__orb--lavender { --ahp-orb: #b8adf2; }
-  .ahp__orb--peach { --ahp-orb: #f3b89d; }
-  .ahp__orb--sage { --ahp-orb: #aacbb7; }
-  .ahp__orb--sky { --ahp-orb: #a8cbed; }
-
-  /* Owners' marks sit on a constant white disc in both themes (works-with/SOURCES.md). */
-  .ahp__orb--logo {
-    background: #ffffff;
-    border: 1px solid #dedcd6;
-  }
-
-  .ahp__orb--logo img {
-    display: block;
-  }
-
-  .ahp__logo--tile {
-    border-radius: 6px;
-  }
-
-  .ahp__chip {
-    padding: 0.2rem 0.6rem;
-    border-radius: var(--radius-pill);
-    font-size: var(--t-2xs);
-    line-height: 1.4;
-    font-weight: var(--weight-semibold);
-    white-space: nowrap;
-  }
-
-  .ahp__chip[data-status="ready"] {
-    color: var(--success);
-    background: var(--success-dim);
-  }
-
-  .ahp__chip[data-status="untested"] {
-    color: var(--warning);
-    background: var(--warning-dim);
-  }
-
-  .ahp__chip[data-status="waiting"] {
-    color: var(--accent-bright);
-    background: var(--accent-dim);
-  }
-
-  .ahp__more,
-  .ahp__testing {
-    border-block-start: 1px solid var(--border);
-    padding-block-start: var(--s-4);
-  }
-
-  .ahp__more > summary,
-  .ahp__testing > summary {
-    min-block-size: 2.75rem;
-    display: flex;
-    align-items: center;
-    color: var(--text);
-    font-weight: var(--weight-semibold);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-  }
-
-  .ahp__more[open] > summary {
-    margin-block-end: var(--s-3);
-  }
-
-  .ahp__footer {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-  }
-
-  .ahp__link,
-  .ahp__back {
-    min-block-size: 2.75rem;
-    padding: var(--s-2);
-    color: var(--accent-bright);
-    font: inherit;
-    font-weight: var(--weight-semibold);
-    background: transparent;
-    border: 0;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-
-  .ahp__back {
-    justify-self: start;
-    margin-inline-start: calc(var(--s-2) * -1);
-    color: var(--text-muted);
-  }
-
-  .ahp__detail-head {
-    display: flex;
-    align-items: center;
-    gap: var(--s-4);
-  }
-
-  .ahp__detail-head > div {
-    display: grid;
-    justify-items: start;
-    gap: var(--s-2);
-  }
-
-  .ahp__steps {
-    display: grid;
-    gap: var(--s-4);
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    counter-reset: ahp-step;
-  }
-
-  .ahp__step {
-    position: relative;
-    display: grid;
-    gap: var(--s-2);
-    padding-inline-start: 2.5rem;
-    counter-increment: ahp-step;
-  }
-
-  .ahp__step::before {
-    content: counter(ahp-step);
-    position: absolute;
-    inset-inline-start: 0;
-    inset-block-start: 0;
-    inline-size: 1.75rem;
-    block-size: 1.75rem;
-    display: grid;
-    place-items: center;
-    color: var(--accent-bright);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-    background: var(--accent-dim);
-    border-radius: 50%;
-  }
-
-  .ahp__step > p {
-    margin: 0;
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
-  }
-
-  .ahp__copyable {
-    display: flex;
-    align-items: stretch;
-    gap: var(--s-2);
-    max-inline-size: 100%;
-    padding: var(--s-2);
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-
-  .ahp__value {
-    flex: 1;
-    min-inline-size: 0;
-    margin: 0;
-    padding: var(--s-2);
-    font-family: var(--font-mono);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    overflow-wrap: anywhere;
-    white-space: pre-wrap;
-  }
-
-  .ahp__copyable--say .ahp__value {
-    font-family: var(--font-sans);
-    font-size: var(--t-base);
-    quotes: "“" "”";
-  }
-
-  .ahp__copy {
-    flex: none;
-    align-self: center;
-    min-block-size: 2.75rem;
-    min-inline-size: 4.5rem;
-    padding: 0 var(--s-4);
-    color: var(--text);
-    font: inherit;
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-    background: var(--surface);
-    border: 1px solid var(--border-interactive);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-
-  .ahp__button {
-    justify-self: start;
-    min-block-size: 2.75rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0 var(--s-5);
-    color: var(--accent-ink);
-    font: inherit;
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-    text-decoration: none;
-    background: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius-pill);
-    cursor: pointer;
-  }
-
-  .ahp__button:hover {
-    background: var(--accent-bright);
-    border-color: var(--accent-bright);
-  }
-
-  .ahp__button--quiet {
-    color: var(--text);
-    background: var(--surface);
-    border-color: var(--border-interactive);
-  }
-
-  .ahp__button--quiet:hover {
-    background: var(--surface-2);
-    border-color: var(--border-interactive);
-  }
-
-  .ahp__notes {
-    display: grid;
-    gap: var(--s-2);
-    margin: 0;
-    padding: var(--s-4);
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
-    list-style: none;
-    background: var(--surface-2);
-    border-radius: var(--radius);
-  }
-
-  .ahp__waiting {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s-3);
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-  }
-
-  .ahp__pulse {
-    inline-size: 0.6rem;
-    block-size: 0.6rem;
-    flex: none;
-    border-radius: 50%;
-    background: var(--accent);
-    animation: ahp-pulse 1.6s ease-in-out infinite;
-  }
-
-  @keyframes ahp-pulse {
-    0%, 100% { opacity: 0.35; transform: scale(0.85); }
-    50% { opacity: 1; transform: scale(1); }
-  }
-
-  .ahp__joined {
-    justify-items: start;
-  }
-
-  .ahp__actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s-3);
-  }
-
-  .ahp__status {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .ahp__pulse {
-      animation: none;
-    }
-
-    .ahp__tile,
-    .ahp__tile:hover {
-      transition: none;
-      transform: none;
-    }
-  }
-</style>
