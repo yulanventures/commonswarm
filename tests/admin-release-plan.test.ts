@@ -182,8 +182,8 @@ test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w
     if (window === 'W2') input.probe_workspace_id = '00000000-0000-4000-8000-000000000000';
     const refused = validate(input); assert.notEqual(refused.status, 0, window); assert.match(refused.stderr, /w2_release_sha\/w2_window_id are W2b-only/);
   }
-  // W6 may bind the same-release W2b by w2b_window_id; no other window may.
-  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  // W6 binds the W2b by w2b_release_sha and w2b_window_id; that W2b may be at an EARLIER release (yYGHEd ran at a5cb8251). No other window may.
+  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   w6.approval = approval(w6, 'activate-admin-issuance-and-smoke');
   const w6good = validate(w6); assert.equal(w6good.status, 0, w6good.stderr);
   // Required for W6: at the W3-W7 release the issuer credential exists only through W2b.
@@ -192,8 +192,15 @@ test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w
   }
   const w6missing: Input = { ...w6 }; delete w6missing.w2b_window_id;
   const absent = validate(w6missing); assert.notEqual(absent.status, 0); assert.match(absent.stderr, /FAIL ai-inputs: W6 w2b_window_id; STOP/);
-  const w5 = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_window_id: 'Xyz789' }); assert.notEqual(w5.status, 0); assert.match(w5.stderr, /w2b_window_id is W6-only/);
-  const w2bSelf = validate({ ...w2b, w2b_window_id: 'Xyz789' }); assert.notEqual(w2bSelf.status, 0); assert.match(w2bSelf.stderr, /w2b_window_id is W6-only/);
+  for (const value of [undefined, 'a'.repeat(39), 'A'.repeat(40), 7, null]) {
+    const bad: Input = { ...w6, w2b_release_sha: value }; if (value === undefined) delete bad.w2b_release_sha;
+    const r = validate(bad); assert.notEqual(r.status, 0, String(value)); assert.match(r.stderr, /FAIL ai-inputs: W6 w2b_release_sha; STOP/);
+  }
+  // The W2b release may differ from the W6 release (the frozen release F binds the a5cb8251 W2b).
+  assert.notEqual(w6.w2b_release_sha, w6.release_sha); assert.equal(w6good.status, 0);
+  const w5sha = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_release_sha: 'd'.repeat(40) }); assert.notEqual(w5sha.status, 0); assert.match(w5sha.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
+  const w5 = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_window_id: 'Xyz789' }); assert.notEqual(w5.status, 0); assert.match(w5.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
+  const w2bSelf = validate({ ...w2b, w2b_window_id: 'Xyz789' }); assert.notEqual(w2bSelf.status, 0); assert.match(w2bSelf.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
   // Window order: W2b is followed by W3 and only then W4; nothing in W2b or the W6 binding reads W3 or W4 state.
   for (const id of ['ai-w2b-preflight', 'ai-w2-issuer-credential']) assert.doesNotMatch(block(id), /W3-probes|W4-readback|-W3-|-W4-/, id);
   assert.match(plan, /The order is W2b, W3, then W4, W5, W6, W7/);
@@ -204,7 +211,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
-    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
+    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
     const noApproval = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.notEqual(noApproval.status, 0);
     assert.match(noApproval.stderr, /explicit .* approval required/);
@@ -233,7 +240,7 @@ test('admin release plan: W4 requires separate terminal fence approval and W6 re
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
   assert.equal(validate(edge).status, 0);
-  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   smoke.approval = approval(smoke, 'activate-admin-issuance-and-smoke');
   assert.equal(validate(smoke).status, 0);
   const result = run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(smoke) });
@@ -615,7 +622,7 @@ esac
 });
 
 test('admin release plan: C1 owner inputs and exact workspace name refuse when absent', () => {
-  const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   input.approval = approval(input, 'activate-admin-issuance-and-smoke');
   const c1 = { release_sha: input.release_sha, window_id: input.window_id, plan_sha256: input.plan_sha256,
     owner_user_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', smoke_workspace_id: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
@@ -704,7 +711,7 @@ test('admin release plan: W6 absent or stale BROWSER-READY refuses before openin
 });
 
 test('admin release plan: keep-open defaults false and requires its own exact activation/window approval', () => {
-  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_window_id:'Xyz789'};
+  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_release_sha:'d'.repeat(40),w2b_window_id:'Xyz789'};
   input.approval=approval(input,'activate-admin-issuance-and-smoke');
   assert.equal(validate(input).status,0);
   assert.notEqual(validate({...input,keep_open:true}).status,0);
@@ -1010,6 +1017,43 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   assert.match(r.result.stderr,/FAIL ai-close: W4 W4-readback\.txt expected present got missing; STOP/);
 });
 
+test('same-version retry / w3-recovered-close: a recovered W3 closes only with the baseline current and image and no tree at this release', () => {
+  const root=mkdtempSync(join(scratch,'w3-close-'));
+  const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W3',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const oldSha='b'.repeat(40), baselineImage='sha256:'+'e'.repeat(64), inputs=join(root,'inputs.json');
+  writeFileSync(inputs,JSON.stringify({...base(),window:'W3',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_oauth_sha:oldSha,baseline_oauth_image:baselineImage}));
+  const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const attempt=(setup:(oauth:string)=>void,image=baselineImage)=>{
+    const oauth=realpathSync(mkdtempSync(join(root,'oauth-'))); mkdirSync(join(oauth,'releases',oldSha),{recursive:true}); symlinkSync(join(oauth,'releases',oldSha),join(oauth,'current'));
+    setup(oauth);
+    writeFileSync(join(shim,'docker'),`#!/bin/sh\ntest "$*" = "inspect --format {{.Image}} commonswarm-oauth-oauth-1" || exit 9\nprintf '%s\\n' '${image}'\n`,{mode:0o700});
+    const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/home/commonswarm/oauth').join(oauth);
+    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+    writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
+    writeFileSync(join(proof,'ordinary-recovery.json'),recovery); writeFileSync(join(proof,'inputs.json'),readFileSync(inputs));
+    const result=run(`ai_ro() { printf 't\\n'; }\n`+close,{WINDOW:'W3',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputs,PLAN_FILE:planPath,
+      BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:'recovered',PATH:shim+':'+process.env.PATH});
+    const closed=existsSync(join(proof,'closed.txt')); if(existsSync(stage)) removeStage(stage);
+    return {result,closed};
+  };
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  // An aside tree of this release and other releases' trees do not block the close.
+  r=attempt(o=>{ mkdirSync(join(o,'failed-attempts',sha+'-W3-Abc123'),{recursive:true}); mkdirSync(join(o,'releases','f'.repeat(40))); }); assert.equal(r.result.status,0,r.result.stderr);
+  const refusal=/FAIL ai-close: recovered W3 oauth current expected baseline and release tree expected absent got other; run ai-w3-rollback; STOP/;
+  r=attempt(o=>mkdirSync(join(o,'releases',sha))); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal); assert.doesNotMatch(r.result.stderr,/Traceback/);
+  r=attempt(o=>symlinkSync(join(o,'nowhere'),join(o,'releases',sha))); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal);
+  r=attempt(o=>{ mkdirSync(join(o,'releases',sha)); rmSync(join(o,'current')); symlinkSync(join(o,'releases',sha),join(o,'current')); }); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal);
+  r=attempt(()=>undefined,'sha256:'+'c'.repeat(64)); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: recovered W3 running image expected baseline got other; STOP/);
+});
 // ---- shared W2/W2b proof validator (ai-w2b-proof-check), run from plan bytes; paths remapped only ----
 const pyJson = (value: Record<string, unknown>) => '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(value[k])).join(', ') + '}\n';
 const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n';
@@ -1041,7 +1085,7 @@ function proofCheckFixture(kind: 'W2' | 'W2b', bound?: { sha: string; id: string
     put('w2b-forward-catalogs.txt', 'PASS W2b forward catalogs: all five true after the issuer credential\n');
   }
   const checking: Input = kind === 'W2' ? { ...base(), window: 'W2b', w2_release_sha: target.sha, w2_window_id: target.id }
-    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id, ...(bound ? { release_sha: target.sha } : {}) };
+    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: target.sha, w2b_window_id: target.id };
   const inputs = join(root, 'checking-inputs.json'); writeFileSync(inputs, JSON.stringify(checking));
   const source = block('ai-w2b-proof-check').split('/home/commonswarm/admin-issuance').join(join(root, 'admin-issuance')).split('/tmp/admin-issuance-').join(join(root, 'archive-'));
   const check = (env: Record<string, string> = {}) => run(source, { PLAN_FILE: planPath, INPUTS_FILE: inputs, PROOF_CHECK_KIND: kind, ...env });
@@ -1132,9 +1176,15 @@ test('admin release plan: the shared proof validator refuses a W2b that did not 
     assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`); assert.equal(r.stdout, '', name);
   }
   // W6 inputs without the binding refuse before reading anything.
-  const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input.w2b_window_id;
-  writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
-  assert.notEqual(r.status, 0); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/);
+  for (const key of ['w2b_window_id', 'w2b_release_sha']) {
+    const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input[key];
+    writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
+    assert.notEqual(r.status, 0, key); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/, key);
+  }
+  // The W6 release does not select the W2b: inputs naming another W2b release find no proof directory.
+  const other = proofCheckFixture('W2b'); const moved = JSON.parse(readFileSync(other.inputs, 'utf8')); moved.w2b_release_sha = 'f'.repeat(40);
+  writeFileSync(other.inputs, JSON.stringify(moved)); const r = other.check();
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /W2b proof directory expected directory got missing-or-symlink/);
 });
 
 test('admin release plan: the shared backup receipt check accepts only a bound, fresh, well-formed receipt', () => {

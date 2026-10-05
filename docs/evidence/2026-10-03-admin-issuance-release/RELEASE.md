@@ -55,7 +55,7 @@ enforced by `ai-inputs`; extra/missing keys STOP. It contains:
 | probe_workspace_id | W2 only (absent in every other window): the UUID of HezLead's authorized ordinary smoke workspace that the W2 probe credentials must name |
 | w2_release_sha, w2_window_id | W2b only (required there, absent in every other window): the full RELEASE_SHA and window ID of the W2 that committed the schema. W2 may have run at an earlier release (W2 RGLqZX ran at 5f64fab4); its proof directory is bound by these two fields, not by RELEASE_SHA |
 | w6_window_id | W7 only, REQUIRED there: the window ID of the W6 of this release that closed success. W7 reads that W6's C1.json and close-result.json from its box proof directory and measures the digest itself |
-| w2b_window_id | W6 only, REQUIRED there (absent in every other window): the window ID of the W2b, at the SAME release as W6, that provisioned the issuer credential. W2 RGLqZX ran at 5f64fab4 and its issuer credential was rolled back, so at the W3–W7 release the credential exists only through W2b. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt and issuer-credential.txt |
+| w2b_release_sha, w2b_window_id | W6 only, REQUIRED there (absent in every other window): the full RELEASE_SHA and window ID of the W2b that provisioned the issuer credential. W2b may have run at an EARLIER release (W2b yYGHEd ran at a5cb8251; W2b cannot run again once the issuer has LOGIN), exactly as W2b binds W2. W6 activation checks refuse unless that W2b closed success with w2b-preconditions.txt, issuer-credential.txt and w2b-forward-catalogs.txt (validated against THAT release's archive and inputs), and ai-w6-issuer-live re-verifies the credential live: role LOGIN with a password, the installed file 0440 root:986, a TLS login as the issuer with the installed credential, and all five forward catalogs true |
 
 `PLAN_FILE`, `INPUTS_FILE`, `GATE_RECEIPT_FILE` are absolute regular files.
 Every block that extracts and runs plan text (ai-extract, ai_run, the ai-edge-receipt
@@ -158,7 +158,7 @@ def regular(name):
 p,plan,receipt=map(regular,sys.argv[1:])
 d=json.loads(p.read_text())
 keys='release_sha plan_sha256 archive_sha256 window window_id window_end_utc baseline_oauth_sha baseline_oauth_image baseline_edge_sha baseline_edge_image baseline_stack_sha baseline_postgres_image baseline_site_sha baseline_site_target baseline_mcp_caddy_sha256 baseline_api_caddy_sha256 baseline_caddyfile_sha256 baseline_ledger_sha256 gate_receipt_sha256 rollback_decision approval legacy_fence_approval edge_recycle_service edge_recycle_timer edge_recycle_sha256'.split()
-need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_window_id','w6_window_id'}, 'required input keys')
+need(isinstance(d,dict) and set(keys)<=set(d)<=set(keys)|{'keep_open','keep_open_approval','probe_workspace_id','w2_release_sha','w2_window_id','w2b_release_sha','w2b_window_id','w6_window_id'}, 'required input keys')
 for k in keys:
     if k.endswith('_sha'):
         need(isinstance(d[k],str) and re.fullmatch('[0-9a-f]{40}',d[k]), k)
@@ -198,8 +198,10 @@ if d['window']=='W2b':
     need(isinstance(d.get('w2_release_sha'),str) and re.fullmatch('[0-9a-f]{40}',d['w2_release_sha']) is not None, 'W2b w2_release_sha')
     need(isinstance(d.get('w2_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2_window_id']) is not None, 'W2b w2_window_id')
 else: need('w2_release_sha' not in d and 'w2_window_id' not in d, 'w2_release_sha/w2_window_id are W2b-only')
-if d['window']=='W6': need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
-else: need('w2b_window_id' not in d, 'w2b_window_id is W6-only')
+if d['window']=='W6':
+    need(isinstance(d.get('w2b_release_sha'),str) and re.fullmatch('[0-9a-f]{40}',d['w2b_release_sha']) is not None, 'W6 w2b_release_sha')
+    need(isinstance(d.get('w2b_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w2b_window_id']) is not None, 'W6 w2b_window_id')
+else: need('w2b_release_sha' not in d and 'w2b_window_id' not in d, 'w2b_release_sha/w2b_window_id are W6-only')
 if d['window']=='W7': need(isinstance(d.get('w6_window_id'),str) and re.fullmatch('[A-Za-z0-9]{6}',d['w6_window_id']) is not None, 'W7 w6_window_id')
 else: need('w6_window_id' not in d, 'w6_window_id is W7-only')
 if d['window']=='W4': approval(d['legacy_fence_approval'],'terminal-legacy-db-fence')
@@ -2413,7 +2415,9 @@ live database; each must be true (no accepted failure), or it runs the issuer
 rollback and STOPs. A successful close requires issuer-credential.txt and
 w2b-forward-catalogs.txt. The order is W2b, W3, then W4, W5, W6 and W7; W2b checks
 no state of any later or earlier code window. W6 binds this proof by its
-required `w2b_window_id` input at the same release.
+required `w2b_release_sha` and `w2b_window_id` inputs; the W2b may have run at
+an earlier release (W2b yYGHEd ran at a5cb8251, and a W2b cannot run again once
+the issuer has LOGIN). ai-w6-issuer-live then re-verifies the credential live.
 
 ```sh
 # step: ai-w2b-preflight
@@ -2549,7 +2553,7 @@ d=json.load(open(inputs))
 if kind=='W2':
     need(d.get('window')=='W2b','checking window for a W2 proof','W2b','other'); sha,wid=d.get('w2_release_sha'),d.get('w2_window_id')
 else:
-    need(d.get('window')=='W6','checking window for a W2b proof','W6','other'); sha,wid=d.get('release_sha'),d.get('w2b_window_id')
+    need(d.get('window')=='W6','checking window for a W2b proof','W6','other'); sha,wid=d.get('w2b_release_sha'),d.get('w2b_window_id')
 need(isinstance(sha,str) and re.fullmatch('[0-9a-f]{40}',sha) is not None and isinstance(wid,str) and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'INPUTS '+kind+' binding','full-sha-and-window-id','missing-or-other')
 w=pathlib.Path('/home/commonswarm/admin-issuance/release-proofs/'+sha+'-'+kind+'-'+wid)
 need(w.is_dir() and not w.is_symlink() and w.resolve()==w,kind+' proof directory','directory','missing-or-symlink')
@@ -2650,7 +2654,15 @@ import pathlib,sys
 rows=pathlib.Path(sys.argv[1]).read_text().splitlines()
 assert not any(r.split('=',1)[0] in ('MCP_OAUTH_ADMIN_ISSUANCE_ENABLED','MCP_OAUTH_ADMIN_ISSUER_DATABASE_CREDENTIALS_FILE') for r in rows), 'FAIL W3 admin env must be unset; STOP'
 PY
-test ! -e "$NEW_OAUTH" || { printf 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; STOP\n' >&2; exit 1; }
+# Trees of other releases are ignored with evidence; the Compose label check above proves the live service uses OLD_OAUTH.
+python3 - /home/commonswarm/oauth "$BASELINE_OAUTH_SHA" "$RELEASE_SHA" "$PROOF_DIR/oauth-releases-inventory.json" <<'PY' || { printf 'FAIL ai-w3-preflight: OAuth release inventory expected current-on-baseline got other; STOP\n' >&2; exit 1; }
+import json,os,sys
+base,old,new,out=sys.argv[1:5]
+if os.path.realpath(os.path.join(base,'current'))!=os.path.join(base,'releases',old): raise SystemExit(1)
+names=sorted(os.listdir(os.path.join(base,'releases')))
+with open(out,'x') as f: f.write(json.dumps({'baseline':old,'release':new,'current':old,'other_releases_ignored':[n for n in names if n not in (old,new)]},sort_keys=True)+'\n')
+PY
+test ! -e "$NEW_OAUTH" || { printf 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; a W3 at this release left it without a completed rollback: run ai-w3-rollback in this window (it moves the tree to /home/commonswarm/oauth/failed-attempts/<release_sha>-W3-<this window_id>), close recovered, then open a new W3 window; STOP\n' >&2; exit 1; }
 test ! -L "$NEW_OAUTH" || { printf 'FAIL ai-w3-preflight: new OAuth release directory expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p "$NEW_OAUTH"
 cp -a "$RELEASE_ROOT/." "$NEW_OAUTH/"
@@ -2708,7 +2720,7 @@ install -o root -g root -m 0600 "$SECRET_STAGE/compose.new.env" /etc/commonswarm
 docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
  -f "$NEW_OAUTH/deploy/mcp-auth/compose.yaml" -f "$NEW_OAUTH/deploy/mcp-auth/compose.management.yaml" \
  up -d --no-build --pull never --force-recreate oauth >"$SECRET_STAGE/recreate.log" 2>&1
-ln -s "$NEW_OAUTH" /home/commonswarm/oauth/current.admin-issuance
+ln -sfT "$NEW_OAUTH" /home/commonswarm/oauth/current.admin-issuance
 mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current
 timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
 W3_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)
@@ -2761,23 +2773,98 @@ PY
 printf 'PASS\n' >"$PROOF_DIR/W3-probes.txt"
 ```
 
+Same-version retry (HezLead/Tom ruling, frozen bundle). A failed W3 must leave
+no tree at `/home/commonswarm/oauth/releases/<release_sha>`: ai-w3-rollback
+restores the baseline, then runs ai-release-aside, which moves that tree to
+`/home/commonswarm/oauth/failed-attempts/<release_sha>-W3-<window_id>` (parent
+root 0700, same filesystem, one rename, evidence `oauth-aside.json` retained).
+A recovered W3 close requires the tree absent and `current` on the baseline.
+ai-w3-preflight therefore admits exactly one state, tree absent, and refuses a
+present tree with the exact recovery instruction. It does not move it: under
+these rules a present tree means an unfinished rollback, which a human must
+look at, and a preflight move would collide with this window's own rollback
+destination. Fewer states: one admissible precondition, one recovery path.
+Trees of OTHER releases (for example the a5cb8251 tree left by W3 IkdTa6
+before this rule) are ignored with evidence: ai-w3-preflight records them in
+`oauth-releases-inventory.json`; the Compose label and `current` checks prove
+nothing references them. Their retention is a separate assignment.
+
+```sh
+# step: ai-release-aside
+# readonly: no
+# host: box root; run through ai_run by ai-w3-rollback (RELEASE_ASIDE_PART=oauth), after the baseline is live again
+set -euo pipefail
+# Every step fails explicitly: the caller runs ( ai_run ai-release-aside ) || ..., where errexit is ignored.
+case "${RELEASE_ASIDE_PART:-}" in
+ oauth) ASIDE_BASE=/home/commonswarm/oauth; ASIDE_CONTAINER=commonswarm-oauth-oauth-1;;
+ edge) ASIDE_BASE=/home/commonswarm/edge; ASIDE_CONTAINER=commonswarm-edge-edge-runtime-1;;
+ *) printf 'FAIL ai-release-aside: RELEASE_ASIDE_PART expected oauth-or-edge got other; STOP\n' >&2; exit 1;;
+esac
+test ! -L "$ASIDE_BASE/failed-attempts" || { printf 'FAIL ai-release-aside: failed-attempts expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+install -d -o root -g root -m 0700 "$ASIDE_BASE/failed-attempts" || { printf 'FAIL ai-release-aside: failed-attempts expected root-0700-directory got failure; STOP\n' >&2; exit 1; }
+test "$(stat -c '%a %u %g' "$ASIDE_BASE/failed-attempts")" = '700 0 0' || { printf 'FAIL ai-release-aside: failed-attempts mode expected 700-0-0 got other; STOP\n' >&2; exit 1; }
+ASIDE_WORKDIR=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$ASIDE_CONTAINER") || { printf 'FAIL ai-release-aside: live container working directory expected readable got failure; STOP\n' >&2; exit 1; }
+python3 - "$ASIDE_BASE" "$RELEASE_SHA" "$WINDOW" "$WINDOW_ID" "$ASIDE_WORKDIR" "$PROOF_DIR" <<'PY' || { printf 'FAIL ai-release-aside: failed-attempt tree expected moved-aside-or-absent got refused; STOP\n' >&2; exit 1; }
+import datetime,json,os,pathlib,re,stat,sys
+base,sha,window,wid,workdir,proof=sys.argv[1:7]
+def need(ok,what,expected,got):
+    if not ok: raise SystemExit('FAIL ai-release-aside: '+what+' expected '+expected+' got '+got+'; STOP')
+need(re.fullmatch('[0-9a-f]{40}',sha) is not None and window in ('W3','W4') and re.fullmatch('[A-Za-z0-9]{6}',wid) is not None,'release/window binding','full-sha-W3-or-W4-window-id','other')
+part=os.path.basename(base)
+new=os.path.join(base,'releases',sha); parent=os.path.join(base,'failed-attempts'); dest=os.path.join(parent,sha+'-'+window+'-'+wid)
+record=pathlib.Path(proof)/(part+'-aside.json')
+def write(moved):
+    fd=os.open(str(record),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as f: f.write(json.dumps({'part':part,'release_sha':sha,'window':window,'window_id':wid,'from':new,'to':dest if moved else None,'moved':moved,'at':datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},sort_keys=True)+'\n')
+if os.path.lexists(record):
+    # A rerun after an earlier rollback attempt: only a consistent finished state passes.
+    r=json.loads(record.read_text())
+    need(not os.path.lexists(new) and (r.get('moved') is False or os.path.isdir(dest)),'existing '+record.name,'consistent-finished-aside','other')
+    print('PASS ai-release-aside: already done; '+record.name+' retained'); raise SystemExit(0)
+if not os.path.lexists(new):
+    write(False); print('PASS ai-release-aside: no '+part+' tree at this release; nothing to move'); raise SystemExit(0)
+need(not os.path.islink(new),'failed-attempt tree','directory','symlink')
+need(stat.S_ISDIR(os.lstat(new).st_mode),'failed-attempt tree','directory','other')
+current=os.path.realpath(os.path.join(base,'current'))
+need(current!=new and not current.startswith(new+'/'),part+' current','baseline-not-the-failed-tree','failed-tree')
+need(workdir!=new and not workdir.startswith(new+'/'),'live container working directory','baseline-not-the-failed-tree','failed-tree')
+need(os.stat(os.path.dirname(new)).st_dev==os.stat(parent).st_dev,'failed-attempts filesystem','same-as-releases','other')
+need(not os.path.lexists(dest),'aside destination','absent','present')
+os.rename(new,dest)
+need(not os.path.lexists(new) and os.path.isdir(dest) and not os.path.islink(dest),'moved tree','absent-at-source-directory-at-destination','other')
+write(True)
+print('PASS ai-release-aside: '+part+' tree moved to '+dest+'; evidence kept')
+PY
+```
+
 ```sh
 # step: ai-w3-rollback
 # readonly: no
 # host: box root; deadline does not prevent recovery
 set -euo pipefail
-test "$WINDOW" = W3
-install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env
-cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env"
+# Every step fails explicitly (a recovered close may run it as ( ai_run ai-w3-rollback ) || ..., where errexit is
+# ignored), and the block derives its own paths from INPUTS: a recovery shell may not have run ai-w3-preflight.
+test "$WINDOW" = W3 || { printf 'FAIL ai-w3-rollback: window expected W3 got other; STOP\n' >&2; exit 1; }
+W3_BASELINE_OAUTH_SHA=$(python3 -c 'import json,re,sys; v=json.load(open(sys.argv[1]))["baseline_oauth_sha"]; assert re.fullmatch("[0-9a-f]{40}",v); print(v)' "$INPUTS_FILE") || { printf 'FAIL ai-w3-rollback: baseline_oauth_sha expected full-sha got other; STOP\n' >&2; exit 1; }
+OLD_OAUTH=/home/commonswarm/oauth/releases/$W3_BASELINE_OAUTH_SHA
+install -o root -g root -m 0600 "$SECRET_STAGE/compose.env" /etc/commonswarm-oauth/compose.env || { printf 'FAIL ai-w3-rollback: baseline compose.env restore expected success got failure; STOP\n' >&2; exit 1; }
+cmp -s /etc/commonswarm-oauth/service.env "$SECRET_STAGE/service.env" || { printf 'FAIL ai-w3-rollback: service.env bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
 docker compose --project-name commonswarm-oauth --env-file /etc/commonswarm-oauth/compose.env \
  -f "$OLD_OAUTH/deploy/mcp-auth/compose.yaml" -f "$OLD_OAUTH/deploy/mcp-auth/compose.management.yaml" \
- up -d --no-build --pull never --force-recreate oauth >"$SECRET_STAGE/rollback.log" 2>&1
-ln -s "$OLD_OAUTH" /home/commonswarm/oauth/current.admin-issuance
-mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current
-timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done'
-W3_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)
-W3_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")
-test "$W3_RUNNING_IMAGE" = "$W3_BASELINE_IMAGE"
+ up -d --no-build --pull never --force-recreate oauth >"$SECRET_STAGE/rollback.log" 2>&1 || { printf 'FAIL ai-w3-rollback: baseline compose up expected success got failure; STOP\n' >&2; exit 1; }
+# -T and -f: a temporary link left by an interrupted switch is replaced, never followed into a release directory.
+ln -sfT "$OLD_OAUTH" /home/commonswarm/oauth/current.admin-issuance || { printf 'FAIL ai-w3-rollback: temporary current link expected created got failure; STOP\n' >&2; exit 1; }
+mv -Tf /home/commonswarm/oauth/current.admin-issuance /home/commonswarm/oauth/current || { printf 'FAIL ai-w3-rollback: current switch expected success got failure; STOP\n' >&2; exit 1; }
+timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-oauth-oauth-1)" = healthy; do sleep 2; done' || { printf 'FAIL ai-w3-rollback: baseline OAuth health expected healthy got timeout; STOP\n' >&2; exit 1; }
+W3_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1) || { printf 'FAIL ai-w3-rollback: running image expected readable got failure; STOP\n' >&2; exit 1; }
+W3_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE") || { printf 'FAIL ai-w3-rollback: baseline_oauth_image expected readable got failure; STOP\n' >&2; exit 1; }
+test "$W3_RUNNING_IMAGE" = "$W3_BASELINE_IMAGE" || { printf 'FAIL ai-w3-rollback: running image expected baseline got other; STOP\n' >&2; exit 1; }
+test "$(readlink -f /home/commonswarm/oauth/current)" = "$OLD_OAUTH" || { printf 'FAIL ai-w3-rollback: oauth current expected baseline got other; STOP\n' >&2; exit 1; }
+# Same-version retry: the failed attempt's tree leaves releases/<release_sha>, kept as evidence.
+RELEASE_ASIDE_PART=oauth
+( ai_run ai-release-aside ) || { printf 'FAIL ai-w3-rollback: failed-attempt tree expected moved-aside-or-absent got refused; STOP\n' >&2; exit 1; }
+unset RELEASE_ASIDE_PART
+printf 'PASS W3 rollback: baseline image and current restored; release tree aside or absent\n' >"$PROOF_DIR/W3-rollback.txt" || { printf 'FAIL ai-w3-rollback: W3-rollback.txt expected written got failure; STOP\n' >&2; exit 1; }
 printf 'PASS W3 baseline image restored; verify ordinary controls before close\n'
 ```
 
@@ -3822,12 +3909,14 @@ PY
 ai_run ai-w6-activation-approval
 ai_run ai-gates
 ai_deadline
-# Issuer credential provenance: the W2b of THIS release, named by w2b_window_id, closed success and
-# provisioned it; validated by CONTENT through the shared validator (ai-w2b-proof-check).
+# Issuer credential provenance: the W2b named by w2b_release_sha and w2b_window_id (it may be an earlier
+# release) closed success and provisioned it; validated by CONTENT through the shared validator (ai-w2b-proof-check).
 PROOF_CHECK_KIND=W2b
-W2B_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w6-activation-checks: issuer credential provenance expected closed-success W2b at this release got refused; STOP\n' >&2; exit 1; }
+W2B_BINDING=$(ai_run ai-w2b-proof-check) || { printf 'FAIL ai-w6-activation-checks: issuer credential provenance expected closed-success bound W2b got refused; STOP\n' >&2; exit 1; }
 unset PROOF_CHECK_KIND
 printf '%s\n' "$W2B_BINDING" >"$PROOF_DIR/issuer-provenance.json"
+# The provenance is a record; the credential itself is re-verified live, now.
+( ai_run ai-w6-issuer-live ) || { printf 'FAIL ai-w6-activation-checks: issuer credential expected live LOGIN, installed 0440 root:986, TLS login and forward catalogs got refused; STOP\n' >&2; exit 1; }
 test "$(readlink -f /home/commonswarm/edge/current)" = "/home/commonswarm/edge/releases/$RELEASE_SHA"
 test "$(readlink -f /home/commonswarm/oauth/current)" = "/home/commonswarm/oauth/releases/$RELEASE_SHA"
 test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1)")" = "$RELEASE_SHA"
@@ -3877,6 +3966,59 @@ need(re.fullmatch(r'/tmp/admin-issuance-'+sys.argv[1]+r'-[A-Za-z0-9]{6}\.tar',st
 need(hashlib.sha256(archive.read_bytes()).hexdigest()==r['artifact_digest'],'recycle archive digest','recycle.json artifact_digest','mismatch')
 PY
 printf 'PASS W6 DB release identity/checksum/legacy controls; activation prerequisites complete\n' >"$PROOF_DIR/W6-checks.txt"
+```
+
+The issuer credential is re-verified live at every W6, whichever release its
+W2b ran at: the provenance proves who provisioned it, not that it still works.
+
+```sh
+# step: ai-w6-issuer-live
+# readonly: yes
+# host: box root, W6; run through ai_run by ai-w6-activation-checks after the W2b provenance; database read-only
+set -euo pipefail
+# Every step fails explicitly: the caller runs ( ai_run ai-w6-issuer-live ) || ..., where errexit is ignored.
+test "$WINDOW" = W6 || { printf 'FAIL ai-w6-issuer-live: window expected W6 got other; STOP\n' >&2; exit 1; }
+test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w6-issuer-live: issuer credential file expected not-symlink got symlink; STOP\n' >&2; exit 1; }
+test -f /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w6-issuer-live: issuer credential file expected regular-file got missing; STOP\n' >&2; exit 1; }
+test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986' || { printf 'FAIL ai-w6-issuer-live: issuer credential mode expected 440-0-986 got other; STOP\n' >&2; exit 1; }
+W6_ISSUER_ROLE=$(ai_ro -Atq --command "SELECT rolcanlogin AND rolpassword IS NOT NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w6-issuer-live: issuer role query expected success got failure; STOP\n' >&2; exit 1; }
+test "$W6_ISSUER_ROLE" = t || { printf 'FAIL ai-w6-issuer-live: issuer role expected LOGIN-with-password got other; STOP\n' >&2; exit 1; }
+# Login files from the INSTALLED credential (never printed): ai-db-session's service file with the issuer user, key=value only.
+python3 - /etc/commonswarm-oauth/admin-issuer-database-credentials "$SECRET_STAGE" <<'PY' || { printf 'FAIL ai-w6-issuer-live: login files from the installed credential expected prepared got refused; STOP\n' >&2; exit 1; }
+import configparser,json,pathlib,re,sys
+try:
+    cred=json.loads(pathlib.Path(sys.argv[1]).read_text()); p=pathlib.Path(sys.argv[2])
+    assert isinstance(cred,dict) and set(cred)=={'user','password'} and cred['user']=='commonswarm_admin_issuer'
+    assert isinstance(cred['password'],str) and re.fullmatch('[0-9a-f]{64}',cred['password'])
+    c=configparser.ConfigParser(interpolation=None); c.read(p/'service.conf')
+    assert c.has_section('target'); c['target']['user']='commonswarm_admin_issuer'
+    with (p/'issuer-live-service.conf').open('w') as f: c.write(f,space_around_delimiters=False)
+    for line in (p/'issuer-live-service.conf').read_text().splitlines():
+        assert not line or re.fullmatch(r'\[[a-z_]+\]',line) or re.fullmatch(r'[a-z_]+=[^ ].*',line)
+    rows=(p/'pass').read_text().splitlines(); assert len(rows)==1
+    parts=rows[0].split(':'); assert len(parts)==5
+    (p/'issuer-live-pass').write_text(':'.join(parts[:3]+['commonswarm_admin_issuer',cred['password']])+'\n')
+    for name in ['issuer-live-service.conf','issuer-live-pass']: (p/name).chmod(0o600)
+except Exception:
+    raise SystemExit(1) from None
+PY
+docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
+ --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
+ --volume "$SECRET_STAGE/issuer-live-service.conf:/run/service.conf:ro" \
+ --volume "$SECRET_STAGE/issuer-live-pass:/run/pass:ro" \
+ --volume /etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro \
+ --entrypoint psql "$PSQL_IMAGE" -X --set=ON_ERROR_STOP=1 -Atq \
+ --command "SELECT current_user='commonswarm_admin_issuer' AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user;" \
+ >"$SECRET_STAGE/issuer-live-login.result" 2>"$SECRET_STAGE/issuer-live-login.log" || { printf 'FAIL ai-w6-issuer-live: TLS psql login with the installed credential expected exit 0 got failure; STOP\n' >&2; exit 1; }
+test "$(cat "$SECRET_STAGE/issuer-live-login.result")" = t || { printf 'FAIL ai-w6-issuer-live: dedicated-role measurement expected t got non-t; STOP\n' >&2; exit 1; }
+# The five forward catalogs, unmodified, all true (the W2b forward check, repeated live at W6).
+for VERSION in 20261003000001 20261003000002 20261003000003 20261003000004 20261003000005; do
+ printf '\\i /release/deploy/release-proofs/item-ai/%s-catalog.sql\nSELECT :\x27catalog_ok\x27::boolean;\n' "$VERSION" >"$PROOF_DIR/catalog.sql" || { printf 'FAIL ai-w6-issuer-live: catalog.sql expected written got failure; STOP\n' >&2; exit 1; }
+ W6_FORWARD=$(ai_ro -Atq --file /proof/catalog.sql) || W6_FORWARD=error
+ test "$W6_FORWARD" = t || { printf 'FAIL ai-w6-issuer-live: forward catalog %s expected t got other; STOP\n' "$VERSION" >&2; exit 1; }
+done
+printf 'PASS W6 issuer live: LOGIN with password, credential 0440 root:986, TLS login as the issuer, five forward catalogs true\n' >"$PROOF_DIR/issuer-live.txt" || { printf 'FAIL ai-w6-issuer-live: issuer-live.txt expected written got failure; STOP\n' >&2; exit 1; }
+printf 'PASS ai-w6-issuer-live\n'
 ```
 
 The C1 verification row is created here, by the release role, after the
@@ -5233,6 +5375,18 @@ if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered; then
  test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-close: recovered W2b credential file expected absent got symlink; STOP\n' >&2; exit 1; }
  W2B_RECOVERED=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-close: recovered W2b issuer role query expected success got failure; STOP\n' >&2; exit 1; }
  test "$W2B_RECOVERED" = t || { printf 'FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP\n' >&2; exit 1; }
+fi
+if test "$WINDOW" = W3 && test "$CLOSE_RESULT" = recovered; then
+ # A recovered W3 leaves the baseline live and no tree at this release (ai-w3-rollback moved it aside), so a
+ # same-version retry preflight finds its one admissible state.
+ python3 - /home/commonswarm/oauth "$INPUTS_FILE" <<'PY' || { printf 'FAIL ai-close: recovered W3 oauth current expected baseline and release tree expected absent got other; run ai-w3-rollback; STOP\n' >&2; exit 1; }
+import json,os,sys
+base=sys.argv[1]; d=json.load(open(sys.argv[2]))
+ok=os.path.realpath(os.path.join(base,'current'))==os.path.join(base,'releases',d['baseline_oauth_sha']) and not os.path.lexists(os.path.join(base,'releases',d['release_sha']))
+raise SystemExit(0 if ok else 1)
+PY
+ W3_RECOVERED_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1) || { printf 'FAIL ai-close: recovered W3 running image expected readable got failure; STOP\n' >&2; exit 1; }
+ test "$W3_RECOVERED_IMAGE" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")" || { printf 'FAIL ai-close: recovered W3 running image expected baseline got other; STOP\n' >&2; exit 1; }
 fi
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery and report to HezLead; STOP\n' >&2; exit 1; }
 # Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.

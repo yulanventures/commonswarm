@@ -48,7 +48,7 @@ const stamp = (msFromNow: number) => new Date(Date.now() + msFromNow).toISOStrin
 test('W6 inputs: the window may last 90 minutes (W6 only); W7 requires w6_window_id, no other window accepts it', () => {
   const receipt = join(root, 'receipt.json'); writeFileSync(receipt, '{}\n');
   const validate = (input: Record<string, unknown>) => run(block('ai-inputs'), { INPUTS_FILE: inputFile(input), PLAN_FILE: planPath, GATE_RECEIPT_FILE: receipt });
-  const w6: Record<string, unknown> = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789', window_end_utc: stamp(80 * 60_000) };
+  const w6: Record<string, unknown> = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789', window_end_utc: stamp(80 * 60_000) };
   w6.approval = approval(w6, 'activate-admin-issuance-and-smoke');
   assert.equal(validate(w6).status, 0, validate(w6).stderr);
   for (const minutes of [91, 120]) {

@@ -156,8 +156,8 @@ function inputsFor(window: string) {
     edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
   };
   if (window === 'W2') d.probe_workspace_id = probeWorkspace;
-  // W6 names the same-release W2b that provisioned the issuer credential (required since lane/w2b-issuer).
-  if (window === 'W6') d.w2b_window_id = 'W2bFx1';
+  // W6 names the W2b (release and window) that provisioned the issuer credential; it may be an earlier release.
+  if (window === 'W6') { d.w2b_release_sha = 'd'.repeat(40); d.w2b_window_id = 'W2bFx1'; }
   // W7 names the same-release W6 whose C1 report it binds (lane/w6-ready).
   if (window === 'W7') d.w6_window_id = 'W6win1';
   const action = { W6: 'activate-admin-issuance-and-smoke', W7: 'retire-legacy-admin-mint' }[window];
