@@ -59,6 +59,22 @@ const assignedA = (todoId = first, extra: Partial<Todo> = {}): Todo => todo(todo
 const assign = (to: { kind: 'agent' | 'user'; id: string }, start: 'queue' | 'now' = 'queue'): TodoCommand =>
   ({ kind: 'todo_assign', todo_id: first, base_version: 1, to, start });
 
+test('AM16 refuses controls in notes and comments, while newline and tab remain plain content', () => {
+  const s = state(todo());
+  for (const code of [0, 1, 8, 11, 13, 31, 127, 128, 159]) {
+    const bad = `Text${String.fromCodePoint(code)}`;
+    refused(run(state(), { kind: 'todo_create', title: 'Notes', notes: bad }), 'notes_invalid');
+    refused(run(s, { kind: 'todo_update', todo_id: first, base_version: 1, notes: bad }), 'notes_invalid');
+    refused(run(s, { kind: 'todo_comment', target: { kind: 'todo', id: first }, body: bad }), 'comment_invalid');
+    assert.equal(value(run(state(), { kind: 'todo_create', title: 'Notes', notes: 'Text\n\t' })).notes, 'Text\n\t');
+    assert.equal(value(run(s, { kind: 'todo_update', todo_id: first, base_version: 1, notes: 'Text\n\t' })).notes, 'Text\n\t');
+    const comment = run(s, { kind: 'todo_comment', target: { kind: 'todo', id: first }, body: 'Text\n\t' }).outcome;
+    assert.equal(comment.status, 'committed');
+    assert.ok(comment.status === 'committed' && 'body' in comment.value);
+    assert.equal(comment.value.body, 'Text\n\t');
+  }
+});
+
 test('creation stores plain content, attribution and deadline without starting work', () => {
   const initial = state();
   const command: TodoCommand = { kind: 'todo_create', title: '<img src=x>', notes: 'Untrusted text', due_on: '2028-02-29' };

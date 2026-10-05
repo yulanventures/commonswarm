@@ -4573,7 +4573,8 @@ function equal(a, b) {
 }
 var textLength = (text3) => Array.from(text3).length;
 var validTitle = (text3) => typeof text3 === "string" && text3.trim().length > 0 && textLength(text3) <= TODO_TITLE_LIMIT && !/[\u0000-\u001f\u007f-\u009f]/u.test(text3);
-var validNotes = (text3) => typeof text3 === "string" && textLength(text3) <= TODO_NOTES_LIMIT && !text3.includes("\0");
+var hasInvalidControls = (text3) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text3);
+var validNotes = (text3) => typeof text3 === "string" && textLength(text3) <= TODO_NOTES_LIMIT && !hasInvalidControls(text3);
 function validDate(value) {
   if (value === null) return true;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -4665,7 +4666,7 @@ function decideTodo(state, command, ctx) {
       occurred_at_server: ctx.now,
       payload: structuredClone(payload)
     };
-    draft = reduceTodoEvents(draft, [event2]);
+    draft = reduceTodoEvents(state, [...events, event2]);
     events.push(event2);
   };
   const member = (userId) => ctx.members.find((m) => m.user_id === userId && m.workspace_id === state.workspace_id && m.revoked_at === null);
@@ -4700,11 +4701,12 @@ function decideTodo(state, command, ctx) {
     const failure = targetRefusal(input.to);
     if (failure) return refuse2(failure);
     const start = input.start ?? "queue";
-    const gate = input.gate ?? todo2.gate;
+    const owner = input.to.kind === "agent" ? agent(input.to.id).owner_user_id : input.to.id;
+    const ownerStartNow = input.to.kind === "agent" && start === "now" && human && owner === actor.user_id;
+    const gate = input.gate ?? (ownerStartNow ? { kind: "none" } : todo2.gate);
     if (start !== "queue" && start !== "now") return refuse2("invalid_transition");
     const gateError = gateRefusal(todo2.todo_id, gate);
     if (gateError) return refuse2(gateError);
-    const owner = input.to.kind === "agent" ? agent(input.to.id).owner_user_id : input.to.id;
     const accepted = input.to.kind === "user" ? input.to.id === actor.user_id : start === "now" ? human && owner === actor.user_id : owner === actor.user_id || (own2(draft.policies, input.to.id)?.accepts_from ?? TODO_DEFAULT_ACCEPTS_FROM) === "anyone";
     if (accepted && queueFull(todo2, input.to)) return refuse2("queue_full");
     if (todo2.offer) {
@@ -4722,7 +4724,7 @@ function decideTodo(state, command, ctx) {
       notice(todo2.todo_id, "ask", { kind: "user", id: owner }, input.to.kind === "user" ? TODO_NOTICE_BODIES.person_offer : TODO_NOTICE_BODIES.agent_offer);
       return null;
     }
-    accept3(todo2, input.to, start, gate, input.gate === void 0 ? todo2.gate_set_by : gate.kind === "none" ? null : actor.user_id);
+    accept3(todo2, input.to, start, gate, gate.kind === "none" ? null : input.gate === void 0 ? todo2.gate_set_by : actor.user_id);
     if (input.to.kind === "agent") {
       if (start === "now") notice(todo2.todo_id, "ask", input.to, TODO_NOTICE_BODIES.start);
       else if (evaluateGate(gate, draft.todos, ctx.now)) notice(todo2.todo_id, "note", input.to, TODO_NOTICE_BODIES.added);
@@ -4765,7 +4767,7 @@ function decideTodo(state, command, ctx) {
   if (command.kind === "todo_comment") {
     const target = command.target;
     if (!target || !id(target.id) || textLength(target.id) > 255 || !["todo", "list", "doc", "file"].includes(target.kind) || (target.kind === "todo" ? !own2(state.todos, target.id) : !ctx.objects.some((o) => o.kind === target.kind && o.id === target.id))) return refuse2("target_not_found");
-    if (typeof command.body !== "string" || !command.body.trim() || textLength(command.body) > TODO_COMMENT_LIMIT || command.body.includes("\0")) return refuse2("comment_invalid");
+    if (typeof command.body !== "string" || !command.body.trim() || textLength(command.body) > TODO_COMMENT_LIMIT || hasInvalidControls(command.body)) return refuse2("comment_invalid");
     const mentions = command.mentions ?? [];
     if (!Array.isArray(mentions) || mentions.length > TODO_MENTIONS_LIMIT || mentions.some((p) => targetRefusal(p) !== null) || new Set(mentions.map((p) => JSON.stringify(p))).size !== mentions.length) return refuse2("mentions_invalid");
     if (!uuid3(ctx.comment_id) || own2(state.comments, ctx.comment_id)) throw new RangeError("new server comment ID is required");
@@ -4859,7 +4861,13 @@ function decideTodo(state, command, ctx) {
       if (queueFull(todo, offer.to)) return refuse2("queue_full");
     }
     emit("TodoOfferAnswered", { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: offer.offer_id, answer: command.answer });
-    if (command.answer === "accept") accept3(own2(draft.todos, todo.todo_id), offer.to, offer.start, offer.gate);
+    if (command.answer === "accept") accept3(
+      own2(draft.todos, todo.todo_id),
+      offer.to,
+      offer.start,
+      offer.gate,
+      offer.gate.kind === "none" ? null : offer.by.user_id
+    );
     if (command.answer === "accept" && offer.to.kind === "agent" && (offer.start === "now" || evaluateGate(offer.gate, draft.todos, ctx.now))) {
       if (offer.start === "now") notice(todo.todo_id, "ask", offer.to, TODO_NOTICE_BODIES.start);
       else notice(todo.todo_id, "note", offer.to, TODO_NOTICE_BODIES.added);
@@ -4927,6 +4935,7 @@ function decideTodo(state, command, ctx) {
 }
 function reduceTodoEvents(initial, events) {
   let state = initial;
+  let acceptedOffer = null;
   for (const event2 of events) {
     if (!TODO_EVENT_TYPES.includes(event2.type)) throw new UnknownEventTypeError(event2.type, event2.seq);
     const fail = (reason) => {
@@ -4957,7 +4966,10 @@ function reduceTodoEvents(initial, events) {
         };
         const allowed = /* @__PURE__ */ new Set(["version", ...fields[event2.type] ?? []]);
         if (Object.keys(current).some((key2) => !allowed.has(key2) && !equal(current[key2], todo[key2]))) fail("unrelated field changed");
-        if (event2.type === "TodoAssigned" && (todo.state !== "open" || todo.offer !== null || !equal(todo.assigned_by, author) || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || todo.gate_set_by !== (todo.gate.kind === "none" ? null : event2.actor_user) && !(equal(todo.gate, current.gate) && todo.gate_set_by === current.gate_set_by))) fail("invalid assignment");
+        if (event2.type === "TodoAssigned") {
+          const validSetter = acceptedOffer ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event2.command_id && acceptedOffer.offer.decider_user_id === event2.actor_user && event2.actor_agent_principal === null && sameParty(todo.assignee, acceptedOffer.offer.to) && equal(todo.gate, acceptedOffer.offer.gate) && todo.gate_set_by === (todo.gate.kind === "none" ? null : acceptedOffer.offer.by.user_id) : todo.gate_set_by === (todo.gate.kind === "none" ? null : event2.actor_user) || equal(todo.gate, current.gate) && todo.gate_set_by === current.gate_set_by;
+          if (todo.state !== "open" || todo.offer !== null || !equal(todo.assigned_by, author) || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || !validSetter) fail("invalid assignment");
+        }
         if (event2.type === "TodoOffered" && (!todo.offer || !equal(todo.offer.by, author) || todo.offer.at !== at || current.offer !== null)) fail("invalid offer provenance");
         if (event2.type === "TodoStateChanged") {
           const allowedStates = current.state === "open" ? ["doing", "done", "dropped"] : current.state === "doing" ? ["open", "done", "dropped"] : ["open"];
@@ -4967,6 +4979,7 @@ function reduceTodoEvents(initial, events) {
       }
       todos[todo.todo_id] = structuredClone(todo);
     };
+    if (event2.type !== "TodoAssigned") acceptedOffer = null;
     switch (event2.type) {
       case "TodoCreated":
         applyTodo(event2.payload.todo, true);
@@ -4981,6 +4994,11 @@ function reduceTodoEvents(initial, events) {
       case "TodoOfferAnswered": {
         const current = own2(todos, event2.payload.todo?.todo_id);
         if (!current?.offer || current.offer.offer_id !== event2.payload.offer_id || event2.payload.todo.offer !== null || !["accept", "decline", "withdraw", "replaced"].includes(event2.payload.answer)) fail("invalid offer answer");
+        if (event2.payload.answer === "accept") acceptedOffer = {
+          todo_id: current.todo_id,
+          command_id: event2.command_id,
+          offer: current.offer
+        };
         applyTodo(event2.payload.todo);
         break;
       }
@@ -5016,6 +5034,7 @@ function reduceTodoEvents(initial, events) {
         break;
       }
     }
+    if (event2.type === "TodoAssigned") acceptedOffer = null;
     const receipt = event2.payload.receipt;
     if (receipt) {
       const key2 = receiptKey2(receipt.principal, receipt.command_id);

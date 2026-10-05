@@ -78,7 +78,7 @@ export interface AgentWorkPolicy {
     set_by_user: string;
     set_at: string;
 }
-export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required' | 'todo_not_found' | 'target_not_found' | 'title_invalid' | 'notes_invalid' | 'due_invalid' | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member' | 'assignee_removed' | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only' | 'offer_not_pending' | 'not_decider' | 'not_in_queue' | 'gate_invalid' | 'gate_cycle' | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited' | 'invalid_command_context';
+export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required' | 'principal_required' | 'todo_not_found' | 'target_not_found' | 'title_invalid' | 'notes_invalid' | 'due_invalid' | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member' | 'assignee_removed' | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only' | 'offer_not_pending' | 'not_decider' | 'not_in_queue' | 'gate_invalid' | 'gate_cycle' | 'queue_empty' | 'queue_full' | 'todo_limit_reached' | 'request_id_reused' | 'todo_write_rate_limited' | 'invalid_command_context';
 export type TodoOutcome = {
     status: 'committed';
     value: Todo | TodoComment | AgentWorkPolicy;

@@ -38,7 +38,7 @@ export interface TodoComment {
   body: string; mentions: readonly Party[]; created_at: string;
 }
 export interface AgentWorkPolicy { principal_id: string; accepts_from: 'owner' | 'anyone'; set_by_user: string; set_at: string }
-export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required'
+export type TodoRefusal = HouseholdAccessRefusal | 'human_confirmation_required' | 'principal_required'
   | 'todo_not_found' | 'target_not_found' | 'title_invalid' | 'notes_invalid' | 'due_invalid'
   | 'comment_invalid' | 'mentions_invalid' | 'assignee_not_member' | 'assignee_removed'
   | 'invalid_transition' | 'not_assignee' | 'not_permitted' | 'owner_only'
@@ -123,7 +123,8 @@ function equal(a: unknown, b: unknown): boolean {
 const textLength = (text: string): number => Array.from(text).length;
 const validTitle = (text: unknown): text is string => typeof text === 'string' && text.trim().length > 0
   && textLength(text) <= TODO_TITLE_LIMIT && !/[\u0000-\u001f\u007f-\u009f]/u.test(text);
-const validNotes = (text: unknown): text is string => typeof text === 'string' && textLength(text) <= TODO_NOTES_LIMIT && !text.includes('\0');
+const hasInvalidControls = (text: string): boolean => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text);
+const validNotes = (text: unknown): text is string => typeof text === 'string' && textLength(text) <= TODO_NOTES_LIMIT && !hasInvalidControls(text);
 function validDate(value: unknown): boolean {
   if (value === null) return true;
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -305,7 +306,7 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
     const target = command.target;
     if (!target || !id(target.id) || textLength(target.id) > 255 || !['todo', 'list', 'doc', 'file'].includes(target.kind)
       || (target.kind === 'todo' ? !own(state.todos, target.id) : !ctx.objects.some(o => o.kind === target.kind && o.id === target.id))) return refuse('target_not_found');
-    if (typeof command.body !== 'string' || !command.body.trim() || textLength(command.body) > TODO_COMMENT_LIMIT || command.body.includes('\0')) return refuse('comment_invalid');
+    if (typeof command.body !== 'string' || !command.body.trim() || textLength(command.body) > TODO_COMMENT_LIMIT || hasInvalidControls(command.body)) return refuse('comment_invalid');
     const mentions = command.mentions ?? [];
     if (!Array.isArray(mentions) || mentions.length > TODO_MENTIONS_LIMIT || mentions.some(p => targetRefusal(p) !== null)
       || new Set(mentions.map(p => JSON.stringify(p))).size !== mentions.length) return refuse('mentions_invalid');

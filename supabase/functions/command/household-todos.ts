@@ -7,7 +7,11 @@ import type postgres from 'postgres';
 import type { HouseholdIdentity } from './household-objects.ts';
 import type { HouseholdAccessFacts } from '../_shared/household-object-policy.d.ts';
 import type { HouseholdTodoState, Todo, TodoCommand, TodoComment, TodoGate, Party, TodoNotice, TodoOutcome } from '../_shared/household-todos.d.ts';
-import type { AgentWorkFacts } from '../_shared/household-todo-policy.d.ts';
+import type { AgentWorkFacts as PolicyAgentWorkFacts } from '../_shared/household-todo-policy.d.ts';
+
+type AgentWorkFacts = Omit<PolicyAgentWorkFacts, 'connection'> & {
+  connection: PolicyAgentWorkFacts['connection'] | 'connection_off';
+};
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 type Core = Pick<typeof import('../_shared/household-todos.d.ts'), 'decideTodo' | 'reduceTodoEvents' | 'emptyHouseholdTodoState' | 'evaluateGate'>
@@ -125,12 +129,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const projection = objects?.projection as { objects?: Record<string, { object_id: string; kind: 'list' | 'doc' | 'file' }> } | undefined;
     const identityAttempts = await rate(tx, `todo:${identity.principal_id ? 'agent' : 'user'}:${principal.toLowerCase()}`, core.TODO_IDENTITY_WRITE_HOURLY_LIMIT);
     const workspaceAttempts = await rate(tx, `todo:ws:${workspaceId.toLowerCase()}`, core.TODO_WORKSPACE_WRITE_HOURLY_LIMIT);
-    // AM16 also holds at the adapter boundary while the pure-core repair lands.
-    const invalidText = command.kind === 'todo_comment' && /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(command.body) ? 'comment_invalid' as const
-      : (command.kind === 'todo_create' || command.kind === 'todo_update') && command.notes !== undefined && /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(command.notes) ? 'notes_invalid' as const : null;
-    const invalidOutcome = invalidText ? { status: 'refused' as const, reason: invalidText } : null;
-    const decision = invalidOutcome ? { outcome: invalidOutcome, events: [], notices: [], replayed: false,
-      receipt: { principal, command_id: requestId, request_digest: digest, outcome: invalidOutcome } } : core.decideTodo(current, command, { access: checked!.facts, now: checked!.now, command_id: requestId, request_digest: digest,
+    const decision = core.decideTodo(current, command, { access: checked!.facts, now: checked!.now, command_id: requestId, request_digest: digest,
       seq: current.last_seq + 1, event_ids: Array.from({ length: 16 }, () => crypto.randomUUID()), todo_id: crypto.randomUUID(), offer_id: crypto.randomUUID(), comment_id: crypto.randomUUID(),
       members: members.map(r => ({ user_id: String(r.user_id), workspace_id: String(r.workspace_id), revoked_at: stamp(r.revoked_at), role: r.role as 'owner' | 'admin' | 'member' })),
       agents: agents.map(r => ({ principal_id: String(r.principal_id), workspace_id: String(r.workspace_id), owner_user_id: String(r.owner_user_id), revoked_at: stamp(r.revoked_at) })),
@@ -165,13 +164,19 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const v = view(todo, current, now);
     return { todo_id: v.todo_id, version: v.version, title: v.title, state: v.state, due_on: v.due_on, assignee: v.assignee,
       offer: v.offer ? { offer_id: v.offer.offer_id, to: v.offer.to, decider_user_id: v.offer.decider_user_id, start: v.offer.start, gate: { kind: v.offer.gate.kind }, by: v.offer.by, at: v.offer.at } : null,
-      gate: { kind: v.gate.kind, clear: v.gate_clear }, gate_clear: v.gate_clear, queue_position: v.queue_position, comment_count: v.comment_count, state_at: v.state_at };
+      gate: { kind: v.gate.kind, clear: v.gate_clear }, queue_position: v.queue_position, comment_count: v.comment_count, state_at: v.state_at };
   }
-  function page<T>(rows: T[], offset: number, limit: number, items: T[], make: (next: number | null) => unknown) {
+  function page<T>(rows: T[], offset: number, limit: number, items: T[], make: (next: number | null) => unknown, minimumRows = 1) {
     let cursor = offset;
     while (cursor < rows.length && items.length < limit) {
       items.push(rows[cursor]!);
-      if (pageBytes(make(cursor + 1 < rows.length ? cursor + 1 : null)) > PAGE_BUDGET) { items.pop(); break; }
+      if (pageBytes(make(cursor + 1 < rows.length ? cursor + 1 : null)) > PAGE_BUDGET) {
+        // AM16 bounds valid singleton rows. Retain the first row even if an
+        // unexpected stored value exceeds that bound, so paging still advances.
+        if (items.length > minimumRows) items.pop();
+        else cursor++;
+        break;
+      }
       cursor++;
     }
     return cursor < rows.length ? cursor : null;
@@ -191,6 +196,8 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
         WHERE t.principal_id=p.principal_id AND t.revoked_at IS NULL AND t.expires_at>${new Date(now)} AND NOT t.surrender_only AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS token_live,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g JOIN swarm.agent_runs r USING(run_id) JOIN swarm.devices d USING(device_id)
         WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND (g.horizon_expires_at IS NULL OR g.horizon_expires_at>${new Date(now)}) AND NOT g.suspension_active AND r.ended_at IS NULL AND d.revoked_at IS NULL) AS renewal_live,
+      coalesce((SELECT g.revoked_at IS NOT NULL FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id ORDER BY g.created_at DESC,g.renewal_grant_id LIMIT 1),
+        (SELECT t.revoked_at IS NOT NULL FROM swarm.agent_tokens t WHERE t.principal_id=p.principal_id ORDER BY t.issued_at DESC,t.token_id LIMIT 1),false) AS key_off,
       EXISTS (SELECT 1 FROM swarm.renewal_grants g WHERE g.principal_id=p.principal_id AND g.revoked_at IS NULL AND g.suspension_active) AS paused
       FROM swarm.agent_principals p WHERE p.workspace_id=${workspaceId}::uuid AND p.principal_id=${principalId}::uuid`;
     if (!agent) return null;
@@ -214,11 +221,12 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     const doing = Object.values(current.todos).filter(t => t.state === 'doing' && t.assignee?.kind === 'agent' && t.assignee.id === principalId).sort((a,b) => a.state_at.localeCompare(b.state_at))[0];
     const live = agent.revoked_at === null && agent.member_live && (agent.transport === 'hosted_mcp' ? agent.hosted_live : agent.token_live || agent.renewal_live);
     const facts: AgentWorkFacts = { transport: agent.transport as 'local' | 'hosted_mcp', turn_only: Boolean(agent.turn_only),
-      connection: live ? 'live' : agent.revoked_at !== null || !agent.member_live ? 'removed' : agent.paused ? 'paused' : 'key_ended',
+      connection: live ? 'live' : agent.revoked_at !== null || !agent.member_live ? 'removed' : agent.transport === 'hosted_mcp' ? 'connection_off' : agent.key_off ? 'key_off' : agent.paused ? 'paused' : 'key_ended',
       last_activity_at: nullableIso(activity!.last_activity_at), messages_waiting_since: nullableIso(activity!.messages_waiting_since),
-      doing: doing ? { todo_id: doing.todo_id, title: approval?.can_read && live ? doing.title : null, since: doing.state_at } : null,
+      doing: doing ? { todo_id: doing.todo_id, title: doing.title, since: doing.state_at } : null,
       working_on: claim ? { signal_id: String(claim.id), at: iso(claim.created_at), until: iso(claim.until) } : null };
-    return { owner_user_id: String(agent.owner_user_id), status: { work: core.agentWorkState(facts, now), facts },
+    const work = facts.connection === 'connection_off' ? 'disconnected' : core.agentWorkState({ ...facts, connection: facts.connection }, now);
+    return { owner_user_id: String(agent.owner_user_id), status: { work, facts },
       content_access: !live || !approval?.can_read ? 'none' : approval.can_write ? 'read_write' : 'read' };
   }
   async function read(tx: Sql, workspaceId: string, identity: HouseholdIdentity, query: HouseholdTodoQuery) {
@@ -246,12 +254,12 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       const detail = todo ? view(todo, current, now) : null;
       const next = page(rows, 0, query.kind === 'todo_read' ? 20 : limit, loaded, n => detail
         ? { todo: detail, comments: loaded, next_comment_offset: n === null ? null : commentOffset + n }
-        : { comments: loaded, next_offset: n === null ? null : commentOffset + n });
+        : { comments: loaded, next_offset: n === null ? null : commentOffset + n }, detail ? 0 : 1);
       result = detail ? { todo: detail, comments: loaded, next_comment_offset: next === null ? null : commentOffset + next }
         : { comments: loaded, next_offset: next === null ? null : commentOffset + next };
     } else {
       const principal = query.principal_id ?? identity.principal_id;
-      if (!principal) return { status: 'refused' as const, reason: 'assignee_not_member' as const };
+      if (!principal) return { status: 'refused' as const, reason: 'principal_required' as const };
       const facts = await queueFacts(tx, workspaceId, principal, current, now);
       if (!facts) return { status: 'refused' as const, reason: 'assignee_not_member' as const };
       const all = Object.values(current.todos).filter(t => t.state === 'open' || t.state === 'doing').sort((a,b) => (a.queue_rank ?? Number.MAX_SAFE_INTEGER) - (b.queue_rank ?? Number.MAX_SAFE_INTEGER) || a.todo_id.localeCompare(b.todo_id));
@@ -270,13 +278,13 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       let cut = false;
       for (const section of sectionNames) {
         if (query.section && query.section !== section || cut) { next_offset[section] = 0; continue; }
-        next_offset[section] = page(sections[section].map(t => summary(t, current, now)), query.section ? offset : 0, limit, loaded[section], n => ({ ...metadata, ...loaded, next_offset: { ...next_offset, [section]: n } }));
+        const minimumRows = sectionNames.some(name => loaded[name].length > 0) ? 0 : 1;
+        next_offset[section] = page(sections[section].map(t => summary(t, current, now)), query.section ? offset : 0, limit, loaded[section], n => ({ ...metadata, ...loaded, next_offset: { ...next_offset, [section]: n } }), minimumRows);
         if (next_offset[section] !== null) cut = true;
       }
       result = { ...metadata, ...loaded, next_offset };
     }
     if ((await authorize(tx, workspaceId, identity, 'read')).denied) return { status: 'refused' as const, reason: 'workspace_access_refused' as const };
-    if (pageBytes(result) > PAGE_BUDGET) throw new RangeError('To-do read exceeds the response budget.');
     return result;
   }
   return { write, read, state };

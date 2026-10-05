@@ -58,6 +58,10 @@ test('migration has exact private ACLs/RLS, envelope/offer checks, append-only h
     ${proof('catalog', false)}
     REVOKE SELECT ON swarm.household_todos FROM authenticated;
     ${proof('catalog')}
+    GRANT swarm_command TO authenticated;
+    ${proof('catalog', false)}
+    REVOKE swarm_command FROM authenticated;
+    ${proof('catalog')}
     SET LOCAL ROLE swarm_command;
     INSERT INTO swarm.household_todo_streams VALUES ('${f.workspace}','${randomUUID()}',-1);
     ${insertEvent(0)};
@@ -159,6 +163,58 @@ test('store rechecks access, commits multiple events once, persists notice recei
         await tx`UPDATE swarm.household_content_connections SET revoked_at=NULL WHERE connection_id=${g.connection}::uuid`;
         committed(await write(control, g.agent));
       });
+      await t.test('human reads need content consent; missing queue principal has a dedicated refusal', async () => {
+        const read = async (identity: HouseholdIdentity, query: Parameters<typeof adapter.read>[3]) => {
+          await tx`SET LOCAL ROLE swarm_command`;
+          const result = await adapter.read(tx, g.workspace, identity, query);
+          await tx`RESET ROLE`; return result;
+        };
+        const reader = { ...g.human, user_id: g.other };
+        const query = { kind: 'todo_read' as const, todo_id: todo.todo_id };
+        assert.equal((await read(reader, query) as { todo: { title: string } }).todo.title, 'Start this');
+        await tx`DELETE FROM swarm.household_member_content_roles WHERE workspace_id=${g.workspace}::uuid AND user_id=${g.other}::uuid`;
+        assert.deepEqual(await read(reader, query), { status: 'refused', reason: 'content_consent_required' });
+        await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+          VALUES (${g.workspace}::uuid,${g.other}::uuid,'reader',${randomUUID()}::uuid,clock_timestamp())`;
+        assert.equal((await read(reader, query) as { todo: { title: string } }).todo.title, 'Start this');
+        assert.deepEqual(await read(g.human, { kind: 'todo_queue' }), { status: 'refused', reason: 'principal_required' });
+        assert.equal((await read(g.human, { kind: 'todo_queue', principal_id: g.principal }) as { principal_id: string }).principal_id, g.principal);
+      });
+      await t.test('Doing titles belong to the viewer; each dead hosted connection reports connection_off', async () => {
+        const doing = committed(await write({ kind: 'todo_start', todo_id: todo.todo_id }, g.agent));
+        assert.equal(doing.state, 'doing');
+        const read = async () => {
+          await tx`SET LOCAL ROLE swarm_command`;
+          const queue = await adapter.read(tx, g.workspace, g.human, { kind: 'todo_queue', principal_id: g.principal }) as {
+            status: { work: string; facts: { connection: string; doing: { title: string } } }; content_access: string;
+          };
+          await tx`RESET ROLE`; return queue;
+        };
+        const check = async (connection: string, contentAccess: string) => {
+          const queue = await read();
+          assert.equal(queue.status.facts.connection, connection);
+          assert.equal(queue.status.facts.doing.title, 'Start this');
+          assert.equal(queue.content_access, contentAccess);
+          if (connection === 'connection_off') assert.equal(queue.status.work, 'disconnected');
+        };
+        await check('live', 'read_write');
+        await tx`UPDATE swarm.household_content_connections SET revoked_at=clock_timestamp() WHERE connection_id=${g.connection}::uuid`;
+        await check('live', 'none');
+        await tx`UPDATE swarm.household_content_connections SET revoked_at=NULL WHERE connection_id=${g.connection}::uuid`;
+        await check('live', 'read_write');
+        for (const table of ['hosted_mcp_seats', 'hosted_mcp_grant_workspaces', 'hosted_mcp_grants'] as const) {
+          const revoke = table === 'hosted_mcp_grants' ? "state='revoked',revoked_at=clock_timestamp()" : 'revoked_at=clock_timestamp()';
+          const restore = table === 'hosted_mcp_grants' ? "state='active',revoked_at=NULL" : 'revoked_at=NULL';
+          await tx.unsafe(`UPDATE swarm.${table} SET ${revoke} WHERE grant_id=$1::uuid`, [g.grant]);
+          await check('connection_off', 'none');
+          await tx.unsafe(`UPDATE swarm.${table} SET ${restore} WHERE grant_id=$1::uuid`, [g.grant]);
+          await check('live', 'read_write');
+        }
+        await tx`UPDATE swarm.hosted_mcp_grants SET state='pending',activated_at=NULL WHERE grant_id=${g.grant}::uuid`;
+        await check('connection_off', 'none');
+        await tx`UPDATE swarm.hosted_mcp_grants SET state='active',activated_at=clock_timestamp() WHERE grant_id=${g.grant}::uuid`;
+        await check('live', 'read_write');
+      });
       await t.test('rate-limited notice commits the to-do and is never retried', async () => {
         let calls = 0;
         const limited = store(async (_tx, _workspace, _identity, intent) => { calls++; return { to: intent.to, status: 'not_sent', reason: 'signal_rate_limited' }; });
@@ -200,7 +256,7 @@ test('read pages fit the double-serialized 28 KiB transport budget and keep sect
       for (const [i, id] of ids.entries()) await tx`INSERT INTO swarm.household_todos(workspace_id,todo_id,version,title,notes,state,created_by_user,created_at,assignee_principal,queue_rank,gate_kind,gate_note,offer_id,offer_principal,offer_decider,offer_start,offer_gate,offer_by_user,offered_at,state_by_user,state_at,last_seq)
         VALUES (${g.workspace}::uuid,${id}::uuid,1,'Synthetic','Never in a summary',${i < 80 ? 'doing' : 'open'},${g.owner}::uuid,clock_timestamp(),
           ${i >= 190 ? null : g.principal}::uuid,${i >= 190 ? null : i + 1},${i >= 160 && i < 190 ? 'hold' : 'none'},${i >= 160 && i < 190 ? 'Private gate note' : null},
-          ${i >= 190 ? randomUUID() : null}::uuid,${i >= 190 ? g.principal : null}::uuid,${i >= 190 ? g.owner : null}::uuid,${i >= 190 ? 'queue' : null},${i >= 190 ? tx.json({ kind: 'none' }) : null},
+          ${i >= 190 ? randomUUID() : null}::uuid,${i >= 190 ? g.principal : null}::uuid,${i >= 190 ? g.owner : null}::uuid,${i >= 190 ? 'queue' : null},${i >= 190 ? tx.json({ kind: 'hold', note: 'Private offer gate note' }) : null},
           ${i >= 190 ? g.owner : null}::uuid,${i >= 190 ? new Date() : null},${g.owner}::uuid,clock_timestamp(),0)`;
       const read = async (query: Parameters<typeof adapter.read>[3]) => {
         await tx`SET LOCAL ROLE swarm_command`;
@@ -229,6 +285,12 @@ test('read pages fit the double-serialized 28 KiB transport budget and keep sect
             const page = await read({ kind: 'todo_queue', principal_id: g.principal, section, offset: cursor, limit: 50 }) as Record<string, unknown> & { next_offset: Record<string, number | null> };
             const rows = page[section] as Array<Record<string, unknown>>;
             assert.ok(rows.length > 0); assert.ok(rows.every(row => !Object.hasOwn(row,'notes')));
+            for (const row of rows) {
+              assert.equal(Object.hasOwn(row, 'gate_note'), false);
+              assert.equal(Object.hasOwn(row, 'gate_clear'), false);
+              assert.equal(Object.hasOwn(row.gate as object, 'note'), false);
+              if (row.offer) assert.equal(Object.hasOwn((row.offer as { gate: object }).gate, 'note'), false);
+            }
             total += rows.length;
             const next = page.next_offset[section]!;
             if (next !== null) assert.ok(next > cursor);
@@ -237,6 +299,10 @@ test('read pages fit the double-serialized 28 KiB transport budget and keep sect
           assert.equal(total, count);
         }
       });
+      const heldDetail = await read({ kind: 'todo_read', todo_id: ids[160]! }) as { todo: { gate: { kind: string; note: string } } };
+      assert.deepEqual(heldDetail.todo.gate, { kind: 'hold', note: 'Private gate note' });
+      const offeredDetail = await read({ kind: 'todo_read', todo_id: ids[190]! }) as { todo: { offer: { gate: { kind: string; note: string } } } };
+      assert.deepEqual(offeredDetail.todo.offer.gate, { kind: 'hold', note: 'Private offer gate note' });
       for (let i=0;i<20;i++) await tx`INSERT INTO swarm.household_comments(workspace_id,comment_id,target_kind,target_id,author_user,body,mentions,seq,created_at)
         VALUES (${g.workspace}::uuid,${randomUUID()}::uuid,'todo',${ids[0]!},${g.owner}::uuid,${'"'.repeat(4000)},'[]',${i},clock_timestamp())`;
       const first = await read({ kind: 'comment_list', target: { kind: 'todo', id: ids[0]! }, limit: 20 }) as { comments: unknown[]; next_offset: number | null };
