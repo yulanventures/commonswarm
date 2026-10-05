@@ -7,7 +7,9 @@ import {
   AGENT_CONNECTOR_ADDRESS,
   AGENT_HOSTS,
   AGENT_HOST_STATUS_LABELS,
+  INVITE_CONNECT_FOOTNOTE,
   agentHostsFor,
+  agentJoinedSentence,
   cursorInstallLink,
   joinSentence,
 } from "./agent-hosts.ts";
@@ -90,12 +92,20 @@ test("the privacy rule is said in plain words for every connector host", async (
   assert.match(picker, /privacyNote\(/u, "the host page must render the privacy note");
 });
 
-test("only the page that watches the roster shows a live waiting line", () => {
-  /* /app polls the roster while a host page is open; /invite does not, so a pulse there would
-     never resolve. The joiner gets a static sentence instead. */
+test("only the setter page shows a live waiting line with the measured poll interval", () => {
   const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
-  assert.match(picker, /audience === "setter" && \(\s*<p class="ahp__waiting" data-ahp-waiting/u);
-  assert.match(picker, /audience === "joiner" && \(\s*<p class="ahp__waiting">\s*When \{host\.name\} has joined/u);
+  assert.match(picker, /audience === "setter" && \(\s*<p class="hm-ahp__waiting" data-ahp-waiting/u);
+  assert.match(picker, /Waiting for an agent from \$\{hostName\} to join \$\{workspace\}\. Checking every \$\{JOIN_POLL_MS \/ 1000\} seconds\./u);
+  assert.match(picker, /const JOIN_POLL_MS = 5_000;/u);
+  assert.doesNotMatch(picker, /audience === "joiner" &&[\s\S]*data-ahp-waiting/u);
+});
+
+test("the picker chips use joiner primary hosts, then More apps, for every audience", () => {
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  assert.match(picker, /host\.joiner === "primary"/u);
+  assert.match(picker, /host\.joiner === "more"/u);
+  assert.match(picker, /<summary>More apps<\/summary>/u);
+  assert.doesNotMatch(picker, /audience === "setter" \|\| host\.joiner === "primary"/u);
 });
 
 test("the join sentence names the agent and CommonSwarm", () => {
@@ -113,6 +123,23 @@ test("the Cursor link decodes to exactly the public address and nothing else", (
     cursorInstallLink("https://mcp.commonswarm.com/mcp"),
     "cursor://anysphere.cursor-deeplink/mcp/install?name=commonswarm&config=eyJ1cmwiOiJodHRwczovL21jcC5jb21tb25zd2FybS5jb20vbWNwIn0%3D",
   );
+});
+
+test("the invite connect footnote does not claim directed messages are public", () => {
+  assert.match(INVITE_CONNECT_FOOTNOTE, /shared channel/u);
+  assert.doesNotMatch(INVITE_CONNECT_FOOTNOTE, /Everyone in Home sees what it posts here/u);
+});
+
+test("showJoined does not invent a join time when joinedAt is missing", () => {
+  assert.equal(agentJoinedSentence("Claude", "Home"), "Claude joined Home.");
+  assert.equal(agentJoinedSentence("Claude", "Home", ""), "Claude joined Home.");
+  assert.equal(agentJoinedSentence("Claude", "Home", "unknown"), "Claude joined Home.");
+  // A local wall-clock timestamp is deterministic across the test machine's time zones.
+  const measured = agentJoinedSentence("Claude", "Home", "2026-10-05T11:32:00");
+  assert.equal(measured.toLowerCase().replace(/[\u00a0\u202f]/gu, " "), "claude joined home at 11:32 am.");
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  assert.match(picker, /agentJoinedSentence\(agent\.name, workspace, agent\.joinedAt\)/u);
+  assert.doesNotMatch(picker, /: new Date\(\)/u);
 });
 
 test("the joiner never sees the key flow, and her first screen is chat apps", () => {

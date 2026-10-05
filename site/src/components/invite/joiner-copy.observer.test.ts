@@ -14,6 +14,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import * as hostCatalog from "../../lib/agent-hosts";
 import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
 
 /** Words the product keeps out of every screen a household member reads. */
@@ -59,6 +62,94 @@ function view(parts: Parts, name: string): string {
 }
 
 const textOf = (markup: string): string => markup.replace(/<[^>]+>/g, "").replace(/\s+/g, " ");
+
+function connectFixture(page: Parts) {
+  const start = page.script.indexOf("const assistantCatalog =");
+  const end = page.script.indexOf("const continueToAgent =", start);
+  assert.ok(start >= 0 && end > start, "exercise the production connect-step controller only");
+
+  // A small recording boundary, not a DOM: the controller supplies all text and ordering.
+  class Node {
+    children: Node[] = [];
+    className = "";
+    textContent = "";
+    hidden = false;
+    dataset: Record<string, string> = {};
+    onclick?: () => Promise<void>;
+    constructor(readonly tag: string) {}
+    append(...nodes: Node[]) { this.children.push(...nodes); }
+    replaceChildren() { this.children = []; }
+    descendants(): Node[] { return this.children.flatMap((child) => [child, ...child.descendants()]); }
+    querySelector(selector: string) {
+      return this.descendants().find((child) => child.className.split(" ").includes(selector.slice(1))) ?? null;
+    }
+  }
+  const steps = new Node("ol");
+  const notes = new Node("ul");
+  const copy = new Node("button");
+  const elements = new Map([["[data-connect-steps]", steps], ["[data-connect-notes]", notes], ["[data-connect-copy]", copy]]);
+  const writes: string[] = [];
+  let blocked = false;
+  let selected: Node | null = null;
+  let ranges = 0;
+  const js = ts.transpileModule(`${page.script.slice(start, end)}\nfillConnectStep;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const fill = runInNewContext(js, {
+    ...hostCatalog,
+    authEmail: "joiner@example.test",
+    one: (selector: string) => elements.get(selector) ?? null,
+    document: {
+      createElement: (tag: string) => new Node(tag),
+      createRange: () => ({ selectNodeContents: (node: Node) => { selected = node; } }),
+    },
+    window: { getSelection: () => ({ removeAllRanges: () => { ranges = 0; }, addRange: () => { ranges++; } }) },
+    navigator: { clipboard: { writeText: async (text: string) => {
+      if (blocked) throw new Error("Clipboard unavailable");
+      writes.push(text);
+    } } },
+  }) as (workspace: string, hostId: string) => void;
+
+  return { fill, steps, notes, copy, writes, blockClipboard: () => { blocked = true; },
+    selected: () => selected, ranges: () => ranges };
+}
+
+test("connect prompt copy selects the join sentence when the clipboard is blocked", async () => {
+  const { fill, steps, copy, writes, blockClipboard, selected, ranges } = connectFixture(await load("InviteOnramp.astro"));
+
+  fill("Home", "claude");
+  const expected = "Use CommonSwarm to join my workspace as Claude, then list who is there.";
+  const values = steps.descendants().filter((node) => node.className === "hm-ahp__value");
+  assert.equal(values[0]?.tag, "code", "the address comes first, so a generic first-value lookup is wrong");
+  assert.notEqual(values[0]?.textContent, expected);
+  const joinPrompt = values.find((node) => node.textContent === expected);
+  assert.ok(joinPrompt, "the controller renders the catalog's join sentence");
+  assert.ok(copy.onclick);
+  await copy.onclick();
+  assert.deepEqual(writes, [expected], "positive control: clipboard copy uses the join prompt");
+  assert.equal(selected(), null);
+  assert.equal(copy.textContent, "Copied");
+  blockClipboard();
+  await copy.onclick();
+  assert.equal(selected(), joinPrompt, "manual copy selects that same prompt, never the connector address");
+  assert.equal(ranges(), 1);
+  assert.equal(copy.textContent, "Select and copy");
+});
+
+test("/invite desktop sign-in fallback uses the workspace link instead of an absent Terminal chip", async () => {
+  const page = await load("InviteOnramp.astro");
+  const { fill, notes } = connectFixture(page);
+  const expected = "Sign-in from desktop apps may not work yet. If it fails, choose Open the workspace and add an agent later.";
+  for (const hostId of ["claude-code", "codex", "cursor"]) {
+    fill("Home", hostId);
+    assert.ok(notes.children.some((node) => node.textContent === expected), hostId);
+    for (const node of notes.children) assert.doesNotMatch(node.textContent, /Terminal agent|under Other/);
+  }
+  fill("Home", "claude");
+  assert.equal(notes.children.some((node) => node.textContent === expected), false,
+    "the desktop warning must stay limited to desktop sign-in hosts");
+  assert.match(view(page, "connect"), /<a [^>]*href="\/app">Open the workspace<\/a>/);
+});
 
 test("the access choices come from household-access.ts, and both pages build their cards from it", async () => {
   // The constants themselves: every enforced role has words (household-access.test.mjs pins the
@@ -122,25 +213,31 @@ test("/invite sender view uses household words and keeps its hooks", async () =>
   assert.match(page.script, /Copied\. Send it to the person you invited\./);
 });
 
-test("/invite review: a 'Join {workspace}?' card with who is here, what she will see and what stays private", async () => {
+test("/invite review: who invited her to Home, access and assistant choices, with nothing preselected", async () => {
   const page = await load("InviteOnramp.astro");
   const review = view(page, "review");
-  assert.match(review, /<h1[^>]*>Join <span data-review-workspace>this workspace<\/span>\?<\/h1>/);
+  assert.match(
+    review,
+    /<h1[^>]*><span data-inviter>A teammate<\/span> invited you to <span data-review-workspace>Home<\/span>\.<\/h1>/,
+  );
   assert.match(review, /<h2[^>]*>Who is here<\/h2> <p data-review-audience><\/p>/);
   assert.match(review, /<h2[^>]*>What you will see<\/h2> <p data-review-disclosure><\/p>/);
   assert.match(textOf(review), /What stays private: your other workspaces\./);
   assert.match(review, /data-review-expiry/);
-  // The server's own disclosure sentence is shown as sent; no second typed disclosure beside it.
   assert.doesNotMatch(textOf(review), /retained history|accept the audience/i);
-  // The tick, the button and the way out.
+  assert.match(review, /<legend>Which assistant will you bring\?<\/legend>/);
+  assert.match(review, /data-assistant-host/);
+  assert.match(review, /Just me for now/);
+  assert.doesNotMatch(review, /<input type="radio"[^>]*\bchecked\b/);
   assert.match(review, /<input type="checkbox" data-independent-consent \/> <span>I'm joining as myself\.<\/span>/);
   assert.match(
     review,
-    /<button[^>]*data-confirm-join><span class="invite-onramp__label">Join <span data-review-workspace>this workspace<\/span><\/span><\/button>/,
+    /<button[^>]*data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home<\/span><\/span><\/button>/,
   );
   assert.match(review, /<a [^>]*href="\/app">Not now<\/a>/);
-  // One workspace-name slot is not enough now that the title and the button both carry it.
   assert.match(page.script, /querySelectorAll<HTMLElement>\('\[data-review-workspace\]'\)/);
+  assert.match(page.script, /querySelectorAll<HTMLElement>\("\[data-join-workspace-name\]"\)/);
+  assert.match(page.script, /data-assistant-host/);
 });
 
 test("/invite review reads the checked radio and still refuses until a role is chosen and the box is ticked", async () => {
@@ -164,39 +261,40 @@ test("/invite review reads the checked radio and still refuses until a role is c
   assert.match(page.script, /lockReview\(true\);/);
 });
 
-test("/invite connect step: a receipt, the shared host picker for the joiner, then the way into the workspace", async () => {
+test("/invite connect step: step 2 host instructions or a receipt, then the way into the workspace", async () => {
   const page = await load("InviteOnramp.astro");
   const connect = view(page, "connect");
-  assert.match(connect, /<h1[^>]*>You're in <span data-workspace>a workspace<\/span>\.<\/h1>/);
-  // The receipt heading comes first, so focus lands there; the picker follows, then the link.
-  const receipt = connect.indexOf("<h1");
-  const picker = connect.indexOf('<AgentHostPicker audience="joiner" />');
-  const open = connect.indexOf(">Open the workspace</a>");
-  assert.ok(receipt >= 0 && picker > receipt && open > picker, "receipt, then the picker, then Open the workspace");
+  assert.match(connect, /data-connect-step-label/);
+  assert.match(connect, /data-connect-title/);
+  assert.match(connect, /data-connect-steps/);
+  assert.match(connect, /data-connect-notes/);
+  assert.match(connect, /data-connect-status/);
+  assert.match(connect, /data-connect-copy/);
+  assert.match(connect, /Copy the connect prompt instead/);
+  assert.match(connect, /data-connect-footnote/);
+  assert.match(page.source, /INVITE_CONNECT_FOOTNOTE/);
   assert.match(connect, /<a [^>]*href="\/app">Open the workspace<\/a>/);
-  // The old protocol paragraphs and the one-time-key flow are not on this page.
+  assert.doesNotMatch(page.source, /<AgentHostPicker audience="joiner"/);
   assert.doesNotMatch(page.source, /AgentConnect/);
-  assert.doesNotMatch(page.text, /separate|connector|authorization|personal workspace|connected apps/i);
   assert.doesNotMatch(page.script, /agent-connect/);
+  assert.doesNotMatch(page.text, /separate|connector|authorization|personal workspace|connected apps/i);
+  assert.match(page.script, /fillConnectStep\(/);
 });
 
-test("/invite tells the picker the workspace and the sign-in email, with a fallback if it is not defined yet", async () => {
+test("/invite connect step fills host steps from the catalog and keeps the workspace name on the receipt", async () => {
   const page = await load("InviteOnramp.astro");
-  assert.match(page.script, /one<PickerElement>\("agent-host-picker"\)/);
-  assert.match(page.script, /typeof picker\.setContext === "function"/);
-  assert.match(page.script, /picker\.setContext\(authEmail \? \{ workspaceName, accountEmail: authEmail \} : \{ workspaceName \}\)/);
-  // The fallback writes the picker's own attributes. They must be the ones it observes.
-  const picker = await readFile(new URL("../connect/AgentHostPicker.astro", import.meta.url), "utf8");
-  const observed = /static observedAttributes = \[([^\]]*)\]/.exec(picker)?.[1] ?? "";
-  for (const attribute of ["workspace-name", "account-email"]) {
-    assert.ok(observed.includes(`"${attribute}"`), `the picker no longer observes ${attribute}`);
-    assert.ok(page.script.includes(`"${attribute}"`), `/invite no longer sets ${attribute}`);
-  }
-  // The email comes from the session the page already reads, in every place it reads one.
+  assert.match(page.script, /inviteAssistantHosts\(\)/);
+  assert.match(page.script, /fillConnectStep\(workspaceName, hostId\)/);
+  assert.match(page.script, /step\.code/);
+  assert.match(page.script, /AGENT_HOST_STATUS_LABELS/);
+  assert.match(page.script, /connectNotes\(/);
+  assert.match(page.script, /sessionStorage\.setItem\(assistantStorageKey\(workspaceId\), hostId\)/);
+  assert.match(page.script, /sessionStorage\.getItem\(assistantStorageKey\(joined\.id\)\)/);
   assert.match(page.script, /authEmail = session\.user\.email \?\? null;/);
   assert.match(page.script, /authEmail = session\?\.user\.email \?\? null;/);
-  // The receipt names the server's workspace, so it is right when she returns later too.
   assert.match(page.script, /'\[data-view="connect"\] \[data-workspace\]'\)\) \{\s*node\.textContent = workspaceName;/);
+  assert.match(page.script, /INVITE_CONNECT_FOOTNOTE/);
+  assert.doesNotMatch(page.script, /innerHTML|outerHTML|insertAdjacentHTML/);
 });
 
 test("/invite keeps every view and the join state machine", async () => {
@@ -399,7 +497,7 @@ test("a button or link-button never mixes loose text with an element (the flex-g
   const onramp = await load("InviteOnramp.astro");
   assert.match(
     onramp.markup,
-    /data-confirm-join><span class="invite-onramp__label">Join <span data-review-workspace>this workspace<\/span><\/span><\/button>/,
+    /data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home<\/span><\/span><\/button>/,
   );
 });
 
