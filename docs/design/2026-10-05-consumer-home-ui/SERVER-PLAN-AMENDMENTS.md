@@ -64,3 +64,15 @@ AM14 (Cursor Grok r2 NB5) todo_queue with no `section` fills sections in the ord
 AM15 (Cursor Grok r2 NB2/NB4) SERVER-PLAN C's assignment table row "agent A | any credential of A's owner" is REPLACED
     by AM1 (human credential only for `now`). L4 regenerates the generated bundle once after its registry edits; L2 is
     the first writer, L4 the second, never at the same time.
+
+## Round 3 (Codex FAIL: an indivisible oversized record) — answer
+AM16 Notes (<= 4000) and comment bodies (<= 4000) may not contain control characters except newline (U+000A) and
+    tab (U+0009): a CHECK in the migration (like the title check) and the same refusal in the decider (notes_invalid /
+    comment_invalid). Worst case per character after double serialization is then 4 bytes (quote, backslash, a 4-byte
+    UTF-8 code point per 2 UTF-16 units), so one to-do with maximum notes or one maximum comment stays near 17 KiB, under
+    the 28 KiB budget. Progress rule: every page returns at least its first row even when the budget is tight; todo_read
+    always returns the to-do and then as many comments as fit (possibly none, with next_comment_offset set);
+    comment_list always returns at least one comment. Tests add 4000 control-free worst-case notes and comments
+    (quotes, backslashes, newlines, emoji) and a rejected U+0001 case with a positive control.
+Consensus: rounds 1-3 found 5 blocking points (AM1, AM2, AM3, AM4, AM13/AM16); every one is answered here and is
+    verified by the lane checkers and tests that implement it (L1b, L2, L2b). Record: lanes/plan-refute/.
