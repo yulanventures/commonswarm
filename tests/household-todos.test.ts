@@ -106,6 +106,95 @@ test('accepted gated work joins the back and emits no ready notice', () => {
   assert.deepEqual(d.notices, []);
 });
 
+test('AM1 only the human owner can assign now, including on creation and with anyone policy', () => {
+  const commands: TodoCommand[] = [
+    { kind: 'todo_create', title: 'Buy milk', assign: { to: { kind: 'agent', id: agentA }, start: 'now' } },
+    assign({ kind: 'agent', id: agentA }, 'now'),
+  ];
+  for (const command of commands) {
+    for (const policy of ['owner', 'anyone'] as const) {
+      const s = state(todo(), assignedA(second, { queue_rank: 4 }));
+      s.policies = { [agentA]: { principal_id: agentA, accepts_from: policy, set_by_user: alice, set_at: at } };
+      const sibling = context(s, command, alice, agentB);
+      sibling.agents = sibling.agents.map(a => ({ ...a, owner_user_id: alice }));
+      const offered = decideTodo(s, command, sibling);
+      const result = value(offered);
+      assert.deepEqual(result.assignee, null);
+      assert.equal(result.queue_rank, null);
+      assert.deepEqual(result.offer, {
+        offer_id: uid(300000), to: { kind: 'agent', id: agentA }, decider_user_id: alice,
+        start: 'now', gate: { kind: 'none' }, by: { user_id: alice, principal_id: agentB }, at,
+      });
+      assert.deepEqual(offered.events.map(e => e.type), command.kind === 'todo_create'
+        ? ['TodoCreated', 'TodoOffered'] : ['TodoOffered']);
+      assert.equal(reduceTodoEvents(s, offered.events).todos[second]!.queue_rank, 4);
+      assert.deepEqual(offered.notices, [{ kind: 'ask', to: [{ kind: 'user', id: alice }],
+        about: `todo:${command.kind === 'todo_create' ? uid(100000) : first}`, body: 'Asks for a to-do for your agent.' }]);
+
+      const human = run(s, command);
+      assert.deepEqual(value(human).assignee, { kind: 'agent', id: agentA });
+      assert.equal(value(human).offer, null);
+      assert.equal(value(human).queue_rank, 1);
+      assert.equal(reduceTodoEvents(s, human.events).todos[second]!.queue_rank, 2);
+      assert.deepEqual(human.events.map(e => e.type), command.kind === 'todo_create'
+        ? ['TodoCreated', 'TodoAssigned', 'TodoQueueOrdered', 'TodoStartAsked']
+        : ['TodoAssigned', 'TodoQueueOrdered', 'TodoStartAsked']);
+    }
+  }
+});
+
+test('agent credentials add queued or gated work only as allowed by the acceptance policy', () => {
+  for (const gate of [{ kind: 'none' }, { kind: 'hold', note: 'Ask first' }] as const) {
+    const s = state(todo(), assignedA(second, { queue_rank: 4 }));
+    const command: TodoCommand = { kind: 'todo_assign', todo_id: first, base_version: 1,
+      to: { kind: 'agent', id: agentA }, start: 'queue', gate };
+    const offered = run(s, command, bob, agentB);
+    assert.equal(value(offered).assignee, null);
+    assert.equal(value(offered).queue_rank, null);
+    assert.equal(value(offered).offer!.decider_user_id, alice);
+    assert.deepEqual(value(offered).offer!.gate, gate);
+    assert.equal(reduceTodoEvents(s, offered.events).todos[second]!.queue_rank, 4);
+
+    s.policies = { [agentA]: { principal_id: agentA, accepts_from: 'anyone', set_by_user: alice, set_at: at } };
+    const accepted = run(s, command, bob, agentB);
+    assert.deepEqual(value(accepted).assignee, { kind: 'agent', id: agentA });
+    assert.equal(value(accepted).offer, null);
+    assert.equal(value(accepted).queue_rank, 5);
+    assert.deepEqual(value(accepted).gate, gate);
+    assert.equal(reduceTodoEvents(s, accepted.events).todos[second]!.queue_rank, 4);
+  }
+});
+
+test('reassignment preserves an omitted gate and its setter; an explicit gate replaces it', () => {
+  for (const gate of [{ kind: 'hold', note: 'Ask first' },
+    { kind: 'at', at: '2026-10-06T12:00:00.000Z' }, { kind: 'after', todo_id: second }] as const) {
+    const s = state(assignedA(first, { gate, gate_set_by: bob }), todo(second));
+    for (const to of [{ kind: 'agent', id: agentA }, { kind: 'user', id: alice }, null] as const) {
+      const command: TodoCommand = { kind: 'todo_assign', todo_id: first, base_version: 1, to };
+      const preserved = run(s, command);
+      assert.deepEqual(value(preserved).gate, gate);
+      assert.equal(value(preserved).gate_set_by, bob);
+      assert.deepEqual(reduceTodoEvents(s, preserved.events).todos[first]!.gate, gate);
+
+      const cleared = run(s, { ...command, gate: { kind: 'none' } });
+      assert.deepEqual(value(cleared).gate, { kind: 'none' });
+      assert.equal(value(cleared).gate_set_by, null);
+    }
+    const offer = run(s, assign({ kind: 'user', id: carol }));
+    assert.deepEqual(value(offer).gate, gate);
+    assert.equal(value(offer).gate_set_by, bob);
+    assert.deepEqual(value(offer).offer!.gate, gate);
+    const offeredState = reduceTodoEvents(s, offer.events);
+    const accepted = run(offeredState, { kind: 'household_todo_answer', todo_id: first,
+      offer_id: uid(300000), answer: 'accept' }, carol);
+    assert.deepEqual(value(accepted).gate, gate);
+    const changed = run(s, { kind: 'todo_assign', todo_id: first, base_version: 1,
+      to: { kind: 'agent', id: agentA }, gate: { kind: 'hold', note: 'New hold' } });
+    assert.deepEqual(value(changed).gate, { kind: 'hold', note: 'New hold' });
+    assert.equal(value(changed).gate_set_by, alice);
+  }
+});
+
 test('offer decisions require the named human, and acceptance applies the offered gate', () => {
   const s0 = state(todo());
   const d = run(s0, { kind: 'todo_assign', todo_id: first, base_version: 1, to: { kind: 'user', id: bob }, gate: { kind: 'hold', note: null } });
@@ -241,7 +330,30 @@ test('R7 reserves hold release to the human owner, including when someone else s
   assert.deepEqual(value(run(s, release)).gate, { kind: 'none' });
   refused(run(s, { ...release, action: { kind: 'move', after_todo_id: null } }, bob), 'owner_only');
   assert.equal(value(run(s, { ...release, action: { kind: 'start_now' } })).state, 'open');
-  assert.deepEqual(value(run(s, { ...release, action: { kind: 'start_now' } })).gate, { kind: 'hold', note: null });
+  assert.deepEqual(value(run(s, { ...release, action: { kind: 'start_now' } })).gate, { kind: 'none' });
+});
+
+test('the human owner starting now clears each gate before the agent starts', () => {
+  for (const gate of [{ kind: 'hold', note: 'Ask first' },
+    { kind: 'at', at: '2026-10-06T12:00:00.000Z' }, { kind: 'after', todo_id: third }] as const) {
+    const s = state(assignedA(first, { queue_rank: 5, gate, gate_set_by: bob }),
+      assignedA(second), todo(third));
+    const start: TodoCommand = { kind: 'todo_start', todo_id: first };
+    refused(run(s, start, alice, agentA), 'gate_invalid');
+    const steer: TodoCommand = { kind: 'household_todo_steer', todo_id: first,
+      base_version: 1, action: { kind: 'start_now' } };
+    refused(run(s, steer, bob), 'owner_only');
+    refused(run(s, steer, alice, agentA), 'human_confirmation_required');
+    const asked = run(s, steer);
+    assert.deepEqual(value(asked).gate, { kind: 'none' });
+    assert.equal(value(asked).gate_set_by, null);
+    assert.equal(value(asked).state, 'open');
+    assert.equal(value(asked).queue_rank, 1);
+    assert.deepEqual(asked.events.map(e => e.type), ['TodoGateSet', 'TodoQueueOrdered', 'TodoStartAsked']);
+    const ready = reduceTodoEvents(s, asked.events);
+    assert.equal(ready.todos[second]!.queue_rank, 2);
+    assert.equal(value(run(ready, start, alice, agentA)).state, 'doing');
+  }
 });
 
 test('start without an ID selects the first clear Open item, skipping Doing and Not yet', () => {
@@ -380,7 +492,7 @@ test('receipt replay returns the original value with no second event or notice; 
   assert.equal(replay.replayed, true);
   assert.deepEqual(replay.events, []);
   assert.deepEqual(replay.notices, []);
-  assert.equal(decideTodo(next, command, c).replayed, true); // original server sequence is immaterial on replay
+  refused(decideTodo(next, command, c), 'invalid_command_context');
   refused(decideTodo(next, command, { ...retry, request_digest: 'a'.repeat(64) }), 'request_id_reused');
   // Refusals are durable receipts without a fictitious refusal event.
   const bad: TodoCommand = { kind: 'todo_update', todo_id: first, base_version: 1, title: '' };
@@ -390,6 +502,34 @@ test('receipt replay returns the original value with no second event or notice; 
   const recovered = run(saved, bad);
   assert.equal(recovered.replayed, true);
   refused(recovered, 'title_invalid');
+});
+
+test('invalid command IDs, digests and sequences return a stable refusal without a receipt', () => {
+  const s = { ...state(todo()), last_seq: 8 };
+  const command: TodoCommand = { kind: 'todo_update', todo_id: first, base_version: 1, title: 'Bread' };
+  const valid = context(s, command);
+  const changes: Partial<DecideTodoContext>[] = [
+    { command_id: '' }, { request_digest: '' }, { request_digest: 'a'.repeat(63) },
+    { request_digest: 'a'.repeat(65) }, { request_digest: 'A'.repeat(64) },
+    { seq: -1 }, { seq: 8 }, { seq: 8.5 }, { seq: NaN }, { seq: Infinity }, { seq: 9007199254740992 },
+  ];
+  for (const change of changes) {
+    assert.deepEqual(decideTodo(s, command, { ...valid, ...change }), {
+      outcome: { status: 'refused', reason: 'invalid_command_context' },
+      events: [], receipt: null, notices: [], replayed: false,
+    });
+  }
+  const accepted = decideTodo(s, command, valid);
+  assert.equal(value(accepted).title, 'Bread');
+  assert.equal(accepted.events[0]!.seq, 9);
+  const next = reduceTodoEvents(s, accepted.events);
+  assert.deepEqual(decideTodo(next, command, { ...valid, seq: 9 }), {
+    outcome: { status: 'refused', reason: 'invalid_command_context' },
+    events: [], receipt: null, notices: [], replayed: false,
+  });
+  const replay = decideTodo(next, command, { ...valid, seq: 10 });
+  assert.equal(value(replay).title, 'Bread');
+  assert.equal(replay.replayed, true);
 });
 
 // This input is hand-written, not output from decideTodo. It protects the event
