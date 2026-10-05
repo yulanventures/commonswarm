@@ -12,7 +12,7 @@ Nothing here is pushed; the coordinator pushes. Commits: `9570c67b` (item 1),
 | W6 binds an EARLIER W2b: inputs `w2b_release_sha` + `w2b_window_id` (W6 only); ai-w2b-proof-check reads the bound release; new ai-w6-issuer-live re-verifies the credential live (LOGIN with password, file 0440 root:986, TLS login with the installed credential, five forward catalogs true), called from ai-w6-activation-checks | 9570c67b | plan.test (inputs, proof-check at another release), w123 (issuer-live positive + 8 refusals), w6-ready, plan-sandbox inputs, W6 rehearsal inputs |
 | W3 same-version retry: ai-release-aside (shared; parent root 0700, same filesystem, one rename, `oauth-aside.json`), ai-w3-rollback rewritten (paths from INPUTS, explicit-fail every step, `ln -sfT`, aside after the baseline is live, `W3-rollback.txt`), ai-w3-preflight refuses a present tree with the exact recovery and records other releases' trees in `oauth-releases-inventory.json`, ai-w3-apply `ln -sfT`, ai-close recovered W3 requires baseline current/image and no tree at this release | 9570c67b | w123 (rollback positive, idempotent rerun, nothing-to-move, 7 refusals x 2 errexit modes, stale-tree evidence, preflight refusal text), plan.test (recovered W3 close: 1 positive + 2 tolerated residues + 4 refusals) |
 | Rulings folded as plan text (section "Execution rulings") | efd84d82 | prose only |
-| W4 same-version retry: ai-w4-rollback (paths from INPUTS, `ln -sfT`, ai-release-aside with `edge` after current is on the baseline), ai-w4-preflight refusal with the exact recovery, ai-w4-apply `ln -sfT`, ai-close recovered W4 requires baseline edge current, baseline Caddy bytes, no drop-in, no tree | 9e32e3b6 | w45 (leftover temporary link replaced, preflight refusal text), plan.test (recovered W4 close: 2 positives + 5 refusals; rollback order). NOT executed: ai-w4-rollback end to end and ai-release-aside with `edge` (no w45 rollback fixture) |
+| W4 same-version retry: ai-w4-rollback (paths from INPUTS, `ln -sfT`, ai-release-aside with `edge` after current is on the baseline), ai-w4-preflight refusal with the exact recovery, ai-w4-apply `ln -sfT`, ai-close recovered W4 requires baseline edge current, baseline Caddy bytes, no drop-in, no tree | 9e32e3b6; execution gap closed by C1-1 working diff | w45 (leftover temporary link replaced, preflight refusal text; now full rollback + real edge aside, normal and modelled ignored-errexit), plan.test (recovered W4 close: 2 positives + 5 refusals; rollback order) |
 
 ## Test runs at 9e32e3b6 (mini, sandbox-exec no-real-chrome)
 
@@ -39,7 +39,7 @@ window_id, so they never block a retry and are not listed again.
 | W3 | `current.admin-issuance` temporary link (crash between ln and mv) | `ln -s` would create a link INSIDE the target directory | FIXED 9570c67b (W3) and 9e32e3b6 (W4): `ln -sfT` |
 | W3 | compose.env, service.env, running container, `current` | Rollback restores from the window's SECRET_STAGE copies; recovered close now checks current + image | FIXED 9570c67b (close checks) |
 | W3 | Image tag `commonswarm-oauth:release-<sha>` | Reused if cached; label checked | OK (deterministic) |
-| W4 | `edge/releases/<sha>` tree | Was refused by ai-w4-preflight and never moved | FIXED 9e32e3b6 (rollback moves it aside; recovered close requires it absent; preflight refusal names the recovery). Rollback run end to end is not yet tested (TODO-1) |
+| W4 | `edge/releases/<sha>` tree | Rollback moves it aside after restoring the baseline | FIXED 9e32e3b6; TODO-1 DONE in C1-1 working diff: rollback executed end to end, including real edge aside and explicit failures |
 | W4 | `edge/current.admin-issuance` link | `ln -s` hazard as W3 | FIXED 9e32e3b6 |
 | W4 | Live Caddy files | Rollback restores from SECRET_STAGE; ai-box-preflight byte-checks the baseline hashes at the next open | OK (existing); recovered-close check added 9e32e3b6 |
 | W4 | Recycle drop-in | Rollback removes it; ai-recycle-install refuses a present one | OK (existing); recovered-close check added 9e32e3b6 |
@@ -47,9 +47,9 @@ window_id, so they never block a retry and are not listed again.
 | W4 | DB: legacy fence, generation +1, invalidated_at | apply_legacy_admin_fence returns early when already closed; apply closes before measuring | OK (idempotent) |
 | W4 | Recycle timer stopped | ai-timer-guard re-arms on every exit; ai-close refuses an inactive timer | OK (existing) |
 | W5 | Site release dir, Mac W5 root, PREP_DIR | Site releases are timestamped; W5 root and PREP_DIR are per window_id; the site plan owns its rollback | OK |
-| W6 | Smoke pointer `/Users/yulanbot/work/dcr-rt/c1-smoke.pointer` (fixed path) | ai-w6-pointer refuses an existing pointer (assert, no recovery text); a recovered W6 close does not require ai-w6-secret-close | TODO-2 |
+| W6 | Smoke pointer `/Users/yulanbot/work/dcr-rt/c1-smoke.pointer` (fixed path) | ai-w6-pointer refuses a present pointer with the exact cleanup recovery; recovered close after C1-client-check requires uploaded C1-cleanup.txt | TODO-2 DONE in C1-1 working diff |
 | W6 | C1 verification row at version v | Identical row accepted | OK |
-| W6 | Owner approval at v, withdrawn by the failed W6 | `approve_admin_client` is refused (`client_approval_withdrawn`, protocol.js:1634); a new version v+1 is refused while v is active ("another active C1 verification version"). W6 is NOT retryable after an approve+withdraw | TODO-3 (real defect) |
+| W6 | Owner approval at v, withdrawn by the failed W6 | Reusing v refuses with the next version; a new reviewed version supersedes the active row only when this owner's approval is withdrawn. Live or missing approval still refuses a second active version | TODO-3 DONE in C1-1 working diff; reducer still refuses `client_approval_withdrawn` at v |
 | W6 | Generation +1 after rollback/emergency close | The edge receipt is stale; ai-edge-refresh first (existing rule) | OK |
 | W6 | Recycle timer held | Apply/rollback/finish re-arm it; ai-close refuses inactive | OK |
 | W7 | Proof files only (read-only proof) | Fresh window_id | OK |
@@ -66,31 +66,62 @@ window_id, so they never block a retry and are not listed again.
 | GATES.json | checker receipt for F (and the W7 second receipt) | Input |
 | Migrations | W6 compares ledger checksums (recorded at W2 5f64fab4 and W2b) with F's 12 migration files | Frozen-release constraint: F must not change any of those 12 files; ai-w6-activation-checks STOPs otherwise |
 
-## Not done (exact next step per item)
+## C1-1 completed TODOs (working diff; not committed or pushed)
 
-- **TODO-1 W4 rollback execution test.** The plan change is in 9e32e3b6. Next
-  step: a w45 fixture that runs ai-w4-rollback end to end (stubs for
-  `ai_run ai-timer-guard` / `ai-recycle-rollback` / `ai-release-aside`, docker
-  compose on OLD_EDGE, `readlink -f`, `install -d`, `stat` on
-  `edge/failed-attempts`), with the modelled ignored-errexit mode as in the W3
-  test. The other W4 rollback lines are still `set -e` only (no explicit
-  `|| { FAIL }`); convert them in the same change.
-- **TODO-2 W6 pointer.** ai-w6-pointer: replace the bare assert with
-  `FAIL ai-w6-pointer: smoke pointer expected absent got present; an earlier W6
-  left it: run ai-w6-secret-close with that window's C1_PROOF_DIR, then retry;
-  STOP`. ai-close recovered W6: if `C1-client-check.txt` exists in PROOF_DIR,
-  require the uploaded `C1-cleanup.txt`.
-- **TODO-3 W6 C1 version retry.** In ai-w6-client-verification's DO block: if
-  the active version u differs from v AND this owner's approval at u is
-  withdrawn, `UPDATE ... SET active=false, withdrawn_at=statement_timestamp(),
-  withdrawal_reason='c1-retry-superseded'` for u (the guard permits exactly
-  these three columns) and insert v; if u = v and the owner's approval at v is
-  withdrawn, refuse naming the next version; keep the other refusals (the
-  rehearsal case `second-active-version`, no approval, still refuses). Add a
-  rehearsal positive with a seeded withdrawn approval
-  (`SET session_replication_role=replica` for the seed). Residual gap to list:
-  the guard's `fence_admin_family(...,'suspended')` on already-revoked bindings
-  is not exercised.
+- **TODO-3 DONE — W6 C1 version retry.** `ai-w6-client-verification` locks the
+  active verification and this owner's approval. A withdrawn approval at the
+  requested version refuses with an exact FAIL line naming the next version.
+  At a different version it supersedes only the three guard-permitted columns
+  (`active`, `withdrawn_at`, `withdrawal_reason='c1-retry-superseded'`), then
+  inserts the reviewed version in the same transaction. The release role lacks
+  approval SELECT: the DO block reads that approval as the session principal,
+  restoring the release role before writes; no grants or migrations changed.
+  Test: `c1 W6 retry: migrated schema supersedes a withdrawn owner version;
+  same-version, live and missing approvals refuse` in
+  `tests/c1-w2-rehearsal.test.ts`: real migrated PostgreSQL 17, seed-only
+  replication mode, another owner's withdrawn approval, unchanged live/missing
+  refusals, idempotent reruns, immutable approval history, and baseline controls.
+  The existing `second-active-version` W6 rehearsal refusal also remains.
+- **TODO-2 DONE — W6 pointer.** The exact stale-pointer recovery now names
+  `ai-w6-secret-close` and the earlier window's `C1_PROOF_DIR`. A recovered W6
+  close after `C1-client-check.txt` requires uploaded `C1-cleanup.txt`.
+  Tests in `tests/admin-release-plan.test.ts`: `admin release plan: D8 pointer
+  emits only paths, consent choices and UTC expiry; secret-shaped name refuses`
+  now checks retained regular and dangling-symlink pointers and the exact FAIL
+  text; `admin release plan: W6 close requires cleanup after client check,
+  accepts recovery before it, and removes its private window` runs the full
+  close for missing cleanup, recovered after-check with cleanup, and recovered
+  before-check without cleanup, alongside the forward-close controls.
+- **TODO-1 DONE — W4 rollback execution.** Every fallible rollback command now
+  has an explicit `|| { FAIL }`; `ln -sfT` and all block headers are retained.
+  Tests in `tests/admin-release-live-failclosed-w45.test.ts`:
+  `same-version retry / w4-rollback-moves-tree-aside: baseline compose and Caddy
+  restored, timer re-armed, evidence kept, rerun idempotent` runs full rollback
+  and the real edge aside in normal and modelled ignored-errexit modes, plus
+  no-tree recovery. `same-version retry / w4-rollback-refusals: each failure
+  stops before the aside and completion, also with ignored errexit` covers
+  individual command failures, wrong image, live failed tree, unsafe aside
+  owner and collision in both modes, with a baseline defect control.
+
+Residual gap: the guard's `fence_admin_family(...,'suspended')` on already-revoked
+bindings is **not exercised** by the retry rehearsal. It seeds approval history,
+not a revoked family binding; no claim of that fence coverage is made.
+
+Existing fixture updates: `admin release plan: every timer-owning body recovers
+after stop failure or its first subsequent failure` now locates a timer-guard
+call with an explicit failure clause. `W6 client verification: canonical digest
+equals canonicalAdminJson; the release-role insert carries the reviewed
+constants` now supplies the owner UUID required for the approval lookup.
+
+Gate: `bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` on 2026-10-05,
+159 tests, 159 pass, 0 fail/cancelled/skipped/todo, exit **0** (229085.768292 ms).
+The first run had 157 pass / 2 fail (exit 1): the two existing fixtures above
+needed those updates; all newly added tests passed in that run.
+No full suite, build, Docker or browser was run. The gate uses local PostgreSQL
+17 and its prescribed temporary HOME; the worker never assigned HOME.
+
+## Not done
+
 - **Generator `scripts/c1-task-from-plan.mjs`** (item 3) and
   **VERIFY-HARNESS.md** (item 4): not started (Tom's priority order puts them
   last).

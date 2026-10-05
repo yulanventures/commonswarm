@@ -54,6 +54,7 @@ import hashlib,io,json,os,pathlib,shutil,socket,subprocess,sys,urllib.request
 root=pathlib.Path(os.environ['W45_ROOT']); cfg=json.loads((root/'fixture.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'commands.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
+if cfg.get('fail_call')==[name]+args: raise SystemExit(1)
 def refuse(*a,**kw): raise RuntimeError('UNMODELLED '+name+' '+repr(args))
 def owned(value):
     p=pathlib.Path(value)
@@ -159,7 +160,10 @@ elif name=='caddy':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_run':
-    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check']]: refuse()
+    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
+    if args==['ai-recycle-rollback']:
+        dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
+        if dropin.exists(): dropin.unlink()
     # The shared backup receipt validator's verdict; its content checks run from plan bytes in admin-release-plan.test.ts.
     if args==['ai-backup-gate-check'] and cfg.get('backup_gate_refused'): raise SystemExit(1)
 elif name=='ai_db':
@@ -174,9 +178,14 @@ elif name=='date':
     if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
     print('2026-10-03T12:00:00Z')
 elif name=='systemctl' and args==['is-active','--quiet','fixture-recycle.timer']:
-    raise SystemExit(0 if cfg.get('timer_active') else 3)
+    active=(root/'timer-state').read_text()=='active' if (root/'timer-state').exists() else cfg.get('timer_active')
+    raise SystemExit(0 if active else 3)
 elif name=='systemctl':
-    if args==['stop','fixture-recycle.timer'] or args==['reload','caddy']: pass
+    if args==['stop','fixture-recycle.timer']:
+        (root/'timer-state').write_text('inactive')
+    elif args==['start','fixture-recycle.timer']:
+        (root/'timer-state').write_text('active')
+    elif args==['reload','caddy']: pass
     elif args==['show','-p','ActiveState','--value','fixture-recycle.service']: print('inactive')
     elif args==['daemon-reload'] and cfg.get('install_root'): pass
     elif args==['cat','fixture-recycle.service'] and cfg.get('install_root'):
@@ -199,12 +208,18 @@ elif name=='mv':
 elif name=='docker':
     edge=str(root/'edge/releases'/cfg['sha']); compose=edge+'/deploy/edge-runtime'
     if args==['inspect','--format','{{.State.Health.Status}}','commonswarm-edge-edge-runtime-1']: print('healthy')
+    elif args==['inspect','--format','{{.Image}}','commonswarm-edge-edge-runtime-1']: print(cfg.get('running_image',cfg['image']))
+    elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.working_dir"}}','commonswarm-edge-edge-runtime-1']:
+        print(cfg.get('working_dir',(root/'edge-working-dir').read_text()))
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.config_files"}}','commonswarm-edge-edge-runtime-1']:
         old=str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime'); print(old+'/compose.yaml,'+old+'/compose.override.yaml')
     elif args==['inspect','commonswarm-edge-edge-runtime-1']:
         print(json.dumps([{'Image':cfg['image'],'State':{'Health':{'Status':'healthy'}},'Config':{'Labels':{'com.docker.compose.project.working_dir':compose}},'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dest,'Source':edge+'/'+rel,'RW':False} for dest,rel in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
     elif args==['compose','--project-name','commonswarm-edge','-f',compose+'/compose.yaml','-f',compose+'/compose.override.yaml','up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']:
         if os.environ.get('COMMONSWARM_EDGE_NETWORK_MODE')!='commonswarm-net': refuse()
+    elif args==['compose','--project-name','commonswarm-edge','-f',str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime/compose.yaml'),'-f',str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime/compose.override.yaml'),'up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']:
+        if os.environ.get('COMMONSWARM_EDGE_NETWORK_MODE')!='commonswarm-net': refuse()
+        (root/'edge-working-dir').write_text(str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime'))
     else: refuse()
 elif name=='timeout':
     expected='until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
@@ -217,9 +232,20 @@ elif name=='awk':
     if args!=['{print $1}']: refuse()
     print(sys.stdin.read().split()[0])
 elif name=='install':
+    if args==['-d','-o','root','-g','root','-m','0700',str(root/'edge/failed-attempts')]:
+        owned(args[7]).mkdir(exist_ok=True); owned(args[7]).chmod(0o700); raise SystemExit(0)
     if len(args)!=8 or args[:6]!=['-o','root','-g','root','-m','0644']: refuse()
     if args[7] not in [str(root/'etc/caddy/sites/20-commonswarm-mcp.caddy'),str(root/'etc/caddy/sites/10-commonswarm-api.caddy')]: refuse()
     shutil.copyfile(owned(args[6]),owned(args[7])); owned(args[7]).chmod(0o644)
+elif name=='readlink':
+    if args!=['-f',str(root/'edge/current')]: refuse()
+    print(owned(args[1]).resolve())
+elif name=='cat':
+    if len(args)!=1 or not args[0].endswith('.sh'): refuse()
+    sys.stdout.write(owned(args[0]).read_text())
+elif name=='stat':
+    if args!=['-c','%a %u %g',str(root/'edge/failed-attempts')]: refuse()
+    p=owned(args[2]); print(str(oct(p.stat().st_mode & 0o777)[2:])+' '+cfg.get('aside_owner','0 0'))
 else: refuse()
 `;
 
@@ -255,7 +281,7 @@ function fixture(config: Record<string, unknown> = {}) {
   chmodSync(join(bin, '_dispatch'), 0o700);
   for (const name of ['python3', 'node', 'ssh', 'psql', 'docker', 'curl', 'caddy', 'systemctl', 'sudo', 'git',
     'npm', 'npx', 'open', 'osascript', 'wget', 'op', 'mkdir', 'cp', 'chmod', 'ai_deadline', 'ai_run', 'ai_db',
-    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install', 'dirname']) symlinkSync('_dispatch', join(bin, name));
+    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install', 'dirname', 'readlink', 'stat', 'cat']) symlinkSync('_dispatch', join(bin, name));
   // Synthetic active box baseline, as in the original diagnostic fixtures.
   // Repository templates are historical OAuth-only files, not this block's box input.
   for (const [file, bytes] of [
@@ -286,14 +312,7 @@ function fixture(config: Record<string, unknown> = {}) {
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
     const opening = steps[0] === 'ai-w5-preflight';
-    let source = steps.map(block).join('\n');
-    for (const [from, to] of [
-      ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
-      ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
-      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
-      ['/etc/systemd/system', join(root, 'systemd')],
-      ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
-    ] as const) source = source.split(from).join(to);
+    const source = remap(steps.map(step => step.startsWith('#') ? step : block(step)).join('\n'));
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
       cwd: root, env: { ...process.env, PATH: bin, PYTHONDONTWRITEBYTECODE: '1', W45_ROOT: root,
@@ -307,12 +326,22 @@ function fixture(config: Record<string, unknown> = {}) {
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
-    for (const file of ['caddy-validate.log', 'caddy-live-validate.log', 'edge-apply.log'])
+    for (const file of ['caddy-validate.log', 'caddy-live-validate.log', 'edge-apply.log', 'caddy-rollback.log', 'edge-rollback.log'])
       if (existsSync(join(stage, file))) assert.doesNotMatch(readFileSync(join(stage, file), 'utf8'), /UNMODELLED/);
     return { ...result, calls: lines('commands.jsonl'), requests: lines('http.jsonl') };
   }
+  function remap(source: string) {
+    for (const [from, to] of [
+      ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
+      ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
+      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
+      ['/etc/systemd/system', join(root, 'systemd')],
+      ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
+    ] as const) source = source.split(from).join(to);
+    return source;
+  }
   function lines(path: string): any[] { return readFileSync(join(root, path), 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s)); }
-  return { root, site, stage, proof, goodClose, later, put, run,
+  return { root, site, stage, proof, goodClose, later, put, run, remap,
     closedRoot: join(receipts, `${data.release_sha}-W5-${data.window_id}`) };
 }
 type Fixture = ReturnType<typeof fixture>;
@@ -326,6 +355,109 @@ function stopped(f: Fixture, r: Result, text: string) {
   assert.ok(!existsSync(f.later), 'no later shell side effect');
 }
 function requestPairs(r: Result) { return r.requests.map(q => [q.method, q.url]); }
+
+const rollbackShim = `# test shim: source the plan's timer guard, recovery and edge aside; stub the recycle removal boundary
+ai_run() {
+ case "$1" in
+  ai-timer-guard) command ai_run "$@" || return $?; eval "$(cat "$W45_ROOT/timer.sh")";;
+  ai-w4-timer-recovery) eval "$(cat "$W45_ROOT/recovery.sh")";;
+  ai-release-aside) eval "$(cat "$W45_ROOT/aside.sh")";;
+  *) command ai_run "$@";;
+ esac
+}`;
+function rollbackFixture(config: Record<string, unknown> = {}, ignored = false) {
+  const f = fixture({ timer_active: true, ...config });
+  const mode = (source: string) => ignored ? source.replace('set -euo pipefail', 'set +e') : source;
+  f.put('timer.sh', f.remap(mode(block('ai-timer-guard'))));
+  f.put('recovery.sh', f.remap(mode(block('ai-w4-timer-recovery'))));
+  f.put('aside.sh', f.remap(mode(block('ai-release-aside'))));
+  f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.yaml`, 'baseline compose\n');
+  f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'baseline override\n');
+  f.put(`edge/releases/${sha}/RELEASE_SHA`, sha+'\n');
+  symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current'));
+  symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current.admin-issuance'));
+  f.put('edge-working-dir',join(f.root,'edge/releases',sha,'deploy/edge-runtime'));
+  f.put('timer-state','active');
+  f.put('etc/caddy/sites/20-commonswarm-mcp.caddy','failed candidate MCP\n');
+  f.put('etc/caddy/sites/10-commonswarm-api.caddy','failed candidate API\n');
+  f.put('systemd/fixture-recycle.service.d/50-admin-measurement.conf','failed attempt hook\n');
+  return f;
+}
+const ignoredRollback = '# modelled ignored errexit (left side of ||)\n( ' + block('ai-w4-rollback').replace('set -euo pipefail','set +e') + '\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+test('same-version retry / w4-rollback-moves-tree-aside: baseline compose and Caddy restored, timer re-armed, evidence kept, rerun idempotent', () => {
+  for(const ignored of [false,true]) {
+    const f=rollbackFixture({},ignored), steps=[rollbackShim,ignored ? ignoredRollback : 'ai-w4-rollback'];
+    const r=f.run(steps); pass(f,r);
+    const dest=join(f.root,'edge/failed-attempts',`${sha}-W4-Fix123`);
+    assert.ok(!existsSync(join(f.root,'edge/releases',sha)));
+    assert.equal(readFileSync(join(dest,'RELEASE_SHA'),'utf8'),sha+'\n');
+    assert.equal(statSync(join(f.root,'edge/failed-attempts')).mode & 0o777,0o700);
+    assert.equal(realpathSync(join(f.root,'edge/current')),join(f.root,'edge/releases',baseline));
+    assert.ok(!existsSync(join(f.root,'edge/current.admin-issuance')));
+    for(const [source,target] of [['mcp.caddy','20-commonswarm-mcp.caddy'],['api.caddy','10-commonswarm-api.caddy']])
+      assert.deepEqual(readFileSync(join(f.root,'etc/caddy/sites',target)),readFileSync(join(f.stage,source)));
+    assert.ok(!existsSync(join(f.root,'systemd/fixture-recycle.service.d/50-admin-measurement.conf')));
+    assert.equal(readFileSync(join(f.root,'timer-state'),'utf8'),'active');
+    const record=JSON.parse(readFileSync(join(f.proof,'edge-aside.json'),'utf8'));
+    assert.deepEqual({...record,at:'x'},{part:'edge',release_sha:sha,window:'W4',window_id:'Fix123',from:join(f.root,'edge/releases',sha),to:dest,moved:true,at:'x'});
+    const compose=r.calls.findIndex(c=>c[0]==='docker' && c[1]==='compose');
+    const aside=r.calls.findIndex(c=>c[0]==='install' && c[1]==='-d');
+    assert.ok(compose>=0 && aside>compose,'move only after the baseline compose is live');
+    const saved=readFileSync(join(f.proof,'edge-aside.json'));
+    const again=f.run(steps); pass(f,again); assert.match(again.stdout,/already done/);
+    assert.deepEqual(readFileSync(join(f.proof,'edge-aside.json')),saved);
+  }
+  const none=rollbackFixture();
+  const erase=spawnSync('rm',['-r','--',join(none.root,'edge/releases',sha)],{encoding:'utf8'}); assert.equal(erase.status,0,erase.stderr);
+  pass(none,none.run([rollbackShim,'ai-w4-rollback']));
+  assert.equal(JSON.parse(readFileSync(join(none.proof,'edge-aside.json'),'utf8')).moved,false);
+});
+test('same-version retry / w4-rollback-refusals: each failure stops before the aside and completion, also with ignored errexit', () => {
+  // Baseline regression control: ignored errexit used to hide a failed recycle rollback and move the tree anyway.
+  const before=spawnSync('git',['show','HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8'});
+  assert.equal(before.status,0,before.stderr);
+  const old=[...before.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: ai-w4-rollback\n'))!;
+  const control=rollbackFixture({fail_call:['ai_run','ai-recycle-rollback']},true);
+  const oldIgnored='# modelled ignored errexit (left side of ||)\n( '+old.replace('set -euo pipefail','set +e')+'\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+  const escaped=control.run([rollbackShim,oldIgnored]); pass(control,escaped);
+  assert.match(escaped.stdout,/Apply body completed/); assert.ok(existsSync(join(control.proof,'edge-aside.json')));
+  assert.ok(escaped.calls.some(c=>c[0]==='ai_run' && c[1]==='ai-recycle-rollback'),'the control reached the failed step');
+  type Fault = [string,(f: Fixture)=>Record<string,unknown>,string];
+  const call=(argv: string[])=>({fail_call:argv});
+  const failures: Fault[] = [
+    ['database close',()=>call(['ai_db','-q','--command','BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;']),'issuance close and invalidation expected committed got failure'],
+    ['timer guard',()=>call(['ai_run','ai-timer-guard']),'timer guard expected installed got failure'],
+    ['timer stop',()=>call(['systemctl','stop','fixture-recycle.timer']),'recycle timer stop expected success got failure'],
+    ['recycle removal',()=>call(['ai_run','ai-recycle-rollback']),'recycle rollback expected success got failure'],
+    ...(['mcp','api'] as const).map((name): Fault=>[name+' restore',f=>call(['install','-o','root','-g','root','-m','0644',join(f.stage,name+'.caddy'),join(f.root,'etc/caddy/sites',name==='mcp'?'20-commonswarm-mcp.caddy':'10-commonswarm-api.caddy')]),`baseline ${name==='mcp'?'MCP':'API'} Caddy restore expected success got failure`]),
+    ['validation',()=>({caddy_status:1}),'baseline Caddy validation expected success got failure'],
+    ['reload',()=>call(['systemctl','reload','caddy']),'Caddy reload expected success got failure'],
+    ['env mismatch',f=>{f.put('box/.env','different\n'); return {};},'edge.env bytes expected identical got different-or-unreadable'],
+    ['temporary link',f=>call(['ln','-sfT',join(f.root,'edge/releases',baseline),join(f.root,'edge/current.admin-issuance')]),'baseline temporary link expected replaced got failure'],
+    ['current switch',f=>call(['mv','-Tf',join(f.root,'edge/current.admin-issuance'),join(f.root,'edge/current')]),'edge current switch expected success got failure'],
+    ['compose',f=>call(['docker','compose','--project-name','commonswarm-edge','-f',join(f.root,'edge/releases',baseline,'deploy/edge-runtime/compose.yaml'),'-f',join(f.root,'edge/releases',baseline,'deploy/edge-runtime/compose.override.yaml'),'up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']),'baseline compose up expected success got failure'],
+    ['health',()=>call(['timeout','90','/bin/bash','-c','until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done']),'baseline edge health expected healthy got timeout-or-failure'],
+    ['image query',()=>call(['docker','inspect','--format','{{.Image}}','commonswarm-edge-edge-runtime-1']),'running image expected readable got failure'],
+    ['image mismatch',()=>({running_image:'sha256:'+'d'.repeat(64)}),'running image expected baseline got other'],
+    ['baseline image missing',f=>{const d=JSON.parse(readFileSync(join(f.root,'inputs.json'),'utf8')); delete d.baseline_edge_image; f.put('inputs.json',d); return {};},'baseline_edge_image expected readable got failure'],
+    ['readlink',f=>call(['readlink','-f',join(f.root,'edge/current')]),'edge current expected baseline got other'],
+    ['aside install',f=>call(['install','-d','-o','root','-g','root','-m','0700',join(f.root,'edge/failed-attempts')]),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['aside owner',()=>({aside_owner:'501 20'}),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['live failed tree',f=>({working_dir:join(f.root,'edge/releases',sha,'deploy/edge-runtime')}),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['aside collision',f=>{mkdirSync(join(f.root,'edge/failed-attempts',`${sha}-W4-Fix123`),{recursive:true}); return {};},'failed-attempt tree expected moved-aside-or-absent got refused'],
+  ];
+  for(const [name,fault,message] of failures) for(const ignored of [false,true]) {
+    const f=rollbackFixture({},ignored), cfg=JSON.parse(readFileSync(join(f.root,'fixture.json'),'utf8'));
+    f.put('fixture.json',{...cfg,...fault(f)});
+    const r=f.run([rollbackShim,ignored?ignoredRollback:'ai-w4-rollback']);
+    stopped(f,r,`FAIL ai-w4-rollback: ${message}; STOP`);
+    if(ignored) assert.match(r.stderr,/CALLER: rollback failure seen/,name);
+    assert.ok(existsSync(join(f.root,'edge/releases',sha)),name+' leaves the failed tree');
+    assert.ok(!existsSync(join(f.proof,'edge-aside.json')),name+' writes no aside receipt');
+    assert.doesNotMatch(r.stdout,/Apply body completed/);
+    assert.equal(readFileSync(join(f.root,'timer-state'),'utf8'),'active',name+' timer is re-armed or was never stopped');
+  }
+});
 const gate = 'https://mcp.commonswarm.com/admin/gate';
 const post = 'https://api.commonswarm.com/admin';
 const probes = ['ai-w4-probes'];

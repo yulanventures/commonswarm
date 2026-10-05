@@ -3224,30 +3224,30 @@ set -euo pipefail
 # Paths come from INPUTS: a recovery shell may not have run ai-w4-preflight.
 W4_BASELINE_EDGE_SHA=$(python3 -c 'import json,re,sys; v=json.load(open(sys.argv[1]))["baseline_edge_sha"]; assert re.fullmatch("[0-9a-f]{40}",v); print(v)' "$INPUTS_FILE") || { printf 'FAIL ai-w4-rollback: baseline_edge_sha expected full-sha got other; STOP\n' >&2; exit 1; }
 OLD_EDGE=/home/commonswarm/edge/releases/$W4_BASELINE_EDGE_SHA
-ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
-ai_run ai-timer-guard
-systemctl stop "$EDGE_RECYCLE_TIMER"
-ai_run ai-recycle-rollback
-install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy
-install -o root -g root -m 0644 "$SECRET_STAGE/api.caddy" /etc/caddy/sites/10-commonswarm-api.caddy
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-rollback.log" 2>&1
-systemctl reload caddy
-cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
-ln -sfT "$OLD_EDGE" /home/commonswarm/edge/current.admin-issuance
-mv -Tf /home/commonswarm/edge/current.admin-issuance /home/commonswarm/edge/current
+ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null || { printf 'FAIL ai-w4-rollback: issuance close and invalidation expected committed got failure; STOP\n' >&2; exit 1; }
+ai_run ai-timer-guard || { printf 'FAIL ai-w4-rollback: timer guard expected installed got failure; STOP\n' >&2; exit 1; }
+systemctl stop "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-w4-rollback: recycle timer stop expected success got failure; STOP\n' >&2; exit 1; }
+ai_run ai-recycle-rollback || { printf 'FAIL ai-w4-rollback: recycle rollback expected success got failure; STOP\n' >&2; exit 1; }
+install -o root -g root -m 0644 "$SECRET_STAGE/mcp.caddy" /etc/caddy/sites/20-commonswarm-mcp.caddy || { printf 'FAIL ai-w4-rollback: baseline MCP Caddy restore expected success got failure; STOP\n' >&2; exit 1; }
+install -o root -g root -m 0644 "$SECRET_STAGE/api.caddy" /etc/caddy/sites/10-commonswarm-api.caddy || { printf 'FAIL ai-w4-rollback: baseline API Caddy restore expected success got failure; STOP\n' >&2; exit 1; }
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-rollback.log" 2>&1 || { printf 'FAIL ai-w4-rollback: baseline Caddy validation expected success got failure; STOP\n' >&2; exit 1; }
+systemctl reload caddy || { printf 'FAIL ai-w4-rollback: Caddy reload expected success got failure; STOP\n' >&2; exit 1; }
+cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env" || { printf 'FAIL ai-w4-rollback: edge.env bytes expected identical got different-or-unreadable; STOP\n' >&2; exit 1; }
+ln -sfT "$OLD_EDGE" /home/commonswarm/edge/current.admin-issuance || { printf 'FAIL ai-w4-rollback: baseline temporary link expected replaced got failure; STOP\n' >&2; exit 1; }
+mv -Tf /home/commonswarm/edge/current.admin-issuance /home/commonswarm/edge/current || { printf 'FAIL ai-w4-rollback: edge current switch expected success got failure; STOP\n' >&2; exit 1; }
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name commonswarm-edge \
  -f "$OLD_EDGE/deploy/edge-runtime/compose.yaml" -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" \
- up -d --no-build --pull never --force-recreate edge-runtime >"$SECRET_STAGE/edge-rollback.log" 2>&1
-timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
-W4_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)
-W4_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")
-test "$W4_RUNNING_IMAGE" = "$W4_BASELINE_IMAGE"
+ up -d --no-build --pull never --force-recreate edge-runtime >"$SECRET_STAGE/edge-rollback.log" 2>&1 || { printf 'FAIL ai-w4-rollback: baseline compose up expected success got failure; STOP\n' >&2; exit 1; }
+timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done' || { printf 'FAIL ai-w4-rollback: baseline edge health expected healthy got timeout-or-failure; STOP\n' >&2; exit 1; }
+W4_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1) || { printf 'FAIL ai-w4-rollback: running image expected readable got failure; STOP\n' >&2; exit 1; }
+W4_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE") || { printf 'FAIL ai-w4-rollback: baseline_edge_image expected readable got failure; STOP\n' >&2; exit 1; }
+test "$W4_RUNNING_IMAGE" = "$W4_BASELINE_IMAGE" || { printf 'FAIL ai-w4-rollback: running image expected baseline got other; STOP\n' >&2; exit 1; }
 test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE" || { printf 'FAIL ai-w4-rollback: edge current expected baseline got other; STOP\n' >&2; exit 1; }
 # Same-version retry: the failed attempt's tree leaves releases/<release_sha>, kept as evidence.
 RELEASE_ASIDE_PART=edge
 ( ai_run ai-release-aside ) || { printf 'FAIL ai-w4-rollback: failed-attempt tree expected moved-aside-or-absent got refused; STOP\n' >&2; exit 1; }
-unset RELEASE_ASIDE_PART
-printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; release tree aside or absent; measurement invalid; legacy remains fenced\n'
+unset RELEASE_ASIDE_PART || { printf 'FAIL ai-w4-rollback: aside part reset expected success got failure; STOP\n' >&2; exit 1; }
+printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; release tree aside or absent; measurement invalid; legacy remains fenced\n' || { printf 'FAIL ai-w4-rollback: completion output expected written got failure; STOP\n' >&2; exit 1; }
 )
 ```
 
@@ -4143,9 +4143,18 @@ evidence='gates:'+d['gate_receipt_sha256']+':admin-c1-smoke+admin-consent-client
 cols="client_id,verification_version,application_type,registration_source,publisher_identity,publisher_contact,metadata_digest,redirect_uris,scope_ceiling,full_account_eligible,delegation_eligible,native_loopback_eligible,pkce_s256_tested,dpop_tested,redirect_tested,origin_control_verified,review_evidence_ref,reviewed_by,active"
 vals="'"+CLIENT+"',"+str(v)+",'web','cimd','Yulan Ventures (CommonSwarm C1 smoke)','https://commonswarm.com','"+h+"',ARRAY['"+REDIRECT+"']::text[],ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[],true,false,false,true,true,true,true,'"+evidence+"','HezLead',true"
 same="v.application_type='web' AND v.registration_source='cimd' AND v.metadata_digest='"+h+"' AND v.redirect_uris=ARRAY['"+REDIRECT+"']::text[] AND v.scope_ceiling=ARRAY['admin:read','workspaces:create','seats:create','seats:revoke']::text[] AND v.full_account_eligible AND NOT v.delegation_eligible AND NOT v.native_loopback_eligible AND v.pkce_s256_tested AND v.dpop_tested AND v.redirect_tested AND v.origin_control_verified AND v.active AND v.withdrawn_at IS NULL"
-sql=("BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $c1$ DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE; BEGIN "
+owner=c.get('owner_user_id')
+need(isinstance(owner,str) and re.fullmatch(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}',owner) is not None,'owner_user_id','UUID','other')
+# The release role cannot read approvals. Read the locked owner's approval as the session principal,
+# then restore the release role before any verification write; no new database privilege is needed.
+sql=("BEGIN; SET LOCAL ROLE commonswarm_admin_release; DO $c1$ DECLARE v commonswarm_oauth.admin_verified_clients%ROWTYPE; u commonswarm_oauth.admin_verified_clients%ROWTYPE; approval_withdrawn boolean; BEGIN "
  "PERFORM 1 FROM commonswarm_oauth.admin_cutover_state WHERE singleton AND NOT admin_issuance_enabled FOR UPDATE; "
  "IF NOT FOUND THEN RAISE EXCEPTION 'C1 verification requires issuance closed'; END IF; "
+ "SELECT * INTO u FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND active FOR UPDATE; "
+ "IF FOUND THEN RESET ROLE; SELECT a.withdrawn_at IS NOT NULL INTO approval_withdrawn FROM commonswarm_oauth.admin_client_owner_approvals a WHERE a.owner_user_id='"+owner+"'::uuid AND a.client_id=u.client_id AND a.verification_version=u.verification_version FOR SHARE; SET LOCAL ROLE commonswarm_admin_release; "
+ "IF u.verification_version="+str(v)+" THEN IF approval_withdrawn THEN RAISE EXCEPTION 'FAIL ai-w6-client-verification: owner approval at verification_version "+str(v)+" expected reusable got withdrawn; use verification_version "+str(v+1)+" for the next W6; STOP'; END IF; "
+ "ELSE IF NOT coalesce(approval_withdrawn,false) THEN RAISE EXCEPTION 'another active C1 verification version'; END IF; "
+ "UPDATE commonswarm_oauth.admin_verified_clients SET active=false,withdrawn_at=statement_timestamp(),withdrawal_reason='c1-retry-superseded' WHERE client_id=u.client_id AND verification_version=u.verification_version; END IF; END IF; "
  "SELECT * INTO v FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND verification_version="+str(v)+"; "
  "IF FOUND THEN IF NOT ("+same+") THEN RAISE EXCEPTION 'existing C1 verification differs'; END IF; "
  "ELSE IF EXISTS(SELECT 1 FROM commonswarm_oauth.admin_verified_clients WHERE client_id='"+CLIENT+"' AND active) THEN RAISE EXCEPTION 'another active C1 verification version'; END IF; "
@@ -4716,7 +4725,9 @@ python3 - "$C1_SECRET_STAGE" "$C1_POINTER" "$C1_INPUTS_FILE" "$INPUTS_FILE" docs
 import datetime,json,os,pathlib,re,sys
 stage,pointer,cfile,inputs,spec=map(pathlib.Path,sys.argv[1:])
 assert re.fullmatch(r'/private/tmp/anvil-secret\.[A-Za-z0-9]{6}',str(stage)) and stage.is_dir() and not stage.is_symlink() and stage.resolve()==stage and stage.stat().st_mode & 0o777==0o700
-assert str(pointer)=='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer' and not pointer.exists() and not pointer.is_symlink() and pointer.parent.resolve()==pointer.parent
+assert str(pointer)=='/Users/yulanbot/work/dcr-rt/c1-smoke.pointer' and pointer.parent.resolve()==pointer.parent
+if pointer.exists() or pointer.is_symlink():
+    raise SystemExit('FAIL ai-w6-pointer: smoke pointer expected absent got present; an earlier W6 left it: run ai-w6-secret-close with that window\'s C1_PROOF_DIR, then retry; STOP')
 c=json.loads(cfile.read_text()); d=json.loads(inputs.read_text()); request=json.loads((stage/'request-plan.json').read_text())
 assert request['client_id']=='https://commonswarm.com/oauth/c1-smoke/client.json' and request['resource']=='https://api.commonswarm.com/admin'
 scopes=[v for v in request['scope'].split() if v not in ('openid','offline_access')]
@@ -5399,6 +5410,9 @@ if test "$CLOSE_RESULT" = success; then
   W7) test -f "$PROOF_DIR/retirement.txt";;
   *) echo 'FAIL no implemented forward close for this window; STOP' >&2; exit 1;;
  esac
+fi
+if test "$WINDOW" = W6 && test "$CLOSE_RESULT" = recovered && test -f "$PROOF_DIR/C1-client-check.txt"; then
+ test -f "$PROOF_DIR/C1-cleanup.txt" || { printf 'FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP\n' >&2; exit 1; }
 fi
 test ! -e "$PROOF_DIR/closed.txt"
 test ! -e "$PROOF_DIR/close-result.json"

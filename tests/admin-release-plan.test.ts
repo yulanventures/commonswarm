@@ -597,11 +597,11 @@ esac
   // ai-w6-finish own their own re-arm traps (tested in tests/admin-release-w6-ready.test.ts).
   const stopOwners = blocks.filter(source => /systemctl stop /.test(source)).map(source => source.split('\n')[0]).sort();
   assert.deepEqual(stopOwners, ['# step: ai-edge-refresh', '# step: ai-w4-apply', '# step: ai-w4-rollback', '# step: ai-w6-activation-apply', '# step: ai-w6-finish'], 'unexpected stop owner');
-  const owners = blocks.filter(source => /systemctl stop /.test(source) && source.includes('ai_run ai-timer-guard\n'));
+  const owners = blocks.filter(source => /systemctl stop /.test(source) && /^ai_run ai-timer-guard(?:\n| \|\|)/m.test(source));
   assert.equal(owners.length, 2, 'unexpected unguarded stop owner');
   for (const source of owners) {
     assert.match(source, /^\(\nset -euo pipefail/m, 'guard lifetime must be a subshell');
-    const start = source.indexOf('ai_run ai-timer-guard\n');
+    const start = source.indexOf('ai_run ai-timer-guard');
     assert.ok(start >= 0 && start < source.indexOf('systemctl stop '), source.split('\n')[0]);
     const body = '(\nset -euo pipefail\n' + source.slice(start);
     for (const failStop of [false, true]) {
@@ -795,7 +795,16 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
     const canonical=JSON.parse(spawnSync('node',['scripts/admin-smoke.mjs','--dry-run'],{encoding:'utf8'}).stdout);
     assert.deepEqual(r.consent_choices.scopes,canonical.scope.split(' ').filter((s:string)=>!['openid','offline_access'].includes(s)));
     assert.doesNotMatch(JSON.stringify(r),/https?:|eyJ|access_token|refresh_token|code_verifier|Bearer/);
+    const pointerBytes=readFileSync(pointer);
+    const stale=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(stale.status,0);
+    assert.ok(stale.stderr.includes("FAIL ai-w6-pointer: smoke pointer expected absent got present; an earlier W6 left it: run ai-w6-secret-close with that window's C1_PROOF_DIR, then retry; STOP"),stale.stderr);
+    assert.deepEqual(readFileSync(pointer),pointerBytes,'a stale pointer is retained for its window cleanup');
     removePointer();
+    symlinkSync(join(pointerDir,'missing-pointer-target'),pointer);
+    const dangling=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(dangling.status,0); assert.match(dangling.stderr,/FAIL ai-w6-pointer: smoke pointer expected absent got present;/);
+    assert.ok(lstatSync(pointer).isSymbolicLink()); rmSync(pointer);
     writeFileSync(c1,JSON.stringify({smoke_workspace_name:'Bearer synthetic-secret-shaped-fixture'}));
     const refused=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.notEqual(refused.status,0); assert.match(refused.stderr,/secret-shaped pointer/); assert.ok(!existsSync(pointer));
@@ -851,7 +860,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
   }
 });
 
-test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
+test('admin release plan: W6 close requires cleanup after client check, accepts recovery before it, and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
   // Valid retained receipts: ai-close re-runs ai-live-controls on them, producer from the verified archive.
   const producerFile=join(scratch,'close-producer.mjs'), archive=join(scratch,'close-release.tar');
@@ -914,6 +923,11 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     const noCleanup=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.notEqual(noCleanup.status,0); assert.match(noCleanup.stderr,/FAIL ai-close: W6 C1-cleanup\.txt expected present got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'C1-client-check.txt'),'PASS');
+    const recoveryWithoutCleanup=run(harness+close,{...env,CLOSE_RESULT:'recovered'});
+    assert.notEqual(recoveryWithoutCleanup.status,0);
+    assert.ok(recoveryWithoutCleanup.stderr.includes('FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP'),recoveryWithoutCleanup.stderr);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
     // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
     const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
@@ -930,6 +944,19 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
+    for(const checked of [false,true]) {
+      const recoveryStage=makeStage(), recoveryProof=mkdtempSync(join(scratch,'close-recovered-w6-'));
+      try {
+        for(const file of readdirSync(proof)) {
+          if(['closed.txt','close-result.json','secret-stage.path','C1-client-check.txt','C1-cleanup.txt'].includes(file)) continue;
+          writeFileSync(join(recoveryProof,file),readFileSync(join(proof,file)));
+        }
+        writeFileSync(join(recoveryProof,'secret-stage.path'),recoveryStage+'\n');
+        if(checked) { writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS'); writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS'); }
+        const recovered=run(harness+close,{...env,SECRET_STAGE:recoveryStage,PROOF_DIR:recoveryProof,CLOSE_RESULT:'recovered'});
+        assert.equal(recovered.status,0,recovered.stderr); assert.ok(existsSync(join(recoveryProof,'closed.txt'))); assert.ok(!existsSync(recoveryStage));
+      } finally { if(existsSync(recoveryStage)) removeStage(recoveryStage); }
+    }
   } finally {
     if(existsSync(stage)) removeStage(stage);
   }

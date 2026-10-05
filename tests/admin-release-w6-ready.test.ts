@@ -238,6 +238,7 @@ function verification(change: { doc?: Buffer | string; digest?: string; version?
   const dir = realpathSync(mkdtempSync(join(root, 'verify-')));
   const bound: Record<string, unknown> = { ...base(), window: 'W6' }, input = { ...bound, ...change.inputs };
   const c1 = { release_sha: bound.release_sha, window_id: bound.window_id, plan_sha256: bound.plan_sha256,
+    owner_user_id: '11111111-1111-4111-8111-111111111111',
     verification_version: change.version ?? 1, metadata_digest: change.digest ?? digest(canonicalAdminJson(JSON.parse(C1_DOC.toString()))) };
   writeFileSync(join(dir, 'C1-inputs.json'), JSON.stringify(c1));
   writeFileSync(join(dir, 'c1-client-document.json'), change.doc ?? C1_DOC);

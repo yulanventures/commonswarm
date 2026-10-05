@@ -11,6 +11,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
+import { createHash } from 'node:crypto';
+import { canonicalAdminJson } from '../src/protocol/admin-policy.js';
 
 const script = resolve('scripts/c1-w2-rehearsal.sh');
 const source = readFileSync(script, 'utf8');
@@ -328,6 +330,62 @@ function postFixture(): string {
   assert.match(built.stdout, /^PASS dump-post-w2: roles\.sql, schema\.sql, ledger\.sql and ledger-extra\.sql \(checksums, cutover state\) of the post-W2 database, issuer rolled back$/m);
   return (postFixtureDir = dir);
 }
+
+test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-version, live and missing approvals refuse', { skip: skipDb }, () => {
+  const dump = postFixture(), pg = PG(), cluster = mkdtempSync('/tmp/c1w2.');
+  const exec = (tool: string, args: string[]) => spawnSync(join(pg, tool), args, { encoding: 'utf8', timeout: 60_000 });
+  const ok = (r: ReturnType<typeof exec>) => assert.equal(r.status, 0, r.stdout + r.stderr);
+  const psql = (sql: string) => spawnSync(join(pg, 'psql'), ['-X', '-h', cluster, '-U', 'supabase_admin', '-d', 'postgres', '-Atq', '-v', 'ON_ERROR_STOP=1', '-f', '-'], { input: sql, encoding: 'utf8' });
+  let started = false;
+  try {
+    ok(exec('initdb', ['-U', 'supabase_admin', '--auth=trust', '-E', 'UTF8', '--locale=C', '-D', join(cluster, 'data')]));
+    ok(exec('pg_ctl', ['-D', join(cluster, 'data'), '-o', `-c listen_addresses='' -c unix_socket_directories='${cluster}'`, '-l', join(cluster, 'pg.log'), '-w', 'start'])); started = true;
+    ok(run(['--record-identity', cluster]));
+    // Restore the repository's migrated dump, with only the bootstrap CREATE ROLE omitted.
+    ok(psql(readFileSync(join(dump, 'roles.sql'), 'utf8').split('\n').filter(line => line.trim() !== 'CREATE ROLE supabase_admin;').join('\n')));
+    for (const file of ['schema.sql', 'ledger.sql', 'ledger-extra.sql']) ok(psql(readFileSync(join(dump, file), 'utf8')));
+    assert.equal(psql("SELECT has_table_privilege('commonswarm_admin_release','commonswarm_oauth.admin_client_owner_approvals','SELECT');").stdout.trim(), 'f', 'no added approval-read privilege');
+    const proof = join(cluster, 'proof'); mkdirSync(proof);
+    const owner = '11111111-1111-4111-8111-111111111111', other = '22222222-2222-4222-8222-222222222222';
+    const client = 'https://commonswarm.com/oauth/c1-smoke/client.json';
+    const document = readFileSync(resolve('site/public/oauth/c1-smoke/client.json'), 'utf8');
+    const metadata = createHash('sha256').update(canonicalAdminJson(JSON.parse(document))).digest('hex');
+    writeFileSync(join(proof, 'c1-client-document.json'), document); writeFileSync(join(proof, 'W6-checks.txt'), 'PASS\n');
+    const inputs = { release_sha: 'a'.repeat(40), window_id: 'Fix123', plan_sha256: 'b'.repeat(64), gate_receipt_sha256: 'c'.repeat(64) };
+    writeFileSync(join(cluster, 'inputs.json'), JSON.stringify(inputs));
+    const plan = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
+    const extract = (text: string) => [...text.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(b => b.startsWith('# step: ai-w6-client-verification\n'))!;
+    const baseline = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }); ok(baseline);
+    const verify = (version: number, text = plan) => {
+      writeFileSync(join(proof, 'C1-inputs.json'), JSON.stringify({ ...inputs, owner_user_id: owner, verification_version: version, metadata_digest: metadata }));
+      return spawnSync('/bin/bash', [], { input: `ai_deadline() { :; }\nai_db() { "$RETRY_PSQL" -X -h "$RETRY_CLUSTER" -U supabase_admin -d postgres -v ON_ERROR_STOP=1 "$@"; }\n` + extract(text).replace('/proof/client-verification.sql', join(proof, 'client-verification.sql')),
+        encoding: 'utf8', env: { ...process.env, RETRY_PSQL: join(pg, 'psql'), RETRY_CLUSTER: cluster, WINDOW: 'W6', PROOF_DIR: proof, INPUTS_FILE: join(cluster, 'inputs.json'), C1_INPUTS_FILE: join(proof, 'C1-inputs.json') } });
+    };
+    ok(verify(1)); ok(verify(1)); // No approval at the identical active version remains idempotent.
+    const refused = (r: ReturnType<typeof verify>, message: RegExp) => { assert.notEqual(r.status, 0); assert.match(r.stderr, message); };
+    refused(verify(2), /another active C1 verification version/); // Missing approval cannot supersede.
+    const seed = (who: string, withdrawn: boolean) => {
+      // Seed only: replication mode skips evidence/FK triggers, preserving all real table constraints.
+      ok(psql(`BEGIN; SET LOCAL session_replication_role=replica;
+        INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,approval_event_id,approval_command_id,withdrawn_at,withdrawal_event_id,withdrawal_reason)
+        VALUES('${who}','${client}',1,'33333333-3333-4333-8333-333333333333','retry-seed',${withdrawn ? "statement_timestamp(),'44444444-4444-4444-8444-444444444444','smoke_cleanup'" : 'NULL,NULL,NULL'}); COMMIT;`));
+    };
+    seed(other, true); refused(verify(2), /another active C1 verification version/); // Another owner's withdrawal is irrelevant.
+    seed(owner, false); refused(verify(2), /another active C1 verification version/); // Live owner approval still refuses.
+    ok(psql(`BEGIN; SET LOCAL session_replication_role=replica; UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at=statement_timestamp(),withdrawal_event_id='44444444-4444-4444-8444-444444444444',withdrawal_reason='smoke_cleanup' WHERE owner_user_id='${owner}'; COMMIT;`));
+    // Baseline controls fail for the real defect: version 1 is wrongly reusable, version 2 cannot supersede it.
+    ok(verify(1, baseline.stdout)); refused(verify(2, baseline.stdout), /another active C1 verification version/);
+    refused(verify(1), /FAIL ai-w6-client-verification: owner approval at verification_version 1 expected reusable got withdrawn; use verification_version 2 for the next W6; STOP/);
+    ok(verify(2)); ok(verify(2));
+    const rows = psql(`SELECT verification_version,active,withdrawn_at IS NOT NULL,coalesce(withdrawal_reason,'') FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' ORDER BY verification_version;`); ok(rows);
+    assert.equal(rows.stdout.trim(), '1|f|t|c1-retry-superseded\n2|t|f|');
+    const approvals = psql(`SELECT count(*),bool_and(withdrawn_at IS NOT NULL) FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${client}';`); ok(approvals);
+    assert.equal(approvals.stdout.trim(), '2|t', 'superseding leaves immutable approval history intact');
+  } finally {
+    if (started) ok(run(['--cleanup-run', cluster], { PG_BIN: pg }));
+    // If startup never completed, retain the directory: do not infer that its postmaster is gone.
+  }
+});
 
 test('c1 W2 rehearsal: --from-post-w2 runs --issuer and --w2b-preconditions on a post-W2 dump without the W2 apply', { skip: skipDb }, () => {
   const env = { PG_BIN: PG() };
