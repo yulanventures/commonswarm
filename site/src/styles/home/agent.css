@@ -1,1 +1,285 @@
-/* Home UI: agent styles. Owned by one lane (see UI-SPEC.md section 6). Site tokens only. */
+/* Home UI: agent view (UI-SPEC.md 3.5). Site tokens only. Class prefix hm-. */
+.hm-agent {
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-lg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--t-base);
+  line-height: var(--lh-base);
+}
+
+.hm-agent__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--s-4);
+  min-inline-size: 0;
+}
+
+.hm-agent__intro {
+  min-inline-size: 0;
+  flex: 1 1 16rem;
+}
+
+.hm-agent__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: var(--weight-display);
+  font-size: var(--t-2xl);
+  line-height: var(--lh-2xl);
+  letter-spacing: var(--track-head);
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__ownership,
+.hm-agent__receive,
+.hm-agent__status-detail,
+.hm-agent__meta,
+.hm-agent__footer {
+  margin: var(--stack-xs) 0 0;
+  color: var(--text-muted);
+  font-size: var(--t-sm);
+  line-height: var(--lh-sm);
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-inline);
+  margin-top: var(--stack-sm);
+}
+
+.hm-agent__banner,
+.hm-agent__fix {
+  padding: var(--pad-card);
+  background: var(--warning-dim);
+  color: var(--warning);
+  border-radius: var(--radius-lg);
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__h2 {
+  margin: 0 0 var(--stack-sm);
+  font-family: var(--font-display);
+  font-weight: var(--weight-head);
+  font-size: var(--t-lg);
+  line-height: var(--lh-lg);
+  letter-spacing: var(--track-head);
+}
+
+.hm-agent__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap-grid);
+  align-items: start;
+}
+
+@media (min-width: 52.01rem) {
+  .hm-agent__body {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+  }
+}
+
+.hm-agent__line,
+.hm-agent__aside,
+.hm-agent__section,
+.hm-agent__facts,
+.hm-agent__activity,
+.hm-agent__doing {
+  min-inline-size: 0;
+}
+
+.hm-agent__section,
+.hm-agent__facts,
+.hm-agent__activity,
+.hm-agent__doing {
+  padding: var(--pad-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.hm-agent__line,
+.hm-agent__aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-lg);
+}
+
+.hm-agent__empty {
+  margin: 0;
+  padding: var(--pad-card);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__queue,
+.hm-agent__scheduled,
+.hm-agent__done,
+.hm-agent__gated-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-sm);
+  min-inline-size: 0;
+}
+
+.hm-agent__gated {
+  display: flex;
+  flex-direction: column;
+  gap: var(--stack-xs);
+  min-inline-size: 0;
+  padding-block: var(--s-2);
+  border-block-start: 1px solid var(--border);
+}
+
+.hm-agent__gated:first-child {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+.hm-agent__gate,
+.hm-agent__detail {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__meta + .hm-agent__detail {
+  margin-top: var(--stack-xs);
+}
+
+.hm-agent__todo-link,
+.hm-agent__home,
+.hm-agent__action,
+.hm-agent__manage {
+  display: inline-flex;
+  align-items: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__todo-link,
+.hm-agent__home,
+.hm-agent__manage {
+  color: var(--accent-bright);
+  text-decoration: none;
+  background: transparent;
+  border: 0;
+}
+
+.hm-agent__action {
+  cursor: pointer;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border: 0;
+}
+
+.hm-agent__manage {
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.hm-agent__todo-link:hover,
+.hm-agent__home:hover,
+.hm-agent__manage:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.hm-agent__todo-link:focus-visible,
+.hm-agent__home:focus-visible,
+.hm-agent__action:focus-visible,
+.hm-agent__manage:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.hm-agent__done-item {
+  min-inline-size: 0;
+  padding-block: var(--s-2);
+  border-block-start: 1px solid var(--border);
+}
+
+.hm-agent__done-item:first-child {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+.hm-agent__fact-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--stack-xs);
+  margin: 0;
+}
+
+@media (min-width: 52.01rem) {
+  .hm-agent__fact-list {
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--stack-xs) var(--gap-inline);
+  }
+}
+
+.hm-agent__fact-label {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--t-sm);
+}
+
+.hm-agent__fact-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__lists {
+  margin-top: var(--stack-md);
+}
+
+.hm-agent__activity-slot {
+  min-inline-size: 0;
+}
+
+.hm-agent__footer {
+  margin: 0;
+}
+
+.hm-agent__action,
+.hm-agent__manage,
+.hm-agent__todo-link,
+.hm-agent__home {
+  transition: color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hm-agent__action,
+  .hm-agent__manage,
+  .hm-agent__todo-link,
+  .hm-agent__home {
+    transition: none;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hm-agent__action {
+    color: var(--accent-ink);
+    background: var(--accent);
+  }
+}
+
+[data-theme="dark"] .hm-agent__action {
+  color: var(--accent-ink);
+  background: var(--accent);
+}
