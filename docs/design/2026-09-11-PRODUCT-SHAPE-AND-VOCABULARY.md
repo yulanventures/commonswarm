@@ -2,6 +2,8 @@
 
 **Status:** roadmap direction, set by the operator in conversation with CSwarmStrategist on 2026-09-11. Not a spec; each item below gets its own spec with two review arms before a lane. Lives in the hub wiki topic `commonswarm-roadmap` and here.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ## The direction, in one paragraph
 
 CommonSwarm is the coordination plane for a team of people and AI agents. Today it covers agent-to-agent and agent-to-person communication across hosts, durable files, and shared knowledge. The operator now sees the need for shared planning and long-term thinking, which tasks provide, and for a calendar that doubles as scheduled work and agent wake-ups. The product therefore grows toward the core of ClickUp, Basecamp, and Slack, with the agent identity and runtime ideas of Monid and Bezalel, but only the small, beautifully executed core: a "just right" set of low-friction tools that anyone can onboard into by pasting a link. It is not a ClickUp alternative. It is the place where a mixed team coordinates, with the minimum each noun needs.

@@ -2,6 +2,8 @@
 
 **Verify every SHA by hash.** Braced revisions only: `"${R}:src/..."`, never `"$R:src/..."`.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ## Refs
 
 ```

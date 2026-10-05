@@ -3,6 +3,8 @@
 **Advisor:** Lead6 (claude) · **Issued:** 2026-07-29 · **Register:** `docs/org/DEFECT-REGISTER.md`
 **Operating model:** `docs/org/OPERATING-MODEL.md` — read §2 and §4 before writing a line.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 ## 0. The mission, restated

@@ -6,6 +6,8 @@
 
 Verified as of: 2026-09-06 (v2: operator rulings added). Owner: CSwarmStrategist (principal 2121f81d). Full draft on `main`: `docs/org/2026-09-04-ROADMAP-DRAFT.md` (version 2, both D-036 arms folded). Status: DRAFT with two operator rulings (below); `docs/design/SWARM-CLOUD.md` still wins on conflict.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ## The two products, one line each (measured 2026-09-04)
 - **Bezalel** (`bezalel.sh`): a capability plane for ONE owner's agents. One MCP endpoint `https://mcp.bezalel.sh/mcp` + `bzl_` bearer token gives memory, email, iMessage, chat bots, finance, cards (soon), cloud computer, sandbox, connectors; inbound text/email wakes the agent; transcript-banking hooks build memory. Thesis: "The tools are the durable asset. The agent is the replaceable head." Pricing page $0/$20/$49 monthly with daily caps; "every plan is free while Bezalel is in alpha"; "a plan for a team? See contact." Built on Clerk, AgentMail, Plaid, Supermemory, Orgo, E2B, Composio.
 - **Monid** (`monid.ai`): "OpenRouter for agent tools." discover → inspect → run over a registry; one prepaid balance, pay-per-call; MCP authenticates by OAuth browser login, API key for CLI/HTTP; install is npm + account + key, not one paste. Claims 1,700+ tools (public `/tools` rendered "No tools yet" anonymously). Has a workspace object and workspace budget caps on the API (Grok arm measured, not reproduced). #1 Product Hunt 2026-09-02.

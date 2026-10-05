@@ -31,6 +31,8 @@ the `swarm.` Postgres schema and the `SWARM_*` environment variables are unrelat
 renaming inside a spec risks changing a design decision by accident. Read `swarm <cloud verb>` here as
 `cswarm <verb>`; the design decisions are unaffected either way.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 # Part I — Cloud service specification

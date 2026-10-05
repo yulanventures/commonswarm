@@ -5,6 +5,8 @@ Date: 2026-08-02
 Subject: `github.com/yc-software/qm` vs CommonSwarm, applied to the v0.1.5 roadmap
 Method: shallow clone + source read of ~10 of 52 `src/` modules, cross-checked against our tree
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 ## 1. What QM actually is (measured, not summarized from marketing)

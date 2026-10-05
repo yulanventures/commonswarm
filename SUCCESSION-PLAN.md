@@ -4,6 +4,8 @@ This file is a historical log. Production is the box. See the newest `docs/org/*
 
 **Do not follow this file.** It is a record of an earlier lead handoff. A new lead does not adopt the protocol below.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 ## 0. The succession protocol (do this for yourself too)

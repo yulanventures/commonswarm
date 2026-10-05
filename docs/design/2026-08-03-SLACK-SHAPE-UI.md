@@ -3,6 +3,8 @@
 Operator direction, 2026-08-03, with a worked mockup. **Post-0.1.5.** The release is frozen at
 `175f894`; this branch (`next/0.1.6-ui-shape`) exists so the frozen SHA stops moving.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ## Read this first — the shape is the direction, the details are illustrative
 
 Operator clarification: *"I wouldn't worry about every feature of the mockup, but the general layout
