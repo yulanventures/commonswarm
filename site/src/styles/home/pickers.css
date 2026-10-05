@@ -1,1 +1,60 @@
-/* Home UI: pickers styles. Owned by one lane (see UI-SPEC.md section 6). Site tokens only. */
+/* Home UI: assign picker and tag picker (UI-SPEC.md 2.4 and 5; lane T). Site tokens only.
+   The popover sits on --surface; the active row is --surface-2 plus a 3px --accent bar (shape, not
+   colour alone, and aria-selected for assistive tech). Contrast by the tokens.css L33-50 method
+   (controls #000/#fff 21.00, #777/#fff 4.48 in the same run): --text-muted captions on --surface-2
+   4.93 light / 7.03 dark; on --surface 5.66 light / 8.08 dark. */
+
+.hm-picker { position: relative; display: grid; min-inline-size: 0; }
+.hm-picker-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
+  min-block-size: 44px; inline-size: 100%; padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--border-interactive); border-radius: var(--radius); background: var(--surface); color: var(--text);
+  font: inherit; font-weight: var(--weight-medium); text-align: start; cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard);
+}
+.hm-picker-trigger:hover { border-color: var(--accent); }
+.hm-picker-trigger[aria-expanded="true"] { border-color: var(--accent); }
+.hm-picker-value { min-inline-size: 0; overflow-wrap: anywhere; }
+span.hm-picker-value { display: block; min-block-size: 44px; align-content: center; font-weight: var(--weight-medium); }
+.hm-picker-chevron { flex: none; color: var(--text-muted); }
+
+.hm-picker-pop {
+  position: absolute; inset-inline: 0; inset-block-start: calc(100% + var(--s-1)); z-index: 20;
+  display: grid; max-block-size: min(24rem, 60vh); overflow: auto; overscroll-behavior: contain;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-floating);
+}
+.hm-tag-picker .hm-picker-pop { inset-block-start: auto; inset-block-end: calc(100% + var(--s-1)); }
+.hm-picker-pop[hidden] { display: none; }
+.hm-pick-list { display: grid; padding: var(--s-1); }
+.hm-pick-group { display: grid; }
+.hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--border); margin-block-start: var(--s-1); padding-block-start: var(--s-1); }
+.hm-pick-group-head {
+  display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; padding: var(--s-2) var(--s-3) var(--s-1);
+  color: var(--text-muted); font-size: var(--t-sm); font-weight: var(--weight-semibold);
+}
+.hm-pick-group-name { overflow-wrap: anywhere; min-inline-size: 0; }
+.hm-pick-option {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-3); align-items: center;
+  min-block-size: 44px; padding: var(--s-2) var(--s-3); border-radius: var(--radius); cursor: pointer; color: var(--text);
+  transition: background-color var(--dur-2) var(--ease-standard);
+}
+.hm-pick-option:hover, .hm-pick-option[aria-selected="true"] { background: var(--surface-2); }
+.hm-pick-option[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); }
+.hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+.hm-pick-copy { display: grid; gap: 0.125rem; min-inline-size: 0; }
+.hm-pick-label { font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.hm-pick-caption { color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere; }
+.hm-pick-letter {
+  display: grid; place-items: center; inline-size: 28px; block-size: 28px; border-radius: var(--radius-pill);
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text); font-size: var(--t-xs); font-weight: var(--weight-semibold);
+}
+.hm-pick-footer {
+  margin: 0; padding: var(--s-2) var(--s-3) var(--s-3); border-block-start: 1px solid var(--border);
+  color: var(--text-muted); font-size: var(--t-sm); overflow-wrap: anywhere;
+}
+
+.hm-picker-trigger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+@media (prefers-reduced-motion: reduce) {
+  .hm-picker-trigger, .hm-pick-option { transition: none; }
+}
