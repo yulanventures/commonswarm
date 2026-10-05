@@ -114,6 +114,8 @@ export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentSta
 
 export type PeopleAgentStatusKind = AgentStatusKind | "key-off" | "key-ended" | "paused" | "stale-messages" | "key-ends-soon" | "new-computer";
 export interface PeopleAgentStatusInput extends AgentStatusInput {
+  /** Optional server overview facts; absent for the existing People dialog. */
+  connection?: "live" | "removed" | "key_off" | "key_ended" | "paused";
   grant?: GrantRiskInput | null;
   oldestUnobservedAt?: string | null;
   app?: string | null;
@@ -144,10 +146,10 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
     input.own ? kind === "key-ends-soon" ? "Get a new key before this one ends." : "It needs a new key to connect again."
       : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
   const grant = input.grant;
-  if (grant?.revokedAt) return keyFix("key-off", "Key turned off");
+  if (grant?.revokedAt || input.connection === "key_off") return keyFix("key-off", "Key turned off");
   const horizon = grant?.kind === "timeboxed" && grant.horizonExpiresAt ? Date.parse(grant.horizonExpiresAt) : NaN;
-  if (horizon <= now) return keyFix("key-ended", "Key ended");
-  if (grant?.kind === "standing" && grant.suspendedAt) return result("paused",
+  if (horizon <= now || input.connection === "key_ended") return keyFix("key-ended", "Key ended");
+  if ((grant?.kind === "standing" && grant.suspendedAt) || input.connection === "paused") return result("paused",
     `Paused: unused for ${STANDING_IDLE_PAUSE_DAYS} days`, input.mayManage ? "Resume it so it can connect again."
       : input.ownerName ? `Ask ${owner} to resume it.` : `Ask ${actors} to resume it.`,
     "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : actors);
@@ -189,19 +191,25 @@ export function homeAgentState(input: HomeAgentStatusInput, now = input.now ?? D
   const hosted = input.transport === "hosted_mcp";
   const hasWakePath = !hosted && (input.hasWakePath ?? Boolean(input.presence &&
     (input.presence.watcher_at || input.presence.channel_at || input.presence.listener_at)));
-  const people = peopleAgentStatus({ ...input, oldestUnobservedAt: hasWakePath && !input.revoked && !input.suspended ? input.oldestUnobservedAt : null }, now);
+  const credentialInput = { ...input, revoked: input.revoked || input.connection === "removed" };
+  const people = peopleAgentStatus({ ...credentialInput, oldestUnobservedAt: hasWakePath && !credentialInput.revoked && !credentialInput.suspended ? input.oldestUnobservedAt : null }, now);
   const receive = agentStatus(input, now).receive;
-  const lastAction = Date.parse(input.lastActionAt ?? input.presence?.last_command_at ?? "");
+  const actionTimes = [input.lastActionAt, input.presence?.last_command_at,
+    input.workingOn?.createdAt ?? input.workingOn?.created_at,
+    input.doingTodo?.since ?? input.doingTodo?.startedAt]
+    .map(value => Date.parse(value ?? "")).filter(at => Number.isFinite(at) && at <= now);
+  const lastAction = actionTimes.length ? Math.max(...actionTimes) : NaN;
   const recent = Number.isFinite(lastAction) && lastAction <= now && now - lastAction <= WORK_RECENT_MS;
   const workingOn = input.workingOn && Date.parse(input.workingOn.until) > now ? input.workingOn : null;
-  const disconnected = ["removed", "suspended", "key-off", "key-ended", "paused"].includes(people.kind);
-  const kind = input.serverWork ?? (disconnected || people.kind === "stale-messages" ? "disconnected"
+  const base = agentStatus(credentialInput, now);
+  const disconnected = base.kind === "removed" || base.kind === "suspended" || ["key-off", "key-ended", "paused"].includes(people.kind);
+  const kind = disconnected ? "disconnected" : input.serverWork ?? (people.kind === "stale-messages" ? "disconnected"
     : recent && (input.doingTodo || workingOn) ? "working" : "idle");
   let word: AgentStateVM["word"] = kind === "working" ? "Working" : kind === "disconnected" ? "Disconnected" : "Idle";
   let detail: string;
   // The server supplies the work class; credential facts still need their own detail and fix.
   if (disconnected) {
-    detail = people.label;
+    detail = ["key-off", "key-ended", "paused"].includes(people.kind) ? people.label : base.chip;
   } else if (kind === "disconnected") {
     if (people.kind === "stale-messages") {
       word = "Not picking up";
@@ -220,11 +228,16 @@ export function homeAgentState(input: HomeAgentStatusInput, now = input.now ?? D
   } else if (!recent && input.doingTodo) {
     detail = `${Number.isFinite(lastAction) ? `Last active ${peopleAgentActivityTime(new Date(lastAction).toISOString(), now)}` : "No activity reported yet"}; ‘${input.doingTodo.title}’ is still in Doing`;
   } else {
-    detail = input.presence == null ? "No activity reported yet" : people.kind === "stale-messages"
+    detail = Number.isFinite(lastAction) ? now - lastAction >= AGENT_INACTIVE_AFTER_MS
+      ? `Not active for ${Math.floor((now - lastAction) / 86_400_000)} days`
+      : now - lastAction < ACTIVE_NOW_MS ? "Active now" : `Active ${peopleAgentActivityTime(new Date(lastAction).toISOString(), now)}`
+      : input.presence == null ? "No activity reported yet" : people.kind === "stale-messages"
       ? agentStatus(input, now).chip : people.label;
   }
   const attention = disconnected || kind === "disconnected" || (people.attention && people.kind !== "stale-messages");
-  const fix = attention && (disconnected || people.attention)
+  const fix = base.kind === "removed" || base.kind === "suspended"
+    ? { action: null, allowed: false, askWho: null, sentence: base.receive ?? "Connect it again from its app." } as AgentStateVM["fix"]
+    : attention && (disconnected || people.attention)
     ? { ...people.fix, sentence: people.sentence }
     : { action: null, allowed: false, askWho: null, sentence: "" } as AgentStateVM["fix"];
   if (kind === "disconnected" && !people.attention && !disconnected) fix.sentence = "Connect it again from its app.";

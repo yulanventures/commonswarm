@@ -73,47 +73,27 @@ const sentKeys = (source: string): string[] => {
   return [...keys].sort();
 };
 
-test("the rail names channels, and `stream` is gone from the app's vocabulary", () => {
-  const rail = between(dashboard, '<aside class="dashboard__rail"', '<section class="dashboard__channel"');
-  /* MESSAGES since the 2026-10-04 redesign (Tom's plain-words rule: a person sees messages). */
-  assert.match(rail, /<h2 id="dashboard-channels-label">MESSAGES<\/h2>/);
-  /* ~~STREAMS (broadcast)~~ retired 2026-09-05. `stream` is the event log on the wire and in
-     SWARM-CLOUD.md 2.1; this heading was the only place the app showed that word.
-     The negative runs on the BUILT markup, because the source keeps the retired wording in
-     the comment that records the change and a source sweep would fail on our own doctrine. */
-  const builtRail = between(appHtml, 'class="dashboard__rail"', 'class="dashboard__channel"');
-  assert.doesNotMatch(builtRail, /STREAMS/);
-  assert.doesNotMatch(builtRail, /\bstream\b/i);
-  /* all-signals sits above the list because it is not one of them: it is the whole feed. */
-  assert.match(rail, /data-channel-place=""[\s\S]*?aria-current="page"/);
-  /* Built from the constant, not typed: ~~`<span>all-signals</span>`~~ 2026-09-05. Since
-     2026-10-04 the label is channelLabel's ("All messages"), still generated from the slug. */
-  assert.match(rail, /<span>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
-  assert.match(rail, /data-channel-list/);
-  assert.match(rail, /data-channel-new[\s\S]*?aria-label="New channel"/);
-  assert.ok(appHtml.includes("MESSAGES"), "the built /app page must ship the rail heading");
-  assert.ok(appHtml.includes("data-channel-list"), "the built /app page must ship the list");
+const shell = readFileSync(join(siteRoot, "src/lib/home-shell.ts"), "utf8");
+const homeCss = readFileSync(join(siteRoot, "src/styles/home/integration.css"), "utf8");
+test("channels live in the stream header menu, with existing hooks and the constant all-messages label", () => {
+  const rail = between(dashboard, '<aside class="dashboard__rail', '<div class="hm-frame__main"');
+  assert.doesNotMatch(rail, /data-channel-list|data-channel-new|data-channel-place|STREAMS/);
+  assert.match(appHtml, /data-home-channel-menu/);
+  assert.match(dashboard, /buildChannelMenu\(document/);
+  for (const hook of ["channelList", "channelNew", "channelPlace"]) assert.ok(shell.includes(hook));
+  assert.match(shell, /channelLabel\(ALL_SIGNALS_SLUG\)/);
+  assert.match(dashboard, /label: unknownChannelId !== null \? "Channel not found" : channelLabel\(activeChannel\(\)\?\.slug \?\? ALL_SIGNALS_SLUG\)/);
+  assert.match(dashboard, /selectChannel\(null\)/);
+  assert.match(shell, /"New channel"/);
 });
-
-test("the phone reaches channels without a second standing header row", () => {
-  /* The 2026-09-04 ruling: the 73px app bar is the only standing header. The rail's channel
-     list is hidden on a phone with the rest of the rail, so the control that replaces it
-     rides in the feed toolbar, which floats over the transcript on a negative margin equal
-     to its own height. Its own height must not exceed that band. */
-  assert.match(dashboard, /class="dashboard__channel-switch"[\s\S]*?data-channel-switch/);
-  assert.match(dashboard, /\.dashboard__channel-switch \{\s*display: none;\s*\}/);
-  const mobile = between(
-    dashboard,
-    "@media (max-width: 52rem) {\n    .dashboard__product {",
-    "@media (max-width: 34rem)",
-  );
-  const rule = between(mobile, ".dashboard__channel-switch {", "}");
-  assert.match(rule, /display: inline-flex;/);
-  assert.match(rule, /min-block-size: 2\.5rem;/, "the control may not be taller than the band");
-  const toolbar = between(mobile, ".dashboard__feed-toolbar {", "}");
-  assert.match(toolbar, /min-block-size: 2\.5rem;/);
-  assert.match(toolbar, /margin-block-end: -2\.5rem;/, "the band still takes its height back");
-  assert.ok(appHtml.includes("data-channel-switch"), "the built page ships the phone control");
+test("phones reach the same channel menu through a 44px disclosure in the stream header", () => {
+  const css = readFileSync(join(siteRoot, "src/styles/home/shell.css"), "utf8");
+  assert.match(css, /\.hm-channel-menu__trigger \{[\s\S]*?min-block-size: 44px/);
+  assert.match(shell, /trigger.setAttribute\("aria-controls", panel.id\)/);
+  assert.match(shell, /trigger.setAttribute\("aria-expanded", String\(open\)\)/);
+  assert.match(shell, /event.key !== "Escape"/);
+  assert.match(shell, /set\(false, true\)/);
+  assert.match(homeCss, /\[data-home-channel-menu\].*pointer-events: auto/);
 });
 
 test("the channel narrowing is the query's, not the rendered list's", () => {
@@ -878,10 +858,16 @@ test("the name of the unfiltered view is typed in exactly one place, and that pl
   const hits = [...code.matchAll(/all-signals/g)];
   assert.equal(hits.length, 1, `all-signals is typed ${hits.length} times outside comments`);
   assert.match(code, /const COMPOSER_DRAFT_SCOPE = "all-signals";/);
-  /* And the markup builds its three from the constant. */
-  assert.match(dashboard, /<span>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
-  assert.match(dashboard, /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h1>/);
-  assert.match(dashboard, /<span data-channel-switch-label>\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/span>/);
+  /* The stream heading and menu both build their labels from the constant. */
+  assert.match(dashboard, /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h2>/);
+  assert.match(dashboard, /channelLabel\(activeChannel\(\)\?\.slug \?\? ALL_SIGNALS_SLUG\)/);
+  assert.match(shell, /channelLabel\(ALL_SIGNALS_SLUG\)/);
+  assert.doesNotMatch(appHtml, /data-channel-switch/);
+  const labels = appHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "").replace(/<style\b[^>]*>[\s\S]*?<\/style>/g, "").replace(/<[^>]+>/g, " ");
+  assert.doesNotMatch(labels, /\bstream\b/i);
+  for (const builder of [shell, readFileSync(join(siteRoot, "src/lib/home-rail.ts"), "utf8")]) {
+    assert.doesNotMatch(builder, /["'`]Stream["'`]/i, "channel and rail labels keep the internal stream word off screen");
+  }
   /* ~~COMPOSER_STREAM~~ renamed with the vocabulary: "stream" is the wire's word for the
      event log and this lane retired it from the app. */
   assert.doesNotMatch(code, /COMPOSER_STREAM/);

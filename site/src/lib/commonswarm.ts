@@ -1,3 +1,5 @@
+import { homeOverviewUnavailable } from "./home-map";
+import type { HomeOverview } from "./home/contract";
 /*
  * The browser client. This file is the whole of the web app's contact with the backend.
  *
@@ -2719,24 +2721,71 @@ export async function browserDeliveryReceipts(
 export async function myWorkspaces(): Promise<{ id: string; name: string }[]> {
   const c = client();
   if (!c) throw new NoDeployment();
-  const { data, error } = await readWithDeadline(
-    "your workspaces",
-    (signal) =>
-      c
-        .schema("swarm_read")
-        .from("workspaces")
-        .select("workspace_id,name,archived_at")
-        .is("archived_at", null)
-        .limit(50)
-        .abortSignal(signal),
-  );
-  if (error) throw new Error(error.message);
-  return (data ?? [])
-    .map((row) => ({
-      id: String(row.workspace_id ?? ""),
-      name: String(row.name ?? row.workspace_id ?? ""),
-    }))
-    .filter((w) => w.id.length > 0);
+  const workspaces: { id: string; name: string }[] = [];
+  const pageSize = 50;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await readWithDeadline("your workspaces", signal => c
+      .schema("swarm_read").from("workspaces").select("workspace_id,name,archived_at")
+      .is("archived_at", null).order("name", { ascending: true }).order("workspace_id", { ascending: true })
+      .range(offset, offset + pageSize - 1).abortSignal(signal));
+    if (error) throw new Error(error.message);
+    const page = data ?? [];
+    workspaces.push(...page.map(row => ({ id: String(row.workspace_id ?? ""),
+      name: String(row.name ?? row.workspace_id ?? "") })).filter(workspace => workspace.id.length > 0));
+    if (page.length < pageSize) return workspaces;
+  }
+}
+
+/** Optional rollout read. Missing RPCs use the older workspace reads; other failures stay failures. */
+export async function homeOverview(): Promise<HomeOverview | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const result = await readWithDeadline("Catch up", signal =>
+    api.schema("swarm_read").rpc("home_overview").abortSignal(signal));
+  if (result.error) {
+    if (homeOverviewUnavailable(result.status, result.error.code)) return null;
+    throw new Error("Catch up could not be checked.");
+  }
+  return result.data as HomeOverview;
+}
+
+/** Ask previews use immutable bodies from the selected workspace, including older messages. */
+export async function homeOverviewAsks(workspaceId: string, ids: readonly string[]): Promise<Signal[]> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  if (!ids.length) return [];
+  const rows: Signal[] = [];
+  for (let offset = 0; offset < ids.length; offset += 50) {
+    const { data, error } = await readWithDeadline("Catch up messages", signal => api.schema("swarm_read")
+      .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId).eq("kind", "ask")
+      .in("signal_id", ids.slice(offset, offset + 50)).abortSignal(signal));
+    if (error) throw new Error("Catch up messages could not be checked.");
+    rows.push(...(data ?? []).map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
+  }
+  return rows;
+}
+
+/** Dedicated work read: an agent's active claim must not depend on the latest chat page. */
+export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  try {
+    const rows: Signal[] = [];
+    const cutoff = new Date().toISOString();
+    const pageSize = 200;
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await readWithDeadline("agent work", signal => api.schema("swarm_read")
+        .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId)
+        .eq("kind", "working-on").gt("until", cutoff).order("created_at", { ascending: false })
+        .order("signal_id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
+      if (error) return []; // No read means no work claim; never guess Working.
+      const page = data ?? [];
+      rows.push(...page.map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
+      if (page.length < pageSize) return rows;
+    }
+  } catch {
+    return []; // An optional status read cannot hide messages already loaded.
+  }
 }
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */

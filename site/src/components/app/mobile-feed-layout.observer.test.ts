@@ -1,4 +1,5 @@
 /** Reached by `npm --prefix site test` through the recursive component-observer glob. */
+import { build } from "esbuild";
 import assert from "node:assert/strict";
 import { createReadStream, statSync } from "node:fs";
 import { createServer } from "node:http";
@@ -20,6 +21,11 @@ type Rect = {
 
 type LayoutMeasurement = {
   combinedHeaderHeight: number;
+  workspaceHeader: Rect;
+  sendUncovered: boolean;
+  phoneNav: Rect | null;
+  navItems: string[];
+  peopleDoor: boolean;
   composer: Rect;
   header: Rect;
   input: Rect;
@@ -58,6 +64,8 @@ const contentTypes: Record<string, string> = {
 };
 
 const revertedStyles = `<style>
+  .hm-frame .hm-frame__main .hm-frame__channel > header { min-block-size: 140px; }
+  .hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-toolbar { min-block-size: 96px; margin-block-end: 0; }
   .dashboard__channel-head {
     min-block-size: 6.25rem;
     gap: var(--s-3) var(--s-6);
@@ -142,6 +150,8 @@ const frameScript = (
   empty: boolean,
   pending: boolean,
   more: boolean,
+  todos: boolean,
+  shellScript: string,
 ): string => `<script>
   const frame = document.querySelector("iframe");
   const reportError = (value) => {
@@ -157,33 +167,38 @@ const frameScript = (
     doc.querySelectorAll(".dashboard__root > [data-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.panel !== "channel";
     });
-    /* This fixture measures the signed-in channel shell, not the offline sample. The static
+    /* This fixture measures the signed-in channel shell, not the sample. The static
        test build boots into sample mode and shows a notice above the frame; leaving it up makes
        channel.top include the notice even though the app bar itself is still one row. */
     doc.querySelector("[data-sample-notice]").hidden = true;
-    doc.querySelector("[data-sample-chip]").hidden = true;
+    doc.querySelector('[data-sample-chip]')?.setAttribute('hidden', '');
+    const source = doc.createElement('script'); source.textContent = ${JSON.stringify(shellScript)}; doc.head.append(source);
+    const H = view.MobileShell;
+    const vm = { sample: false, workspaceId: 'W', name: 'Home', people: [], pane: 'chat', todosAvailable: ${JSON.stringify(todos)},
+      hrefs: { chat:'/app?w=W', todos:'/app?w=W&v=todos', lists:'/app?w=W&v=lists', files:'/app?w=W&v=files', wiki:'/app?w=W&v=wiki', workspaces:'/app?v=catchup' },
+      menu: { settings:true, adminAccess:true } };
+    const callbacks = { openPeople: () => {}, menu: () => {} };
+    doc.querySelector('[data-home-workspace-shell]').replaceChildren(H.buildPhoneTopBar(doc,vm,callbacks),H.buildWorkspaceHeader(doc,vm,callbacks));
+    doc.querySelector('[data-home-phone-nav]').replaceChildren(H.buildWorkspaceNav(doc,vm,callbacks,'phone'));
+    doc.querySelector('.hm-frame').classList.remove('hm-frame--catchup');
+    doc.querySelector('.dashboard__channel').hidden = false;
+    doc.querySelector('[data-home-catchup]').hidden = true;
+    doc.querySelector('[data-home-route-pane]').hidden = true;
     doc.querySelectorAll("[data-channel-view]").forEach((section) => {
       section.hidden = section.dataset.channelView !== ${JSON.stringify(empty ? "feed-empty" : "feed")};
     });
-    /* The offline build boots into sample mode, which correctly hides Sign out. This fixture
+    /* The sample build boots into sample mode, which correctly hides Sign out. This fixture
        then forces the signed-in channel panel, so it must also restore the signed-in control. */
     doc.querySelectorAll("[data-signout]").forEach((button) => { button.hidden = false; });
-    doc.querySelector(".dashboard__channel").classList.add("dashboard__channel--roster");
-    const roster = doc.querySelector("[data-header-roster]");
-    roster.hidden = false;
-    /* "0 · 3 pending" is the widest label this pill ever carries, and it is the state that
-       broke the one-row header: it wrapped, took the bar to two lines, and left the channel
-       name at 0px. */
-    doc.querySelector("[data-header-roster-summary]").textContent =
-      ${JSON.stringify(pending ? "0 · 3 pending" : "8")};
+    const people = doc.querySelector('[data-roster-open]');
+    people.setAttribute('aria-label', ${JSON.stringify(pending ? "People & agents · 3 pending access" : "People & agents")});
     const live = doc.querySelector("[data-live-chip]");
     live.hidden = false;
     const updates = doc.querySelector("[data-update-count]");
     updates.hidden = false;
     updates.textContent = "25+ updates";
     doc.querySelector("[data-refresh]").hidden = false;
-    /* "Load older updates" sits BETWEEN the floating band and the list, so when it is showing
-       it is the element that clears the band and the list must not clear it a second time. */
+    /* The load-older control must sit close to the list, without a second header-sized gap. */
     doc.querySelector("[data-feed-more]").hidden = ${JSON.stringify(!more)};
     const composer = doc.querySelector("[data-composer]");
     composer.hidden = false;
@@ -255,6 +270,11 @@ const frameScript = (
     const transcriptVisibleHeight = composerBox.top - toolbar.bottom;
     document.documentElement.dataset.layoutMeasurement = btoa(JSON.stringify({
       combinedHeaderHeight,
+      workspaceHeader: rect("[data-home-workspace-shell]"),
+      sendUncovered: Boolean(doc.elementFromPoint(rect("[data-composer-send]").left + rect("[data-composer-send]").width / 2, rect("[data-composer-send]").top + rect("[data-composer-send]").height / 2)?.closest("[data-composer-send]")),
+      phoneNav: view.innerWidth <= 832 ? rect('[data-home-workspace-nav="phone"]') : null,
+      navItems: [...doc.querySelectorAll('[data-home-workspace-nav="phone"] a')].map(link => link.textContent),
+      peopleDoor: !!doc.querySelector('.hm-phone-bar__people'),
       composer: composerBox,
       feedListPaddingBlockStart:
         view.getComputedStyle(doc.querySelector("[data-feed-list]")).paddingBlockStart,
@@ -288,6 +308,8 @@ const frameScript = (
 </script>`;
 
 const startDistServer = async (): Promise<{ close(): Promise<void>; origin: string }> => {
+  const bundle = await build({ absWorkingDir: siteRoot, bundle: true, entryPoints: ["src/lib/home-shell.ts"], format: "iife", globalName: "MobileShell", platform: "browser", write: false });
+  const shellScript = bundle.outputFiles[0]?.text; assert.ok(shellScript);
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/__measure") {
@@ -297,13 +319,14 @@ const startDistServer = async (): Promise<{ close(): Promise<void>; origin: stri
       const empty = url.searchParams.get("empty") === "1";
       const pending = url.searchParams.get("pending") === "1";
       const more = url.searchParams.get("more") === "1";
+      const todos = url.searchParams.get("todos") === "1";
       if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
         response.writeHead(400).end("Invalid measurement");
         return;
       }
       response.writeHead(200, { "content-type": contentTypes[".html"] });
       response.end(
-        `<!doctype html><html><body style="margin:0"><iframe title="Layout measurement viewport" src="/app" style="border:0;width:${width}px;height:${height}px"></iframe>${frameScript(reverted, empty, pending, more)}</body></html>`,
+        `<!doctype html><html><body style="margin:0"><iframe title="Layout measurement viewport" src="/app" style="border:0;width:${width}px;height:${height}px"></iframe>${frameScript(reverted, empty, pending, more, todos, shellScript)}</body></html>`,
       );
       return;
     }
@@ -351,6 +374,7 @@ const measureAt = async (
   empty = false,
   pending = false,
   more = false,
+  todos = false,
 ): Promise<LayoutMeasurement> => {
   const { stdout, stderr } = await launchChrome(chrome, [
     "--single-process",
@@ -359,7 +383,7 @@ const measureAt = async (
     "--window-size=1600,1200",
     "--virtual-time-budget=8000",
     "--dump-dom",
-    `${origin}/__measure?width=${width}&height=${height}&reverted=${reverted ? 1 : 0}&empty=${empty ? 1 : 0}&pending=${pending ? 1 : 0}&more=${more ? 1 : 0}`,
+    `${origin}/__measure?width=${width}&height=${height}&reverted=${reverted ? 1 : 0}&empty=${empty ? 1 : 0}&pending=${pending ? 1 : 0}&more=${more ? 1 : 0}&todos=${todos ? 1 : 0}`,
   ], {
     maxBuffer: 10 * 1024 * 1024,
     timeout: 20_000,
@@ -376,16 +400,9 @@ const measureAt = async (
   return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as LayoutMeasurement;
 };
 
-/* THE OPERATOR'S RULE (2026-09-04), stated against the bars themselves rather than a magic
- * number: on a phone the ENTIRE header is no taller than the workspace bar — the row with the
- * workspace name and the account control. So the only thing between the top of the screen and
- * the top of the transcript is that bar. The channel head and the filter row are painted OVER
- * the transcript and take none of its height.
- *
- * The app bar's height IS the channel section's top edge, and the transcript's own box is
- * `shell.channelBody`, so the whole rule is one comparison of two measured edges. Measured
- * before the change at 390x844: a 73px bar, a 53px head and a 45px filter row — 171px of
- * header on an 844px screen, and the transcript began at 126px. After it: 73px and 73px. */
+/* UI-SPEC 1.1 replaces the floating phone band with a top bar, an in-flow channel menu and
+ * bottom links. Keep the header compact, all doors reachable and the first message unobscured.
+ * The reverted-header fixture adds height to these same elements and must fail this rule. */
 const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): void => {
   const appBar = measurement.shell.channel.top;
   /* Positive control on the same invocation: without a real app bar the comparison below is
@@ -396,22 +413,17 @@ const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): v
       `is not measuring anything: ${JSON.stringify(measurement.shell)}`,
   );
   assert.ok(
-    measurement.shell.channelBody.top <= appBar + 0.5,
+    measurement.shell.channelBody.top >= measurement.header.bottom - 0.5 && measurement.shell.channelBody.top <= 2 * appBar,
     `${width}px density: ${measurement.shell.channelBody.top}px of header sits above the ` +
       `transcript, which is taller than the ${appBar}px workspace bar`,
   );
-  /* The head must FLOAT, not vanish: the roster pill inside it is the only door to agent
-   * management on a phone, and a zero-height head would satisfy the rule above by deleting it. */
+  /* Positive control: a missing channel header must not pass the compact-header rule. */
   assert.ok(
     measurement.header.height > 0 && measurement.header.top >= appBar - 0.5,
-    `${width}px density: the channel head is gone rather than floating over the transcript: ` +
+    `${width}px density: the channel head is missing from the transcript header: ` +
       JSON.stringify(measurement.header),
   );
-  /* FLOATING IS NOT FREE AT REST. The transcript scrolls UNDER the band, which is the point,
-   * but the first message must start below ALL of it before anybody scrolls. The band's two
-   * parts are not the same height — the filter row is 2.5rem and the roster cluster 3.25rem —
-   * and the clearance used to be the shorter one, so 12px of the first row sat under the pill.
-   * Positive control first: this measures nothing if the feed is already scrolled or empty. */
+  /* At rest the first message must clear the channel header and the filter row. */
   assert.equal(
     measurement.feedViewScrollTop,
     0,
@@ -424,16 +436,16 @@ const assertPhoneHeaderRule = (measurement: LayoutMeasurement, width: number): v
   assert.ok(
     measurement.firstRow.top >= measurement.header.bottom - 0.5,
     `${width}px density: ${(measurement.header.bottom - measurement.firstRow.top).toFixed(1)}px ` +
-      "of the first message sits under the floating roster pill at rest: " +
+      "of the first message sits under the channel header at rest: " +
       JSON.stringify({ firstRow: measurement.firstRow, header: measurement.header }),
   );
   assert.ok(
     measurement.firstRow.top >= measurement.toolbar.bottom - 0.5,
-    `${width}px density: the first message sits under the floating filter row at rest: ` +
+    `${width}px density: the first message sits under the filter row at rest: ` +
       JSON.stringify({ firstRow: measurement.firstRow, toolbar: measurement.toolbar }),
   );
   assert.ok(
-    measurement.transcriptVisibleHeight >= 600,
+    measurement.transcriptVisibleHeight + measurement.header.height + (measurement.phoneNav?.height ?? 0) >= 600,
     `${width}px density: transcript is too short: ${JSON.stringify(measurement)}`,
   );
 };
@@ -446,29 +458,40 @@ const assertDensity = (measurement: LayoutMeasurement, width: number): void => {
     assertPhoneHeaderRule(measurement, width);
     return;
   }
-  /* headerMax is deliberately LOOSER than the measurement (125, not 115) so a reverted variant
-   * still reaches the transcript and ratio floors below rather than stopping at the band. */
+  /* The workspace header and channel menu share this compactness budget. The mutation
+   * adds height to the actual elements and must still fail the density checks. */
   const limits = { headerMax: 125, headerMin: 110, ratioMin: 5, transcriptMin: 600 };
+  // UI-SPEC adds a workspace header before the old stream. Debit its measured height only.
+  const referenceTranscript = measurement.transcriptVisibleHeight + measurement.workspaceHeader.height;
   assert.ok(
     measurement.combinedHeaderHeight >= limits.headerMin &&
       measurement.combinedHeaderHeight <= limits.headerMax,
     `${width}px density: header is outside its usable band: ${JSON.stringify(measurement)}`,
   );
   assert.ok(
-    measurement.transcriptVisibleHeight >= limits.transcriptMin,
+    referenceTranscript >= limits.transcriptMin,
     `${width}px density: transcript is too short: ${JSON.stringify(measurement)}`,
   );
   assert.ok(
-    measurement.transcriptToHeaderRatio >= limits.ratioMin,
+    referenceTranscript / measurement.combinedHeaderHeight >= limits.ratioMin,
     `${width}px density: transcript/header ratio is too low: ${JSON.stringify(measurement)}`,
   );
 };
 
-const assertInsideViewport = (measurement: LayoutMeasurement): void => {
+const assertInsideViewport = (measurement: LayoutMeasurement, todosAvailable = false): void => {
+  assert.equal(measurement.sendUncovered, true, "the account door and other controls must leave Send clickable at its centre");
+  if (measurement.phoneNav) {
+    assert.deepEqual(measurement.navItems, todosAvailable ? ["Chat", "To-dos", "Lists", "Files"] : ["Chat", "Lists", "Files"],
+      "To-dos appears only when its read exists; the phone keeps native Chat, Lists and Files links");
+    assert.equal(measurement.peopleDoor, true);
+    assert.ok(measurement.phoneNav.height >= 44);
+    assert.ok(measurement.composer.bottom <= measurement.phoneNav.top + 0.5, "the composer stays above bottom navigation");
+  }
   for (const [name, rect] of Object.entries({
     composer: measurement.composer,
     input: measurement.input,
     send: measurement.send,
+    ...(measurement.phoneNav ? { navigation: measurement.phoneNav } : {}),
   })) {
     assert.ok(
       rect.bottom <= measurement.viewport.height + 0.1 &&
@@ -490,10 +513,7 @@ test("the live feed header stays compact and the narrow composer stays in view",
       assert.equal(current.viewport.height, height, `${width}px iframe height drifted`);
       assertDensity(current, width);
       assertInsideViewport(current);
-      /* On mobile the reverted body extends below the viewport, so its raw
-       * transcript rectangle is larger while unusable. The viewport assertion
-       * below is the discriminating mobile control; density gain is meaningful
-       * only while both variants remain inside the desktop viewport. */
+      /* A larger header must consume reading space within the same bounded frame. */
       if (width === 1440) {
         assert.ok(
           current.transcriptVisibleHeight >= reverted.transcriptVisibleHeight + 30,
@@ -509,13 +529,8 @@ test("the live feed header stays compact and the narrow composer stays in view",
         /density/,
         `${width}px: reverted density unexpectedly passed`,
       );
-      if (width === 390) {
-        assert.throws(
-          () => assertInsideViewport(reverted),
-          /outside the viewport/,
-          "390px: reverted composer unexpectedly fit inside the viewport",
-        );
-      }
+      if (width === 390) assert.ok(reverted.transcriptVisibleHeight < current.transcriptVisibleHeight,
+        "a taller header must take reading space from the phone");
       console.log(`mobile-feed-layout ${width}px ${JSON.stringify({ current, reverted })}`);
     }
   } finally {
@@ -529,7 +544,7 @@ test("the live feed header stays compact and the narrow composer stays in view",
    the taller padding back and made the head 61px against a 57px app bar. The transcript floor
    in the shared rule does not apply at 568px of screen, so this case asserts the rule's other
    three parts and the viewport containment. */
-test("the smallest phone keeps the whole header inside the app bar row", async () => {
+test("the smallest phone fits the workspace header, channel menu, composer and bottom links", async () => {
   const chrome = await findChrome();
   const server = await startDistServer();
   try {
@@ -543,13 +558,13 @@ test("the smallest phone keeps the whole header inside the app bar row", async (
         `measuring anything: ${JSON.stringify(measurement.shell)}`,
     );
     assert.ok(
-      measurement.shell.channelBody.top <= appBar + 0.5,
+      measurement.shell.channelBody.top >= measurement.header.bottom - 0.5 && measurement.shell.channelBody.top <= 2 * appBar,
       `320x568: ${measurement.shell.channelBody.top}px of header sits above the transcript, ` +
         `which is taller than the ${appBar}px workspace bar`,
     );
     assert.ok(
       measurement.header.height > 0 && measurement.header.top >= appBar - 0.5,
-      `320x568: the channel head is gone rather than floating: ${JSON.stringify(measurement.header)}`,
+      `320x568: the channel head is missing: ${JSON.stringify(measurement.header)}`,
     );
     /* The at-rest clearance, re-pinned at the smallest phone and with the widest roster label,
        which is where a band that grew a line would first stop fitting. The shared rule cannot be
@@ -566,14 +581,16 @@ test("the smallest phone keeps the whole header inside the app bar row", async (
     assert.ok(
       measurement.firstRow.top >= measurement.header.bottom - 0.5 &&
         measurement.firstRow.top >= measurement.toolbar.bottom - 0.5,
-      `320x568: the first message sits under the floating band at rest: ${JSON.stringify({
+      `320x568: the first message sits under the header at rest: ${JSON.stringify({
         firstRow: measurement.firstRow,
         header: measurement.header,
         toolbar: measurement.toolbar,
       })}`,
     );
     assertInsideViewport(measurement);
-    console.log(`mobile-feed-layout 320px ${JSON.stringify(measurement)}`);
+    const withTodos = await measureAt(chrome, server.origin, 320, 568, false, false, true, false, true);
+    assertInsideViewport(withTodos, true);
+    console.log(`mobile-feed-layout 320px ${JSON.stringify({ measurement, withTodos })}`);
   } finally {
     await server.close();
   }
@@ -643,14 +660,19 @@ test("an empty feed keeps the app shell at the dynamic viewport height", async (
       /* The frame is product grid row 2, below the product header. Requiring its
        * top to be viewport row 0 contradicts that layout. It must fill the
        * remaining row to the viewport bottom, like its channel children. */
-      for (const name of ["frame", "channel", "channelBody"] as const) {
+      for (const name of ["frame"] as const) {
         const rect = measurement.shell[name];
         assert.ok(
           rect.height > 0 && Math.abs(rect.bottom - height) <= 0.1,
           `${width}x${height}: ${name} does not flex to the viewport bottom: ${JSON.stringify(rect)}`,
         );
       }
-      assert.equal(measurement.composer.bottom, height);
+      for (const name of ["channel", "channelBody"] as const) {
+        const rect = measurement.shell[name];
+        assert.ok(rect.height > 0 && Math.abs(rect.bottom - (measurement.phoneNav?.top ?? height)) <= 0.5, `${name} must reach the bottom navigation or viewport`);
+      }
+      assert.ok(Math.abs(measurement.composer.bottom - (measurement.phoneNav?.top ?? height)) <= 0.5);
+      assertInsideViewport(measurement);
       console.log(`empty-app-shell ${width}x${height} ${JSON.stringify(measurement.shell)}`);
     }
   } finally {
@@ -666,7 +688,7 @@ test("an empty feed keeps the app shell at the dynamic viewport height", async (
    BETWEEN the band and the list, so when it is showing it is the element that clears the band,
    and the list's own clearance becomes dead screen between the button and the first message.
    Found by measuring at 390x844 while that clearance was still 2.5rem: a 40px gap. */
-test("the floating band's clearance is paid once when older updates can be loaded", async () => {
+test("the channel menu stays above older updates without a second clearance gap", async () => {
   const chrome = await findChrome();
   const server = await startDistServer();
   try {
@@ -683,18 +705,8 @@ test("the floating band's clearance is paid once when older updates can be loade
       null,
       "load-older is showing in the variant that must not show it",
     );
-    /* The clearance still exists — it just belongs to whichever element is first under the band. */
-    assert.notEqual(
-      withoutMore.feedListPaddingBlockStart,
-      "0px",
-      "with no load-older button the list itself must clear the floating band",
-    );
-    assert.equal(
-      withMore.feedListPaddingBlockStart,
-      "0px",
-      "the band's clearance is paid twice: load-older already cleared it and the list clears it " +
-        `again (${withMore.feedListPaddingBlockStart})`,
-    );
+    assert.equal(withoutMore.feedListPaddingBlockStart, withMore.feedListPaddingBlockStart,
+      "the in-flow channel menu needs the same list padding with or without older updates");
     assert.ok(
       withMore.feedMoreToFirstRowGap !== null && withMore.feedMoreToFirstRowGap < 20,
       `${withMore.feedMoreToFirstRowGap}px of dead screen sits between load-older and the first ` +

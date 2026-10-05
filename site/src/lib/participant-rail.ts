@@ -84,7 +84,7 @@ export const groupParticipantsByOwner = <
 /** Normalizes roster rows without discarding agents whose owner cannot be resolved. */
 export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
   rows
-    .map((row) => ({
+    .map<RosterAgent>((row) => ({
       principalId: String(row.principal_id ?? ''),
       name: String(row.name ?? 'Unnamed agent'),
       model: row.model == null ? null : String(row.model),
@@ -169,10 +169,7 @@ export const renderSidebarParticipants = <
       avatar.className = 'dashboard__sidebar-person-avatar';
       avatar.textContent = initials(group.member.name);
       avatar.setAttribute('aria-hidden', 'true');
-      const presence = document.createElement('span');
-      presence.className = 'dashboard__presence-dot';
-      presence.setAttribute('aria-hidden', 'true');
-      avatarWrap.append(avatar, presence);
+      avatarWrap.append(avatar);
       const copy = document.createElement('span');
       copy.className = 'dashboard__sidebar-participant-copy';
       const name = document.createElement('strong');
