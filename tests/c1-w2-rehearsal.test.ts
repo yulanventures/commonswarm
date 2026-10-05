@@ -312,7 +312,8 @@ test('c1 W6 rehearsal: the sourced steps are Bash 3.2 syntax, run plan slices fr
   assert.equal(syntax.status, 0, syntax.stderr);
   assert.doesNotMatch(w6Steps, /\$\([^)]*<</, 'no heredoc inside $(...)');
   assert.doesNotMatch(w6Steps, /\bHOME=/, 'HOME is never assigned');
-  assert.doesNotMatch(w6Steps, /\brm\b/, 'the steps delete nothing; the main script removes only its own mktemp directory');
+  assert.doesNotMatch(w6Steps, /(?<!-)\brm\b/, 'the steps delete nothing (docker\'s --rm flag aside); the main script removes only its own mktemp directory');
+  assert.match('x; rm -f y', /(?<!-)\brm\b/, 'scan control'); assert.doesNotMatch('docker run --rm', /(?<!-)\brm\b/);
   assert.match(source, /\. "\$REPO\/scripts\/c1-w6-rehearsal-steps\.sh"/);
   // The copy differs from the plan only by the listed prefixes, and the reverse map must restore it byte for byte.
   assert.match(w6Steps, /assert back==raw/);
@@ -388,4 +389,43 @@ test('c1 W6 rehearsal: negative controls: the release-role checksum gate (plan a
   assert.match(fault.stdout, /^PASS ai-w6-activation-readback$/m);
   assert.match(fault.stdout, /^FAIL ai-w6-finish:default-closed: .*ERROR: {2}close issuance before release measurement changes/m);
   assert.match(fault.stdout, /^PASS cleanup: /m);
+});
+
+// ---------------- release Z2: SQL never on stdin (docker run has no -i) ----------------
+const dockerCheck = resolve('scripts/c1-docker-stdin-check.sh');
+
+test('c1 docker stdin check: Bash 3.2 syntax, plan functions extracted (not retyped), no heredoc inside $(...)', () => {
+  const syntax = spawnSync('/bin/bash', ['-n', dockerCheck], { encoding: 'utf8' }); assert.equal(syntax.status, 0, syntax.stderr);
+  const text = readFileSync(dockerCheck, 'utf8');
+  assert.doesNotMatch(text, /\$\([^)]*<</); assert.doesNotMatch(text, /\bHOME=/);
+  assert.match(text, /# step: ai-db-session/); assert.match(text, /ai_db_secret_file "\$SECRET_STAGE\/statement\.sql"/);
+  // The harness models the box: every stand-in psql call reads /dev/null, never the caller's stdin.
+  assert.match(source, /-X --set=ON_ERROR_STOP=1 "\$\{args\[@\]\}" <\/dev\/null 2>"\$SECRET_STAGE\/psql\.log"/);
+});
+
+test('c1 docker stdin check: the local stand-in run (no -i semantics) passes every step; CI runs it with real docker', { skip: skipDb }, () => {
+  const r = spawnSync('/bin/bash', [dockerCheck], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, PG_BIN: PG(), C1_DOCKER_STAND_IN: '1' } });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const line of [/^PASS docker-stdin-no-op: docker run without -i, psql --file - <file: exit 0 and nothing ran \(rows 0\)/m,
+    /^PASS ai_db-refuses-stdin: /m, /^PASS ai_db_secret_file: the plan's helper ran the SQL from a read-only mounted file \(rows 1\)$/m,
+    /^PASS ai_db-proof-file: /m, /^PASS cleanup: cluster stopped; /m]) assert.match(r.stdout, line);
+});
+
+test('c1 W2b issuer: the release-Z block (stdin ALTER) fails the real TLS login exactly as live; the stdin fault is caught by the readback', { skip: skipDb }, () => {
+  const present = spawnSync('git', ['cat-file', '-e', '78eaeb2a^{commit}']);
+  assert.equal(present.status, 0, 'commit 78eaeb2a is absent from this clone: fetch it (fetch-depth: 0)');
+  const env = { PG_BIN: PG() };
+  const z = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--plan-from', '78eaeb2a', postFixture()], env);
+  assert.notEqual(z.status, 0);
+  assert.match(z.stdout, /^PASS ai-w2-issuer-credential:alter-role$/m, 'the stdin ALTER "succeeds" (psql read nothing)');
+  assert.match(z.stdout, /^FAIL ai-w2-issuer-credential:login: libpq login exit status expected 0 got nonzero: password authentication failed for user "commonswarm_admin_issuer"$/m);
+  const fault = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', postFixture()], { ...env, C1_W2_REHEARSAL_FAULT: 'issuer-sql-on-stdin' });
+  assert.notEqual(fault.status, 0);
+  assert.match(fault.stdout, /^FAULT injected: the issuer ALTER ROLE sent on stdin/m);
+  assert.match(fault.stdout, /^FAIL ai-w2-issuer-credential:alter-role: FAIL ai-w2-issuer-credential: issuer LOGIN with a SCRAM-SHA-256 verifier expected t got f \(ALTER ROLE not applied\); STOP$/m);
+  assert.doesNotMatch(fault.stdout, /ai-w2-issuer-credential:login/, 'stopped before any login test');
+  // The release-Z recycle hook sent every statement on stdin too: its first remeasure fails (and reports UNKNOWN).
+  const hook = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--w6', postFixture()], { ...env, C1_W6_PLAN_FROM: '78eaeb2a' });
+  assert.notEqual(hook.status, 0);
+  assert.match(hook.stdout, /^FAIL ai-edge-refresh:before-W6-open: FAIL ai-edge-refresh: issuance state UNKNOWN after the remeasure failure/m);
 });

@@ -373,8 +373,26 @@ if test "$ISSUER" = 1 || test -n "$DUMP_POST"; then
 fi
 if test "$ISSUER" = 1; then
   ISSUER_PLAN=$PLAN; test -z "$PLAN_FROM" || ISSUER_PLAN=$T/issuer-plan.md
-  extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
-  extract "$ISSUER_PLAN" ai-w2-issuer-credential line 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-alter.sh"
+  if grep -qF 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' "$ISSUER_PLAN" && test "${C1_W2_REHEARSAL_FAULT:-}" != issuer-sql-on-stdin; then
+    # The ALTER from a read-only mounted file, then the SCRAM readback (both from the plan bytes).
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' 'install -o root -g 986' >"$T/blocks/issuer-alter.sh"
+  elif grep -qF 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' "$ISSUER_PLAN"; then
+    # Test control: the current block with its ALTER sent on stdin again (as at release Z); the readback must catch it.
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' 'install -o root -g 986' \
+      | sed 's#^ai_db_secret_file "$SECRET_STAGE/issuer.sql"#ai_db -q --file - <"$SECRET_STAGE/issuer.sql"#' >"$T/blocks/issuer-alter.sh"
+    say "FAULT injected: the issuer ALTER ROLE sent on stdin to the docker-shaped psql (no -i), as at release Z (test control)"
+  else
+    # A --plan-from block before the mounted-file fix: its ALTER is fed on stdin.
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential line 'ai_db -q --file - <"$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-alter.sh"
+  fi
+  if grep -qF 'ai_db_secret_file() { # file' "$PLAN"; then
+    # Its one external command, docker run, goes to the stand-in below (renamed so no other docker use is shadowed).
+    extract "$PLAN" ai-db-session lines 'ai_db_secret_file() { # file' 'python3 - "$MIGRATE/lib.sh"' | sed 's#^ docker run #rehearsal_docker run #' >"$T/blocks/ai_db_secret_file.sh"
+    grep -q '^rehearsal_docker run ' "$T/blocks/ai_db_secret_file.sh" || die extract 'ai_db_secret_file docker run line expected once got none'
+  fi
   # The block's own proof line (its docker login is replaced by the real libpq login below), then the plan's
   # post-credential forward catalogs block and the issuer rollback it runs on failure, all from this checkout.
   extract "$PLAN" ai-w2-issuer-credential line '>"$PROOF_DIR/issuer-credential.txt"' >"$T/blocks/issuer-credential-proof.sh"
@@ -430,8 +448,36 @@ ai_db() {
     fi
     args+=("$a"); prev=$a
   done
-  "$PG_BIN/psql" -h "$T" -p "$PORT" -U supabase_admin -d postgres -X --set=ON_ERROR_STOP=1 "${args[@]}" 2>"$SECRET_STAGE/psql.log"
+  # The box runs psql through docker run WITHOUT -i: the container never sees stdin. Modelled exactly: stdin is
+  # /dev/null for every call, so SQL fed on stdin is a silent no-op here as on the box.
+  "$PG_BIN/psql" -h "$T" -p "$PORT" -U supabase_admin -d postgres -X --set=ON_ERROR_STOP=1 "${args[@]}" </dev/null 2>"$SECRET_STAGE/psql.log"
 }
+# The plan's own ai_db_secret_file runs through this docker stand-in: file volumes map back to their host files and
+# stdin is never attached (no -i on the box).
+rehearsal_docker() {
+  local vols= a v src dst args=()
+  test "${1:-}" = run || return 64; shift
+  while test $# -gt 0; do
+    case "$1" in --rm) shift ;; --network|--add-host|--env) shift 2 ;; --volume) vols="$vols
+$2"; shift 2 ;; --entrypoint) test "${2:-}" = psql || return 64; shift 3; break ;; *) return 64 ;; esac
+  done
+  for a in "$@"; do
+    while IFS= read -r v; do
+      test -n "$v" || continue
+      src=${v%%:*}; dst=${v#*:}; dst=${dst%%:*}
+      if test "$a" = "$dst"; then a=$src; fi
+    done <<EOF_VOLUMES
+$vols
+EOF_VOLUMES
+    args+=("$a")
+  done
+  "$PG_BIN/psql" -h "$T" -p "$PORT" -U supabase_admin -d postgres "${args[@]}" </dev/null
+}
+PGSERVICE_FILE=$SECRET_STAGE/service.conf PGPASS_FILE=$SECRET_STAGE/pass PSQL_IMAGE=rehearsal-local-psql
+if test -f "$T/blocks/ai_db_secret_file.sh"; then
+  eval "$(cat "$T/blocks/ai_db_secret_file.sh")"
+  type ai_db_secret_file >/dev/null 2>&1 || die extract 'ai_db_secret_file definition not found in ai-db-session'
+fi
 eval "$(cat "$T/blocks/ai_ro.sh")"
 type ai_ro >/dev/null 2>&1 || die extract 'ai_ro definition not found in ai-db-session'
 ai_deadline() { :; }
@@ -507,6 +553,10 @@ secret_step() { # label script
   ( set -euo pipefail; eval "$(cat "$2")" ) >"$SECRET_STAGE/secret-step.out" 2>"$SECRET_STAGE/secret-step.err"
   local status=$?
   if test "$status" = 0; then say "PASS $1"; return 0; fi
+  # Only plan FAIL lines known to carry no secret are printed; everything else stays in the stage.
+  local known
+  known=$(grep -m1 -E '^FAIL ai-w2-issuer-credential: issuer LOGIN with a SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\); STOP$' "$SECRET_STAGE/secret-step.err")
+  if test -n "$known"; then say "FAIL $1: $known"; exit 1; fi
   say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
 }
 
@@ -626,7 +676,7 @@ PY
   if issuer_psql "service=target" -X --set=ON_ERROR_STOP=1 -Atq --command "$ISSUER_QUERY" >"$SECRET_STAGE/issuer-login.result" 2>"$SECRET_STAGE/issuer-login.log"; then
     test "$(cat "$SECRET_STAGE/issuer-login.result")" = t || die ai-w2-issuer-credential:login 'dedicated-role measurement expected t got non-t'
   else
-    WHY=$(grep -o 'syntax error in service file "[^"]*", line [0-9]*' "$SECRET_STAGE/issuer-login.log" | head -1)
+    WHY=$(grep -o -e 'syntax error in service file "[^"]*", line [0-9]*' -e 'password authentication failed for user "commonswarm_admin_issuer"' "$SECRET_STAGE/issuer-login.log" | head -1)
     die ai-w2-issuer-credential:login "libpq login exit status expected 0 got nonzero: ${WHY:-other libpq error (diagnostics kept in the 0700 stage)}"
   fi
   SSL_USED=$(issuer_psql "service=target" -X -Atq --command 'SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid();' 2>/dev/null) || SSL_USED=

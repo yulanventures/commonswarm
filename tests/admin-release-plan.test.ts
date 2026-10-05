@@ -638,7 +638,8 @@ test('admin release plan: C1 owner inputs and exact workspace name refuse when a
 test('admin release plan: credential material is file/stdin only and generating it emits nothing', () => {
   const source = block('ai-w2-issuer-credential');
   assert.match(source, /openssl rand -hex 32 >"\$SECRET_STAGE\/issuer-password"/);
-  assert.match(source, /ai_db -q --file - <"\$SECRET_STAGE\/issuer.sql"/);
+  assert.match(source, /^ai_db_secret_file "\$SECRET_STAGE\/issuer.sql"/m);
+  assert.doesNotMatch(source, /--file -/, 'no SQL on stdin: docker run has no -i');
   assert.match(source, /install -o root -g 986 -m 0440/);
   assert.doesNotMatch(source, /echo\b|set -x|cat "\$SECRET_STAGE\/issuer-password"|--password|PGPASSWORD=/);
   assert.match(block('ai-w2-issuer-rollback'), /NOLOGIN PASSWORD NULL/);
@@ -1321,8 +1322,11 @@ def fixture_output(args, **kwargs):
           'HostConfig': {'NetworkMode': 'commonswarm-net', 'Memory': 2147483648},
           'Mounts': [{'Destination': dst, 'Source': target+'/'+rel, 'RW': False} for dst,rel in
             [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]).encode()
-    assert args[:2] == ['docker', 'run'] and args[-1] == '-'
-    sql = kwargs['input']; state = json.loads(fixture_state.read_text()); prior = state['enabled']
+    # docker run has no -i: the SQL is a read-only mounted file, never stdin.
+    assert args[:2] == ['docker', 'run'] and args[-2:] == ['--file', '/run/statement.sql'] and 'input' not in kwargs and kwargs.get('stdin') == subprocess.DEVNULL
+    mount = [args[i+1] for i in range(len(args)-1) if args[i] == '--volume' and args[i+1].endswith(':/run/statement.sql:ro')]
+    assert len(mount) == 1
+    sql = pathlib.Path(mount[0].split(':')[0]).read_text(); state = json.loads(fixture_state.read_text()); prior = state['enabled']
     if 'SELECT lane8_evidence_digest IS NOT NULL' in sql: return 't'
     if sql.startswith('SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL'):
         if os.environ.get('RECYCLE_FIXTURE_READBACK_FAILS') == '1': raise subprocess.CalledProcessError(2, ['docker', 'run'])
@@ -2564,4 +2568,43 @@ test('box times: the exact Y W2b closed.txt and close-result.json bytes parse; t
   f.put('close-result.json', Y_CLOSE_RESULT.replace('"recovered"', '"success"') + '\n');
   const success = f.check(); assert.equal(success.status, 0, success.stderr);
   assert.equal(JSON.parse(success.stdout).closed_at, '2026-10-04T22:29:52Z');
+});
+
+// ---------------- release Z2: SQL never travels on stdin (docker run has no -i) ----------------
+test('stdin SQL: the plan\'s ai_db refuses every stdin form before docker runs; ai_db_secret_file mounts the file read-only', () => {
+  const session = block('ai-db-session');
+  const fns = session.slice(session.indexOf('ai_db() {'), session.indexOf('\npython3 - "$MIGRATE/lib.sh"'));
+  assert.ok(fns.includes('ai_db_secret_file() {'));
+  const dir = realpathSync(mkdtempSync(join(scratch, 'stdin-sql-'))), stage = join(dir, 'stage'), calls = join(dir, 'calls');
+  mkdirSync(stage, { mode: 0o700 }); writeFileSync(calls, '');
+  const harness = `docker() { printf '%s\\n' "$*" >>'${calls}'; cat >/dev/null <&- 2>/dev/null; return 0; }\n${fns}\n`;
+  const env = { SECRET_STAGE: stage, PGSERVICE_FILE: join(stage, 'service.conf'), PGPASS_FILE: join(stage, 'pass'), PSQL_IMAGE: 'fixture', RELEASE_ROOT: dir, PROOF_DIR: dir };
+  const call = (args: string) => { writeFileSync(calls, ''); const r = run(`${harness}${args}\nprintf 'status=%s\\n' "$?"`, env); return { r, docker: readFileSync(calls, 'utf8').trim() }; };
+  for (const form of ['ai_db -q --file - </dev/null', 'ai_db -q -f - </dev/null', 'ai_db -q --file=- </dev/null', 'ai_db -q -f- </dev/null']) {
+    const { r, docker } = call(form);
+    assert.match(r.stdout, /status=2/, form); assert.equal(docker, '', `${form}: no docker run`);
+    assert.match(r.stderr, /^FAIL ai_db: SQL on stdin \(--file -\) expected never got used; docker run has no -i/m, form);
+  }
+  const bare = call('ai_db -q </dev/null'); assert.match(bare.r.stdout, /status=2/); assert.equal(bare.docker, '');
+  assert.match(bare.r.stderr, /FAIL ai_db: --command or --file expected got neither/);
+  const ok = call(`ai_db -Atq --command 'SELECT 1;'`); assert.match(ok.r.stdout, /status=0/); assert.match(ok.docker, /^run --rm /);
+  assert.doesNotMatch(ok.docker, /(^| )(-i|--interactive)( |$)/, 'never -i');
+  const ro = call(`ai_ro -Atq --file /proof/x.sql`); assert.match(ro.r.stdout, /status=0/);
+  // The secret-file helper: a non-empty regular file in SECRET_STAGE, mounted read-only and run with --file.
+  writeFileSync(join(stage, 'issuer.sql'), "ALTER ROLE x LOGIN PASSWORD 'fixture-not-a-secret';\n", { mode: 0o600 });
+  const helper = call(`ai_db_secret_file '${join(stage, 'issuer.sql')}'`);
+  assert.match(helper.r.stdout, /status=0/);
+  assert.ok(helper.docker.includes(`--volume ${join(stage, 'issuer.sql')}:/run/secret.sql:ro`) && helper.docker.endsWith('--file /run/secret.sql'), helper.docker);
+  assert.doesNotMatch(helper.docker, /fixture-not-a-secret|(^| )(-i|--interactive)( |$)/, 'no SQL text in argv, never -i');
+  writeFileSync(join(dir, 'outside.sql'), 'SELECT 1;\n'); writeFileSync(join(stage, 'empty.sql'), '');
+  for (const [path, message] of [[join(dir, 'outside.sql'), /SQL file expected inside SECRET_STAGE/], [join(stage, 'empty.sql'), /SQL file expected non-empty regular file/]] as const) {
+    const bad = call(`ai_db_secret_file '${path}'`); assert.match(bad.r.stdout, /status=2/); assert.equal(bad.docker, ''); assert.match(bad.r.stderr, message);
+  }
+  // No plan block sends SQL on stdin or runs docker interactively.
+  assert.match('ai_db -q --file - <"$X"', /\bai_(?:db|ro) [^\n]*--file -(?:\s|$)|'--file','-'/, 'scan control');
+  for (const b of blocks) {
+    const code = b.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+    assert.doesNotMatch(code, /\bai_(?:db|ro) [^\n]*--file -(?:\s|$)|'--file','-'/, b.split('\n')[0]);
+    assert.doesNotMatch(code.replace(/printf '[^']*'/g, ''), /docker run[^\n]*(?:\s-i\s|\s--interactive\s|\s-it\s)/, b.split('\n')[0]);
+  }
 });

@@ -68,14 +68,23 @@ elif name=='ai_ro':
         if not (root/'proof/w2b-preconditions.sql').read_text().startswith(chr(92)+'i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql'): refuse()
         output(cfg.get('w2b','t')); raise SystemExit(0)
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
+    if args[2]=="SELECT rolcanlogin AND rolpassword IS NOT NULL AND left(rolpassword,14)='SCRAM-SHA-256$' FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';":
+        # State model: t only if the ALTER ROLE ... LOGIN PASSWORD statement actually reached the database.
+        applied=root/'applied.sql'
+        output('t' if applied.exists() and 'LOGIN PASSWORD' in applied.read_text() else 'f'); raise SystemExit(0)
     if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
     if 'pg_authid' in args[2]:
         if cfg.get('readback_failed'): raise SystemExit(1)
         output(cfg.get('readback','t')); raise SystemExit(0)
     output(cfg.get('readonly','t'))
+elif name=='ai_db_secret_file':
+    # The plan's mounted-file helper: the SQL file (in the stage) reaches the database; stdin is never read.
+    if len(args)!=1: refuse()
+    if not cfg.get('secret_file_noop'): (root/'applied.sql').write_text(owned(args[0]).read_text())
 elif name=='ai_db':
     if args==['-q','--file','-']:
-        (root/'applied.sql').write_text(sys.stdin.read())
+        # The box's docker run has no -i: stdin never reaches psql, which runs nothing and exits 0.
+        pass
     elif args==['-q','--command','ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;']:
         if cfg.get('alter_failed'): raise SystemExit(1)
         (root/'applied.sql').write_text(args[2])
@@ -201,7 +210,7 @@ function fixture(config: Record<string, unknown> = {}) {
   // A valid opening pair, as ai-open retains it.
   const preText = JSON.stringify(consentReceipt('pre-W1'));
   put('proof/consent-pre-W1.json', preText); put('proof/ordinary-before.json', liveReceipt('W3', 'fixture', 'before', preText));
-  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
+  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'ai_db_secret_file', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
     writeFileSync(join(bin, name), '#!'+python+'\n'+dispatcher, { mode: 0o700 });
   }
   const env = { ...process.env, PATH: bin, FIXTURE_ROOT: root, WINDOW: 'W3', PROOF_DIR: proof, SECRET_STAGE: stage,
@@ -682,6 +691,17 @@ test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: 
     assert.ok(result.calls.some(c => c[0] === 'docker' && c.includes('psql')));
     stopped(result, message);
   }
+});
+test('admin-issuer-credential-provisioning / scram-readback-before-login: an ALTER that never reached the database STOPs before the login', () => {
+  // The W2b 67aAId failure: the ALTER ran nowhere (stdin into a docker run without -i). The readback must stop it.
+  const f = fixture({ secret_file_noop: true }), result = f.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(result, 'FAIL ai-w2-issuer-credential: issuer LOGIN with a SCRAM-SHA-256 verifier expected t got f (ALTER ROLE not applied); STOP');
+  assert.ok(!result.calls.some(c => c[0] === 'docker'), 'no login test after a failed readback');
+  assert.ok(!existsSync(join(f.proof, 'issuer-credential.txt')));
+  // The positive path calls the mounted-file helper with the stage file, never ai_db on stdin.
+  const good = fixture(), ok = good.run(['ai-w2-issuer-credential'], 'W2'); pass(ok);
+  assert.ok(ok.calls.some(c => c[0] === 'ai_db_secret_file' && c[1]!.endsWith('/issuer.sql')));
+  assert.ok(!ok.calls.some(c => c[0] === 'ai_db' && c.includes('-')), 'no stdin SQL');
 });
 test('admin-issuer-credential-provisioning / libpq-service-file-bytes: refuses a service file line that is not key=value before any credential is installed', () => {
   const f = fixture();
