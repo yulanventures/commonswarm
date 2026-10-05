@@ -1,1 +1,254 @@
-/* Home UI: catchup styles. Owned by one lane (see UI-SPEC.md section 6). Site tokens only. */
+/* Catch up view (UI-SPEC.md section 3.2). Lane C. Site tokens only. */
+
+.hm-catchup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-grid, var(--s-8));
+  padding: var(--s-8) clamp(var(--s-4), 3vw, var(--s-10)) var(--s-12);
+  color: var(--text);
+  background: var(--bg);
+}
+
+.hm-catchup-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.hm-catchup-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--t-3xl);
+  font-weight: var(--weight-display);
+  letter-spacing: var(--track-head);
+  line-height: 1.05;
+}
+
+.hm-catchup-subline {
+  margin: 0;
+  font-size: var(--t-lg);
+  color: var(--text-muted);
+}
+
+.hm-catchup-section-title {
+  margin: 0 0 var(--s-3);
+  font-family: var(--font-display);
+  font-size: var(--t-xl);
+  font-weight: var(--weight-display);
+  letter-spacing: var(--track-head);
+}
+
+.hm-catchup-needs,
+.hm-catchup-workspaces,
+.hm-catchup-latest,
+.hm-catchup-latest-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.hm-catchup-needs-list,
+.hm-catchup-latest-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.hm-catchup-needs-preview {
+  padding: var(--pad-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.hm-catchup-needs-eyebrow,
+.hm-catchup-needs-what {
+  margin: 0;
+}
+
+.hm-catchup-needs-eyebrow {
+  font-size: var(--t-sm);
+  color: var(--text-muted);
+}
+
+.hm-catchup-show-more {
+  align-self: flex-start;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--s-4);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.hm-catchup-show-more:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--focus-halo);
+}
+
+.hm-catchup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--s-3);
+}
+
+.hm-catchup-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-height: 10.75rem;
+  padding: var(--pad-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  color: inherit;
+  text-decoration: none;
+}
+
+.hm-catchup-card:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--focus-halo);
+}
+
+.hm-catchup-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.hm-catchup-card-title,
+.hm-catchup-card-head {
+  font-family: var(--font-display);
+  font-size: var(--t-lg);
+  font-weight: var(--weight-display);
+  line-height: 1.15;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.hm-catchup-card-summary,
+.hm-catchup-card-status,
+.hm-catchup-card-open,
+.hm-catchup-card-counts {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--text-muted);
+}
+
+.hm-catchup-card-capsules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.hm-catchup-card-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-top: auto;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+}
+
+.hm-catchup-card-attention {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+}
+
+.hm-catchup-latest-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.hm-catchup-latest-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--s-2) var(--s-3);
+  padding: var(--s-4) var(--s-5);
+}
+
+.hm-catchup-latest-row + .hm-catchup-latest-row {
+  border-top: 1px solid var(--border);
+}
+
+.hm-catchup-latest-author {
+  flex: 0 0 6rem;
+  font-size: var(--t-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.hm-catchup-latest-body {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.hm-catchup-latest-excerpt {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.hm-catchup-latest-when {
+  display: block;
+  margin-top: var(--s-1);
+  font-size: var(--t-sm);
+  color: var(--text-muted);
+}
+
+.hm-catchup-latest-workspace {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--border-interactive);
+  border-radius: var(--radius-pill);
+  color: inherit;
+  font-size: var(--t-sm);
+  font-weight: var(--weight-semibold);
+  text-decoration: none;
+}
+
+.hm-catchup-latest-workspace:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--focus-halo);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hm-catchup-card,
+  .hm-catchup-show-more,
+  .hm-catchup-latest-workspace {
+    transition: color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard),
+      background-color var(--dur-2) var(--ease-standard);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hm-catchup-card,
+  :root:not([data-theme="light"]) .hm-catchup-latest-list {
+    background: var(--elev-2);
+  }
+}
+
+[data-theme="dark"] .hm-catchup-card,
+[data-theme="dark"] .hm-catchup-latest-list {
+  background: var(--elev-2);
+}
