@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -27,6 +27,20 @@ after(() => {
   const cleanup = spawnSync('rm', ['-r', '--', scratch], { encoding: 'utf8' });
   assert.equal(cleanup.status, 0, `fixture cleanup refused ${scratch}: ${cleanup.stderr}`);
 });
+
+// Scrubbed production /etc/caddy/Caddyfile, copied from HezLead's reviewed staging input.
+const productionCaddyfile = `{
+	auto_https off
+	admin unix//run/caddy/admin.sock|0600
+	servers {
+		protocols h1 h2
+		# Cloudflare published ranges, fetched 2026-09-16 from cloudflare.com/ips-v4 and ips-v6 (HezLead owns this block)
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		trusted_proxies_strict
+	}
+}
+import sites/*.caddy
+`;
 
 const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64);
 // Test-data stand-in for the released producer bytes at RELEASE_SHA (never written under repo scripts/).
@@ -145,6 +159,8 @@ elif name=='mkdir':
 elif name=='cp':
     if len(args)==3 and args[0]=='-a' and args[1].endswith('/.'):
         shutil.copytree(owned(args[1]),owned(args[2]),dirs_exist_ok=True)
+        if cfg.get('empty_live_sites'):
+            live=owned(args[1]); live.rename(root/'live-sites-aside'); live.mkdir()
     elif len(args)==2: shutil.copyfile(owned(args[0]),owned(args[1]))
     else: refuse()
 elif name=='chmod' and len(args)==2 and args[0] in ('0700','0644') and cfg.get('install_root'):
@@ -155,6 +171,12 @@ elif name=='chmod':
 elif name=='caddy':
     if args not in [['validate','--config',str(root/'stage/Caddyfile'),'--adapter','caddyfile'],['validate','--config',str(root/'etc/caddy/Caddyfile'),'--adapter','caddyfile']]: refuse()
     if not owned(args[2]).is_file(): refuse()
+    if cfg.get('real_caddy_binary'):
+        # Run the real dependency from the live config directory, not the candidate directory.
+        os.chdir(root/'etc/caddy')
+        os.environ['XDG_CONFIG_HOME']=str(root/'caddy-config')
+        os.environ['XDG_DATA_HOME']=str(root/'caddy-data')
+        os.execv(cfg['real_caddy_binary'],[cfg['real_caddy_binary']]+args)
     if cfg.get('caddy_status',0): print('synthetic validation rejected')
     raise SystemExit(cfg.get('caddy_status',0))
 elif name=='ai_deadline':
@@ -291,7 +313,7 @@ function fixture(config: Record<string, unknown> = {}) {
     put('stage/' + file, bytes);
     put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
   }
-  const caddyfile = 'import /etc/caddy/sites/*.caddy\n';
+  const caddyfile = typeof config.caddyfile === 'string' ? config.caddyfile : productionCaddyfile;
   // The remapped root is also used in the fixture baseline config's import.
   const fixtureCaddyfile = caddyfile.replace('/etc/caddy', join(root, 'etc/caddy'));
   put('etc/caddy/Caddyfile', fixtureCaddyfile); data.baseline_caddyfile_sha256 = hash(fixtureCaddyfile);
@@ -464,6 +486,71 @@ const gate = 'https://mcp.commonswarm.com/admin/gate';
 const post = 'https://api.commonswarm.com/admin';
 const probes = ['ai-w4-probes'];
 const gateFailure = (method: string) => `FAIL ai-w4-probes: ${method} /admin/gate status/ACAO/cache/body-length expected 200/*/no-store/<=4096 got 200/non-wildcard-or-missing/no-store/${method === 'GET' ? 19 : 0}; Origin expected commonswarm-site got commonswarm-site; STOP`;
+
+test('C1-5 Caddy imports: production relative and absolute forms validate candidate routes with empty live sites', () => {
+  // Caddy is a test prerequisite, not a daemon: only validate/adapt are called.
+  const located = spawnSync('/bin/sh', ['-c', 'command -v caddy'], { encoding: 'utf8' });
+  const binary = realpathSync(process.env.C1_CADDY_BINARY || located.stdout.trim() || resolve('scratchpad/c1-5-tools/caddy'));
+  assert.equal(spawnSync(binary, ['version'], { encoding: 'utf8' }).status, 0, 'working Caddy binary required');
+  const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
+  for (const [form, input] of [
+    ['relative', productionCaddyfile],
+    ['absolute', productionCaddyfile.replace('import sites/*.caddy', 'import /etc/caddy/sites/*.caddy')],
+  ] as const) {
+    const f = fixture({ caddyfile: input, real_caddy_binary: binary, empty_live_sites: true });
+    // Valid minimal site configs retain the real candidate generator's anchors.
+    for (const [file, bytes] of [
+      ['mcp.caddy', '(mcp_oauth_active) {\n respond /oauth-fixture "baseline"\n}\n(mcp_resource_active) {\n respond /mcp-fixture "baseline"\n}\nmcp.commonswarm.com {\n import mcp_oauth_active\n import mcp_resource_active\n' + log + '}\n'],
+      ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\n' + log + '}\n'],
+    ] as const) {
+      f.put('stage/' + file, bytes);
+      f.put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
+    }
+    const liveConfig = readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8');
+    const r = f.run(['ai-w4-caddy-candidate']);
+    assert.equal(r.status, 0, r.stderr + readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'));
+    pass(f, r);
+    assert.deepEqual(readdirSync(join(f.root, 'etc/caddy/sites')), [], 'live sites are empty during real validation');
+    assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), liveConfig, 'live Caddyfile bytes preserved');
+    const target = form === 'relative' ? 'sites/*.caddy' : join(f.stage, 'sites/*.caddy');
+    assert.equal(readFileSync(join(f.stage, 'Caddyfile'), 'utf8'), productionCaddyfile.replace('import sites/*.caddy', 'import ' + target));
+    assert.match(readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'), /Valid configuration/);
+    const adapted = spawnSync(binary, ['adapt', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+    });
+    assert.equal(adapted.status, 0, adapted.stderr);
+    const config = JSON.parse(adapted.stdout);
+    assert.match(JSON.stringify(config), /\/functions\/v1\/admin/);
+    assert.match(JSON.stringify(config), /127\.0\.0\.1:3490/);
+    // Negative dependency control: invalid candidate site bytes must fail real validation,
+    // even while the live directory is empty (an empty glob alone would validate).
+    f.put('stage/sites/10-commonswarm-api.caddy', 'invalid_candidate_directive {\n');
+    const invalid = spawnSync(binary, ['validate', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+    });
+    assert.notEqual(invalid.status, 0, 'validation reads candidate site files');
+  }
+});
+
+test('C1-5 Caddy imports: zero, duplicate, other-target and mixed imports refuse exactly before validation', () => {
+  const control = fixture(); pass(control, control.run(['ai-w4-caddy-candidate']));
+  const prefix = 'FAIL ai-w4-caddy-candidate: Caddy imports expected exactly one of ["import sites/*.caddy", "import /etc/caddy/sites/*.caddy"] got ';
+  for (const [input, found] of [
+    ['', '[]'],
+    ['import sites/*.caddy\nimport sites/*.caddy\n', '["import sites/*.caddy", "import sites/*.caddy"]'],
+    ['import other/*.caddy\n', '["import other/*.caddy"]'],
+    ['import sites/*.caddy\nimport /etc/caddy/sites/*.caddy\n', '["import sites/*.caddy", "import /etc/caddy/sites/*.caddy"]'],
+    ['import sites/*.caddy\nimport other/*.caddy\n', '["import sites/*.caddy", "import other/*.caddy"]'],
+  ] as const) {
+    const f = fixture({ caddyfile: input }); const r = f.run(['ai-w4-caddy-candidate']);
+    const expected = (prefix + found + '; STOP').replaceAll('/etc/caddy', join(f.root, 'etc/caddy'));
+    stopped(f, r, expected);
+    assert.equal(r.stderr, expected + '\n', 'one exact failure line, without traceback');
+    assert.ok(!r.calls.some(c => c[0] === 'caddy'), 'invalid import never reaches validation');
+    assert.ok(!existsSync(join(f.stage, 'Caddyfile')), 'no candidate config written on refusal');
+    assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), input.replaceAll('/etc/caddy', join(f.root, 'etc/caddy')));
+  }
+});
 
 test('edge-caddy-route / canonical-api-admin-route: fails closed when canonical POST misses the verifier', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', ...probes]); pass(good, r);

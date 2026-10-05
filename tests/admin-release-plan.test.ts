@@ -1107,7 +1107,7 @@ test('same-version retry / w4-recovered-close: a recovered W4 closes only with t
   const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
     producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
   const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W4',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
-  const oldSha='b'.repeat(40), bytes={mcp:'mcp baseline\n',api:'api baseline\n',file:'import sites\n'}, inputs=join(root,'inputs.json');
+  const oldSha='b'.repeat(40), bytes={mcp:'mcp baseline\n',api:'api baseline\n',file:'import sites/*.caddy\n'}, inputs=join(root,'inputs.json');
   writeFileSync(inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_edge_sha:oldSha,
     baseline_mcp_caddy_sha256:digest(bytes.mcp),baseline_api_caddy_sha256:digest(bytes.api),baseline_caddyfile_sha256:digest(bytes.file)}));
   const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});

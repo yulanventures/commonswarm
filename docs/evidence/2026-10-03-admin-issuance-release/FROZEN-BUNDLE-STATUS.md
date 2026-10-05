@@ -136,6 +136,68 @@ Full logs: `scratchpad/c1-4-gate.log` and `scratchpad/c1-4-gate-final.log`.
 The result measures the prepared C1-4 patch, not committed HEAD, CI or production.
 No full suite, build, Docker or browser was run; no commit or push was made.
 
+## C1-5 W4 Caddy import form (prepared at 69fa19f7)
+
+Found during staging preparation on 2026-10-05: the reviewed, scrubbed production
+`/etc/caddy/Caddyfile` uses `import sites/*.caddy`. The copy at
+`/Users/yulanbot/work/c1-frozen-resume/staging/prod-files/Caddyfile` is the
+task's byte-identical production input, with no secrets. Its 614 bytes are now
+copied into the W4 test fixture. The old `ai-w4-caddy-candidate` required only
+the absolute form and stopped with `FAIL Caddy import form; STOP`.
+
+The prepared fix enumerates active import lines and accepts exactly one line,
+either `import sites/*.caddy` or `import /etc/caddy/sites/*.caddy`. Zero,
+duplicate, mixed, and other-target imports stop with one exact FAIL line that
+lists the accepted forms and the lines found, without a traceback. Relative
+form stays relative; absolute form points at the resolved candidate directory.
+Caddy resolves a relative import against the containing config file, so
+`caddy validate --config "$SECRET_STAGE/Caddyfile"` reads
+`$SECRET_STAGE/sites/*.caddy`, even with the live config directory as cwd.
+The live Caddyfile is never rewritten. Shifted run-order quote references were
+refreshed; the generator still extracts all 18 tasks.
+
+Root-Caddyfile audit (all five marked blocks that reference it):
+
+| Block | Production relative-form result |
+| --- | --- |
+| ai-box-preflight | SHA-256 of the live root Caddyfile and both site files; no import parsing or normalization. Accepts the recorded production bytes. |
+| ai-w4-caddy-candidate | The import-form repair above; candidate root config only. |
+| ai-w4-apply | Compares both live site files to their baseline copies and hashes the untouched root Caddyfile against `baseline_caddyfile_sha256`. Installs only site files, then validates `/etc/caddy/Caddyfile`; the relative import resolves to the live sites at that location. |
+| ai-w4-rollback | Restores only the baseline site files, leaving the root Caddyfile untouched, then validates `/etc/caddy/Caddyfile`. It has no separate root-Caddyfile hash check; recovered close owns that comparison. |
+| ai-close recovered W4 | Hashes all three baseline Caddy files, including the root Caddyfile, and checks the baseline edge, absent drop-in and absent failed release tree. No import parsing or normalization. Its fixture now uses `import sites/*.caddy`. |
+
+Verification: the new tests first failed on the unmodified plan for the intended
+`FAIL Caddy import form` defect. After the import repair, the exact-refusal
+matrix passed (zero, duplicate-relative, mixed-relative/absolute, other target,
+and accepted-plus-other target). The standalone generator file passed 7/7;
+`bash -n` passed all 87 complete plan blocks; copied production fixture byte
+equality and `git diff --check` passed.
+
+**The required gate is not green.**
+`C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
+returned **169 tests, 168 pass, 1 fail, 0 cancelled/skipped/todo, exit 1**
+(212560.580917 ms). Log: `scratchpad/c1-5-gate.log`; exit receipt:
+`scratchpad/c1-5-gate.exit`.
+
+The only failure is the new real-Caddy candidate validation test, using the
+official Caddy v2.11.7 Mac arm64 binary (publisher SHA-512 checked), with the
+fixture's live sites directory emptied after copying and cwd set to the live
+config directory. Import handling passes, then Caddy reports
+`File to import not found: admin_resource_active`: the generated
+`10-commonswarm-api.caddy` imports that snippet before the later
+`20-commonswarm-mcp.caddy` defines it. This is a second route-generation defect,
+outside the assigned import-form repair. The relative case stops there, so the
+real-Caddy absolute case and subsequent candidate-corruption control have not
+completed. No successful real candidate validation is claimed.
+
+HezLead's scope decision was requested before moving the snippet definition to
+the API candidate. No answer or authorization is inferred. The route generator
+and the failing regression remain in place for that decision. The downloaded
+binary is retained at `scratchpad/c1-5-tools/caddy`; tests accept
+`C1_CADDY_BINARY` or `caddy` on PATH, with that local path as fallback.
+No full suite, build, Docker, browser, commit, push or production operation ran.
+HezLead owns the cross-family check.
+
 ## Handoff
 
 - Generator `scripts/c1-task-from-plan.mjs` and its CLI tests are committed in
