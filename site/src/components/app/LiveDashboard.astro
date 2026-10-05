@@ -518,7 +518,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 aria-label="0 agents — view and manage agents"
               >
                 <span class="dashboard__roster-stack" data-header-agent-stack aria-hidden="true"></span>
-                <span class="dashboard__roster-count" data-header-roster-summary aria-hidden="true">0</span>
+                <span class="dashboard__roster-count" data-header-roster-summary aria-hidden="true"><span data-agent-count>0</span><span data-header-pending-count></span></span>
               </button>
             </div>
 
@@ -1176,111 +1176,32 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     data-roster-dialog
     aria-labelledby="dashboard-roster-title"
   >
-    <div class="dashboard__roster-dialog-head">
-      <h2 id="dashboard-roster-title">
-        People &amp; agents
-        <span class="dashboard__roster-dialog-count" data-agent-count>0</span>
-      </h2>
-      <button
-        class="dashboard__icon-button"
-        type="button"
-        data-roster-close
-        aria-label="Close agents panel"
-        title="Close agents panel"
-      >
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-          <path d="M6 6l12 12M18 6L6 18"></path>
-        </svg>
-      </button>
-    </div>
-
-    <div class="dashboard__roster-dialog-body">
-      {/* Two doors, because a person and an agent join differently (audit B2): an agent through
-          its own app, a person through an invite they accept as themselves. */}
-      <div class="dashboard__roster-dialog-actions">
-        <button
-          class="dashboard__button dashboard__button--primary dashboard__roster-dialog-add"
-          type="button"
-          data-add-agent-dialog
-        >
-          Add an agent
-        </button>
-        <button
-          class="dashboard__button dashboard__button--secondary"
-          type="button"
-          data-invite-dialog
-        >
-          Invite someone
-        </button>
+    <header class="dashboard__roster-dialog-head" data-people-header>
+      <div class="pd-title-line">
+        <div><p class="pd-eyebrow" data-people-workspace></p><h2 tabindex="-1" id="dashboard-roster-title">People &amp; agents</h2></div>
+        <button class="dashboard__icon-button" type="button" data-roster-close aria-label="Close People &amp; agents">×</button>
       </div>
-
-      <input
-        class="dashboard__roster-dialog-search"
-        type="search"
-        data-roster-search
-        aria-label="Filter agents"
-        placeholder="Filter agents…"
-        autocomplete="off"
-        spellcheck="false"
-      />
-
-      <ul
-        class="dashboard__agent-list dashboard__roster-dialog-list"
-        data-dialog-agent-list
-      ></ul>
-      <p class="dashboard__form-error" data-agent-error role="alert" hidden></p>
-
-      {/* Manage people (human members) moved here from the rail (operator direction
-          2026-08-19). Same data-hooks — data-member-details gates visibility to
-          owner/admin exactly as before (renderMembers sets .hidden; the harmless
-          .open no-op on a non-details element is intentional). */}
-      <section class="dashboard__roster-dialog-members" data-member-details hidden aria-labelledby="dashboard-roster-members-title">
-        <h3 class="dashboard__roster-dialog-pending-title" id="dashboard-roster-members-title">People</h3>
-        <ul class="dashboard__agent-list" data-member-list></ul>
-        <p class="dashboard__form-error" data-member-error role="alert" hidden></p>
-        {/* The OAuth control here is GENERATED, not written. It used to be one hand-typed
-            "Sign in again with GitHub" button carrying `data-member-reauth-github`, which the
-            provider sweep in components/auth/provider-buttons.observer.test.ts could not see
-            AT THE TIME: its marker then looked for `data-signin*` and for `data-<provider>`, and
-            neither spelling matched a name ending in the provider. That marker was widened in
-            the same lane and does see it now. So the one place that
-            names a provider is auth-providers.ts, and the set follows the deployment — turning
-            Google on in GoTrue on the server gives this block a Google button with no change
-            here. The word "again" is not lost: the sentence above these buttons is
-            FreshLoginRequired's "Sign in again, then press Remove once more." */}
-        <div data-member-reauth hidden>
-          <ProviderButtons buttonClass="dashboard__rail-add" />
-          <button class="dashboard__rail-add" type="button" data-member-reauth-email>
-            Email a fresh sign-in link
-          </button>
-        </div>
-      </section>
-
-      {/* Pending access lives in this dialog at every width. The rail's own pending
-          details were removed when the secondary rail controls moved into this dialog
-          (b7977ad3), so this section is the only pending surface: it must not be hidden
-          at desktop (item J). */}
-      <section
-        class="dashboard__roster-dialog-pending"
-        data-dialog-access-section
-        aria-labelledby="dashboard-roster-pending-title"
-        hidden
-      >
-        <h3
-          class="dashboard__roster-dialog-pending-title"
-          id="dashboard-roster-pending-title"
-        >
-          Pending access
-          <span class="dashboard__roster-dialog-pending-count" data-dialog-access-count>0</span>
-        </h3>
-        <ul
-          class="dashboard__agent-list dashboard__roster-dialog-pending-list"
-          data-dialog-access-list
-        ></ul>
-        <p data-pending-load-note hidden>Invited, not connected: could not load</p>
-        <p class="dashboard__form-error" data-dialog-access-error role="alert" hidden></p>
-      </section>
+      <p class="pd-counts" data-people-counts aria-live="polite"></p>
+      <nav class="dashboard__roster-dialog-actions" aria-label="Add to this space">
+        <button class="dashboard__button dashboard__button--primary" type="button" data-add-agent-dialog><span aria-hidden="true">＋</span> Add an agent</button>
+        <button class="dashboard__button dashboard__button--secondary" type="button" data-invite-dialog>Invite someone</button>
+      </nav>
+      <input class="dashboard__roster-dialog-search" type="search" data-roster-search aria-label="Filter people and agents" placeholder="Find a person or agent…" autocomplete="off" spellcheck="false" hidden />
+    </header>
+    <div class="dashboard__roster-dialog-body">
+      <div class="dashboard__roster-dialog-list" data-dialog-agent-list></div>
+      <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
     </div>
+    <section class="dashboard__roster-dialog-members" data-member-details>
+      <p class="dashboard__form-error" data-member-error role="alert" hidden></p>
+      <div data-member-reauth hidden>
+        <ProviderButtons buttonClass="dashboard__rail-add" />
+        <button class="dashboard__rail-add" type="button" data-member-reauth-email>Email a fresh sign-in link</button>
+      </div>
+    </section>
+    <p class="pd-sr-only" role="status" aria-live="polite" data-people-receipt></p>
+    <footer class="pd-scroll-footer" data-people-scroll-footer hidden><p data-people-scroll-cue></p></footer>
+    <dialog class="pd-confirm" data-people-confirm role="alertdialog" aria-labelledby="pd-confirm-title" aria-describedby="pd-confirm-description"></dialog>
   </dialog>
 </live-dashboard>
 
@@ -1298,7 +1219,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   } from "../../lib/household-access";
   import { setupProgress, setupSteps } from "../../lib/setup-checklist";
   import { createLatestRead } from "../../lib/latest-read";
-  import { agentStatus } from "../../lib/agent-status";
+  import { agentStatus, peopleAgentStatus, agentResumeReceipt } from "../../lib/agent-status";
+  import { renderPeopleDialog, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
+    type PeopleDialogModel, type PeopleDialogState, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
+  import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
     ClientTooOld,
@@ -1348,6 +1272,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     reportBrowserSignalsSeen,
     uploadBrowserAttachment,
     revokeAgentToken,
+    resumeRenewalGrant,
     revokeWorkspaceInvitation,
     signInWithEmail,
     signInWithProvider,
@@ -1455,7 +1380,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     renderSidebarParticipants,
     rosterAgentsFromRows,
   } from "../../lib/participant-rail";
-  import { buildAgentModelEditor } from "../../lib/agent-model-editor";
   import {
     grantRiskBadge,
     STANDING_GRANT_COPY,
@@ -2383,78 +2307,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       };
     };
 
-    const renderMembers = (): void => {
-      const list = one<HTMLUListElement>("[data-member-list]");
-      const details = one<HTMLDetailsElement>("[data-member-details]");
-      const me = members.find((member) => member.userId === session?.user.id);
-      if (details) {
-        details.hidden =
-          sampleMode || (me?.role !== "owner" && me?.role !== "admin");
-        if (details.hidden) details.open = false;
-      }
-      if (!list) return;
-      list.replaceChildren();
-      for (const member of members) {
-        const item = document.createElement("li");
-        item.className = "dashboard__agent";
-        const label = document.createElement("span");
-        label.textContent = `${member.name} · ${member.role}`;
-        item.append(label);
-        const mayRemove = me?.role === "owner" ||
-          (me?.role === "admin" && member.role !== "owner");
-        if (mayRemove && member.userId !== session?.user.id) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "dashboard__text-button";
-          button.textContent = "Remove";
-          button.dataset.removeMember = member.userId;
-          button.addEventListener("click", async () => {
-            if (!session || !activeWorkspaceId) return;
-            if (
-              !window.confirm(
-                `Remove ${member.name} from this workspace? This does not affect their other workspaces.`,
-              )
-            ) return;
-            const errorTarget = one<HTMLElement>("[data-member-error]");
-            const reauth = one<HTMLElement>("[data-member-reauth]");
-            if (errorTarget) {
-              errorTarget.hidden = true;
-              errorTarget.textContent = "";
-            }
-            if (reauth) reauth.hidden = true;
-            button.disabled = true;
-            try {
-              await removeWorkspaceMember(
-                session,
-                uuid(),
-                activeWorkspaceId,
-                member.userId,
-              );
-              await openWorkspace(activeWorkspaceId);
-            } catch (error) {
-              if (error instanceof FreshLoginRequired) {
-                sessionStorage.setItem(
-                  "commonswarm.pending-member-selection",
-                  JSON.stringify({
-                    workspaceId: activeWorkspaceId,
-                    userId: member.userId,
-                  }),
-                );
-                if (reauth) reauth.hidden = false;
-              }
-              if (errorTarget) {
-                errorTarget.textContent = readableError(error);
-                errorTarget.hidden = false;
-              }
-            } finally {
-              button.disabled = false;
-            }
-          });
-          item.append(button);
-        }
-        list.append(item);
-      }
-    };
+    // Names and roles are already membership-gated by member_profiles; management is gated in the view model.
+    const renderMembers = (): void => { renderDialogRoster(); };
 
     /*
      * ONE row model, TWO lists. The rail's Pending access details (desktop) and the
@@ -2572,7 +2426,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       };
 
       railList?.replaceChildren(buildRows(one("[data-access-error]")));
-      dialogList?.replaceChildren(buildRows(one("[data-dialog-access-error]")));
+      renderDialogRoster();
 
       /* Pending access is itself a reason to expose the header management door,
          including in a brand-new zero-agent workspace on mobile. Resync before
@@ -4352,8 +4206,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     /*
      * The header stack is a summary, not a second management surface: up to three uniform
-     * circular initials and the live count. The count spans (stack button + dialog title)
-     * share one data-hook and one loop, so they cannot drift apart.
+     * circular initials and the agents-only count. The dialog has its own people,
+     * agents and attention counts; its two-noun title carries no bare count.
      */
     const HEADER_STACK_LIMIT = 3;
 
@@ -4371,9 +4225,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       for (const count of all<HTMLElement>("[data-agent-count]")) {
         count.textContent = String(agents.length);
       }
-      if (summary) summary.textContent = pendingTotal > 0
-        ? `${agents.length} · ${pendingTotal} pending`
-        : String(agents.length);
+      const pendingCount = summary?.querySelector<HTMLElement>("[data-header-pending-count]");
+      if (pendingCount) pendingCount.textContent = pendingTotal > 0 ? ` · ${pendingTotal} pending` : "";
       if (button) {
         button.classList.toggle("dashboard__roster-button--pending", pendingTotal > 0);
         const agentLabel = `${agents.length} ${agents.length === 1 ? "agent" : "agents"}`;
@@ -4401,378 +4254,176 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     /*
-     * The dialog roster is the management list: model, owner, and a permission-aware
-     * Remove per row — the same rules the rail roster enforced, unchanged. When a
-     * background roster refresh re-renders while the dialog is open, focus parked inside
+     * The dialog groups agents under people and opens management in a detail pane.
+     * Permissions and server calls stay unchanged. When a background refresh re-renders,
+     * focus parked inside
      * the list is handed back to the same agent's row rather than dropped out of the
      * dialog (a replaced node cannot keep focus, and losing it would strand a keyboard
      * user on <body> behind the modal).
      */
-    const renderDialogRoster = (): void => {
-      const add = one<HTMLButtonElement>("[data-add-agent-dialog]");
-      if (add) add.hidden = sampleMode;
-      const list = one<HTMLUListElement>("[data-dialog-agent-list]");
-      if (!list) return;
-      let refocusPrincipal = "";
-      if (
-        document.activeElement instanceof HTMLElement &&
-        list.contains(document.activeElement)
-      ) {
-        refocusPrincipal =
-          document.activeElement.closest<HTMLElement>("[data-agent-row]")?.dataset
-            .agentRow ?? "";
-      }
-      list.replaceChildren();
-      const query = rosterFilter.trim().toLowerCase();
-      const agentIdentityRoster = identityRoster().agents;
-      const visible = query
-        ? agents.filter((agent) => {
-          const label = identityDisplayLabel(
-            { id: agent.principalId, name: agent.name },
-            agentIdentityRoster,
-          );
-          return agent.name.toLowerCase().includes(query) ||
-            label.toLowerCase().includes(query);
-        })
-        : agents;
-      if (visible.length === 0) {
-        const empty = document.createElement("li");
-        empty.className = "dashboard__agent-empty";
-        empty.textContent = query
-          ? `No agents match “${rosterFilter.trim()}”.`
-          : "No agents yet";
-        list.append(empty);
-        return;
-      }
+    const peopleDialogState: PeopleDialogState = { selected: null, collapsed: new Set(), showAllAttention: false, query: "" };
+    const peopleDialogReceipts = new Map<string, string>();
+    const peopleDialogModel = (): PeopleDialogModel => {
       const me = members.find((member) => member.userId === session?.user.id);
-      for (const agent of visible) {
-        const grant = accessStatuses.find(
-          (candidate) => candidate.principalId === agent.principalId,
-        );
-        const row = document.createElement("li");
-        row.className = "dashboard__agent";
-        row.dataset.agentRow = agent.principalId;
-        row.tabIndex = -1;
-        const avatar = document.createElement("span");
-        avatar.className = "dashboard__agent-avatar";
-        avatar.textContent = initials(agent.name);
-        avatar.setAttribute("aria-hidden", "true");
-        markAgentAvatar(avatar, agent.principalId);
-        const copy = document.createElement("span");
-        copy.className = "dashboard__agent-copy";
-        const name = document.createElement("strong");
-        name.textContent = identityDisplayLabel(
-          { id: agent.principalId, name: agent.name },
-          agentIdentityRoster,
-        );
-        /* ONE PLAIN STATUS PER AGENT (redesign 2026-10-04). The row says whose agent it is,
-           one status chip and how it receives messages (site/src/lib/agent-status.ts). The
-           wire facts (transport, presence, grant, risk) keep their exact words one tap away
-           under "Connection details", for support. */
-        const ownerName = people.get(agent.ownerUserId) ?? "Workspace member";
-        const status = agentStatus({
-          transport: agent.transport,
-          turnOnly: agent.turnOnly,
-          presence: agent.presence,
-          suspended: Boolean(grant && (grant.suspendedAt || grant.grantRevokedAt)),
-        });
-        const state = document.createElement("span");
-        state.textContent = `${ownerName}’s agent${agent.model ? ` · ${agent.model}` : ""}`;
-        const chip = document.createElement("span");
-        chip.className = "dashboard__agent-status";
-        chip.dataset.agentStatus = status.kind;
-        chip.textContent = status.chip;
-        copy.append(name, state, chip);
-        if (status.receive) {
-          const receive = document.createElement("span");
-          receive.className = "dashboard__agent-receive";
-          receive.textContent = status.receive;
-          copy.append(receive);
-        }
-        const details = document.createElement("details");
-        details.className = "dashboard__agent-details";
-        const summary = document.createElement("summary");
-        summary.textContent = "Connection details";
-        const transportLine = document.createElement("span");
-        transportLine.textContent =
-          `${agent.transport === "hosted_mcp" ? "Hosted MCP" : "Local"} · ${
-            agent.model ?? "Model not specified"
-          } · owned by ${ownerName}`;
-        details.append(summary, transportLine);
-        copy.append(details);
-        const presenceLine = agentPresenceLine(agent.presence);
-        if (presenceLine) {
-          const presence = document.createElement("span");
-          presence.className = "dashboard__agent-presence";
-          presence.textContent = presenceLine;
-          details.append(presence);
-        }
-        const wakeMark = wakePathMark(agent.oldestUnobservedAt);
-        if (wakeMark) {
-          const wake = document.createElement("span");
-          wake.className = "dashboard__wake-stale";
-          wake.textContent = wakeMark;
-          details.append(wake);
-        }
-        if (grant) {
-          const grantLine = document.createElement("span");
-          grantLine.className = "dashboard__grant-state";
-          grantLine.textContent = grant.grantKind === "standing"
-            ? `Standing · last used ${
-              grant.lastUsedAt === null
-                ? "never"
-                : formatTime(grant.lastUsedAt).relative
-            }`
-            : `Timeboxed · horizon ${
-              grant.horizonExpiresAt === null
-                ? "not available"
-                : formatTime(grant.horizonExpiresAt).relative
-            } · last used ${
-              grant.lastUsedAt === null
-                ? "never"
-                : formatTime(grant.lastUsedAt).relative
-            }`;
-          details.append(grantLine);
-          if (grant.grantKind === "standing") {
-            const standingCopy = document.createElement("span");
-            standingCopy.className = "dashboard__grant-standing-copy";
-            standingCopy.textContent = STANDING_GRANT_COPY;
-            details.append(standingCopy);
+      const elevated = me?.role === "owner" || me?.role === "admin";
+      const rosterNames = identityRoster().agents;
+      return {
+        sample: sampleMode, pendingFailed: pendingAgentsLoadFailed,
+        people: members.map((member) => ({ id: member.userId, name: member.name, role: member.role,
+          own: member.userId === session?.user.id,
+          mayRemove: !sampleMode && member.userId !== session?.user.id &&
+            (me?.role === "owner" || (me?.role === "admin" && member.role !== "owner")) })),
+        agents: agents.map((agent) => {
+          const grant = accessStatuses.find((candidate) => candidate.principalId === agent.principalId);
+          const own = Boolean(me && agent.ownerUserId === me.userId && !sampleMode);
+          const mayManage = Boolean(me && (elevated || agent.ownerUserId === me.userId) && !sampleMode);
+          const ownerName = people.get(agent.ownerUserId) ?? null;
+          const approval = householdConnections.filter((connection) => connection.principal_id === agent.principalId)
+            .map(connectionApproval).find((value) => value !== null) ?? null;
+          const status = peopleAgentStatus({ transport: agent.transport, turnOnly: agent.turnOnly,
+            presence: agent.presence, oldestUnobservedAt: agent.oldestUnobservedAt, ownerName, own, mayManage, sample: sampleMode,
+            grant: grant ? { kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt, boundDeviceId: grant.boundDeviceId,
+              lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
+              suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt } : null });
+          const presence = classifyAgentPresence(agent.presence ?? null);
+          const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence }).receive;
+          const technical = [`Agent ID: ${agent.principalId}`, `Connection: ${agent.transport === "hosted_mcp" ? "Hosted MCP · OAuth connector" : agent.transport === "local" ? "Local" : "Not reported"}`];
+          const presenceLine = agentPresenceLine(agent.presence); if (presenceLine) technical.push(presenceLine);
+          const wakeMark = wakePathMark(agent.oldestUnobservedAt); if (wakeMark) technical.push(wakeMark);
+          let grantRisk: string | null = null;
+          if (grant) {
+            technical.push(`Key ID: ${grant.grantId}`, `Last used: ${grant.lastUsedAt === null ? "never" : formatTime(grant.lastUsedAt).relative}`);
+            if (grant.grantKind === "standing") technical.push(STANDING_GRANT_COPY);
+            const risk = grantRiskBadge({ kind: grant.grantKind, horizonExpiresAt: grant.horizonExpiresAt,
+              boundDeviceId: grant.boundDeviceId, lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt,
+              newHostAt: grant.newHostAt, suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt });
+            if (risk) { grantRisk = risk; technical.push(risk); }
           }
-          const risk = grantRiskBadge({
-            kind: grant.grantKind,
-            horizonExpiresAt: grant.horizonExpiresAt,
-            boundDeviceId: grant.boundDeviceId,
-            lastUsedAt: grant.lastUsedAt,
-            issuedAt: grant.issuedAt,
-            newHostAt: grant.newHostAt,
-            suspendedAt: grant.suspendedAt,
-            revokedAt: grant.grantRevokedAt ?? grant.revokedAt,
-          });
-          if (risk !== null) {
-            const badge = document.createElement("span");
-            badge.className = "dashboard__grant-risk";
-            badge.textContent = risk;
-            badge.dataset.grantRisk = risk;
-            details.append(badge);
-          }
-        }
-        row.append(avatar, copy);
-        /* A prompt carries a fresh credential for this identity, so it is narrower than
-           the management gate: only the person who owns the agent gets this action.
-           AgentConnect owns minting, dashboardAgentPrompt, one-time display, and copy. */
-        const mayGetPrompt = Boolean(
-          me && agent.ownerUserId === me.userId && !sampleMode,
-        );
-        if (mayGetPrompt) {
-          const promptButton = document.createElement("button");
-          promptButton.type = "button";
-          promptButton.className = "dashboard__text-button";
-          promptButton.textContent = "Get prompt";
-          promptButton.dataset.getAgentPrompt = agent.principalId;
-          promptButton.setAttribute("aria-label", `Get prompt for ${agent.name}`);
-          promptButton.addEventListener("click", () => {
-            closeRosterDialog();
-            openConnect();
-            window.requestAnimationFrame(() => {
-              one<SecretHoldingAgentConnect>("agent-connect")
-                ?.requestPromptFor(agent.principalId);
-            });
-          });
-          row.append(promptButton);
-        }
-        /* Model is editable under the SAME gate as removal (owner/admin any
-           agent, member their own) — the human mirror of the agent's own
-           declare. The value is free text and lands in the DOM only as
-           textContent; the closed-default glyph mapper owns display. */
-        const mayEditModel = Boolean(
-          me &&
-          (
-            me.role === "owner" ||
-            me.role === "admin" ||
-            agent.ownerUserId === me.userId
-          ),
-        );
-        if (mayEditModel && !sampleMode) {
-          const editButton = document.createElement("button");
-          editButton.type = "button";
-          editButton.className = "dashboard__text-button";
-          editButton.textContent = "Edit model";
-          editButton.dataset.editModel = agent.principalId;
-          editButton.addEventListener("click", () => {
-            if (row.querySelector("[data-model-editor]")) return;
-            const editor = buildAgentModelEditor(document, {
-              agentName: agent.name,
-              currentModel: agent.model,
-              onCancel: () => editor.remove(),
-              onSave: async (model) => {
-                if (!session || !activeWorkspaceId) return;
-                try {
-                  await setAgentModel(
-                    session,
-                    uuid(),
-                    activeWorkspaceId,
-                    agent.principalId,
-                    model,
-                  );
-                  /* Same refresh path removal uses: re-open the workspace so
-                     the rail glyph, the dialog line, and local state all
-                     re-read the one authority instead of a hand-patched copy. */
-                  await openWorkspace(activeWorkspaceId);
-                } catch (error) {
-                  const errorTarget = one<HTMLElement>("[data-agent-error]");
-                  if (errorTarget) {
-                    errorTarget.textContent = readableError(error);
-                    errorTarget.hidden = false;
-                  }
-                }
-              },
-            });
-            editor.dataset.modelEditor = agent.principalId;
-            row.append(editor);
-            editor.querySelector("input")?.focus({ preventScroll: true });
-          });
-          row.append(editButton);
-        }
-        // Owner/admin any principal; member only own. Clear on the connect
-        // prompt only hides the secret — it never revokes.
-        const mayRemove = Boolean(
-          me &&
-          (
-            me.role === "owner" ||
-            me.role === "admin" ||
-            agent.ownerUserId === me.userId
-          ),
-        );
-        if (
-          mayRemove &&
-          !sampleMode &&
-          grant &&
-          grant.grantRevokedAt === null &&
-          grant.revokedAt === null
-        ) {
-          const revokeButton = document.createElement("button");
-          revokeButton.type = "button";
-          revokeButton.className = "dashboard__text-button";
-          revokeButton.textContent = "Revoke grant";
-          revokeButton.dataset.revokeGrant = grant.grantId;
-          revokeButton.addEventListener("click", async () => {
-            if (!session || !activeWorkspaceId) return;
-            if (!window.confirm(`Revoke ${agent.name}’s renewal grant? The agent will stop when its current bearer expires.`)) return;
-            revokeButton.disabled = true;
-            try {
-              await revokeAgentToken(
-                session,
-                uuid(),
-                activeWorkspaceId,
-                grant.tokenId,
-              );
-              await openWorkspace(activeWorkspaceId);
-            } catch (error) {
-              const errorTarget = one<HTMLElement>("[data-agent-error]");
-              if (errorTarget) {
-                errorTarget.textContent = readableError(error);
-                errorTarget.hidden = false;
-              }
-            } finally {
-              revokeButton.disabled = false;
-            }
-          });
-          row.append(revokeButton);
-        }
-        if (mayRemove && !sampleMode) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "dashboard__text-button";
-          button.textContent = "Remove";
-          button.dataset.removeAgent = agent.principalId;
-          button.addEventListener("click", async () => {
-            if (!session || !activeWorkspaceId) return;
-            if (
-              !window.confirm(
-                `Remove ${agent.name}? This ends its identity and every live credential in this workspace. Clearing a Copy prompt only hides the secret — it does not remove the agent.`,
-              )
-            ) return;
-            const errorTarget = one<HTMLElement>("[data-agent-error]");
-            if (errorTarget) {
-              errorTarget.hidden = true;
-              errorTarget.textContent = "";
-            }
-            button.disabled = true;
-            try {
-              await revokeAgentPrincipal(
-                session,
-                uuid(),
-                activeWorkspaceId,
-                agent.principalId,
-              );
-              if (livePromptPrincipalId === agent.principalId) {
-                one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false);
-                livePromptPrincipalId = "";
-              }
-              await openWorkspace(activeWorkspaceId);
-              /* The reload closed the dialog; hand focus to the control that reopens
-                 it, or to the empty channel's Add door when that was the last agent. */
-              const door = agents.length > 0
-                ? one<HTMLButtonElement>("[data-roster-open]")
-                : one<HTMLButtonElement>("[data-add-agent]");
-              door?.focus({ preventScroll: true });
-            } catch (error) {
-              if (errorTarget) {
-                errorTarget.textContent = readableError(error);
-                errorTarget.hidden = false;
-              }
-            } finally {
-              button.disabled = false;
-            }
-          });
-          row.append(button);
-        }
-        if (!sampleMode && agent.ownerUserId === session?.user.id) {
-          const connection = householdConnections.find((candidate) =>
-            candidate.principal_id === agent.principalId && connectionApproval(candidate));
-          const approval = connection ? connectionApproval(connection) : null;
-          if (approval) {
-            const accessLine = document.createElement("span");
-            accessLine.dataset.agentContentAccess = "";
-            accessLine.textContent = approval.expires_at === null
-              ? "Can use Lists & docs"
-              : `Can use Lists & docs. ${approvalUntil(approval.expires_at)}`;
-            row.append(accessLine);
-          }
-          if (approval || householdReceipts.has(agent.principalId)) {
-            const receipt = document.createElement("p");
-            receipt.setAttribute("role", "status");
-            receipt.setAttribute("aria-live", "polite");
-            receipt.dataset.agentContentResult = "";
-            receipt.textContent = householdReceipts.get(agent.principalId) ?? "";
-            row.append(receipt);
-            if (approval) {
-              const withdraw = document.createElement("button");
-              withdraw.type = "button";
-              withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw";
-              withdraw.textContent = "Withdraw Lists & docs";
-              withdraw.dataset.withdrawAgentAccess = agent.principalId;
-              withdraw.addEventListener("click", () => { void withdrawAgent(agent.principalId, agent.name, withdraw, receipt); });
-              row.append(withdraw);
-            }
-          }
-        }
-        list.append(row);
+          return { id: agent.principalId, name: identityDisplayLabel({ id: agent.principalId, name: agent.name }, rosterNames),
+            ownerId: agent.ownerUserId, ownerName, model: agent.model, app: null, hosted: agent.transport === "hosted_mcp", status, receive,
+            lastActive: agent.presence === undefined ? "Not reported" : agent.presence?.last_command_at ? formatTime(agent.presence.last_command_at).relative : "Not active yet",
+            technical, grantRisk, updateAvailable: presence.client.kind === "update available", access: approval ? { until: approval.expires_at === null ? null : new Date(approval.expires_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) } : null,
+            key: grant ? ["key-off", "key-ended", "paused", "key-ends-soon"].includes(status.kind) ? status.kind === "key-off" ? "Turned off. A new key can bring it back." : status.label + "." : "Uses a key to connect." : null,
+            liveKey: Boolean(grant && grant.revokedAt === null && grant.grantRevokedAt === null), own, mayManage,
+            receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
+        }),
+        invites: currentPendingAccessRows().map((row) => {
+          const invitation = pendingInvites.find((invite) => invite.invitationId === row.id);
+          const key = accessStatuses.find((entry) => entry.tokenId === row.id);
+          return { id: row.id, kind: row.kind, name: row.kind === "pending" && !pendingAgents.find((entry) => entry.principalId === row.id)?.principalName ? "an agent" : row.title,
+            detail: invitation ? `Expires ${formatTime(invitation.expiresAt).relative}` : key ? `Expires ${formatTime(key.expiresAt).relative}` : "Waiting for an agent to connect.",
+            mayCancel: !sampleMode && (row.kind === "invite" ? elevated : row.kind === "agent" && !!me && (elevated || key?.ownerUserId === me.userId)) };
+        }),
+      };
+    };
+
+    const syncPeopleDialogLayout = (): void => {
+      const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const detail = one<HTMLElement>("[data-people-detail]");
+      const pushed = Boolean(peopleDialogState.selected && window.matchMedia("(max-width: 52rem)").matches);
+      const list = one<HTMLElement>("[data-dialog-agent-list]");
+      const header = one<HTMLElement>("[data-people-header]");
+      if (list) list.inert = pushed; if (header) header.inert = pushed;
+      dialog?.setAttribute("aria-labelledby", pushed ? "pd-detail-title" : "dashboard-roster-title");
+      const scroller = pushed ? detail : list;
+      const more = !!scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 8;
+      const footer = one<HTMLElement>("[data-people-scroll-footer]"); if (footer) footer.hidden = !more;
+      const cue = one<HTMLElement>("[data-people-scroll-cue]"); if (cue) cue.textContent = more ? pushed ? "Scroll to see more details ↓" : "Scroll to see more people & agents ↓" : "";
+    };
+    const renderDialogRoster = (): void => {
+      const list = one<HTMLElement>("[data-dialog-agent-list]"); const detail = one<HTMLElement>("[data-people-detail]");
+      if (!list || !detail) return;
+      const model = peopleDialogModel(); peopleDialogState.query = rosterFilter;
+      const add = one<HTMLButtonElement>("[data-add-agent-dialog]"); if (add) add.hidden = sampleMode;
+      const invite = one<HTMLButtonElement>("[data-invite-dialog]"); if (invite) invite.hidden = sampleMode || !model.people.some((person) => person.own && person.role !== "member");
+      const counts = one<HTMLElement>("[data-people-counts]"); if (counts) {
+        const line = peopleDialogCounts(model), attention = model.agents.some((agent) => agent.status.attention);
+        counts.textContent = attention ? line.slice(0, line.lastIndexOf(" · ")) + " · " : line;
+        if (attention) { const mark = document.createElement("span"); mark.className = "pd-count-attention";
+          mark.textContent = "⚠ " + line.slice(line.lastIndexOf(" · ") + 3); counts.append(mark); }
       }
-      if (refocusPrincipal) {
-        const row = list.querySelector<HTMLElement>(
-          `[data-agent-row="${refocusPrincipal}"]`,
-        );
-        const target = row?.querySelector<HTMLButtonElement>("button") ?? row;
-        target?.focus({ preventScroll: true });
+      const workspaceName = one<HTMLElement>("[data-people-workspace]"); if (workspaceName) workspaceName.textContent = workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "";
+      const search = one<HTMLInputElement>("[data-roster-search]"); if (search) search.hidden = model.people.length + model.agents.length <= 10;
+      renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
+        if (button.disabled) return; button.disabled = true;
+        const workspaceId = activeWorkspaceId, userId = session?.user.id;
+        try { await peopleDialogAction(action, id, button, notice); }
+        catch (error) { if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) return;
+          const errorTarget = Array.from(list.querySelectorAll<HTMLElement>("[data-agent-row-error]")).find((element) => element.dataset.agentRowError === id)
+            ?? one<HTMLElement>("[data-agent-error]");
+          if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
+        } finally { button.disabled = false; }
+      },
+        confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
+          if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
+          const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
+          await setAgentModel(session, uuid(), scope.workspaceId, principalId, modelValue);
+          if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
+          await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
+        } });
+      syncPeopleDialogLayout(); window.requestAnimationFrame(syncPeopleDialogLayout);
+    };
+    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string): Promise<void> => {
+      const selected = peopleDialogState.selected; const query = rosterFilter;
+      const userId = session?.user.id;
+      const wasOpen = one<HTMLDialogElement>("[data-roster-dialog]")?.open;
+      await openWorkspace(workspaceId);
+      if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
+      if (receipt && principalId) peopleDialogReceipts.set(`${workspaceId}:${principalId}`, receipt);
+      if (wasOpen) { openRosterDialog(); rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
+        const search = one<HTMLInputElement>("[data-roster-search]"); if (search) search.value = query;
+        const target = one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${principalId}`) ?? one<HTMLElement>("#dashboard-roster-title");
+        target?.focus({ preventScroll: true }); window.requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true })); }
+      const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
+    };
+    const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
+      if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
+      const workspaceId = activeWorkspaceId, userId = session.user.id;
+      const agent = agents.find((entry) => entry.principalId === id);
+      const grant = accessStatuses.find((entry) => entry.principalId === id);
+      if (action === "new-key") { closeRosterDialog(); openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id)); return; }
+      if (action === "connected-apps") { closeRosterDialog(); one<HTMLButtonElement>("[data-connected-apps-open]")?.click(); return; }
+      if (action === "allow") { closeRosterDialog(); activateWorkspaceView("objects"); one<HTMLElement>("[data-household-consent]")?.scrollIntoView({ block: "start" }); return; }
+      let receipt = "";
+      if (action === "withdraw" && agent) { await withdrawAgent(id, agent.name, button, notice, true); return; }
+      if (action === "resume" && grant && agent) { await resumeRenewalGrant(session, uuid(), workspaceId, grant.grantId); receipt = agentResumeReceipt(agent.name); }
+      if (action === "turn-off-key" && grant && agent) { await revokeAgentToken(session, uuid(), workspaceId, grant.tokenId); receipt = `Key turned off. ${agent.name} stops when its current access ends.`; }
+      if (action === "remove-agent" && agent) { await revokeAgentPrincipal(session, uuid(), workspaceId, id); receipt = `${agent.name} removed. Its history stays as “${agent.name} (removed)”.`;
+        if (livePromptPrincipalId === id) { one<SecretHoldingAgentConnect>("agent-connect")?.clearPrompt(false); livePromptPrincipalId = ""; } }
+      if (action === "remove-person") {
+        const reauth = one<HTMLElement>("[data-member-reauth]"); if (reauth) reauth.hidden = true;
+        const memberError = one<HTMLElement>("[data-member-error]"); if (memberError) { memberError.hidden = true; memberError.textContent = ""; }
+        try { await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`; }
+        catch (error) { if (error instanceof FreshLoginRequired && activeWorkspaceId === workspaceId && session?.user.id === userId) {
+          sessionStorage.setItem("commonswarm.pending-member-selection", JSON.stringify({ workspaceId, userId: id }));
+          const reauth = one<HTMLElement>("[data-member-reauth]"); if (reauth) reauth.hidden = false;
+          const errorTarget = one<HTMLElement>("[data-member-error]"); if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
+          // The sign-in controls live in the parent dialog, so release the confirmation focus trap.
+          one<HTMLDialogElement>("[data-people-confirm]")?.close();
+          one<HTMLElement>("[data-member-reauth] button")?.focus();
+        } throw error; }
       }
+      if (action === "cancel-invite") { const row = currentPendingAccessRows().find((entry) => entry.id === id); if (!row) return;
+        if (row.kind === "invite") await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
+        else await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
+        receipt = row.kind === "invite" ? "Invitation canceled." : "Unused key canceled."; }
+      if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
+      await reloadPeopleDialog(workspaceId, id, receipt);
+    };
+    const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
+      const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
+      const item = action === "remove-person" ? model.people.find((person) => person.id === id) : action === "cancel-invite" ? model.invites.find((invite) => invite.id === id) : model.agents.find((agent) => agent.id === id);
+      const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (!item || !confirm) return;
+      const workspaceId = activeWorkspaceId, userId = session?.user.id;
+      showPeopleConfirmation(confirm, action, item, opener, async (button, notice) => {
+        if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
+        await peopleDialogAction(action, id, button, notice);
+      }, () => confirmPeopleDialogAction("turn-off-key", id, opener));
     };
 
     /*
-     * Opening resets the filter so every session starts from the full roster. Initial
-     * focus goes to Add an agent — the first visible primary action — or, when sample
-     * mode hides that door, to the filter. Escape, modal focus containment, and focus
+     * Opening resets the filter and selection to the full roster. Initial focus
+     * goes to the title, which is available in sample mode too. Escape, modal focus containment, and focus
      * restore on close are the native <dialog>'s; the close event re-syncs the stack
      * button's aria-expanded no matter which path closed it.
      */
@@ -4780,19 +4431,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       if (!dialog || dialog.open) return;
       rosterFilter = "";
+      peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
       const search = one<HTMLInputElement>("[data-roster-search]");
       if (search) search.value = "";
       renderDialogRoster();
       dialog.showModal();
       if (!sampleMode) void loadHouseholdConnections();
-      const add = one<HTMLButtonElement>("[data-add-agent-dialog]");
-      const firstStop = add && !add.hidden ? add : search;
+      const firstStop = one<HTMLElement>("#dashboard-roster-title");
       window.requestAnimationFrame(() => firstStop?.focus({ preventScroll: true }));
       one<HTMLButtonElement>("[data-roster-open]")?.setAttribute("aria-expanded", "true");
     };
 
     const closeRosterDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
+      const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (confirm?.open) confirm.close();
       if (dialog?.open) dialog.close();
     };
 
@@ -7407,10 +7059,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       agentName: string,
       button: HTMLButtonElement,
       status: HTMLElement,
+      confirmed = false,
     ): Promise<void> => {
       const scope = householdScope();
-      if (!scope || button.disabled) return;
-      if (!window.confirm(`Withdraw Lists & docs access for ${agentName}? It can no longer see or change lists and docs here until you allow it again.`)) return;
+      if (!scope || (!confirmed && button.disabled)) return;
+      if (!confirmed && !window.confirm(`Withdraw Lists & docs access for ${agentName}? It can no longer see or change lists and docs here until you allow it again.`)) return;
       button.disabled = true;
       status.textContent = "Withdrawing…";
       const settle = (message: string): void => {
@@ -7430,9 +7083,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           settle(message);
           await loadHouseholdConnections();
         } else {
-          settle(withdrawRefusalMessage(result.body.reason));
+          const refusal = withdrawRefusalMessage(result.body.reason);
+          settle(refusal);
+          if (confirmed) throw new Error(refusal);
         }
-      } catch {
+      } catch (error) {
+        if (confirmed) throw error;
         settle("The result is unknown. Reload Lists & docs to check this agent's access.");
       } finally {
         button.disabled = false;
@@ -9143,6 +8799,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     });
     one<HTMLInputElement>("[data-roster-search]")?.addEventListener("input", (event) => {
       rosterFilter = (event.currentTarget as HTMLInputElement).value;
+      peopleDialogState.collapsed.clear();
       renderDialogRoster();
     });
     one<HTMLButtonElement>("[data-composer-attach]")?.addEventListener("click", () => {
@@ -10285,6 +9942,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       dialog?.addEventListener("click", (event) => {
         if (event.target === dialog) dialog.close();
       });
+      dialog?.addEventListener("cancel", (event) => {
+        if (peopleDialogState.selected) { event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
+          renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#dashboard-roster-title"))?.focus({ preventScroll: true }); }
+      });
+      one<HTMLElement>("[data-dialog-agent-list]")?.addEventListener("scroll", syncPeopleDialogLayout, { passive: true });
+      one<HTMLElement>("[data-people-detail]")?.addEventListener("scroll", syncPeopleDialogLayout, { passive: true });
+      window.matchMedia("(max-width: 52rem)").addEventListener("change", syncPeopleDialogLayout);
+      const observer = new ResizeObserver(syncPeopleDialogLayout);
+      const list = one<HTMLElement>("[data-dialog-agent-list]"), detail = one<HTMLElement>("[data-people-detail]");
+      if (list) observer.observe(list); if (detail) observer.observe(detail);
       dialog?.addEventListener("close", () => {
         one<HTMLButtonElement>("[data-roster-open]")?.setAttribute("aria-expanded", "false");
       });
@@ -12578,141 +12245,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     font-weight: var(--weight-semibold);
   }
 
-  /* The dialog. Native <dialog>: the UA centers it over a backdrop and owns Escape,
-     focus containment, and focus restore; the styles only make it ours. At ≤52rem the
-     same element becomes a bottom sheet rather than a second component. */
-  .dashboard__roster-dialog {
-    inline-size: min(calc(100% - var(--s-8)), 26rem);
-    max-inline-size: calc(100% - var(--s-8));
-    max-block-size: min(42rem, calc(100dvh - var(--s-8)));
-    /* global.css's universal * { margin: 0 } beats the UA's dialog-centering margin:auto,
-       so centering is restated here; the ≤52rem sheet re-anchors it to the bottom. */
-    margin: auto;
-    padding: 0;
-    color: var(--text);
-    background: var(--elev-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
-  }
-
-  .dashboard__roster-dialog::backdrop {
-    background: color-mix(in oklab, var(--text) 32%, transparent);
-  }
-
-  .dashboard__roster-dialog[open] {
-    animation: dashboard-dialog-in var(--dur-3) var(--ease-decelerate);
-  }
-
-  @keyframes dashboard-dialog-in {
-    from {
-      opacity: 0;
-      transform: translateY(6px);
-    }
-  }
-
-  .dashboard__roster-dialog-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-3);
-    padding: var(--s-4) var(--s-5);
-    border-block-end: 1px solid var(--border);
-  }
-
-  .dashboard__roster-dialog-head h2 {
-    margin: 0;
-    display: flex;
-    align-items: baseline;
-    gap: var(--s-2);
-    color: var(--text);
-    font-size: var(--t-lg);
-    line-height: var(--lh-lg);
-    letter-spacing: var(--track-head);
-  }
-
-  .dashboard__roster-dialog-count {
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-medium);
-  }
-
-  .dashboard__roster-dialog-body {
-    display: grid;
-    gap: var(--s-3);
-    padding: var(--s-4) var(--s-5) var(--s-5);
-  }
-
-  .dashboard__roster-dialog-add {
-    inline-size: 100%;
-  }
-
-  .dashboard__roster-dialog-search {
-    min-block-size: 2.75rem;
-    inline-size: 100%;
-    padding: var(--s-2) var(--s-3);
-    color: var(--text);
-    background: var(--elev-1);
-    border: 1px solid var(--border-interactive);
-    border-radius: var(--radius);
-    font: inherit;
-    font-size: var(--t-sm);
-  }
-
-  /* The roster scrolls inside the dialog rather than growing it past the viewport. */
-  .dashboard__roster-dialog-list {
-    max-block-size: min(46svh, 20rem);
-    overflow: auto;
-    margin-inline: calc(var(--s-2) * -1);
-  }
-
-  /* Pending access belongs in the roster dialog at every width. The rail has
-     no pending markup, so hiding this section hides the only pending surface. */
   .dashboard__roster-dialog-pending {
     display: grid;
     gap: var(--s-2);
-    padding-block-start: var(--s-3);
-    border-block-start: 1px solid var(--border);
-  }
-
-  /* The dialog becomes a column so the body can scroll when the pending section
-     makes the content taller than the sheet. Scoped to [open]: an unscoped
-     display would override the UA's dialog:not([open]){display:none} and show
-     the dialog permanently. */
-  .dashboard__roster-dialog[open] {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .dashboard__roster-dialog-body {
-    min-block-size: 0;
-    overflow-y: auto;
-  }
-
-  .dashboard__roster-dialog-pending-title {
-    margin: 0;
-    display: flex;
-    align-items: baseline;
-    gap: var(--s-2);
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-  }
-
-  .dashboard__roster-dialog-pending-count {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-    font-weight: var(--weight-medium);
-  }
-
-  .dashboard__roster-dialog-pending-list {
-    max-block-size: 12rem;
-    overflow: auto;
-    margin-inline: calc(var(--s-2) * -1);
-  }
-
-  .dashboard__roster-dialog-pending-list .dashboard__agent {
-    border-radius: var(--radius-sm);
   }
 
   /* ── Channels ───────────────────────────────────────────────────────────────────── */
@@ -12832,25 +12367,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     display: flex;
     flex-wrap: wrap;
     gap: var(--s-3);
-  }
-
-  .dashboard__roster-dialog-list .dashboard__agent {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    border-radius: var(--radius-sm);
-  }
-
-  .dashboard__roster-dialog-list [data-agent-content-access],
-  .dashboard__roster-dialog-list [data-agent-content-result],
-  .dashboard__roster-dialog-list .dashboard__agent-content-withdraw {
-    grid-column: 2 / -1;
-  }
-
-  /* The access line and its result are row meta, like the owner and model line in the copy
-     above them: same muted colour and small size, not body text. */
-  .dashboard__roster-dialog-list [data-agent-content-access],
-  .dashboard__roster-dialog-list [data-agent-content-result] {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
   }
 
   .dashboard__agent-content-withdraw {
@@ -15199,19 +14715,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       padding-block-start: 0;
     }
 
-    /* The same dialog, presented as a bottom sheet. */
-    .dashboard__roster-dialog {
-      inline-size: 100%;
-      max-inline-size: 100%;
-      max-block-size: calc(var(--dashboard-viewport-height, 100dvh) * 0.82);
-      margin-block-start: auto;
-      margin-block-end: 0;
-      margin-inline: 0;
-      border-inline: 0;
-      border-block-end: 0;
-      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    }
-
     .dashboard__workspace-details-dialog {
       inline-size: 100%;
       max-inline-size: 100%;
@@ -15220,10 +14723,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       margin-block-end: 0;
       border-block-end: 0;
       border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    }
-
-    .dashboard__roster-dialog-list {
-      max-block-size: calc(var(--dashboard-viewport-height, 100dvh) * 0.46);
     }
 
     .dashboard__mobile-view {
@@ -16016,68 +15515,195 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     border-radius: var(--radius-pill);
   }
 
-  /* --- People & agents dialog: two doors and plain status --- */
-  .dashboard__roster-dialog-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s-2);
+  /* --- People & agents dialog: A2 member cards and facts --- */
+  .dashboard__roster-dialog {
+    inline-size: 640px;
+    max-inline-size: calc(100vw - 48px);
+    block-size: 716px;
+    max-block-size: calc(100dvh - 48px);
+    margin: auto;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    background: var(--canvas);
+    color: var(--text);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
   }
-
-  .dashboard__roster-dialog-actions .dashboard__button {
-    flex: 1 1 10rem;
-    border-radius: var(--radius-pill);
+  .dashboard__roster-dialog[open] { display: flex; flex-direction: column; }
+  .dashboard__roster-dialog.has-detail { inline-size: 960px; block-size: 760px; }
+  .dashboard__roster-dialog::backdrop { background: color-mix(in srgb, var(--text) 32%, transparent); backdrop-filter: blur(3px); }
+  .dashboard__roster-dialog-head { flex: none; padding: 24px 24px 18px; background: var(--surface); border-block-end: 1px solid var(--border); }
+  .pd-title-line { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+  .pd-title-line h2 { font-family: var(--font-display); font-size: 28px; line-height: 1.3; letter-spacing: -.8px; }
+  .pd-eyebrow { color: var(--text-muted); text-transform: uppercase; letter-spacing: .12em; font-size: 10px; margin-block-end: 8px; }
+  .pd-count-attention { color: var(--warning); font-weight: 600; }
+  .pd-counts { color: var(--text-muted); font-size: 13px; margin-block-start: 10px; }
+  .dashboard__roster-dialog-actions { display: flex; gap: 10px; margin-block-start: 20px; }
+  .dashboard__roster-dialog-actions .dashboard__button { border-radius: var(--radius-pill); min-block-size: 44px; }
+  .dashboard__roster-dialog-search { inline-size: 100%; min-block-size: 44px; margin-block-start: 12px; padding: 10px 12px; border: 1px solid var(--border-interactive); border-radius: var(--radius); background: var(--canvas); color: var(--text); font: inherit; font-size: 13px; }
+  .dashboard__roster-dialog-body { display: flex; flex: 1; min-block-size: 0; overflow: hidden; }
+  .dashboard__roster-dialog-list { flex: 1; min-inline-size: 0; padding: 20px 24px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  .has-detail .dashboard__roster-dialog-list { flex: 0 0 400px; padding: 18px 16px; }
+  .pd-member-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+  .has-detail .pd-member-grid { grid-template-columns: minmax(0,1fr); }
+  .pd-member-card { min-inline-size: 0; border: 1px solid var(--border); border-radius: 20px; background: var(--surface); box-shadow: 0 5px 18px color-mix(in srgb,var(--text) 4%,transparent); }
+  .pd-person-head { display: flex; align-items: center; padding: 12px 6px 12px 14px; gap: 8px; }
+  .pd-person-disclosure { display: flex; flex: 1; align-items: center; min-inline-size: 0; gap: 10px; min-block-size: 48px; text-align: start; background: transparent; color: var(--text); border: 0; cursor: pointer; }
+  .pd-person-copy { display: grid; min-inline-size: 0; gap: 3px; font-size: 14px; }
+  .pd-person-copy .pd-muted { font-size: 12px; }
+  .pd-initials { position: relative; display: grid; place-items: center; flex: 0 0 36px; inline-size: 36px; block-size: 36px; border-radius: 50%; color: var(--canvas); background: var(--text); font-size: 12px; font-weight: 600; }
+  .pd-collapse, .pd-close-detail { display: grid; place-items: center; inline-size: 44px; min-block-size: 44px; flex: none; border: 0; background: transparent; color: var(--text); cursor: pointer; }
+  .pd-agents-list { list-style: none; padding: 0 12px 12px 20px; margin: 0; }
+  .pd-agents-list:has(.pd-agent) { border-block-start: 1px solid var(--border); margin-inline: 14px; padding-inline: 6px; }
+  .pd-agent { min-inline-size: 0; padding: 4px 0 8px; }
+  .pd-agent + .pd-agent { border-block-start: 1px solid var(--border); }
+  .pd-agent[data-attention="true"] { margin-block: 4px 8px; padding-inline: 6px; background: var(--warning-dim); border-radius: 12px; }
+  .pd-agent-disclosure { display: flex; inline-size: 100%; min-block-size: 44px; align-items: start; gap: 10px; padding: 10px 0 0; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; }
+  .pd-orb { display: grid; place-items: center; inline-size: 28px; block-size: 28px; flex: 0 0 28px; border-radius: 50%; color: #20242c; font-size: 10px; font-weight: 700; background: radial-gradient(circle at 28% 22%,#eeeaff,var(--lavender)); }
+  .pd-orb[data-tint="1"] { background: radial-gradient(circle at 28% 22%,#ffeadc,var(--peach)); }
+  .pd-orb[data-tint="2"] { background: radial-gradient(circle at 28% 22%,#e4f5e9,var(--sage)); }
+  .pd-orb[data-tint="3"] { background: radial-gradient(circle at 28% 22%,#e2f0ff,var(--sky)); }
+  .pd-agent-copy { display: grid; gap: 4px; min-inline-size: 0; flex: 1; font-size: 13px; }
+  .pd-agent-name-line { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
+  .pd-agent-app { font-size: 12px; color: var(--text-muted); }
+  .pd-access-mark { flex: none; color: var(--text-muted); font-size: 14px; }
+  .pd-row-arrow { color: var(--text-muted); align-self: center; }
+  .pd-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-inline-size: 0; }
+  .pd-agent[data-attention="true"] .pd-agent-name-line strong { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+  .pd-status { display: inline-flex; inline-size: fit-content; max-inline-size: 100%; padding: 3px 6px; background: var(--elev-3); color: var(--text-muted); border-radius: var(--radius-sm); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+  .pd-status[data-agent-status="active"], .pd-status[data-agent-status="connected"] { color: var(--success); background: var(--success-dim); }
+  .pd-status[data-attention="true"] { color: var(--warning); background: var(--warning-dim); }
+  .pd-agent[data-attention="true"] .pd-status { background: var(--surface); }
+  .pd-row-help { padding-inline-start: 38px; font-size: 12px; line-height: 1.5; }
+  .pd-text-button, .pd-danger-button { min-block-size: 44px; padding: 8px 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 13px; font-weight: 500; text-align: start; cursor: pointer; overflow-wrap: anywhere; }
+  .pd-danger-button { color: var(--danger); }
+  .pd-text-button:hover, .pd-danger-button:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .dashboard__roster-dialog button:focus-visible, .dashboard__roster-dialog summary:focus-visible, .dashboard__roster-dialog input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .dashboard__roster-dialog button:disabled { opacity: .6; cursor: wait; }
+  .pd-muted { color: var(--text-muted); }
+  .pd-attention { border: 1px solid var(--border); border-inline-start: 3px solid var(--warning); border-radius: 12px; background: var(--surface); padding: 10px 12px 4px; margin-block-end: 16px; }
+  .pd-attention h3 { color: var(--warning); font-size: 12px; font-weight: 600; margin-block-end: 3px; }
+  .pd-attention-list { list-style: none; margin: 0; padding: 0; }
+  .pd-attention-list li { display: flex; align-items: center; gap: 8px; min-block-size: 45px; }
+  .pd-attention-list li + li { border-block-start: 1px solid var(--border); }
+  .pd-attention-jump { flex: 1; min-inline-size: 0; min-block-size: 44px; padding: 10px 0; background: transparent; color: var(--text); border: 0; text-align: start; font-size: 12px; line-height: 1.5; cursor: pointer; overflow-wrap: anywhere; }
+  .pd-attention-list .pd-text-button { flex: none; white-space: nowrap; font-size: 12px; }
+  .pd-attention-reason { color: var(--warning); }
+  .pd-portraits { display: flex; gap: 10px; overflow-x: auto; list-style: none; margin: 0 0 18px; padding: 0 0 4px; }
+  .pd-portraits li { flex: none; }
+  .pd-portrait { display: flex; align-items: center; gap: 9px; min-block-size: 52px; max-inline-size: 100%; padding: 7px 13px 7px 8px; border-radius: 999px; background: var(--elev-3); color: var(--text); border: 1px solid transparent; font-size: 13px; cursor: pointer; }
+  .pd-portrait:hover { border-color: var(--border-strong); }
+  .pd-portrait strong { max-inline-size: 120px; }
+  .pd-initials[data-attention="true"]::after { content: ""; position: absolute; inset-inline-end: -1px; inset-block-start: -1px; inline-size: 11px; block-size: 11px; border: 2px solid var(--canvas); border-radius: 50%; background: var(--warning); }
+  .pd-portrait-orbs { display: flex; padding-inline-start: 4px; }
+  .pd-portrait-orbs .pd-orb { inline-size: 23px; block-size: 23px; flex-basis: 23px; font-size: 0; border: 2px solid var(--elev-3); margin-inline-start: -5px; }
+  .pd-empty-person { color: var(--text-muted); font-size: 12px; padding: 0 16px 16px; }
+  .pd-invited { margin-block-start: 24px; }
+  .pd-invited h3 { font-size: 12px; }
+  .pd-invite-list { list-style: none; margin: 0; padding: 0; }
+  .pd-invite { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-block-start: 1px solid var(--border); min-inline-size: 0; }
+  .pd-invite-symbol { inline-size: 36px; block-size: 36px; flex: none; display: grid; place-items: center; border: 1px dashed var(--border-interactive); border-radius: 50%; color: var(--text-muted); }
+  .pd-invite .pd-muted { font-size: 11px; }
+  .pd-detail { flex: 1; min-inline-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; border-inline-start: 1px solid var(--border); padding: 12px 24px 24px; background: var(--surface); }
+  .pd-detail-top { display: flex; align-items: center; justify-content: space-between; margin-block-end: 8px; }
+  .pd-detail-top .pd-text-button { color: var(--text-muted); }
+  .pd-detail-identity { display: flex; align-items: center; gap: 14px; margin-block-end: 18px; flex-wrap: wrap; }
+  .pd-detail-identity h2 { font-size: 24px; letter-spacing: -.6px; line-height: 1.3; overflow-wrap: anywhere; }
+  .pd-detail-identity p { font-size: 13px; margin-block-start: 3px; }
+  .pd-detail-identity .pd-status { margin-block-start: 6px; }
+  .pd-detail-identity .pd-orb { inline-size: 48px; block-size: 48px; flex-basis: 48px; font-size: 16px; }
+  .pd-detail-identity > div { flex: 1; min-inline-size: 0; }
+  .pd-fact-sheet { border: 1px solid var(--border); border-radius: 16px; overflow: hidden; margin: 0 0 14px; }
+  .pd-fact-row { display: grid; grid-template-columns: 94px minmax(0,1fr) auto; gap: 10px; align-items: center; min-block-size: 48px; padding: 6px 12px; }
+  .pd-fact-row + .pd-fact-row { border-block-start: 1px solid var(--border); }
+  .pd-fact-row dt { color: var(--text-muted); font-size: 13px; }
+  .pd-fact-row dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; grid-column: 2 / -1; }
+  .pd-fact-row:has(.pd-fact-action) dd:not(.pd-fact-action) { grid-column: 2; }
+  .pd-fact-row .pd-fact-action { grid-column: 3; }
+  .pd-fact-row .pd-text-button { white-space: nowrap; }
+  .pd-quiet-link { color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
+  .pd-guidance { padding: 12px 14px; border-radius: 12px; background: var(--warning-dim); margin-block-end: 14px; font-size: 13px; line-height: 1.55; }
+  .pd-guidance h3 { font-size: 13px; margin-block-end: 4px; }
+  .pd-permission-note, .pd-model-form { background: var(--elev-3); padding: 12px; border-radius: 12px; margin-block-end: 12px; font-size: 12px; color: var(--text-muted); }
+  .pd-model-form { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pd-model-form label { inline-size: 100%; }
+  .pd-model-form input { inline-size: 100%; min-inline-size: 0; min-block-size: 44px; background: var(--canvas); color: var(--text); border: 1px solid var(--border-interactive); border-radius: var(--radius-sm); padding: 10px; }
+  .pd-receipt { font-size: 13px; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; margin-block-end: 14px; }
+  .pd-detail > .pd-receipt { border-inline-start: 3px solid var(--success); background: var(--success-dim); padding: 10px 12px; }
+  .pd-error { color: var(--danger); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+  .pd-connection-note { font-size: 12px; color: var(--text-muted); line-height: 1.55; margin-block-end: 10px; }
+  .pd-connection-note span { display: block; }
+  .pd-technical { border-radius: 10px; background: var(--elev-3); padding: 0 12px; color: var(--text-muted); }
+  .pd-technical summary { cursor: pointer; min-block-size: 44px; padding: 12px 0; font-size: 13px; }
+  .pd-technical p { font: 11px var(--font-mono); overflow-wrap: anywhere; padding-block-end: 8px; }
+  .pd-danger-zone { border-block-start: 1px solid var(--border); margin-block-start: 16px; padding-block-start: 12px; }
+  .pd-danger-zone h3, .pd-section-title { color: var(--text-muted); font-size: 12px; }
+  .pd-danger-actions { display: flex; gap: 6px 24px; flex-wrap: wrap; }
+  .pd-person-agents { padding-inline-start: 18px; }
+  .pd-scroll-footer { flex: none; padding: 10px 24px; border-block-start: 1px solid var(--border); background: var(--surface); font-size: 11px; color: var(--text-muted); }
+  .dashboard__roster-dialog-members:has(> p:not([hidden])), .dashboard__roster-dialog-members:has(> div:not([hidden])) { padding: 12px 24px; background: var(--surface); }
+  .pd-sr-only { position: absolute; inline-size: 1px; block-size: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .pd-empty { grid-column: 1 / -1; text-align: center; padding: 28px 16px 36px; }
+  .pd-empty h3 { font-size: 23px; letter-spacing: -.5px; }
+  .pd-app-chips { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-block-start: 20px; }
+  .pd-app-chips span { background: var(--elev-3); color: var(--text-muted); font-size: 12px; padding: 6px 12px; border-radius: var(--radius-pill); }
+  .pd-empty p { font-size: 14px; line-height: 1.7; max-inline-size: 370px; margin: 10px auto 0; }
+  .pd-empty-art { position: relative; inline-size: 180px; block-size: 118px; margin: 0 auto 18px; }
+  .pd-empty-art .pd-initials { position: absolute; inline-size: 56px; block-size: 56px; inset-inline-start: 62px; inset-block-start: 30px; font-size: 18px; }
+  .pd-orbit { position: absolute; inset: 14px 12px; border: 1px dashed var(--border-strong); border-radius: 50%; transform: rotate(-18deg); }
+  .pd-empty-art .pd-orb { position: absolute; inline-size: 30px; block-size: 30px; }
+  .pd-empty-art .pd-orb:nth-of-type(3) { left: 9px; top: 18px; }
+  .pd-empty-art .pd-orb:nth-of-type(4) { right: 8px; top: 7px; }
+  .pd-empty-art .pd-orb:nth-of-type(5) { left: 24px; bottom: 5px; }
+  .pd-empty-art .pd-orb:nth-of-type(6) { right: 0; bottom: 16px; }
+  .pd-confirm { inline-size: 440px; max-inline-size: calc(100vw - 32px); max-block-size: calc(100dvh - 48px); margin: auto; padding: 28px; border: 1px solid var(--border); border-radius: 20px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); overflow: auto; }
+  .pd-confirm::backdrop { background: color-mix(in srgb,var(--text) 24%,transparent); backdrop-filter: blur(2px); }
+  .pd-confirm-icon { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border-radius: 50%; color: var(--danger); background: var(--danger-dim); margin-block-end: 18px; }
+  .pd-confirm h2 { font-size: 23px; line-height: 1.3; letter-spacing: -.6px; overflow-wrap: anywhere; }
+  .pd-confirm-facts { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 12px; }
+  .pd-confirm-facts li { position: relative; padding-inline-start: 21px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+  .pd-confirm-facts li::before { content: ""; position: absolute; inset-inline-start: 0; inset-block-start: 8px; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--danger); }
+  .pd-confirm-facts li.keep::before { background: var(--success); }
+  .pd-alternative { margin-block-start: 20px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--canvas); }
+  .pd-alternative h3 { font-size: 13px; }
+  .pd-alternative p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin-block-start: 6px; }
+  .pd-confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-block-start: 24px; }
+  .pd-danger-fill { background: var(--danger); color: var(--danger-ink); border-color: var(--danger); }
+  @media (max-width: 52rem) {
+    .dashboard__roster-dialog, .dashboard__roster-dialog.has-detail { inline-size: 100%; max-inline-size: 100%; block-size: 100dvh; max-block-size: 100dvh; margin-block-start: auto; margin-block-end: 0; margin-inline: 0; border: 0; border-radius: 20px 20px 0 0; }
+    .dashboard__roster-dialog-head { position: relative; padding: 24px 16px 16px; }
+    .dashboard__roster-dialog-head::before { content: ""; position: absolute; inset-block-start: 8px; inset-inline-start: calc(50% - 18px); inline-size: 36px; block-size: 4px; background: var(--border-strong); border-radius: var(--radius-pill); }
+    .dashboard__roster-dialog-list, .has-detail .dashboard__roster-dialog-list { flex: 1; padding: 18px 16px; }
+    .pd-title-line h2 { font-size: 25px; }
+    .dashboard__roster-dialog-actions .dashboard__button { flex: 1; font-size: 13px; padding-inline: 12px; }
+    .pd-member-grid { grid-template-columns: minmax(0,1fr); }
+    .pd-portraits { display: none; }
+    .pd-person-copy { font-size: 15px; }
+    .pd-agent-copy { font-size: 14px; }
+    .pd-attention-list li { flex-wrap: wrap; gap: 0 8px; padding-block: 4px; }
+    .pd-attention-jump { flex-basis: 100%; font-size: 13px; padding: 7px 0 0; }
+    .pd-attention-reason { display: block; font-size: 13px; }
+    .pd-attention-list .pd-text-button { font-size: 13px; }
+    .has-detail > .dashboard__roster-dialog-head { display: none; }
+    .has-detail .dashboard__roster-dialog-list { visibility: hidden; }
+    .pd-detail { position: absolute; inset: 0; border: 0; inline-size: 100%; padding: 20px 16px 32px; z-index: 3; }
+    .has-detail:has(.pd-scroll-footer:not([hidden])) .pd-detail { inset-block-end: 38px; }
+    .has-detail .pd-scroll-footer { position: relative; z-index: 4; }
+    .has-detail .dashboard__roster-dialog-members { position: relative; z-index: 4; }
+    .pd-detail-identity h2 { font-size: 26px; }
+    .pd-detail-identity .pd-orb { inline-size: 54px; block-size: 54px; flex-basis: 54px; font-size: 18px; }
+    .pd-fact-row { grid-template-columns: minmax(0,1fr) auto; gap: 2px 10px; padding: 10px 12px; min-block-size: 65px; }
+    .pd-fact-row dt { grid-column: 1 / -1; font-size: 12px; }
+    .pd-fact-row dd, .pd-fact-row:has(.pd-fact-action) dd:not(.pd-fact-action) { grid-column: 1; }
+    .pd-fact-row .pd-fact-action { grid-column: 2; grid-row: 2; }
+    .pd-fact-row .pd-text-button, .pd-danger-button { font-size: 14px; }
+    .pd-scroll-footer { padding: 9px 16px calc(9px + env(safe-area-inset-bottom)); }
+    .pd-confirm { padding: 24px; }
+    .pd-confirm-actions { flex-direction: column-reverse; }
+    .pd-confirm-actions .dashboard__button { inline-size: 100%; }
   }
-
-  .dashboard__agent-status {
-    justify-self: start;
-    inline-size: fit-content;
-    padding: 0.1rem 0.55rem;
-    color: var(--success);
-    font-size: var(--t-2xs);
-    font-weight: var(--weight-semibold);
-    background: var(--success-dim);
-    border-radius: var(--radius-pill);
-  }
-
-  .dashboard__agent-status[data-agent-status="inactive"],
-  .dashboard__agent-status[data-agent-status="idle"] {
-    color: var(--warning);
-    background: var(--warning-dim);
-  }
-
-  .dashboard__agent-status[data-agent-status="suspended"],
-  .dashboard__agent-status[data-agent-status="removed"] {
-    color: var(--danger);
-    background: var(--danger-dim);
-  }
-
-  .dashboard__agent-status[data-agent-status="connected"] {
-    color: var(--accent-bright);
-    background: var(--accent-dim);
-  }
-
-  .dashboard__agent-receive {
-    color: var(--text-muted);
-    font-size: var(--t-xs);
-  }
-
-  .dashboard__agent-details {
-    font-size: var(--t-xs);
-    color: var(--text-muted);
-  }
-
-  .dashboard__agent-details > summary {
-    min-block-size: 2.75rem;
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-    color: var(--text-muted);
-  }
-
-  .dashboard__agent-details > span {
-    display: block;
-    overflow-wrap: anywhere;
-  }
+  @media (prefers-reduced-motion: reduce) { .dashboard__roster-dialog, .pd-confirm { animation: none; transition: none; scroll-behavior: auto; } }
 
   .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="inactive"],
   .dashboard__sidebar-participant-copy > .dashboard__sidebar-agent-status[data-agent-status="suspended"] {

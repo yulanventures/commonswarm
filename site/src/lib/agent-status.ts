@@ -15,6 +15,9 @@
  */
 
 import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud/agent-presence";
+import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
+import { wakePathMark } from "./wake-path";
+import { STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, type GrantRiskInput } from "./standing-grants";
 
 export type AgentStatusKind = "removed" | "suspended" | "inactive" | "active" | "idle" | "connected";
 
@@ -52,8 +55,8 @@ function ago(ageMs: number): string {
 }
 
 export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentStatus {
-  const hosted = input.transport === "hosted_mcp" || input.turnOnly === true;
-  let receive: string | null = hosted ? "Checks messages when you chat with it." : null;
+  const hosted = input.transport === "hosted_mcp";
+  let receive: string | null = hosted ? "Checks messages when you chat with it." : input.turnOnly ? "Checks messages each time it starts a task." : null;
   let lastCallAge: number | null = null;
   if (input.presence !== undefined) {
     const presence = classifyAgentPresence(input.presence, now);
@@ -62,7 +65,7 @@ export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentSta
       receive = presence.wake.kind.startsWith("live ")
         ? "Gets messages as they arrive."
         : presence.wake.kind === "turn"
-          ? "Checks messages at the start of each turn."
+          ? "Checks messages each time it starts a task."
           : null;
     }
   }
@@ -87,4 +90,62 @@ export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentSta
     chip: lastCallAge < ACTIVE_NOW_MS ? "Active now" : `Active ${ago(lastCallAge)}`,
     receive,
   };
+}
+
+
+export type PeopleAgentStatusKind = AgentStatusKind | "key-off" | "key-ended" | "paused" | "stale-messages" | "key-ends-soon" | "new-computer";
+export interface PeopleAgentStatusInput extends AgentStatusInput {
+  grant?: GrantRiskInput | null;
+  oldestUnobservedAt?: string | null;
+  app?: string | null;
+  ownerName: string | null;
+  own: boolean;
+  mayManage: boolean;
+  sample: boolean;
+}
+export interface PeopleAgentStatus {
+  kind: PeopleAgentStatusKind;
+  label: string;
+  sentence: string;
+  attention: boolean;
+  fix: { action: "resume" | "new-key" | "guide-chat" | "guide-local" | null; allowed: boolean; askWho: string | null };
+}
+
+/** One translation of the same wire facts, with attention and viewer-specific next steps. */
+export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now()): PeopleAgentStatus {
+  const base = agentStatus({ transport: input.transport, turnOnly: input.turnOnly, presence: input.presence }, now);
+  const owner = input.ownerName?.split(/\s+/)[0] ?? "its owner";
+  const actors = STANDING_RESUME_ACTORS.map((actor, index) =>
+    index === STANDING_RESUME_ACTORS.length - 1 ? `or ${actor}` : actor).join(", ");
+  const result = (kind: PeopleAgentStatusKind, label: string, sentence: string,
+    action: PeopleAgentStatus["fix"]["action"] = null, permitted = false, askWho: string | null = null,
+    attention = true): PeopleAgentStatus => ({ kind, label, sentence, attention,
+      fix: { action, allowed: permitted && !input.sample, askWho } });
+  const keyFix = (kind: "key-off" | "key-ended" | "key-ends-soon", label: string) => result(kind, label,
+    input.own ? kind === "key-ends-soon" ? "Get a new key before this one ends." : "It needs a new key to connect again."
+      : `Ask ${owner} to get a new key.`, "new-key", input.own, input.own ? null : owner);
+  const grant = input.grant;
+  if (grant?.revokedAt) return keyFix("key-off", "Key turned off");
+  const horizon = grant?.kind === "timeboxed" && grant.horizonExpiresAt ? Date.parse(grant.horizonExpiresAt) : NaN;
+  if (horizon <= now) return keyFix("key-ended", "Key ended");
+  if (grant?.kind === "standing" && grant.suspendedAt) return result("paused",
+    `Paused: unused for ${STANDING_IDLE_PAUSE_DAYS} days`, input.mayManage ? "Resume it so it can connect again."
+      : input.ownerName ? `Ask ${owner} to resume it.` : `Ask ${actors} to resume it.`,
+    "resume", input.mayManage, input.mayManage ? null : input.ownerName ? owner : actors);
+  if (wakePathMark(input.oldestUnobservedAt, now)) {
+    const hosted = input.transport === "hosted_mcp";
+    return result("stale-messages", `Hasn’t picked up messages for ${WAKE_STALE_MS / 60_000}+ min`,
+      hosted ? `Open ${input.app ?? "its chat app"} and say: check CommonSwarm.` : "Start its cswarm process.",
+      hosted ? "guide-chat" : "guide-local", input.own, input.own ? null : owner);
+  }
+  if (horizon - now <= 3 * 86_400_000) {
+    const days = Math.max(1, Math.ceil((horizon - now) / 86_400_000));
+    return keyFix("key-ends-soon", `Key ends in ${days} ${days === 1 ? "day" : "days"}`);
+  }
+  if (grant?.newHostAt) return result("new-computer", "Used from a new computer", "Keep using it if you recognize this computer.");
+  return result(base.kind, base.chip, base.receive ?? "Message checks have not been reported.", null, false, null, false);
+}
+
+export function agentResumeReceipt(name: string): string {
+  return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts. Another ${STANDING_IDLE_PAUSE_DAYS} days without use will pause it again.`;
 }

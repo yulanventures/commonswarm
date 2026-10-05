@@ -16,6 +16,8 @@ import type {
   PendingMemberInvite,
 } from "../../lib/commonswarm";
 
+const peopleView = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
+
 test("server pending rows show invitation age and disappear with the next snapshot", { timeout: 2_000 }, () => {
   const issuedAt = "2026-09-24T12:00:00Z";
   const pending: PendingAgentAccess[] = [
@@ -67,7 +69,8 @@ test("a failed pending read leaves the workspace pending section available", { t
   }
   assert.deepEqual(await loadPendingAccess(async () => ["row"]), { rows: ["row"], failed: false });
   const source = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
-  assert.match(source, /data-pending-load-note hidden>Invited, not connected: could not load/);
+  assert.match(peopleView, /dataset.pendingLoadNote/);
+  assert.match(peopleView, /Invited: could not load/);
   assert.equal(pendingReadWiring(source).length, 4);
   assert.match(source, /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed/);
 });
@@ -233,7 +236,7 @@ test("workspace access shows pending rows and explicit agent identity", () => {
   assert.match(dashboard, /revokeWorkspaceInvitation/);
   assert.match(dashboard, /revokeAgentToken/);
   assert.match(dashboard, /Model not specified/);
-  assert.match(dashboard, /owned by/);
+  assert.match(peopleView, /agent.ownerName/);
   assert.match(dashboard, /markAgentAvatar/);
   assert.match(dashboard, /--avatar-hue/);
 });
@@ -778,19 +781,13 @@ test("the Live chip shows only while the feed poll can be armed", () => {
 
 test("the Agents dialog carries Pending access at every width from one renderer", () => {
   /* The section's hooks, its h3 under the dialog's h2, and a unique labelledby. */
-  assert.match(dashboard, /data-dialog-access-section/);
-  assert.match(dashboard, /data-dialog-access-list/);
-  assert.match(dashboard, /data-dialog-access-count/);
-  assert.match(dashboard, /data-dialog-access-error/);
-  assert.match(
-    dashboard,
-    /<h3[\s\S]*id="dashboard-roster-pending-title"[\s\S]*Pending access/,
-  );
-  assert.equal(
-    dashboard.match(/dashboard-roster-pending-title/g)?.length,
-    2,
-    "the id appears once as id and once as aria-labelledby — never duplicated",
-  );
+  assert.match(peopleView, /dataset.dialogAccessSection/);
+  assert.match(peopleView, /dataset.dialogAccessList/);
+  assert.match(peopleView, /dataset.dialogAccessCount/);
+  assert.match(peopleView, /dataset.dialogAccessError/);
+  assert.match(peopleView, /node\(doc, "h3", "pd-muted", "Invited · "\)/);
+  assert.equal(peopleView.match(/dashboard-roster-pending-title/g)?.length, 2,
+    "the generated id has one title and one aria-labelledby");
 
   /* ONE row-model call feeds BOTH lists; mirrors of one state, never two states. */
   const render = dashboard.slice(
@@ -809,7 +806,7 @@ test("the Agents dialog carries Pending access at every width from one renderer"
     "one row-model call feeds both lists",
   );
   assert.match(render, /railList\?\.replaceChildren\(buildRows/);
-  assert.match(render, /dialogList\?\.replaceChildren\(buildRows/);
+  assert.match(render, /renderDialogRoster\(\);/);
   assert.match(
     render,
     /row\.kind === "invite"[\s\S]*revokeWorkspaceInvitation\(session, uuid\(\), row\.workspaceId, row\.id\)[\s\S]*revokeAgentToken\(session, uuid\(\), row\.workspaceId, row\.id\)/,

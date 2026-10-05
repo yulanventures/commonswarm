@@ -708,6 +708,23 @@ export async function revokeAgentToken(
   }
 }
 
+/** Resume is an existing human-interactive command; server facts are re-read after it. */
+export async function resumeRenewalGrant(
+  session: Session, commandId: string, workspaceId: string, renewalGrantId: string,
+): Promise<void> {
+  const { status, body } = await postCommand(session, commandId,
+    { kind: "resume_renewal_grant", renewal_grant_id: renewalGrantId },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "The result is unknown. Reload to check whether this key resumed.");
+  if (status === 200 && body.status === "accepted") return;
+  // Current server returns only error=forbidden; the detailed reason stays in its audit.
+  const reason = body.reason ?? body.error;
+  const copy = reason === "forbidden"
+    ? "This key cannot be resumed with your current access. Nothing was changed."
+    : "Resume was not confirmed. Reload to check this key before trying again.";
+  throw new Error(copy);
+}
+
 export interface PendingMemberInvite {
   workspaceId: string;
   invitationId: string;

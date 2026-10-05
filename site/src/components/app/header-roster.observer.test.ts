@@ -13,6 +13,7 @@ import { test } from "node:test";
  * not grow with agent count.
  */
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+const view = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const connect = await readFile(
   new URL("../connect/AgentConnect.astro", import.meta.url),
   "utf8",
@@ -116,7 +117,7 @@ test("management lives in a dialog whose first primary action is Add an agent", 
     "sample mode never shows an Add door that cannot mint",
   );
   assert.match(dashboard, /rosterFilter/);
-  assert.match(dashboard, /dataset\.removeAgent/);
+  assert.match(view, /"data-remove-agent"/);
   assert.match(dashboard, /data-agent-error/);
 });
 
@@ -125,18 +126,12 @@ test("Get prompt is own-agent only and reuses the existing prompt copy path", ()
     dashboard.indexOf("const renderDialogRoster ="),
     dashboard.indexOf("const openRosterDialog ="),
   );
-  assert.match(
-    roster,
-    /const mayGetPrompt = Boolean\(\s*me && agent\.ownerUserId === me\.userId && !sampleMode/,
-    "another member's agent must never receive a Get prompt action",
-  );
-  assert.match(roster, /promptButton\.textContent = "Get prompt"/);
-  assert.match(roster, /promptButton\.dataset\.getAgentPrompt = agent\.principalId/);
-  assert.match(
-    roster,
-    /requestPromptFor\(agent\.principalId\)/,
-    "the row must pass that exact principal into AgentConnect",
-  );
+  assert.match(dashboard, /const own = Boolean\(me && agent\.ownerUserId === me\.userId && !sampleMode/,
+    "another member's agent must never receive a new key action");
+  assert.match(view, /"data-get-agent-prompt"/);
+  assert.match(view, /"Get a new key"/);
+  assert.match(roster, /requestPromptFor\(id\)/,
+    "the real prompt flow receives the selected principal");
 
   const request = connect.slice(
     connect.indexOf("requestPromptFor(principalId"),

@@ -14,6 +14,7 @@ import { approvalUntil, accessRefusalMessage, withdrawRefusalMessage, PERSONAL_P
  * regex can honestly check.
  */
 const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+const peopleView = readFileSync(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const markup = dashboard.slice(0, dashboard.indexOf("<script>")).replace(/\{\/\*[\s\S]*?\*\/\}/g, " ");
 const script = dashboard.slice(dashboard.indexOf("<script>"), dashboard.indexOf("</script>"));
 
@@ -152,17 +153,18 @@ test("active approvals expose Save and withdrawal in both places, owned agents o
   assert.match(cards, /allow.textContent = approval \? "Save" : "Allow"/);
   assert.match(cards, /withdraw.textContent = "Withdraw access"/);
   assert.match(cards, /approvalDescription\(approval\)/);
-  const dialog = section(script, "const renderDialogRoster", "const openRosterDialog");
-  assert.match(dialog, /!sampleMode && agent.ownerUserId === session\?\.user.id/);
-  assert.match(dialog, /withdraw.textContent = "Withdraw Lists & docs"/);
-  assert.match(dialog, /withdraw.className = "dashboard__text-button dashboard__agent-content-withdraw"/);
-  assert.match(dialog, /row.append\(accessLine\)/);
-  assert.match(dialog, /row.append\(receipt\)/);
-  assert.match(dialog, /row.append\(withdraw\)/, "withdrawal spans the row below the copy");
-  assert.match(dashboard, /\.dashboard__roster-dialog-list \[data-agent-content-access\],\s*\.dashboard__roster-dialog-list \[data-agent-content-result\],\s*\.dashboard__roster-dialog-list \.dashboard__agent-content-withdraw\s*\{[^}]*grid-column: 2 \/ -1/);
-  assert.match(dashboard, /\.dashboard__agent-content-withdraw\s*\{[^}]*justify-self: start/);
-  assert.ok(dialog.indexOf("row.append(promptButton)") < dialog.indexOf("row.append(accessLine)"), "Get prompt keeps column 3 before the full-width access line");
-  assert.match(dialog, /"Can use Lists & docs"/);
+  const model = section(script, "const peopleDialogModel", "const syncPeopleDialogLayout");
+  assert.match(model, /const own = Boolean\(me && agent.ownerUserId === me.userId && !sampleMode/);
+  assert.match(peopleView, /"data-withdraw-agent-access"/);
+  assert.match(peopleView, /"data-agent-error"|dataset.agentError/);
+  assert.match(peopleView, /dataset.agentContentAccess/);
+  assert.match(peopleView, /dataset.agentContentResult/);
+  assert.match(peopleView, /"pd-quiet-link"/);
+  assert.match(peopleView, /fact\("Lists & docs", peopleDialogAccessUntil\(agent\), accessAction\)/,
+    "withdrawal now belongs to the detail fact; the surface has only its quiet access indicator");
+  assert.match(peopleView, /"Can use Lists & docs"/);
+  assert.match(script, /withdrawAgent\(id, agent.name, button, notice, true\)/,
+    "the dialog's nested confirmation suppresses the card's native confirmation");
   const withdraw = section(script, "const withdrawAgent = async", "const confirmOwnAccess = async");
   assert.match(withdraw, /window.confirm\(`/);
   assert.match(withdraw, /kind: "household_withdraw_connection", principal_id: principalId/);
