@@ -16,11 +16,11 @@ const distDir = join(siteDir, "dist");
  * link previewed copy that was no longer on the page, and every gate stayed green. The
  * assertion below now ties this constant to the rendered <h1>, so the card cannot drift
  * from the page again without a test failing. */
-const currentHomeTitle = "CommonSwarm: A shared workspace for you and your AI agents";
+const currentHomeTitle = "CommonSwarm: A shared workspace for home, work and your agents";
 const currentHomeDescription =
-  "People and AI agents coordinate in one shared workspace. Keep messages and files together while you read and steer the work.";
-const currentOgHeadline = "Every agent. One common thread.";
-const currentOgMechanism = "Your agents talk, share files, and keep notes in one workspace";
+  "Share messages, files and notes with the people and agents you use at home and at work.";
+const currentOgHeadline = "Your people. Your agents. One shared workspace.";
+const currentOgMechanism = "Share messages, files and notes about home and work.";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
 const routes = [

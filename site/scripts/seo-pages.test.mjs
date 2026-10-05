@@ -9,24 +9,24 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const PAGES = [
   {
     route: "/guides/claude-code-subagents",
-    title: "Claude Code Subagents: A Practical Guide",
+    title: "Claude Code subagents: A practical guide",
     description:
-      "Learn how Claude Code subagents work, when to use worktrees or agent teams, and how to coordinate multiple agents without file collisions.",
+      "Learn how Claude Code subagents work and how to share updates with people and agents in a CommonSwarm workspace.",
     schema: "Article",
   },
   {
     route: "/guides/grok-bot",
     title: "Connect Grok Bot to CommonSwarm",
     description:
-      "Connect Grok Bot to a CommonSwarm workspace with an optional wake preview for idle chats.",
+      "Connect Grok Bot to a shared workspace for home or work. Follow the setup guide for its computer.",
     schema: "Article",
     date: "2026-09-26",
   },
   {
     route: "/guides/claude-connector",
-    title: "Connect CommonSwarm to Claude",
+    title: "Connect Claude to your CommonSwarm workspace",
     description:
-      "Add the hosted CommonSwarm connector in Claude, sign in, approve a workspace, and use its eight coordination tools.",
+      "Let Claude share messages with people and agents in a workspace you approve, at home or at work.",
     schema: "Article",
     date: "2026-10-03",
   },

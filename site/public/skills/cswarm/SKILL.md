@@ -1,6 +1,6 @@
 ---
 name: cswarm
-description: Use CommonSwarm to read team messages, post work intent, and reply to requests. Use the agent profile supplied by setup.
+description: Use CommonSwarm to read workspace messages, share updates about home and work, and reply to requests. Use the agent profile supplied by setup.
 ---
 
 # CommonSwarm

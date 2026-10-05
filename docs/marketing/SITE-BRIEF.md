@@ -1,325 +1,219 @@
-# CommonSwarm marketing site — shared brief
+# CommonSwarm marketing site: shared brief
 
-Every agent working on the site reads this first. It exists so parallel work cannot
-invent contradictory stories about what the product is.
+Every agent working on the site reads this first. It keeps the site consistent with
+[the canonical product vision](../product/VISION.md), updated 5 October 2026.
+That vision sets the audience and direction. [SWARM-CLOUD](../design/SWARM-CLOUD.md)
+sets product behavior. Public copy describes only what works today.
 
-## ⚠ TWO AUDIENCES, TWO SURFACES (operator, 2026-07-26) — read this first
+## Two audiences, two surfaces
 
-**Agents live in the CLI. Humans do not.** Every design conversation that has gone wrong here
-went wrong by collapsing those into one audience.
+CommonSwarm is a shared workspace for people and their agents, at home and at work.
+Households come first. Small teams and small businesses come next. Start with two
+adults who each use agents. Household examples should show messages and shared files.
 
-> "Dashboard and download buttons are for the human operators to onboard. Web UI is more ideal
-> for human users coordinating. It doesn't need to be complex — the only write operation is
-> creating a new setup/area to work and onboard agents into. The rest is just for
-> visualisations, which can be very simple now."
+People read along, send messages and guide their agents in the browser. Agents use
+an appropriate connection for their host. Keep setup instructions specific to that
+connection. Do not ask a person to use a terminal when the browser can do the job.
 
-**A model panel rejected "a dashboard" unanimously**, on the grounds that it is a second write
-surface competing with the CLI for truth. That objection is correct **and does not apply
-here**, because the proposed UI has exactly **one** write operation. The panel argued against a
-strawman and the Lead relayed it. Recorded because a unanimous cross-model "consensus" was
-wrong, and the reason it was wrong is that nobody had told it there are two audiences.
-
-**So the web UI is in scope, and its shape is:**
-
-| surface | audience | operations |
+| Surface | Audience | Operations |
 |---|---|---|
-| Web UI | **humans** | ONE write: create a workspace and onboard agents into it. Everything else read-only visualisation — who is on what, what changed. Keep it simple; it can be very plain and still be right. |
-| CLI | **agents** | everything else |
+| Web app at `/app` | People | Sign in, create or open a workspace, invite people, connect agents, read and send messages, and share files. |
+| Hosted connector | Agents in a connected app | Use the hosted message tools in an approved workspace. This catalog has no file or admin tools. |
+| `cswarm` CLI | Agents with access to a supported computer | Use the CLI commands for their workspace and access. |
 
-**A download button is for the human**, and it is how a human gets software. The panel's
-argument against it was about macOS Gatekeeper mechanics, which is a packaging question, not a
-reason to make a human hunt for a terminal command.
+A download button helps people install the CLI when their agent needs it. Opening
+the web app and installing the CLI are separate steps. Prefer the existing install
+routes. Do not invent a signed package or promise that every host can connect.
 
-**What the panel got right and still stands:** npm ahead of `curl | sh`; no signed `.pkg` yet;
-reuse the existing GitHub OAuth + PKCE rather than inventing auth; ~~and the finding that the
-real wall today is that `resolveCloudTarget` has **no compiled-in default**, so a perfect
-install still dead-ends on a Supabase error~~ — **dead (2026-08-18)**: a cold install
-discovers the target from commonswarm.com, and the hosted API is api.commonswarm.com.
-The npm-ahead-of-curl point also landed: `npm install -g commonswarm` is live.
+## Product direction
 
-## ⚠ PRODUCT DIRECTION (operator, 2026-07-26)
+Make the experience simple, polished and useful beyond coding. The person should
+understand what a workspace is and how to bring their agent into it.
 
-> The setup and onboarding process needs to be **consumer shaped**. Simple web UI, download
-> button, simple install. **Simple. Polished. Easy.** The website should convey that with
-> clean, clear, simple wording — **less is more if it's simple, like an Apple product.**
+The canonical principles guide the product and its copy:
 
-This retires the invite-only, CLI-first onboarding story this file was written around, and it
-is a **product** instruction before it is a copy instruction. The page cannot look simple
-while describing a flow that is not.
+1. Put consumers first. Put Google sign-in first when enabled. Generate sign-in
+   choices from the provider code and deployment settings.
+2. Aim for a generous free plan with no paywall on core features. State current
+   limits only from the code that enforces them. Do not promise future pricing.
+3. Treat agents as members. Explain status and access in plain words. Show people
+   how to guide their agents and manage access through the actions available today.
+4. Do not add a kids' reward layer.
 
-What it implies, in order:
+Keep the experience quiet. Avoid a chat-first pitch, a full project-management
+suite, required new hardware and visual overhauls without a clear user benefit.
+These are direction rules, not claims that new screens or features have shipped.
 
-1. **A download button, not a `curl | sh`.** A pipe-to-shell is a developer-tolerated ritual,
-   not a consumer one. The installer we built stays as the advanced path.
-2. **A web UI.** There is none today. Onboarding currently cannot happen without a terminal,
-   and no amount of copy fixes that.
-3. **Self-serve, not per-person invite links.** An invite link cannot come off a public page —
-   that constraint is what forced every awkward compromise in this brief.
-4. **Copy: less is more.** Short lines. No jargon. The retired vocabulary table below is still
-   right about what to avoid, and now the bar is higher: cut anything a non-expert would stop on.
-
-**Name: CommonSwarm, decided (operator, 2026-07-27).** The binary and every typed command
-are `cswarm`. This replaces the earlier `coswarm`, which collided with a competitor in the
-same space — that is the whole reason for the change, and it is not open for relitigation.
-The superseded line, kept dead so nobody re-derives it: ~~"Name: `coswarm`, decided."~~
-
-**Domain: `commonswarm.com`, decided AND LIVE** (2026-07-29): Cloudflare DNS, apex + www
-answer 200, mail delivers. Write copy against it; it is the public URL.
-The superseded ruling, kept dead: ~~"NOT WIRED. DNS is parked and nothing serves it. Do
-not write copy claiming the site is live there. The live URL today is
-`https://coswarm-site.vercel.app`."~~ — dead since the repoint; the sweep caught this line
-still forbidding the true claim.
-`coswarm.dev` belongs to a live, unrelated product and must never be referenced; see the
-hazard note in `site/astro.config.mjs`.
-
-Everything below predates this and should be read as history unless it is about honesty rules,
-which still bind: no invented facts, no fake social proof, every command real.
+The product name is CommonSwarm. The command people type is `cswarm`. The public
+website is `https://commonswarm.com`. `/app` owns sign-up and the workspace. `/start`
+is a compatibility handoff for old links.
 
 ## The bar
 
-`https://workbench.md` — a spiritual competitor and the explicit benchmark. It is very
-good and we are being judged against it in a **blind side-by-side**. What it does well:
+Use clear type, calm spacing and a short headline. Show what the product does with
+an example workspace that is labelled as an example. Keep the primary action clear.
 
-- Dark, high-contrast, enormous confident type. Headline is 5 words: "Turn your agents
-  into a team."
-- Orange caps eyebrow → big headline → one-sentence subhead. Repeated per section.
-- The hero is not a screenshot of a homepage; it is **the product doing its job** — a
-  live-looking doc with board, chat, status feed, and roster.
-- **Interactive** demos, not static images: an editable markdown pane rendering to a
-  live board beside it. Copy-prompt button.
-- Concrete trust line: "works from `claude` `codex` `cursor` `curl` — anything that
-  speaks HTTP", and a 1 link / Any agent / Free triad.
-- Positioning: zero friction. "No account needed to start." "The doc is the API."
+- Lead with people, their agents and a shared workspace for home and work.
+- Show messages and files that the current product supports.
+- Keep setup steps short and specific to the chosen connection.
+- Keep limitations next to the relevant claim.
+- Use motion only when it helps. Respect reduced-motion settings.
 
-To beat it we cannot ship static marketing copy. We need equal typographic confidence
-and at least one genuinely interactive demo of *our* product's actual behaviour.
+A demo must reflect real behavior. Do not imply a working connection, automatic
+reply or household feature from decorative artwork.
 
-## What CommonSwarm actually is — GROUND TRUTH, DO NOT EMBELLISH
+## What CommonSwarm actually is: ground truth, do not embellish
 
-Multi-human, multi-agent **coordination cloud service**. The cloud evolution of the
-local `swarm` CLI. It is a **CLI plus a hosted service plus a web front door** —
-self-serve signup and the workspace channel at `/app`; `/start` is a compatibility
-handoff for old links and auth callbacks (workspace-first redesign chartered 2026-07-29).
-Two superseded claims, kept dead: ~~"There is no web UI."~~ and
-~~"Status: P3-1, invited dogfood. Pre-launch. Not self-serve yet."~~
+CommonSwarm provides workspaces where people and connected agents share messages
+and files. People can read and send messages in the web app. Agents can share
+updates, ask questions and reply through the connection available to them.
 
-Status: **P3-1, open free tier.** Self-serve signup is LIVE (`SWARM_SELF_SERVE=1` in
-production since 2026-07-28): a stranger creates their own workspace at
-commonswarm.com/app — free, three workspaces, no card, no invitation.
+Self-serve workspace creation exists in the repository. The repository describes
+an open free tier. This brief is not a fresh production acceptance or billing check.
+Keep published plan limits in sync with enforcement and measured release evidence.
 
-Real, shipped surface (from `cswarm --help`, verified):
+The current surfaces have different capabilities:
 
-- Auth: `login` / `logout` — GitHub OAuth with PKCE.
-- Membership: `invite --email`, `accept <cswarm://accept/...>`, `workspaces`, `use`.
-- Signals (intention sharing): `working-on`, `note`, `ask`, `feed`, `inbox`.
-  These take `--about <ref>`, `--to <member>`, `--until <dur>` (capped 30d).
-- Authority core: `principal create`, `token mint` (bound to principal + run + task +
-  epoch, with a TTL), `command <kind>`, `dogfood`.
-- Install: `curl -fsSL <url>/install.sh | sh` → `~/.local/bin/cswarm`, checksum
-  verified, no sudo. Requires Node >= 22.
+- The browser client creates workspaces, supports invitations and messages, and
+  provides shared file operations.
+- The CLI supports workspace messages and files. Commands depend on the caller's
+  credentials and access. Check command names and requirements against source.
+- The hosted connector exposes the tools in `HOSTED_TOOL_TABLE`. It supports
+  named seats, identity, messages, replies, inbox checks and member listing.
+  It does not expose file, household-object or admin tools.
+- The hosted workspace does not run agents. A connected agent checks and replies
+  during a turn. The optional local listener wakes its own seat. It does not
+  start a model or create a worker.
 
-### ⚠ THE DIFFERENTIATOR WAS WRONG. THIS SUPERSEDES IT. (2026-07-26)
+Household lists, chores, a calendar or calendar feed, a Today view and a display
+link are roadmap items. Do not advertise them as available. Full agent account
+administration and universal host support also need release and acceptance evidence.
 
-**The retired framing, kept so nobody re-derives it:** "coswarm optimises for authority —
-who authorised this, what is this agent allowed to do, what actually happened." I wrote
-that, every seat inherited it because I told them to, and it produced a hero reading
-"Every agent action, authorised and on the record" over a demo captioned "Ask the agent to
-do something it was never granted. Watch the refusal get written down."
+### The differentiator: shared work at home and at work
 
-The operator's verdict, and it is correct: that reads as *"a super annoying system where
-you can't do what you want and you get blocked at every pass. That's not the benefit."*
-We built a beautiful advertisement for friction.
+The benefit is a common place for people and their agents to share context. Lead
+with household use. Work examples can follow. Keep examples within messages and
+files, such as sharing a school form or asking about a project handoff.
 
-**THE ACTUAL BENEFIT: agent-to-agent communication, so collaborators are unblocked and
-don't step on each other's toes.**
+Public introduction:
 
-Pitch's one-line reframe is the test to apply to every sentence:
+> CommonSwarm is a shared workspace for you and your agents, at home and at work.
+> Share messages, files and notes. Read along and guide your agents.
 
-> OLD — *we know what your agents did.*
-> NEW — **your agents know what each other are doing.**
->
-> An audit trail is written for someone who arrives later to judge. A signal is written for
-> the teammate working now. Our records were always addressed to peers, and we described
-> them as evidence.
+A note in this introduction means a workspace message or an existing shared file.
+It does not promise an editable household document through the hosted connector.
+A signal shares information. It never claims, blocks or closes a task.
 
-Same signal plane, same leases. The difference is **who the information is for**. A lease
-is not a police officer — it is how builder-2 learns that scout is already in that file.
+#### Vocabulary: keep the public wording plain
 
-**Refusals are a failure mode to minimise, not a feature to demonstrate.** Every refusal a
-real user meets is us failing to have coordinated smoothly.
-
-#### Vocabulary — four seats are rewriting at once and the old words will leak back
-
-| retired | use instead |
+| Avoid in introductions | Use instead |
 |---|---|
-| authorised | announced |
-| permission | heads-up |
-| refusal | "someone's already there" |
-| audit trail | shared feed |
-| immutable record | written once so nobody loses it |
-| governed | coordinated |
-| lease | a claim, so the next agent routes around it |
-| enforcement | awareness |
-| scoped token | keep credentials out of the hero entirely |
+| authority or enforcement | coordination and shared context |
+| audit trail | shared messages |
+| immutable signal | a message that cannot be edited or recalled |
+| lease as a task claim | an update about what someone is doing |
+| scoped token | explain access in the relevant setup or security guide |
+| any agent just works | choose the connection guide for your agent |
+| nothing to install | say when the agent needs the CLI |
 
-Rule of thumb: **if a sentence would sound at home in a compliance datasheet, it is the old
-story wearing new words.**
+Keep precise security terms in the contracts that need them. Do not replace an
+actual refusal or access limit with a success-shaped message.
 
 #### On the ethos line
 
-"Friction is justified only by irreversibility" stays in the spec and in fleet decisions.
-It does **not** go in a headline — it is a sentence about friction, and putting it in the
-largest type on the site makes friction the subject. It is a builder's rule, not a pitch.
+Keep internal engineering principles out of the headline. Describe what a person
+can do and what happens next. Do not put controls or friction at the centre of the
+consumer story.
 
 #### And it binds the product, not just the copy
 
-Safeguards now carry the burden of proof. Assume the agent is intelligent and
-well-intentioned; if an act is reversible, it should not be gated. Simpler is better.
+Onboarding should ask for the minimum. Detect context when detection is reliable.
+Do not guess. A success message must state what happened and identify unfinished
+steps. Simplicity cannot hide missing setup or access requirements.
 
-### The onboarding story — lead with this, it is genuinely clean
+### The onboarding story: lead with the workspace
 
-Every other verb needs `--url` and `--anon-key`. **`cswarm accept <link>` does not.**
-That single exception is the entire first-run narrative and the installer already
-points at it:
+Open `/app`, sign in and create or open a workspace. Then choose the connection
+guide for the agent. Read the messages and add your direction.
 
-```
-curl -fsSL <url>/install.sh | sh
-cswarm accept <invite-link>
-cswarm working-on "wiring the payments webhook"
-```
+Public setup note:
 
-Three lines, no configuration. That is our "one link".
+> Choose the connection guide for your agent. Some agents connect through an app.
+> Others need the cswarm CLI.
 
-### ⚠ SETTLED — THE QUICKSTART IS TWO LINES. Line 3 is false. Do not relitigate.
+Do not make one generated prompt the universal route. A local agent needs the
+computer capabilities described by its guide. A hosted connection needs OAuth
+and approval for a workspace. A guide is not proof of fresh host acceptance.
 
-Two seats established this independently, by different methods, and they agree:
+### Settled quickstart rules: match the current connection
 
-- **Vane, by source trace.** `src/cli.ts:295-299` — `target()` is the sole resolver for
-  every command and reads exactly two sources: the `--url` flag and `SWARM_CLOUD_URL`.
-  Nothing reads disk.
-- **Ledger, by execution against a real store.** `sha256("https://<ref>.supabase.co")[:24]`
-  equals the profile filename exactly. The store holds two files, the profile schema has no
-  url field, and grepping every file under `~/.coswarm` for a URL returns nothing — with a
-  positive control proving the grep matches when a URL *is* present.
-  (That measurement was taken before the rename; the config directory is now `~/.cswarm`.
-  The path measured is left as written because that is what was measured.)
+There is no universal two-line or three-line quickstart. The earlier terminal-only
+rule is superseded. Human CLI commands resolve explicit settings, environment
+settings and a saved target. A cold human install can discover the deployment.
+Agent credentials use their own target and must not inherit a person's target.
 
-The URL is the **lookup key**, and a one-way hash cannot be reversed into the project you
-logged into. The CLI must be told the URL every time **by construction, not by omission**.
+A working command also needs the required sign-in, workspace and agent context.
+Do not call a command block a quickstart unless the reader can complete every step
+from the stated starting point. Keep flags and placeholders where required.
 
-**Open bound, recorded and non-blocking:** nobody has run a real `accept`. It could in
-principle write an *additional* last-project pointer that neither seat's store ever held.
-Three things argue against it — no url field in the schema, only two files and no config,
-and the `--url` error offers env vars rather than "your saved project" — but it is not
-proven. Copy sets at two lines regardless. The asymmetry decides it: being wrong this way
-costs a slightly more modest quickstart; being wrong the other way ships a first command
-that does not run.
+### The original draft: historical context
 
-The honest third line exists and is simply longer. Use this form on the site:
+The July terminal-only draft predated target persistence and the current web app.
+Its claim that every command always needs `--url` and `--anon-key` is obsolete.
+Do not restore it. The source resolver in `src/cli.ts` and the current connection
+guides govern command examples. Historical measurements remain in the dated
+engineering records; they do not establish current availability.
 
-```
-cswarm working-on "wiring the payments webhook" \
-  --url https://api.commonswarm.com --anon-key <key>
-```
+## Hard rules: non-negotiable
 
-or export `SWARM_CLOUD_URL` and `SWARM_CLOUD_ANON_KEY` once. Both are copy-pasteable and
-true. The flagless form is not.
-
-A fix is in flight (Quill): a current-target pointer with precedence flag > env > stored.
-**Until it lands and is tested, copy describes today's behaviour, not the fix.**
-
-### The original draft below is kept for the record — its third line is FALSE
-
-Vane audited the whole surface against a build of landed `main` (e0287ba), running each
-command bare exactly as a reader would paste it. Result: **six of six** — `working-on`,
-`note`, `feed`, `inbox`, `workspaces`, `status` — fail with `--url is required`. The only
-two commands that run bare are `--version` and `--help`, **and neither shows what the
-product does**.
-
-The three-line story above survives only if `accept` auto-saves the project, so that the
-third line inherits it. The help text does claim this ("A sole accepted project is saved
-automatically"), but **Vane could not test the post-accept path** — it needs a real invite
-link, which is issued per person.
-
-Consequences, and they bind:
-
-- **Do not put line 3 on the site until someone runs it after a real `accept`.** If it
-  turns out to need `--url`, the honest quickstart is two lines, not three.
-- ~~**There is no working paste we can give a stranger today.**~~ — **dead** (2026-07-29):
-  `curl -fsSL https://commonswarm.com/install.sh | sh` works for any stranger, and
-  commonswarm.com/app needs no per-person link. What survives of the old rule: an invite
-  link is still per-person and still cannot come off a web page. Any command block on the
-  site either carries its own exports/flags inline, or it is presented as *what you run
-  once you are in* — not as
-  something the reader can run right now.
-- This is Charter §6 item 1 wearing marketing clothes. It is a product gap, not a
-  copywriting problem, and copy must not paper over it.
-
-## Hard rules — non-negotiable
-
-1. **No invented facts.** No fake testimonials, no customer logos, no fabricated
-   metrics, no "trusted by N teams", no made-up benchmarks. We have no customers yet.
-   A marketing site that lies is worse than no site.
-2. **No fake social proof of any kind**, including invented GitHub stars or user counts.
-3. Do not claim SOC2 — it does not exist. The wider superseded rule — ~~"Do not claim a
-   web UI, a free self-serve tier, or SOC2. None exist."~~ — is **dead** (2026-07-29): the
-   web UI and the free self-serve tier both exist and are live, and this line spent a day
-   actively blocking the D-023 fix. Claim them; they are true.
-4. Availability is stated honestly, and today that means OPEN: signup is live, free,
-   three workspaces, no card. The superseded framing — ~~"'Invited dogfood' is a
-   *scarcity* asset"~~ — is **dead**: the product is not invite-only, and the codex
-   consumer critique showed where that frame leads once it stops being true (D-023).
-5. Every command shown on the site must be copy-pasteable and real. If you show it, a
-   reader must be able to run it. Verify against `cswarm --help`.
-6. Accessibility is part of AAA: real contrast ratios, keyboard focus states, reduced
-   motion honoured, semantic landmarks, alt text.
+1. No invented facts, testimonials, customer logos, user counts or benchmarks.
+2. No fake social proof, including fabricated stars or endorsements.
+3. No unsupported security certification or vendor compatibility claim.
+4. State availability and plan limits from current code and release evidence.
+5. Every displayed command must be real and usable from its stated starting point.
+   Preserve credential, recipient, retention and lifecycle disclosures.
+6. Accessibility is part of the product. Use sufficient contrast, visible keyboard
+   focus, semantic landmarks, accurate alt text and reduced-motion support.
+7. Use plain short sentences and a consumer tone. Do not use em dashes in new public
+   text. Keep product comparisons from the internal vision out of public copy.
+8. Do not claim unshipped household features, universal agent support or zero
+   installation. Name the surface when capabilities differ.
 
 ## Stack
 
-Astro + Tailwind, deployed to Vercel. Static output. No external runtime deps in the
-page. Target: Lighthouse 100/100/100/100, and it must look right at 375px.
+Astro 7, static output, hand-written CSS and vanilla browser JavaScript. Follow
+`site/AGENTS.md`. Do not add Tailwind or runtime UI libraries.
+
+The site is served by Caddy on the Hetzner server behind Cloudflare. Only the
+release owners execute production releases. A copy edit or merge is not a release.
+Check the layout at small screen sizes when browser testing is authorized.
 
 ---
 
-## Load-bearing coupling — read before editing any heading
+## Load-bearing coupling: read before editing any heading
 
-The page is a **decision set**, not a list of independently-correct parts. Two elements are
-only honest *in combination*, and changing either one alone silently breaks the page:
+Review the heading, setup steps, command block and limitation together. They form
+one promise. A friendly heading must not imply that an unfinished connection works.
 
-| heading | command shown | result |
+| Heading or surface | Instructions | Honest result |
 |---|---|---|
-| "What you run once you're invited" | carries `--url` / `--anon-key` | **honest** |
-| "Getting started" | carries `--url` / `--anon-key` | **a broken promise** — implies a stranger can run it |
-| "What you run once you're invited" | bare, no flags | needlessly grim, and false once the fix lands |
+| Open a workspace | Browser sign-in and workspace creation | A workspace for the person to use. |
+| Connect your agent | Guide for that agent's connection | Setup requirements are explicit. |
+| Install the cswarm CLI | Supported system and install steps | CLI installation, followed by connection setup. |
 
-**The heading is load-bearing copy that looks like decoration.** That is precisely why it is
-the element most likely to be "tidied" by someone improving the page, and why this note
-exists. Pitch's rule: the heading and the command block should live in **one constant**, so
-they cannot drift apart. The commands already share a single block in `HowItWorks.astro`
-that feeds both display and clipboard — if the heading sits outside that block, it can drift.
+Keep displayed commands and clipboard text in sync. Update pinned copy tests when
+approved wording changes. Keep every assertion and verify the underlying claim.
+The homepage, metadata, OG card and image alt must describe the same promise.
 
-### The gate for moving to the flagless form — stated as a command, not as prose
+### The gate for command examples: verify the stated starting point
 
-Run, with a stored login and no flags:
-
-```
-cswarm working-on "x"
-```
-
-- **prints `--url is required`** → keep the flag-carrying command *and* the "once you're
-  invited" heading.
-- **succeeds** → Quill's target persistence has landed; move to the bare command *and* the
-  friendlier heading.
-
-**Both lines move together or neither moves.** This exists to stop copy shipping ahead of
-code.
+Check source for target resolution, credentials, workspace selection and access.
+When a task permits execution, run the example with that exact starting state.
+Retain the result and any limits. Do not use a source check to claim that a fresh
+host install or an idle wake passed in production.
 
 ### Why this section exists at all
 
-Two rulings this session were each individually correct, individually reviewed, and unsafe
-*in combination* — "fix the binding, drop the timer" plus "delete the binding fields", and
-"delete the mint surface fields" plus "server generates run_id". Neither was findable by
-reviewing either decision alone.
-
-**Doctrine: when a decision set grows, someone must review the set, not the items.** Applies
-to copy exactly as it applies to code.
+Individually true lines can form a false promise together. Review the complete
+journey from the person's starting state to the result. A guide, a successful
+install and an approved workspace are separate facts. State only what was verified.

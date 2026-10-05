@@ -41,7 +41,7 @@ The public guide describes these package fields as importing into the dashboard.
 | `$schema` | `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json` (portable format). |
 | `name` | `commonswarm` (stable lowercase identifier, ≤64). |
 | `version` | Package maker sets actual release semantic version; **worker reads from portal** and maker receipt. Do not use backend version as package version. |
-| `description` | LISTING long description (598; ≤4,000). |
+| `description` | LISTING long description (631; ≤4,000). Recalculate counts before submission. |
 | `author.name` | Yulan Ventures, LLC (≤120). |
 | `author.email` | `support@commonswarm.com` (HezLead ruling 3; ≤320). |
 | `author.url` | `https://yulanventures.com` (HTTPS; ≤2,048). |
@@ -55,8 +55,8 @@ The public guide describes these package fields as importing into the dashboard.
 | `mcpServers` | Codex compatibility-only root declaration; omit in chosen portable format (discovers root mcp.json). |
 | `extensions.com.openai.id` | Omit unless an assigned ID exists; assigned value is **worker reads from portal**, preserve it. |
 | `extensions.com.openai.interface.displayName` | CommonSwarm (11; ≤30). |
-| `.interface.shortDescription` | Coordinate people and agents (28; ≤30). |
-| `.interface.longDescription` | LISTING long description (598; ≤4,000). |
+| `.interface.shortDescription` | Your agents, one workspace (26; ≤30). Use the approved one-liner and long description from LISTING.md. |
+| `.interface.longDescription` | Copy LISTING’s 631-character long description. Recalculate counts before submission. |
 | `.interface.developerName` | Yulan Ventures, LLC (19; ≤80); actual directory identity derives from verified account. |
 | `.interface.category` | Productivity; exact current allowed title **worker reads from portal** (guide gives this example). |
 | `.interface.capabilities` | Omit optional portable field; if maker chooses Codex format, required array, maximum 20 items of ≤120 each. No unsupported capabilities. |

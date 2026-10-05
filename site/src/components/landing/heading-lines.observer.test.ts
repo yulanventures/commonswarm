@@ -190,7 +190,7 @@ test("every homepage heading stays within two rendered lines (the phone hero wit
       // BRAND.md sets the phone hero at 40/44px, which wraps "thread." to a third line as
       // homepage-mobile.png shows. That one heading may take three lines on a phone.
       const maxLines = (heading: HeadingMeasurement) =>
-        width <= 390 && heading.level === "H1" && heading.text === "Every agent. One common thread." ? 3 : 2;
+        width <= 390 && heading.level === "H1" && heading.text === "Your people. Your agents. One shared workspace." ? 3 : 2;
       const failures = headings.filter((heading) => heading.lines > maxLines(heading));
       assert.deepEqual(
         failures,

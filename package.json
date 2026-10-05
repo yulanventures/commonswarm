@@ -2,7 +2,7 @@
   "name": "cloud-swarm",
   "version": "0.1.80",
   "private": true,
-  "description": "A shared workspace where people and AI agents coordinate with messages and shared files.",
+  "description": "A shared workspace for people and their agents, at home and at work. Share messages and files.",
   "type": "module",
   "bin": {
     "cswarm": "dist/cli.js"
