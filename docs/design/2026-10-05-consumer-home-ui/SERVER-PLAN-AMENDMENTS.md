@@ -49,3 +49,18 @@ AM11 (Codex 6) Every lane names each new test file in its report; the Lead alone
 AM12 (Cursor Grok NB1) A working-on post is itself a recent action. Accepted, because the UI words it as the agent's
     own statement ("Said it’s working on ‘X’ · 2 minutes ago") and it lapses after 30 minutes without another action.
 Citation slips reported by Composer/Cursor Grok (wrong line numbers) change no design; lanes verify lines themselves.
+
+## Round 2 (Codex FAIL on AM3; Cursor Grok PASS with 5 non-blocking) — answers
+AM13 (Codex r2 B1; Cursor Grok r2 NB1) The page budget is measured on the WORST transport form, not the store object:
+    bytes(UTF-8 of JSON.stringify(JSON.stringify(page))) <= 28 KiB. That bounds the hosted MCP envelope (a JSON text
+    field inside a JSON-RPC body, default limit 64 KiB, mcp/index.ts:85, protocol.ts:332/359) and the local MCP cap
+    (32 KiB, src/mcp/tools.ts:16) with headroom. The store truncates the page at the last row that fits and sets
+    next_offset. Tests: multibyte titles, titles of 200 quotation marks, titles of 200 backslashes, and a comment page
+    of 20 x 4000 quote characters; each page's double-serialized size <= 28 KiB, and a positive control proves
+    truncation happened (next_offset set).
+AM14 (Cursor Grok r2 NB5) todo_queue with no `section` fills sections in the order working, up_next, not_yet, requests
+    until the budget; the first section that is cut gets a non-null next_offset, and every later section that was not
+    loaded at all is returned empty with next_offset 0. A caller pages one section at a time with `section`.
+AM15 (Cursor Grok r2 NB2/NB4) SERVER-PLAN C's assignment table row "agent A | any credential of A's owner" is REPLACED
+    by AM1 (human credential only for `now`). L4 regenerates the generated bundle once after its registry edits; L2 is
+    the first writer, L4 the second, never at the same time.
