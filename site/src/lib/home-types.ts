@@ -23,7 +23,7 @@ export interface ChoiceVM<V extends string> { name: string; legend: string; valu
 export interface SwitchRowVM { id: Id; label: string; detail: string; state: "on" | "off" | "always" | "never"; busy?: boolean; disabled?: boolean }
 export type Assignee = { kind: "person"; person: PersonVM } | { kind: "agent"; agent: AgentVM } | null;
 export type Gate = { kind: "todo"; todo: { id: Id; title: string; href: string; done: boolean } } | { kind: "time"; at: string } | { kind: "note"; note: string };
-export interface TodoVM { id: Id; workspaceId: Id; title: string; notes: string; state: "open" | "doing" | "done";
+export interface TodoVM { id: Id; workspaceId: Id; title: string; notes: string; state: "open" | "doing" | "done" | "dropped";
   addedBy: PersonVM | AgentVM; addedAt: string; due: string | null; assignee: Assignee;
   start: { mode: "queue" | "now" | "gated" | "at"; position: number | null; gate: Gate | null; at: string | null } | null;
   request: { status: "pending" | "declined"; ownerFirstName: string } | null;

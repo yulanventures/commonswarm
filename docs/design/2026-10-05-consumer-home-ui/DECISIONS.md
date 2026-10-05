@@ -37,3 +37,30 @@ Handoff: ./handoff/2026-10-05-CONSUMER-HOME-UI-CANVAS.md and ./handoff/2026-10-0
   20261005-15). Fallback approved by HezLead on 2026-10-05: Makers via ~/bin/codex-worker rw (Codex GPT-6.1 Sol) and
   Claude subagents (allowed the week of 10-03); checkers read-only via `alloy panel --mode review` from another family;
   CI decides. No two lanes edit the same files.
+
+## Lead rulings that reconcile UI-SPEC.md and SERVER-PLAN.md (2026-10-05 ~22:30Z; binding for every lane)
+R1. Agent status class follows SERVER-PLAN A10: working = not disconnected AND (a to-do in Doing OR an unexpired
+    working-on signal) AND a server-recorded action within the last 30 minutes (WORK_RECENT_MS); disconnected =
+    credential facts only (removed, key off, key ended, paused, needs reconnecting); idle = everything else.
+    "Not picking up" (diamond) appears ONLY where peopleAgentStatus already flags stale messages for an agent that
+    has a wake path (local agents). A chat-app (hosted, turn-only) agent with waiting messages is IDLE, detail
+    "Messages waiting since 10:05 am" plus its receive sentence. When the server's AgentWorkStatus is present the UI
+    uses its `work`; until then the UI applies the same rule to the facts it has. An old working-on claim with no
+    recent action reads "Last active 3 hours ago; ‘X’ is still in Doing" (or the idle chip), never "Working".
+R2. Consumer to-dos are a new household sibling object (SERVER-PLAN A1). This supersedes TASKS-AND-CALENDAR:46-49
+    ("no consumer-task table") for consumer to-dos only; governed repository tasks are unchanged. Lead decision under
+    Tom's 10-05 direction; recorded for HezLead and the SWARM-CLOUD amendment.
+R3. "Who can give it work" (accepts_from) defaults to "owner": work from anyone else is a request the owner answers.
+R4. "At a set time" sends no ping and starts nothing: "Joins Claude’s line at 9:00 pm. Claude sees it the next time
+    it checks." Never "starts at".
+R5. To-do states are open, doing, done, dropped. Dropped to-dos leave every open list; "All to-dos" shows them with
+    the word "Dropped". (home-types.ts TodoVM.state includes "dropped".)
+R6. Assigning to ANOTHER PERSON is a request that person answers (SERVER-PLAN A4), shown like an agent request:
+    "Sent to Nikki as a request." Assigning to yourself or your own agent is accepted at once.
+R7. Steering an agent's line (move, start now, not yet, release) is for that agent's human owner only (SERVER-PLAN A5).
+    Everyone with content access can SEE every line; no copy may say otherwise.
+R8. Comment tags deliver a notice to the tagged people and agents once the server ships comments (SERVER-PLAN A8/A9);
+    chat thread replies still carry no recipient, so a tag in a thread highlights only (UI-SPEC 2.4 tag picker).
+R9. Catch up shows "N new since you last looked" per workspace when the overview read returns last_seen_at/new_messages;
+    until then it shows "Latest" (UI-SPEC 3.2).
+R10. Screen word for the ordered list is "line" ("2nd in line", "Claude’s line", "Up next"); the server word is queue.
