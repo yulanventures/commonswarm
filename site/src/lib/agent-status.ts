@@ -18,10 +18,15 @@ import { classifyAgentPresence, type AgentPresenceRow } from "../../../src/cloud
 import { WAKE_STALE_MS } from "../../../src/cloud/idle-poll";
 import { wakePathMark } from "./wake-path";
 import { STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, type GrantRiskInput } from "./standing-grants";
+import type { AgentStateVM } from "./home-types";
+import { formatWhen } from "./home-names";
 
 export type AgentStatusKind = "removed" | "suspended" | "inactive" | "active" | "idle" | "connected";
 
 export interface AgentStatusInput {
+  own?: boolean;
+  ownerName?: string | null;
+  ownerFirstName?: string | null;
   transport?: "local" | "hosted_mcp";
   turnOnly?: boolean;
   presence?: AgentPresenceRow | null;
@@ -67,7 +72,10 @@ export function peopleAgentActivityTime(value: string, now = Date.now()): string
 
 export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentStatus {
   const hosted = input.transport === "hosted_mcp";
-  let receive: string | null = hosted ? "Checks messages when you chat with it." : input.turnOnly ? "Checks messages each time it starts a task." : null;
+  const chatPerson = input.own === false ? input.ownerFirstName?.trim() || input.ownerName?.trim().split(/\s+/)[0] : null;
+  let receive: string | null = hosted ? input.own === false
+    ? chatPerson ? `Checks messages when ${chatPerson} chats with it.` : "Checks messages when its owner chats with it."
+    : "Checks messages when you chat with it." : input.turnOnly ? "Checks messages each time it starts a task." : null;
   let lastCallAge: number | null = null;
   if (input.presence !== undefined) {
     const presence = classifyAgentPresence(input.presence, now);
@@ -124,7 +132,7 @@ export interface PeopleAgentStatus {
 
 /** One translation of the same wire facts, with attention and viewer-specific next steps. */
 export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now()): PeopleAgentStatus {
-  const base = agentStatus({ transport: input.transport, turnOnly: input.turnOnly, presence: input.presence }, now);
+  const base = agentStatus(input, now);
   const owner = input.ownerName?.split(/\s+/)[0] ?? "its owner";
   const actors = STANDING_RESUME_ACTORS.map((actor, index) =>
     index === STANDING_RESUME_ACTORS.length - 1 ? `or ${actor}` : actor).join(", ");
@@ -161,4 +169,64 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
 
 export function agentResumeReceipt(name: string): string {
   return `Resumed. Nothing has reached ${name} yet. It renews the next time it starts. Another ${STANDING_IDLE_PAUSE_DAYS} days without use will pause it again.`;
+}
+
+/** Server-recorded activity keeps an old work claim from reading as current work. */
+export const WORK_RECENT_MS = 30 * 60_000;
+export interface HomeAgentStatusInput extends PeopleAgentStatusInput {
+  workingOn?: { title?: string; body?: string; until: string; createdAt?: string; created_at?: string } | null;
+  doingTodo?: { title: string; since?: string; startedAt?: string } | null;
+  lastActionAt?: string | null;
+  hasWakePath?: boolean;
+  serverWork?: "working" | "idle" | "disconnected";
+  now?: number;
+  locale?: string;
+}
+export interface HomeAgentState extends AgentStateVM { receive: string | null }
+
+/** Home presentation extends the dialog translation; it never invents a reconnect action. */
+export function homeAgentState(input: HomeAgentStatusInput, now = input.now ?? Date.now()): HomeAgentState {
+  const hosted = input.transport === "hosted_mcp";
+  const hasWakePath = !hosted && (input.hasWakePath ?? Boolean(input.presence &&
+    (input.presence.watcher_at || input.presence.channel_at || input.presence.listener_at)));
+  const people = peopleAgentStatus({ ...input, oldestUnobservedAt: hasWakePath && !input.revoked && !input.suspended ? input.oldestUnobservedAt : null }, now);
+  const receive = agentStatus(input, now).receive;
+  const lastAction = Date.parse(input.lastActionAt ?? input.presence?.last_command_at ?? "");
+  const recent = Number.isFinite(lastAction) && lastAction <= now && now - lastAction <= WORK_RECENT_MS;
+  const workingOn = input.workingOn && Date.parse(input.workingOn.until) > now ? input.workingOn : null;
+  const disconnected = ["removed", "suspended", "key-off", "key-ended", "paused"].includes(people.kind);
+  const kind = input.serverWork ?? (disconnected || people.kind === "stale-messages" ? "disconnected"
+    : recent && (input.doingTodo || workingOn) ? "working" : "idle");
+  let word: AgentStateVM["word"] = kind === "working" ? "Working" : kind === "disconnected" ? "Disconnected" : "Idle";
+  let detail: string;
+  // The server supplies the work class; credential facts still need their own detail and fix.
+  if (disconnected) {
+    detail = people.label;
+  } else if (kind === "disconnected") {
+    if (people.kind === "stale-messages") {
+      word = "Not picking up";
+      detail = `A message has waited since ${formatWhen(input.oldestUnobservedAt!, now, input.locale)}`;
+    } else detail = "Needs reconnecting";
+  } else if (kind === "working") {
+    if (input.doingTodo) {
+      const since = input.doingTodo.since ?? input.doingTodo.startedAt;
+      detail = `Doing ‘${input.doingTodo.title}’${since ? ` since ${formatWhen(since, now, input.locale)}` : ""}`;
+    } else if (workingOn) {
+      const at = workingOn.createdAt ?? workingOn.created_at;
+      detail = `Said it’s working on ‘${workingOn.title ?? workingOn.body ?? "a task"}’${at ? ` · ${peopleAgentActivityTime(at, now)}` : " · Time unavailable"}`;
+    } else detail = "Recent work reported by the server";
+  } else if (hosted && wakePathMark(input.oldestUnobservedAt, now)) {
+    detail = `Messages waiting since ${formatWhen(input.oldestUnobservedAt!, now, input.locale)}${receive ? `. ${receive}` : ""}`;
+  } else if (!recent && input.doingTodo) {
+    detail = `${Number.isFinite(lastAction) ? `Last active ${peopleAgentActivityTime(new Date(lastAction).toISOString(), now)}` : "No activity reported yet"}; ‘${input.doingTodo.title}’ is still in Doing`;
+  } else {
+    detail = input.presence == null ? "No activity reported yet" : people.kind === "stale-messages"
+      ? agentStatus(input, now).chip : people.label;
+  }
+  const attention = disconnected || kind === "disconnected" || (people.attention && people.kind !== "stale-messages");
+  const fix = attention && (disconnected || people.attention)
+    ? { ...people.fix, sentence: people.sentence }
+    : { action: null, allowed: false, askWho: null, sentence: "" } as AgentStateVM["fix"];
+  if (kind === "disconnected" && !people.attention && !disconnected) fix.sentence = "Connect it again from its app.";
+  return { kind, word, detail, attention, fix, receive };
 }
