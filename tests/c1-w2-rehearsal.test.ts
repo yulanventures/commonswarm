@@ -298,7 +298,7 @@ test('c1 W2 rehearsal: --issuer real libpq verify-full login PASSES; the 5f64fab
   for (const line of [/^PASS ai-w2-issuer-rollback:role$/m, /^PASS ai-w2b-preflight:preconditions$/m, /^PASS tls: cluster restarted with ssl=on on 127\.0\.0\.1:\d+;/m,
     /^PASS listener: postmaster \d+ listens on TCP 127\.0\.0\.1:\d+ only/m, /^PASS service-conf: /m, /^PASS ai-w2-issuer-credential:prepare$/m,
     /^PASS ai-w2-issuer-credential:alter-role$/m, /^PASS ai-w2-issuer-credential:login: real libpq sslmode=verify-full TLS login as commonswarm_admin_issuer/m,
-    /^PASS issuer-plaintext: /m, /^PASS ai-w2-issuer-credential:proof$/m, /^PASS ai-w2b-forward-catalogs$/m,
+    /^PASS issuer-plaintext: /m, /^PASS ai-w2-issuer-credential:proof$/m, /^PASS secret-sql-not-logged: /m, /^PASS ai-w2b-forward-catalogs$/m,
     /^PASS cleanup: cluster stopped; data, CA and secrets deleted; \S+ absent$/m]) assert.match(good.stdout, line);
   assert.doesNotMatch(good.stdout + good.stderr, /\b[0-9a-f]{48,64}\b/, 'no generated password is printed');
   const present = spawnSync('git', ['cat-file', '-e', '5f64fab4^{commit}']);
@@ -512,8 +512,9 @@ test('c1 docker stdin check: the local stand-in run (no -i semantics) passes eve
   const r = spawnSync('/bin/bash', [dockerCheck], { encoding: 'utf8', timeout: 300_000, env: { ...process.env, PG_BIN: PG(), C1_DOCKER_STAND_IN: '1' } });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   for (const line of [/^PASS docker-stdin-no-op: docker run without -i, psql --file - <file: exit 0 and nothing ran \(rows 0\)/m,
-    /^PASS ai_db-refuses-stdin: /m, /^PASS ai_db_secret_file: the plan's helper ran the SQL from a read-only mounted file \(rows 1\)$/m,
-    /^PASS ai_db-proof-file: /m, /^PASS cleanup: cluster stopped; /m]) assert.match(r.stdout, line);
+    /^PASS ai_db-grammar: the plan's ai_db\/ai_ro refused 14 forms outside the grammar/m, /^PASS ai_db_secret_file: the plan's helper ran the SQL from a read-only mounted file \(rows 1\)$/m,
+    /^PASS ai_db-proof-file: /m, /^PASS secret-sql-not-logged: the plan helper's failing statement is absent from the server log; the control is logged$/m,
+    /^PASS cleanup: cluster stopped; /m]) assert.match(r.stdout, line);
 });
 
 test('c1 W2b issuer: the release-Z block (stdin ALTER) fails the real TLS login exactly as live; the stdin fault is caught by the readback', { skip: skipDb }, () => {
@@ -527,7 +528,7 @@ test('c1 W2b issuer: the release-Z block (stdin ALTER) fails the real TLS login 
   const fault = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', postFixture()], { ...env, C1_W2_REHEARSAL_FAULT: 'issuer-sql-on-stdin' });
   assert.notEqual(fault.status, 0);
   assert.match(fault.stdout, /^FAULT injected: the issuer ALTER ROLE sent on stdin/m);
-  assert.match(fault.stdout, /^FAIL ai-w2-issuer-credential:alter-role: FAIL ai-w2-issuer-credential: issuer LOGIN with a SCRAM-SHA-256 verifier expected t got f \(ALTER ROLE not applied\); STOP$/m);
+  assert.match(fault.stdout, /^FAIL ai-w2-issuer-credential:alter-role: FAIL ai-w2-issuer-credential: issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got f \(ALTER ROLE not applied\); STOP$/m);
   assert.doesNotMatch(fault.stdout, /ai-w2-issuer-credential:login/, 'stopped before any login test');
   // The release-Z recycle hook sent every statement on stdin too: its first remeasure fails (and reports UNKNOWN).
   const hook = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--w6', postFixture()], { ...env, C1_W6_PLAN_FROM: '78eaeb2a' });

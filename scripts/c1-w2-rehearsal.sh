@@ -440,7 +440,9 @@ sys.stdout.write(out)
 PY
 PLAN=$RELEASE_ROOT/$PLAN_REL
 extract() { python3 "$T/extract.py" "$@" 2>"$T/extract.err" || die extract "$(cat "$T/extract.err")"; }
-extract "$PLAN" ai-db-session line 'ai_ro() {' >"$T/blocks/ai_ro.sh"
+# The plan's own argument grammar and ai_ro (ai_ro calls the stand-in ai_db below).
+{ extract "$PLAN" ai-db-session lines 'ai_db_grammar() { # caller arguments' 'ai_db() {'
+  extract "$PLAN" ai-db-session lines 'ai_ro() {' '# Secret SQL:'; } >"$T/blocks/ai_ro.sh"
 extract "$PLAN" ai-db-session line '>"$PROOF_DIR/ledger-before.txt"' >"$T/blocks/ledger-before.sh"
 extract "$PLAN" ai-w2-preflight slice 'python3 - "$RELEASE_ROOT" "$PROOF_DIR" <<' '# Current backup/restore evidence' >"$T/blocks/preflight-ledger.sh"
 extract "$T/catalog-plan.md" ai-w2-preflight slice '# Before proofs:' 'ai_run ai-w2-measure' >"$T/blocks/preflight-before.sh"
@@ -464,11 +466,11 @@ if test "$ISSUER" = 1; then
   ISSUER_PLAN=$PLAN; test -z "$PLAN_FROM" || ISSUER_PLAN=$T/issuer-plan.md
   if grep -qF 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' "$ISSUER_PLAN" && test "${C1_W2_REHEARSAL_FAULT:-}" != issuer-sql-on-stdin; then
     # The ALTER from a read-only mounted file, then the SCRAM readback (both from the plan bytes).
-    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ISSUER_FRESH=$(ai_ro -Atq' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
     extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' 'install -o root -g 986' >"$T/blocks/issuer-alter.sh"
   elif grep -qF 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' "$ISSUER_PLAN"; then
     # Test control: the current block with its ALTER sent on stdin again (as at release Z); the readback must catch it.
-    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32 >"$SECRET_STAGE/issuer-password"' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
+    extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ISSUER_FRESH=$(ai_ro -Atq' 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' >"$T/blocks/issuer-prepare.sh"
     extract "$ISSUER_PLAN" ai-w2-issuer-credential lines 'ai_db_secret_file "$SECRET_STAGE/issuer.sql"' 'install -o root -g 986' \
       | sed 's#^ai_db_secret_file "$SECRET_STAGE/issuer.sql"#ai_db -q --file - <"$SECRET_STAGE/issuer.sql"#' >"$T/blocks/issuer-alter.sh"
     say "FAULT injected: the issuer ALTER ROLE sent on stdin to the docker-shaped psql (no -i), as at release Z (test control)"
@@ -644,7 +646,7 @@ secret_step() { # label script
   if test "$status" = 0; then say "PASS $1"; return 0; fi
   # Only plan FAIL lines known to carry no secret are printed; everything else stays in the stage.
   local known
-  known=$(grep -m1 -E '^FAIL ai-w2-issuer-credential: issuer LOGIN with a SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\); STOP$' "$SECRET_STAGE/secret-step.err")
+  known=$(grep -m1 -E "^FAIL ai-w2-issuer-credential: (issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\)|issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first); STOP$" "$SECRET_STAGE/secret-step.err")
   if test -n "$known"; then say "FAIL $1: $known"; exit 1; fi
   say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
 }
@@ -775,6 +777,20 @@ PY
   if issuer_psql "service=target sslmode=disable" -X -Atq --command 'SELECT 1;' >/dev/null 2>&1; then die issuer-plaintext 'plaintext TCP login expected refused got accepted'; fi
   say "PASS issuer-plaintext: a non-TLS TCP login as the issuer is refused by pg_hba"
   step ai-w2-issuer-credential:proof "$T/blocks/issuer-credential-proof.sh"
+  if type ai_db_secret_file >/dev/null 2>&1; then
+    # A failing secret statement is never written to the server log by the plan's helper (logging off for that
+    # session); the control without that session setting shows the server WOULD log it.
+    LOG_MARK_A=c1-log-control-$(openssl rand -hex 6) LOG_MARK_B=c1-log-secret-$(openssl rand -hex 6)
+    printf "ALTER ROLE c1_rehearsal_no_such_role PASSWORD '%s';\n" "$LOG_MARK_A" >"$SECRET_STAGE/log-control.sql"
+    printf "ALTER ROLE c1_rehearsal_no_such_role PASSWORD '%s';\n" "$LOG_MARK_B" >"$SECRET_STAGE/log-secret.sql"
+    chmod 0600 "$SECRET_STAGE/log-control.sql" "$SECRET_STAGE/log-secret.sql"
+    pgx -X -q --set=ON_ERROR_STOP=1 --file "$SECRET_STAGE/log-control.sql" </dev/null >/dev/null 2>&1 && die secret-log 'control statement expected to fail got success'
+    ai_db_secret_file "$SECRET_STAGE/log-secret.sql" >/dev/null 2>&1 && die secret-log 'secret statement expected to fail got success'
+    sleep 0.5
+    grep -q "$LOG_MARK_A" "$T/pg.log" || die secret-log 'control: the server log expected the failing statement got none (the check would prove nothing)'
+    if grep -q "$LOG_MARK_B" "$T/pg.log"; then die secret-log 'the plan helper'"'"'s failing statement expected absent from the server log got present'; fi
+    say "PASS secret-sql-not-logged: a failing statement through the plan's ai_db_secret_file is absent from the server log (log_min_error_statement=panic); the control without it is logged"
+  fi
   if test "${C1_W2_REHEARSAL_FAULT:-}" = post-credential-catalog; then
     # Test control: make one forward catalog row false AFTER provisioning (0002-001 requires NOT rolinherit).
     pgx -q -v ON_ERROR_STOP=1 -c 'ALTER ROLE commonswarm_admin_issuer INHERIT;' >/dev/null 2>"$PSQL_LOG" || die fault "$(first_error "$PSQL_LOG")"

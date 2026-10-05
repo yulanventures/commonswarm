@@ -86,7 +86,7 @@ plan,out,ca=sys.argv[1:4]
 block=[b for b in re.findall(r'^```sh\n(.*?)^```$',open(plan).read(),re.M|re.S) if b.startswith('# step: ai-db-session\n')]
 assert len(block)==1
 b=block[0]
-start=b.index('ai_db() {\n'); end=b.index('\npython3 - "$MIGRATE/lib.sh"',start)
+start=b.index('ai_db_grammar() {'); end=b.index('\npython3 - "$MIGRATE/lib.sh"',start)
 src=b[start:end]+'\n'
 assert src.count('ai_db_secret_file() {')==1 and src.count('docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 ')==2
 src=src.replace('docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 ','docker run --rm --network host ')
@@ -104,8 +104,8 @@ chmod 0644 "$PGSERVICE_FILE" "$D/ca.pem"; chmod 0600 "$PGPASS_FILE"
 # Test files only (no secret): readable by whatever user the image runs psql as, through the read-only mounts.
 chmod 0755 "$SECRET_STAGE" "$PROOF_DIR"
 eval "$(cat "$D/ai_db.sh")"
-type ai_db >/dev/null 2>&1 && type ai_db_secret_file >/dev/null 2>&1 || die extract 'functions not defined'
-printf 'INSERT INTO c1_stdin_probe VALUES (1);\n' >"$SECRET_STAGE/statement.sql"; chmod 0644 "$SECRET_STAGE/statement.sql"
+type ai_db >/dev/null 2>&1 && type ai_ro >/dev/null 2>&1 && type ai_db_secret_file >/dev/null 2>&1 || die extract 'functions not defined'
+printf 'INSERT INTO c1_stdin_probe VALUES (1);\n' >"$SECRET_STAGE/statement.sql"; chmod 0600 "$SECRET_STAGE/statement.sql"
 
 # 1. The release-Z shape: docker run WITHOUT -i, SQL on stdin. psql sees no stdin, runs nothing, exits 0.
 docker run --rm --network host --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
@@ -114,11 +114,17 @@ docker run --rm --network host --env PGSERVICE=target --env PGSERVICEFILE=/run/s
 STDIN_STATUS=$?
 test "$STDIN_STATUS" = 0 && test "$(count)" = 0 || die docker-stdin "release-Z shape expected exit 0 and no row (silent no-op) got status $STDIN_STATUS rows $(count)"
 say "PASS docker-stdin-no-op: docker run without -i, psql --file - <file: exit 0 and nothing ran (rows 0), the W2b 67aAId failure reproduced"
-# 2. The plan's ai_db refuses stdin SQL before any docker call.
-ai_db -q --file - <"$SECRET_STAGE/statement.sql" >/dev/null 2>"$D/refuse.err"; REFUSE_STATUS=$?
-test "$REFUSE_STATUS" = 2 && grep -q '^FAIL ai_db: SQL on stdin (--file -) expected never got used' "$D/refuse.err" && test "$(count)" = 0 \
-  || die ai_db-refuses-stdin "status 2 and the FAIL line expected got status $REFUSE_STATUS"
-say "PASS ai_db-refuses-stdin: the plan's ai_db fails closed on --file - (exit 2, nothing ran)"
+# 2. The plan's ai_db and ai_ro refuse every form outside their grammar before any docker call: stdin in all its
+#    spellings, clustered short options, abbreviations, = forms, files outside the /proof and /release mounts.
+REFUSED=0
+for form in "ai_db -q --file -" "ai_db -q -f -" "ai_db -qf -" "ai_db -q --file /dev/stdin" "ai_db -q --file /dev/fd/0" "ai_db -q --file /proc/self/fd/0" \
+  "ai_db -q --file=-" "ai_db -q --fil -" "ai_db -q -c SELECT\ 1" "ai_db -q --file /tmp/x.sql" "ai_db -q --file /proof/../x.sql" "ai_db -q" "ai_ro -qf -" "ai_ro -Atq"; do
+  eval "$form" <"$SECRET_STAGE/statement.sql" >/dev/null 2>"$D/refuse.err"; REFUSE_STATUS=$?
+  test "$REFUSE_STATUS" = 2 && grep -qE '^FAIL ai_(db|ro): arguments expected the plan grammar' "$D/refuse.err" && test "$(count)" = 0 \
+    || die ai_db-grammar "$form: status 2 and the grammar FAIL line expected got status $REFUSE_STATUS"
+  REFUSED=$((REFUSED + 1))
+done
+say "PASS ai_db-grammar: the plan's ai_db/ai_ro refused $REFUSED forms outside the grammar (stdin, /dev/stdin, /dev/fd, clustered -qf, abbreviations, = forms, foreign files) with exit 2; nothing ran"
 # 3. The plan's ai_db_secret_file: a read-only mounted file, never stdin.
 ai_db_secret_file "$SECRET_STAGE/statement.sql" >/dev/null || die ai_db_secret_file "exit status expected 0 got $? ($(head -c 300 "$SECRET_STAGE/psql.log"))"
 test "$(count)" = 1 || die ai_db_secret_file "one row expected got $(count)"
@@ -128,4 +134,18 @@ printf 'INSERT INTO c1_stdin_probe VALUES (2);\n' >"$PROOF_DIR/probe.sql"; chmod
 ai_db -q --file /proof/probe.sql >/dev/null || die ai_db-proof-file "exit status expected 0 got $?"
 test "$(count)" = 2 || die ai_db-proof-file "two rows expected got $(count)"
 say "PASS ai_db-proof-file: the plan's ai_db ran /proof/probe.sql from the read-only proof mount (rows 2)"
+# 5. A failing secret statement through the plan's helper never reaches the server log; the control (same failing
+#    statement, without the helper's session settings) shows the server WOULD log it.
+MARK_A=c1-log-control-$$ MARK_B=c1-log-secret-$$
+printf "ALTER ROLE c1_no_such_role PASSWORD '%s';\n" "$MARK_A" >"$SECRET_STAGE/log-control.sql"
+printf "ALTER ROLE c1_no_such_role PASSWORD '%s';\n" "$MARK_B" >"$SECRET_STAGE/log-secret.sql"
+chmod 0600 "$SECRET_STAGE/log-control.sql" "$SECRET_STAGE/log-secret.sql"
+docker run --rm --network host --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
+  --volume "$PGSERVICE_FILE:/run/service.conf:ro" --volume "$PGPASS_FILE:/run/pass:ro" --volume "$SECRET_STAGE/log-control.sql:/run/secret.sql:ro" \
+  --entrypoint psql "$IMAGE" -X --set=ON_ERROR_STOP=1 -q --file /run/secret.sql >/dev/null 2>&1 && die secret-log 'control statement expected to fail got success'
+ai_db_secret_file "$SECRET_STAGE/log-secret.sql" >/dev/null 2>&1 && die secret-log 'helper statement expected to fail got success'
+sleep 1
+grep -q "$MARK_A" "$D/pg.log" || die secret-log 'control: the server log expected the failing statement got none'
+if grep -q "$MARK_B" "$D/pg.log"; then die secret-log "the helper's failing statement expected absent from the server log got present"; fi
+say "PASS secret-sql-not-logged: the plan helper's failing statement is absent from the server log; the control is logged"
 say "PASS docker-stdin-check: $IMAGE"
