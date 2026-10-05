@@ -6,13 +6,18 @@ require `catalog_ok` to be `t`. This checks function ownership, security,
 volatility, search paths, return types, and the exact EXECUTE grantees.
 The internal consent predicate has no client EXECUTE grant.
 
-The RPC counts only visible messages from other people and their agents,
+The RPC counts visible messages, including messages from the viewer's own agents,
+and excludes the viewer's own human posts,
 using the viewer's maximum first-seen receipt (or seven days without receipts).
 To-do and object activity belongs in the separate Latest activity read; it is
 not counted as new. All content counts and personal to-do lists require live
 human content consent. Agent Doing facts omit titles without that consent.
 The result is bounded at 50 workspaces, 25 people and 50 agents per workspace,
-10 asks, and 20 entries in each assigned/waiting list.
+10 asks, and 20 to-dos in each assigned/waiting list. Waiting to-dos appear once,
+with the first matching reason in this order: request, after, hold, agent_removed.
+Working-on references use the directed-signal read view; the raw signal table
+contributes only a timestamp to last activity. Revoked hosted connections report
+`connection_off`; revoked principals report `removed`.
 
 Before rollback, restore clients that do not require this RPC. In one session,
 run `BEGIN;`, `20261006000002-rollback.sql`, and

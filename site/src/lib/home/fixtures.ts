@@ -172,11 +172,11 @@ const museStatus: AgentWorkStatus = {
 };
 
 const priyaClaudeStatus: AgentWorkStatus = {
-  work: 'idle',
+  work: 'disconnected',
   facts: {
     transport: 'hosted_mcp',
     turn_only: true,
-    connection: 'live',
+    connection: 'connection_off',
     last_activity_at: ms(-hours(5)),
     messages_waiting_since: null,
     doing: null,
@@ -506,8 +506,8 @@ const homeOverview: HomeOverview = {
       name: 'Home',
       role: 'owner',
       last_seen_at: ms(-hours(8)),
-      new_messages: 3,
-      content: { open_todos: 16, lists: 2, docs: 1, files: 4, new_activity: 0 },
+      new_messages: 4,
+      content: { open_todos: 16, lists: 2, docs: 1, files: 4 },
       people: [
         {
           user_id: U.tom,
@@ -565,7 +565,7 @@ const homeOverview: HomeOverview = {
       role: 'owner',
       last_seen_at: null,
       new_messages: 0,
-      content: { open_todos: 1, lists: 1, docs: 0, files: 2, new_activity: 0 },
+      content: { open_todos: 1, lists: 1, docs: 0, files: 2 },
       people: [
         {
           user_id: U.tom,
