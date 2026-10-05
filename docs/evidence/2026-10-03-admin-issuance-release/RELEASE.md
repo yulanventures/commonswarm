@@ -139,6 +139,51 @@ and W6 open/checks/apply query the box again; a recycle makes an older receipt
 unusable. After a recycle, retain fresh measurement evidence before reopening.
 The recycle hook already binds its reopen to the current locked generation.
 
+## Execution rulings (frozen bundle, 2026-10-04)
+
+These rulings were given by message during the Z/Z2 windows. They are plan text
+now; a task file may repeat them but never weakens them. Each is a STOP rule.
+
+1. **Conditional public W3 probe.** W3 always runs ai-w3-local-gate at loopback.
+   It runs the public ai-w3-probes only if the baseline Caddy already routes
+   `/admin/gate` (measured, never guessed); a public 404 before W4 is expected
+   unavailable ingress, never gate closed (see the W3 section). W4 makes the
+   public probe mandatory with CORS.
+2. **Persistent driver contract.** One window has exactly two shells: one
+   persistent Mac `/bin/bash` 3.2 shell M, and ONE persistent root shell on the
+   box, opened once over ssh from M. Every box block runs WHOLE on that root
+   shell's stdin, in plan order; no other ssh shell runs a box block. Mac-only
+   blocks run in M. The rule applies to forward runs AND recovered closes. If
+   the box shell is lost, STOP: a recovered close opens one new persistent root
+   shell, re-runs ai-db-session in it, and runs the recovery blocks there.
+3. **One closer.** A window has exactly one closer: the shell that runs
+   ai-close. Before any close (forward or recovered), no other shell, worker or
+   script may still act on the window. If one does, stop it first and record it.
+4. **No box shell waits on a future file.** A box shell never polls for a
+   receipt or file that a later step or another host will produce. A block that
+   needs such a file runs only after the file exists; a worker whose local ssh
+   dies must not leave a box-side shell behind (W2b close, 2026-10-04).
+5. **W2 apply-time gate.** ai-w2-apply starts only when `window_end_utc - now
+   >= 600 s` on the box clock; otherwise STOP before the fence and close
+   pre-fence. No deadline check runs after the fence.
+6. **W7 second checker receipt.** ai-gates requires `admin-c1-smoke` in the W7
+   receipt, and its evidence is the production C1.json, which exists only after
+   W6. W7 therefore uses a SECOND checker receipt, produced after W6, with its
+   own `gate_receipt_sha256` in the W7 INPUTS; its `admin-c1-smoke` evidence
+   file is the production C1.json of the W6 bound by `w6_window_id` (the digest
+   ai-w7-preflight measures). The W6 receipt carries `admin-c1-smoke` on its
+   pre-production evidence; the client-verification row stores that receipt.
+7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal
+   human revoke is refused after the cutoff), the close is pre-decided:
+   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,
+   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then
+   the owner withdraw, then a recovered close, then report STOP. Keep-open is
+   lost in that case (ai-emergency-close closes issuance).
+8. **Owner session: one caller.** The owner file-store session
+   (`/Users/yulanbot/.cswarm/credentials.d`) has one caller at a time:
+   ai-w6-c1-inputs, the owner approve, the fence chain and the withdraw never
+   overlap each other or a controls-worker run that uses the same store.
+
 ## Marked common blocks
 
 ```sh
