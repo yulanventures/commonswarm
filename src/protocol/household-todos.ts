@@ -211,7 +211,8 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
       seq: ctx.seq + events.length, event_id: eventId, command_id: ctx.command_id, type,
       actor_user: actor.user_id, actor_agent_principal: actor.principal_id, actor_run: ctx.access.actor.run_id,
       occurred_at_server: ctx.now, payload: structuredClone(payload) } as TodoEvent;
-    draft = reduceTodoEvents(draft, [event]);
+    // Replay the command together so acceptance retains the answered offer's provenance.
+    draft = reduceTodoEvents(state, [...events, event]);
     events.push(event);
   };
   const member = (userId: string): TodoMemberFacts | undefined => ctx.members.find(m => m.user_id === userId && m.workspace_id === state.workspace_id && m.revoked_at === null);
@@ -245,11 +246,12 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
     const failure = targetRefusal(input.to);
     if (failure) return refuse(failure);
     const start = input.start ?? 'queue';
-    const gate = input.gate ?? todo.gate;
+    const owner = input.to.kind === 'agent' ? agent(input.to.id)!.owner_user_id : input.to.id;
+    const ownerStartNow = input.to.kind === 'agent' && start === 'now' && human && owner === actor.user_id;
+    const gate = input.gate ?? (ownerStartNow ? { kind: 'none' } : todo.gate);
     if (start !== 'queue' && start !== 'now') return refuse('invalid_transition');
     const gateError = gateRefusal(todo.todo_id, gate);
     if (gateError) return refuse(gateError);
-    const owner = input.to.kind === 'agent' ? agent(input.to.id)!.owner_user_id : input.to.id;
     const accepted = input.to.kind === 'user' ? input.to.id === actor.user_id
       : start === 'now' ? human && owner === actor.user_id
         : owner === actor.user_id || (own(draft.policies, input.to.id)?.accepts_from ?? TODO_DEFAULT_ACCEPTS_FROM) === 'anyone';
@@ -269,7 +271,7 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
       notice(todo.todo_id, 'ask', { kind: 'user', id: owner }, input.to.kind === 'user' ? TODO_NOTICE_BODIES.person_offer : TODO_NOTICE_BODIES.agent_offer);
       return null;
     }
-    accept(todo, input.to, start, gate, input.gate === undefined ? todo.gate_set_by : gate.kind === 'none' ? null : actor.user_id);
+    accept(todo, input.to, start, gate, gate.kind === 'none' ? null : input.gate === undefined ? todo.gate_set_by : actor.user_id);
     if (input.to.kind === 'agent') {
       if (start === 'now') notice(todo.todo_id, 'ask', input.to, TODO_NOTICE_BODIES.start);
       else if (evaluateGate(gate, draft.todos, ctx.now)) notice(todo.todo_id, 'note', input.to, TODO_NOTICE_BODIES.added);
@@ -377,7 +379,8 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
       if (queueFull(todo, offer.to)) return refuse('queue_full');
     }
     emit('TodoOfferAnswered', { todo: { ...todo, version: todo.version + 1, offer: null }, offer_id: offer.offer_id, answer: command.answer });
-    if (command.answer === 'accept') accept(own(draft.todos, todo.todo_id)!, offer.to, offer.start, offer.gate);
+    if (command.answer === 'accept') accept(own(draft.todos, todo.todo_id)!, offer.to, offer.start, offer.gate,
+      offer.gate.kind === 'none' ? null : offer.by.user_id);
     // The one-signal cap conflicts with notifying both sides on acceptance.
     // A ready agent gets the queue/start notice; otherwise notify the offerer.
     if (command.answer === 'accept' && offer.to.kind === 'agent'
@@ -448,6 +451,7 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
  * durable receipts into state.receipts as well as the receipts replayed here. */
 export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly TodoEvent[]): HouseholdTodoState {
   let state = initial;
+  let acceptedOffer: { todo_id: string; command_id: string; offer: TodoOffer } | null = null;
   for (const event of events) {
     if (!(TODO_EVENT_TYPES as readonly string[]).includes(event.type)) throw new UnknownEventTypeError(event.type, event.seq);
     const fail = (reason: string): never => { throw new StreamIntegrityError(`to-do event at seq ${event.seq}: ${reason}`); };
@@ -490,10 +494,17 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
         };
         const allowed = new Set<keyof Todo>(['version', ...(fields[event.type] ?? [])]);
         if (Object.keys(current!).some(key => !allowed.has(key as keyof Todo) && !equal(current![key as keyof Todo], todo[key as keyof Todo]))) fail('unrelated field changed');
-        if (event.type === 'TodoAssigned' && (todo.state !== 'open' || todo.offer !== null || !equal(todo.assigned_by, author)
-          || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at
-          || (todo.gate_set_by !== (todo.gate.kind === 'none' ? null : event.actor_user)
-            && !(equal(todo.gate, current!.gate) && todo.gate_set_by === current!.gate_set_by)))) fail('invalid assignment');
+        if (event.type === 'TodoAssigned') {
+          const validSetter = acceptedOffer
+            ? acceptedOffer.todo_id === todo.todo_id && acceptedOffer.command_id === event.command_id
+              && acceptedOffer.offer.decider_user_id === event.actor_user && event.actor_agent_principal === null
+              && sameParty(todo.assignee, acceptedOffer.offer.to) && equal(todo.gate, acceptedOffer.offer.gate)
+              && todo.gate_set_by === (todo.gate.kind === 'none' ? null : acceptedOffer.offer.by.user_id)
+            : todo.gate_set_by === (todo.gate.kind === 'none' ? null : event.actor_user)
+              || equal(todo.gate, current!.gate) && todo.gate_set_by === current!.gate_set_by;
+          if (todo.state !== 'open' || todo.offer !== null || !equal(todo.assigned_by, author)
+            || todo.assigned_at !== at || !equal(todo.state_by, author) || todo.state_at !== at || !validSetter) fail('invalid assignment');
+        }
         if (event.type === 'TodoOffered' && (!todo.offer || !equal(todo.offer.by, author) || todo.offer.at !== at || current!.offer !== null)) fail('invalid offer provenance');
         if (event.type === 'TodoStateChanged') {
           const allowedStates = current!.state === 'open' ? ['doing', 'done', 'dropped'] : current!.state === 'doing' ? ['open', 'done', 'dropped'] : ['open'];
@@ -506,6 +517,7 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
       }
       todos[todo.todo_id] = structuredClone(todo);
     };
+    if (event.type !== 'TodoAssigned') acceptedOffer = null;
     switch (event.type) {
       case 'TodoCreated': applyTodo(event.payload.todo, true); break;
       case 'TodoDetailsChanged': case 'TodoAssigned': case 'TodoOffered': case 'TodoStateChanged': case 'TodoGateSet': applyTodo(event.payload.todo); break;
@@ -513,6 +525,8 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
         const current = own(todos, event.payload.todo?.todo_id);
         if (!current?.offer || current.offer.offer_id !== event.payload.offer_id || event.payload.todo.offer !== null
           || !['accept', 'decline', 'withdraw', 'replaced'].includes(event.payload.answer)) fail('invalid offer answer');
+        if (event.payload.answer === 'accept') acceptedOffer = { todo_id: current!.todo_id,
+          command_id: event.command_id, offer: current!.offer! };
         applyTodo(event.payload.todo); break;
       }
       case 'TodoQueueOrdered': {
@@ -548,6 +562,7 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
         policies[policy.principal_id] = structuredClone(policy); break;
       }
     }
+    if (event.type === 'TodoAssigned') acceptedOffer = null;
     const receipt = event.payload.receipt;
     if (receipt) {
       const key = receiptKey(receipt.principal, receipt.command_id);
