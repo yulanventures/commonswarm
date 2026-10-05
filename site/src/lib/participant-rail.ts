@@ -49,14 +49,22 @@ const compareMembers = <TMember extends RailMember>(left: TMember, right: TMembe
 const compareAgents = <TAgent extends RailAgent>(left: TAgent, right: TAgent): number =>
   compareText(left.name, right.name) || compareText(left.principalId, right.principalId);
 
+export interface ParticipantOrderOptions {
+  /** The signed-in person. Their group comes first; everyone else stays alphabetical. */
+  viewerId?: string | null;
+}
+
 /** Keeps every workspace member and agent visible while making ownership structural. */
 export const groupParticipantsByOwner = <
   TMember extends RailMember,
   TAgent extends RailAgent,
->(members: TMember[], agents: TAgent[]): ParticipantGroup<TMember, TAgent>[] => {
+>(members: TMember[], agents: TAgent[], options: ParticipantOrderOptions = {}): ParticipantGroup<TMember, TAgent>[] => {
   const memberIds = new Set(members.map((member) => member.userId));
+  const viewerId = options.viewerId ?? null;
+  const viewerFirst = (left: TMember, right: TMember): number =>
+    viewerId === null ? 0 : Number(right.userId === viewerId) - Number(left.userId === viewerId);
   const groups: ParticipantGroup<TMember, TAgent>[] = [...members]
-    .sort(compareMembers)
+    .sort((left, right) => viewerFirst(left, right) || compareMembers(left, right))
     .map((member) => ({
       kind: "member",
       member,
@@ -95,6 +103,7 @@ export const renderSidebarParticipants = <
   members: TMember[],
   agents: TAgent[],
   initials: (name: string) => string,
+  options: ParticipantOrderOptions = {},
 ): void => {
   const document = participantList.ownerDocument;
   participantList.replaceChildren();
@@ -145,7 +154,7 @@ export const renderSidebarParticipants = <
     return row;
   };
 
-  for (const group of groupParticipantsByOwner(members, agents)) {
+  for (const group of groupParticipantsByOwner(members, agents, options)) {
     const groupItem = document.createElement('li');
     groupItem.className = 'dashboard__sidebar-owner-group';
     const personRow = document.createElement('div');

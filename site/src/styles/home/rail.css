@@ -1,1 +1,224 @@
-/* Home UI: rail styles. Owned by one lane (see UI-SPEC.md section 6). Site tokens only. */
+/* Home UI: rail styles. Owned by lane R (see UI-SPEC.md sections 1.1, 5 and 6). Site tokens only.
+
+   The ink rail (UI-SPEC 5). Contrast, measured by the tokens.css L33-50 method (WCAG 2.1 relative
+   luminance, color-mix composited to its sRGB value first; the instrument reproduced 21.00, 4.48,
+   4.54 and 8.59 for the known pairs on the same run):
+     light  rail text     --canvas on --ink                                13.59:1
+     light  muted text    color-mix(--canvas 72%, --ink) on --ink           7.75:1
+     light  current row   --ink on --canvas                                13.59:1
+     light  person face   --ink on --canvas                                13.59:1
+     light  badge         --accent-ink on --accent                          5.12:1
+     light  focus halo    --focus-halo against --ink                       14.42:1
+     dark   rail text     --text on --elev-1                               14.45:1
+     dark   muted text    --text-muted on --elev-1                          8.81:1
+     dark   current row   --text on --elev-3 11.53:1; --text-muted on it    7.03:1
+     dark   person face   --canvas on --text                               15.43:1
+     dark   badge         --accent-ink on --accent                          8.25:1
+   No translucent -dim token is placed over ink. Status chips inside the rail are opaque
+   (--chip-active-*, --chip-review-*); Idle has no fill and takes the rail's muted colour. */
+
+.hm-rail {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s-4);
+  block-size: 100%;
+  min-block-size: 0;
+  padding: var(--s-4) var(--s-3);
+  overflow-y: auto;
+  background: var(--ink);
+  color: var(--canvas);
+  font-family: var(--font-sans);
+  font-size: var(--t-sm);
+}
+
+.hm-rail ul { margin: 0; padding: 0; list-style: none; }
+
+.hm-rail__wordmark:empty { display: none; }
+.hm-rail__wordmark { flex: none; padding-inline: var(--s-2); }
+
+.hm-rail__nav {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--s-3);
+  min-block-size: 0;
+  max-block-size: 60%;
+}
+
+.hm-rail__workspaces { display: flex; flex-direction: column; gap: var(--s-1); min-block-size: 0; }
+.hm-rail__workspace-list { min-block-size: 0; overflow-y: auto; }
+
+.hm-rail__heading,
+.hm-rail__other-head {
+  margin: 0;
+  padding: var(--s-2) var(--s-2) var(--s-1);
+  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
+  font-size: var(--t-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--track-eyebrow);
+  text-transform: uppercase;
+}
+.hm-rail__other-head { text-transform: none; letter-spacing: normal; }
+
+.hm-rail__link,
+.hm-rail__person,
+.hm-rail__agent,
+.hm-rail__more {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  padding: var(--s-1) var(--s-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+}
+
+.hm-rail a,
+.hm-rail button { cursor: pointer; }
+
+.hm-rail__link:hover,
+.hm-rail button:hover {
+  background: color-mix(in srgb, var(--canvas) 10%, var(--ink));
+}
+
+.hm-rail__link[aria-current="page"] {
+  background: var(--canvas);
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+}
+
+.hm-rail__more { color: color-mix(in srgb, var(--canvas) 72%, var(--ink)); }
+.hm-rail__new { color: color-mix(in srgb, var(--canvas) 72%, var(--ink)); }
+.hm-rail__plus { display: grid; place-items: center; inline-size: 24px; flex: none; font-size: var(--t-base); }
+
+.hm-rail__name {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hm-rail__badge {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  min-inline-size: 1.375rem;
+  padding: 0 var(--s-1);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--t-xs);
+  font-weight: var(--weight-semibold);
+  line-height: 1.375rem;
+}
+
+/* People list: fills the height the rail has left and scrolls; a short list shrinks to fit. */
+.hm-rail__people {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-block-size: 7rem;
+}
+
+.hm-rail__people-list {
+  flex: 0 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.hm-rail__group + .hm-rail__group { margin-block-start: var(--s-1); }
+.hm-rail .hm-rail__agents { padding-inline-start: var(--s-6); }
+.hm-rail__face,
+.hm-rail__orb { display: inline-grid; place-items: center; flex: none; }
+.hm-rail .hm-rail__face > * { background: var(--canvas); color: var(--ink); }
+
+.hm-rail__you {
+  flex: none;
+  padding: 0 var(--s-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
+  font-size: var(--t-2xs);
+  line-height: 1.5;
+}
+
+.hm-rail__status {
+  flex: none;
+  max-inline-size: 45%;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.hm-rail [data-agent-state="idle"] .hm-rail__status * { color: inherit; }
+
+.hm-rail__note {
+  flex: none;
+  margin: 0;
+  padding: var(--s-2);
+  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
+  font-size: var(--t-xs);
+  line-height: 1.45;
+}
+
+.hm-rail__sr {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hm-rail a:focus-visible,
+.hm-rail button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hm-rail a,
+  .hm-rail button { transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
+}
+
+/* Dark: --ink flips to light text, so both dark blocks restate the rail (UI-SPEC 5). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .hm-rail { background: var(--elev-1); color: var(--text); border-inline-end: 1px solid var(--border); }
+  :root:not([data-theme="light"]) .hm-rail__heading,
+  :root:not([data-theme="light"]) .hm-rail__other-head,
+  :root:not([data-theme="light"]) .hm-rail__more,
+  :root:not([data-theme="light"]) .hm-rail__new,
+  :root:not([data-theme="light"]) .hm-rail__you,
+  :root:not([data-theme="light"]) .hm-rail__status,
+  :root:not([data-theme="light"]) .hm-rail__note { color: var(--text-muted); }
+  :root:not([data-theme="light"]) .hm-rail__link:hover,
+  :root:not([data-theme="light"]) .hm-rail button:hover { background: var(--elev-3); }
+  :root:not([data-theme="light"]) .hm-rail__link[aria-current="page"] { background: var(--elev-3); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+  :root:not([data-theme="light"]) .hm-rail .hm-rail__face > * { background: var(--text); color: var(--canvas); }
+  :root:not([data-theme="light"]) .hm-rail__link[aria-current="page"]:focus-visible { box-shadow: inset 3px 0 0 var(--accent), var(--focus-ring); }
+}
+
+[data-theme="dark"] .hm-rail { background: var(--elev-1); color: var(--text); border-inline-end: 1px solid var(--border); }
+[data-theme="dark"] .hm-rail__heading,
+[data-theme="dark"] .hm-rail__other-head,
+[data-theme="dark"] .hm-rail__more,
+[data-theme="dark"] .hm-rail__new,
+[data-theme="dark"] .hm-rail__you,
+[data-theme="dark"] .hm-rail__status,
+[data-theme="dark"] .hm-rail__note { color: var(--text-muted); }
+[data-theme="dark"] .hm-rail__link:hover,
+[data-theme="dark"] .hm-rail button:hover { background: var(--elev-3); }
+[data-theme="dark"] .hm-rail__link[aria-current="page"] { background: var(--elev-3); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+[data-theme="dark"] .hm-rail .hm-rail__face > * { background: var(--text); color: var(--canvas); }
+[data-theme="dark"] .hm-rail__link[aria-current="page"]:focus-visible { box-shadow: inset 3px 0 0 var(--accent), var(--focus-ring); }
