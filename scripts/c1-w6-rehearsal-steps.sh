@@ -120,21 +120,32 @@ case "$1" in
   if test "$mode" = bad-image; then exec cat @ROOT@/container-bad.json; fi
   exec cat @ROOT@/container.json ;;
  run)
-  shift; while test $# -gt 0; do if test "$1" = --entrypoint; then shift 3; break; fi; shift; done
-  set -o pipefail; stdin=0; prev=
-  for a in "$@"; do if test "$prev" = --file && test "$a" = -; then stdin=1; fi; prev=$a; done
-  if test "$stdin" = 0 && test "$mode" = query-fails; then exit 1; fi
-  # Box path namespace at the database boundary: the rows hold /home/commonswarm paths (the table CHECK pins them).
-  if test "$stdin" = 1; then
-   sql=$(sed "s#@ROOT@/home#/home/commonswarm#g")
-   # Modelled faults: a reopen that COMMITS but whose response is lost; and a refused release-role close.
-   case "$mode:$sql" in lose-reopen-and-close:*'release_generation=release_generation+1 WHERE singleton; COMMIT;'*) exit 1;; esac
-   printf '%s\n' "$sql" | @PG@/psql -h @T@ -p @PORT@ -U supabase_admin -d postgres "$@" | sed "s#/home/commonswarm#@ROOT@/home#g" || exit $?
-   case "$mode:$sql" in lose-reopen-*:*'admin_issuance_enabled=true WHERE singleton'*) exit 1;; esac
-   exit 0
-  fi
-  @PG@/psql -h @T@ -p @PORT@ -U supabase_admin -d postgres "$@" | sed "s#/home/commonswarm#@ROOT@/home#g"
-  exit $? ;;
+  # The box's docker run has no -i: the container never sees stdin (modelled with </dev/null below). Read-only file
+  # volumes map back to their host files; box paths in SQL map to the box namespace (the table CHECK pins them).
+  shift; vols=
+  while test $# -gt 0; do
+   case "$1" in --volume) vols="$vols
+$2"; shift 2 ;; --entrypoint) shift 3; break ;; --rm) shift ;; --network|--add-host|--env) shift 2 ;; *) exit 64 ;; esac
+  done
+  set -o pipefail; args=(); prev=; sqlfile=
+  for a in "$@"; do
+   if test "$prev" = --file && test "$a" != -; then
+    while IFS= read -r v; do test -n "$v" || continue; src=${v%%:*}; dst=${v#*:}; dst=${dst%%:*}; test "$a" != "$dst" || a=$src; done <<EOF_VOLUMES
+$vols
+EOF_VOLUMES
+    sqlfile=$(mktemp @ROOT@/stmt.XXXXXX) || exit 70
+    sed "s#@ROOT@/home#/home/commonswarm#g" "$a" >"$sqlfile" || exit 70
+    a=$sqlfile
+   fi
+   args+=("$a"); prev=$a
+  done
+  sql=; test -z "$sqlfile" || sql=$(cat "$sqlfile")
+  if test -z "$sqlfile" && test "$mode" = query-fails; then exit 1; fi
+  # Modelled faults: a reopen that COMMITS but whose response is lost; and a refused release-role close.
+  case "$mode:$sql" in lose-reopen-and-close:*'release_generation=release_generation+1 WHERE singleton; COMMIT;'*) exit 1;; esac
+  @PG@/psql -h @T@ -p @PORT@ -U supabase_admin -d postgres "${args[@]}" </dev/null | sed "s#/home/commonswarm#@ROOT@/home#g" || exit $?
+  case "$mode:$sql" in lose-reopen-*:*'admin_issuance_enabled=true WHERE singleton'*) exit 1;; esac
+  exit 0 ;;
 esac
 exit 64
 """

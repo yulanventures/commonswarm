@@ -219,6 +219,11 @@ jobs:
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y 2>&1 | tee -a server.log
           sudo apt-get install -y -q postgresql-17 2>&1 | tee -a server.log
           RUN_PG_REHEARSAL=1 PG_BIN=/usr/lib/postgresql/17/bin node --import tsx --test tests/c1-w2-rehearsal.test.ts 2>&1 | tee -a server.log
+      - name: C1 docker stdin check (plan ai_db shape, postgres:17)
+        if: ${{ !cancelled() && matrix.suite == 'server' }}
+        run: |
+          set -euo pipefail
+          PG_BIN=/usr/lib/postgresql/17/bin C1_DOCKER_PSQL_IMAGE=postgres:17 bash scripts/c1-docker-stdin-check.sh 2>&1 | tee -a server.log
       - name: p1-cli suite
         if: matrix.suite == 'p1-cli'
         run: |

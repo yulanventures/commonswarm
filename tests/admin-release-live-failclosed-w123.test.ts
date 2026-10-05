@@ -73,9 +73,22 @@ elif name=='ai_ro':
         if cfg.get('readback_failed'): raise SystemExit(1)
         output(cfg.get('readback','t')); raise SystemExit(0)
     output(cfg.get('readonly','t'))
+elif name=='ai_db_secret_file':
+    # The plan's mounted-file helper: the SQL file (in the stage) reaches the database; stdin is never read.
+    if len(args)!=1: refuse()
+    sql=owned(args[0]).read_text()
+    if sql.startswith('SELECT rolcanlogin AND rolpassword='):
+        # Readback state model: t only if THIS verifier is the one the database holds.
+        held=re.search(r"LOGIN PASSWORD '([^']*)'",(root/'applied.sql').read_text()) if (root/'applied.sql').exists() else None
+        asked=re.search(r"rolpassword='([^']*)'",sql)
+        output('t' if held and asked and held.group(1)==asked.group(1) else 'f')
+    elif sql.startswith('ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '):
+        if not cfg.get('secret_file_noop'): (root/'applied.sql').write_text(sql)
+    else: refuse()
 elif name=='ai_db':
     if args==['-q','--file','-']:
-        (root/'applied.sql').write_text(sys.stdin.read())
+        # The box's docker run has no -i: stdin never reaches psql, which runs nothing and exits 0.
+        pass
     elif args==['-q','--command','ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;']:
         if cfg.get('alter_failed'): raise SystemExit(1)
         (root/'applied.sql').write_text(args[2])
@@ -201,7 +214,7 @@ function fixture(config: Record<string, unknown> = {}) {
   // A valid opening pair, as ai-open retains it.
   const preText = JSON.stringify(consentReceipt('pre-W1'));
   put('proof/consent-pre-W1.json', preText); put('proof/ordinary-before.json', liveReceipt('W3', 'fixture', 'before', preText));
-  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
+  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'ai_db_secret_file', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
     writeFileSync(join(bin, name), '#!'+python+'\n'+dispatcher, { mode: 0o700 });
   }
   const env = { ...process.env, PATH: bin, FIXTURE_ROOT: root, WINDOW: 'W3', PROOF_DIR: proof, SECRET_STAGE: stage,
@@ -682,6 +695,31 @@ test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: 
     assert.ok(result.calls.some(c => c[0] === 'docker' && c.includes('psql')));
     stopped(result, message);
   }
+});
+test('admin-issuer-credential-provisioning / scram-readback-before-login: an ALTER that never reached the database STOPs before the login', () => {
+  // The W2b 67aAId failure: the ALTER ran nowhere (stdin into a docker run without -i). The readback must stop it.
+  const f = fixture({ secret_file_noop: true }), result = f.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(result, "FAIL ai-w2-issuer-credential: issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got f (ALTER ROLE not applied); STOP");
+  assert.ok(!result.calls.some(c => c[0] === 'docker' || c[0] === 'install'), 'no install or login test after a failed readback');
+  assert.ok(!existsSync(join(f.proof, 'issuer-credential.txt')));
+  // A STALE verifier from an earlier attempt (still in the database) plus a no-op ALTER: the exact-verifier readback STOPs.
+  const stale = fixture({ secret_file_noop: true });
+  stale.put('applied.sql', "ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD 'SCRAM-SHA-256$4096:c3RhbGVzdGFsZXN0YWxlc3Q=$c3RhbGU=:c3RhbGU=';\n");
+  const staleRun = stale.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(staleRun, "FAIL ai-w2-issuer-credential: issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got f (ALTER ROLE not applied); STOP");
+  assert.ok(!staleRun.calls.some(c => c[0] === 'install' || c[0] === 'docker'));
+  // The mutation boundary: a role that already has LOGIN or a password STOPs before any secret is generated.
+  const used = fixture({ readback: 'f' }), usedRun = used.run(['ai-w2-issuer-credential'], 'W2');
+  stopped(usedRun, 'FAIL ai-w2-issuer-credential: issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP');
+  assert.ok(!usedRun.calls.some(c => ['openssl', 'ai_db_secret_file', 'install', 'docker'].includes(c[0]!)));
+  // The positive path calls the mounted-file helper with the stage file, never ai_db on stdin.
+  const good = fixture(), ok = good.run(['ai-w2-issuer-credential'], 'W2'); pass(ok);
+  assert.ok(ok.calls.some(c => c[0] === 'ai_db_secret_file' && c[1]!.endsWith('/issuer.sql')));
+  // Only the SCRAM verifier reaches the database; the plaintext stays in issuer.json and issuer-pass.
+  const applied = readFileSync(join(good.root, 'applied.sql'), 'utf8');
+  assert.match(applied, /^ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD 'SCRAM-SHA-256\$4096:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=';\n$/);
+  assert.ok(!applied.includes('d'.repeat(64)), 'the plaintext never goes to the database');
+  assert.ok(!ok.calls.some(c => c[0] === 'ai_db' && c.includes('-')), 'no stdin SQL');
 });
 test('admin-issuer-credential-provisioning / libpq-service-file-bytes: refuses a service file line that is not key=value before any credential is installed', () => {
   const f = fixture();

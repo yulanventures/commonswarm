@@ -811,7 +811,27 @@ chmod 0600 "$PGSERVICE_FILE" "$PGPASS_FILE"
 EDGE_RECYCLE_SERVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_service"])' "$INPUTS_FILE")
 EDGE_RECYCLE_TIMER=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["edge_recycle_timer"])' "$INPUTS_FILE")
 PSQL_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_postgres_image"])' "$INPUTS_FILE")
+# docker run has no -i here (it must not swallow the driver's stdin), so a container never sees stdin: SQL sent on
+# stdin is silently skipped and psql exits 0. ai_db and ai_ro therefore accept ONLY the plan's own exact grammar and
+# refuse everything else before docker runs (exit 2): options -q or -Atq; --command <sql>; --file <path>, the path a
+# plain .sql file under the read-only /proof or /release mounts (never -, /dev/stdin, /dev/fd/*, /proc/*, a cluster of
+# short options, an abbreviation or an = form); and at least one --command or --file from the caller.
+ai_db_grammar() { # caller arguments
+ local sql=0
+ while test $# -gt 0; do
+  case "$1" in
+   -q|-Atq) shift ;;
+   --command) test $# -ge 2 && test -n "$2" || return 1; sql=1; shift 2 ;;
+   --file) test $# -ge 2 || return 1
+    [[ "$2" =~ ^/(proof|release)(/[A-Za-z0-9][A-Za-z0-9_.-]*)+\.sql$ ]] || return 1
+    sql=1; shift 2 ;;
+   *) return 1 ;;
+  esac
+ done
+ test "$sql" = 1
+}
 ai_db() {
+ ai_db_grammar "$@" || { printf 'FAIL ai_db: arguments expected the plan grammar (-q|-Atq, --command SQL, --file /proof-or-/release .sql) got other; SQL on stdin is never used (docker run has no -i); STOP\n' >&2; return 2; }
  docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
   --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
   --volume "$PGSERVICE_FILE:/run/service.conf:ro" --volume "$PGPASS_FILE:/run/pass:ro" \
@@ -819,7 +839,33 @@ ai_db() {
   --volume "$RELEASE_ROOT:/release:ro" --volume "$PROOF_DIR:/proof:ro" \
   --entrypoint psql "$PSQL_IMAGE" -X --set=ON_ERROR_STOP=1 "$@" 2>"$SECRET_STAGE/psql.log"
 }
-ai_ro() { ai_db --command 'SET default_transaction_read_only=on;' "$@"; }
+ai_ro() {
+ ai_db_grammar "$@" || { printf 'FAIL ai_ro: arguments expected the plan grammar (-q|-Atq, --command SQL, --file /proof-or-/release .sql) got other; SQL on stdin is never used (docker run has no -i); STOP\n' >&2; return 2; }
+ ai_db --command 'SET default_transaction_read_only=on;' "$@"
+}
+# Secret SQL: a 0600 regular file owned by this user, resolved (no symlink in its path) inside the resolved
+# SECRET_STAGE, mounted read-only and run with --file; never stdin, argv or env. The session first turns off
+# statement logging and error-statement logging (nonsecret --command), so a failing statement is never logged.
+ai_db_secret_file() { # file
+ local real
+ real=$(python3 -c '
+import os,stat,sys
+f,stage=sys.argv[1],sys.argv[2]
+real=os.path.realpath(f); root=os.path.realpath(stage)
+st=os.lstat(f)
+ok=(os.path.isabs(f) and os.path.normpath(f)==f and real==f and real.startswith(root+"/") and stat.S_ISREG(st.st_mode)
+    and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600 and st.st_size>0)
+print(real if ok else "")
+' "$1" "$SECRET_STAGE" 2>/dev/null) || real=
+ test -n "$real" || { printf 'FAIL ai_db_secret_file: SQL file expected non-empty 0600 regular file of this user resolved inside SECRET_STAGE got other; STOP\n' >&2; return 2; }
+ docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
+  --env PGSERVICE=target --env PGSERVICEFILE=/run/service.conf --env PGPASSFILE=/run/pass \
+  --volume "$PGSERVICE_FILE:/run/service.conf:ro" --volume "$PGPASS_FILE:/run/pass:ro" \
+  --volume /etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro \
+  --volume "$real:/run/secret.sql:ro" \
+  --entrypoint psql "$PSQL_IMAGE" -X --set=ON_ERROR_STOP=1 -Atq \
+  --command 'SET log_statement=none; SET log_min_error_statement=panic;' --file /run/secret.sql 2>"$SECRET_STAGE/psql.log"
+}
 python3 - "$MIGRATE/lib.sh" "$PROOF_DIR/identity.sql" <<'PY'
 import pathlib,sys
 source=pathlib.Path(sys.argv[1]).read_text()
@@ -2230,16 +2276,32 @@ esac
 ai_deadline
 test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
+# The mutation boundary: the role is still NOLOGIN without a password (a rerun after a partial attempt runs
+# ai-w2-issuer-rollback first).
+ISSUER_FRESH=$(ai_ro -Atq --command "SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-credential: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
+test "$ISSUER_FRESH" = t || { printf 'FAIL ai-w2-issuer-credential: issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP\n' >&2; exit 1; }
 openssl rand -hex 32 >"$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password generation expected success got failure; STOP\n' >&2; exit 1; }
 chmod 0600 "$SECRET_STAGE/issuer-password" || { printf 'FAIL ai-w2-issuer-credential: password file mode expected 0600 got failure; STOP\n' >&2; exit 1; }
 python3 - "$SECRET_STAGE" <<'PY'
-import configparser,json,pathlib,re,sys
+import base64,configparser,hashlib,hmac,json,os,pathlib,re,sys
+def scram_verifier(password,salt,iterations=4096):
+    # RFC 5802/7677 SCRAM-SHA-256, computed on the box: PostgreSQL stores a pre-hashed verifier as given, so the
+    # plaintext never reaches the server or any server log.
+    salted=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,iterations)
+    stored=hashlib.sha256(hmac.new(salted,b'Client Key',hashlib.sha256).digest()).digest()
+    server=hmac.new(salted,b'Server Key',hashlib.sha256).digest()
+    b64=lambda x: base64.b64encode(x).decode()
+    return 'SCRAM-SHA-256$'+str(iterations)+':'+b64(salt)+'$'+b64(stored)+':'+b64(server)
 try:
     p=pathlib.Path(sys.argv[1]); value=(p/'issuer-password').read_text().strip()
     assert re.fullmatch('[0-9a-f]{64}',value)
     (p/'issuer.json').write_text(json.dumps({'user':'commonswarm_admin_issuer','password':value})+'\n')
-    # Value is in a stdin SQL file only, never in argv, env or nonsecret proof.
-    (p/'issuer.sql').write_text("SET password_encryption='scram-sha-256'; ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"+value+"';\n")
+    verifier=scram_verifier(value,os.urandom(16))
+    assert re.fullmatch(r'SCRAM-SHA-256\$4096:[A-Za-z0-9+/]{22}==\$[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=',verifier)
+    # Only the verifier goes to the database, from a 0600 mounted file; the readback compares this exact verifier
+    # inside the database, so an earlier attempt's verifier cannot pass.
+    (p/'issuer.sql').write_text("ALTER ROLE commonswarm_admin_issuer LOGIN PASSWORD '"+verifier+"';\n")
+    (p/'issuer-readback.sql').write_text("SELECT rolcanlogin AND rolpassword='"+verifier+"' FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';\n")
     c=configparser.ConfigParser(interpolation=None); c.read(p/'service.conf')
     assert c.has_section('target'); c['target']['user']='commonswarm_admin_issuer'
     # libpq service files take key=value only: no space around the delimiter.
@@ -2250,11 +2312,15 @@ try:
     rows=(p/'pass').read_text().splitlines(); assert len(rows)==1
     parts=rows[0].split(':'); assert len(parts)==5
     (p/'issuer-pass').write_text(':'.join(parts[:3]+['commonswarm_admin_issuer',value])+'\n')
-    for name in ['issuer.json','issuer.sql','issuer-service.conf','issuer-pass']: (p/name).chmod(0o600)
+    for name in ['issuer.json','issuer.sql','issuer-readback.sql','issuer-service.conf','issuer-pass']: (p/name).chmod(0o600)
 except Exception:
     raise SystemExit('FAIL issuer credential preparation; STOP') from None
 PY
-ai_db -q --file - <"$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log" || { printf 'FAIL ai-w2-issuer-credential: issuer ALTER ROLE LOGIN expected success got failure; STOP\n' >&2; exit 1; }
+# The ALTER runs from a read-only mounted file: docker run has no -i, so stdin SQL would be silently skipped (W2b 67aAId).
+ai_db_secret_file "$SECRET_STAGE/issuer.sql" >"$SECRET_STAGE/issuer-alter.log" || { printf 'FAIL ai-w2-issuer-credential: issuer ALTER ROLE LOGIN expected success got failure; STOP\n' >&2; exit 1; }
+# Readback BEFORE any login test: LOGIN with exactly THIS attempt's verifier (only the boolean leaves the database).
+ISSUER_SCRAM=$(ai_db_secret_file "$SECRET_STAGE/issuer-readback.sql") || { printf 'FAIL ai-w2-issuer-credential: issuer verifier readback expected success got failure; STOP\n' >&2; exit 1; }
+test "$ISSUER_SCRAM" = t || { printf 'FAIL ai-w2-issuer-credential: issuer LOGIN with this attempt'"'"'s SCRAM-SHA-256 verifier expected t got %s (ALTER ROLE not applied); STOP\n' "${ISSUER_SCRAM:-empty}" >&2; exit 1; }
 install -o root -g 986 -m 0440 "$SECRET_STAGE/issuer.json" /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: credential install expected success got failure; STOP\n' >&2; exit 1; }
 test "$(stat -c '%a %u %g' /etc/commonswarm-oauth/admin-issuer-database-credentials)" = '440 0 986' || { printf 'FAIL ai-w2-issuer-credential: credential mode expected 440-0-986 got other; STOP\n' >&2; exit 1; }
 docker run --rm --network commonswarm-net --add-host db.commonswarm.internal:172.31.0.10 \
@@ -3193,10 +3259,17 @@ try:
         subprocess.run(['node',str(root/'deploy/supabase-stack/migrate/make-pg-service.mjs')],env=env,stdout=log,stderr=log,check=True)
     for name in ['service.conf','pass']: (stage/name).chmod(0o600)
     assert re.fullmatch('sha256:[0-9a-f]{64}',r['postgres_image'])
-    args=['docker','run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(stage/'service.conf')+':/run/service.conf:ro','--volume',str(stage/'pass')+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--entrypoint','psql',r['postgres_image'],'-X','--set=ON_ERROR_STOP=1','-Atq','--file','-']
+    # docker run has no -i: stdin SQL would be silently skipped, so each statement runs from a read-only mounted
+    # 0600 file in this hook's private stage: a NEW file per call, fully written and closed before docker starts,
+    # never rewritten (a container that outlived its client cannot see a later statement); the stage goes at exit.
+    import tempfile
     def db(sql):
+        fd,name=tempfile.mkstemp(prefix='statement.',suffix='.sql',dir=str(stage))
+        with os.fdopen(fd,'w') as f: f.write(sql)
+        os.chmod(name,0o600)
+        args=['docker','run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(stage/'service.conf')+':/run/service.conf:ro','--volume',str(stage/'pass')+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--volume',name+':/run/statement.sql:ro','--entrypoint','psql',r['postgres_image'],'-X','--set=ON_ERROR_STOP=1','-Atq','--file','/run/statement.sql']
         with (stage/'db.log').open('w') as log:
-            return subprocess.check_output(args,input=sql,text=True,stderr=log).strip()
+            return subprocess.check_output(args,stdin=subprocess.DEVNULL,text=True,stderr=log).strip()
     intent=pathlib.Path('/etc/commonswarm-admin-release/recycle-intent.json')
     def confirm_closed():
         # Independent readback: CLOSED is claimed only when the database says so.
