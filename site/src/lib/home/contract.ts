@@ -28,6 +28,15 @@ export interface Todo {
   state_by: Actor; state_at: IsoTime; comment_count: number;
 }
 export interface TodoRef { todo_id: Uuid; title: string; state: TodoState; due_on: LocalDate | null }
+/** List/queue rows (SERVER-PLAN-AMENDMENTS AM3): no notes, no comments, no gate note; pages of <= 50 that the
+ * store also truncates to a 48 KiB response budget. Details come only from readTodo. */
+export interface TodoSummary {
+  todo_id: Uuid; version: number; title: string; state: TodoState; due_on: LocalDate | null;
+  assignee: Party | null; offer: { offer_id: Uuid; to: Party; decider_user_id: Uuid; start: TodoStart } | null;
+  gate: { kind: TodoGate['kind']; clear: boolean; todo_id: Uuid | null; at: IsoTime | null };
+  queue_position: number | null; comment_count: number; state_at: IsoTime;
+}
+export type QueueSection = 'working' | 'up_next' | 'not_yet' | 'requests';
 
 export type CommentTarget = { kind: 'todo'; id: Uuid } | { kind: 'list' | 'doc' | 'file'; id: string };
 export interface Comment {
@@ -66,7 +75,8 @@ export interface AgentQueue {
   workspace_id: Uuid; principal_id: Uuid; owner_user_id: Uuid;
   accepts_from: 'anyone' | 'owner'; content_access: 'none' | 'read' | 'read_write';
   status: AgentWorkStatus;
-  working: Todo[]; up_next: Todo[]; not_yet: Todo[]; requests: Todo[]; read_at: IsoTime;
+  working: TodoSummary[]; up_next: TodoSummary[]; not_yet: TodoSummary[]; requests: TodoSummary[]; read_at: IsoTime;
+  next_offset: Record<QueueSection, number | null>;
 }
 
 export interface WorkspaceCatchUp {
@@ -97,13 +107,13 @@ export type SteerAction = { kind: 'move'; after_todo_id: Uuid | null } | { kind:
 export interface HomeServer {
   overview(): Promise<HomeOverview>;                                   // rpc swarm_read.home_overview
   activity(workspaceId: Uuid, since: IsoTime, limit: number): Promise<ActivityItem[]>; // newest first
-  listTodos(workspaceId: Uuid, q: { scope: 'open' | 'all'; assignee?: Party; offset: number; limit: number }):
-    Promise<{ todos: Todo[]; next_offset: number | null }>;
+  listTodos(workspaceId: Uuid, q: { scope: 'open' | 'all'; assignee?: Party; offset: number; limit: number /* <= 50 */ }):
+    Promise<{ todos: TodoSummary[]; next_offset: number | null }>;
   readTodo(workspaceId: Uuid, todoId: Uuid, commentOffset?: number):
     Promise<{ todo: Todo; comments: Comment[]; next_comment_offset: number | null }>;
   listComments(workspaceId: Uuid, target: CommentTarget, offset: number, limit: number):
     Promise<{ comments: Comment[]; next_offset: number | null }>;
-  agentQueue(workspaceId: Uuid, principalId: Uuid): Promise<AgentQueue>;
+  agentQueue(workspaceId: Uuid, principalId: Uuid, q?: { section?: QueueSection; offset?: number; limit?: number /* <= 50 */ }): Promise<AgentQueue>;
   createTodo(workspaceId: Uuid, input: { title: string; notes?: string; due_on?: LocalDate | null;
     assign?: AssignInput }, requestId: string): Promise<WriteResult<Todo>>;
   updateTodo(workspaceId: Uuid, input: { todo_id: Uuid; base_version: number; title?: string;
