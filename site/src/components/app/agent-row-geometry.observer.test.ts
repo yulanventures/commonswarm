@@ -13,7 +13,7 @@ assert.ok(style, "LiveDashboard must expose its component stylesheet to the geom
 
 type Geometry = { width: number; listWidth: number; detailWidth: number; rowOverflow: boolean; touchTargets: boolean;
   hostileElements: number; hostileText: boolean; accessMark: string | null; modelValues: (string | null)[];
-  confirmRole: string | null; safeConfirmFocus: boolean; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
+  confirmRole: string | null; safeConfirmFocus: boolean; detailTouchTargets: boolean; closeIconSize: number; backIconSize: number; cancelRestoresOpener: boolean; outerStillOpen: boolean; technicalClosed: boolean };
 
 // CI only: build the production DOM builder rather than recreating obsolete row markup.
 test("A2 rows, details and confirms have usable geometry and preserve plain text", { timeout: 60_000 }, async () => {
@@ -29,7 +29,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       .dashboard [hidden] { display: none !important; }
       ${tokens} ${style}
     </style></head><body><main class="dashboard"><dialog class="dashboard__roster-dialog" data-roster-dialog aria-labelledby="dashboard-roster-title">
-      <header class="dashboard__roster-dialog-head"><h2 id="dashboard-roster-title">People &amp; agents</h2></header>
+      <header class="dashboard__roster-dialog-head"><h2 id="dashboard-roster-title">People &amp; agents</h2><button class="dashboard__icon-button" data-roster-close aria-label="Close People &amp; agents">×</button></header>
       <div class="dashboard__roster-dialog-body"><div class="dashboard__roster-dialog-list" id="roster"></div><section class="pd-detail" id="detail" hidden></section></div>
       <dialog class="pd-confirm" id="confirm"></dialog></dialog></main>
       <script>${script}</script><script>
@@ -44,14 +44,18 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const outer = document.querySelector('[data-roster-dialog]'), roster = document.querySelector('#roster'), detail = document.querySelector('#detail'), confirm = document.querySelector('#confirm');
         const modelValues = [];
         const callbacks = { render: () => PeopleView.renderPeopleDialog(roster, detail, model, state, callbacks), action: () => {}, saveModel: async (_id, value) => { modelValues.push(value); },
-          confirm: (action, _id, opener) => PeopleView.showPeopleConfirmation(confirm, action, agent, opener, async () => {}) };
+          confirm: (action, _id, opener) => PeopleView.showPeopleConfirmation(confirm, action, agent, opener, async () => {}, () => "The result is unknown. Reload to check.") };
         callbacks.render(); outer.showModal();
         const rows = [...roster.querySelectorAll('.pd-agent')];
         const rowOverflow = rows.some(row => row.scrollWidth > row.clientWidth);
-        const touchTargets = [...roster.querySelectorAll('button')].every(button => button.getBoundingClientRect().height >= 44);
+        const visibleButtons = element => [...element.querySelectorAll('button')].filter(button => button.getClientRects().length && getComputedStyle(button).visibility !== 'hidden');
+        const touchTargets = visibleButtons(outer).length > 0 && visibleButtons(outer).every(button => button.getBoundingClientRect().height >= 44);
+        const closeIconSize = parseFloat(getComputedStyle(outer.querySelector('[data-roster-close]')).fontSize);
         const listWidth = outer.getBoundingClientRect().width;
         roster.querySelector('#pd-agent-agent').click();
         const detailWidth = outer.getBoundingClientRect().width;
+        const detailTouchTargets = visibleButtons(detail).length > 0 && visibleButtons(detail).every(button => button.getBoundingClientRect().height >= 44);
+        const backIconSize = parseFloat(getComputedStyle(detail.querySelector('.pd-back-icon')).fontSize);
         const accessMark = roster.querySelector('[data-agent-content-access]').getAttribute('aria-label');
         detail.querySelector('[data-edit-model]').click();
         const form = detail.querySelector('[data-model-editor]'), input = form.querySelector('input');
@@ -59,7 +63,7 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
         const opener = detail.querySelector('[data-remove-agent]'); opener.focus(); opener.click();
         const confirmRole = confirm.getAttribute('role'); const safeConfirmFocus = document.activeElement.textContent === 'Go back';
         confirm.dispatchEvent(new Event('cancel', { cancelable: true, bubbles: true }));
-        const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, hostileElements: document.querySelectorAll('img').length,
+        const metrics = { width: innerWidth, listWidth, detailWidth, rowOverflow, touchTargets, detailTouchTargets, closeIconSize, backIconSize, hostileElements: document.querySelectorAll('img').length,
           hostileText: detail.querySelector('h2').textContent.includes(hostile), accessMark, modelValues, confirmRole, safeConfirmFocus,
           cancelRestoresOpener: document.activeElement === opener, outerStillOpen: outer.open, technicalClosed: !detail.querySelector('details').open };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
@@ -72,7 +76,9 @@ test("A2 rows, details and confirms have usable geometry and preserve plain text
       const encoded = stdout.match(/^\s*(?:<!doctype html>\s*)?<html\b[^>]*\bdata-metrics="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
       assert.ok(encoded, "the production builder must finish its DOM interactions");
       const geometry = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
-      assert.equal(geometry.width, width); assert.equal(geometry.rowOverflow, false); assert.equal(geometry.touchTargets, true);
+      assert.equal(geometry.width, width); assert.equal(geometry.rowOverflow, false); assert.equal(geometry.touchTargets, true, `${width}px visible roster controls meet the 44px minimum`);
+      assert.equal(geometry.detailTouchTargets, true, `${width}px visible detail controls meet the 44px minimum`);
+      for (const size of [geometry.closeIconSize, geometry.backIconSize]) assert.ok(size >= 18 && size <= 20, `${width}px close and back glyphs are readable`);
       assert.ok(Math.abs(geometry.listWidth - (width === 390 ? 390 : 640)) <= 2);
       assert.ok(Math.abs(geometry.detailWidth - (width === 390 ? 390 : 960)) <= 2);
       assert.equal(geometry.hostileElements, 0); assert.equal(geometry.hostileText, true);

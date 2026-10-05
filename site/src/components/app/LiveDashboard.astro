@@ -1191,6 +1191,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     <div class="dashboard__roster-dialog-body">
       <div class="dashboard__roster-dialog-list" data-dialog-agent-list></div>
       <section class="pd-detail" id="pd-detail" aria-labelledby="pd-detail-title" data-people-detail hidden></section>
+      <p class="pd-detail-scroll-cue" data-people-detail-scroll-cue hidden>Scroll to see more details ↓</p>
     </div>
     <section class="dashboard__roster-dialog-members" data-member-details>
       <p class="dashboard__form-error" data-member-error role="alert" hidden></p>
@@ -2311,12 +2312,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     const renderMembers = (): void => { renderDialogRoster(); };
 
     /*
-     * ONE row model, TWO lists. The rail's Pending access details (desktop) and the
-     * Agents dialog section (the only reachable surface at ≤52rem) both render from
-     * a single pendingAccessRows call, so they can never disagree about content,
-     * order, or wording — the lists are mirrors of one state, never two states.
-     * Each Cancel closure captures its list's own error slot. Join codes and
-     * principals with no token are informational rows, so they have no Cancel.
+     * One row model feeds the rail and the People & agents dialog. Each renderer
+     * uses currentPendingAccessRows(); the dialog builds its own Invited section.
+     * Join codes and principals with no token are informational rows with no Cancel.
      */
     const currentPendingAccessRows = () =>
       pendingAccessRows(
@@ -2337,14 +2335,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       renderedPendingAccessKey = pendingAccessKey(rows);
       const total = rows.length;
       const railList = one<HTMLUListElement>("[data-access-list]");
-      const dialogList = one<HTMLUListElement>("[data-dialog-access-list]");
       const active = document.activeElement;
       const focusedPending =
         active instanceof HTMLButtonElement &&
-          (railList?.contains(active) || dialogList?.contains(active)) &&
+          railList?.contains(active) &&
           active.dataset.pendingKind && active.dataset.pendingId
           ? {
-              surface: dialogList?.contains(active) ? "dialog" as const : "rail" as const,
               kind: active.dataset.pendingKind,
               id: active.dataset.pendingId,
             }
@@ -2357,13 +2353,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         details.hidden = sampleMode || total === 0;
         if (details.hidden) details.open = false;
       }
-
-      const dialogSection = one<HTMLElement>("[data-dialog-access-section]");
-      const dialogCount = one<HTMLElement>("[data-dialog-access-count]");
-      const loadNote = one<HTMLElement>("[data-pending-load-note]");
-      if (loadNote) loadNote.hidden = !pendingAgentsLoadFailed;
-      if (dialogCount) dialogCount.textContent = String(total);
-      if (dialogSection) dialogSection.hidden = sampleMode || (total === 0 && !pendingAgentsLoadFailed);
 
       const buildRows = (errorTarget: HTMLElement | null): DocumentFragment => {
         const fragment = document.createDocumentFragment();
@@ -2438,9 +2427,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          disappeared, move focus to a stable control instead of dropping it behind
          a modal or onto <body>. */
       if (focusedPending) {
-        const focusList = focusedPending.surface === "dialog" ? dialogList : railList;
         const replacement = Array.from(
-          focusList?.querySelectorAll<HTMLButtonElement>(
+          railList?.querySelectorAll<HTMLButtonElement>(
             "[data-pending-kind][data-pending-id]",
           ) ?? [],
         ).find((candidate) =>
@@ -2449,8 +2437,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         );
         if (replacement) {
           replacement.focus({ preventScroll: true });
-        } else if (focusedPending.surface === "dialog") {
-          one<HTMLButtonElement>("[data-add-agent-dialog]")?.focus({ preventScroll: true });
         } else if (total > 0) {
           one<HTMLDetailsElement>("[data-access-details]")
             ?.querySelector<HTMLElement>("summary")
@@ -4308,10 +4294,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             receipt: peopleDialogReceipts.get(`${activeWorkspaceId}:${agent.principalId}`) ?? householdReceipts.get(agent.principalId) ?? "" };
         }),
         invites: currentPendingAccessRows().map((row) => {
-          const invitation = pendingInvites.find((invite) => invite.invitationId === row.id);
           const key = accessStatuses.find((entry) => entry.tokenId === row.id);
           return { id: row.id, kind: row.kind, name: row.kind === "pending" && !pendingAgents.find((entry) => entry.principalId === row.id)?.principalName ? "an agent" : row.title,
-            detail: invitation ? `Expires ${formatTime(invitation.expiresAt).relative}` : key ? `Expires ${formatTime(key.expiresAt).relative}` : "Waiting for an agent to connect.",
+            detail: row.kind === "invite" ? row.state.replace(/^Teammate invite/, "Invite sent") : row.state,
             mayCancel: !sampleMode && (row.kind === "invite" ? elevated : row.kind === "agent" && !!me && (elevated || key?.ownerUserId === me.userId)) };
         }),
       };
@@ -4325,10 +4310,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const header = one<HTMLElement>("[data-people-header]");
       if (list) list.inert = pushed; if (header) header.inert = pushed;
       dialog?.setAttribute("aria-labelledby", pushed ? "pd-detail-title" : "dashboard-roster-title");
-      const scroller = pushed ? detail : list;
-      const more = !!scroller && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 8;
-      const footer = one<HTMLElement>("[data-people-scroll-footer]"); if (footer) footer.hidden = !more;
-      const cue = one<HTMLElement>("[data-people-scroll-cue]"); if (cue) cue.textContent = more ? pushed ? "Scroll to see more details ↓" : "Scroll to see more people & agents ↓" : "";
+      const rosterMore = !!list && !pushed && list.scrollHeight - list.clientHeight - list.scrollTop > 8;
+      const footer = one<HTMLElement>("[data-people-scroll-footer]"); if (footer) footer.hidden = !rosterMore;
+      const cue = one<HTMLElement>("[data-people-scroll-cue]"); if (cue) cue.textContent = rosterMore ? "Scroll to see more people & agents ↓" : "";
+      const detailMore = !!detail && !detail.hidden && detail.scrollHeight - detail.clientHeight - detail.scrollTop > 8;
+      const detailCue = one<HTMLElement>("[data-people-detail-scroll-cue]"); if (detailCue) detailCue.hidden = !detailMore;
     };
     const renderDialogRoster = (): void => {
       const list = one<HTMLElement>("[data-dialog-agent-list]"); const detail = one<HTMLElement>("[data-people-detail]");
@@ -4343,7 +4329,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           mark.textContent = "⚠ " + line.slice(line.lastIndexOf(" · ") + 3); counts.append(mark); }
       }
       const workspaceName = one<HTMLElement>("[data-people-workspace]"); if (workspaceName) workspaceName.textContent = workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "";
-      const search = one<HTMLInputElement>("[data-roster-search]"); if (search) search.hidden = model.people.length + model.agents.length <= 10;
+      const search = one<HTMLInputElement>("[data-roster-search]"); if (search) search.hidden = !rosterFilter && model.people.length + model.agents.length + model.invites.length <= 10;
       renderPeopleDialog(list, detail, model, peopleDialogState, { render: renderDialogRoster, action: async (action, id, button, notice) => {
         if (button.disabled) return; button.disabled = true;
         const workspaceId = activeWorkspaceId, userId = session?.user.id;
@@ -4363,7 +4349,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } });
       syncPeopleDialogLayout(); window.requestAnimationFrame(syncPeopleDialogLayout);
     };
-    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string): Promise<void> => {
+    const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
       const selected = peopleDialogState.selected; const query = rosterFilter;
       const userId = session?.user.id;
       const wasOpen = one<HTMLDialogElement>("[data-roster-dialog]")?.open;
@@ -4372,9 +4358,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (receipt && principalId) peopleDialogReceipts.set(`${workspaceId}:${principalId}`, receipt);
       if (wasOpen) { openRosterDialog(); rosterFilter = query; peopleDialogState.selected = selected; renderDialogRoster();
         const search = one<HTMLInputElement>("[data-roster-search]"); if (search) search.value = query;
-        const target = one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${principalId}`) ?? one<HTMLElement>("#dashboard-roster-title");
+        const target = peopleDialogFocusTarget(action, principalId);
         target?.focus({ preventScroll: true }); window.requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true })); }
       const announce = one<HTMLElement>("[data-people-receipt]"); if (announce) announce.textContent = receipt;
+    };
+    const peopleDialogFocusTarget = (action: PeopleDialogAction | undefined, id: string): HTMLElement | null => {
+      if (action === "cancel-invite") {
+        const section = one<HTMLElement>("[data-dialog-access-section]");
+        if (section && !section.hidden) return one<HTMLElement>("#dashboard-roster-pending-title");
+      }
+      if (action === "remove-person" || action === "cancel-invite") {
+        return one<HTMLElement>(".pd-person-disclosure") ?? one<HTMLElement>("#dashboard-roster-title");
+      }
+      return one<HTMLElement>("#pd-detail-title") ?? document.getElementById(`pd-agent-${id}`) ?? one<HTMLElement>("#dashboard-roster-title");
     };
     const peopleDialogAction = async (action: PeopleDialogAction, id: string, button: HTMLButtonElement, notice: HTMLElement): Promise<void> => {
       if (!session || !activeWorkspaceId || !peopleDialogCanAct(peopleDialogModel(), action, id)) throw new Error("This action is no longer available. Go back and check the details.");
@@ -4408,7 +4404,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         else await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
         receipt = row.kind === "invite" ? "Invitation canceled." : "Unused key canceled."; }
       if (activeWorkspaceId !== workspaceId || session?.user.id !== userId) return;
-      await reloadPeopleDialog(workspaceId, id, receipt);
+      await reloadPeopleDialog(workspaceId, id, receipt, action);
     };
     const confirmPeopleDialogAction = (action: PeopleConfirmAction, id: string, opener: HTMLButtonElement): void => {
       const model = peopleDialogModel(); if (!peopleDialogCanAct(model, action, id)) return;
@@ -4418,7 +4414,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       showPeopleConfirmation(confirm, action, item, opener, async (button, notice) => {
         if (workspaceId !== activeWorkspaceId || userId !== session?.user.id) throw new Error("This space has changed. Go back and check the details.");
         await peopleDialogAction(action, id, button, notice);
-      }, () => confirmPeopleDialogAction("turn-off-key", id, opener));
+      }, readableError, () => confirmPeopleDialogAction("turn-off-key", id, opener),
+        () => peopleDialogFocusTarget(action, id)?.focus({ preventScroll: true }));
     };
 
     /*
@@ -15542,7 +15539,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .dashboard__roster-dialog-actions { display: flex; gap: 10px; margin-block-start: 20px; }
   .dashboard__roster-dialog-actions .dashboard__button { border-radius: var(--radius-pill); min-block-size: 44px; }
   .dashboard__roster-dialog-search { inline-size: 100%; min-block-size: 44px; margin-block-start: 12px; padding: 10px 12px; border: 1px solid var(--border-interactive); border-radius: var(--radius); background: var(--canvas); color: var(--text); font: inherit; font-size: 13px; }
-  .dashboard__roster-dialog-body { display: flex; flex: 1; min-block-size: 0; overflow: hidden; }
+  .dashboard__roster-dialog-body { position: relative; display: flex; flex: 1; min-block-size: 0; overflow: hidden; }
   .dashboard__roster-dialog-list { flex: 1; min-inline-size: 0; padding: 20px 24px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
   .has-detail .dashboard__roster-dialog-list { flex: 0 0 400px; padding: 18px 16px; }
   .pd-member-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
@@ -15553,17 +15550,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-person-copy { display: grid; min-inline-size: 0; gap: 3px; font-size: 14px; }
   .pd-person-copy .pd-muted { font-size: 12px; }
   .pd-initials { position: relative; display: grid; place-items: center; flex: 0 0 36px; inline-size: 36px; block-size: 36px; border-radius: 50%; color: var(--canvas); background: var(--text); font-size: 12px; font-weight: 600; }
-  .pd-collapse, .pd-close-detail { display: grid; place-items: center; inline-size: 44px; min-block-size: 44px; flex: none; border: 0; background: transparent; color: var(--text); cursor: pointer; }
+  .dashboard__roster-dialog [data-roster-close] { inline-size: 44px; min-inline-size: 44px; min-block-size: 44px; font-size: 20px; line-height: 1; flex: none; }
+  .pd-collapse, .pd-close-detail { font-size: 20px; line-height: 1; display: grid; place-items: center; inline-size: 44px; min-block-size: 44px; flex: none; border: 0; background: transparent; color: var(--text); cursor: pointer; }
   .pd-agents-list { list-style: none; padding: 0 12px 12px 20px; margin: 0; }
   .pd-agents-list:has(.pd-agent) { border-block-start: 1px solid var(--border); margin-inline: 14px; padding-inline: 6px; }
   .pd-agent { min-inline-size: 0; padding: 4px 0 8px; }
   .pd-agent + .pd-agent { border-block-start: 1px solid var(--border); }
   .pd-agent[data-attention="true"] { margin-block: 4px 8px; padding-inline: 6px; background: var(--warning-dim); border-radius: 12px; }
   .pd-agent-disclosure { display: flex; inline-size: 100%; min-block-size: 44px; align-items: start; gap: 10px; padding: 10px 0 0; border: 0; background: transparent; color: var(--text); text-align: start; cursor: pointer; }
-  .pd-orb { display: grid; place-items: center; inline-size: 28px; block-size: 28px; flex: 0 0 28px; border-radius: 50%; color: #20242c; font-size: 10px; font-weight: 700; background: radial-gradient(circle at 28% 22%,#eeeaff,var(--lavender)); }
-  .pd-orb[data-tint="1"] { background: radial-gradient(circle at 28% 22%,#ffeadc,var(--peach)); }
-  .pd-orb[data-tint="2"] { background: radial-gradient(circle at 28% 22%,#e4f5e9,var(--sage)); }
-  .pd-orb[data-tint="3"] { background: radial-gradient(circle at 28% 22%,#e2f0ff,var(--sky)); }
+  .pd-orb { display: grid; place-items: center; inline-size: 28px; block-size: 28px; flex: 0 0 28px; border-radius: 50%; color: var(--text); font-size: 10px; font-weight: 700; background: radial-gradient(circle at 28% 22%,var(--surface),color-mix(in srgb,var(--lavender) 50%,var(--surface))); }
+  .pd-orb[data-tint="1"] { background: radial-gradient(circle at 28% 22%,var(--surface),color-mix(in srgb,var(--peach) 50%,var(--surface))); }
+  .pd-orb[data-tint="2"] { background: radial-gradient(circle at 28% 22%,var(--surface),color-mix(in srgb,var(--sage) 50%,var(--surface))); }
+  .pd-orb[data-tint="3"] { background: radial-gradient(circle at 28% 22%,var(--surface),color-mix(in srgb,var(--sky) 50%,var(--surface))); }
   .pd-agent-copy { display: grid; gap: 4px; min-inline-size: 0; flex: 1; font-size: 13px; }
   .pd-agent-name-line { display: flex; align-items: center; gap: 6px; min-inline-size: 0; }
   .pd-agent-app { font-size: 12px; color: var(--text-muted); }
@@ -15595,7 +15593,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-portrait { display: flex; align-items: center; gap: 9px; min-block-size: 52px; max-inline-size: 100%; padding: 7px 13px 7px 8px; border-radius: 999px; background: var(--elev-3); color: var(--text); border: 1px solid transparent; font-size: 13px; cursor: pointer; }
   .pd-portrait:hover { border-color: var(--border-strong); }
   .pd-portrait strong { max-inline-size: 120px; }
-  .pd-initials[data-attention="true"]::after { content: ""; position: absolute; inset-inline-end: -1px; inset-block-start: -1px; inline-size: 11px; block-size: 11px; border: 2px solid var(--canvas); border-radius: 50%; background: var(--warning); }
+  .pd-portrait-warning { display: grid; place-items: center; font-size: 12px; line-height: 1; color: var(--warning); position: absolute; inset-inline-end: -1px; inset-block-start: -1px; inline-size: 18px; block-size: 18px; border: 2px solid var(--canvas); border-radius: 50%; background: var(--surface); }
   .pd-portrait-orbs { display: flex; padding-inline-start: 4px; }
   .pd-portrait-orbs .pd-orb { inline-size: 23px; block-size: 23px; flex-basis: 23px; font-size: 0; border: 2px solid var(--elev-3); margin-inline-start: -5px; }
   .pd-empty-person { color: var(--text-muted); font-size: 12px; padding: 0 16px 16px; }
@@ -15605,9 +15603,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-invite { display: flex; gap: 10px; align-items: center; padding: 10px 0; border-block-start: 1px solid var(--border); min-inline-size: 0; }
   .pd-invite-symbol { inline-size: 36px; block-size: 36px; flex: none; display: grid; place-items: center; border: 1px dashed var(--border-interactive); border-radius: 50%; color: var(--text-muted); }
   .pd-invite .pd-muted { font-size: 11px; }
-  .pd-detail { flex: 1; min-inline-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; border-inline-start: 1px solid var(--border); padding: 12px 24px 24px; background: var(--surface); }
+  .pd-detail { flex: 1; min-inline-size: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; border-inline-start: 1px solid var(--border); padding: 12px 24px 48px; background: var(--surface); }
   .pd-detail-top { display: flex; align-items: center; justify-content: space-between; margin-block-end: 8px; }
   .pd-detail-top .pd-text-button { color: var(--text-muted); }
+  .pd-back { display: inline-flex; align-items: center; gap: 6px; min-block-size: 44px; }
+  .pd-back-icon { display: grid; place-items: center; inline-size: 20px; min-block-size: 44px; font-size: 20px; line-height: 1; }
   .pd-detail-identity { display: flex; align-items: center; gap: 14px; margin-block-end: 18px; flex-wrap: wrap; }
   .pd-detail-identity h2 { font-size: 24px; letter-spacing: -.6px; line-height: 1.3; overflow-wrap: anywhere; }
   .pd-detail-identity p { font-size: 13px; margin-block-start: 3px; }
@@ -15641,6 +15641,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   .pd-danger-zone h3, .pd-section-title { color: var(--text-muted); font-size: 12px; }
   .pd-danger-actions { display: flex; gap: 6px 24px; flex-wrap: wrap; }
   .pd-person-agents { padding-inline-start: 18px; }
+  .pd-detail-scroll-cue { position: absolute; inset-inline-end: 0; inset-block-end: 0; inline-size: calc(100% - 400px); padding: 10px 24px; background: var(--surface); border-block-start: 1px solid var(--border); color: var(--text-muted); font-size: 11px; pointer-events: none; }
   .pd-scroll-footer { flex: none; padding: 10px 24px; border-block-start: 1px solid var(--border); background: var(--surface); font-size: 11px; color: var(--text-muted); }
   .dashboard__roster-dialog-members:has(> p:not([hidden])), .dashboard__roster-dialog-members:has(> div:not([hidden])) { padding: 12px 24px; background: var(--surface); }
   .pd-sr-only { position: absolute; inline-size: 1px; block-size: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -15687,9 +15688,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     .pd-attention-list .pd-text-button { font-size: 13px; }
     .has-detail > .dashboard__roster-dialog-head { display: none; }
     .has-detail .dashboard__roster-dialog-list { visibility: hidden; }
-    .pd-detail { position: absolute; inset: 0; border: 0; inline-size: 100%; padding: 20px 16px 32px; z-index: 3; }
-    .has-detail:has(.pd-scroll-footer:not([hidden])) .pd-detail { inset-block-end: 38px; }
-    .has-detail .pd-scroll-footer { position: relative; z-index: 4; }
+    .pd-detail { position: absolute; inset: 0; border: 0; inline-size: 100%; padding: 20px 16px 56px; z-index: 3; }
+    .pd-detail-scroll-cue { inline-size: 100%; z-index: 4; padding: 9px 16px calc(9px + env(safe-area-inset-bottom)); }
     .has-detail .dashboard__roster-dialog-members { position: relative; z-index: 4; }
     .pd-detail-identity h2 { font-size: 26px; }
     .pd-detail-identity .pd-orb { inline-size: 54px; block-size: 54px; flex-basis: 54px; font-size: 18px; }

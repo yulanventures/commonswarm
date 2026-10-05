@@ -779,7 +779,7 @@ test("the Live chip shows only while the feed poll can be armed", () => {
   );
 });
 
-test("the Agents dialog carries Pending access at every width from one renderer", () => {
+test("the People & agents dialog and rail share one pending row model", () => {
   /* The section's hooks, its h3 under the dialog's h2, and a unique labelledby. */
   assert.match(peopleView, /dataset.dialogAccessSection/);
   assert.match(peopleView, /dataset.dialogAccessList/);
@@ -789,7 +789,7 @@ test("the Agents dialog carries Pending access at every width from one renderer"
   assert.equal(peopleView.match(/dashboard-roster-pending-title/g)?.length, 2,
     "the generated id has one title and one aria-labelledby");
 
-  /* ONE row-model call feeds BOTH lists; mirrors of one state, never two states. */
+  /* Both renderers use the same row-model function over the same server state. */
   const render = dashboard.slice(
     dashboard.indexOf("const renderPendingAccess ="),
     dashboard.indexOf("const signalPage ="),
@@ -803,10 +803,13 @@ test("the Agents dialog carries Pending access at every width from one renderer"
   assert.equal(
     rowModel.match(/pendingAccessRows\(/g)?.length,
     1,
-    "one row-model call feeds both lists",
+    "one row-model definition feeds both renderers",
   );
   assert.match(render, /railList\?\.replaceChildren\(buildRows/);
   assert.match(render, /renderDialogRoster\(\);/);
+  const dialogModel = dashboard.slice(dashboard.indexOf("const peopleDialogModel ="), dashboard.indexOf("const syncPeopleDialogLayout ="));
+  assert.match(dialogModel, /invites: currentPendingAccessRows\(\)\.map/);
+  assert.doesNotMatch(render, /dialogList|dialogSection|dialogCount|focusedPending\.surface/, "the rail renderer never captures or rebuilds dialog nodes");
   assert.match(
     render,
     /row\.kind === "invite"[\s\S]*revokeWorkspaceInvitation\(session, uuid\(\), row\.workspaceId, row\.id\)[\s\S]*revokeAgentToken\(session, uuid\(\), row\.workspaceId, row\.id\)/,
@@ -819,11 +822,10 @@ test("the Agents dialog carries Pending access at every width from one renderer"
     /candidate\.dataset\.pendingKind === focusedPending\.kind[\s\S]*candidate\.dataset\.pendingId === focusedPending\.id/,
     "an unchanged refresh restores the exact focused pending action",
   );
-  assert.match(
-    render,
-    /data-add-agent-dialog[\s\S]*focus\(\{ preventScroll: true \}\)/,
-    "a consumed focused row moves focus to a stable control inside the dialog",
-  );
+  assert.match(peopleView, /target \?\? \(focusWithinDetail[\s\S]*data-add-agent-dialog[\s\S]*dashboard-roster-title/,
+    "the dialog renderer repairs replaced controls inside its own focus surface");
+  assert.match(dashboard, /action === "cancel-invite"[\s\S]*dashboard-roster-pending-title[\s\S]*action === "remove-person"[\s\S]*pd-person-disclosure/,
+    "completed person and invite actions focus a remaining person or the Invited heading");
   assert.match(render, /dashboard__pending-access-row/);
   assert.match(
     render,
@@ -841,11 +843,11 @@ test("the Agents dialog carries Pending access at every width from one renderer"
     /\.dashboard__pending-access-row\s*>\s*\.dashboard__text-button\s*\{[\s\S]*white-space:\s*nowrap/,
     "the pending-row action keeps Cancel horizontal at rail and phone widths",
   );
-  /* The dialog is the only pending surface at every width. */
+  /* The dialog pending section stays available at every width. */
   const visibleAtEveryWidth = /\.dashboard__roster-dialog-pending\s*\{\s*display: grid;/;
   // Discriminating control: the pre-item-J base rule hid the section at desktop.
   assert.doesNotMatch(dashboard, /\.dashboard__roster-dialog-pending\s*\{\s*display:\s*none/,
-    "no base rule hides the only pending surface at desktop");
+    "no base rule hides the dialog pending surface at desktop");
   assert.match(
     dashboard,
     visibleAtEveryWidth,

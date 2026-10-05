@@ -135,7 +135,7 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
   if (wakePathMark(input.oldestUnobservedAt, now)) {
     const hosted = input.transport === "hosted_mcp";
     return result("stale-messages", `Hasn’t picked up messages for ${WAKE_STALE_MS / 60_000}+ min`,
-      hosted ? `Open ${input.app ?? "its chat app"} and say: check CommonSwarm.` : "Start its cswarm process.",
+      hosted ? "Open the chat app you use it in and say: check CommonSwarm." : "Start its cswarm process.",
       hosted ? "guide-chat" : "guide-local", input.own, input.own ? null : owner);
   }
   if (horizon - now <= 3 * 86_400_000) {

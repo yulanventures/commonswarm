@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { peopleDialogGroups, peopleDialogCounts, peopleDialogAccessUntil, peopleDialogCanAct, peopleConfirmationCopy } from "./people-dialog-view.ts";
 const person = (id, name, role = "member", own = false, mayRemove = false) => ({ id, name, role, own, mayRemove });
 const agent = (id, ownerId, overrides = {}) => ({ id, ownerId, name: id, app: null, model: null, ownerName: ownerId === "tom" ? "Tom Langridge" : "Mei Langridge", own: false, mayManage: false, liveKey: false, access: null, status: { kind: "active", attention: false, fix: { allowed: false } }, ...overrides });
-const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "invite", name: "friend@example.test", mayCancel: false }], sample: false });
+const model = () => ({ people: [person("tom", "Tom Langridge", "owner"), person("mei", "Mei Langridge")], agents: [agent("Claude", "tom"), agent("Dot", "mei", { app: "ChatGPT" }), agent("Muse", "mei", { model: "Muse Spark" }), agent("Orphan", "gone")], invites: [{ id: "invite", kind: "invite", name: "friend@example.test", detail: "Invite sent · expires in 6 days", mayCancel: false }], sample: false });
 
 test("counts separate people, agents and attention without asserting health", () => {
   const data = model(); data.agents[2].status.attention = true;
@@ -11,7 +11,7 @@ test("counts separate people, agents and attention without asserting health", ()
   data.agents[2].status.attention = false; assert.equal(peopleDialogCounts(data), "2 people · 4 agents");
   assert.equal(peopleDialogCounts({ ...data, people: [data.people[0]], agents: [] }), "1 person · 0 agents");
 });
-test("grouping excludes orphans from people cards and searches names, apps and models", () => {
+test("grouping filters people, agents, invitations and matching attention by names and labels", () => {
   const data = model();
   assert.deepEqual(peopleDialogGroups(data, "").groups.map((group) => [group.person.id, group.agents.map((agent) => agent.id)]), [["tom",["Claude"]],["mei",["Dot","Muse"]]]);
   assert.deepEqual(peopleDialogGroups(data, "").other.map((agent) => agent.id), ["Orphan"]);
@@ -19,6 +19,13 @@ test("grouping excludes orphans from people cards and searches names, apps and m
   assert.deepEqual(peopleDialogGroups(data, "chatgpt").groups[0].agents.map((agent) => agent.id), ["Dot"]);
   assert.deepEqual(peopleDialogGroups(data, "spark").groups[0].agents.map((agent) => agent.id), ["Muse"]);
   assert.equal(peopleDialogGroups(data, "absent").groups.length, 0);
+  assert.deepEqual(peopleDialogGroups(data, "FRIEND@example").invites.map((invite) => invite.id), ["invite"]);
+  assert.deepEqual(peopleDialogGroups(data, "invite sent").invites.map((invite) => invite.id), ["invite"]);
+  assert.deepEqual(peopleDialogGroups(data, "absent").invites, []);
+  data.agents[0].status.attention = true; data.agents[2].status.attention = true;
+  assert.deepEqual(peopleDialogGroups(data, "spark").attention.map((agent) => agent.id), ["Muse"]);
+  assert.deepEqual(peopleDialogGroups(data, "Mei").attention.map((agent) => agent.id), ["Muse"]);
+  assert.deepEqual(peopleDialogGroups(data, "absent").attention, []);
 });
 test("Lists & docs duration names the person who can withdraw, or uses the returned date", () => {
   const value = agent("Muse", "mei", { access: { until: null } });

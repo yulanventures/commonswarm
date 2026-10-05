@@ -8,13 +8,16 @@ test("agent roster Remove is role-aware and confirms identity end", async () => 
     "utf8",
   );
   assert.match(source, /owner_user_id/);
-  assert.match(source, /me\.role === "owner"/);
-  assert.match(source, /me\.role === "admin"/);
+  const view = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
+  const connect = await readFile(new URL("../connect/AgentConnect.astro", import.meta.url), "utf8");
+  assert.match(source, /me\?\.role === "owner"/);
+  assert.match(source, /me\?\.role === "admin"/);
   assert.match(source, /agent\.ownerUserId === me\.userId/);
-  assert.match(source, /dataset\.removeAgent/);
+  assert.match(view, /actionButton\("remove-agent", agent,[^\n]*"data-remove-agent"\)/);
   assert.match(source, /revokeAgentPrincipal\(/);
-  assert.match(source, /ends its identity and every live credential/);
-  assert.match(source, /Clearing a Copy prompt only hides the secret/);
+  assert.match(view, /Its identity and every connection will end/);
+  assert.match(connect, /clearPrompt\(notify = true\)\s*\{\s*this\.finishPrompt\("done", notify\)/);
+  assert.doesNotMatch(connect, /revokeAgentPrincipal|revoke_agent_principal|revokeAgentToken|revoke_agent_token/);
   assert.match(source, /data-agent-error/);
   assert.match(source, /livePromptPrincipalId/);
 });

@@ -96,7 +96,7 @@ test("resume is available to managers, new keys to the agent owner, and sample m
 test("chat-app agents without a key have message guidance and never key states", () => {
   const hosted = peopleAgentStatus(input({ transport: "hosted_mcp", app: "Claude", grant: null, oldestUnobservedAt: at(180000) }), NOW);
   assert.equal(hosted.kind, "stale-messages"); assert.equal(hosted.fix.action, "guide-chat");
-  assert.equal(hosted.sentence, "Open Claude and say: check CommonSwarm.");
+  assert.equal(hosted.sentence, "Open the chat app you use it in and say: check CommonSwarm.");
   const local = peopleAgentStatus(input({ oldestUnobservedAt: at(180000) }), NOW);
   assert.equal(local.sentence, "Start its cswarm process."); assert.equal(local.fix.action, "guide-local");
   assert.equal(peopleAgentStatus(input({ oldestUnobservedAt: at(179999) }), NOW).kind, "active");
