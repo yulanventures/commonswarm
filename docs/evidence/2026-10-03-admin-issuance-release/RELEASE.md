@@ -122,6 +122,334 @@ separately derived from RELEASE_SHA. A mismatch STOPs activation.
 | W6 ACTIVATION + C1 | ai-w6-c1-inputs (Mac producer), ai-w6-preflight (readiness + activation/consent approval); ai-edge-refresh first if the edge receipt is stale; common preflight/open/session; ai-w6-prepare and upload C1-inputs.json; ai-w6-activation-checks (includes the retained recycle archive); ai-w6-client-document, ai-w6-client-verification (reviewed C1 row, issuance still CLOSED); ai-w6-activation-apply (shared remeasure; recycle timer HELD until finish), probes, readback; ai-w6-client-check, download C1-client-check.txt; ai-w6-start, ai-w6-pointer; owner approve immediately before consent; box ai-w6-audit-watch; Mac ai-w6-fence-driver (agent receipt, upload, audit, download, human revoke inside the 240 s fence); agent receipt again, owner withdrawal, upload client-withdraw.json and agent-final.json, fence readback, ai-w6-finish (both paths remeasure into edge-measurement-final.json and re-arm the timer), secret-close, report, ordinary controls, ai-close. Default removes env/overlay and closes cutover, then probes CLOSED; an explicit bound keep-open input retains OPEN (HezLead ruling at this release: keep open). W6 may last 90 minutes. Failure stops forward work; withdraw/revoke any committed grant, ai-emergency-close (re-arms the timer) before the recovered close; every close STOPs while the timer is inactive. |
 | W7 RETIRE | ai-w7-approval; EDGE_MEASUREMENT_FILE = W6's edge-measurement-final.json, or ai-edge-refresh first if a recycle made it stale; common preflight/open/session, ai-w7-preflight (the W6 named by w6_window_id closed success with an exact C1 report), ai-w7-proof, ordinary controls, ai-close. Retirement proof is unchanged and works with issuance OPEN (keep-open) or CLOSED; never restore opaque authentication. |
 
+## Run orders (machine-read by scripts/c1-task-from-plan.mjs)
+
+Each JSON line is one ordered block, an exact `manual:` source passage, or an
+unresolved ambiguity with both readings. `host` is `mac` (persistent M) or
+`box` (persistent B). `when:` quotes start at their stated 1-based plan line;
+input notes are required caller inputs, never shell commands. Conditions are
+literal plan text, not executable expressions. Failure-only entries are branches:
+a failed open aborts and stops forward work. Rollback orders stop before close;
+recovered-close orders include recovery and the sole closer. W6e is the W6
+emergency-close entry point, using W6 inputs, never a new window value.
+Ambiguity entries MUST receive a Lead ruling before their dependent work; no
+reading is selected here. Tasks are review artifacts and execute no commands.
+Nested helpers execute through their existing callers and are not dispatched twice.
+W5 delegates the pinned companion bytes at the same RELEASE_SHA (F); its shared
+preflight/allowlist conflict and recovery closure remain unresolved below.
+
+site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha256":"37bfd2779ec7994ca25353e2f10bc0c6e59969add6a4589cb765caa3407a147b"}
+
+```c1-order W3 forward
+{"id":"ai-inputs","host":"mac"}
+{"id":"ai-gates","host":"mac"}
+{"id":"ai-prepare","host":"mac"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-inputs","host":"box"}
+{"ambiguity":"preopen-live-paths","readings":[{"source":{"line":1396,"quote":": \"${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}\"\n: \"${BOX_ARCHIVE_PATH:?FAIL ai-live-controls: BOX_ARCHIVE_PATH expected open-shell-variable got unset; STOP}\"\n: \"${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}\"\n# The single receipt validator. ai-open's later consumers and W5 run this exact\n# block on retained copies (LIVE_CONTROLS_EXPECT_PHASE set, LIVE_CONTROLS_RETAIN=no).\n# Producer bytes come from the release archive, re-verified against archive_sha256\n# here, never from an extracted tree."},"meaning":"Before-open live controls are named, but validator requires PROOF_DIR before ai-open defines it.","steps":[{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=before; PROOF_DIR and archive required; no staging producer specified"}]},{"source":{"line":1052,"quote":"# Live before receipt and its release-bound consent receipt (SCHEMA section 3);\n# producer bytes come from the checksum-verified uploaded archive."},"meaning":"ai-open validates opening receipts itself; later preflight repeats retained validation.","steps":[]}]}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-open","host":"box"}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":5833,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-db-session","host":"box"}
+{"id":"ai-w3-preflight","host":"box"}
+{"id":"ai-w3-build","host":"box"}
+{"id":"ai-w3-apply","host":"box"}
+{"id":"ai-w3-local-gate","host":"box"}
+{"id":"ai-w3-probes","host":"mac","when":{"line":3127,"quote":"ai-w3-probes only if baseline Caddy already serves that route; W4 makes it\nmandatory with CORS. Baseline route availability is measured, never guessed."}}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W3 rollback
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w3-rollback","host":"box"}
+```
+
+```c1-order W3 recovered-close
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w3-rollback","host":"box"}
+{"ambiguity":"recovered-emergency","readings":[{"source":{"line":5614,"quote":"Recovered close requires emergency env/overlay/DB close and ordinary controls."},"meaning":"Generic recovered close requires emergency close.","steps":[{"id":"ai-emergency-close","host":"box"}]},{"source":{"line":4704,"quote":"# host: HezLead box root; W6–W7 recovery, never reopens opaque authentication"},"meaning":"Emergency block is scoped to W6–W7; W3 rollback restores baseline instead.","steps":[]}]}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W4 forward
+{"id":"ai-inputs","host":"mac"}
+{"id":"ai-gates","host":"mac"}
+{"id":"ai-prepare","host":"mac"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-inputs","host":"box"}
+{"ambiguity":"preopen-live-paths","readings":[{"source":{"line":1396,"quote":": \"${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}\"\n: \"${BOX_ARCHIVE_PATH:?FAIL ai-live-controls: BOX_ARCHIVE_PATH expected open-shell-variable got unset; STOP}\"\n: \"${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}\"\n# The single receipt validator. ai-open's later consumers and W5 run this exact\n# block on retained copies (LIVE_CONTROLS_EXPECT_PHASE set, LIVE_CONTROLS_RETAIN=no).\n# Producer bytes come from the release archive, re-verified against archive_sha256\n# here, never from an extracted tree."},"meaning":"Before-open live controls are named, but validator requires PROOF_DIR before ai-open defines it.","steps":[{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=before; PROOF_DIR and archive required; no staging producer specified"}]},{"source":{"line":1052,"quote":"# Live before receipt and its release-bound consent receipt (SCHEMA section 3);\n# producer bytes come from the checksum-verified uploaded archive."},"meaning":"ai-open validates opening receipts itself; later preflight repeats retained validation.","steps":[]}]}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-open","host":"box"}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":5833,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-db-session","host":"box"}
+{"id":"ai-w1-backup-gate","host":"box"}
+{"id":"ai-w4-preflight","host":"box"}
+{"id":"ai-w4-caddy-candidate","host":"box"}
+{"id":"ai-w4-apply","host":"box"}
+{"id":"ai-w4-probes","host":"mac"}
+{"id":"ai-w4-readback","host":"box"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W4 rollback
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w4-rollback","host":"box"}
+{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":3608,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
+```
+
+```c1-order W4 recovered-close
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-w4-rollback","host":"box"}
+{"id":"ai-w4-timer-recovery","host":"box","input":"Only after timer recovery failure; retains no close claim","when":{"line":3608,"quote":"# host: box root; also available after a failed rollback; not a close receipt"}}
+{"ambiguity":"recovered-emergency","readings":[{"source":{"line":5614,"quote":"Recovered close requires emergency env/overlay/DB close and ordinary controls."},"meaning":"Generic emergency requirement.","steps":[{"id":"ai-emergency-close","host":"box"}]},{"source":{"line":4704,"quote":"# host: HezLead box root; W6–W7 recovery, never reopens opaque authentication"},"meaning":"Emergency is W6–W7; W4 preserves permanent legacy closure and rolls edge/Caddy back.","steps":[]}]}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W5 forward
+{"id":"ai-inputs","host":"mac"}
+{"id":"ai-gates","host":"mac"}
+{"id":"ai-prepare","host":"mac"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new EDGE_MEASUREMENT_OUT; replace EDGE_MEASUREMENT_FILE with successful fresh receipt","when":{"line":827,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-w5-preflight","host":"mac"}
+{"ambiguity":"site-first","readings":[{"source":{"line":4049,"quote":"Run the referenced plan's exact normal order from its Run order table, including\nits error reconciliation and close blocks. Do not shortcut to deploy.sh. W5"},"meaning":"Use exact site normal order; site plan L133 also mandates shared preflight first.","steps":[{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site-release-shared-preflight; STOP: current wrapper allowlist refuses this value"}]},{"source":{"line":4003,"quote":"case \"$SITE_STEP\" in\n site2-plan-inputs|site2-00-source-checkout|site2-01|site2-00-a-close-ingest|site2-00-build-env|site2-02|site2-03-browser-session-preflight|site2-03|site2-03-pin-previous|site2-03-go-record|site2-04|site2-04-reconcile-failure|site2-05|site2-05-browser-acceptance|site2-06|site2-07-pre-pin-manifest-close|site2-07-manifest-close) ;;\n *) echo 'FAIL W5 unknown site step; STOP' >&2; exit 1;;\nesac"},"meaning":"Wrapper allows only site2 steps; omitting shared preflight violates companion plan.","steps":[]}]}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-plan-inputs"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-00-source-checkout"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-01"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-00-a-close-ingest"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-00-build-env"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-02"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-03-browser-session-preflight"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-03"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-03-pin-previous"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-03-go-record"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-05"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-05-browser-acceptance"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close"}
+{"id":"ai-w5-closed","host":"mac"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W5 rollback
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06"}
+{"ambiguity":"site-recovery-close","readings":[{"source":{"line":4049,"quote":"Run the referenced plan's exact normal order from its Run order table, including\nits error reconciliation and close blocks. Do not shortcut to deploy.sh. W5"},"meaning":"Delegate failure/close paths to site plan L123–125.","steps":[{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation"},{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure"}]},{"source":{"line":4738,"quote":"strengthened browser ownership helper; ai-w5-closed verifies that plan's actual\nCLOSE.txt (CLOSED=yes, OUTCOME=released, PIN_RELEASED=yes and manifest digest)."},"meaning":"ai-w5-closed accepts only OUTCOME=released; no C1 recovered W5 receipt is defined.","steps":[{"id":"ai-w5-closed","host":"mac","input":"STOP pending ruling: rolled-back outcome refused"}]}]}
+```
+
+```c1-order W5 recovered-close
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-04-reconcile-failure; only once after failed/disconnected site2-04"}
+{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-06"}
+{"ambiguity":"site-recovery-close","readings":[{"source":{"line":4049,"quote":"Run the referenced plan's exact normal order from its Run order table, including\nits error reconciliation and close blocks. Do not shortcut to deploy.sh. W5"},"meaning":"Delegate failure/close paths to site plan L123–125.","steps":[{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-pre-pin-manifest-close; only failure before pin invocation"},{"id":"ai-w5-reference","host":"mac","input":"SITE_STEP=site2-07-manifest-close; only reconciled deployment/public/browser failure"}]},{"source":{"line":4738,"quote":"strengthened browser ownership helper; ai-w5-closed verifies that plan's actual\nCLOSE.txt (CLOSED=yes, OUTCOME=released, PIN_RELEASED=yes and manifest digest)."},"meaning":"ai-w5-closed accepts only OUTCOME=released; no C1 recovered W5 receipt is defined.","steps":[{"id":"ai-w5-closed","host":"mac","input":"STOP pending ruling: rolled-back outcome refused"}]}]}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W6 forward
+{"id":"ai-w6-activation-approval","host":"mac"}
+{"host":"mac","manual":{"line":4763,"quote":"- **BROWSER-READY** (`/Users/yulanbot/work/BROWSER-READY`, Mac). Producer: HezLead\n  on Tom's unlocked Mac, by `touch` AFTER the W5 close at this release and\n  shortly before the W6 open. Contract: a regular non-symlink file; only its\n  modification time matters (newer than the W5 `closed.txt` time and not in the\n  future: ai-w6-readiness, ai-w6-preflight, ai-open). Content is ignored. A file\n  touched before the W5 close STOPs W6; touch it again after the close."}}
+{"id":"ai-w6-c1-inputs","host":"mac"}
+{"id":"ai-w6-preflight","host":"mac"}
+{"id":"ai-inputs","host":"mac"}
+{"id":"ai-gates","host":"mac"}
+{"id":"ai-prepare","host":"mac"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-inputs","host":"box"}
+{"ambiguity":"preopen-live-paths","readings":[{"source":{"line":1396,"quote":": \"${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}\"\n: \"${BOX_ARCHIVE_PATH:?FAIL ai-live-controls: BOX_ARCHIVE_PATH expected open-shell-variable got unset; STOP}\"\n: \"${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}\"\n# The single receipt validator. ai-open's later consumers and W5 run this exact\n# block on retained copies (LIVE_CONTROLS_EXPECT_PHASE set, LIVE_CONTROLS_RETAIN=no).\n# Producer bytes come from the release archive, re-verified against archive_sha256\n# here, never from an extracted tree."},"meaning":"Before-open live controls are named, but validator requires PROOF_DIR before ai-open defines it.","steps":[{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=before; PROOF_DIR and archive required; no staging producer specified"}]},{"source":{"line":1052,"quote":"# Live before receipt and its release-bound consent receipt (SCHEMA section 3);\n# producer bytes come from the checksum-verified uploaded archive."},"meaning":"ai-open validates opening receipts itself; later preflight repeats retained validation.","steps":[]}]}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-w6-readiness-transfer","host":"mac"}
+{"id":"ai-edge-receipt","host":"box"}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; new output; use fresh receipt","when":{"line":827,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-open","host":"box"}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":5833,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-db-session","host":"box"}
+{"id":"ai-w6-prepare","host":"mac"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-inputs.json; box C1_INPUTS_FILE=$PROOF_DIR/C1-inputs.json"}
+{"id":"ai-w6-activation-checks","host":"box"}
+{"id":"ai-w6-client-document","host":"box"}
+{"id":"ai-w6-client-verification","host":"box"}
+{"id":"ai-w6-readiness","host":"box"}
+{"id":"ai-w6-activation-apply","host":"box"}
+{"id":"ai-w6-activation-probes","host":"mac"}
+{"id":"ai-w6-activation-readback","host":"box"}
+{"id":"ai-w6-client-check","host":"box"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=download; C1_TRANSFER_FILE=C1-client-check.txt"}
+{"id":"ai-w6-start","host":"mac"}
+{"id":"ai-w6-pointer","host":"mac"}
+{"ambiguity":"pointer-recovery","readings":[{"source":{"line":5057,"quote":"if pointer.exists() or pointer.is_symlink():\n    raise SystemExit('FAIL ai-w6-pointer: smoke pointer expected absent got present; an earlier W6 left it: run ai-w6-secret-close with that window\\'s C1_PROOF_DIR, then retry; STOP')"},"meaning":"Earlier pointer requires earlier window cleanup, then retry pointer.","steps":[{"id":"ai-w6-secret-close","host":"mac","input":"Earlier window's C1_PROOF_DIR; only stopped runner; do not remove another window's pointer by hand"},{"id":"ai-w6-pointer","host":"mac","input":"Current window after prior-window cleanup; restore current variables"}]},{"source":{"line":453,"quote":"After any failure STOP forward work and record the step and fixed failure code in\nLOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,\ntoken/proof/callback bodies, headers, cookies or request URLs. Private tool\ndiagnostics live only in SECRET_STAGE and are removed at close. Unknown COMMIT\nor command outcome requires read-only reconciliation, never automatic retry."},"meaning":"Failure STOPs forward work; unknown outcome never retries automatically.","steps":[]}]}
+{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=approve; immediately before separately assigned consent"}
+{"ambiguity":"audit-wait","readings":[{"source":{"line":490,"quote":"4. **No box shell waits on a future file.** A box shell never polls for a\n   receipt or file that a later step or another host will produce. A block that\n   needs such a file runs only after the file exists; a worker whose local ssh\n   dies must not leave a box-side shell behind (W2b close, 2026-10-04)."},"meaning":"Never wait on a future file in B; audit can run once agent.json exists.","steps":[{"id":"ai-w6-audit","host":"box","input":"Only once uploaded agent.json exists; C1_AGENT_RECEIPT=$PROOF_DIR/agent.json; no reviewed Mac driver dispatch is supplied"}]},{"source":{"line":5169,"quote":"# host: HezLead box root shell (W6 session), started right after the owner approval and before consent; waits for agent.json, then runs ai-w6-audit"},"meaning":"Start watcher after approval and before consent, concurrently with Mac fence driver.","steps":[{"id":"ai-w6-audit-watch","host":"box"}]}]}
+{"host":"mac","manual":{"line":5102,"quote":"HezLead's browser worker reads the pointer, waits for the 0600 authorize file,\nrefuses an expired pointer, follows consent_choices exactly (including workspace, scopes and home), performs fresh full-account\nsecond confirmation, then atomically writes the full callback URL as 0600 to\nthe secret callback path without logging it. This is a separate browser-worker\nassignment; this plan never launches the installed Chrome app. HezLead starts"}}
+{"ambiguity":"withdraw-before-revoke","readings":[{"source":{"line":4942,"quote":"reporting. Upload client-withdraw.json before revoke and agent-final.json after the same runner completes, before finish; after report/cleanup, upload C1.json and C1-cleanup.txt for W6 close."},"meaning":"Upload withdrawal before revoke; conflicts with block refusing a pre-existing withdrawal.","steps":[{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw"},{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json"}]},{"source":{"line":5159,"quote":"human-revoke-recovery.json, never as C1 refusal proof. In ai-w6-human-revoke the human revoke verb fences the grant,\nthen the fence file is written and the runner proves the refused follow-up. The owner's approval withdrawal comes\nAFTER the runner exits: withdrawal itself fences every family of that\nowner/client/version (guard_owner_approval), so it must not precede the human\nrevoke it is meant to follow. Report order: approval_at <= revoked_at <=\nwithdrawn_at."},"meaning":"Revoke first, await refused follow-up/runner exit, then withdraw.","steps":[]}]}
+{"id":"ai-w6-fence-driver","host":"mac","input":"Whole fence chain; owns agent receipt/upload, audit download and normal human revoke; no other owner-session caller"}
+{"id":"ai-w6-agent-receipt","host":"mac"}
+{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; after runner exits"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=agent-final.json"}
+{"id":"ai-w6-fence-readback","host":"box"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=download; C1_TRANSFER_FILE=C1-fence.txt"}
+{"id":"ai-w6-finish","host":"box","input":"Explicit bound keep_open input controls branch; final measurement for W7; timer rearmed on exit"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=download; C1_TRANSFER_FILE=C1-finish.json"}
+{"id":"ai-w6-secret-close","host":"mac"}
+{"id":"ai-w6-report","host":"mac"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1.json"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W6 rollback
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":504,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; only existing approval; after recovery revoke"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":5415,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
+{"ambiguity":"recovered-cleanup-retry","readings":[{"source":{"line":5742,"quote":"if test \"$WINDOW\" = W6 && test \"$CLOSE_RESULT\" = recovered && test -f \"$PROOF_DIR/C1-client-check.txt\"; then\n test -f \"$PROOF_DIR/C1-cleanup.txt\" || { printf 'FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP\\n' >&2; exit 1; }"},"meaning":"Recovered close with client-check requires cleanup and upload before retry.","steps":[{"id":"ai-w6-secret-close","host":"mac","input":"C1_PROOF_DIR from this window; runner stopped"},{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt"},{"id":"ai-close","host":"box","input":"Retry CLOSE_RESULT=recovered only after cleanup upload"}]},{"source":{"line":5417,"quote":": \"${C1_PROOF_DIR:?}\"\nC1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat \"$C1_PROOF_DIR/secret-stage.path\")}\nC1_RUNNER_PID=${C1_RUNNER_PID:-$(cat \"$C1_PROOF_DIR/runner.pid\")}"},"meaning":"Cleanup needs secret-stage.path/runner.pid created by start, but client-check can precede start; no pre-start cleanup producer is defined.","steps":[]}]}
+```
+
+```c1-order W6 recovered-close
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":504,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; only existing approval; after recovery revoke"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":5415,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
+{"ambiguity":"recovered-cleanup-retry","readings":[{"source":{"line":5742,"quote":"if test \"$WINDOW\" = W6 && test \"$CLOSE_RESULT\" = recovered && test -f \"$PROOF_DIR/C1-client-check.txt\"; then\n test -f \"$PROOF_DIR/C1-cleanup.txt\" || { printf 'FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP\\n' >&2; exit 1; }"},"meaning":"Recovered close with client-check requires cleanup and upload before retry.","steps":[{"id":"ai-w6-secret-close","host":"mac","input":"C1_PROOF_DIR from this window; runner stopped"},{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt"},{"id":"ai-close","host":"box","input":"Retry CLOSE_RESULT=recovered only after cleanup upload"}]},{"source":{"line":5417,"quote":": \"${C1_PROOF_DIR:?}\"\nC1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat \"$C1_PROOF_DIR/secret-stage.path\")}\nC1_RUNNER_PID=${C1_RUNNER_PID:-$(cat \"$C1_PROOF_DIR/runner.pid\")}"},"meaning":"Cleanup needs secret-stage.path/runner.pid created by start, but client-check can precede start; no pre-start cleanup producer is defined.","steps":[]}]}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W6e forward
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+```
+
+```c1-order W6e rollback
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+```
+
+```c1-order W6e recovered-close
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+{"id":"ai-w6-human-revoke","host":"mac","input":"Only committed grant needing recovery; C1_RECOVERY_REVOKE=1; obtain run-specific C1-audit.json first; saved request ID must be reconciled after unknown outcome; cleanup never C1 proof","when":{"line":504,"quote":"7. **Missed fence.** If the W6 fence driver misses its cutoff (the normal\n   human revoke is refused after the cutoff), the close is pre-decided:\n   ai-emergency-close, then the recovery revoke (`C1_RECOVERY_REVOKE=1`,\n   recorded as `human-revoke-recovery.json`, never as C1 refusal proof), then\n   the owner withdraw, then a recovered close, then report STOP. Keep-open is"}}
+{"id":"ai-w6-owner-client-command","host":"mac","input":"C1_CLIENT_ACTION=withdraw; only existing approval; after recovery revoke"}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=client-withdraw.json; only produced receipt"}
+{"id":"ai-w6-secret-close","host":"mac","input":"Only if runner/stage exist and runner has stopped","when":{"line":5415,"quote":"# host: HezLead Mac; success or stopped runner, guarded private cleanup"}}
+{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt; only produced cleanup receipt"}
+{"ambiguity":"recovered-cleanup-retry","readings":[{"source":{"line":5742,"quote":"if test \"$WINDOW\" = W6 && test \"$CLOSE_RESULT\" = recovered && test -f \"$PROOF_DIR/C1-client-check.txt\"; then\n test -f \"$PROOF_DIR/C1-cleanup.txt\" || { printf 'FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP\\n' >&2; exit 1; }"},"meaning":"Recovered close with client-check requires cleanup and upload before retry.","steps":[{"id":"ai-w6-secret-close","host":"mac","input":"C1_PROOF_DIR from this window; runner stopped"},{"id":"ai-w6-transfer","host":"mac","input":"C1_TRANSFER_DIRECTION=upload; C1_TRANSFER_FILE=C1-cleanup.txt"},{"id":"ai-close","host":"box","input":"Retry CLOSE_RESULT=recovered only after cleanup upload"}]},{"source":{"line":5417,"quote":": \"${C1_PROOF_DIR:?}\"\nC1_SECRET_STAGE=${C1_SECRET_STAGE:-$(cat \"$C1_PROOF_DIR/secret-stage.path\")}\nC1_RUNNER_PID=${C1_RUNNER_PID:-$(cat \"$C1_PROOF_DIR/runner.pid\")}"},"meaning":"Cleanup needs secret-stage.path/runner.pid created by start, but client-check can precede start; no pre-start cleanup producer is defined.","steps":[]}]}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W7 forward
+{"id":"ai-w7-approval","host":"mac"}
+{"id":"ai-inputs","host":"mac"}
+{"id":"ai-gates","host":"mac"}
+{"id":"ai-prepare","host":"mac"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-inputs","host":"box"}
+{"ambiguity":"preopen-live-paths","readings":[{"source":{"line":1396,"quote":": \"${CONSENT_RECEIPT_FILE:?FAIL ai-live-controls: CONSENT_RECEIPT_FILE expected absolute-regular-file got unset; STOP}\"\n: \"${BOX_ARCHIVE_PATH:?FAIL ai-live-controls: BOX_ARCHIVE_PATH expected open-shell-variable got unset; STOP}\"\n: \"${PROOF_DIR:?FAIL ai-live-controls: PROOF_DIR expected open-shell-variable got unset; STOP}\"\n# The single receipt validator. ai-open's later consumers and W5 run this exact\n# block on retained copies (LIVE_CONTROLS_EXPECT_PHASE set, LIVE_CONTROLS_RETAIN=no).\n# Producer bytes come from the release archive, re-verified against archive_sha256\n# here, never from an extracted tree."},"meaning":"Before-open live controls are named, but validator requires PROOF_DIR before ai-open defines it.","steps":[{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=before; PROOF_DIR and archive required; no staging producer specified"}]},{"source":{"line":1052,"quote":"# Live before receipt and its release-bound consent receipt (SCHEMA section 3);\n# producer bytes come from the checksum-verified uploaded archive."},"meaning":"ai-open validates opening receipts itself; later preflight repeats retained validation.","steps":[]}]}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-edge-receipt","host":"box","input":"EDGE_MEASUREMENT_FILE=W6 edge-measurement-final.json"}
+{"id":"ai-edge-refresh","host":"box","input":"Only stale receipt; retain new receipt and use it","when":{"line":827,"quote":"ai-close. Before a W5/W6/W7 open whose receipt is stale, HezLead runs\n`ai-edge-refresh`, which owns the timer for that step only and always re-arms it."}}
+{"id":"ai-box-preflight","host":"box"}
+{"id":"ai-open","host":"box"}
+{"id":"ai-open-abort","host":"box","input":"Failure branch only: no production operation occurred; STOP forward order after abort","when":{"line":5833,"quote":"# host: box root; no production operation occurred before failed open"}}
+{"id":"ai-db-session","host":"box"}
+{"id":"ai-w7-preflight","host":"box"}
+{"id":"ai-w7-proof","host":"box"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=after; use independently produced after receipt and matching consent receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=success"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+```c1-order W7 rollback
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+```
+
+```c1-order W7 recovered-close
+{"id":"ai-db-session","host":"box","input":"Only if original box shell was lost; use exactly one new persistent root shell; recover existing protected window variables, never ai-open","when":{"line":484,"quote":"   blocks run in M. The rule applies to forward runs AND recovered closes. If\n   the box shell is lost, STOP: a recovered close opens one new persistent root\n   shell, re-runs ai-db-session in it, and runs the recovery blocks there."}}
+{"id":"ai-emergency-close","host":"box"}
+{"id":"ai-ordinary-probes","host":"mac"}
+{"id":"ai-live-controls","host":"box","input":"LIVE_CONTROLS_EXPECT_PHASE=recovery; independently produced recovery receipt"}
+{"host":"box","manual":{"line":487,"quote":"3. **One closer.** A window has exactly one closer: the shell that runs\n   ai-close. Before any close (forward or recovered), no other shell, worker or\n   script may still act on the window. If one does, stop it first and record it.\n4. **No box shell waits on a future file.** A box shell never polls for a"}}
+{"id":"ai-close","host":"box","input":"CLOSE_RESULT=recovered; existing proof/secret paths; every embedded rollback outcome check must pass"}
+{"host":"mac","manual":{"line":5866,"quote":"assignment. Every close is recorded in the operator's LOG.md with actual\nstart/end, identities, gate/probe receipts, approved rollback decision and\nsecret cleanup outcome. This preparation LOG contains no execution claims."}}
+{"id":"ai-mac-close","host":"mac"}
+```
+
+Not run by a window (common helpers, called internally, or outside W3–W7):
+
+not-run: {"id":"ai-extract","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-recycle-inventory","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-edge-remeasure","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-backup-gate-check","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-w2-stage-probes","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-preflight","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-backfill","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-measure","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-between-probes","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-revoke-probes","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-apply","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-reconcile","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-probes","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-issuer-credential","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2-issuer-rollback","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2b-forward-catalogs","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2b-preflight","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-w2b-proof-check","reason":"W1/W2/W2b are outside this section"}
+not-run: {"id":"ai-release-aside","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-timer-guard","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-recycle-hook","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-recycle-install","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-recycle-rollback","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-w6-issuer-live","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-w6-activation-rollback","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+not-run: {"id":"ai-w6-closed-gate-probe","reason":"Helper used by an existing marked block or outside-window preparation; execute only through its stated caller"}
+
 After any failure STOP forward work and record the step and fixed failure code in
 LOG.md. Do not print exceptions, SQL result rows, docker inspect, resolved env,
 token/proof/callback bodies, headers, cookies or request URLs. Private tool
