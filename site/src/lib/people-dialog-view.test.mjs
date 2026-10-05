@@ -20,7 +20,8 @@ test("grouping filters people, agents, invitations and matching attention by nam
   assert.deepEqual(peopleDialogGroups(data, "spark").groups[0].agents.map((agent) => agent.id), ["Muse"]);
   assert.equal(peopleDialogGroups(data, "absent").groups.length, 0);
   assert.deepEqual(peopleDialogGroups(data, "FRIEND@example").invites.map((invite) => invite.id), ["invite"]);
-  assert.deepEqual(peopleDialogGroups(data, "invite sent").invites.map((invite) => invite.id), ["invite"]);
+  assert.deepEqual(peopleDialogGroups(data, "invite sent").invites, []);
+  assert.deepEqual(peopleDialogGroups(data, "re").invites, []);
   assert.deepEqual(peopleDialogGroups(data, "absent").invites, []);
   data.agents[0].status.attention = true; data.agents[2].status.attention = true;
   assert.deepEqual(peopleDialogGroups(data, "spark").attention.map((agent) => agent.id), ["Muse"]);

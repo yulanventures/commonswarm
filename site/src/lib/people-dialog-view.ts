@@ -31,7 +31,7 @@ export function peopleDialogGroups(model: PeopleDialogModel, query: string) {
     agent.ownerId === person.id && (!needle || person.name.toLocaleLowerCase().includes(needle) || matches(agent))) }))
     .filter(({ person, agents }) => !needle || person.name.toLocaleLowerCase().includes(needle) || agents.length);
   const other = model.agents.filter((agent) => !model.people.some((person) => person.id === agent.ownerId) && (!needle || matches(agent)));
-  const invites = model.invites.filter((invite) => !needle || invite.name.toLocaleLowerCase().includes(needle) || invite.detail?.toLocaleLowerCase().includes(needle));
+  const invites = model.invites.filter((invite) => !needle || invite.name.toLocaleLowerCase().includes(needle));
   const attention = [...groups.flatMap((group) => group.agents), ...other].filter((agent) => agent.status.attention);
   return { groups, other, invites, attention };
 }
@@ -87,6 +87,17 @@ function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, clas
 function button(doc: Document, text: string, click: (button: HTMLButtonElement) => void, className = "pd-text-button") {
   const element = node(doc, "button", className, text); element.type = "button";
   element.addEventListener("click", () => click(element)); return element;
+}
+function icon(doc: Document, kind: "close" | "back" | "invite") {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", kind === "back" ? "pd-icon pd-back-icon" : "pd-icon");
+  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
+  const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", kind === "close" ? "M6 6l12 12M18 6L6 18" : kind === "back" ? "M14 6l-6 6 6 6" : "M4 6h16v12H4zM4 7l8 6 8-6");
+  svg.append(path); return svg;
 }
 function orb(doc: Document, agent: PeopleDialogAgent, index: number) {
   const element = node(doc, "span", "pd-orb", letters(agent.name));
@@ -205,13 +216,18 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const personButton = button(doc, "", () => select("person", person.id), "pd-person-disclosure"); personButton.id = `pd-person-${person.id}`; personButton.dataset.pdFocus = `person-${person.id}`;
       personButton.setAttribute("aria-expanded", String(state.selected?.type === "person" && state.selected.id === person.id)); personButton.setAttribute("aria-controls", detail.id);
       const face = node(doc, "span", "pd-initials", personLetters(person.name)); face.setAttribute("aria-hidden", "true");
-      const copy = node(doc, "span", "pd-person-copy"); const name = node(doc, "strong", "pd-ellipsis", person.name); name.title = person.name;
+      const copy = node(doc, "span", "pd-person-copy"); const name = node(doc, "strong", "pd-person-name", person.name); name.title = person.name;
       copy.append(name, node(doc, "span", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`)); personButton.append(face, copy); head.append(personButton);
       if (agents.length) { const toggle = button(doc, state.collapsed.has(person.id) ? "›" : "⌄", () => { state.collapsed.has(person.id) ? state.collapsed.delete(person.id) : state.collapsed.add(person.id); callbacks.render();
         root.querySelector<HTMLElement>(`[data-pd-focus="collapse-${person.id}"]`)?.focus(); }, "pd-collapse");
         toggle.dataset.pdFocus = `collapse-${person.id}`; toggle.setAttribute("aria-label", `${state.collapsed.has(person.id) ? "Show" : "Hide"} ${person.name}’s agents`);
         toggle.setAttribute("aria-expanded", String(!state.collapsed.has(person.id))); toggle.setAttribute("aria-controls", `pd-group-${person.id}`); head.append(toggle); }
-    } else head.append(node(doc, "h3", "", "Other agents"));
+    } else {
+      const face = node(doc, "span", "pd-initials pd-neutral-avatar"); face.setAttribute("aria-hidden", "true");
+      const copy = node(doc, "div", "pd-person-copy");
+      copy.append(node(doc, "h3", "pd-person-name", "Other agents"), node(doc, "span", "pd-muted", "Their owner is no longer a member"));
+      head.append(face, copy);
+    }
     element.append(head);
     const list = node(doc, "ul", "pd-agents-list"); if (person) list.id = `pd-group-${person.id}`;
     list.hidden = !!person && state.collapsed.has(person.id); agents.forEach((agent) => list.append(agentRow(agent))); element.append(list);
@@ -235,8 +251,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const count = node(doc, "span", "", String(invites.length)); count.dataset.dialogAccessCount = ""; invitedTitle.append(count);
   const inviteList = node(doc, "ul", "pd-invite-list"); inviteList.dataset.dialogAccessList = "";
   for (const invite of invites) {
-    const row = node(doc, "li", "pd-invite"); const symbol = node(doc, "span", "pd-invite-symbol", "↗"); symbol.setAttribute("aria-hidden", "true");
-    const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "invite" ? invite.name : `Key for ${invite.name} not used yet`); name.title = name.textContent ?? "";
+    const row = node(doc, "li", "pd-invite"); const symbol = node(doc, "span", "pd-invite-symbol", invite.kind === "invite" ? undefined : "↗"); symbol.setAttribute("aria-hidden", "true");
+    if (invite.kind === "invite") symbol.append(icon(doc, "invite"));
+    const copy = node(doc, "span", "pd-agent-copy"); const name = node(doc, "strong", "pd-ellipsis", invite.kind === "agent" ? `Key for ${invite.name} not used yet` : invite.name); name.title = name.textContent ?? "";
     copy.append(name, node(doc, "span", "pd-muted", invite.detail)); row.append(symbol, copy);
     if (peopleDialogCanAct(model, "cancel-invite", invite.id)) { const cancel = button(doc, "Cancel", (opener) => callbacks.confirm("cancel-invite", invite.id, opener));
       cancel.dataset.pendingKind = invite.kind; cancel.dataset.pendingId = invite.id; cancel.dataset.pdFocus = `pending-${invite.kind}-${invite.id}`; cancel.setAttribute("aria-label", `Cancel ${invite.kind === "invite" ? "invite" : "unused key"} for ${invite.name}`); row.append(cancel); }
@@ -252,9 +269,9 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   if (state.selected && selected) {
     const top = node(doc, "div", "pd-detail-top");
     const backButton = button(doc, "", back, "pd-text-button pd-back");
-    const backIcon = node(doc, "span", "pd-back-icon", "‹"); backIcon.setAttribute("aria-hidden", "true");
-    backButton.append(backIcon, node(doc, "span", "", "Back to everyone"));
-    top.append(backButton, button(doc, "×", back, "pd-close-detail")); top.lastElementChild?.setAttribute("aria-label", `Close ${selected.name} details`); detail.append(top);
+    backButton.append(icon(doc, "back"), node(doc, "span", "", "Back to everyone"));
+    const closeButton = button(doc, "", back, "pd-close-detail"); closeButton.append(icon(doc, "close"));
+    closeButton.setAttribute("aria-label", `Close ${selected.name} details`); top.append(backButton, closeButton); detail.append(top);
     const title = node(doc, "h2", "", selected.name); title.id = "pd-detail-title"; title.tabIndex = -1;
     const identity = node(doc, "div", "pd-detail-identity");
     if (state.selected.type === "agent") {

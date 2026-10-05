@@ -54,6 +54,17 @@ function ago(ageMs: number): string {
   return `${days} ${days === 1 ? "day" : "days"} ago`;
 }
 
+/** Dialog activity uses whole words and elapsed days, also for its Last active fact. */
+export function peopleAgentActivityTime(value: string, now = Date.now()): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Time unavailable";
+  const minutes = Math.floor(Math.max(0, now - timestamp) / 60_000);
+  if (minutes < 1) return "just now";
+  const [amount, unit] = minutes < 60 ? [minutes, "minute"]
+    : minutes < 1440 ? [Math.floor(minutes / 60), "hour"] : [Math.floor(minutes / 1440), "day"];
+  return `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
+}
+
 export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentStatus {
   const hosted = input.transport === "hosted_mcp";
   let receive: string | null = hosted ? "Checks messages when you chat with it." : input.turnOnly ? "Checks messages each time it starts a task." : null;
@@ -143,7 +154,9 @@ export function peopleAgentStatus(input: PeopleAgentStatusInput, now = Date.now(
     return keyFix("key-ends-soon", `Key ends in ${days} ${days === 1 ? "day" : "days"}`);
   }
   if (grant?.newHostAt) return result("new-computer", "Used from a new computer", "Keep using it if you recognize this computer.");
-  return result(base.kind, base.chip, base.receive ?? "Message checks have not been reported.", null, false, null, false);
+  const label = base.kind === "active" && base.chip !== "Active now" && input.presence?.last_command_at
+    ? `Active ${peopleAgentActivityTime(input.presence.last_command_at, now)}` : base.chip;
+  return result(base.kind, label, base.receive ?? "Message checks have not been reported.", null, false, null, false);
 }
 
 export function agentResumeReceipt(name: string): string {

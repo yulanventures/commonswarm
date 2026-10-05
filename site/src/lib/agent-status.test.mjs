@@ -56,7 +56,7 @@ test("revoked and suspended outrank activity; no presence row claims nothing", (
 });
 
 
-import { peopleAgentStatus, agentResumeReceipt } from "./agent-status.ts";
+import { peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "./agent-status.ts";
 const key = (overrides = {}) => ({ kind: "standing", horizonExpiresAt: null, boundDeviceId: "computer", lastUsedAt: at(60_000), issuedAt: at(30 * 86400000), newHostAt: null, suspendedAt: null, revokedAt: null, ...overrides });
 const input = (overrides = {}) => ({ transport: "local", ownerName: "Mei Langridge", own: true, mayManage: true, sample: false, presence: row({ last_command_at: at(1000) }), ...overrides });
 
@@ -74,7 +74,9 @@ test("dialog status precedence: revoked, ended, paused, messages, expiry, new co
     ["idle", "Not active yet", { presence: null }],
     ["connected", "Connected", { presence: undefined }],
     ["active", "Active now", {}],
-    ["active", "Active 2 h ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
+    ["active", "Active 2 hours ago", { presence: row({ last_command_at: at(2 * 3600000) }) }],
+    ["active", "Active 10 hours ago", { presence: row({ last_command_at: at(10 * 3600000) }) }],
+    ["active", "Active 3 hours ago", { presence: row({ last_command_at: at(3 * 3600000) }) }],
   ];
   for (const [kind, label, facts] of cases) { const status = peopleAgentStatus(input(facts), NOW); assert.equal(status.kind, kind); assert.equal(status.label, label); assert.equal(status.attention, ["key-off", "key-ended", "paused", "stale-messages", "key-ends-soon", "new-computer"].includes(kind)); }
   assert.equal(peopleAgentStatus(input({ grant: key({ kind: "timeboxed", horizonExpiresAt: at(-4 * 86400000) }) }), NOW).kind, "active");
@@ -107,5 +109,6 @@ test("resume preserves last activity: idle 15 days becomes inactive, never Activ
   assert.equal(peopleAgentStatus(facts, NOW).kind, "paused");
   const resumed = peopleAgentStatus({ ...facts, grant: { ...facts.grant, suspendedAt: null } }, NOW);
   assert.equal(resumed.label, "Not active for 15 days"); assert.equal(resumed.attention, false);
+  assert.equal(peopleAgentActivityTime(facts.presence.last_command_at, NOW), "15 days ago");
   assert.equal(agentResumeReceipt("Codex"), "Resumed. Nothing has reached Codex yet. It renews the next time it starts. Another 14 days without use will pause it again.");
 });
