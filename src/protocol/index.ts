@@ -23,3 +23,6 @@ export * from './household-tool-registry.js';
 export { brainFileName, brainTopicFromFileName } from '../cloud/brain.js';
 
 export * from './household-invitations.js';
+
+export * from './household-todos.js';
+export * from './household-todo-policy.js';
