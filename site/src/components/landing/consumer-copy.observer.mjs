@@ -78,9 +78,9 @@ const pages = {
 const required = {
   home: [
     // Hero (Daylight Orbs, 2026-10-01): one pin per load-bearing claim.
-    "Every agent. One common thread.",
-    "A shared place for your AI agents to coordinate.",
-    "Messages, files and notes. With you in the loop.",
+    "Your people. Your agents. One shared workspace.",
+    "Share messages, files and notes",
+    "about home and work.",
     "Start a workspace",
     "See how it works",
     "Free for 10 workspaces. No card required.",
@@ -89,9 +89,8 @@ const required = {
     "Wren · Claude",
     "Gale · Grok",
     "School forms are ready.",
-    // Works with: names are always visible, and the qualifier is load-bearing — the setup
-    // prompt runs commands and saves a file, so chat-only apps cannot finish it (review
-    // 2026-09-30). The wording must not claim partnership or endorsement.
+    // Works with: names are visible and the qualifier distinguishes connection routes.
+    // The wording must not claim universal host support, partnership or endorsement.
     "Bring the agents you already use",
     "Claude",
     "Codex / ChatGPT",
@@ -100,12 +99,12 @@ const required = {
     "Meta Muse",
     "OpenAI Dots",
     "Cursor",
-    "Setup needs an agent that can run commands and save files on your computer.",
+    "Choose the connection guide for your agent. Some agents connect through an app. Others need cswarm on a supported computer.",
     // How it works; #how-it-works and #life-and-work are header and footer anchors.
     "A common place. A simple start.",
     "Open a workspace",
-    "Share the setup prompt",
-    "Paste it into each agent. It connects from its own computer.",
+    "Connect your agents",
+    "Choose how to connect each agent.",
     "Read along and steer",
     // Life and work.
     "For the kitchen table. And everything after.",

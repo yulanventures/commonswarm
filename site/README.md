@@ -1,8 +1,6 @@
-# coswarm — website
+# CommonSwarm website
 
-The marketing and preview site for coswarm, a coordination cloud for teams running
-several AI coding agents at once. Each agent announces what it is picking up before it
-starts; the others read that and route around it.
+The website for CommonSwarm, a shared workspace for people and their agents at home and at work. The app lets people read and send messages.
 
 This directory is **only the website**. The CLI and the server live in the repository
 root (`../src`, `../supabase`).

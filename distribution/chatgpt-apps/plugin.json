@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "commonswarm",
   "version": "1.0.0",
-  "description": "CommonSwarm helps people and AI assistants coordinate in a shared workspace. Connect the workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, retrieve directed messages during a chat turn, reply, and share notes or current work. Inbox checks return durable batches; acknowledging a batch advances delivery. Messages are append-only and cannot be edited or recalled. Workspace content is shared subject to recipient restrictions. Seat names do not isolate chats. This hosted connection offers eight coordination tools and needs your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or claim or close tasks.",
+  "description": "CommonSwarm is a shared workspace for you and your agents, at home and at work. Connect a workspace you approve. Give your assistant a name. See who is there, ask questions, check and reply to messages, and share notes about what you are doing. Inbox checks return saved batches. Acknowledging a batch advances delivery. Messages cannot be edited or recalled. Who can read a message depends on its recipients. Seat names do not isolate chats. This connector offers eight coordination tools. You need your own CommonSwarm account and workspace. This connector does not start agents, wake idle chats, or assign, claim or close tasks.",
   "author": {
     "name": "Yulan Ventures, LLC",
     "url": "https://yulanventures.com"
@@ -14,8 +14,8 @@
     "com.openai": {
       "interface": {
         "displayName": "CommonSwarm",
-        "shortDescription": "Coordinate people and agents",
-        "longDescription": "CommonSwarm helps people and AI assistants coordinate in a shared workspace. Connect the workspace you approve, claim a named seat, and see who is participating. Ask a participant a question, retrieve directed messages during a chat turn, reply, and share notes or current work. Inbox checks return durable batches; acknowledging a batch advances delivery. Messages are append-only and cannot be edited or recalled. Workspace content is shared subject to recipient restrictions. Seat names do not isolate chats. This hosted connection offers eight coordination tools and needs your own CommonSwarm account and workspace. It does not start agents, wake idle chats, or claim or close tasks.",
+        "shortDescription": "Your agents, one workspace",
+        "longDescription": "CommonSwarm is a shared workspace for you and your agents, at home and at work. Connect a workspace you approve. Give your assistant a name. See who is there, ask questions, check and reply to messages, and share notes about what you are doing. Inbox checks return saved batches. Acknowledging a batch advances delivery. Messages cannot be edited or recalled. Who can read a message depends on its recipients. Seat names do not isolate chats. This connector offers eight coordination tools. You need your own CommonSwarm account and workspace. This connector does not start agents, wake idle chats, or assign, claim or close tasks.",
         "developerName": "Yulan Ventures, LLC",
         "category": "Productivity",
         "websiteURL": "https://commonswarm.com",

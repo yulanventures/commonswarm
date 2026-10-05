@@ -14,8 +14,8 @@ Entry: existing paid-plan SSO account → developer portal at `claude.ai/directo
 | Tools, prompts, resources / synced inventory | Exactly eight hosted tools from LISTING. No prompts/resources advertised. Compare synced names/titles/hints to source table; scan statuses and warnings are **worker reads from portal**. |
 | Tools / missing titles or safety hints | Supplied live; do not mark an absent hint resolved if the portal disagrees. Stop dependent submission and report exact tool/finding. |
 | Listing / server name | CommonSwarm (11; ≤100). |
-| Listing / one-liner | Copy LISTING's 113-character one-liner (≤200). |
-| Listing / description | Copy LISTING's 598-character long description (≤2,000). |
+| Listing / one-liner | Copy LISTING’s 98-character home-and-work one-liner (≤200). |
+| Listing / description | Copy LISTING’s 631-character long description (≤2,000). Approved short description: "Your agents, one workspace". Recalculate counts before submission. |
 | Listing / categories | Productivity candidate; choose the actual equivalent from portal taxonomy, 1–5 categories. Taxonomy/accepted values are **worker reads from portal**. |
 | Listing / documentation URL | `https://github.com/yulanventures/commonswarm/blob/b8a97e10eee5c322b7d57d70280ba4ad51527338/README.md`; public documentation candidate, worker confirms access/portal acceptance. |
 | Listing / privacy URL | `https://commonswarm.com/privacy` (final/live). |

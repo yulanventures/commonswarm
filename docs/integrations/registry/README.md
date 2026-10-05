@@ -30,7 +30,7 @@ Values are proposed publisher metadata. Their CommonSwarm evidence is below.
 | `$schema` | Format identifier. Pins the documented 2025-12-11 schema URL. |
 | `name` | Registry identifier with one slash. Proposed namespace `io.github.yulanventures`, server `commonswarm`. Publisher permission is NOT VERIFIED. |
 | `title` | Display name: CommonSwarm. |
-| `description` | Short capability summary, limited by the schema to 100 characters. Describes workspace messages, inbox checks, and required OAuth. |
+| `description` | Shared workspace for people and agents, at home and work. Messages and inbox checks. OAuth required. Schema limit: 100 characters. |
 | `version` | Server implementation version: `1.0.0`. Matches the inspected hosted `serverInfo.version`. Live version parity is NOT VERIFIED. |
 | `websiteUrl` | Project website: `https://commonswarm.com`. Current reachability is NOT VERIFIED by D2. |
 | `repository.url` | Source repository: `https://github.com/yulanventures/commonswarm`. Current public reachability is NOT VERIFIED by D2. |

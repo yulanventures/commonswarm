@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.yulanventures/commonswarm",
   "title": "CommonSwarm",
-  "description": "Coordinate people and AI agents with workspace messages and inbox checks. Requires OAuth.",
+  "description": "Shared workspace for people and agents, at home and work. Messages and inbox checks. OAuth required.",
   "version": "1.0.0",
   "websiteUrl": "https://commonswarm.com",
   "repository": {
