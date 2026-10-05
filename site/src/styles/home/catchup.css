@@ -40,8 +40,7 @@
 
 .hm-catchup-needs,
 .hm-catchup-workspaces,
-.hm-catchup-latest,
-.hm-catchup-latest-group {
+.hm-catchup-latest {
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
@@ -87,9 +86,8 @@
 }
 
 .hm-catchup-show-more:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 3px;
-  box-shadow: 0 0 0 2px var(--focus-halo);
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
 }
 
 .hm-catchup-grid {
@@ -113,9 +111,8 @@
 }
 
 .hm-catchup-card:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 3px;
-  box-shadow: 0 0 0 2px var(--focus-halo);
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring), var(--shadow-card);
 }
 
 .hm-catchup-card-body {
@@ -138,6 +135,7 @@
 }
 
 .hm-catchup-card-summary,
+.hm-catchup-card-since,
 .hm-catchup-card-status,
 .hm-catchup-card-open,
 .hm-catchup-card-counts {
@@ -227,9 +225,8 @@
 }
 
 .hm-catchup-latest-workspace:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: 3px;
-  box-shadow: 0 0 0 2px var(--focus-halo);
+  outline: 2px solid transparent;
+  box-shadow: var(--focus-ring);
 }
 
 @media (prefers-reduced-motion: no-preference) {
