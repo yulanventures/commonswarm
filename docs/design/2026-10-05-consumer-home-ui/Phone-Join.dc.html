@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Join Home</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&amp;family=Instrument+Sans:wght@400..700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#D4F04A}a:hover{color:#E4F78A}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; padding: 56px 24px 28px; background: #17231C; color: #EEF2EA; font-family: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.4">
+
+<div style="display: flex; align-items: center; gap: 8px; font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 17px">
+<svg width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="#D4F04A"></circle><rect x="12" y="12" width="14" height="14" rx="4.5" stroke="#EEF2EA" stroke-width="2"></rect></svg>
+<span>CommonSwarm</span>
+</div>
+
+<div style="display: flex; align-items: center; gap: 10px; margin-top: 28px">
+<span title="Tom" style="width: 48px; height: 48px; border-radius: 50%; background: #2A5DBF; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; flex: none">T</span>
+<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#B4C2B8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8h11M9 4l4 4-4 4"></path></svg>
+<span title="You" style="width: 48px; height: 48px; border-radius: 50%; border: 1.5px dashed #E58A55; color: #F3B48E; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; flex: none">N</span>
+</div>
+
+<h1 style="margin: 18px 0 0; font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 40px; line-height: 1.05; letter-spacing: -0.025em">Tom invited you to Home.</h1>
+<p style="margin: 12px 0 0; font-size: 17px; color: #B4C2B8; text-wrap: pretty">A shared space for the two of you and the assistants you each already use.</p>
+
+<div style="margin-top: 22px; font-size: 14px; font-weight: 700; color: #B4C2B8">Bring an assistant</div>
+<div style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px">
+
+<button type="button" aria-pressed="{{museOn}}" onClick="{{musePick}}" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 14px; box-sizing: border-box; border: 1.5px solid {{museLine}}; border-radius: 14px; background: {{museFill}}; color: #EEF2EA; font: inherit; font-weight: 600; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none">M</span>
+<span style="flex: 1">Muse</span>
+<span style="width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #B4C2B8; box-sizing: border-box; flex: none; background: {{museDot}}"></span>
+</button>
+
+<button type="button" aria-pressed="{{claudeOn}}" onClick="{{claudePick}}" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 14px; box-sizing: border-box; border: 1.5px solid {{claudeLine}}; border-radius: 14px; background: {{claudeFill}}; color: #EEF2EA; font: inherit; font-weight: 600; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none">C</span>
+<span style="flex: 1">Claude</span>
+<span style="width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #B4C2B8; box-sizing: border-box; flex: none; background: {{claudeDot}}"></span>
+</button>
+
+<button type="button" aria-pressed="{{grokOn}}" onClick="{{grokPick}}" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 14px; box-sizing: border-box; border: 1.5px solid {{grokLine}}; border-radius: 14px; background: {{grokFill}}; color: #EEF2EA; font: inherit; font-weight: 600; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none">G</span>
+<span style="flex: 1">Grok</span>
+<span style="width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #B4C2B8; box-sizing: border-box; flex: none; background: {{grokDot}}"></span>
+</button>
+
+<button type="button" aria-pressed="{{dotOn}}" onClick="{{dotPick}}" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 14px; box-sizing: border-box; border: 1.5px solid {{dotLine}}; border-radius: 14px; background: {{dotFill}}; color: #EEF2EA; font: inherit; font-weight: 600; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex: none">d</span>
+<span style="flex: 1">dot</span>
+<span style="width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #B4C2B8; box-sizing: border-box; flex: none; background: {{dotDot}}"></span>
+</button>
+
+<button type="button" aria-pressed="{{noneOn}}" onClick="{{nonePick}}" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 14px; box-sizing: border-box; border: 1.5px solid {{noneLine}}; border-radius: 14px; background: {{noneFill}}; color: #EEF2EA; font: inherit; font-weight: 600; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; border: 1.5px dashed #7B897F; box-sizing: border-box; display: inline-block; flex: none"></span>
+<span style="flex: 1">Just me for now</span>
+<span style="width: 20px; height: 20px; border-radius: 50%; border: 1.5px solid #B4C2B8; box-sizing: border-box; flex: none; background: {{noneDot}}"></span>
+</button>
+
+</div>
+
+<p style="margin: 14px 0 0; font-size: 14px; color: #B4C2B8; text-wrap: pretty">{{note}}</p>
+
+<button type="button" style="width: 100%; min-height: 56px; margin-top: auto; border: 0; border-radius: 999px; background: #D4F04A; color: #17231C; font: inherit; font-weight: 700; font-size: 18px; cursor: pointer">{{cta}}</button>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+state = { picked: 'muse' };
+renderVals() {
+const picked = (this.state && this.state.picked) || 'muse';
+const names = { muse: 'Muse', claude: 'Claude', grok: 'Grok', dot: 'dot', none: '' };
+const v = {};
+Object.keys(names).forEach((k) => {
+const on = picked === k;
+v[k + 'On'] = on;
+v[k + 'Line'] = on ? '#D4F04A' : '#3A4E42';
+v[k + 'Fill'] = on ? '#2A3D32' : '#1E2D25';
+v[k + 'Dot'] = on ? '#D4F04A' : 'transparent';
+v[k + 'Pick'] = () => this.setState({ picked: k });
+});
+const name = names[picked];
+v.cta = name ? 'Join with ' + name : 'Join on my own';
+v.note = name
+? name + ' will see what gets posted in Home. Your own chats with ' + name + ' stay yours.'
+: 'You can bring an assistant in later, from the space.';
+return v;
+}
+}
+</script>
+</body>
+</html>

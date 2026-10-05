@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>To-do: assign and tag</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&amp;family=Instrument+Sans:wght@400..700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#17231C}a:hover{color:#2F4438}
+</style>
+</helmet>
+<div style="min-height: 100vh; box-sizing: border-box; padding: 20px clamp(16px, 4vw, 32px) 32px; background: #FCFDFA; color: #17231C; font-family: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.45">
+<div style="max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px">
+
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px">
+<a href="Space.dc.html" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: #4F5E54; text-decoration: none; font-size: 15px; font-weight: 600">
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F5E54" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"></path></svg>
+<span>Home · To-dos</span>
+</a>
+<span style="font-size: 13px; color: #4F5E54">Added by Nikki yesterday · Due this week</span>
+</div>
+
+<div style="display: flex; align-items: flex-start; gap: 14px">
+<button type="button" role="checkbox" aria-checked="false" aria-label="Mark done" style="width: 44px; height: 44px; margin: -4px -8px 0 -10px; border: 0; background: transparent; display: inline-flex; align-items: center; justify-content: center; flex: none; cursor: pointer"><span style="width: 26px; height: 26px; border-radius: 8px; border: 2px solid #17231C; box-sizing: border-box; display: inline-block"></span></button>
+<div style="min-width: 0">
+<h1 style="margin: 0; font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 32px; line-height: 1.1; letter-spacing: -0.02em">Order filters for the AC</h1>
+<p style="margin: 8px 0 0; color: #4F5E54; text-wrap: pretty">The size is printed on the edge of the old one in the hallway return. A two-pack is fine.</p>
+</div>
+</div>
+
+<section style="padding: 18px 20px 20px; background: #EEF2EA; border-radius: 18px">
+<div style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 19px; letter-spacing: -0.01em">Assigned to</div>
+
+<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; background: #FCFDFA; border: 1px solid #D3DBCC; border-radius: 16px">
+<button type="button" aria-pressed="{{tomOn}}" onClick="{{tomPick}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: {{tomBg}}; color: {{tomFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 50%; background: #2A5DBF; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">T</span>
+<span>Tom (you)</span>
+</button>
+<button type="button" aria-pressed="{{claudeOn}}" onClick="{{claudePick}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: {{claudeBg}}; color: {{claudeFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #DDE7FA; border: 1.5px solid #2A5DBF; color: #1B3F87; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">C</span>
+<span>Claude</span>
+</button>
+<button type="button" aria-pressed="{{dotOn}}" onClick="{{dotPick}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: {{dotBg}}; color: {{dotFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #DDE7FA; border: 1.5px solid #2A5DBF; color: #1B3F87; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">d</span>
+<span>dot</span>
+</button>
+</div>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; background: #FCFDFA; border: 1px solid #D3DBCC; border-radius: 16px">
+<button type="button" aria-pressed="{{nikkiOn}}" onClick="{{nikkiPick}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: {{nikkiBg}}; color: {{nikkiFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 50%; background: #B5501C; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">N</span>
+<span>Nikki</span>
+</button>
+<button type="button" aria-pressed="{{museOn}}" onClick="{{musePick}}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: {{museBg}}; color: {{museFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">M</span>
+<span>Muse</span>
+</button>
+</div>
+</div>
+
+<sc-if value="{{isPerson}}" hint-placeholder-val="{{false}}">
+<p style="margin: 14px 0 0; color: #4F5E54">{{personLine}}</p>
+</sc-if>
+
+<sc-if value="{{isAgent}}" hint-placeholder-val="{{true}}">
+<div style="margin-top: 18px; padding-top: 16px; border-top: 1px solid #D3DBCC">
+<div style="font-weight: 700">{{startLabel}}</div>
+<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px">
+<button type="button" aria-pressed="{{freeOn}}" onClick="{{freePick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{freeBg}}; color: {{freeFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">When it's free</button>
+<button type="button" aria-pressed="{{nowOn}}" onClick="{{nowPick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{nowBg}}; color: {{nowFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">Now</button>
+<button type="button" aria-pressed="{{holdOn}}" onClick="{{holdPick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{holdBg}}; color: {{holdFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">Not yet</button>
+<button type="button" aria-pressed="{{timeOn}}" onClick="{{timePick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{timeBg}}; color: {{timeFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">At a set time</button>
+</div>
+<p style="margin: 12px 0 0; min-height: 46px; text-wrap: pretty">{{statusLine}}</p>
+
+<sc-if value="{{isOffline}}" hint-placeholder-val="{{false}}">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 10px; padding: 12px 14px; background: #FCEBCB; border-radius: 14px; color: #5E3300">
+<span style="flex: 1 1 260px">dot is offline. Nobody is in its seat, so this waits in its queue. Nothing is lost.</span>
+<a href="Members.dc.html" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border: 1.5px solid #5E3300; border-radius: 999px; color: #5E3300; text-decoration: none; font-weight: 700; font-size: 14px">Reconnect dot</a>
+</div>
+</sc-if>
+
+<sc-if value="{{isOthers}}" hint-placeholder-val="{{false}}">
+<div style="margin-top: 10px; padding: 12px 14px; border: 1.5px dashed #7B897F; border-radius: 14px; font-size: 14px; color: #4F5E54; text-wrap: pretty">Muse is Nikki's. She lets anyone in Home give it work, but only she can reorder its queue or see what else is in it.</div>
+</sc-if>
+
+<div style="display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 14px; color: #4F5E54">
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F5E54" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.8"></rect><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"></path></svg>
+<span>{{guardLine}}</span>
+</div>
+</div>
+</sc-if>
+</section>
+
+<section>
+<div style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 19px; letter-spacing: -0.01em">Comments</div>
+
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-top: 14px">
+<span style="width: 36px; height: 36px; border-radius: 50%; background: #B5501C; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; flex: none">N</span>
+<div style="flex: 1; min-width: 0">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px"><span style="font-weight: 700">Nikki</span><span style="font-size: 13px; color: #4F5E54">Yesterday, 6:52 pm</span></div>
+<div style="margin-top: 2px"><span style="padding: 1px 7px; border-radius: 6px; background: #FBE4D5; color: #7E3410; font-weight: 600">@Muse</span> can you find the size? There's a photo in Files from last spring.</div>
+</div>
+</div>
+
+<div style="display: flex; align-items: flex-start; gap: 12px; margin-top: 16px">
+<span title="Nikki's Muse" style="position: relative; display: inline-flex; flex: none"><span style="width: 36px; height: 36px; border-radius: 11px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; flex: none">M</span><span style="position: absolute; right: -6px; bottom: -5px; width: 17px; height: 17px; border-radius: 50%; background: #B5501C; color: #FFFFFF; box-shadow: 0 0 0 2px #FCFDFA; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; line-height: 1">N</span></span>
+<div style="flex: 1; min-width: 0">
+<div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px"><span style="font-weight: 700">Nikki's Muse</span><span style="font-size: 13px; color: #4F5E54">Yesterday, 6:53 pm</span></div>
+<div style="margin-top: 2px">20 × 25 × 1. It's readable in the March photo.</div>
+</div>
+</div>
+
+<div style="margin-top: 20px; background: #FCFDFA; border: 1px solid #D3DBCC; border-radius: 16px; box-shadow: 0 6px 18px rgba(23, 35, 28, 0.12); overflow: hidden">
+<div style="padding: 10px 16px; font-size: 13px; font-weight: 700; color: #4F5E54; background: #F1F5EC">Tag someone in Home</div>
+<button type="button" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 16px; border: 0; background: #D4F04A; color: #17231C; font: inherit; text-align: left; cursor: pointer">
+<span style="position: relative; display: inline-flex; flex: none"><span style="width: 28px; height: 28px; border-radius: 9px; background: #DDE7FA; border: 1.5px solid #2A5DBF; color: #1B3F87; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">C</span><span style="position: absolute; right: -6px; bottom: -5px; width: 16px; height: 16px; border-radius: 50%; background: #2A5DBF; color: #FFFFFF; box-shadow: 0 0 0 2px #D4F04A; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; line-height: 1">T</span></span>
+<span style="flex: 1; font-weight: 600">Your Claude</span>
+<span style="font-size: 13px">working · goes into its queue</span>
+</button>
+<button type="button" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 16px; border: 0; border-top: 1px solid #E3E9DD; background: transparent; color: #17231C; font: inherit; text-align: left; cursor: pointer">
+<span style="position: relative; display: inline-flex; flex: none"><span style="width: 28px; height: 28px; border-radius: 9px; background: #DDE7FA; border: 1.5px solid #2A5DBF; color: #1B3F87; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">d</span><span style="position: absolute; right: -6px; bottom: -5px; width: 16px; height: 16px; border-radius: 50%; background: #2A5DBF; color: #FFFFFF; box-shadow: 0 0 0 2px #FCFDFA; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; line-height: 1">T</span></span>
+<span style="flex: 1; font-weight: 600">Your dot</span>
+<span style="font-size: 13px; color: #8A4B00">offline · sees it on reconnect</span>
+</button>
+<button type="button" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 16px; border: 0; border-top: 1px solid #E3E9DD; background: transparent; color: #17231C; font: inherit; text-align: left; cursor: pointer">
+<span style="width: 28px; height: 28px; border-radius: 50%; background: #B5501C; color: #FFFFFF; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">N</span>
+<span style="flex: 1; font-weight: 600">Nikki</span>
+<span style="font-size: 13px; color: #4F5E54">gets a notification</span>
+</button>
+<button type="button" style="display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 16px; border: 0; border-top: 1px solid #E3E9DD; background: transparent; color: #17231C; font: inherit; text-align: left; cursor: pointer">
+<span style="position: relative; display: inline-flex; flex: none"><span style="width: 28px; height: 28px; border-radius: 9px; background: #FBE4D5; border: 1.5px solid #B5501C; color: #7E3410; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex: none">M</span><span style="position: absolute; right: -6px; bottom: -5px; width: 16px; height: 16px; border-radius: 50%; background: #B5501C; color: #FFFFFF; box-shadow: 0 0 0 2px #FCFDFA; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; line-height: 1">N</span></span>
+<span style="flex: 1; font-weight: 600">Nikki's Muse</span>
+<span style="font-size: 13px; color: #4F5E54">working · goes into its queue</span>
+</button>
+</div>
+
+<div style="display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 10px">
+<label style="flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+<span style="font-size: 13px; font-weight: 600; color: #4F5E54">Add a comment</span>
+<input type="text" value="Thanks. @" style="width: 100%; min-height: 50px; padding: 0 16px; box-sizing: border-box; border: 1.5px solid #17231C; border-radius: 14px; background: #FFFFFF; font: inherit; color: #17231C">
+</label>
+<button type="button" style="min-height: 50px; padding: 0 24px; border: 0; border-radius: 14px; background: #17231C; color: #EEF2EA; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer">Post</button>
+</div>
+<p style="margin: 10px 0 0; font-size: 14px; color: #4F5E54">Tagging works the same in chat, threads, lists and files. A tagged agent gets it in its queue. A tagged person gets a notification.</p>
+</section>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":760,"height":1400}}'>
+class Component extends DCLogic {
+state = { who: 'claude', start: 'free' };
+renderVals() {
+const s = this.state || {};
+const who = s.who || 'claude';
+const start = s.start || 'free';
+const v = {};
+['tom', 'claude', 'dot', 'nikki', 'muse'].forEach((k) => {
+const on = who === k;
+v[k + 'On'] = on;
+v[k + 'Bg'] = on ? '#17231C' : 'transparent';
+v[k + 'Fg'] = on ? '#EEF2EA' : '#17231C';
+v[k + 'Pick'] = () => this.setState({ who: k });
+});
+['free', 'now', 'hold', 'time'].forEach((k) => {
+const on = start === k;
+v[k + 'On'] = on;
+v[k + 'Bg'] = on ? '#17231C' : 'transparent';
+v[k + 'Fg'] = on ? '#EEF2EA' : '#17231C';
+v[k + 'Pick'] = () => this.setState({ start: k });
+});
+const names = { claude: 'your Claude', dot: 'your dot', muse: "Nikki's Muse" };
+const name = names[who] || '';
+const cap = name ? name.charAt(0).toUpperCase() + name.slice(1) : '';
+v.isAgent = !!name;
+v.isPerson = !name;
+v.isOffline = who === 'dot';
+v.isOthers = who === 'muse';
+v.personLine = who === 'tom'
+? 'Yours. People have no queue and no start controls. It sits on your list until you check it off.'
+: 'Nikki gets a notification. People have no queue and no start controls.';
+v.startLabel = 'When should ' + name + ' start?';
+const lines = {
+free: {
+claude: 'Queued. 2nd in line for your Claude, behind "Compare three flight options".',
+dot: 'Queued. First in line for your dot once it reconnects.',
+muse: "Queued. 3rd in line for Nikki's Muse."
+},
+now: {
+claude: 'Your Claude starts on this now and goes back to "Compare three flight options" after.',
+dot: 'Moved to the front. Your dot starts on it the moment it reconnects.',
+muse: "Sent to Nikki as a request. Only she can move things to the front of her Muse's queue."
+}
+};
+if (start === 'hold') v.statusLine = 'Assigned and on hold. ' + cap + ' will not start until you release it.';
+else if (start === 'time') v.statusLine = 'Scheduled. ' + cap + ' starts tonight at 9:00 pm, whether or not you are around.';
+else v.statusLine = (lines[start] && lines[start][who]) || '';
+v.guardLine = who === 'muse'
+? "Nikki's Muse asks Nikki before it pays, books or messages anyone outside Home."
+: cap + ' asks you before it pays, books or messages anyone outside Home.';
+return v;
+}
+}
+</script>
+</body>
+</html>

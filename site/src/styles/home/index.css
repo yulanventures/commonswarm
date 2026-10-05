@@ -1,0 +1,12 @@
+/* Home UI styles (UI-SPEC.md sections 5 and 6). Integration imports this file once from LiveDashboard.
+   Each lane owns exactly one of the files below; tokens from tokens.css only, no raw hex. */
+@import "./primitives.css";
+@import "./shell.css";
+@import "./rail.css";
+@import "./catchup.css";
+@import "./workspace.css";
+@import "./todo.css";
+@import "./pickers.css";
+@import "./agent.css";
+@import "./people.css";
+@import "./onboarding.css";
