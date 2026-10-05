@@ -5,6 +5,8 @@ in Claude Code v2.1.224.
 
 > "cross user and provider agnostic i think is a good place to sit"
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ## What changed outside this repo
 
 Claude Code now has [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging):

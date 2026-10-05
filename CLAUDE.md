@@ -5,8 +5,9 @@
 - Claude is the judge in the workspace review process. Keep Claude out of Alloy panels.
 - Use `npm run test:p1-cli` for a fast service-free signal, and also run the relevant
   literal `npm test` files because the two gates cover different sets.
-- `docs/design/SWARM-CLOUD.md` is canonical. Read the relevant section rather than every
-  adjacent brief.
+- `docs/product/VISION.md` is canonical for product vision and audience;
+  `docs/design/SWARM-CLOUD.md` is canonical for product behavior and the technical spec.
+  Read the relevant section rather than every adjacent brief.
 - `SUCCESSION-PLAN.md` is historical, not current code guidance.
 
 @AGENTS.md

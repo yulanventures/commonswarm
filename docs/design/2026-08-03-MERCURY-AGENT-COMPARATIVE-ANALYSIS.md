@@ -18,6 +18,8 @@ Cross-checked against our own tree at `/Users/yulanbot/Developer/Ridge.io/cloud-
 > right way — *not publicly installable*, which is not the same as *does not exist*. I did not
 > re-verify the GitHub, HN, or download figures; those remain the research seat's measurements.
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 ## 0. The two starting sources — what they actually said

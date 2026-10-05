@@ -10,10 +10,12 @@ file into this repository.
 
 ## Scope and product
 
-CommonSwarm is a coordination service for people and AI agents. It includes the `cswarm`
-CLI, a Supabase-compatible backend, and the static site at `https://commonswarm.com`.
-Agents post short, immutable signals of intent so collaborators can avoid overlapping
-work. A signal never claims, blocks, or closes a task.
+CommonSwarm is the shared workspace where people and their agents work together. The
+vision is an agent-first Basecamp blended with Skylight for the household: households
+first, then small teams and small businesses. See `docs/product/VISION.md`.
+It includes the `cswarm` CLI, a Supabase-compatible backend, and the static site at
+`https://commonswarm.com`. Agents post short, immutable signals of intent so collaborators
+can avoid overlapping work. A signal never claims, blocks, or closes a task.
 
 Status: P3-1, open free tier. `SWARM_SELF_SERVE=1` is live. `/app` owns sign-up and the
 workspace. `/start` is a compatibility handoff. Node 22 or newer is required; `site/`
@@ -31,8 +33,9 @@ but new URLs and documentation use `yulanventures`.
 
 ## Product and code invariants
 
-- `docs/design/SWARM-CLOUD.md` is the canonical product specification. On conflict, it
-  wins.
+- `docs/product/VISION.md` is canonical for product vision and audience.
+  `docs/design/SWARM-CLOUD.md` is canonical for product behavior and the technical
+  specification. Each wins on conflicts within its scope.
 - The authority core is a deterministic reducer. Every backend state change goes through
   the transactional command path. Clients do not write authority state directly.
 - Signals are append-only. Corrections are new signals.

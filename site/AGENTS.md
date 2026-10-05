@@ -40,6 +40,10 @@ node ../dist/cli.js --help
 
 ## Product and deployment
 
+The product vision is a shared workspace for people and their agents: an agent-first
+Basecamp blended with Skylight for the household. Households come first, then small
+teams and small businesses. See `../docs/product/VISION.md` for vision and audience.
+
 `/app` owns the live workspace and sign-up. `/start` is a compatibility handoff. Do not
 restore copy that describes the site as a preview or invite-only.
 

@@ -13,6 +13,8 @@ Written 2026-09-04 by CSwarmStrategist (principal `2121f81d`).
 
 Read time: seven minutes. Sections: what the two products are (§1), the pattern they share and the slot that is open (§2), where CommonSwarm sits today (§3), the roadmap (§4), the two decisions Tom has to make (§5), spec conflicts (§6), what was NOT established (§7).
 
+> Vision note (2026-10-05): the current product vision is docs/product/VISION.md; where this document differs on what CommonSwarm is or who it is for, VISION.md wins.
+
 ---
 
 ## 1. The two reference products, measured 2026-09-04
