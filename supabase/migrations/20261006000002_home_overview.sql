@@ -57,9 +57,6 @@ BEGIN
    SELECT s.id FROM swarm_read.signals s
    WHERE s.workspace_id = workspace.workspace_id
     AND NOT (s.from_kind = 'user' AND s."from" = viewer)
-    AND NOT (s.from_kind = 'agent' AND EXISTS (
-     SELECT 1 FROM swarm.agent_principals p WHERE p.workspace_id = s.workspace_id
-      AND p.principal_id = s."from" AND p.owner_user_id = viewer))
     AND s.created_at > coalesce(last_seen, read_at - interval '7 days')
    LIMIT 99
   ) messages;
@@ -104,15 +101,18 @@ BEGIN
       'reason',reason.kind,'agent_id', CASE WHEN reason.kind = 'request' THEN t.offer_principal ELSE t.assignee_principal END) value
     FROM swarm.household_todos t
     LEFT JOIN swarm.agent_principals p ON p.workspace_id = t.workspace_id AND p.principal_id = t.assignee_principal
+    -- Pick one reason per to-do before the 20-to-do bound: request, after, hold, agent_removed.
     CROSS JOIN LATERAL (
-     SELECT 'request' AS kind WHERE t.offer_id IS NOT NULL AND t.offer_decider = viewer
-     UNION ALL SELECT 'after' WHERE t.gate_kind = 'after' AND EXISTS (
+     SELECT CASE
+     WHEN t.offer_id IS NOT NULL AND t.offer_decider = viewer THEN 'request'
+     WHEN t.gate_kind = 'after' AND EXISTS (
       SELECT 1 FROM swarm.household_todos prerequisite WHERE prerequisite.workspace_id = t.workspace_id
-       AND prerequisite.todo_id = t.gate_todo_id AND prerequisite.assignee_user = viewer AND prerequisite.state IN ('open','doing'))
-     UNION ALL SELECT 'hold' WHERE t.gate_kind = 'hold' AND p.owner_user_id = viewer AND p.revoked_at IS NULL
-     UNION ALL SELECT 'agent_removed' WHERE p.owner_user_id = viewer AND p.revoked_at IS NOT NULL
+       AND prerequisite.todo_id = t.gate_todo_id AND prerequisite.assignee_user = viewer AND prerequisite.state IN ('open','doing')) THEN 'after'
+     WHEN t.gate_kind = 'hold' AND p.owner_user_id = viewer AND p.revoked_at IS NULL THEN 'hold'
+     WHEN p.owner_user_id = viewer AND p.revoked_at IS NOT NULL THEN 'agent_removed'
+     END AS kind
     ) reason
-    WHERE t.workspace_id = workspace.workspace_id AND t.state IN ('open','doing')
+    WHERE t.workspace_id = workspace.workspace_id AND t.state IN ('open','doing') AND reason.kind IS NOT NULL
     ORDER BY t.state_at DESC, t.todo_id, reason.kind LIMIT 20
    ) a;
   END IF;
@@ -134,6 +134,7 @@ BEGIN
    FROM swarm.household_todos t WHERE t.workspace_id = workspace.workspace_id
   ), agent_facts AS (
    SELECT p.*, connection.kind AS connection,
+    -- Raw signals are safe here: last_activity_at exposes only a time, no content or signal id.
     greatest(presence.last_command_at,
      (SELECT max(s.created_at) FROM swarm.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id),
      (SELECT max(greatest(b.created_at,b.acknowledged_at)) FROM swarm.hosted_mcp_check_batches b WHERE b.workspace_id = p.workspace_id AND b.principal_id = p.principal_id),
@@ -157,7 +158,7 @@ BEGIN
    ) doing ON true
    LEFT JOIN LATERAL (
     SELECT jsonb_build_object('signal_id',s.id,'at',s.created_at,'until',s.until) value
-    FROM swarm.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s.from_principal = p.principal_id
+    FROM swarm_read.signals s WHERE s.workspace_id = p.workspace_id AND s.from_kind = 'agent' AND s."from" = p.principal_id
      AND s.kind = 'working-on' AND s.until > read_at ORDER BY s.created_at DESC, s.id LIMIT 1
    ) working ON true
    CROSS JOIN LATERAL (
@@ -168,7 +169,7 @@ BEGIN
       JOIN swarm.hosted_mcp_grant_workspaces binding ON binding.grant_id = seat.grant_id AND binding.workspace_id = seat.workspace_id AND binding.owner_user_id = seat.owner_user_id
       JOIN swarm.hosted_mcp_grants g ON g.grant_id = binding.grant_id AND g.owner_user_id = binding.owner_user_id
       WHERE seat.workspace_id = p.workspace_id AND seat.principal_id = p.principal_id AND seat.owner_user_id = p.owner_user_id
-       AND seat.revoked_at IS NULL AND binding.revoked_at IS NULL AND g.revoked_at IS NULL AND g.state = 'active') THEN 'live' ELSE 'key_off' END
+       AND seat.revoked_at IS NULL AND binding.revoked_at IS NULL AND g.revoked_at IS NULL AND g.state = 'active') THEN 'live' ELSE 'connection_off' END
      WHEN EXISTS (
       SELECT 1 FROM swarm.agent_tokens token JOIN swarm.agent_runs run ON run.run_id = token.run_id AND run.principal_id = token.principal_id
       JOIN swarm.devices device ON device.device_id = run.device_id

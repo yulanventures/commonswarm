@@ -148,7 +148,7 @@ test('overview isolates live workspaces, consent, viewer-directed asks, receipt 
     AND value->'workspaces'->0->'needs_you'->'waiting'='[]'::jsonb`, 'no content without approval')}
    ${check(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements(value->'workspaces'->0->'people') person
     CROSS JOIN LATERAL jsonb_array_elements(person->'agents') agent WHERE agent->'queue' <> 'null'::jsonb)`, 'queue counts require consent')}
-   ${check(`(value->'workspaces'->0->>'new_messages')::int=7`, 'counts visible other-authored messages only including expired messages and agent-directed messages')}
+   ${check(`(value->'workspaces'->0->>'new_messages')::int=8`, 'counts own-agent replies too; excludes own human posts and unreadable messages')}
    ${check(`(value->'workspaces'->0->>'last_seen_at')::timestamptz='${seen}'::timestamptz`, 'viewer receipt maximum ignores another viewer')}
    ${check(`(SELECT array_agg(a->>'signal_id' ORDER BY a->>'signal_id') FROM jsonb_array_elements(value->'workspaces'->0->'needs_you'->'asks') a)
     = ARRAY[${[directed,multi].sort().map(id=>`'${id}'`).join(',')}]::text[]`, 'only unanswered live asks addressed to viewer')}
@@ -179,6 +179,69 @@ test('overview isolates live workspaces, consent, viewer-directed asks, receipt 
    ${refuses('SELECT swarm_read.home_overview()', '42501')}
    RESET ROLE; SET LOCAL ROLE swarm_command;
    ${refuses('SELECT swarm_read.home_overview()', '42501')}
+   RESET ROLE;
+  `);
+});
+
+test('working-on references obey viewer visibility while last activity may include unreadable signals', () => {
+  const viewer = randomUUID(), other = randomUUID(), w = randomUUID();
+  const principal = randomUUID(), hiddenOnly = randomUUID();
+  const readable = randomUUID(), hidden = randomUUID(), privateOnly = randomUUID(), expired = randomUUID();
+  const hiddenAt = new Date(Date.now() - 60_000).toISOString();
+  const agents = `jsonb_array_elements(${overviewWorkspace}->'people') person
+   CROSS JOIN LATERAL jsonb_array_elements(person->'agents') agent`;
+  const fact = (id: string, key: string) => `(SELECT agent->'status'->'facts'->'${key}' FROM ${agents} WHERE agent->>'principal_id'='${id}')`;
+  runSql(`
+   ${migration()} ${userSql(viewer)} ${userSql(other)} ${workspaceSql(w,viewer)} ${boundarySql(w)}
+   INSERT INTO swarm.memberships(workspace_id,user_id,role) VALUES ('${w}','${other}','member');
+   ${agentSql(w,other,principal)} ${agentSql(w,other,hiddenOnly)}
+   ${localCredential(w,other,principal)} ${localCredential(w,other,hiddenOnly)}
+   ${signalSql(w,principal,readable,{from_kind:"'agent'",kind:"'working-on'",to_user_id:`'${viewer}'`,created_at:"statement_timestamp()-interval '3 minutes'"})}
+   ${signalSql(w,principal,hidden,{from_kind:"'agent'",kind:"'working-on'",to_user_id:`'${other}'`,created_at:"statement_timestamp()-interval '2 minutes'"})}
+   ${signalSql(w,hiddenOnly,privateOnly,{from_kind:"'agent'",kind:"'working-on'",to_user_id:`'${other}'`,created_at:`'${hiddenAt}'::timestamptz`})}
+   ${signalSql(w,principal,expired,{from_kind:"'agent'",kind:"'working-on'",to_user_id:`'${viewer}'`,created_at:"statement_timestamp()-interval '30 seconds'",until:"statement_timestamp()-interval '1 second'"})}
+   ${claims(viewer)} SET LOCAL ROLE authenticated; ${snapshot()}
+   ${dbAssert(`SELECT count(*)=1 FROM swarm_read.signals WHERE id='${readable}'`, 'readable working-on positive control')}
+   ${dbAssert(`SELECT count(*)=0 FROM swarm_read.signals WHERE id IN ('${hidden}','${privateOnly}')`, 'directed signals hidden from viewer')}
+   ${check(`${fact(principal,'working_on')}->>'signal_id'='${readable}'`, 'newest readable unexpired working-on selected')}
+   ${check(`${fact(hiddenOnly,'working_on')}='null'::jsonb`, 'unreadable-only working-on is absent')}
+   ${check(`position('${hidden}' in value::text)=0 AND position('${privateOnly}' in value::text)=0`, 'unreadable signal ids never exposed')}
+   ${check(`(${fact(hiddenOnly,'last_activity_at')} #>> '{}')::timestamptz='${hiddenAt}'::timestamptz`, 'unreadable activity exposes only its time')}
+   RESET ROLE; ${claims(other)} SET LOCAL ROLE authenticated; ${refresh()}
+   ${check(`${fact(principal,'working_on')}->>'signal_id'='${hidden}' AND ${fact(hiddenOnly,'working_on')}->>'signal_id'='${privateOnly}'`, 'recipient can read both private working-on references')}
+   RESET ROLE;
+  `);
+});
+
+test('waiting chooses one reason per to-do before applying its twenty-to-do cap', () => {
+  const viewer = randomUUID(), w = randomUUID(), principal = randomUUID(), removed = randomUUID(), prerequisite = randomUUID();
+  const requestAfter = randomUUID(), afterRemoved = randomUUID(), requestHold = randomUUID();
+  const offer = { offer_id:`'${randomUUID()}'`, offer_principal:`'${principal}'`, offer_decider:`'${viewer}'` };
+  const rows = Array.from({length:21}, () => randomUUID());
+  const waiting = `${overviewWorkspace}->'needs_you'->'waiting'`;
+  const reason = (id: string) => `(SELECT a->>'reason' FROM jsonb_array_elements(${waiting}) a WHERE a->>'todo_id'='${id}')`;
+  const setup = rows.map((id,index) => todoSql(w,viewer,id,{
+    ...offer, offer_id:`'${randomUUID()}'`, gate_kind:"'after'", gate_todo_id:`'${prerequisite}'`,
+    state_at:`statement_timestamp()-interval '${index + 1} minutes'`,
+  })).join('\n');
+  runSql(`
+   ${migration()} ${userSql(viewer)} ${workspaceSql(w,viewer)} ${boundarySql(w)} ${consentSql(w,viewer)}
+   ${agentSql(w,viewer,principal)} ${agentSql(w,viewer,removed,true)}
+   ${todoSql(w,viewer,prerequisite,{assignee_user:`'${viewer}'`})}
+   ${todoSql(w,viewer,requestAfter,{...offer, gate_kind:"'after'", gate_todo_id:`'${prerequisite}'`,assignee_principal:`'${removed}'`,state_at:"statement_timestamp()-interval '1 day'"})}
+   ${todoSql(w,viewer,afterRemoved,{gate_kind:"'after'",gate_todo_id:`'${prerequisite}'`,assignee_principal:`'${removed}'`,state_at:"statement_timestamp()-interval '1 day'"})}
+   ${todoSql(w,viewer,requestHold,{...offer,offer_id:`'${randomUUID()}'`,gate_kind:"'hold'",assignee_principal:`'${principal}'`,state_at:"statement_timestamp()-interval '1 day'"})}
+   ${claims(viewer)} SET LOCAL ROLE authenticated; ${snapshot()}
+   ${check(`jsonb_array_length(${waiting})=3`, 'overlapping reasons produce one row each')}
+   ${check(`${reason(requestAfter)}='request' AND ${reason(afterRemoved)}='after' AND ${reason(requestHold)}='request'`, 'fixed reason priority')}
+   ${check(`(SELECT a->>'agent_id' FROM jsonb_array_elements(${waiting}) a WHERE a->>'todo_id'='${requestAfter}')='${principal}'`, 'request names offered agent rather than removed assignee')}
+   RESET ROLE; ${setup}
+   ${dbAssert(`SELECT count(*)=21 FROM swarm.household_todos WHERE workspace_id='${w}' AND state_at>statement_timestamp()-interval '1 hour' AND offer_id IS NOT NULL AND gate_kind='after'`, 'excess overlapping to-do control')}
+   SET LOCAL ROLE authenticated; ${refresh()}
+   ${check(`jsonb_array_length(${waiting})=20 AND (SELECT count(DISTINCT a->>'todo_id') FROM jsonb_array_elements(${waiting}) a)=20`, 'twenty unique to-dos survive the bound')}
+   ${check(`(SELECT array_agg(a->>'todo_id' ORDER BY ordinal) FROM jsonb_array_elements(${waiting}) WITH ORDINALITY AS entry(a,ordinal))
+    = ARRAY[${rows.slice(0,20).map(id=>`'${id}'`).join(',')}]::text[]`, 'bound selects newest twenty to-dos in order')}
+   ${check(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements(${waiting}) a WHERE a->>'reason'<>'request')`, 'requests win over after gates throughout bounded list')}
    RESET ROLE;
   `);
 });
@@ -305,19 +368,20 @@ test('without receipts only the last seven days of other-authored visible messag
 test('hosted activity comes from check batches; waiting messages stay idle and revoked hosted credentials disconnect', () => {
   const owner = randomUUID(), w = randomUUID();
   const cases = [
-    { name:'doing after check', work:'working', doing:true },
-    { name:'waiting without work', work:'idle' },
-    { name:'seat removed', work:'disconnected', seatRemoved:true },
-    { name:'binding removed', work:'disconnected', bindingRemoved:true },
-    { name:'grant removed', work:'disconnected', grantRemoved:true },
+    { name:'doing after check', work:'working', connection:'live', doing:true },
+    { name:'waiting without work', work:'idle', connection:'live' },
+    { name:'seat removed', work:'disconnected', connection:'connection_off', seatRemoved:true },
+    { name:'binding removed', work:'disconnected', connection:'connection_off', bindingRemoved:true },
+    { name:'grant removed', work:'disconnected', connection:'connection_off', grantRemoved:true },
+    { name:'principal removed', work:'disconnected', connection:'removed', principalRemoved:true, seatRemoved:true },
   ];
   let sql = migration() + userSql(owner) + workspaceSql(w,owner) + boundarySql(w) + consentSql(w,owner);
   const principals: string[] = [];
   for (const c of cases) {
     const principal = randomUUID(), grant = randomUUID(), seat = randomUUID(), signal = randomUUID();
     principals.push(principal);
-    sql += `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only)
-     VALUES ('${principal}','${w}','${owner}','Synthetic ${principal}','hosted_mcp',true);
+    sql += `INSERT INTO swarm.agent_principals(principal_id,workspace_id,owner_user_id,name,transport,turn_only,revoked_at)
+     VALUES ('${principal}','${w}','${owner}','Synthetic ${principal}','hosted_mcp',true,${c.principalRemoved ? 'statement_timestamp()' : 'NULL'});
      INSERT INTO swarm.hosted_mcp_grants(grant_id,provider_grant_id,owner_user_id,home_workspace_id,client_id,resource,
       selected_workspace_ids,manifest_digest,interaction_ref,state,created_at,activated_at,revoked_at)
      VALUES ('${grant}','synthetic-${grant}','${owner}','${w}','synthetic-client','https://mcp.commonswarm.com/mcp',
@@ -341,7 +405,9 @@ test('hosted activity comes from check batches; waiting messages stay idle and r
   sql += `${claims(owner)} SET LOCAL ROLE authenticated; ${snapshot()}`;
   for (const [i,c] of cases.entries()) {
     sql += check(`(SELECT a->'status'->>'work' FROM jsonb_array_elements(value->'workspaces'->0->'people'->0->'agents') a
-     WHERE a->>'principal_id'='${principals[i]}')='${c.work}'`, c.name);
+     WHERE a->>'principal_id'='${principals[i]}')='${c.work}'
+     AND (SELECT a->'status'->'facts'->>'connection' FROM jsonb_array_elements(value->'workspaces'->0->'people'->0->'agents') a
+      WHERE a->>'principal_id'='${principals[i]}')='${c.connection}'`, c.name);
   }
   sql += check(`(SELECT a->'status'->'facts'->>'messages_waiting_since' FROM jsonb_array_elements(value->'workspaces'->0->'people'->0->'agents') a
    WHERE a->>'principal_id'='${principals[1]}') IS NOT NULL`, 'hosted waiting-time fact retained');

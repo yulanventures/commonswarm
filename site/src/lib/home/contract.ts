@@ -62,7 +62,7 @@ export type WriteResult<T> =
 export type AgentWork = 'working' | 'idle' | 'disconnected';
 export interface AgentWorkFacts {
   transport: 'local' | 'hosted_mcp'; turn_only: boolean;
-  connection: 'live' | 'removed' | 'key_off' | 'key_ended' | 'paused';
+  connection: 'live' | 'removed' | 'connection_off' | 'key_off' | 'key_ended' | 'paused';
   last_activity_at: IsoTime | null;            // latest server-recorded action by this agent
   messages_waiting_since: IsoTime | null;
   doing: { todo_id: Uuid; title: string | null; since: IsoTime } | null; // title null without content access
@@ -82,7 +82,7 @@ export interface AgentQueue {
 export interface WorkspaceCatchUp {
   workspace_id: Uuid; name: string; role: 'owner' | 'admin' | 'member';
   last_seen_at: IsoTime | null; new_messages: number;           // capped at 99
-  content: { open_todos: number; lists: number; docs: number; files: number; new_activity: number } | null;
+  content: { open_todos: number; lists: number; docs: number; files: number } | null;
   people: Array<{ user_id: Uuid; display_name: string; role: 'owner' | 'admin' | 'member'; is_viewer: boolean;
     agents: Array<{ principal_id: Uuid; name: string; status: AgentWorkStatus; queue: QueueCounts | null }> }>;
   needs_you: {

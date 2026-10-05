@@ -293,26 +293,30 @@ test('agentQueue removes transport status and retains agent work facts', async (
   assert.equal('queue' in result, false);
 });
 
-test('fixture catch-up counts only other authors after the receipt window', () => {
+test('fixture catch-up counts own agents and other authors after the receipt window, excluding own human posts', () => {
   const viewer = HOME_FIXTURES.overview.viewer_user_id;
   for (const workspace of HOME_FIXTURES.overview.workspaces) {
-    // The server counts visible messages authored by other users strictly AFTER
+    // The server counts visible messages except the viewer's human posts strictly AFTER
     // last_seen_at (or within seven days for a first visit), capped at 99.
     const since = Date.parse(workspace.last_seen_at ?? FIXED_NOW) - (workspace.last_seen_at ? 0 : 7 * 86400000);
-    // Only other people's to-do events and COMMITTED revisions strictly after the receipt window.
     if (workspace.content) {
-      const activity = HOME_FIXTURES.activityByWorkspace[workspace.workspace_id];
-      assert.equal(workspace.content.new_activity, activity.filter(row => row.actor.user_id !== viewer && Date.parse(row.at) > since).length, workspace.name);
+      assert.deepEqual(Object.keys(workspace.content).sort(), ['docs', 'files', 'lists', 'open_todos']);
     }
     const messages = HOME_FIXTURES.messagesByWorkspace[workspace.workspace_id];
-    const visibleOtherMessages = messages.filter(row => row.author.user_id !== viewer
+    const visibleOtherMessages = messages.filter(row => (row.author.user_id !== viewer || row.author.principal_id !== null)
       && Date.parse(row.created_at) > since
       && (row.recipients === null || row.recipients.some(party => party.kind === 'user' && party.id === viewer)));
     assert.equal(workspace.new_messages, Math.min(99, visibleOtherMessages.length), workspace.name);
-
   }
-  assert.equal(HOME_FIXTURES.overview.workspaces[0].content.new_activity, 0);
-  assert.equal(HOME_FIXTURES.overview.workspaces[1].content.new_activity, 0);
+  assert.deepEqual(HOME_FIXTURES.overview.workspaces.map(row => row.new_messages), [4, 0, 12]);
+});
+
+test('fixtures distinguish a disabled chat-app connection from a removed agent and a disabled local key', () => {
+  const home = HOME_FIXTURES.overview.workspaces.find(row => row.workspace_id === W.home);
+  const hosted = home.people.find(row => row.user_id === U.priya).agents[0].status;
+  assert.deepEqual([hosted.work, hosted.facts.transport, hosted.facts.connection], ['disconnected', 'hosted_mcp', 'connection_off']);
+  assert.equal(HOME_FIXTURES.otherAgents.find(row => row.principal_id === A.orphan).status.facts.connection, 'removed');
+  assert.equal(HOME_FIXTURES.queues[A.dot].status.facts.connection, 'key_off');
 });
 
 test('refusals use stable codes and conflicts retain the current to-do', async () => {
