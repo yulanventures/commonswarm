@@ -331,7 +331,7 @@ function postFixture(): string {
   return (postFixtureDir = dir);
 }
 
-test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-version, live and missing approvals refuse', { skip: skipDb }, () => {
+test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-version, superseded, any-owner live and missing approvals refuse', { skip: skipDb }, () => {
   const dump = postFixture(), pg = PG(), cluster = mkdtempSync('/tmp/c1w2.');
   const exec = (tool: string, args: string[]) => spawnSync(join(pg, tool), args, { encoding: 'utf8', timeout: 60_000 });
   const ok = (r: ReturnType<typeof exec>) => assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -355,13 +355,21 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     writeFileSync(join(cluster, 'inputs.json'), JSON.stringify(inputs));
     const plan = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
     const extract = (text: string) => [...text.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(b => b.startsWith('# step: ai-w6-client-verification\n'))!;
-    const baseline = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }); ok(baseline);
-    const verify = (version: number, text = plan) => {
+    const retryBaseline = spawnSync('git', ['cat-file', '-e', '50759707^{commit}']);
+    assert.equal(retryBaseline.status, 0, 'baseline commit 50759707 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 50759707)');
+    const baseline = spawnSync('git', ['show', '50759707:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }); ok(baseline);
+    const verify = (version: number, text = plan, gateDigest = inputs.gate_receipt_sha256) => {
+      writeFileSync(join(cluster, 'inputs.json'), JSON.stringify({ ...inputs, gate_receipt_sha256: gateDigest }));
       writeFileSync(join(proof, 'C1-inputs.json'), JSON.stringify({ ...inputs, owner_user_id: owner, verification_version: version, metadata_digest: metadata }));
       return spawnSync('/bin/bash', [], { input: `ai_deadline() { :; }\nai_db() { "$RETRY_PSQL" -X -h "$RETRY_CLUSTER" -U supabase_admin -d postgres -v ON_ERROR_STOP=1 "$@"; }\n` + extract(text).replace('/proof/client-verification.sql', join(proof, 'client-verification.sql')),
         encoding: 'utf8', env: { ...process.env, RETRY_PSQL: join(pg, 'psql'), RETRY_CLUSTER: cluster, WINDOW: 'W6', PROOF_DIR: proof, INPUTS_FILE: join(cluster, 'inputs.json'), C1_INPUTS_FILE: join(proof, 'C1-inputs.json') } });
     };
-    ok(verify(1)); ok(verify(1)); // No approval at the identical active version remains idempotent.
+    ok(verify(1)); ok(verify(1));
+    for (const invalid of ['C'.repeat(64), 'c'.repeat(63), "c'; SELECT 1; --"]) {
+      const bad = verify(1, plan, invalid); assert.notEqual(bad.status, 0);
+      assert.match(bad.stderr, /FAIL ai-w6-client-verification: gate_receipt_sha256 expected 64-lowercase-hex got other; STOP/);
+    }
+    // No approval at the identical active version remains idempotent.
     const refused = (r: ReturnType<typeof verify>, message: RegExp) => { assert.notEqual(r.status, 0); assert.match(r.stderr, message); };
     refused(verify(2), /another active C1 verification version/); // Missing approval cannot supersede.
     const seed = (who: string, withdrawn: boolean) => {
@@ -376,7 +384,13 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     // Baseline controls fail for the real defect: version 1 is wrongly reusable, version 2 cannot supersede it.
     ok(verify(1, baseline.stdout)); refused(verify(2, baseline.stdout), /another active C1 verification version/);
     refused(verify(1), /FAIL ai-w6-client-verification: owner approval at verification_version 1 expected reusable got withdrawn; use verification_version 2 for the next W6; STOP/);
+    // The current owner withdrew, but a second owner's live approval still forbids superseding.
+    ok(psql(`BEGIN; SET LOCAL session_replication_role=replica; UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at=NULL,withdrawal_event_id=NULL,withdrawal_reason=NULL WHERE owner_user_id='${other}'; COMMIT;`));
+    refused(verify(2), /FAIL ai-w6-client-verification: verification_version 1 expected no live approvals from any owner got live approval; STOP/);
+    assert.equal(psql(`SELECT active FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' AND verification_version=1;`).stdout.trim(), 't');
+    ok(psql(`BEGIN; SET LOCAL session_replication_role=replica; UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at=statement_timestamp(),withdrawal_event_id='44444444-4444-4444-8444-444444444444',withdrawal_reason='smoke_cleanup' WHERE owner_user_id='${other}'; COMMIT;`));
     ok(verify(2)); ok(verify(2));
+    refused(verify(1), /FAIL ai-w6-client-verification: verification_version 1 expected reusable got superseded; use verification_version 3 for the next W6; STOP/);
     const rows = psql(`SELECT verification_version,active,withdrawn_at IS NOT NULL,coalesce(withdrawal_reason,'') FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' ORDER BY verification_version;`); ok(rows);
     assert.equal(rows.stdout.trim(), '1|f|t|c1-retry-superseded\n2|t|f|');
     const approvals = psql(`SELECT count(*),bool_and(withdrawn_at IS NOT NULL) FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${client}';`); ok(approvals);

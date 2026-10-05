@@ -860,7 +860,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
   }
 });
 
-test('admin release plan: W6 close requires cleanup after client check, accepts recovery before it, and removes its private window', () => {
+test('admin release plan: W6 close requires cleanup only after Mac start, rejects symlinks, and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
   // Valid retained receipts: ai-close re-runs ai-live-controls on them, producer from the verified archive.
   const producerFile=join(scratch,'close-producer.mjs'), archive=join(scratch,'close-release.tar');
@@ -880,6 +880,8 @@ test('admin release plan: W6 close requires cleanup after client check, accepts 
   for(const file of ['C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
   const w6Inputs=join(scratch,'close-inputs-W6.json'); writeFileSync(w6Inputs,JSON.stringify({...base(),window:'W6',archive_sha256:archiveSha}));
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
+  const closeState=(started:boolean)=>JSON.stringify({release_sha:sha,window_id:'Abc123',plan_sha256:digest(plan),started});
+  writeFileSync(join(proof,'C1-close-state.json'),closeState(true));
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
@@ -926,9 +928,19 @@ test('admin release plan: W6 close requires cleanup after client check, accepts 
     writeFileSync(join(proof,'C1-client-check.txt'),'PASS');
     const recoveryWithoutCleanup=run(harness+close,{...env,CLOSE_RESULT:'recovered'});
     assert.notEqual(recoveryWithoutCleanup.status,0);
-    assert.ok(recoveryWithoutCleanup.stderr.includes('FAIL ai-close: recovered W6 C1-cleanup.txt expected present after C1-client-check.txt got missing; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP'),recoveryWithoutCleanup.stderr);
+    assert.ok(recoveryWithoutCleanup.stderr.includes('FAIL ai-close: recovered W6 C1-cleanup.txt expected regular-non-symlink after secret-stage.path in C1_PROOF_DIR got missing-or-other; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP'),recoveryWithoutCleanup.stderr);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
+    for(const file of ['C1-client-check.txt','C1-cleanup.txt','C1-close-state.json','C1.json','C1-finish.json']) for(const dangling of [false,true]) {
+      const saved=readFileSync(join(proof,file)); rmSync(join(proof,file));
+      const target=join(scratch,`close-link-${file}`); if(!dangling) writeFileSync(target,saved);
+      else if(existsSync(target)) rmSync(target);
+      symlinkSync(target,join(proof,file));
+      const linked=run(harness+close,{...env,CLOSE_RESULT:'recovered'});
+      assert.notEqual(linked.status,0); assert.ok(linked.stderr.includes(`FAIL ai-close: recovered W6 ${file} expected regular-non-symlink got other; STOP`),linked.stderr);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+      rmSync(join(proof,file)); writeFileSync(join(proof,file),saved);
+    }
     // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
     const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
     writeFileSync(join(proof2,'consent-pre-W1.json'),pre); writeFileSync(join(proof2,'ordinary-after.json'),liveFor('W2','after',pre));
@@ -944,17 +956,20 @@ test('admin release plan: W6 close requires cleanup after client check, accepts 
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
-    for(const checked of [false,true]) {
+    for(const started of [false,true]) {
       const recoveryStage=makeStage(), recoveryProof=mkdtempSync(join(scratch,'close-recovered-w6-'));
       try {
         for(const file of readdirSync(proof)) {
-          if(['closed.txt','close-result.json','secret-stage.path','C1-client-check.txt','C1-cleanup.txt'].includes(file)) continue;
+          if(['closed.txt','close-result.json','secret-stage.path','C1-client-check.txt','C1-cleanup.txt','C1-close-state.json','C1-no-start.txt'].includes(file)) continue;
           writeFileSync(join(recoveryProof,file),readFileSync(join(proof,file)));
         }
         writeFileSync(join(recoveryProof,'secret-stage.path'),recoveryStage+'\n');
-        if(checked) { writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS'); writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS'); }
+        writeFileSync(join(recoveryProof,'C1-close-state.json'),closeState(started));
+        writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS');
+        if(started) writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS');
         const recovered=run(harness+close,{...env,SECRET_STAGE:recoveryStage,PROOF_DIR:recoveryProof,CLOSE_RESULT:'recovered'});
         assert.equal(recovered.status,0,recovered.stderr); assert.ok(existsSync(join(recoveryProof,'closed.txt'))); assert.ok(!existsSync(recoveryStage));
+        assert.equal(existsSync(join(recoveryProof,'C1-no-start.txt')),!started);
       } finally { if(existsSync(recoveryStage)) removeStage(recoveryStage); }
     }
   } finally {
@@ -1736,7 +1751,7 @@ test('admin release plan: W5 companion site plan comes only from the verified re
   const root = mkdtempSync(join(scratch, 'site-ref-')), prep = join(root, 'prep'), repoDir = join(root, 'site-repo');
   mkdirSync(prep); const sitePath = 'docs/evidence/2026-10-02-site-release/SITE-RELEASE.md';
   const fence = '```';
-  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
+  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site-release-shared-preflight\nW5_SITE_MARK=shared-preflight\n${fence}\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
   const staging = join(root, 'tree'); mkdirSync(dirname(join(staging, sitePath)), { recursive: true }); writeFileSync(join(staging, sitePath), sitePlan);
   mkdirSync(dirname(join(repoDir, sitePath)), { recursive: true }); writeFileSync(join(repoDir, sitePath), sitePlan);
   const tar = join(prep, 'release.tar');
@@ -1746,7 +1761,8 @@ test('admin release plan: W5 companion site plan comes only from the verified re
   const reference = (step: string) => run(block('ai-w5-reference') + '\nprintf "mark=%s\\n" "${W5_SITE_MARK:-unset}"\n',
     { SITE_STEP: step, SITE_RELEASE_REPO: repoDir, PREP_DIR: prep, INPUTS_FILE: inputs, SITE_RELEASE_SHA: sha });
   // Positive: the archive block is evaluated in this shell (its variable persists).
-  let r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
+  let r = reference('site-release-shared-preflight'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=shared-preflight/);
+  r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
   r = reference('site2-02'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /site2-02 ran/);
   assert.deepEqual(readdirSync(prep).sort(), ['release.tar'], 'no staged site-plan.md or site-step.sh');
   const refused = (out: ReturnType<typeof run>, text: string) => {
@@ -1802,7 +1818,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 21, 'one shared reader at all 21 sites (20 plan-text sites, including ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
+  assert.equal(readers.length, 22, 'one shared reader at all 22 sites (21 plan-text sites, including the W5 recovered-close validator, ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
@@ -2770,4 +2786,71 @@ print('ok')
   // Control: a wrong password fails the same check.
   const bad = spawnSync('python3', ['-c', check.replace("scram_verifier('pencil',salt)", "scram_verifier('pencil2',salt)")], { encoding: 'utf8' });
   assert.notEqual(bad.status, 0);
+});
+
+test('recovered W6 start state measures the Mac marker and refuses regular and dangling receipt symlinks', () => {
+  const dir=mkdtempSync(join(scratch,'mac-close-state-'));
+  const input=join(dir,'inputs.json'); const d={...base(),window:'W6'}; writeFileSync(input,JSON.stringify(d));
+  const execute=()=>run(block('ai-w6-close-state'),{C1_PROOF_DIR:dir,INPUTS_FILE:input});
+  writeFileSync(join(dir,'C1-client-check.txt'),'PASS');
+  let r=execute(); assert.equal(r.status,0,r.stderr);
+  assert.equal(JSON.parse(readFileSync(join(dir,'C1-close-state.json'),'utf8')).started,false,'client-check alone never starts a runner');
+  writeFileSync(join(dir,'secret-stage.path'),'/private/tmp/synthetic-stage\n'); writeFileSync(join(dir,'runner.pid'),'2147483646\n');
+  r=execute(); assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(readFileSync(join(dir,'C1-close-state.json'),'utf8')).started,true);
+  for(const file of ['secret-stage.path','runner.pid','C1-client-check.txt','C1-cleanup.txt']) for(const dangling of [false,true]) {
+    const path=join(dir,file), target=join(dir,'link-target');
+    const saved=existsSync(path)?readFileSync(path):null; if(saved) rmSync(path);
+    if(existsSync(target)) rmSync(target); if(!dangling) writeFileSync(target,'PASS');
+    symlinkSync(target,path); r=execute(); assert.notEqual(r.status,0);
+    assert.ok(r.stderr.includes(`FAIL ai-w6-close-state: ${file} expected regular-non-symlink got other; STOP`),r.stderr);
+    rmSync(path); if(saved) writeFileSync(path,saved);
+  }
+  writeFileSync(join(dir,'runner.pid'),String(process.pid));
+  r=execute(); assert.notEqual(r.status,0); assert.match(r.stderr,/runner expected stopped got active/);
+});
+
+test('W5 recovered close requires companion closure, bound rollback/reconciliation and the original baseline current', () => {
+  const root=realpathSync(mkdtempSync(join(scratch,'w5-recovered-'))), site=join(root,'site'), bin=join(root,'bin'); mkdirSync(bin);
+  writeFileSync(join(bin,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const original=join(site,'releases','20261003T120000Z-'+base().baseline_site_sha.slice(0,12)+'-'+'1'.repeat(16));
+  mkdirSync(join(original,'app'),{recursive:true}); writeFileSync(join(original,'app/index.html'),'baseline'); symlinkSync(original,join(site,'current'));
+  const producer=join(root,'producer.mjs'), archive=join(root,'release.tar'); writeFileSync(producer,'export const fixture = true;\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producer],{encoding:'utf8'}); assert.equal(tar.status,0,tar.stderr);
+  const consent=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'post-W5',measured_at:new Date(Date.now()-60_000).toISOString(),producer_sha256:digest(readFileSync(producer)),controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['w5-recovery-own'],cleanup:{grants_revoked:true,dcr_clients_expiring:[{client_id:'earlier-client',expires_after:new Date(Date.now()+86400_000).toISOString()}]}});
+  const live=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W5',phase:'recovery',controls:{hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true},consent_receipt_sha256:digest(consent),producer_sha256:digest(readFileSync(producer)),dcr_client_ids:['window-client']});
+  const fixture=(outcome:string)=>{
+    const proof=mkdtempSync(join(root,'proof-')), evidence=join(proof,'site-recovery'); mkdirSync(evidence);
+    const input=join(proof,'inputs.json'); writeFileSync(input,JSON.stringify({...base(),window:'W5',baseline_site_target:original,archive_sha256:digest(readFileSync(archive))}));
+    writeFileSync(join(proof,'ordinary-recovery.json'),live); writeFileSync(join(proof,'consent-post-W5.json'),consent);
+    writeFileSync(join(evidence,'previous.original'),original+'\n'); writeFileSync(join(evidence,'site2-07-pin-close.txt'),`pin_released=yes\nOUTCOME=${outcome}\n`);
+    if(outcome==='rolled-back') { writeFileSync(join(evidence,'rollback-auto.txt'),'rollback_reason=public-control-failure\nrestored_release=/srv/commonswarm/site/releases/.site-window-pin-fixture\n'); writeFileSync(join(evidence,'site2-06-rollback-verify.txt'),'ROLLBACK_PUBLIC_BYTES=PASS\nuser_agent=curl/8.7.1\n'); }
+    else writeFileSync(join(evidence,'site2-04-reconciliation.txt'),'DEPLOYMENT=failed-before-switch\nRETRY=forbidden\n');
+    const seal=()=>{
+      const names=readdirSync(evidence).filter(n=>!['CLOSE.txt','manifest.json'].includes(n));
+      const manifest=JSON.stringify(names.map(path=>({path,sha256:digest(readFileSync(join(evidence,path)))}))); writeFileSync(join(evidence,'manifest.json'),manifest);
+      writeFileSync(join(evidence,'CLOSE.txt'),`CLOSED=yes\nOUTCOME=${outcome}\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(manifest)}\n`);
+    }; seal();
+    const execute=()=>run(block('ai-close').replaceAll('/srv/commonswarm/site',site),{WINDOW:'W5',CLOSE_RESULT:'recovered',INPUTS_FILE:input,PLAN_FILE:planPath,PROOF_DIR:proof,BOX_ARCHIVE_PATH:archive,SITE_RECOVERY_EVIDENCE:evidence,PATH:bin+':'+process.env.PATH});
+    return {proof,evidence,execute,seal};
+  };
+  for(const outcome of ['rolled-back','failed-before-switch']) {
+    const good=fixture(outcome), r=good.execute(); assert.equal(r.status,0,r.stderr);
+    assert.match(r.stdout,/CLOSED-RECOVERED W5/); assert.equal(JSON.parse(readFileSync(join(good.proof,'close-result.json'),'utf8')).result,'recovered');
+  }
+  for(const fault of ['missing-close','cleanup-failed','wrong-current','wrong-baseline','receipt-missing','receipt-altered','pin-partial','forward-outcome','receipt-symlink','bad-controls']) {
+    const f=fixture(fault==='receipt-missing'?'failed-before-switch':'rolled-back');
+    if(fault==='missing-close') rmSync(join(f.evidence,'CLOSE.txt'));
+    if(fault==='cleanup-failed') writeFileSync(join(f.evidence,'CLOSE.txt'),'CLOSED=no\n');
+    if(fault==='wrong-current') { rmSync(join(site,'current')); symlinkSync(site,join(site,'current')); }
+    if(fault==='wrong-baseline') { const input=join(f.proof,'inputs.json'); const d=JSON.parse(readFileSync(input,'utf8')); d.baseline_site_sha='0'.repeat(40); writeFileSync(input,JSON.stringify(d)); }
+    if(fault==='receipt-missing') { rmSync(join(f.evidence,'site2-04-reconciliation.txt')); f.seal(); }
+    if(fault==='receipt-altered') writeFileSync(join(f.evidence,'rollback-auto.txt'),'changed');
+    if(fault==='pin-partial') { writeFileSync(join(f.evidence,'site2-07-pin-close.txt'),'pin_released=no\n'); f.seal(); }
+    if(fault==='forward-outcome') writeFileSync(join(f.evidence,'CLOSE.txt'),readFileSync(join(f.evidence,'CLOSE.txt'),'utf8').replace('OUTCOME=rolled-back','OUTCOME=released'));
+    if(fault==='receipt-symlink') { const path=join(f.evidence,'rollback-auto.txt'); rmSync(path); symlinkSync(join(root,'absent'),path); }
+    if(fault==='bad-controls') writeFileSync(join(f.proof,'ordinary-recovery.json'),'{}');
+    const r=f.execute(); assert.notEqual(r.status,0,fault); assert.ok(!existsSync(join(f.proof,'closed.txt')),fault); assert.ok(!existsSync(join(f.proof,'close-result.json')),fault);
+    assert.match(r.stderr,fault==='bad-controls'?/retained close receipts expected valid got refused/:/recovered W5 site close, recovery receipt and current expected closed-recovered-baseline got other/);
+    if(fault==='wrong-current') { rmSync(join(site,'current')); symlinkSync(original,join(site,'current')); }
+  }
 });

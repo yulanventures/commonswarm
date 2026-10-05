@@ -414,7 +414,9 @@ test('same-version retry / w4-rollback-moves-tree-aside: baseline compose and Ca
 });
 test('same-version retry / w4-rollback-refusals: each failure stops before the aside and completion, also with ignored errexit', () => {
   // Baseline regression control: ignored errexit used to hide a failed recycle rollback and move the tree anyway.
-  const before=spawnSync('git',['show','HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8'});
+  const retryBaseline = spawnSync('git', ['cat-file', '-e', '50759707^{commit}']);
+  assert.equal(retryBaseline.status, 0, 'baseline commit 50759707 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 50759707)');
+  const before=spawnSync('git',['show','50759707:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8'});
   assert.equal(before.status,0,before.stderr);
   const old=[...before.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: ai-w4-rollback\n'))!;
   const control=rollbackFixture({fail_call:['ai_run','ai-recycle-rollback']},true);

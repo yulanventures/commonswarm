@@ -91,6 +91,8 @@ test('real plan: every one of 18 window/mode tasks retains exact blocks, manual 
     assert.equal(result.status, 0, `${window} ${mode}: ${result.stderr}`);
     const task: Task = JSON.parse(result.stdout);
     verify(task, plan, window, mode); visit(task.steps);
+    assert.equal((task.header as any).requires_lead_ruling, false);
+    assert.ok(task.steps.every(s => !s.ambiguity));
   }
   const excluded = new Set([...text.matchAll(/^not-run: (.+)$/gm)].map(m => JSON.parse(m[1]!).id));
   assert.deepEqual(new Set([...used, ...excluded]), defined, 'every definition is dispatched or explicitly excluded');
@@ -110,17 +112,16 @@ test('W3 forward retains the public-probe condition beside the actual probe and 
   assert.ok(task.steps.findIndex(s => s.id === 'ai-w3-local-gate') < task.steps.indexOf(probe));
 });
 
-test('W5 pins companion bytes and enumerates its normal route without choosing the unresolved first-step conflict', () => {
+test('W5 pins companion bytes and starts the companion normal route with shared preflight', () => {
   const result = run(planPath, 'W5', 'forward');
   assert.equal(result.status, 0, result.stderr);
   const task = JSON.parse(result.stdout);
   const site = readFileSync('docs/evidence/2026-10-02-site-release/SITE-RELEASE.md');
   assert.equal(task.header.site_plan.sha256, createHash('sha256').update(site).digest('hex'));
-  assert.equal(task.header.requires_lead_ruling, true);
+  assert.equal(task.header.requires_lead_ruling, false);
   const contract = JSON.parse(/```release-contract\n([\s\S]*?)\n```/.exec(site.toString())![1]!);
-  const first = task.steps.find((s: any) => s.ambiguity === 'site-first');
-  const selected = [...first.readings[0].steps, ...task.steps.filter((s: any) => s.id === 'ai-w5-reference')];
-  assert.deepEqual(selected.map(s => s.input.split(';')[0].replace('SITE_STEP=', '')), contract.routes.normal);
+  const selected = task.steps.filter((s: any) => s.id === 'ai-w5-reference');
+  assert.deepEqual(selected.map((s: any) => s.input.split(';')[0].replace('SITE_STEP=', '')), contract.routes.normal);
 });
 
 test('synthetic order, edited block, file output and UTF-8 offsets are observable at the CLI', () => {
@@ -173,4 +174,58 @@ test('missing orders, undefined/unaccounted steps, wrong quotes, duplicates and 
   // Legacy table cannot override explicit orders inside the canonical section.
   const legacy = '| Window | Mode | Steps |\n| W3 | forward | ai-ignored |\n' + positive;
   assert.equal(run(fixture('legacy.md', legacy)).status, 0);
+});
+
+// Independent call-graph check: fixtures that replace ai_run cannot detect a missing dispatcher entry.
+test('box ai_run allowlist covers every literal nested box dispatch', () => {
+  let source = text;
+  if (process.env.C1_ALLOWLIST_PLAN_REF) {
+    const ref = process.env.C1_ALLOWLIST_PLAN_REF;
+    const present = spawnSync('git', ['cat-file', '-e', `${ref}^{commit}`]);
+    assert.equal(present.status, 0, `allowlist control commit ${ref} is absent: fetch it with fetch-depth: 0`);
+    const old = spawnSync('git', ['show', `${ref}:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md`], { encoding: 'utf8' });
+    assert.equal(old.status, 0, old.stderr); source = old.stdout;
+  }
+  const bodies = [...source.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+  const dispatcher = bodies.find(b => b.includes('ai_run() {'))!;
+  assert.ok(dispatcher, 'box dispatcher exists');
+  const arm = /case "\$STEP_NAME" in ([^\n]+?)\) ;;/m.exec(dispatcher);
+  assert.ok(arm, 'dispatcher has one step allowlist');
+  const allowed = new Set(arm[1]!.split('|'));
+  const macOnly = new Map<string, string>(); // No box caller may dispatch a Mac-only step today.
+  const calls = new Map<string, string[]>();
+  for (const body of bodies) {
+    if (!/^# host: .*box/im.test(body)) continue;
+    const caller = /^# step: (\S+)/m.exec(body)![1]!;
+    for (const m of body.split('\n').filter(line => !/^\s*#/.test(line)).join('\n').matchAll(/\bai_run\s+(ai-[a-z0-9-]+)/g)) calls.set(m[1]!, [...(calls.get(m[1]!) ?? []), caller]);
+  }
+  assert.ok(calls.size > 0, 'enumerated box calls');
+  for (const [step, callers] of calls) assert.ok(allowed.has(step) || macOnly.has(step), `box ai_run allowlist missing ${step}; callers: ${[...new Set(callers)].join(', ')}`);
+});
+
+test('resolved run orders keep opening, recovery and concurrent audit dispatch conditions', () => {
+  const task = (window: string, mode = 'forward') => {
+    const result = run(planPath, window, mode); assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout) as Task;
+  };
+  for (const window of ['W3', 'W4', 'W6', 'W7']) {
+    const steps = task(window).steps;
+    const open = steps.findIndex(s => s.id === 'ai-open');
+    assert.ok(open >= 0);
+    assert.ok(steps.every((s, i) => s.id !== 'ai-live-controls' || i > open), `${window}: live controls require open proof paths`);
+  }
+  const w4 = task('W4', 'recovered-close').steps;
+  assert.ok(!w4.some(s => s.id === 'ai-emergency-close'));
+  assert.ok(w4.findIndex(s => s.id === 'ai-w4-rollback') < w4.findIndex(s => s.id === 'ai-close'));
+  const w5 = task('W5', 'recovered-close').steps;
+  assert.ok(!w5.some(s => s.id === 'ai-w5-closed'));
+  assert.ok(w5.findIndex(s => s.id === 'ai-w5-recovery-transfer') < w5.findIndex(s => s.id === 'ai-close'));
+  const w6 = task('W6').steps;
+  assert.ok(!w6.some(s => s.id === 'ai-w6-audit-watch'));
+  const audit = w6.find(s => s.id === 'ai-w6-audit')!;
+  assert.match(audit.input!, /ONLY after agent.json upload completed/);
+  assert.match(audit.input!, /do not dispatch twice/);
+  assert.ok(w6.findIndex(s => s.id === 'ai-w6-fence-driver') < w6.findIndex(s => s.input?.startsWith('C1_CLIENT_ACTION=withdraw')));
+  const recovered = task('W6', 'recovered-close').steps;
+  assert.ok(recovered.findIndex(s => s.id === 'ai-w6-close-state') < recovered.findIndex(s => s.id === 'ai-close'));
 });

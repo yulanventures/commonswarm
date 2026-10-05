@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
-const VERSION = '2';
+const VERSION = '3';
 const WINDOWS = new Set(['W3', 'W4', 'W5', 'W6', 'W6e', 'W7']);
 const MODES = new Set(['forward', 'rollback', 'recovered-close']);
 class PlanError extends Error {}
@@ -67,13 +67,7 @@ function runOrders(plan, path) {
   const expand = (row, line) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) fail(`invalid order entry at plan line ${line}`);
     const evidence = { start_line: line, end_line: line, quote: lines[line - 1] };
-    if (typeof row.ambiguity === 'string' && row.ambiguity && Array.isArray(row.readings) && row.readings.length >= 2) {
-      return { ambiguity: row.ambiguity, requires_lead_ruling: true, order_evidence: evidence,
-        readings: row.readings.map(r => {
-          if (!r || typeof r.meaning !== 'string' || !Array.isArray(r.steps)) fail(`invalid ambiguity at plan line ${line}`);
-          return { source: quote(r.source, 'ambiguity'), meaning: r.meaning, steps: r.steps.map(s => expand(s, line)) };
-        }) };
-    }
+    if (row.ambiguity !== undefined) fail(`unresolved Lead ruling ${row.ambiguity} at plan line ${line}`);
     if (!['mac', 'box'].includes(row.host)) fail(`invalid order host at plan line ${line}`);
     const conditions = row.when ? [quote(row.when, 'when')] : [];
     if (row.input !== undefined && (typeof row.input !== 'string' || !row.input)) fail(`invalid input note at plan line ${line}`);

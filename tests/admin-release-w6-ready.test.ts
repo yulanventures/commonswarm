@@ -312,18 +312,7 @@ test('W7 preflight binds the closed-success W6 of this release by w6_window_id a
   assert.match(block('ai-w7-proof'), /W7_C1_BINDING=\$\(ai_run ai-w7-preflight\) \|\|/);
 });
 
-// ---------------- audit watcher and fence driver (R7 timing) ----------------
-test('ai-w6-audit-watch runs the audit once agent.json arrives and refuses at the window end without it', () => {
-  const dir = realpathSync(mkdtempSync(join(root, 'watch-')));
-  const harness = `ai_deadline() { test ! -e "$PROOF_DIR/expired"; }\nai_run() { test "$1" = ai-w6-audit || return 1; test "$C1_AGENT_RECEIPT" = "$PROOF_DIR/agent.json"; printf '{"grant_id":"g"}\\n' >"$PROOF_DIR/C1-audit.json"; }\n`;
-  writeFileSync(join(dir, 'agent.json'), '{}');
-  const ok = run(harness + block('ai-w6-audit-watch'), { WINDOW: 'W6', PROOF_DIR: dir });
-  assert.equal(ok.status, 0, ok.stderr); assert.ok(existsSync(join(dir, 'C1-audit.json')));
-  const late = realpathSync(mkdtempSync(join(root, 'watch-'))); writeFileSync(join(late, 'expired'), '');
-  const r = run(harness + block('ai-w6-audit-watch'), { WINDOW: 'W6', PROOF_DIR: late });
-  assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-audit-watch: agent.json expected before window end got none; STOP/);
-});
-
+// ---------------- explicit audit dispatch and fence driver (R7 timing) ----------------
 // Box-path mapper for the ssh/scp stubs: maps each path that starts with /home/commonswarm or /tmp to the fixture box
 // root, once. Anchored to a path start and idempotent: a path already under the box root (which itself is under /tmp
 // on Linux, where os.tmpdir() is /tmp) is left alone.
@@ -364,13 +353,12 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   const boxProof = join(boxRoot, `home/commonswarm/admin-issuance/release-proofs/${sha}-W6-Abc123`); mkdirSync(boxProof, { recursive: true });
   const calls = join(dir, 'calls');
   // ssh/scp stubs: one latency per call; the box side maps /home/commonswarm and /tmp under boxRoot. When agent.json
-  // is installed, the box audit watcher (modelled) writes C1-audit.json after AUDIT_SECONDS.
+  // is installed, no audit runs until the driver dispatches it through the existing box shell stdin.
   writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 sleep ${LATENCY}; cmd="\${@: -1}"; printf 'ssh %s\\n' "$cmd" >>"${calls}"
 ${stallUpload ? 'case "$cmd" in "test ! -e "*agent.json) exec sleep 600;; esac' : ''}
 cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
-case "$cmd" in install*agent.json) eval "$cmd" || exit 1; ( sleep 2; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","provider_grant_id":"family","audit_counts":{"init":1,"list":1,"read":1,"action":1}}\\n' >"${boxProof}/C1-audit.json" ) & exit 0;; esac
 eval "$cmd"\n`, { mode: 0o700 });
   writeFileSync(join(bin, 'scp'), `#!/bin/bash\nsleep ${LATENCY}; printf 'scp\\n' >>"${calls}"; dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"; cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
   const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
@@ -394,7 +382,19 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls
   const started = Date.now();
   const r = await new Promise<{ status: number | null; stdout: string; stderr: string }>(done => {
     const child = spawn('/bin/bash', [], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PLAN_FILE: planCopy, INPUTS_FILE: inputs, C1_PROOF_DIR: proof,
-      C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), ...(budget ? { C1_FENCE_BUDGET_SECONDS: String(budget) } : {}) } });
+      C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_BOX_STDIN_FD: '9', ...(budget ? { C1_FENCE_BUDGET_SECONDS: String(budget) } : {}) }, stdio: ['pipe', 'pipe', 'pipe', 'ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'ignore', 'pipe'] });
+    const dispatch = child.stdio[9] as import('node:stream').Readable;
+    let command = '';
+    dispatch.on('data', data => {
+      command += data.toString();
+      if (!command.endsWith('\n')) return;
+      assert.match(command, /C1_AGENT_RECEIPT="\$PROOF_DIR\/agent.json"/);
+      assert.match(command, /ai_run ai-w6-audit/);
+      assert.ok(existsSync(join(boxProof, 'agent.json')), 'audit never dispatches before uploaded input exists');
+      const auditReceipt=JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111', provider_grant_id: 'family', audit_counts: { init: 1, list: 1, read: 1, action: 1 } });
+      const box=run(`ai_run() { test "$1" = ai-w6-audit; test "$C1_AGENT_RECEIPT" = "$PROOF_DIR/agent.json"; test -f "$C1_AGENT_RECEIPT"; printf 'box dispatch ai-w6-audit\\n' >>"$DISPATCH_CALLS"; printf '%s\\n' '${auditReceipt}' >"$PROOF_DIR/C1-audit.json"; }\n`+command,{PROOF_DIR:boxProof,DISPATCH_CALLS:calls});
+      assert.equal(box.status,0,box.stderr);
+    });
     let stdout = '', stderr = ''; child.stdout.on('data', d => { stdout += d; }); child.stderr.on('data', d => { stderr += d; });
     child.on('close', status => done({ status, stdout, stderr }));
     child.stdin.end(block('ai-w6-fence-driver', [...copy.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!)));
@@ -413,11 +413,13 @@ test('ai-w6-fence-driver: agent receipt, upload, audit, download and human revok
   const roundTrips = trace.filter(l => l.startsWith('ssh') || l === 'scp').length;
   process.stdout.write(`R7 fence chain: ${seconds} s (wall ${elapsed.toFixed(1)} s) with ${roundTrips} ssh/scp round trips at ${LATENCY} s each; budget 240 s, target < 200 s\n`);
   assert.ok(seconds < 200 && elapsed < 200, `fence chain ${seconds} s`);
-  // Order: upload agent.json, poll for the audit, download it, then the owner check and the human revoke; no withdrawal.
+  // Order: upload agent.json, explicitly dispatch the audit, download it, then the owner check and the human revoke; no withdrawal.
   const firstInstall = trace.findIndex(l => l.includes('install') && l.includes('agent.json'));
+  const dispatch = trace.indexOf('box dispatch ai-w6-audit');
+  assert.equal(trace.filter(l => l === 'box dispatch ai-w6-audit').length, 1);
   const download = trace.findIndex(l => l.includes('cat') && l.includes('C1-audit.json'));
   const revoke = trace.indexOf('node revoke');
-  assert.ok(firstInstall >= 0 && download > firstInstall && revoke > download, trace.join('\n'));
+  assert.ok(firstInstall >= 0 && dispatch > firstInstall && download > dispatch && revoke > download, trace.join('\n'));
   assert.ok(!trace.some(l => l.includes('client-withdraw')), 'no approval withdrawal inside the fence window');
   assert.deepEqual(JSON.parse(readFileSync(join(proof, 'C1-audit.json'), 'utf8')).grant_id, '11111111-1111-4111-8111-111111111111');
   assert.equal(JSON.parse(readFileSync(join(proof, 'human-revoke.json'), 'utf8')).state, 'revoked');
