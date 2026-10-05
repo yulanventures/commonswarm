@@ -187,8 +187,12 @@ elif name=='cmp':
     if len(args)!=3 or args[0]!='-s': refuse()
     raise SystemExit(0 if owned(args[1]).read_bytes()==owned(args[2]).read_bytes() else 1)
 elif name=='ln':
-    if len(args)!=3 or args[0]!='-s': refuse()
-    owned(args[2]).symlink_to(owned(args[1]),target_is_directory=True)
+    # The plan uses -sfT: an existing temporary link is replaced, never followed.
+    if len(args)!=3 or args[0]!='-sfT': refuse()
+    link=owned(args[2])
+    if link.is_symlink(): link.unlink()
+    elif link.exists(): raise SystemExit(1)
+    link.symlink_to(owned(args[1]),target_is_directory=True)
 elif name=='mv':
     if len(args)!=3 or args[0]!='-Tf': refuse()
     owned(args[1]).replace(owned(args[2]))
@@ -350,6 +354,14 @@ test('edge-caddy-route / mcp-get-head-gate-cors: fails closed on a non-wildcard 
   }
 });
 
+test('same-version retry / w4-temporary-link-replaced: a current.admin-issuance link left by an interrupted switch is replaced, never followed', () => {
+  const f = fixture(); mkdirSync(join(f.root, 'edge/releases', baseline), { recursive: true });
+  symlinkSync(join(f.root, 'edge/releases', baseline), join(f.root, 'edge/current.admin-issuance'));
+  const r = f.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(f, r);
+  assert.equal(realpathSync(join(f.root, 'edge/current')), join(f.root, 'edge/releases', sha));
+  assert.ok(!existsSync(join(f.root, 'edge/releases', baseline, sha)), 'no link created inside the baseline release');
+  assert.ok(r.calls.some(c => c[0] === 'ln' && c[1] === '-sfT'));
+});
 test('backup-restore-gate / w4-apply-mutation-boundary: ai-w4-apply validates the backup receipt right before its first database mutation', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(good, r);
   const gate = r.calls.findIndex(c => c[0] === 'ai_run' && c[1] === 'ai-backup-gate-check');
@@ -549,7 +561,7 @@ test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses
   symlinkSync(join(linked.root, 'real-override.yaml'), join(linked.root, `edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`));
   guardRefused(linked, linked.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected not-symlink got symlink; STOP');
   const present = fixture(); ready(present); mkdirSync(join(present.root, 'edge/releases', sha));
-  guardRefused(present, present.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected absent got present; STOP');
+  guardRefused(present, present.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected absent got present; a W4 at this release left it without a completed rollback: run ai-w4-rollback in this window (it moves the tree to ' + join(present.root, 'edge') + '/failed-attempts/<release_sha>-W4-<this window_id>), close recovered, then open a new W4 window; STOP');
   const dangling = fixture(); ready(dangling); symlinkSync(join(dangling.root, 'absent-edge'), join(dangling.root, 'edge/releases', sha));
   guardRefused(dangling, dangling.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP');
   assert.ok(!existsSync(join(dangling.root, 'absent-edge')));

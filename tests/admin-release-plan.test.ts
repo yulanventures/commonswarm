@@ -1054,6 +1054,53 @@ test('same-version retry / w3-recovered-close: a recovered W3 closes only with t
   r=attempt(()=>undefined,'sha256:'+'c'.repeat(64)); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: recovered W3 running image expected baseline got other; STOP/);
 });
+test('same-version retry / w4-recovered-close: a recovered W4 closes only with the baseline edge, baseline Caddy bytes, no drop-in and no tree at this release', () => {
+  const root=realpathSync(mkdtempSync(join(scratch,'w4-close-')));
+  const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W4',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const oldSha='b'.repeat(40), bytes={mcp:'mcp baseline\n',api:'api baseline\n',file:'import sites\n'}, inputs=join(root,'inputs.json');
+  writeFileSync(inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_edge_sha:oldSha,
+    baseline_mcp_caddy_sha256:digest(bytes.mcp),baseline_api_caddy_sha256:digest(bytes.api),baseline_caddyfile_sha256:digest(bytes.file)}));
+  const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const attempt=(setup:(box:string)=>void)=>{
+    const box=realpathSync(mkdtempSync(join(root,'box-'))), edge=join(box,'edge'), caddy=join(box,'caddy'), systemd=join(box,'systemd');
+    mkdirSync(join(edge,'releases',oldSha),{recursive:true}); symlinkSync(join(edge,'releases',oldSha),join(edge,'current'));
+    mkdirSync(join(caddy,'sites'),{recursive:true}); writeFileSync(join(caddy,'sites/20-commonswarm-mcp.caddy'),bytes.mcp);
+    writeFileSync(join(caddy,'sites/10-commonswarm-api.caddy'),bytes.api); writeFileSync(join(caddy,'Caddyfile'),bytes.file); mkdirSync(join(systemd,'fixture.service.d'),{recursive:true});
+    setup(box);
+    const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/home/commonswarm/edge').join(edge).split('/etc/caddy').join(caddy).split('/etc/systemd/system').join(systemd);
+    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+    writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
+    writeFileSync(join(proof,'ordinary-recovery.json'),recovery); writeFileSync(join(proof,'inputs.json'),readFileSync(inputs));
+    const result=run(`ai_ro() { printf 't\\n'; }\n`+close,{WINDOW:'W4',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',EDGE_RECYCLE_SERVICE:'fixture.service',
+      INPUTS_FILE:inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:'recovered',PATH:shim+':'+process.env.PATH});
+    const closed=existsSync(join(proof,'closed.txt')); if(existsSync(stage)) removeStage(stage);
+    return {result,closed};
+  };
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  r=attempt(b=>mkdirSync(join(b,'edge/failed-attempts',sha+'-W4-Abc123'),{recursive:true})); assert.equal(r.result.status,0,r.result.stderr);
+  const refusal=/FAIL ai-close: recovered W4 edge current, Caddy bytes, drop-in and release tree expected baseline-baseline-absent-absent got other; run ai-w4-rollback; STOP/;
+  for(const [name,setup] of [
+    ['tree at this release',(b:string)=>mkdirSync(join(b,'edge/releases',sha))],
+    ['current on the new tree',(b:string)=>{ mkdirSync(join(b,'edge/releases',sha)); rmSync(join(b,'edge/current')); symlinkSync(join(b,'edge/releases',sha),join(b,'edge/current')); }],
+    ['candidate Caddy left live',(b:string)=>writeFileSync(join(b,'caddy/sites/20-commonswarm-mcp.caddy'),'candidate\n')],
+    ['Caddyfile changed',(b:string)=>writeFileSync(join(b,'caddy/Caddyfile'),'other\n')],
+    ['drop-in left',(b:string)=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')],
+  ] as const) {
+    r=attempt(setup); assert.notEqual(r.result.status,0,name); assert.ok(!r.closed,name); assert.match(r.result.stderr,refusal,name); assert.doesNotMatch(r.result.stderr,/Traceback/,name);
+  }
+  // The rollback derives its paths from INPUTS and moves the tree aside only after current is back on the baseline.
+  const rollback=block('ai-w4-rollback');
+  assert.ok(rollback.indexOf('OLD_EDGE=/home/commonswarm/edge/releases/$W4_BASELINE_EDGE_SHA')<rollback.indexOf('ln -sfT "$OLD_EDGE"'));
+  assert.ok(rollback.indexOf('test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE" ||')<rollback.indexOf('RELEASE_ASIDE_PART=edge\n( ai_run ai-release-aside ) ||'));
+});
 // ---- shared W2/W2b proof validator (ai-w2b-proof-check), run from plan bytes; paths remapped only ----
 const pyJson = (value: Record<string, unknown>) => '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(value[k])).join(', ') + '}\n';
 const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n';

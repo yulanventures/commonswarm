@@ -2837,7 +2837,7 @@ nothing references them. Their retention is a separate assignment.
 ```sh
 # step: ai-release-aside
 # readonly: no
-# host: box root; run through ai_run by ai-w3-rollback (RELEASE_ASIDE_PART=oauth), after the baseline is live again
+# host: box root; run through ai_run by ai-w3-rollback (RELEASE_ASIDE_PART=oauth) and ai-w4-rollback (edge), after the baseline is live again
 set -euo pipefail
 # Every step fails explicitly: the caller runs ( ai_run ai-release-aside ) || ..., where errexit is ignored.
 case "${RELEASE_ASIDE_PART:-}" in
@@ -2973,7 +2973,7 @@ NEW_EDGE=/home/commonswarm/edge/releases/$RELEASE_SHA
 test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' commonswarm-edge-edge-runtime-1)" = "$OLD_EDGE/deploy/edge-runtime/compose.yaml,$OLD_EDGE/deploy/edge-runtime/compose.override.yaml"
 test -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" || { printf 'FAIL ai-w4-preflight: baseline compose.override.yaml expected regular-file got missing; STOP\n' >&2; exit 1; }
 test ! -L "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" || { printf 'FAIL ai-w4-preflight: baseline compose.override.yaml expected not-symlink got symlink; STOP\n' >&2; exit 1; }
-test ! -e "$NEW_EDGE" || { printf 'FAIL ai-w4-preflight: new edge release directory expected absent got present; STOP\n' >&2; exit 1; }
+test ! -e "$NEW_EDGE" || { printf 'FAIL ai-w4-preflight: new edge release directory expected absent got present; a W4 at this release left it without a completed rollback: run ai-w4-rollback in this window (it moves the tree to /home/commonswarm/edge/failed-attempts/<release_sha>-W4-<this window_id>), close recovered, then open a new W4 window; STOP\n' >&2; exit 1; }
 test ! -L "$NEW_EDGE" || { printf 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP\n' >&2; exit 1; }
 mkdir -p "$NEW_EDGE"
 cp -a "$RELEASE_ROOT/." "$NEW_EDGE/"
@@ -3106,7 +3106,7 @@ ai_run ai-timer-guard
 systemctl stop "$EDGE_RECYCLE_TIMER"
 test "$(systemctl show -p ActiveState --value "$EDGE_RECYCLE_SERVICE")" = inactive
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
-ln -s "$NEW_EDGE" /home/commonswarm/edge/current.admin-issuance
+ln -sfT "$NEW_EDGE" /home/commonswarm/edge/current.admin-issuance
 mv -Tf /home/commonswarm/edge/current.admin-issuance /home/commonswarm/edge/current
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name commonswarm-edge \
  -f "$NEW_EDGE/deploy/edge-runtime/compose.yaml" -f "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml" \
@@ -3221,6 +3221,9 @@ cmp -s /etc/caddy/sites/10-commonswarm-api.caddy "$SECRET_STAGE/api.new.caddy"
 # host: box root; leave legacy closure permanent and issuance closed
 (
 set -euo pipefail
+# Paths come from INPUTS: a recovery shell may not have run ai-w4-preflight.
+W4_BASELINE_EDGE_SHA=$(python3 -c 'import json,re,sys; v=json.load(open(sys.argv[1]))["baseline_edge_sha"]; assert re.fullmatch("[0-9a-f]{40}",v); print(v)' "$INPUTS_FILE") || { printf 'FAIL ai-w4-rollback: baseline_edge_sha expected full-sha got other; STOP\n' >&2; exit 1; }
+OLD_EDGE=/home/commonswarm/edge/releases/$W4_BASELINE_EDGE_SHA
 ai_db -q --command "BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;" >/dev/null
 ai_run ai-timer-guard
 systemctl stop "$EDGE_RECYCLE_TIMER"
@@ -3230,7 +3233,7 @@ install -o root -g root -m 0644 "$SECRET_STAGE/api.caddy" /etc/caddy/sites/10-co
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$SECRET_STAGE/caddy-rollback.log" 2>&1
 systemctl reload caddy
 cmp -s /home/commonswarm/.env "$SECRET_STAGE/edge.env"
-ln -s "$OLD_EDGE" /home/commonswarm/edge/current.admin-issuance
+ln -sfT "$OLD_EDGE" /home/commonswarm/edge/current.admin-issuance
 mv -Tf /home/commonswarm/edge/current.admin-issuance /home/commonswarm/edge/current
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose --project-name commonswarm-edge \
  -f "$OLD_EDGE/deploy/edge-runtime/compose.yaml" -f "$OLD_EDGE/deploy/edge-runtime/compose.override.yaml" \
@@ -3239,8 +3242,12 @@ timeout 90 /bin/bash -c 'until test "$(docker inspect --format "{{.State.Health.
 W4_RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-edge-edge-runtime-1)
 W4_BASELINE_IMAGE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_edge_image"])' "$INPUTS_FILE")
 test "$W4_RUNNING_IMAGE" = "$W4_BASELINE_IMAGE"
-test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE"
-printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; measurement invalid; legacy remains fenced\n'
+test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE" || { printf 'FAIL ai-w4-rollback: edge current expected baseline got other; STOP\n' >&2; exit 1; }
+# Same-version retry: the failed attempt's tree leaves releases/<release_sha>, kept as evidence.
+RELEASE_ASIDE_PART=edge
+( ai_run ai-release-aside ) || { printf 'FAIL ai-w4-rollback: failed-attempt tree expected moved-aside-or-absent got refused; STOP\n' >&2; exit 1; }
+unset RELEASE_ASIDE_PART
+printf 'Apply body completed; timer recovery still required: W4 baseline source/Caddy restored; release tree aside or absent; measurement invalid; legacy remains fenced\n'
 )
 ```
 
@@ -5432,6 +5439,20 @@ raise SystemExit(0 if ok else 1)
 PY
  W3_RECOVERED_IMAGE=$(docker inspect --format '{{.Image}}' commonswarm-oauth-oauth-1) || { printf 'FAIL ai-close: recovered W3 running image expected readable got failure; STOP\n' >&2; exit 1; }
  test "$W3_RECOVERED_IMAGE" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["baseline_oauth_image"])' "$INPUTS_FILE")" || { printf 'FAIL ai-close: recovered W3 running image expected baseline got other; STOP\n' >&2; exit 1; }
+fi
+if test "$WINDOW" = W4 && test "$CLOSE_RESULT" = recovered; then
+ # A recovered W4 leaves the baseline edge, the baseline Caddy bytes, no recycle drop-in and no tree at this release.
+ python3 - /home/commonswarm/edge "$INPUTS_FILE" /etc/caddy "/etc/systemd/system/$EDGE_RECYCLE_SERVICE.d/50-admin-measurement.conf" <<'PY' || { printf 'FAIL ai-close: recovered W4 edge current, Caddy bytes, drop-in and release tree expected baseline-baseline-absent-absent got other; run ai-w4-rollback; STOP\n' >&2; exit 1; }
+import hashlib,json,os,sys
+base,inputs,caddy,dropin=sys.argv[1:5]; d=json.load(open(inputs))
+def digest(p): return hashlib.sha256(open(p,'rb').read()).hexdigest() if os.path.isfile(p) and not os.path.islink(p) else None
+ok=(os.path.realpath(os.path.join(base,'current'))==os.path.join(base,'releases',d['baseline_edge_sha'])
+    and not os.path.lexists(os.path.join(base,'releases',d['release_sha'])) and not os.path.lexists(dropin)
+    and digest(os.path.join(caddy,'sites/20-commonswarm-mcp.caddy'))==d['baseline_mcp_caddy_sha256']
+    and digest(os.path.join(caddy,'sites/10-commonswarm-api.caddy'))==d['baseline_api_caddy_sha256']
+    and digest(os.path.join(caddy,'Caddyfile'))==d['baseline_caddyfile_sha256'])
+raise SystemExit(0 if ok else 1)
+PY
 fi
 systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" || { printf 'FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery and report to HezLead; STOP\n' >&2; exit 1; }
 # Final ruling validation BEFORE the stage is removed: a refusal here leaves the window retryable.
