@@ -287,6 +287,7 @@ test('c1 W2 rehearsal: --issuer listens on 127.0.0.1 only, with hostssl for the 
   // The plan's issuer block is executed from RELEASE.md bytes, not retyped.
   assert.match(source, /extract "\$ISSUER_PLAN" ai-w2-issuer-credential lines 'openssl rand -hex 32/);
   assert.match(source, /extract "\$ISSUER_PLAN" ai-w2-issuer-credential command-sql/);
+  assert.match(source, /issuer role expected fresh-without-password before the credential got other/);
   assert.doesNotMatch(source, /-CAcreateserial/, 'no CA serial file outside the mktemp directory');
 });
 

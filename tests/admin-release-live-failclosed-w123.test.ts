@@ -74,7 +74,7 @@ elif name=='ai_ro':
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
     if args[2]=="SELECT rolcanlogin AND rolpassword IS NOT NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';":
         output(cfg.get('issuer_login','t')); raise SystemExit(0)
-    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
+    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';","SELECT rolpassword IS NULL AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
     if 'pg_authid' in args[2]:
         if cfg.get('readback_failed'): raise SystemExit(1)
         output(cfg.get('readback','t')); raise SystemExit(0)
@@ -856,7 +856,7 @@ test('admin-issuer-credential-provisioning / scram-readback-before-login: an ALT
   assert.ok(!staleRun.calls.some(c => c[0] === 'install' || c[0] === 'docker'));
   // The mutation boundary: a role that already has LOGIN or a password STOPs before any secret is generated.
   const used = fixture({ readback: 'f' }), usedRun = used.run(['ai-w2-issuer-credential'], 'W2');
-  stopped(usedRun, 'FAIL ai-w2-issuer-credential: issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP');
+  stopped(usedRun, 'FAIL ai-w2-issuer-credential: issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP');
   assert.ok(!usedRun.calls.some(c => ['openssl', 'ai_db_secret_file', 'install', 'docker'].includes(c[0]!)));
   // The positive path calls the mounted-file helper with the stage file, never ai_db on stdin.
   const good = fixture(), ok = good.run(['ai-w2-issuer-credential'], 'W2'); pass(ok);

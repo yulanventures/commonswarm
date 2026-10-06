@@ -649,7 +649,7 @@ secret_step() { # label script
   if test "$status" = 0; then say "PASS $1"; return 0; fi
   # Only plan FAIL lines known to carry no secret are printed; everything else stays in the stage.
   local known
-  known=$(grep -m1 -E "^FAIL ai-w2-issuer-credential: (issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\)|issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first); STOP$" "$SECRET_STAGE/secret-step.err")
+  known=$(grep -m1 -E "^FAIL ai-w2-issuer-credential: (issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\)|issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first); STOP$" "$SECRET_STAGE/secret-step.err")
   if test -n "$known"; then say "FAIL $1: $known"; exit 1; fi
   say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
 }

@@ -1090,3 +1090,95 @@ INNER_RC=0
 ```
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). C1-20 drive-through now runs extracted `ai-db-session` and `ai-close`. D-030 still reaches every test file. No commit or push. HEAD remains `4f5ecf0e`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-22: two plan defects from staging E16 at F7 (uncommitted)
+
+Prepared against committed HEAD `888d130b` (worktree `lane/c1-frozen-work`). No commit,
+push, production operation, full suite, build, Docker or browser. HezLead owns
+independent review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for
+the Lead.
+
+### Defect 1: W2/W2b issuer fresh check (RELEASE.md:3025)
+
+`supabase/migrations/20261003000002_admin_oauth_policy.sql:48` creates
+`commonswarm_admin_issuer LOGIN` with no password. `ai-w2-issuer-credential`
+treated only `NOT rolcanlogin AND rolpassword IS NULL` as fresh, so a database
+that is exactly the migration start state could never pass.
+
+Fix: ISSUER_FRESH is `rolpassword IS NULL` plus the migration attribute set
+(NOINHERIT, NOCREATEDB, NOCREATEROLE, not super, no replication, no bypassrls).
+`rolcanlogin` may be either value. A password still refuses. Rollback still
+proves NOLOGIN-without-password; the post-provisioning SCRAM readback is
+unchanged.
+
+| Item | Status | Locus |
+| --- | --- | --- |
+| 1 ISSUER_FRESH SQL | done | L3025; FAIL text `fresh-without-password` |
+| 2 rollback / close end state | unchanged | still `NOT rolcanlogin AND rolpassword IS NULL` |
+| 3 post-provision readback | unchanged | `SELECT rolcanlogin AND rolpassword='<verifier>'` |
+| 4 rehearsal FAIL allowlist | done | `scripts/c1-w2-rehearsal.sh` secret_step known-FAIL regex |
+
+Tests (pre-change at `888d130b`):
+
+| Test | file:line | Pre-change |
+| --- | --- | --- |
+| LOGIN-without-password (migration start) reaches the ownership marker | `tests/admin-release-plan.test.ts:4000` | FAIL `NOLOGIN-without-password`; marker not written |
+| NOLOGIN-without-password (rollback end) reaches the marker | `tests/admin-release-plan.test.ts:4000` | PASS (old SQL required NOLOGIN) |
+| password refuses | `tests/admin-release-plan.test.ts:4000` | FAIL (kept) |
+| inherit-without-password refuses | `tests/admin-release-plan.test.ts:4000` | not defined as fresh |
+| w123 used-role refusal text | `tests/admin-release-live-failclosed-w123.test.ts:859` | `NOLOGIN-without-password` |
+
+### Defect 2: lost-shell `ai-db-session` after a schema change (RELEASE.md:1542)
+
+First entry still writes `ledger-before.txt` and checks
+`baseline_ledger_sha256`, now with a FAIL line on mismatch. Re-entry (open.txt
+already required; `ledger-before.txt` already a regular file) never overwrites
+that file. It writes `ledger-at-recovery.txt` (0600, refuse if present) and
+accepts live bytes only when they equal the retained ledger or that ledger plus
+exactly the versions this window recorded as committed
+(`schema-prefix.json` `committed`, else the exact `schema-committed.txt` line,
+else `apply-durations.txt`). Any other difference prints the FAIL line.
+
+Run-order quote pins after the session insert (+22) were shifted: 1953→1975,
+1962→1984, 2977→2999, 3005→3027, 3137→3159, 3479→3501, 3992→4014, 4578→4600,
+4579→4601, 4582→4604, 5389→5411, 5815→5837, 5954→5976, 6213→6235, 6899→6921,
+7090→7112.
+
+| Test | file:line | Pre-change |
+| --- | --- | --- |
+| first entry writes ledger-before; no recovery file | `tests/admin-release-plan.test.ts:4063` | same write; silent `test` on digest mismatch |
+| re-entry nothing applied keeps ledger-before | `tests/admin-release-plan.test.ts:4063` | overwrite + digest vs INPUTS (PASS only if live still equals baseline) |
+| re-entry after all five W2 versions; ledger-before byte-identical | `tests/admin-release-plan.test.ts:4063` | overwrite; silent set -e death; no FAIL line |
+| extra unexpected version refuses with FAIL | `tests/admin-release-plan.test.ts:4063` | silent set -e death |
+| leftover ledger-at-recovery.txt refuses | `tests/admin-release-plan.test.ts:4063` | file did not exist |
+
+### Other recovered-close blocks after `ai-db-session` (baseline equals live)
+
+| Block | Assumption | Same defect? |
+| --- | --- | --- |
+| `ai-close` pre-fence W2 (`apply-started.txt` absent) | live `20261003%` versions equal `ledger-at-open.txt` | No. That path is only pre-fence; after apply the branch is skipped |
+| `ai-close` recovered W2/W2b issuer | live role is NOLOGIN without a password | No. That is the rollback end state, not the session ledger baseline |
+| `ai-w2-reconcile` (W2 recovered-close, after session) | live ledger equals baseline + recorded prefix from proof files | No. It reads `ledger-after` and `new-migrations.json` / `backfill.json`, not INPUTS `baseline_ledger_sha256` |
+| W1 / W2b / W3 / W4 / W6 / W7 recovered-close | no window schema write after the original `ledger-before.txt` | Re-entry `live == ledger-before` holds; no change required |
+
+Harness edits (listed separately): `scripts/c1-w2-rehearsal.sh` secret_step known-FAIL regex only. No change to extract markers (`ISSUER_FRESH=$(ai_ro -Atq`, `>"$PROOF_DIR/ledger-before.txt"`). `scripts/c1-w6-rehearsal-steps.sh` untouched.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.r70Arp: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.nyfIBE`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 191
+ℹ pass 190
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 206487.708833
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (extracted issuer fresh; extracted session re-entry). D-030 still reaches every test file. No commit or push. HEAD remains `888d130b`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+

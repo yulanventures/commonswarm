@@ -3996,3 +3996,131 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
 
   if (existsSync(stageAfter)) removeStage(stageAfter);
 });
+
+test('C1-22: issuer fresh accepts migration LOGIN and rollback NOLOGIN; a password still refuses', () => {
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', '888d130b^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit 888d130b is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 888d130b)');
+  const frozenPlan = spawnSync('git', ['show', '888d130b:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozenIssuer = frozenPlan.stdout.match(/^```sh\n(# step: ai-w2-issuer-credential\n[\s\S]*?)^```[ \t]*$/m)![1]!;
+  assert.match(frozenIssuer, /SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog\.pg_authid WHERE rolname='commonswarm_admin_issuer'/);
+  assert.match(frozenIssuer, /issuer role expected NOLOGIN-without-password before the credential got other/);
+  const issuer = block('ai-w2-issuer-credential');
+  assert.match(issuer, /SELECT rolpassword IS NULL AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls FROM pg_catalog\.pg_authid WHERE rolname='commonswarm_admin_issuer'/);
+  assert.match(issuer, /issuer role expected fresh-without-password before the credential got other/);
+  assert.doesNotMatch(issuer, /SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog\.pg_authid WHERE rolname='commonswarm_admin_issuer'/);
+  assert.match(issuer, /SELECT rolcanlogin AND rolpassword='/);
+  const slice = (source: string) => {
+    const start = source.indexOf('ISSUER_FRESH=$(ai_ro -Atq');
+    const end = source.indexOf('openssl rand -hex 32');
+    assert.ok(start >= 0 && end > start, 'issuer fresh slice');
+    return source.slice(start, end);
+  };
+  const safe = { rolpassword: null, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolbypassrls: false };
+  const runFresh = (source: string, role: Record<string, unknown>) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'c122-iss-')));
+    writeFileSync(join(dir, 'role.json'), JSON.stringify(role));
+    const harness = `ai_ro() { python3 - '${join(dir, 'role.json')}' "$@" <<'PY'
+import json,sys
+role=json.load(open(sys.argv[1]))
+sql=sys.argv[sys.argv.index('--command')+1]
+assert "commonswarm_admin_issuer" in sql
+fresh=(role["rolpassword"] is None and not role["rolinherit"] and not role["rolsuper"]
+    and not role["rolcreatedb"] and not role["rolcreaterole"] and not role["rolreplication"]
+    and not role["rolbypassrls"])
+if "NOT rolcanlogin" in sql: fresh=fresh and not role["rolcanlogin"]
+print("t" if fresh else "f")
+PY
+}
+`;
+    return { dir, result: run('set -euo pipefail\n' + harness + slice(source), { PROOF_DIR: dir }) };
+  };
+  const login = { ...safe, rolcanlogin: true };
+  const nologin = { ...safe, rolcanlogin: false };
+  const password = { ...safe, rolcanlogin: true, rolpassword: 'SCRAM-SHA-256$4096:fixture' };
+  const inherit = { ...safe, rolcanlogin: false, rolinherit: true };
+  const oldLogin = runFresh(frozenIssuer, login);
+  assert.notEqual(oldLogin.result.status, 0);
+  assert.match(oldLogin.result.stderr, /issuer role expected NOLOGIN-without-password before the credential got other/);
+  assert.ok(!existsSync(join(oldLogin.dir, 'issuer-provisioning-attempted.txt')));
+  const newLogin = runFresh(issuer, login);
+  assert.equal(newLogin.result.status, 0, newLogin.result.stderr);
+  assert.ok(existsSync(join(newLogin.dir, 'issuer-provisioning-attempted.txt')));
+  const newNologin = runFresh(issuer, nologin);
+  assert.equal(newNologin.result.status, 0, newNologin.result.stderr);
+  assert.ok(existsSync(join(newNologin.dir, 'issuer-provisioning-attempted.txt')));
+  const oldNologin = runFresh(frozenIssuer, nologin);
+  assert.equal(oldNologin.result.status, 0, oldNologin.result.stderr);
+  const newPassword = runFresh(issuer, password);
+  assert.notEqual(newPassword.result.status, 0);
+  assert.match(newPassword.result.stderr, /issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP/);
+  assert.ok(!existsSync(join(newPassword.dir, 'issuer-provisioning-attempted.txt')));
+  const newInherit = runFresh(issuer, inherit);
+  assert.notEqual(newInherit.result.status, 0);
+  assert.match(newInherit.result.stderr, /issuer role expected fresh-without-password before the credential got other/);
+});
+
+test('C1-22: lost-shell ai-db-session keeps ledger-before; five committed versions pass; an extra version refuses', () => {
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', '888d130b^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit 888d130b is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 888d130b)');
+  const frozenPlan = spawnSync('git', ['show', '888d130b:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozenSession = frozenPlan.stdout.match(/^```sh\n(# step: ai-db-session\n[\s\S]*?)^```[ \t]*$/m)![1]!;
+  assert.match(frozenSession, /^test "\$LEDGER_SHA256" = "\$EXPECTED_LEDGER_SHA256"$/m);
+  assert.doesNotMatch(frozenSession, /ledger-at-recovery/);
+  const session = block('ai-db-session');
+  assert.match(session, /ledger-at-recovery\.txt expected ledger-before-or-ledger-before-plus-window-committed got other/);
+  assert.match(session, /ledger-before\.txt digest expected inputs baseline_ledger_sha256 got other/);
+  const currentSlice = (() => {
+    const start = session.indexOf('if test -f "$PROOF_DIR/ledger-before.txt"');
+    const end = session.indexOf('\nai_run() {');
+    assert.ok(start >= 0 && end > start);
+    return session.slice(start, end);
+  })();
+  const frozenSlice = (() => {
+    const start = frozenSession.indexOf("ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >\"$PROOF_DIR/ledger-before.txt\"");
+    const end = frozenSession.indexOf('\nai_run() {');
+    assert.ok(start >= 0 && end > start);
+    return frozenSession.slice(start, end);
+  })();
+  const before = '20260928000003\n20261001000001\n20261002000001\n';
+  const five = [1, 2, 3, 4, 5].map(i => `2026100300000${i}\n`).join('');
+  const committedLine = 'all five ledger rows, M4/M5 checksums and complete backfills exact\n';
+  const runLedger = (slice: string, live: string, extra: Record<string, string> = {}, files: Record<string, string> = {}) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'c122-led-')));
+    const inputs = join(dir, 'inputs.json');
+    writeFileSync(inputs, JSON.stringify({ baseline_ledger_sha256: digest(before) }));
+    for (const [name, value] of Object.entries(files)) writeFileSync(join(dir, name), value);
+    const liveFile = join(dir, 'live.txt');
+    writeFileSync(liveFile, live);
+    const harness = `ai_ro() { cat '${liveFile}'; }\n`;
+    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs, ...extra }) };
+  };
+  const first = runLedger(currentSlice, before);
+  assert.equal(first.result.status, 0, first.result.stderr);
+  assert.equal(readFileSync(join(first.dir, 'ledger-before.txt'), 'utf8'), before);
+  assert.ok(!existsSync(join(first.dir, 'ledger-at-recovery.txt')));
+  const firstMismatch = runLedger(currentSlice, before + five);
+  assert.notEqual(firstMismatch.result.status, 0);
+  assert.match(firstMismatch.result.stderr, /FAIL ai-db-session: ledger-before\.txt digest expected inputs baseline_ledger_sha256 got other; STOP/);
+  const recoveredNone = runLedger(currentSlice, before, {}, { 'ledger-before.txt': before });
+  assert.equal(recoveredNone.result.status, 0, recoveredNone.result.stderr);
+  assert.equal(readFileSync(join(recoveredNone.dir, 'ledger-before.txt'), 'utf8'), before);
+  assert.equal(readFileSync(join(recoveredNone.dir, 'ledger-at-recovery.txt'), 'utf8'), before);
+  assert.equal(statSync(join(recoveredNone.dir, 'ledger-at-recovery.txt')).mode & 0o777, 0o600);
+  const recoveredFive = runLedger(currentSlice, before + five, {}, { 'ledger-before.txt': before, 'schema-committed.txt': committedLine });
+  assert.equal(recoveredFive.result.status, 0, recoveredFive.result.stderr);
+  assert.equal(readFileSync(join(recoveredFive.dir, 'ledger-before.txt'), 'utf8'), before);
+  assert.equal(readFileSync(join(recoveredFive.dir, 'ledger-at-recovery.txt'), 'utf8'), before + five);
+  const extra = runLedger(currentSlice, before + five + '20261003999999\n', {}, { 'ledger-before.txt': before, 'schema-committed.txt': committedLine });
+  assert.notEqual(extra.result.status, 0);
+  assert.match(extra.result.stderr, /FAIL ai-db-session: ledger-at-recovery\.txt expected ledger-before-or-ledger-before-plus-window-committed got other; STOP/);
+  assert.equal(readFileSync(join(extra.dir, 'ledger-before.txt'), 'utf8'), before);
+  const leftover = runLedger(currentSlice, before, {}, { 'ledger-before.txt': before, 'ledger-at-recovery.txt': 'stale\n' });
+  assert.notEqual(leftover.result.status, 0);
+  assert.match(leftover.result.stderr, /FAIL ai-db-session: ledger-at-recovery\.txt expected absent got present; STOP/);
+  const oldRecovered = runLedger(frozenSlice, before + five, {}, { 'ledger-before.txt': before });
+  assert.notEqual(oldRecovered.result.status, 0);
+  assert.doesNotMatch(oldRecovered.result.stderr, /FAIL ai-db-session/);
+  assert.equal(readFileSync(join(oldRecovered.dir, 'ledger-before.txt'), 'utf8'), before + five);
+});
