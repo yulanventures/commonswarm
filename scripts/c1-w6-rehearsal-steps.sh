@@ -3,10 +3,13 @@
 # ai_ro (the box psql emulation), extract (plan slices by unique anchors), step, say, die. Bash 3.2-safe.
 #
 # Plan bytes. The box blocks name box paths (/etc/commonswarm-admin-release, /home/commonswarm, the hook in
-# /usr/local/libexec, /private/tmp/anvil-secret stages, /tmp/admin-issuance-* archives) and the hook requires a
-# root-owned recycle.json. The rehearsal runs a plan COPY with exactly those prefixes (and the hook's st_uid==0)
-# mapped into its own mktemp directory; the REMAP line lists every substitution with its count, and the reverse
-# map must restore the plan bytes exactly. INPUTS plan_sha256 is the copy's digest, so verified_plan accepts it.
+# /usr/local/libexec, /tmp/anvil-secret stages, /tmp/admin-issuance-* archives; Mac blocks keep
+# /private/tmp/anvil-secret) and the hook requires a root-owned recycle.json. The rehearsal runs a plan COPY
+# with exactly those prefixes (and the hook's st_uid==0) mapped into its own mktemp directory; the REMAP line
+# lists every substitution with its count, and the reverse map must restore the plan bytes exactly. INPUTS
+# plan_sha256 is the copy's digest, so verified_plan accepts it. /private/tmp/anvil-secret is remapped first so
+# /tmp/anvil-secret cannot rewrite it as a suffix. Darwin /tmp is a symlink to /private/tmp; without the box
+# remap, p.resolve()==p in the edge-receipt query cleanup fails and the W4 measurement STOP looks like a missing row.
 # Every slice comes from that copy by unique anchors; nothing is retyped.
 #
 # External commands are stubs on PATH, in the W6 root only: systemctl (a state file), docker (inspect returns the
@@ -48,13 +51,15 @@ python3 - "$W6_PLAN_SRC" "$PLANC" "$W6R" <<'PY' || die w6-plan-copy 'remapped pl
 import re,sys
 src,dst,root=sys.argv[1:4]
 raw=open(src,encoding='utf-8',newline='').read()
-subs=[('/private/tmp/anvil-secret',root+'/secret/anvil-secret'),('/etc/commonswarm-admin-release',root+'/etc'),
+subs=[('/private/tmp/anvil-secret',root+'/secret/mac-anvil-secret'),('/tmp/anvil-secret',root+'/secret/anvil-secret'),('/etc/commonswarm-admin-release',root+'/etc'),
       ('/usr/local/libexec/commonswarm-admin-edge-recycle',root+'/libexec/commonswarm-admin-edge-recycle'),
       ('/home/commonswarm',root+'/home'),('/tmp/admin-issuance-',root+'/tmp/admin-issuance-'),('/var/lib/commonswarm-release',root+'/var-lib'),('/var/backups/commonswarm-postgres',root+'/backups'),
       ('path.stat().st_uid==0','path.stat().st_uid==os.getuid()')]
 count={a:raw.count(a) for a,_ in subs}
-# The closed-issuance marker path exists only from 04d09c3d on; a C1_W6_PLAN_FROM control may lack it.
-assert count['path.stat().st_uid==0']==1 and all(v for k,v in count.items() if k!='/var/lib/commonswarm-release')
+# The closed-issuance marker path exists only from 04d09c3d on; box /tmp/anvil-secret exists only after C1-12;
+# a C1_W6_PLAN_FROM control may lack either.
+optional=('path.stat().st_uid==0','/var/lib/commonswarm-release','/tmp/anvil-secret')
+assert count['path.stat().st_uid==0']==1 and all(v for k,v in count.items() if k not in optional[1:])
 forward=dict(subs); inverse={b:a for a,b in subs}
 assert not any(b in raw for b in inverse)
 out=re.compile('|'.join(re.escape(a) for a,_ in subs)).sub(lambda m:forward[m.group(0)],raw)
@@ -531,7 +536,13 @@ say "PASS g3-right-order: human revoke fenced the grant (revoked|human_revoked, 
 # The WHOLE finish block, then ai-close's timer line, in one shell: ai_run is eval, so the finish block's own
 # subshell must have re-armed the timer before the close looks (no extra harness boundary between them).
 x ai-w6-finish block >"$T/blocks/w6-finish.sh"
-x ai-close line 'systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||' >"$T/blocks/w6-close-timer.sh"
+# Unique in ai-close: C1-12 also added the W7 restore check, which shares the old
+# `systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||` prefix. extract requires one match.
+C1_CLOSE_TIMER_ANCHOR='FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery'
+C1_CLOSE_TIMER_N=$(python3 -c 'import sys; print(open(sys.argv[1],encoding="utf-8").read().count(sys.argv[2]))' "$PLANC" "$C1_CLOSE_TIMER_ANCHOR") || die w6-extract 'ai-close general timer line count failed'
+test "$C1_CLOSE_TIMER_N" = 1 || die w6-extract "ai-close general timer line expected once got $C1_CLOSE_TIMER_N"
+x ai-close line "$C1_CLOSE_TIMER_ANCHOR" >"$T/blocks/w6-close-timer.sh"
+grep -q '^FAIL' "$T/blocks/w6-close-timer.sh" && die w6-extract "$(grep -m1 '^FAIL' "$T/blocks/w6-close-timer.sh")"
 { printf 'set -euo pipefail\n'; cat "$T/blocks/w6-finish.sh" "$T/blocks/w6-close-timer.sh"; printf 'say "PASS ai-close:timer-line after ai-w6-finish in the same shell" >&3\n'; } >"$T/blocks/w6-finish-default-run.sh"
 cp "$T/blocks/w6-finish-default-run.sh" "$T/blocks/w6-finish-keep-run.sh" || exit 1
 for f in "$T"/blocks/w6-finish-*-run.sh; do /bin/bash -n "$f" || die w6-extract "$(basename "$f") is not valid bash"; done

@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -76,7 +76,7 @@ function edgeFixture(opts: { row?: Record<string, unknown>; hookAfterFails?: boo
   const bin = join(dir, 'bin'), etc = join(dir, 'etc'), home = join(dir, 'home'), secret = join(dir, 'secret'), hook = join(dir, 'hook');
   for (const d of [bin, etc, home, secret]) mkdirSync(d, { recursive: true, mode: 0o700 });
   const target = join(home, 'edge/releases', sha);
-  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/etc/commonswarm-admin-release').join(etc)
+  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'mac-anvil-secret')).split('/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/etc/commonswarm-admin-release').join(etc)
     .split('/usr/local/libexec/commonswarm-admin-edge-recycle').join(hook).split('/home/commonswarm').join(home);
   const planCopy = join(dir, 'RELEASE.md'); writeFileSync(planCopy, copy);
   const recycle = { release_sha: sha, target, image_digest: `sha256:${hex}`, artifact_digest: hex };
@@ -279,7 +279,7 @@ test('W6 client verification: canonical digest equals canonicalAdminJson; the re
 // ---------------- W7 binds its W6 ----------------
 test('W7 preflight binds the closed-success W6 of this release by w6_window_id and measures the C1 digest', () => {
   const pre = block('ai-w7-preflight');
-  const make = (change: { record?: Record<string, unknown> | null; report?: Record<string, unknown>; inputs?: Record<string, unknown>; closed?: string } = {}) => {
+  const make = (change: { record?: Record<string, unknown> | null; report?: Record<string, unknown>; reportBytes?: Buffer; smokeSha?: string; inputs?: Record<string, unknown>; closed?: string } = {}) => {
     const dir = realpathSync(mkdtempSync(join(root, 'w7-')));
     const w6 = join(dir, 'admin-issuance/release-proofs', `${sha}-W6-W6win1`); mkdirSync(w6, { recursive: true });
     const closed = change.closed ?? '2026-10-04T12:00:00Z';
@@ -291,13 +291,18 @@ test('W7 preflight binds the closed-success W6 of this release by w6_window_id a
     }
     const report = { release_sha: sha, status: 'PASS', cleanup: true, audit_kinds: ['init', 'list', 'read', 'action'], grant_revoked: true, refresh_family_tombstoned: true,
       live_access_refused: true, client_approval_withdrawn: true, final_gate: 'open', ...change.report };
-    writeFileSync(join(w6, 'C1.json'), JSON.stringify(report, null, 2) + '\n');
+    const reportBytes = Buffer.from(JSON.stringify(report, null, 2) + '\n');
+    writeFileSync(join(w6, 'C1.json'), change.reportBytes ?? reportBytes);
+    const boxC1 = readFileSync(join(w6, 'C1.json'));
+    const receipt = { release_sha: sha, gates: { 'admin-c1-smoke': { sha256: change.smokeSha ?? digest(boxC1) } } };
+    const receiptPath = join(dir, 'gates.json');
+    writeFileSync(receiptPath, JSON.stringify(receipt));
     const input = { ...base(), window: 'W7', w6_window_id: 'W6win1' };
-    const r = run(pre.split('/home/commonswarm/admin-issuance').join(join(dir, 'admin-issuance')), { INPUTS_FILE: inputFile(input) });
-    return { r, report: readFileSync(join(w6, 'C1.json')) };
+    const r = run(pre.split('/home/commonswarm/admin-issuance').join(join(dir, 'admin-issuance')), { INPUTS_FILE: inputFile(input), GATE_RECEIPT_FILE: receiptPath });
+    return { r, report: boxC1 };
   };
   const ok = make(); assert.equal(ok.r.status, 0, ok.r.stderr);
-  assert.deepEqual(JSON.parse(ok.r.stdout), { w6_window_id: 'W6win1', c1_report: JSON.parse(ok.r.stdout).c1_report, c1_report_sha256: digest(ok.report), final_gate: 'open' });
+  assert.deepEqual(JSON.parse(ok.r.stdout), { admin_c1_smoke_sha256: digest(ok.report), w6_window_id: 'W6win1', c1_report: JSON.parse(ok.r.stdout).c1_report, c1_report_sha256: digest(ok.report), final_gate: 'open' });
   const cases: Array<[string, Parameters<typeof make>[0], RegExp]> = [
     ['no close record', { record: null }, /W6 inputs.json\/closed.txt\/close-result.json\/C1.json expected regular-files got missing-or-not-regular/],
     ['recovered W6', { record: { result: 'recovered' } }, /W6 close result expected success-at-closed.txt got other/],
@@ -309,7 +314,16 @@ test('W7 preflight binds the closed-success W6 of this release by w6_window_id a
   for (const [name, change, message] of cases) {
     const c = make(change); assert.notEqual(c.r.status, 0, name); assert.match(c.r.stderr, message, `${name}: ${c.r.stderr}`);
   }
+  const goodReport = { release_sha: sha, status: 'PASS', cleanup: true, audit_kinds: ['init', 'list', 'read', 'action'], grant_revoked: true, refresh_family_tombstoned: true,
+    live_access_refused: true, client_approval_withdrawn: true, final_gate: 'open' };
+  const goodBytes = Buffer.from(JSON.stringify(goodReport, null, 2) + '\n');
+  const oneByte = Buffer.from(goodBytes);
+  oneByte[oneByte.lastIndexOf('open')] = 'O'.charCodeAt(0);
+  const mismatch = make({ reportBytes: oneByte, smokeSha: digest(goodBytes) });
+  assert.notEqual(mismatch.r.status, 0);
+  assert.match(mismatch.r.stderr, /W6 C1.json digest vs admin-c1-smoke gate expected identical got mismatch/);
   assert.match(block('ai-w7-proof'), /W7_C1_BINDING=\$\(ai_run ai-w7-preflight\) \|\|/);
+  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates/);
 });
 
 // ---------------- explicit audit dispatch and fence driver (R7 timing) ----------------
@@ -345,9 +359,9 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   const dir = realpathSync(mkdtempSync(join(root, 'fence-')));
   const bin = join(dir, 'bin'), secret = join(dir, 'secret'), boxRoot = join(dir, 'box'), proof = join(dir, 'c1-proof');
   for (const d of [bin, secret, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
-  const stage = mkdtempSync(join(secret, 'anvil-secret.')); chmodSync(stage, 0o700);
+  const stage = mkdtempSync(join(secret, 'mac-anvil-secret.')); chmodSync(stage, 0o700);
   const pointer = join(dir, 'c1-smoke.pointer');
-  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/Users/yulanbot/work/dcr-rt/c1-smoke.pointer').join(pointer);
+  const copy = plan.split('/private/tmp/anvil-secret').join(join(secret, 'mac-anvil-secret')).split('/tmp/anvil-secret').join(join(secret, 'anvil-secret')).split('/Users/yulanbot/work/dcr-rt/c1-smoke.pointer').join(pointer);
   const planCopy = join(dir, 'RELEASE.md'); writeFileSync(planCopy, copy);
   const inputs = inputFile({ ...base(), window: 'W6', plan_sha256: digest(copy) });
   const boxProof = join(boxRoot, `home/commonswarm/admin-issuance/release-proofs/${sha}-W6-Abc123`); mkdirSync(boxProof, { recursive: true });
@@ -356,7 +370,7 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   // is installed, no audit runs until the driver dispatches it through the existing box shell stdin.
   writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 sleep ${LATENCY}; cmd="\${@: -1}"; printf 'ssh %s\\n' "$cmd" >>"${calls}"
-${stallUpload ? 'case "$cmd" in "test ! -e "*agent.json) exec sleep 600;; esac' : ''}
+${stallUpload ? 'case "$cmd" in *admin-c1-*agent.json*) exec sleep 600;; esac' : ''}
 cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
 eval "$cmd"\n`, { mode: 0o700 });
@@ -502,8 +516,8 @@ test('W6 activation checks require the retained recycle archive with its digest 
   }
 });
 
-// ---------------- W7 close: success compares the retained retirement state; recovered proves the emergency close ----------------
-test('ai-close W7: success compares the retained retirement gate state; a recovered close needs the emergency close and a CLOSED row, not that file', () => {
+// ---------------- W7 close: success compares the retained retirement state; recovered preserves W6 OPEN/CLOSED via W7-recovery
+test('ai-close W7: success compares the retained retirement gate state; a recovered close needs W7-recovery receipts, not emergency-close CLOSED', () => {
   const close = block('ai-close');
   const start = close.indexOf('if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6');
   const end = close.indexOf('if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered');
@@ -520,11 +534,11 @@ test('ai-close W7: success compares the retained retirement gate state; a recove
   ok(check('success', 't', { 'retirement-gate-state.txt': 't\n' }));
   refused(check('success', 'f', { 'retirement-gate-state.txt': 't\n' }), /W7 gate state expected retained-retirement-state got other/);
   refused(check('success', 't', {}), /W7 retirement-gate-state\.txt expected present got missing/);
-  // Recovered after an OPEN retirement proof and an emergency close: accepted, with or without the retained file.
-  ok(check('recovered', 'f', { 'retirement-gate-state.txt': 't\n', 'activation-rollback.txt': 'PASS\n' }));
-  ok(check('recovered', 'f', { 'activation-rollback.txt': 'PASS\n' }));
-  refused(check('recovered', 't', { 'activation-rollback.txt': 'PASS\n' }), /recovered W7 issuance expected closed got open/);
-  refused(check('recovered', 'f', {}), /recovered W7 activation-rollback\.txt \(ai-emergency-close\) expected present got missing/);
+  const expected = (keep: boolean) => JSON.stringify({ keep_open: keep, generation: 7 }) + '\n';
+  ok(check('recovered', 't', { 'W7-recovery.txt': 'PASS\n', 'W7-recovery-expected.json': expected(true) }));
+  ok(check('recovered', 'f', { 'W7-recovery.txt': 'PASS\n', 'W7-recovery-expected.json': expected(false) }));
+  refused(check('recovered', 't', { 'W7-recovery.txt': 'PASS\n', 'W7-recovery-expected.json': expected(false) }), /recovered W7 issuance expected preserved-closed-at-W6-generation got other/);
+  refused(check('recovered', 'f', {}), /recovered W7 W7-recovery\.txt expected present got missing/);
 });
 
 // ---------------- the human revoke: both owner refreshes and the revoke request end at the revoke cutoff ----------------
@@ -580,6 +594,70 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${call
   assert.equal(rec.r.status, 0, rec.r.stderr); assert.match(rec.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
   assert.ok(existsSync(join(recovery.proof, 'human-revoke-recovery.json')) && !existsSync(join(recovery.proof, 'human-revoke.json')) && !rec.fenced);
 });
+
+test('C1-14 W6B2-2: recovery revoke reuses a saved request id; frozen noclobber dies on reentry', () => {
+  const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const current = block('ai-w6-human-revoke');
+  const frozenPlan = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozen = block('ai-w6-human-revoke', [...frozenPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!));
+  assert.match(current, /saved request ID expected uuid got other/);
+  assert.doesNotMatch(frozen, /saved request ID expected uuid got other/);
+  const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
+  const make = (source: string) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'c114-revoke-')));
+    const bin = join(dir, 'bin'), proof = join(dir, 'proof'), stage = join(dir, 'stage');
+    for (const d of [bin, proof, stage]) mkdirSync(d, { mode: 0o700 });
+    writeFileSync(join(proof, 'C1-audit.json'), JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111' }));
+    writeFileSync(join(proof, 'agent.json'), JSON.stringify({ run_id: '0123456789abcdef' }));
+    writeFileSync(join(stage, 'agent.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403 } }));
+    writeFileSync(join(proof, 'C1-inputs.json'), '{}');
+    writeFileSync(join(proof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
+    const calls = join(dir, 'calls'); writeFileSync(calls, '');
+    writeFileSync(join(bin, 'node'), `#!/bin/bash
+case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${calls}'; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","request_id":"${saved}","state":"revoked"}\\n';;
+ *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}';;
+ *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
+    const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+    return { r, proof, calls: readFileSync(calls, 'utf8') };
+  };
+  const old = make(frozen);
+  assert.notEqual(old.r.status, 0, old.r.stderr);
+  assert.match(old.r.stderr, /revoke-request-id|cannot overwrite|nexist|File exists|exit status/i);
+  assert.equal(readFileSync(join(old.proof, 'revoke-request-id'), 'utf8').trim(), saved);
+  const cur = make(current);
+  assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
+  assert.equal(readFileSync(join(cur.proof, 'revoke-request-id'), 'utf8').trim(), saved);
+  assert.match(cur.calls, new RegExp(`--request-id ${saved}`));
+  assert.match(cur.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
+  const reusedDir = realpathSync(mkdtempSync(join(root, 'c114-revoke-reused-')));
+  const reusedBin = join(reusedDir, 'bin'), reusedProof = join(reusedDir, 'proof'), reusedStage = join(reusedDir, 'stage');
+  for (const d of [reusedBin, reusedProof, reusedStage]) mkdirSync(d, { mode: 0o700 });
+  writeFileSync(join(reusedProof, 'C1-audit.json'), JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111' }));
+  writeFileSync(join(reusedProof, 'C1-inputs.json'), '{}');
+  writeFileSync(join(reusedProof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(reusedProof, 'human-revoke-recovery.json'), JSON.stringify({ state: 'revoked', request_id: saved }) + '\n');
+  const reusedCalls = join(reusedDir, 'calls'); writeFileSync(reusedCalls, '');
+  writeFileSync(join(reusedBin, 'node'), `#!/bin/bash
+case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke\\n' >>'${reusedCalls}';; *) exit 64;; esac\n`, { mode: 0o700 });
+  const second = spawnSync('/bin/bash', ['-c', current], { encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, PATH: `${reusedBin}:${process.env.PATH}`, C1_PROOF_DIR: reusedProof, C1_INPUTS_FILE: join(reusedProof, 'C1-inputs.json'), C1_SECRET_STAGE: reusedStage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
+  assert.equal(readFileSync(reusedCalls, 'utf8'), '');
+  const mismatchDir = realpathSync(mkdtempSync(join(root, 'c114-revoke-mis-')));
+  const mismatchProof = join(mismatchDir, 'proof'); mkdirSync(mismatchProof, { mode: 0o700 });
+  writeFileSync(join(mismatchProof, 'C1-audit.json'), JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111' }));
+  writeFileSync(join(mismatchProof, 'C1-inputs.json'), '{}');
+  writeFileSync(join(mismatchProof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(mismatchProof, 'human-revoke-recovery.json'), JSON.stringify({ state: 'revoked', request_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' }) + '\n');
+  const mismatch = spawnSync('/bin/bash', ['-c', current], { encoding: 'utf8', timeout: 20_000,
+    env: { ...process.env, C1_PROOF_DIR: mismatchProof, C1_INPUTS_FILE: join(mismatchProof, 'C1-inputs.json'), C1_SECRET_STAGE: mismatchProof, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+  assert.notEqual(mismatch.status, 0);
+  assert.match(mismatch.stderr, /retained revoke receipt expected revoked-for-saved-id got mismatch/);
+});
+
 
 // ---------------- remeasure failure results reach every caller unchanged (production shape: eval, continuing shell) ----------------
 test('ai-w6-finish and ai-w6-activation-apply report the remeasure failure-close result: CLOSED only when confirmed, else UNKNOWN', () => {
@@ -675,4 +753,98 @@ test('status contract from block entry: early refresh, apply, finish and rollbac
   // Rollback: the first DB close fails with 1 and no timer name is known: 2, not 1.
   const rb = continuing(`ai_db() { return 1; }\n${block('ai-w6-activation-rollback')}`, { PATH: t3.env.PATH, PROOF_DIR: t3.dir });
   assert.equal(rb.status, '2', rb.r.stderr); assert.match(rb.r.stderr, /recycle timer name unknown at exit/);
+});
+
+test('C1-12 W7-KEEPOPEN: recovery quotes W6 OPEN/CLOSED preservation and never calls activation-rollback', () => {
+  const recovery = block('ai-w7-recovery');
+  assert.match(recovery, /W7 preserves the measured OPEN\/CLOSED state left by W6/);
+  assert.doesNotMatch(recovery, /ai-w6-activation-rollback/);
+  assert.match(recovery, /ai_run ai-w4-timer-recovery/);
+  assert.match(plan, /W7 preserves the measured OPEN\/CLOSED state left by W6/);
+  const frozen = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozen.status, 0, frozen.stderr);
+  const w7rb = frozen.stdout.match(/```c1-order W7 rollback\n([\s\S]*?)```/)![1]!;
+  assert.match(w7rb, /ai-emergency-close/);
+  const currentRb = plan.match(/```c1-order W7 rollback\n([\s\S]*?)```/)![1]!;
+  assert.match(currentRb, /ai-w7-recovery/);
+  assert.doesNotMatch(currentRb, /ai-emergency-close/);
+});
+
+test('C1-12 W7-TIMER: hold through proof/close; restore in ai-close before closed.txt; frozen proof has no hold', () => {
+  const hold = block('ai-w7-timer-hold');
+  assert.match(hold, /systemctl stop "\$EDGE_RECYCLE_TIMER"/);
+  assert.match(hold, /EDGE_RECYCLE_SERVICE/);
+  assert.match(hold, /trap 'ai_w7_timer_restore; exit \$\?' EXIT/);
+  const proof = block('ai-w7-proof');
+  assert.match(proof, /recycle timer expected held-inactive/);
+  assert.doesNotMatch(proof, /systemctl start "\$EDGE_RECYCLE_TIMER"/);
+  const close = block('ai-close');
+  const restore = close.indexOf('if test "$WINDOW" = W7; then');
+  const record = close.indexOf("printf '%s\\n' \"$CLOSED_AT\" >\"$PROOF_DIR/closed.txt\"");
+  assert.ok(restore > 0 && record > restore, 'W7 timer restore runs before closed.txt');
+  const frozen = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.doesNotMatch(frozen.stdout, /# step: ai-w7-timer-hold/);
+  const t = timerStub(); writeFileSync(join(t.dir, 'state'), 'active');
+  const r = run(`set -euo pipefail\nWINDOW=W7\n${hold}`, t.env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(t.state(), 'active', 'EXIT trap restores the timer when the sourced hold process exits');
+  assert.match(r.stdout, /PASS ai-w7-timer-hold/);
+});
+
+test('C1-14 W6b1-1: leftover upload temp is replaced and removed; empty download is staged; frozen test ! -e dies', () => {
+  const current = block('ai-w6-transfer');
+  const frozenPlan = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozen = block('ai-w6-transfer', [...frozenPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!));
+  assert.match(current, /upload temp expected owner-matched-regular-file for this window and file got other/);
+  assert.match(frozen, /printf -v C1_REMOTE 'test ! -e %q' "\$C1_UPLOAD"/);
+  assert.match(current, /download expected nonempty got empty/);
+  const windowId = 'Abc123';
+  const transfer = (source: string, opts: { leftover?: 'file' | 'symlink'; download?: 'empty'; file?: string }) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'xfer-')));
+    const bin = join(dir, 'bin'), boxRoot = join(dir, 'box'), proof = join(dir, 'c1-proof');
+    for (const d of [bin, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
+    const file = opts.file ?? (opts.download ? 'C1-fence.txt' : 'agent.json');
+    const boxProof = join(boxRoot, `home/commonswarm/admin-issuance/release-proofs/${sha}-W6-${windowId}`);
+    mkdirSync(boxProof, { recursive: true });
+    mkdirSync(join(boxRoot, 'tmp'), { recursive: true });
+    const leftover = join(boxRoot, 'tmp', `admin-c1-${windowId}-${file}`);
+    if (opts.leftover === 'file') writeFileSync(leftover, 'stale leftover\n');
+    if (opts.leftover === 'symlink') symlinkSync(join(dir, 'absent'), leftover);
+    if (opts.download) {
+      writeFileSync(join(proof, file), opts.download === 'empty' ? '' : 'kept\n');
+      writeFileSync(join(boxProof, file), 'from-box\n');
+    } else {
+      writeFileSync(join(proof, file), '{"ok":true}\n');
+    }
+    writeFileSync(join(bin, 'ssh'), `#!/bin/bash
+cmd="\${@: -1}"
+cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
+cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
+eval "$cmd"\n`, { mode: 0o700 });
+    writeFileSync(join(bin, 'scp'), `#!/bin/bash
+dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"
+cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
+    const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
+        C1_TRANSFER_DIRECTION: opts.download ? 'download' : 'upload', C1_TRANSFER_FILE: file,
+        RELEASE_SHA: sha, WINDOW_ID: windowId } });
+    return { r, leftover, boxProof, dest: join(proof, file) };
+  };
+  const old = transfer(frozen, { leftover: 'file' });
+  assert.notEqual(old.r.status, 0, old.r.stderr);
+  assert.equal(readFileSync(old.leftover, 'utf8'), 'stale leftover\n');
+  const cur = transfer(current, { leftover: 'file' });
+  assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
+  assert.ok(!existsSync(cur.leftover), 'upload temp removed after install');
+  assert.equal(readFileSync(join(cur.boxProof, 'agent.json'), 'utf8'), '{"ok":true}\n');
+  const linked = transfer(current, { leftover: 'symlink' });
+  assert.notEqual(linked.r.status, 0);
+  assert.match(linked.r.stderr, /upload temp expected not-symlink got symlink/);
+  const frozenEmpty = transfer(frozen, { download: 'empty', file: 'C1-fence.txt' });
+  assert.notEqual(frozenEmpty.r.status, 0);
+  assert.equal(readFileSync(frozenEmpty.dest, 'utf8'), '');
+  const curEmpty = transfer(current, { download: 'empty', file: 'C1-fence.txt' });
+  assert.equal(curEmpty.r.status, 0, curEmpty.r.stderr);
+  assert.equal(readFileSync(curEmpty.dest, 'utf8'), 'from-box\n');
 });

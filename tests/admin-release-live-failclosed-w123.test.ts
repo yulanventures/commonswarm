@@ -51,6 +51,8 @@ elif name=='python3':
     import socket
     def no_network(*a,**kw): raise RuntimeError('UNMODELLED network')
     socket.socket.connect=no_network; socket.create_connection=no_network
+    if 'W2 ledger expected no complete 20261003 set before open' in source:
+        source=source.replace("n=subprocess.check_output(['/bin/bash','-s','--',sha,image],input=query,text=True,stderr=subprocess.DEVNULL).strip()","n='0'")
     exec(compile(source,'<complete-plan-block>','exec'))
 elif name=='ai_deadline':
     if args: refuse()
@@ -213,7 +215,7 @@ else: refuse()
 function fixture(config: Record<string, unknown> = {}) {
   const root = mkdtempSync(join(scratch, 'case-'));
   const bin = join(root, 'bin'), proof = join(root, 'proof'), stage = join(root, 'stage');
-  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'release/scripts'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth'), join(root, 'archive'), join(root, 'tmp'), join(root, 'caddy')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'release/scripts'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth'), join(root, 'archive'), join(root, 'tmp'), join(root, 'mac-anvil-secret'), join(root, 'caddy')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const put = (path: string, value: unknown) => writeFileSync(join(root, path), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
   put('commands.json', { sha, baseline, image, ...config }); put('argv.jsonl', '');
   put('proof/schema-committed.txt', 'PASS');
@@ -257,7 +259,8 @@ function fixture(config: Record<string, unknown> = {}) {
       ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
       ['/home/commonswarm/.env', join(root, 'home.env')],
       ['/etc/caddy/sites', join(root, 'caddy')],
-      ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
+      ['/private/tmp/anvil-secret', join(root, 'mac-anvil-secret')],
+      ['/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
       ['/var/backups/commonswarm-postgres', join(root, 'backup')],
       ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
       ['/home/commonswarm/oauth', join(root, 'oauth')],
@@ -402,7 +405,7 @@ function openFixture(window: string, producer = producerSource, includeProducer 
     archive, ...files.flatMap(([name]) => [name, join(releaseRoot, name)])], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   chmodSync(archive, 0o600);
-  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText) });
+  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText), baseline_postgres_image: image });
   f.put('gates.json', '{}'); f.put('home.env', 'EDGE=fixture\n');
   for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/'+name, 'fixture '+name);
   const proof = join(f.root, 'admin-issuance/release-proofs', `${sha}-${window}-${openId}`);
@@ -744,6 +747,7 @@ test('same-version retry / w6-issuer-live: W6 re-verifies the installed issuer c
 test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-password-guarded-file-removal: fails closed when guarded cleanup refuses', () => {
   for (const refused of [false, true]) {
     const f = fixture({ cleanup_refused: refused }); f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', 'synthetic fixture');
+    f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
     const result = f.run(['ai-w2-issuer-rollback'], 'W2');
     assert.equal(readFileSync(join(f.root, 'applied.sql'), 'utf8'), 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;');
     assert.deepEqual(result.calls.filter(c => c[0] === 'rm'), [['rm', '--', join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')]]);
@@ -758,6 +762,7 @@ test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-p
   const f = fixture();
   const target = join(f.root, 'etc/commonswarm-oauth/protected-sibling');
   symlinkSync(target, join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials'));
+  f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
   const result = f.run(['ai-w2-issuer-rollback'], 'W2'); assert.notEqual(result.status, 0);
   assert.ok(!result.calls.some(c => c[0] === 'rm')); assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')));
   assert.equal(readFileSync(target, 'utf8'), 'must survive');
@@ -777,6 +782,7 @@ test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every ro
   ];
   for (const [name, config, setup, message] of cases) for (const [mode, steps] of [['as written', ['ai-w2-issuer-rollback']], ['modelled ignored errexit', [modelled]]] as const) {
     const f = fixture(config); setup(f);
+    f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
     const result = f.run([...steps], 'W2b');
     assert.notEqual(result.status, 0, `${name} ${mode}`); stopped(result, message);
     if (mode !== 'as written') assert.match(result.stderr, /CALLER: rollback failure seen/, name);
@@ -786,8 +792,18 @@ test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every ro
   }
   // Positive control in both modes.
   for (const steps of [['ai-w2-issuer-rollback'], [modelled]]) {
-    const f = fixture(); f.put(C, 'synthetic fixture'); pass(f.run(steps, 'W2b'));
+    const f = fixture(); f.put(C, 'synthetic fixture'); f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n'); pass(f.run(steps, 'W2b'));
     assert.equal(readFileSync(join(f.proof, 'issuer-rollback.txt'), 'utf8'), 'PASS issuer login disabled; additive roles/grants retained\n');
+  }
+  // Without this window's marker the live issuer is left untouched.
+  {
+    const f = fixture(); f.put(C, 'synthetic fixture');
+    const result = f.run(['ai-w2-issuer-rollback'], 'W2b');
+    assert.notEqual(result.status, 0);
+    stopped(result, 'FAIL ai-w2-issuer-rollback: this window did not own issuer provisioning; live issuer left untouched; STOP');
+    assert.ok(existsSync(join(f.root, C)));
+    assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')));
+    assert.ok(!result.calls.some(c => c[0] === 'ai_db' || c[0] === 'rm'));
   }
 });
 
@@ -810,6 +826,7 @@ test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set a
 test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', () => {
   const good = fixture(); const positive = good.run(['ai-w2-issuer-credential'], 'W2'); pass(positive);
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
+  assert.ok(existsSync(join(good.proof, 'issuer-provisioning-attempted.txt')));
   // libpq's service-file parser takes key=value only (5f64fab4 W2 RGLqZX failed on configparser's "key = value").
   const service = readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8');
   assert.match(service, /^sslmode=verify-full$/m);
@@ -885,6 +902,7 @@ test('admin-issuer-credential-provisioning / w2b-shared-issuer-block: W2b runs t
     stopped(f.run(['ai-w2-issuer-rollback'], window), 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP');
   }
   const rollback = fixture(); rollback.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}');
+  rollback.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
   pass(rollback.run(['ai-w2-issuer-rollback'], 'W2b'));
   assert.ok(!existsSync(join(rollback.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
   assert.ok(existsSync(join(rollback.proof, 'issuer-rollback.txt')));

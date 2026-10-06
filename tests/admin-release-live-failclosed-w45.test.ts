@@ -96,6 +96,16 @@ if name=='python3':
         elif url=='https://api.commonswarm.com/admin':
             if method!='POST' or request.get_header('Origin')!='https://commonswarm.com' or request.data!=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}': refuse()
             status=cfg.get('post_status',401); body=b'{"error":"unauthorized"}'; headers={}
+        elif url=='https://api.commonswarm.com/.well-known/oauth-protected-resource/admin':
+            if method not in ('GET','HEAD'): refuse()
+            headers={'Content-Type':'application/json'}
+            if method=='GET':
+                status=200; body=json.dumps({'resource':'https://api.commonswarm.com/admin','authorization_servers':['https://mcp.commonswarm.com']}).encode()
+            else:
+                status=405; body=b'{"error":"method_not_allowed"}'
+                class HeadResponse(io.BytesIO): pass
+                response=HeadResponse(body); response.status=status; response.headers=headers
+                raise urllib.error.HTTPError(url,status,'fixture',headers,response)
         elif url==cfg['client']['client_id']:
             if method!='GET': refuse()
             status=200; body=json.dumps(cfg['client']).encode(); headers={'Content-Type':'application/json'}
@@ -307,8 +317,8 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   // Synthetic active box baseline, as in the original diagnostic fixtures.
   // Repository templates are historical OAuth-only files, not this block's box input.
   for (const [file, bytes] of [
-    ['mcp.caddy', 'mcp.commonswarm.com {\nimport mcp_oauth_active\nimport mcp_resource_active\nrequest>Authorization delete\nresp_headers>Authorization delete\n}\n'],
-    ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\nrequest>Authorization delete\nresp_headers>Authorization delete\n}\n'],
+    ['mcp.caddy', 'mcp.commonswarm.com {\nimport mcp_oauth_active\nimport mcp_resource_active\nrequest>headers>Authorization delete\nresp_headers>Authorization delete\n}\n'],
+    ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\nrequest>headers>Authorization delete\nresp_headers>Authorization delete\n}\n'],
   ] as const) {
     put('stage/' + file, bytes);
     put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
@@ -484,7 +494,9 @@ test('same-version retry / w4-rollback-refusals: each failure stops before the a
 });
 const gate = 'https://mcp.commonswarm.com/admin/gate';
 const post = 'https://api.commonswarm.com/admin';
+const discovery = 'https://api.commonswarm.com/.well-known/oauth-protected-resource/admin';
 const probes = ['ai-w4-probes'];
+const probePairs = [['GET', gate], ['HEAD', gate], ['POST', post], ['GET', discovery], ['HEAD', discovery]] as const;
 const gateFailure = (method: string) => `FAIL ai-w4-probes: ${method} /admin/gate status/ACAO/cache/body-length expected 200/*/no-store/<=4096 got 200/non-wildcard-or-missing/no-store/${method === 'GET' ? 19 : 0}; Origin expected commonswarm-site got commonswarm-site; STOP`;
 
 test('C1-5 Caddy imports: production relative and absolute forms validate candidate routes with empty live sites', (t) => {
@@ -499,7 +511,7 @@ test('C1-5 Caddy imports: production relative and absolute forms validate candid
   assert.equal(spawnSync(binary, ['version'], { encoding: 'utf8' }).status, 0, 'working Caddy binary required');
   const caddyRoot = realpathSync(mkdtempSync(join(temporaryRoot, 'admin-w45-caddy-')));
   try {
-    const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
+    const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>headers>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
     for (const [form, input] of [
       ['relative', productionCaddyfile],
       ['absolute', productionCaddyfile.replace('import sites/*.caddy', 'import /etc/caddy/sites/*.caddy')],
@@ -569,8 +581,11 @@ test('edge-caddy-route / canonical-api-admin-route: fails closed when canonical 
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', ...probes]); pass(good, r);
   // The lexical API candidate defines shared snippets before both sites use them.
   assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\n/);
+  assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\/.well-known\/oauth-protected-resource\n/);
+  assert.doesNotMatch(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\/.well-known\/oauth-protected-resource\/admin/);
+  assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /request>headers>Authorization delete/);
   assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /import admin_resource_active/);
-  assert.deepEqual(requestPairs(r), [['GET', gate], ['HEAD', gate], ['POST', post]]);
+  assert.deepEqual(requestPairs(r), probePairs);
   const bad = fixture({ post_status: 200 }); const refused = bad.run(['ai-w4-caddy-candidate', ...probes]);
   stopped(bad, refused, 'FAIL ai-w4-probes: POST canonical /admin status/body-length expected 401/<=4096 got 200/not-read-status-mismatch; STOP');
   assert.deepEqual(requestPairs(refused), [['GET', gate], ['HEAD', gate], ['POST', post]]);
@@ -579,7 +594,7 @@ test('edge-caddy-route / canonical-api-admin-route: fails closed when canonical 
 
 test('edge-caddy-route / mcp-get-head-gate-cors: fails closed on a non-wildcard gate response', () => {
   const good = fixture(); const r = good.run(probes); pass(good, r);
-  assert.deepEqual(requestPairs(r), [['GET', gate], ['HEAD', gate], ['POST', post]]);
+  assert.deepEqual(requestPairs(r), probePairs);
   for (const method of ['GET', 'HEAD']) {
     const bad = fixture({ acao: 'https://wrong.example', bad_method: method }); const refused = bad.run(probes);
     stopped(bad, refused, gateFailure(method));
@@ -642,8 +657,8 @@ test('edge-caddy-route / caddy-validate-reload: fails closed before reload on ca
 
 test('edge-caddy-route / outside-origin-probe: fails closed on wrong CORS with the site Origin sent outside ingress', () => {
   const good = fixture(); const r = good.run(probes); pass(good, r);
-  assert.deepEqual(requestPairs(r), [['GET', gate], ['HEAD', gate], ['POST', post]]);
-  for (const q of r.requests) assert.equal(q.headers.Origin, 'https://commonswarm.com');
+  assert.deepEqual(requestPairs(r), probePairs);
+  for (const q of r.requests) if (q.url !== discovery) assert.equal(q.headers.Origin, 'https://commonswarm.com');
   const bad = fixture({ acao: 'https://wrong.example' }); const refused = bad.run(probes);
   stopped(bad, refused, gateFailure('GET'));
   assert.deepEqual(requestPairs(refused), [['GET', gate]]);
@@ -837,18 +852,23 @@ test('release-plan-contract / w6-transfer-file-guards: refuses a missing or syml
   symlinkSync(join(linked.root, 'elsewhere.json'), join(linked.root, 'c1/agent.json'));
   r = linked.run(['ai-w6-transfer'], env('upload', 'agent.json', linked));
   guardRefused(linked, r, 'FAIL ai-w6-transfer: upload file expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
-  // Download positive: guards admit; the remote read's stdout lands in the new 0600 target.
-  const down = fixture(); mkdirSync(join(down.root, 'c1')); r = down.run(['ai-w6-transfer'], env('download', 'C1-audit.json', down));
-  assert.equal(r.status, 97, r.stderr); assert.doesNotMatch(r.stderr, /FAIL/);
-  assert.equal(readFileSync(join(down.root, 'c1/C1-audit.json'), 'utf8'), 'ADMITTED ssh\n');
-  const present = fixture(); present.put('c1/C1-audit.json', 'retained\n');
-  r = present.run(['ai-w6-transfer'], env('download', 'C1-audit.json', present));
-  guardRefused(present, r, 'FAIL ai-w6-transfer: download target expected absent got present; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
-  assert.equal(readFileSync(join(present.root, 'c1/C1-audit.json'), 'utf8'), 'retained\n');
   const dangling = fixture(); mkdirSync(join(dangling.root, 'c1')); symlinkSync(join(dangling.root, 'absent-audit'), join(dangling.root, 'c1/C1-audit.json'));
   r = dangling.run(['ai-w6-transfer'], env('download', 'C1-audit.json', dangling));
   guardRefused(dangling, r, 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
   assert.ok(!existsSync(join(dangling.root, 'absent-audit')));
+  // C1-14: nonempty dest is reused without ssh; empty dest is not published from a failed transport.
+  const reuseDown = fixture(); reuseDown.put('c1/C1-fence.txt', 'kept-fence\n');
+  r = reuseDown.run(['ai-w6-transfer'], env('download', 'C1-fence.txt', reuseDown));
+  assert.equal(r.status, 0, r.stderr); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.equal(readFileSync(join(reuseDown.root, 'c1/C1-fence.txt'), 'utf8'), 'kept-fence\n');
+  const emptyDown = fixture(); mkdirSync(join(emptyDown.root, 'c1')); writeFileSync(join(emptyDown.root, 'c1/C1-fence.txt'), '');
+  r = emptyDown.run(['ai-w6-transfer'], env('download', 'C1-fence.txt', emptyDown));
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-transfer: download staging file expected created got failure; STOP/);
+  assert.equal(readFileSync(join(emptyDown.root, 'c1/C1-fence.txt'), 'utf8'), '');
+  const present = fixture(); present.put('c1/C1-audit.json', 'retained\n');
+  r = present.run(['ai-w6-transfer'], env('download', 'C1-audit.json', present));
+  guardRefused(present, r, 'FAIL ai-w6-transfer: retained C1-audit.json expected four committed kinds got mismatch; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.equal(readFileSync(join(present.root, 'c1/C1-audit.json'), 'utf8'), 'retained\n');
 });
 
 // W5 opening: ai-w5-preflight runs ai-live-controls phase before with the pre-W1 consent

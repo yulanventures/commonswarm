@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -225,7 +225,9 @@ test('resolved run orders keep opening, recovery and concurrent audit dispatch c
   assert.ok(w4.findIndex(s => s.id === 'ai-w4-rollback') < w4.findIndex(s => s.id === 'ai-close'));
   const w5 = task('W5', 'recovered-close').steps;
   assert.ok(!w5.some(s => s.id === 'ai-w5-closed'));
-  assert.ok(w5.findIndex(s => s.id === 'ai-w5-recovery-transfer') < w5.findIndex(s => s.id === 'ai-close'));
+  assert.ok(w5.findIndex(s => s.id === 'ai-w5-recovery-transfer') < w5.findIndex(s => s.id === 'ai-w5-recovery-env'));
+  assert.ok(w5.findIndex(s => s.id === 'ai-w5-recovery-env') < w5.findIndex(s => s.id === 'ai-close'));
+  assert.ok(!w5.some(s => s.id === 'ai-open' || s.id === 'ai-db-session'));
   const w6 = task('W6').steps;
   assert.ok(!w6.some(s => s.id === 'ai-w6-audit-watch'));
   assert.ok(!w6.some(s => s.id === 'ai-w6-audit'), 'audit is never an executable order step');
@@ -269,6 +271,13 @@ test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admi
     assert.ok(steps.some(s => s.manual?.quote.includes('production schema rollback is authorized')));
     assert.equal(steps.some(s => s.id === 'ai-close'), mode === 'recovered-close');
   }
+  assert.ok(task('W2', 'rollback').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
+  assert.ok(!task('W2', 'recovered-close').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
+  assert.ok(task('W2b', 'rollback').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
+  assert.ok(!task('W2b', 'recovered-close').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
+  assert.equal(task('W2', 'forward').steps.length, 21);
+  assert.equal(task('W2', 'recovered-close').steps.length, 11);
+  assert.equal(task('W2b', 'recovered-close').steps.length, 9);
   for (const mode of modes) {
     const steps = task('W2b', mode).steps;
     assert.equal(steps[0]!.conditions[0]!.quote, 'Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back.');
@@ -276,4 +285,63 @@ test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admi
   }
   const w2b = task('W2b', 'forward').steps.map(s => s.id);
   assert.ok(w2b.indexOf('ai-w2-issuer-credential') < w2b.indexOf('ai-w2b-forward-catalogs'));
+  const w7f = task('W7', 'forward').steps;
+  assert.ok(w7f.findIndex(s => s.id === 'ai-gates') >= 0, 'Mac still runs ai-gates');
+  assert.ok(w7f.findIndex(s => s.id === 'ai-w7-timer-hold') < w7f.findIndex(s => s.id === 'ai-w7-proof'));
+  assert.ok(w7f.findIndex(s => s.id === 'ai-w7-timer-hold') < w7f.findIndex(s => s.id === 'ai-close'));
+  for (const mode of ['rollback', 'recovered-close']) {
+    const steps = task('W7', mode).steps;
+    assert.ok(steps.some(s => s.id === 'ai-w7-recovery'), mode);
+    assert.ok(!steps.some(s => s.id === 'ai-emergency-close'), mode);
+    assert.ok(!steps.some(s => s.id === 'ai-w6-activation-rollback'), mode);
+  }
+  assert.equal(task('W5', 'recovered-close').steps.length, 10);
+  assert.equal(task('W7', 'forward').steps.length, 22);
+  assert.equal(task('W7', 'rollback').steps.length, 2);
+  assert.equal(task('W7', 'recovered-close').steps.length, 8);
+});
+
+test('C1-12 W5 recovered-close generated task under bash -u reaches ai-close with recovery-env variables set', () => {
+  const generated = run(planPath, 'W5', 'recovered-close');
+  assert.equal(generated.status, 0, generated.stderr);
+  const task: Task = JSON.parse(generated.stdout);
+  const envStep = task.steps.find(s => s.id === 'ai-w5-recovery-env')!;
+  const closeIdx = task.steps.findIndex(s => s.id === 'ai-close');
+  assert.ok(envStep && closeIdx > task.steps.indexOf(envStep));
+  const frozen = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozen.status, 0, frozen.stderr);
+  const frozenRecovered = frozen.stdout.match(/```c1-order W5 recovered-close\n([\s\S]*?)```/)![1]!;
+  assert.doesNotMatch(frozenRecovered, /ai-w5-recovery-env/);
+  assert.match(frozenRecovered, /"id":"ai-close"/);
+  const dir = mkdtempSync(join(scratch, 'w5env-'));
+  const sha = 'a'.repeat(40), wid = 'Ab12Cd';
+  const proof = join(dir, 'home/commonswarm/admin-issuance/release-proofs', `${sha}-W5-${wid}`);
+  mkdirSync(proof, { recursive: true, mode: 0o700 });
+  chmodSync(proof, 0o700);
+  const planSrc = join(dir, 'RELEASE.src.md');
+  writeFileSync(planSrc, '# reviewed plan\n');
+  const archive = join(proof, 'release.tar');
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n t.add(sys.argv[2],arcname="docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md")', archive, planSrc], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const archiveDigest = createHash('sha256').update(readFileSync(archive)).digest('hex');
+  const planDigest = createHash('sha256').update(readFileSync(planSrc)).digest('hex');
+  const inputs = { window: 'W5', release_sha: sha, window_id: wid, archive_sha256: archiveDigest, plan_sha256: planDigest };
+  const operatorInputs = join(dir, 'inputs.json');
+  writeFileSync(operatorInputs, JSON.stringify(inputs));
+  writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs));
+  mkdirSync(join(proof, 'site-recovery'), { mode: 0o700 });
+  const closeStub = `reached_ai_close() {
+  : "\${WINDOW:?}" "\${WINDOW_ID:?}" "\${RELEASE_SHA:?}" "\${PROOF_DIR:?}" "\${INPUTS_FILE:?}" "\${BOX_ARCHIVE_PATH:?}" "\${SITE_RECOVERY_EVIDENCE:?}" "\${PLAN_FILE:?}" "\${CLOSE_RESULT:?}"
+  printf 'REACHED ai-close WINDOW=%s PROOF_DIR=%s INPUTS_FILE=%s BOX_ARCHIVE_PATH=%s SITE_RECOVERY_EVIDENCE=%s PLAN_FILE=%s CLOSE_RESULT=%s\\n' \\
+    "$WINDOW" "$PROOF_DIR" "$INPUTS_FILE" "$BOX_ARCHIVE_PATH" "$SITE_RECOVERY_EVIDENCE" "$PLAN_FILE" "$CLOSE_RESULT"
+}
+`;
+  const body = envStep.block.split('/home/commonswarm/admin-issuance').join(join(dir, 'home/commonswarm/admin-issuance')) + '\nreached_ai_close\n';
+  const env: NodeJS.ProcessEnv = { ...process.env, INPUTS_FILE: operatorInputs };
+  for (const key of ['WINDOW', 'WINDOW_ID', 'RELEASE_SHA', 'PROOF_DIR', 'BOX_ARCHIVE_PATH', 'SITE_RECOVERY_EVIDENCE', 'PLAN_FILE', 'CLOSE_RESULT']) delete env[key];
+  const r = spawnSync('/bin/bash', ['-u'], { input: closeStub + body, encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /REACHED ai-close WINDOW=W5/);
+  assert.match(r.stdout, new RegExp(`PROOF_DIR=${proof.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(r.stdout, /CLOSE_RESULT=recovered/);
 });

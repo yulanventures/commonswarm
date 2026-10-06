@@ -551,3 +551,185 @@ Final gate tail:
 `git diff --check` passed. No in-scope item is awaiting a tool/service refusal.
 The external producer handoff and the existing W2 replacement-session conflict
 are stated above; neither is a claim that this patch has run on a box.
+
+## C1-12: nine Grok-sweep findings (uncommitted on lane/c1-frozen-work)
+
+Prepared against frozen `86673f1f`. No commit, push, production operation,
+full suite, build, Docker or browser. HezLead owns independent review.
+
+Changed step counts (manual and conditional rows included, as in C1-8):
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+W5 recovered-close gained `ai-w5-recovery-env` (9→10). W7 forward gained
+`ai-w7-timer-hold` (21→22). W7 rollback and recovered-close keep their lengths
+but dispatch `ai-w7-recovery` instead of `ai-emergency-close`.
+
+| Finding | Status | Plan locus |
+| --- | --- | --- |
+| W4-PREFLIGHT-MEM-JSON | done | `ai-w4-preflight` `mem_bytes=int(mem)` L3522-3524 |
+| W4-CAND-LOG-ANCHOR | done | `ai-w4-caddy-candidate` prefixes `request>headers`,`resp_headers` L3599-3602 |
+| W4-META-REWRITE | done | rewrite without extra `/admin` L3583; GET-only `@admin_metadata` L3578-3585; probes GET 200 / HEAD 405 L3748-3766 |
+| W5-RECOVERED-CLOSE-UNBOUND | done | `ai-w5-recovery-env` L4580-4627; recovered-close order before `ai-close` L409-410 |
+| W5-RECOVERY-TRANSFER-RETRY | done | exclusive-create tar L4481-4497; resume proof/upload/tar L4514-4534, L4554-4558 |
+| W7-GATES | done | Mac `ai-gates` L531; box digest bind L6067-6099; `ai-w7-proof` has no `ai_run ai-gates` L6106-6128 |
+| W7-STAGE | done | box mktemp `/tmp/anvil-secret` L958, L1324, L3916; Mac `/private/tmp/anvil-secret` stays L26, L5477, L5505, L5537, L5867; close cleanup `/tmp` L6498-6500, L6533 |
+| W7-KEEPOPEN | done | quote L5964, L6003, L6181; `ai-w7-recovery` L5999-6042; W7 rollback/recovered-close orders L555, L560 |
+| W7-TIMER | done | `ai-w7-timer-hold` L5971-5995; proof inactive checks L6112-6113 before `W7_C1_BINDING` L6114; `ai-close` restore before `closed.txt` L6487-6491 |
+
+W7-STAGE box paths changed from `/private/tmp/anvil-secret` to `/tmp/anvil-secret`: `EDGE_QUERY_STAGE` L958/L962, `ai-open` `SECRET_STAGE` L1324, `HOOK_SECRET_STAGE` L3916/L3921, `ai-w2-between-probes` L2444 and L2557, `W2_REMOTE_SCRIPT` L2003, `ai-close` cleanup L6498-6500 and L6533. Mac `C1_SECRET_STAGE` and W6 pointer/agent-receipt/secret-close regexes stay `/private/tmp/anvil-secret`. Denied-list still names `/private/tmp/anvil-secret.abcdef` so a Mac leftover cannot pass the box closer.
+
+### Gate
+
+Exact assigned command:
+
+`C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
+
+from `/private/tmp/cs-c1-frozen`. Exit 1 immediately:
+
+`mktemp: mkdtemp failed on /tmp/lane-home.nTNsOQ: Operation not permitted`
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.iso`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 161
+ℹ pass 160
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 258733.800833
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `86673f1f`.
+
+## C1-13: rehearsal regression, staging abort, and five refuter findings (uncommitted)
+
+Prepared against frozen `86673f1f` plus uncommitted C1-12. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent review.
+PG rehearsal is left for the Lead.
+
+Changed step counts (manual and conditional rows included, as in C1-8):
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+W2 recovered-close still has 11 rows: `ai-w2-issuer-rollback` is a manual omit-unless-marker
+instruction, not a dispatched block. W2b recovered-close stays 9 on the same pattern.
+W2 forward keeps abort, session and stage-probes (21). Live smoke uses granular consent;
+the existing full-account second-confirmation tests are unchanged and the live smoke no
+longer exercises that control.
+
+| Item | Status | Plan locus |
+| --- | --- | --- |
+| 1 C1-12 W6 rehearsal edge-measurement | done (rehearsal remap) | `scripts/c1-w6-rehearsal-steps.sh` remaps `/private/tmp/anvil-secret` first, then `/tmp/anvil-secret` |
+| 2 ai-open-abort absent secret-stage.path | done | `ai-open-abort` L6606-6624 |
+| 3 box-hosted `/private/` guard | done | close denied-list `NEGATIVE-CONTROL /private/` L6573; test fails on 86673f1f |
+| 4 W6a-2 EDGE_MEASUREMENT_FILE + INPUTS_FILE | done | W6 order L427; re-execs pass both in `env=dict` (ai-open, ai-w5-reference, activation-checks, activation-apply, refresh) |
+| 5 W6 granular pointer scopes | done | pointer `full_account: False` L5588; browser/producer L5232-5243, L5297, L5621-5622 |
+| 6 W2B recovery must not wipe live issuer | done | marker before mutation L2923; rollback refuse L2987-2988; recovered close wipe only with marker L6524 |
+| 7 W2 pre-fence close / refuse-before-open | done | ai-open refuse-before-mkdir L1219-1257; ledger-at-open L1366-1371; close compares capture L6515-6520 |
+
+Root cause for item 1: C1-12 moved box stages to `/tmp/anvil-secret`. The rehearsal still
+remapped only `/private/tmp/anvil-secret`. On Darwin `/tmp` is a symlink to `/private/tmp`,
+so the edge-receipt query EXIT trap `p.resolve()==p` failed and the parent reported
+`FAIL edge-measurement.json: current release_generation/invalidated_at unavailable`.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.cwoDha: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.mYNgbn`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 166
+ℹ pass 165
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 211943.202541
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `86673f1f`. PG rehearsal left for the Lead.
+
+## C1-14: W6 retry/recovery idempotency (uncommitted)
+
+Prepared against frozen `86673f1f` plus uncommitted C1-12 and C1-13. No commit,
+push, production operation, full suite, build, Docker or browser. HezLead owns
+independent review. PG rehearsal is left for the Lead.
+
+Changed step counts (manual and conditional rows included, as in C1-8): **none**.
+No run-order rows were added or removed.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+Harness edits (not in the allowed plan-only list; listed for the checker):
+`scripts/c1-w2-rehearsal.sh` `exec 3>&1` and `die` to fd 3 (L100-101);
+`scripts/c1-w6-rehearsal-steps.sh` unique `ai-close` general-timer extract plus
+once-count control (L541-545).
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 0 W6 rehearsal extract uniqueness + die visibility | done (harness) | unique FAIL `re-arm with ai-w4-timer-recovery` L541-545 of `scripts/c1-w6-rehearsal-steps.sh`; `die` `>&3` L100-101 of `scripts/c1-w2-rehearsal.sh` |
+| 1 W6B2-1 atomic C1-audit.json | done | `ai-w6-audit` staging mktemp/validate/`mv -f` L5727-5738; Mac probe `test -s` L5842 |
+| 2 W6B2-2 / W6b1-2 reuse revoke-request-id | done | `ai-w6-human-revoke` reuse saved UUID, skip CLI when receipt already revoked L5900-5952; emergency-close still has no mint — recovery is `C1_RECOVERY_REVOKE=1` |
+| 3 W6B2-3 reuse owner-client command id | done | `ai-w6-owner-client-command` lstat saved id, matching completed receipt, exclusive create only when absent L5558-5606 |
+| 4 W6b1-1 recoverable transfer | done | leftover owner-matched regular `/tmp/admin-c1-${WINDOW_ID}-${file}` replaced then removed L5441-5466; downloads stage then publish L5468-5504 |
+| 5 W6b1-3 redundant HEAD `body==b''` | not done | left in place (light review UNPROVEN; not trivially safe) |
+
+Tests interrupt at the named point; frozen `86673f1f` bytes fail the same fixture.
+
+Run-order quote pins retargeted after the W6 block growth (not new rows):
+`ai-open-abort` 6603→6718; fence dispatch 5753→5834; `ai-w6-secret-close` 5926→6041;
+browser-worker manual 5621→5695; close LOG.md manual 6655→6770.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.b8UUZw: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.c114inner`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 170
+ℹ pass 169
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 201136.348625
+INNER_RC=0
+```
+
+The C1-14 extract uniqueness test in `tests/c1-w2-rehearsal.test.ts` passed in a separate inner run without `RUN_PG_REHEARSAL=1` (PG tests skipped). PG rehearsal is left for the Lead.
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. Frozen SHA remains `86673f1f`.

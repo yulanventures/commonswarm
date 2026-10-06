@@ -765,6 +765,48 @@ test('c1 W6 rehearsal: the sourced steps are Bash 3.2 syntax, run plan slices fr
   }
 });
 
+test('C1-14: ai-close timer extract is unique; extract die reaches fd 3 under stdout redirect', () => {
+  const planText = readFileSync(resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'), 'utf8');
+  const anchor = 'FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery';
+  assert.equal(planText.split(anchor).length - 1, 1);
+  const close = planText.match(/```sh\n(# step: ai-close\n[\s\S]*?)```/)![1]!;
+  const oldNeedle = 'systemctl is-active --quiet "$EDGE_RECYCLE_TIMER" ||';
+  assert.ok((close.split(oldNeedle).length - 1) >= 2, 'control: the old prefix is no longer unique in ai-close');
+  assert.match(w6Steps, /C1_CLOSE_TIMER_ANCHOR='FAIL ai-close: recycle timer expected active got inactive; re-arm with ai-w4-timer-recovery'/);
+  assert.match(w6Steps, /ai-close general timer line expected once got/);
+  assert.match(w6Steps, /x ai-close line "\$C1_CLOSE_TIMER_ANCHOR"/);
+  assert.match(w6Steps, /grep -q '\^FAIL' "\$T\/blocks\/w6-close-timer\.sh"/);
+  assert.doesNotMatch(w6Steps, /x ai-close line 'systemctl is-active --quiet "\$EDGE_RECYCLE_TIMER" \|\|'/);
+  assert.match(source, /exec 3>&1\ndie\(\) \{ printf '%s\\n' "FAIL \$1: \$2" >&3; exit 1; \}/);
+  const extractPy = source.match(/cat >"\$T\/extract\.py" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+  const dir = mkdtempSync(join(scratch, 'extract-die-'));
+  writeFileSync(join(dir, 'extract.py'), extractPy);
+  const planFile = join(dir, 'RELEASE.md');
+  writeFileSync(planFile, planText);
+  const blockFile = join(dir, 'block.sh');
+  const errFile = join(dir, 'extract.err');
+  const harness = `set -euo pipefail
+exec 3>&1
+die() { printf '%s\\n' "FAIL $1: $2" >&3; exit 1; }
+extract() { python3 "${join(dir, 'extract.py')}" "$@" 2>"${errFile}" || die extract "$(cat "${errFile}")"; }
+extract "${planFile}" ai-close line "$NEEDLE" >"${blockFile}"
+`;
+  writeFileSync(blockFile, 'UNTOUCHED\n');
+  const hidden = spawnSync('/bin/bash', ['-c', harness], { encoding: 'utf8', env: { ...process.env, NEEDLE: oldNeedle } });
+  assert.notEqual(hidden.status, 0);
+  assert.match(hidden.stdout, /FAIL extract: line expected once in ai-close/);
+  assert.doesNotMatch(readFileSync(blockFile, 'utf8'), /FAIL/, 'die must not land in the redirected block file');
+  const oldDie = harness.replace('printf \'%s\\n\' "FAIL $1: $2" >&3', 'printf \'%s\\n\' "FAIL $1: $2"');
+  const leaked = spawnSync('/bin/bash', ['-c', oldDie], { encoding: 'utf8', env: { ...process.env, NEEDLE: oldNeedle } });
+  assert.notEqual(leaked.status, 0);
+  assert.doesNotMatch(leaked.stdout, /FAIL extract/);
+  assert.match(readFileSync(blockFile, 'utf8'), /^FAIL extract: line expected once in ai-close/m);
+  const unique = spawnSync('/bin/bash', ['-c', harness], { encoding: 'utf8', env: { ...process.env, NEEDLE: anchor } });
+  assert.equal(unique.status, 0, unique.stderr + unique.stdout);
+  assert.match(readFileSync(blockFile, 'utf8'), /re-arm with ai-w4-timer-recovery/);
+  assert.doesNotMatch(readFileSync(blockFile, 'utf8'), /^FAIL /m);
+});
+
 test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle hook, F2 trigger negatives, activation, G3 both orders, both keep_open finishes, W7, ruling-1 recycles, timer re-arm', { skip: skipDb }, () => {
   for (const tool of ['openssl', 'lsof', 'node']) assert.equal(spawnSync('/bin/sh', ['-c', `command -v ${tool}`]).status, 0, `${tool} is required for --w6`);
   const r = run(['--from-post-w2', '--w2-release-sha', headSha(), '--issuer', '--w6', postFixture()], { PG_BIN: PG() });
