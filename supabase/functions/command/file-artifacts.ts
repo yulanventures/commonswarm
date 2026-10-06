@@ -101,7 +101,7 @@ export const FILE_CREATE_RATE_LIMIT_PER_HOUR = 600;
 export const FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR = 2000;
 
 export const FILE_BUCKET = "swarm-files";
-export const FILE_DOWNLOAD_URL_TTL_SECONDS = 300;
+export const FILE_DOWNLOAD_URL_TTL_SECONDS = 300; // Removal does not recall URLs already issued; they expire within 300 seconds.
 /** ★R8: shipped on download and list payloads — agents read bytes, and an
  * attachment disposition protects only browsers. */
 export const FILE_CONTENT_WARNING =
