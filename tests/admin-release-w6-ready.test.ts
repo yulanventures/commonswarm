@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -525,7 +525,7 @@ test('W6 activation checks require the retained recycle archive with its digest 
 test('ai-close W7: success compares the retained retirement gate state; a recovered close needs W7-recovery receipts, not emergency-close CLOSED', () => {
   const close = block('ai-close');
   const start = close.indexOf('if test "$CLOSE_RESULT" = success && test "$WINDOW" = W6');
-  const end = close.indexOf('if test "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered');
+  const end = close.indexOf('if test "$WINDOW" = W2 -o "$WINDOW" = W2b && test "$CLOSE_RESULT" = recovered');
   assert.ok(start > 0 && end > start);
   const states = close.slice(start, end);
   const check = (result: string, enabled: 't' | 'f', files: Record<string, string>) => {
@@ -918,31 +918,111 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
   assert.match(empty.calls, /admin revoke/);
 });
 
-test('C1-16: W7 recovery uses the refresh generation when present; frozen 00e4fca4 always uses W6', () => {
-  const current = block('ai-w7-recovery');
-  const frozen = frozen00Block('ai-w7-recovery');
-  assert.match(current, /preserved-open-at-expected-generation/);
-  assert.match(frozen, /preserved-open-at-W6-generation/);
-  const pyOf = (source: string) => source.match(/python3 - "\$INPUTS_FILE" "\$PROOF_DIR" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
-  const dir = realpathSync(mkdtempSync(join(root, 'w7gen-')));
-  const home = join(dir, 'home');
-  const w6 = join(home, 'commonswarm/admin-issuance/release-proofs', `${sha}-W6-W6win1`);
-  const proof = join(dir, 'proof');
-  mkdirSync(w6, { recursive: true, mode: 0o700 });
-  mkdirSync(proof, { mode: 0o700 });
-  writeFileSync(join(w6, 'C1-finish.json'), JSON.stringify({ state: 'open', explicit_keep_open: true }) + '\n');
-  writeFileSync(join(w6, 'edge-measurement-final.json'), JSON.stringify({ release_sha: sha, generation: 15, invalidated_at: null }) + '\n');
-  writeFileSync(join(proof, 'edge-measurement.json'), JSON.stringify({ release_sha: sha, generation: 16, invalidated_at: null }) + '\n');
-  const inputs = inputFile({ ...base(), window: 'W7', w6_window_id: 'W6win1', release_sha: sha });
-  const runPy = (py: string) => spawnSync('python3', ['-', inputs, proof], {
-    input: py.split('/home/commonswarm').join(join(home, 'commonswarm')), encoding: 'utf8',
+test('C1-17: completed human-revoke.json plus a partial recovery receipt PASSes without parsing the partial; HEAD 6f4a0ac9 dies', () => {
+  const grant = '11111111-1111-4111-8111-111111111111';
+  const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(headPlan.status, 0, headPlan.stderr);
+  const headRevoke = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-w6-human-revoke\n'))!;
+  assert.doesNotMatch(headRevoke, /incomplete\/human-revoke-recovery/);
+  const makeBoth = (source: string) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'c117-both-')));
+    const bin = join(dir, 'bin'), proof = join(dir, 'proof'), stage = join(dir, 'stage');
+    for (const d of [bin, proof, stage]) mkdirSync(d, { mode: 0o700 });
+    writeFileSync(join(proof, 'C1-audit.json'), JSON.stringify({ grant_id: grant }));
+    writeFileSync(join(proof, 'C1-inputs.json'), '{}');
+    writeFileSync(join(proof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
+    writeFileSync(join(proof, 'human-revoke.json'), JSON.stringify({ state: 'revoked', grant_id: grant, request_id: saved }) + '\n');
+    writeFileSync(join(proof, 'human-revoke-recovery.json'), '{"state":');
+    writeFileSync(join(stage, 'agent.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403 } }));
+    const calls = join(dir, 'calls'); writeFileSync(calls, '');
+    writeFileSync(join(bin, 'node'), `#!/bin/bash
+printf 'cli %s\\n' "$*" >>'${calls}'
+exit 64
+`, { mode: 0o700 });
+    const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+    return { r, calls: readFileSync(calls, 'utf8'), proof };
+  };
+  const old = makeBoth(headRevoke);
+  assert.notEqual(old.r.status, 0, 'HEAD 6f4a0ac9 parsed the partial recovery receipt');
+  assert.match(old.r.stderr, /JSONDecodeError|Expecting|recovery revoke expected revoked-for-this-grant-and-saved-id/);
+  const cur = makeBoth(block('ai-w6-human-revoke'));
+  assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
+  assert.equal(cur.calls, '', 'completed evidence must not dispatch');
+  assert.ok(!existsSync(join(cur.proof, 'human-revoke-recovery.json')));
+  assert.equal(readFileSync(join(cur.proof, 'incomplete/human-revoke-recovery.json'), 'utf8'), '{"state":');
+  assert.match(readFileSync(join(cur.proof, 'incomplete/reason.txt'), 'utf8'), /partial human-revoke-recovery.json was not parsed/);
+  assert.equal(statSync(join(cur.proof, 'incomplete')).mode & 0o777, 0o700);
+  assert.match(cur.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
+});
+
+test('C1-17: W7 recovery consumes the opening receipt ai-open retains from refresh; HEAD 6f4a0ac9 never produces it', () => {
+  const persistPy = block('ai-open').match(/python3 - "\$EDGE_MEASUREMENT_FILE" "\$PROOF_DIR\/edge-measurement-open.json" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  const recovery = block('ai-w7-recovery');
+  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(headPlan.status, 0, headPlan.stderr);
+  const headBlocks = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+  const headOpen = headBlocks.find(s => s.startsWith('# step: ai-open\n'))!;
+  const headRecovery = headBlocks.find(s => s.startsWith('# step: ai-w7-recovery\n'))!;
+  assert.doesNotMatch(headOpen, /edge-measurement-open\.json/);
+  assert.match(headRecovery, /edge-measurement\.json/);
+  assert.match(recovery, /edge-measurement-open\.json/);
+  const persist = (src: string, dst: string) => spawnSync('python3', ['-', src, dst], { input: persistPy, encoding: 'utf8' });
+  const recover = (source: string, opts: { proof: string; home: string; live: number; inputs: string }) => {
+    const harness = `WINDOW=W7
+ai_run() { case "$1" in ai-w4-timer-recovery) return 0;; *) return 1;; esac; }
+ai_ro() { case "$*" in *release_generation=${opts.live}*) printf 't\\n';; *) printf 'f\\n';; esac; }
+`;
+    return run(harness + source.split('/home/commonswarm').join(join(opts.home, 'commonswarm')) + "\nprintf 'SHELL_ALIVE\\n'\n", {
+      WINDOW: 'W7', INPUTS_FILE: opts.inputs, PROOF_DIR: opts.proof,
+    });
+  };
+  const w7world = (w6Gen: number) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'w7open-')));
+    const home = join(dir, 'home');
+    const w6 = join(home, 'commonswarm/admin-issuance/release-proofs', `${sha}-W6-W6win1`);
+    const proof = join(dir, 'proof');
+    mkdirSync(w6, { recursive: true, mode: 0o700 });
+    mkdirSync(proof, { mode: 0o700 });
+    writeFileSync(join(w6, 'C1-finish.json'), JSON.stringify({ state: 'open', explicit_keep_open: true }) + '\n');
+    writeFileSync(join(w6, 'edge-measurement-final.json'), JSON.stringify({ release_sha: sha, generation: w6Gen, invalidated_at: null }) + '\n');
+    const inputs = inputFile({ ...base(), window: 'W7', w6_window_id: 'W6win1', release_sha: sha });
+    return { dir, home, proof, inputs };
+  };
+
+  const refreshed = edgeFixture({ timerActive: true, row: { release_generation: 16, measured_generation: 16 } });
+  const out = join(refreshed.dir, 'refreshed.json');
+  const refresh = run(block('ai-edge-refresh', [...refreshed.copy.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!)), {
+    ...refreshed.env, EDGE_MEASUREMENT_OUT: out,
   });
-  const cur = runPy(pyOf(current));
-  assert.equal(cur.status, 0, cur.stderr);
-  assert.equal(JSON.parse(readFileSync(join(proof, 'W7-recovery-expected.json'), 'utf8')).generation, 16);
-  const old = runPy(pyOf(frozen));
-  assert.equal(old.status, 0, old.stderr);
-  assert.equal(JSON.parse(readFileSync(join(proof, 'W7-recovery-expected.json'), 'utf8')).generation, 15);
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.equal(JSON.parse(readFileSync(out, 'utf8')).generation, 16);
+  const w16 = w7world(15);
+  const installed = persist(out, join(w16.proof, 'edge-measurement-open.json'));
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.equal(statSync(join(w16.proof, 'edge-measurement-open.json')).mode & 0o777, 0o600);
+  assert.equal(digest(readFileSync(out)), digest(readFileSync(join(w16.proof, 'edge-measurement-open.json'))));
+  const pass16 = recover(recovery, { ...w16, live: 16 });
+  assert.equal(pass16.status, 0, pass16.stderr + pass16.stdout);
+  assert.equal(JSON.parse(readFileSync(join(w16.proof, 'W7-recovery-expected.json'), 'utf8')).generation, 16);
+  assert.match(pass16.stdout, /SHELL_ALIVE/);
+  const head16 = recover(headRecovery, { ...w16, live: 16 });
+  assert.notEqual(head16.status, 0, 'HEAD 6f4a0ac9 selects W6 generation 15 while live is 16');
+  assert.match(head16.stderr, /preserved-open-at-expected-generation|W6 measured OPEN\/CLOSED state expected preserved/);
+
+  const w15 = w7world(15);
+  const pass15 = recover(recovery, { ...w15, live: 15 });
+  assert.equal(pass15.status, 0, pass15.stderr);
+  assert.equal(JSON.parse(readFileSync(join(w15.proof, 'W7-recovery-expected.json'), 'utf8')).generation, 15);
+
+  const w14 = w7world(15);
+  const stale = join(w14.dir, 'stale.json');
+  writeFileSync(stale, JSON.stringify({ release_sha: sha, generation: 14, invalidated_at: null }) + '\n');
+  assert.equal(persist(stale, join(w14.proof, 'edge-measurement-open.json')).status, 0);
+  const refuse14 = recover(recovery, { ...w14, live: 15 });
+  assert.notEqual(refuse14.status, 0);
+  assert.match(refuse14.stderr, /W7 opening generation expected >=W6-final got stale-14/);
 });
 
 test('C1-16: download reuse refuses partial C1-finish.json; frozen 00e4fca4 reuses it', () => {

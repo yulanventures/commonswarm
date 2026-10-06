@@ -79,7 +79,11 @@ function runOrders(plan, path) {
     if (row.input !== undefined && (typeof row.input !== 'string' || !row.input)) fail(`invalid input note at plan line ${line}`);
     if (row.manual) {
       if (row.id || row.dispatches) fail(`manual entry also names a block at plan line ${line}`);
-      return { host: row.host, manual: quote(row.manual, 'manual'), conditions, input: row.input, order_evidence: evidence };
+      const manual = quote(row.manual, 'manual');
+      if (/\bFAIL /.test(manual.quote)) fail(`manual quote is a FAIL line at plan line ${line}`);
+      const named = typeof row.input === 'string' ? /\bRun (ai-[a-z0-9-]+)/.exec(row.input)?.[1] : undefined;
+      if (named && blocks.has(named)) fail(`manual names defined step ${named} as something to Run at plan line ${line}`);
+      return { host: row.host, manual, conditions, input: row.input, order_evidence: evidence };
     }
     const block = blocks.get(row.id);
     if (!block) fail(`step referenced but not defined: ${row.id}`);

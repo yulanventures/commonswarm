@@ -802,3 +802,115 @@ INNER_RC=0
 ```
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `00e4fca4`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-17: checker round 7 (uncommitted)
+
+Prepared against committed HEAD `6f4a0ac9`. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent
+review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for the Lead.
+
+Changed step counts (manual and conditional rows included, as in C1-8): **none**.
+No run-order rows were added or removed.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+No `scripts/c1-task-from-plan.mjs` edits.
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 W7 opening receipt persisted then consumed | done | ai-open retains `PROOF_DIR/edge-measurement-open.json` at 0600 with the same digest L1377-1401; ai-w7-recovery prefers it when generation >= W6 final else uses W6 final, and refuses a stale opening L6316-6324 |
+| 2 abort lists, never deletes, unpointed stages | done | mtime scan and `os.rmdir` removed; absent pointer lists `/tmp/anvil-secret.??????` (uid 0 or euid, 0700, empty) and records "no secret stage was recorded; candidates listed for manual review" L6839-6863; recorded pointer still removes only that stage |
+| 3 two retained revoke receipts | done | matching `human-revoke.json` moves leftover `human-revoke-recovery.json` to `PROOF_DIR/incomplete/` (0700) with a reason and does not parse it L5996-6034 |
+| 4 W5 recovery tar vs retained tree | done | existing dest compared to tar file list and digests; identical skips extract; any difference refuses L4646-4679 |
+
+Tests drive the real extracted producer/consumer blocks. HEAD `6f4a0ac9` bytes fail the same fixtures.
+
+Run-order quote pins retargeted after block growth (not new rows):
+abort host 6748→6832; LOG 6820→6900; `ai-w6-secret-close` 6063→6146;
+W5 recovered prose 4498→4523; site2 table 4494→4519 and 4495→4520;
+`ai-w4-timer-recovery` 3908→3933; `ai-w3-probes` 3395→3420; issuer
+rollback 2893→2918 and 3053→3078; issuer FAIL 2987→3012; W2 reconcile
+1912→1937 and 1921→1946; BROWSER-READY 5270→5322.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.4JKin3: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.uvgnBz`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 183
+ℹ pass 182
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 217666.191125
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `6f4a0ac9`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-18: recovered-close rollback restore and attestation isolation (uncommitted)
+
+Prepared against committed HEAD `6f4a0ac9`. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent
+review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for the Lead.
+C1-17 changes are kept.
+
+Changed step counts (manual and conditional rows included, as in C1-8): **none**.
+C1-13 had replaced the recovered-close rollback steps with manuals of the same
+count; C1-18 restores real steps in those same slots.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 W2/W2b recovered-close dispatches real `ai-w2-issuer-rollback` | done | orders L236 and L277; `when` quotes ownership marker L2987; generator refuses a run-order manual that quotes `FAIL ` or names a defined `ai-` step to Run (`scripts/c1-task-from-plan.mjs` expand); extracted rollback then close in `admin-release-plan.test.ts` |
+| 2 attestation isolation | done | `ai-w2-backfill` after the row loop: refuse `c1-staging` on a production box; pin 2026-10-04 canonical sha256 `b17a55e8c078945af8df0c56dcb272682d1e22fb7318b529a633cf9468d70031` for 20260916000001/20260916000002; staging marker requires `pointer` to start with `c1-staging/` |
+
+Run-order quote pins retargeted after the isolation insertion (+41, not new rows):
+abort host 6832→6873; LOG 6900→6941; `ai-w6-secret-close` 6146→6187;
+W5 recovered prose 4523→4564; site2 table 4519→4560 and 4520→4561;
+`ai-w4-timer-recovery` 3933→3974; `ai-w3-probes` 3420→3461; issuer
+rollback 2918→2959, 3078→3119, recovered marker 2946→2987;
+BROWSER-READY 5322→5363; browser worker 5748→5789; dispatch 5887→5928.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.gk8BKN: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.UBt9Fy`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 186
+ℹ pass 185
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 211515.849458
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `6f4a0ac9`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.

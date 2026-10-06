@@ -272,9 +272,15 @@ test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admi
     assert.equal(steps.some(s => s.id === 'ai-close'), mode === 'recovered-close');
   }
   assert.ok(task('W2', 'rollback').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
-  assert.ok(!task('W2', 'recovered-close').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
   assert.ok(task('W2b', 'rollback').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
-  assert.ok(!task('W2b', 'recovered-close').steps.some(s => s.id === 'ai-w2-issuer-rollback'));
+  for (const window of ['W2', 'W2b'] as const) {
+    const recovered = task(window, 'recovered-close').steps;
+    const rollback = recovered.find(s => s.id === 'ai-w2-issuer-rollback');
+    assert.ok(rollback, `${window} recovered-close must dispatch ai-w2-issuer-rollback`);
+    assert.equal(rollback!.manual, undefined, `${window} recovered-close rollback is a step, not a manual`);
+    assert.ok(rollback!.conditions.some(c => c.quote.includes('Ownership marker BEFORE any mutation')), `${window} recovered-close rollback carries the marker condition`);
+    assert.ok(recovered.findIndex(s => s.id === 'ai-w2-issuer-rollback') < recovered.findIndex(s => s.id === 'ai-close'), `${window}: rollback before close`);
+  }
   assert.equal(task('W2', 'forward').steps.length, 21);
   assert.equal(task('W2', 'recovered-close').steps.length, 11);
   assert.equal(task('W2b', 'recovered-close').steps.length, 9);
@@ -344,4 +350,29 @@ test('C1-12 W5 recovered-close generated task under bash -u reaches ai-close wit
   assert.match(r.stdout, /REACHED ai-close WINDOW=W5/);
   assert.match(r.stdout, new RegExp(`PROOF_DIR=${proof.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(r.stdout, /CLOSE_RESULT=recovered/);
+});
+
+test('C1-18: run-order manuals never quote a FAIL line or name a defined ai- step to Run', () => {
+  const defined = new Set([...text.matchAll(/^# step: (ai-[a-z0-9-]+)$/gm)].map(m => m[1]!));
+  const section = /## Run orders \(machine-read by scripts\/c1-task-from-plan\.mjs\)\n([\s\S]*?)\n## /.exec(text)![1]!;
+  const manuals: { line: number; quote: string; input?: string }[] = [];
+  for (const raw of section.split('\n')) {
+    if (!raw.startsWith('{') || !raw.includes('"manual"')) continue;
+    const row = JSON.parse(raw) as { manual?: { quote: string }; input?: string };
+    if (!row.manual) continue;
+    manuals.push({ line: 0, quote: row.manual.quote, input: row.input });
+  }
+  assert.ok(manuals.length > 0, 'plan has manual rows');
+  for (const row of manuals) {
+    assert.doesNotMatch(row.quote, /\bFAIL /, `manual quotes FAIL text: ${row.quote.slice(0, 80)}`);
+    const named = row.input?.match(/\bRun (ai-[a-z0-9-]+)/)?.[1];
+    assert.ok(!named || !defined.has(named), `manual names defined step ${named} as something to Run`);
+  }
+  const positive = explicit('ai-present') + block('ai-present');
+  const failManual = 'FAIL ai-present: synthetic\n' + positive.replaceAll('{"id":"ai-present","host":"mac"}',
+    '{"host":"box","manual":{"line":1,"quote":"FAIL ai-present: synthetic"},"input":"acknowledge the refusal"}');
+  refusal(fixture('fail-manual.md', failManual), 'W3', 'forward', 'manual quote is a FAIL line at plan line 5');
+  const runManual = 'Ownership marker BEFORE any mutation\n' + positive.replaceAll('{"id":"ai-present","host":"mac"}',
+    '{"host":"box","manual":{"line":1,"quote":"Ownership marker BEFORE any mutation"},"input":"Run ai-present only when a marker exists"}');
+  refusal(fixture('run-manual.md', runManual), 'W3', 'forward', 'manual names defined step ai-present as something to Run at plan line 5');
 });

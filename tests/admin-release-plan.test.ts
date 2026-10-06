@@ -69,6 +69,13 @@ function portable(source: string, expected: { stage: number; pointer: number }) 
   assert.ok(!result.includes('/private/tmp/anvil-secret\\.') && !result.includes("r'/tmp/anvil-secret\\.") && !result.includes(PRODUCTION_POINTER));
   return result;
 }
+function remapAbortTmp(source: string, tmpNs: string) {
+  assert.equal(source.split("os.listdir('/tmp')").length - 1, 1, 'abort lists /tmp once');
+  assert.equal(source.split("path='/tmp/'+").length - 1, 1, 'abort builds /tmp candidate paths once');
+  return source
+    .split("os.listdir('/tmp')").join(`os.listdir(${JSON.stringify(tmpNs)})`)
+    .split("path='/tmp/'+").join(`path=${JSON.stringify(tmpNs + '/')}+`);
+}
 const STAGE_NAME = /^anvil-secret\.[A-Za-z0-9]{6}$/;
 function guardStage(stage: string) {
   const stat = lstatSync(stage);
@@ -2376,7 +2383,8 @@ test('admin release plan: W2 probe-staged marker makes preflight, early apply an
   } finally { h.clean(); }
   // ai-open-abort refuses once a probe grant was staged (the recovered ai-close revokes it).
   const root = mkdtempSync(join(scratch, 'abort-')); writeFileSync(join(root, 'probe-staged.txt'), 'x\n');
-  const abort = run(block('ai-open-abort'), { PROOF_DIR: root });
+  const abortTmp = mkdtempSync(join(scratch, 'abort-probe-tmp-'));
+  const abort = run(remapAbortTmp(block('ai-open-abort'), abortTmp), { PROOF_DIR: root });
   assert.notEqual(abort.status, 0); assert.match(abort.stderr, /FAIL ai-open-abort: a W2 DCR probe grant was staged; use the recovered ai-close, which revokes it; STOP/);
 });
 
@@ -3017,11 +3025,17 @@ test('ai-inputs reserves STG ids by box marker and Mac box measurements, before 
 // blocks/files so assigning the path to a variable does not hide a later write.
 test('release blocks and scripts contain zero staging-marker writers; writer probes are refused', () => {
   const mentions = (source: string) => source.includes('/etc/commonswarm-release') && source.includes('STAGING-ONLY');
+  // Isolation in ai-w2-backfill reads the marker O_RDONLY in a block that also
+  // writes PROOF_DIR receipts and reads inputs.json. Those are not marker writes.
+  const withoutProofIo = (source: string) => source
+    .replace(/\(proof\/'[^']+'\)\.(?:write_text|write_bytes)\s*\(/g, '(')
+    .replace(/>"\$PROOF_DIR\/[^"]+"/g, '')
+    .replace(/json\.load\(open\(inputs\)\)/g, 'json.load(READ(inputs))');
   const writer = (source: string) => mentions(source) && (
     /\b(?:install|cp|tee|touch)\s/.test(source) ||
-    /(?:^|[\s;])(?:\d*)>{1,2}\s*\S/.test(source) ||
-    /\b(?:write_text|write_bytes|writeFileSync|writeFile|appendFileSync|appendFile)\s*\(/.test(source) ||
-    /\bopen\s*\([^\n]*[,(=]\s*['"](?:[wax]|[rwa][+])/i.test(source) ||
+    /(?:^|[\s;])(?:\d*)>{1,2}\s*\S/.test(withoutProofIo(source)) ||
+    /\b(?:write_text|write_bytes|writeFileSync|writeFile|appendFileSync|appendFile)\s*\(/.test(withoutProofIo(source)) ||
+    /\bopen\s*\([^\n]*[,(=]\s*['"](?:[wax]|[rwa][+])/i.test(withoutProofIo(source)) ||
     /\bos\.open\s*\([^\n]*(?:O_WRONLY|O_RDWR|O_CREAT|O_TRUNC)/.test(source)
   );
   const path = '/etc/commonswarm-release/STAGING-ONLY';
@@ -3148,13 +3162,15 @@ test('C1-13 box-hosted blocks name /private/ only in a marked negative-control l
 });
 
 test('C1-13 ai-open-abort PASSes when secret-stage.path is absent; frozen 86673f1f cats the missing path', () => {
+  const tmpNs = mkdtempSync(join(scratch, 'abort-tmp-'));
   const missing = mkdtempSync(join(scratch, 'abort-missing-'));
-  const abort = run(block('ai-open-abort'), { PROOF_DIR: missing });
+  const abort = run(remapAbortTmp(block('ai-open-abort'), tmpNs) + "\nprintf 'SHELL_ALIVE\\n'\n", { PROOF_DIR: missing });
   assert.equal(abort.status, 0, abort.stderr);
-  assert.match(abort.stdout, /PASS ai-open-abort: no secret stage was created/);
-  assert.match(readFileSync(join(missing, 'aborted-before-mutation.txt'), 'utf8'), /no secret stage was created/);
+  assert.match(abort.stdout, /PASS ai-open-abort: no secret stage was recorded; candidates listed for manual review/);
+  assert.match(abort.stdout, /SHELL_ALIVE/);
+  assert.match(readFileSync(join(missing, 'aborted-before-mutation.txt'), 'utf8'), /no secret stage was recorded; candidates listed for manual review/);
   const never = join(scratch, 'abort-never-created');
-  const beforeMkdir = run(block('ai-open-abort'), { PROOF_DIR: never });
+  const beforeMkdir = run(remapAbortTmp(block('ai-open-abort'), tmpNs), { PROOF_DIR: never });
   assert.equal(beforeMkdir.status, 0, beforeMkdir.stderr);
   assert.match(beforeMkdir.stdout, /PROOF_DIR never created/);
   assert.ok(!existsSync(never));
@@ -3165,7 +3181,7 @@ test('C1-13 ai-open-abort PASSes when secret-stage.path is absent; frozen 86673f
   try {
     const present = mkdtempSync(join(scratch, 'abort-present-'));
     writeFileSync(join(present, 'secret-stage.path'), stage + '\n');
-    const kept = run(portable(block('ai-open-abort'), { stage: 1, pointer: 0 }), { PROOF_DIR: present });
+    const kept = run(remapAbortTmp(portable(block('ai-open-abort'), { stage: 1, pointer: 0 }), tmpNs), { PROOF_DIR: present });
     assert.equal(kept.status, 0, kept.stderr);
     assert.ok(existsSync(join(present, 'aborted-before-mutation.txt')));
     assert.ok(!existsSync(stage));
@@ -3450,6 +3466,39 @@ done
   assert.equal(readFileSync(join(dest, 'inputs.json'), 'utf8'), 'new-bytes\n');
 });
 
+test('C1-17: W5 recovery-transfer compares retained tree list and digests to the tar before extract; HEAD 6f4a0ac9 extracts anyway', () => {
+  const current = block('ai-w5-recovery-transfer');
+  const py = current.match(/python3 - "\$upload" "\$dest" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  assert.match(py, /retained site-recovery tree expected tar-file-list-and-digests/);
+  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(headPlan.status, 0, headPlan.stderr);
+  const head = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-w5-recovery-transfer\n'))!;
+  assert.match(head, /tar --no-same-owner -xf "\$upload" -C "\$dest"/);
+  assert.doesNotMatch(head, /tar-file-list-and-digests/);
+  const dir = mkdtempSync(join(scratch, 'c117-w5tree-'));
+  const evidence = join(dir, 'site'); mkdirSync(evidence);
+  writeFileSync(join(evidence, 'CLOSE.txt'), 'CLOSED=yes\n');
+  writeFileSync(join(evidence, 'manifest.json'), '[]\n');
+  const archive = join(dir, 'site-recovery.tar');
+  const packed = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n t.add(sys.argv[2],arcname="CLOSE.txt")\n t.add(sys.argv[3],arcname="manifest.json")', archive, join(evidence, 'CLOSE.txt'), join(evidence, 'manifest.json')], { encoding: 'utf8' });
+  assert.equal(packed.status, 0, packed.stderr);
+  const dest = join(dir, 'dest'); mkdirSync(dest, { mode: 0o700 });
+  writeFileSync(join(dest, 'CLOSE.txt'), 'CLOSED=yes\n');
+  writeFileSync(join(dest, 'manifest.json'), '[]\n');
+  const identical = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
+  assert.equal(identical.status, 0, identical.stderr);
+  assert.equal(identical.stdout.trim(), 'identical');
+  writeFileSync(join(dest, 'manifest.json'), '[1]\n');
+  const changed = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.stderr, /changed=manifest\.json/);
+  writeFileSync(join(dest, 'manifest.json'), '[]\n');
+  writeFileSync(join(dest, 'extra.txt'), 'nope\n');
+  const extra = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
+  assert.notEqual(extra.status, 0);
+  assert.match(extra.stderr, /extra=extra\.txt/);
+});
+
 test('C1-16: box-hosted blocks have no success-path exit 0; frozen 00e4fca4 has them', () => {
   const currentHits: string[] = [];
   for (const source of blocks) {
@@ -3478,22 +3527,176 @@ test('C1-16: host lines classify by the first Mac|box token; ai-w7-proof and ai-
   assert.equal(hostRoleOf(block('ai-w5-closed')), 'mac');
 });
 
-test('C1-16: abort publishes the pointer with mktemp and scans leftover stages when the pointer is absent', () => {
+test('C1-16: abort publishes the pointer with mktemp in the same statement', () => {
   assert.match(block('ai-open'), /SECRET_STAGE=\$\(mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf '%s\\n' "\$SECRET_STAGE" >"\$PROOF_DIR\/secret-stage\.path"/);
   assert.doesNotMatch(frozen00Block('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf/);
-  const py = block('ai-open-abort').match(/ABORT_SCAN=\$\(python3 - "\$PROOF_DIR" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
-  assert.match(py, /anvil-secret\\\.\[A-Za-z0-9\]\{6\}/);
-  const tmp = mkdtempSync(join(scratch, 'abort-scan-tmp-'));
-  const proof = mkdtempSync(join(scratch, 'abort-scan-proof-'));
-  const leftover = join(tmp, 'anvil-secret.AbCdEf');
-  mkdirSync(leftover, { mode: 0o700 });
-  chmodSync(leftover, 0o700);
-  const rewritten = py.replace("os.listdir('/tmp')", `os.listdir(${JSON.stringify(tmp)})`).replace("path='/tmp/'+", `path=${JSON.stringify(tmp + '/')}+`);
-  const found = spawnSync('python3', ['-', proof], { input: rewritten, encoding: 'utf8' });
-  assert.equal(found.status, 0, found.stderr);
-  assert.match(found.stdout, /removed unrecorded secret stage\(s\): .*anvil-secret\.AbCdEf/);
-  assert.ok(!existsSync(leftover));
-  const none = spawnSync('python3', ['-', proof], { input: rewritten, encoding: 'utf8' });
-  assert.equal(none.status, 0, none.stderr);
-  assert.match(none.stdout, /no secret stage was created/);
+});
+
+test('C1-17: abort lists another window\'s recorded empty stage and deletes nothing; HEAD 6f4a0ac9 removes it', () => {
+  const current = block('ai-open-abort');
+  assert.match(current, /no secret stage was recorded; candidates listed for manual review/);
+  assert.doesNotMatch(current, /os\.rmdir|removed unrecorded|st_mtime/);
+  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(headPlan.status, 0, headPlan.stderr);
+  const headAbort = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-open-abort\n'))!;
+  assert.match(headAbort, /os\.rmdir\(path\)/);
+  const tmpNs = mkdtempSync(join(scratch, 'c117-abort-tmp-'));
+  const otherProof = mkdtempSync(join(scratch, 'c117-other-proof-'));
+  const ourProof = mkdtempSync(join(scratch, 'c117-our-proof-'));
+  const otherStage = join(tmpNs, 'anvil-secret.AbCdEf');
+  mkdirSync(otherStage, { mode: 0o700 });
+  chmodSync(otherStage, 0o700);
+  writeFileSync(join(otherProof, 'secret-stage.path'), otherStage + '\n');
+  const go = (source: string) => run(remapAbortTmp(source, tmpNs) + "\nprintf 'SHELL_ALIVE\\n'\n", { PROOF_DIR: ourProof });
+  const old = go(headAbort);
+  assert.equal(old.status, 0, old.stderr);
+  assert.match(old.stdout, /removed unrecorded secret stage\(s\): .*anvil-secret\.AbCdEf/);
+  assert.ok(!existsSync(otherStage), 'HEAD 6f4a0ac9 deleted the other window stage');
+  mkdirSync(otherStage, { mode: 0o700 });
+  chmodSync(otherStage, 0o700);
+  const cur = go(current);
+  assert.equal(cur.status, 0, cur.stderr + cur.stdout);
+  assert.match(cur.stdout, /no secret stage was recorded; candidates listed for manual review/);
+  assert.match(cur.stdout, /anvil-secret\.AbCdEf/);
+  assert.match(cur.stdout, /SHELL_ALIVE/);
+  assert.ok(existsSync(otherStage), 'other window stage must remain');
+  assert.equal(readFileSync(join(otherProof, 'secret-stage.path'), 'utf8').trim(), otherStage);
+  assert.match(readFileSync(join(ourProof, 'aborted-before-mutation.txt'), 'utf8'), /candidates listed for manual review/);
+});
+
+test('C1-18: recovered-close extracted rollback then close; no marker leaves issuer untouched', () => {
+  const root = mkdtempSync(join(scratch, 'c118-rc-'));
+  const producerFile = join(root, 'producer.mjs'), archive = join(root, 'release.tar');
+  writeFileSync(producerFile, 'export const closeFixture = "live-ordinary-controls";\n');
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")', archive, producerFile], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const producerSha = digest(readFileSync(producerFile)), archiveSha = digest(readFileSync(archive));
+  const controls = { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true };
+  const pre = JSON.stringify({
+    kind: 'c1-consent', release_sha: sha, consent_phase: 'pre-W1', measured_at: new Date(Date.now() - 60_000).toISOString(),
+    producer_sha256: producerSha, controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dcr-close-own'], cleanup: null,
+  });
+  const liveFor = (window: string) => JSON.stringify({
+    release_sha: sha, window_id: 'Abc123', window, phase: 'recovery', controls,
+    consent_receipt_sha256: digest(pre), producer_sha256: producerSha, dcr_client_ids: ['dcr-close-window'],
+  });
+  const shim = join(root, 'shims'); mkdirSync(shim); writeFileSync(join(shim, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const etc = join(root, 'etc'); mkdirSync(etc);
+  const closeBlock = portable(block('ai-close'), { stage: 2, pointer: 0 }).split('/etc/commonswarm-oauth/').join(etc + '/');
+  const rollbackBlock = block('ai-w2-issuer-rollback').split('/etc/commonswarm-oauth/').join(etc + '/');
+  const stamp = (ms: number) => new Date(Date.now() - ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const credential = '{"user":"commonswarm_admin_issuer","password":"synthetic-leftover"}\n';
+  const go = (window: 'W2' | 'W2b', withMarker: boolean) => {
+    const stage = makeStage(), proof = mkdtempSync(join(root, 'proof-'));
+    const inputs = join(proof, 'inputs.json');
+    writeFileSync(inputs, JSON.stringify({ ...base(), window, archive_sha256: archiveSha, ...(window === 'W2b' ? { w2_release_sha: 'e'.repeat(40), w2_window_id: 'RGLqZX' } : {}) }));
+    writeFileSync(join(proof, 'secret-stage.path'), stage + '\n');
+    writeFileSync(join(proof, 'consent-pre-W1.json'), pre);
+    writeFileSync(join(proof, 'ordinary-recovery.json'), liveFor(window));
+    writeFileSync(join(proof, 'open.txt'), stamp(300_000) + '\n');
+    if (window === 'W2') writeFileSync(join(proof, 'apply-started.txt'), stamp(240_000) + '\n');
+    writeFileSync(join(etc, 'admin-issuer-database-credentials'), credential);
+    if (withMarker) writeFileSync(join(proof, 'issuer-provisioning-attempted.txt'), '2026-10-05T00:00:00Z\n');
+    const rollbackHarness = `ai_db() { printf '%s\\n' "$*" >>"$PROOF_DIR/ai_db.log"; return 0; }\nai_ro() { printf 't\\n'; }\n`;
+    const rollback = run(rollbackHarness + rollbackBlock, { WINDOW: window, PROOF_DIR: proof });
+    const issuerAfterRollback = existsSync(join(etc, 'admin-issuer-database-credentials'));
+    const rollbackPass = existsSync(join(proof, 'issuer-rollback.txt'));
+    const closeHarness = `ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *'FROM pg_catalog.pg_authid'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
+    const close = withMarker && rollback.status === 0
+      ? run(closeHarness + closeBlock, {
+          WINDOW: window, SECRET_STAGE: stage, PROOF_DIR: proof, EDGE_RECYCLE_TIMER: 'fixture.timer',
+          INPUTS_FILE: inputs, PLAN_FILE: planPath, BOX_ARCHIVE_PATH: archive, CLOSE_RESULT: 'recovered',
+          PATH: shim + ':' + process.env.PATH,
+        })
+      : null;
+    const closed = existsSync(join(proof, 'closed.txt'));
+    if (existsSync(stage)) removeStage(stage);
+    return { rollback, close, issuerAfterRollback, rollbackPass, closed, dbLog: existsSync(join(proof, 'ai_db.log')) ? readFileSync(join(proof, 'ai_db.log'), 'utf8') : '' };
+  };
+  for (const window of ['W2', 'W2b'] as const) {
+    const owned = go(window, true);
+    assert.equal(owned.rollback.status, 0, `${window} marker: ${owned.rollback.stderr}`);
+    assert.ok(owned.rollbackPass, `${window} marker: rollback PASS`);
+    assert.ok(!owned.issuerAfterRollback, `${window} marker: credential wiped`);
+    assert.match(owned.dbLog, /ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;/);
+    assert.equal(owned.close!.status, 0, `${window} recovered close: ${owned.close!.stderr}`);
+    assert.ok(owned.closed, `${window} recovered close wrote closed.txt`);
+    const leftover = go(window, false);
+    assert.notEqual(leftover.rollback.status, 0, `${window} no marker`);
+    assert.match(leftover.rollback.stderr, /FAIL ai-w2-issuer-rollback: this window did not own issuer provisioning; live issuer left untouched; STOP/);
+    assert.ok(leftover.issuerAfterRollback, `${window} no marker: issuer credential untouched`);
+    assert.ok(!leftover.rollbackPass, `${window} no marker: no issuer-rollback.txt`);
+    assert.equal(leftover.dbLog, '', `${window} no marker: no ALTER`);
+    assert.equal(leftover.close, null);
+  }
+});
+
+test('C1-18: attestation isolation refuses c1-staging on production and pins 2026-10-04 rows', () => {
+  const picture = JSON.parse(readFileSync(resolve('tests/fixtures/c1-backfill-w2.json'), 'utf8')) as {
+    attestations: Array<{ version: string; attested_by: string; attested_at: string; reason: string }>;
+  };
+  const versions = ['20260916000001', '20260916000002'] as const;
+  const names = { '20260916000001': 'agent_join_credentials', '20260916000002': 'agent_join_attempts' } as const;
+  const attestation = Object.fromEntries(picture.attestations.map(a => [a.version, a]));
+  for (const v of versions) assert.ok(attestation[v], v);
+  const root = mkdtempSync(join(scratch, 'c118-iso-'));
+  const proof = join(root, 'proof'), archives = join(root, 'historical'), marker = join(root, 'marker-fixture');
+  mkdirSync(proof); mkdirSync(archives);
+  const files = versions.map(v => `supabase/migrations/${v}_${names[v]}.sql`);
+  for (const file of files) assert.ok(existsSync(file), file);
+  const tar = spawnSync('python3', ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(m,arcname=m) for m in sys.argv[2:]]', join(root, 'release.tar'), ...files], { encoding: 'utf8' });
+  assert.equal(tar.status, 0, tar.stderr);
+  const releaseArchive = join(root, 'release.tar');
+  const inputs = join(root, 'inputs.json');
+  writeFileSync(inputs, JSON.stringify({ archive_sha256: digest(readFileSync(releaseArchive)) }));
+  const productionRows = versions.map(v => ({
+    version: v, evidence_kind: 'attested-baseline', file: `supabase/migrations/${v}_${names[v]}.sql`,
+    sha256: digest(readFileSync(`supabase/migrations/${v}_${names[v]}.sql`)),
+    attested_by: attestation[v]!.attested_by, attested_at: attestation[v]!.attested_at, reason: attestation[v]!.reason,
+  }));
+  const source = block('ai-w2-backfill');
+  assert.equal(source.split('os.open(marker_path,').length - 1, 1, 'isolation opens the remapped marker once');
+  assert.equal(source.split('os.path.lexists(marker_path)').length - 1, 1);
+  assert.equal(source.split('info.st_uid==0 and info.st_gid==0').length - 1, 1);
+  const remapped = source
+    .split('os.open(marker_path,').join(`os.open(${JSON.stringify(marker)},`)
+    .split('os.path.lexists(marker_path)').join(`os.path.lexists(${JSON.stringify(marker)})`)
+    .split('info.st_uid==0 and info.st_gid==0').join('info.st_uid==os.getuid() and info.st_gid in (0, os.getgid())');
+  const removeMarker = () => {
+    if (!existsSync(marker)) return;
+    const r = spawnSync('rm', ['--', marker], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `BLOCKED by rm guard: ${r.stderr.trim()}. To resolve: leave ${marker} for HezLead.`);
+  };
+  const go = (rows: Record<string, unknown>[], staging: boolean) => {
+    for (const name of ['backfill.json', 'backfill-evidence.json']) if (existsSync(join(proof, name))) rmSync(join(proof, name));
+    writeFileSync(join(root, 'backfill.json'), JSON.stringify(rows));
+    writeFileSync(join(proof, 'ledger-before.txt'), versions.join('\n') + '\n');
+    writeFileSync(join(root, 'ledger.jsonl'), versions.map(v => JSON.stringify({ version: v, statements: null })).join('\n') + '\n');
+    removeMarker();
+    if (staging) writeFileSync(marker, 'c1-staging-disposable-no-production', { mode: 0o600 });
+    const harness = `ai_ro() { case "$*" in *"json_build_object('version',version,'statements',statements)"*) cat '${join(root, 'ledger.jsonl')}';; *) return 1;; esac; }\n`;
+    return run(harness + remapped, {
+      WINDOW: 'W2', PROOF_DIR: proof, BACKFILL_FILE: join(root, 'backfill.json'), HISTORICAL_ARCHIVES_DIR: archives,
+      RELEASE_SHA: sha, BOX_ARCHIVE_PATH: releaseArchive, INPUTS_FILE: inputs, RELEASE_ROOT: resolve('.'),
+    });
+  };
+  const stagingRow = (v: typeof versions[number]) => ({
+    ...productionRows[versions.indexOf(v)]!,
+    pointer: 'c1-staging/run-id/W2',
+    written_by: 'C1 kit under HezLead ruling A, 2026-10-06',
+  });
+  const stagingOnProd = go(productionRows.map((r, i) => i === 0 ? stagingRow(versions[0]) : r), false);
+  assert.notEqual(stagingOnProd.status, 0);
+  assert.match(stagingOnProd.stderr, /FAIL ai-w2-backfill: attestation for 20260916000001 expected production-not-c1-staging got c1-staging; STOP/);
+  assert.ok(!existsSync(join(proof, 'backfill-evidence.json')));
+  const prodOnProd = go(productionRows, false);
+  assert.equal(prodOnProd.status, 0, prodOnProd.stderr);
+  assert.match(prodOnProd.stdout, /PASS ai-w2-backfill/);
+  const modified = go([{ ...productionRows[0]!, reason: productionRows[0]!.reason + ' modified' }, productionRows[1]!], false);
+  assert.notEqual(modified.status, 0);
+  assert.match(modified.stderr, /FAIL ai-w2-backfill: production attestation rows expected pinned-2026-10-04-canonical-sha256 got mismatch; STOP/);
+  const stagingOnStaging = go(versions.map(v => stagingRow(v)), true);
+  assert.equal(stagingOnStaging.status, 0, stagingOnStaging.stderr);
+  assert.match(stagingOnStaging.stdout, /PASS ai-w2-backfill/);
+  removeMarker();
 });
