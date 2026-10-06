@@ -995,7 +995,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
     overviewCatchUpData, catchUpDetailFromOverview, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
-  import { statusLine } from "../../lib/home-primitives";
+  import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
+  import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
+  import type { HomeServer, Todo, TodoSummary, Comment, AgentQueue, AgentWorkStatus, WriteResult, Party, SteerAction, Notice as HomeNotice } from "../../lib/home/contract";
+  import type { TodoVM, AgentVM, ObjectCardVM } from "../../lib/home-types";
+  import { mapHomeTodo, homeTodoCard, mapHomeAgentPage, homeParty, homeAgentFixCards, type HomeTodoContext } from "../../lib/home-map";
+  import { agentPage } from "../../lib/home-agent";
+  import { todosPane, type TodoFilter } from "../../lib/home-todo-list";
+  import { todoView, type TodoStartInput } from "../../lib/home-todo";
+  import { todoStatus, todoSubline, TODO_RESULT_UNKNOWN, TODO_SAVE_FAILED, type TodoNotice } from "../../lib/home-todo-copy";
+  import { tagOptionRow, tagOptions, personNames } from "../../lib/home-pickers";
+  import { buildSideCards, type SideObjectsVM } from "../../lib/home-side-cards";
+  import { buildAuthorLine, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
+  import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
+  import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import {
     CONTENT_OPERATION_LABELS,
@@ -1328,11 +1341,28 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let homeRailKey = "";
     let homeCatchUpKey = "";
     let homeWorkClaims: Signal[] = [];
+    let homeTodosState: "pending" | "ready" | "refused" | "failed" | "absent" = "pending";
+    let homeTodoRows: TodoSummary[] = [];
+    let homeTodoRead: { todo: Todo; comments: Comment[] } | null = null;
+    let homeTodoFilter: TodoFilter = "open";
+    let homeTodoSave: "idle" | "saving" | "failed" | "unknown" = "idle";
+    let homeTodoReceipt = "";
+    let homeTodoNotice: TodoNotice | null = null;
+    let homeQueue: AgentQueue | null = null;
+    let homeQueueRead: HomeReadState = "pending";
+    let homeDetailKey = "";
+    let homeGateEditorId: string | null = null;
+    let homeDetailGeneration = 0;
+    let homeWorkspaceGeneration = 0;
+    let homeWorkspaceRead = 0;
+    let homeObjects: SideObjectsVM = { state: "pending" };
+    const homeTodoDetails = new Map<string, Todo>();
+    const homePolicies = new Map<string, "owner" | "anyone">();
     let homePeopleReadState: HomeReadState = "pending";
     const homeScroll = new Map<string, number>();
     const homeOverviewCounts = new Map<string, number | null>();
 
-    let agents: Agent[] = [];
+    let agents: (Agent & { work?: AgentWorkStatus })[] = [];
     let members: Member[] = [];
     let pendingInvites: PendingMemberInvite[] = [];
     let accessStatuses: AgentAccessStatus[] = [];
@@ -1743,6 +1773,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          found, and renderFeed then threw the pending row away, so the writer saw nothing.
          Found by a review arm. There is no channel to post to, so there is no composer. */
       if (composer) {
+        if (name === "feed" || name === "feed-empty") syncComposerPlacement();
         composer.hidden = unknownChannelId !== null ||
           (name !== "feed" && name !== "feed-empty");
       }
@@ -2345,6 +2376,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const current = agentActivityFrames.get(frame.principalId);
           if (!agentActivityFrameIsNewer(current, frame)) return;
           agentActivityFrames.set(frame.principalId, frame);
+          if (homeRoute.view === "agent" && homeRoute.agentId === frame.principalId) renderHomeObjectPane();
           if (selectedEntity?.kind === "agent" && selectedEntity.id === frame.principalId) {
             refreshEntityActivitySection();
           }
@@ -3627,6 +3659,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         return;
       }
       mentionPickerIndex = Math.min(mentionPickerIndex, candidates.length - 1);
+      const model = currentHomePeople();
+      const options = tagOptions(model);
       candidates.forEach((candidate, index) => {
         const button = document.createElement("button");
         button.type = "button";
@@ -3634,25 +3668,22 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         button.tabIndex = -1;
         button.setAttribute("role", "option");
         button.setAttribute("aria-selected", String(index === mentionPickerIndex));
-        const avatar = document.createElement("span");
-        avatar.className = "dashboard__mention-picker-avatar";
-        avatar.textContent = initials(entityName(candidate));
-        avatar.setAttribute("aria-hidden", "true");
-        if (candidate.kind === "agent") markAgentAvatar(avatar, candidate.id);
-        const copy = document.createElement("span");
-        copy.className = "dashboard__mention-picker-copy";
-        const name = document.createElement("strong");
-        name.textContent = entityName(candidate);
-        copy.append(name);
-        if (candidate.kind === "agent") {
-          const agent = agents.find((entry) => entry.principalId === candidate.id);
-          const detail = document.createElement("span");
-          detail.textContent = `agent · managed by ${
-            agent ? people.get(agent.ownerUserId) ?? "Workspace member" : "Workspace member"
-          }`;
-          copy.append(detail);
-        }
-        button.append(avatar, copy);
+        const option = options.find(option => option.value === candidate.id && option.kind === candidate.kind);
+        if (option) {
+          const who = homeParty({ kind: candidate.kind === "person" ? "user" : "agent", id: candidate.id }, model);
+          const content = tagOptionRow(document, option, { who: who ?? undefined });
+          const avatar = content.firstElementChild as HTMLElement | null;
+          avatar?.classList.add("dashboard__mention-picker-avatar");
+          if (avatar && who && "state" in who) {
+            markAgentAvatar(avatar, candidate.id);
+            button.setAttribute("aria-label", who.ownerFirstName
+              ? `${option.label}, agent · managed by ${who.ownerFirstName}, ${option.caption}`
+              : `${option.label}, agent, ${option.caption}`);
+          }
+          content.removeAttribute("role"); content.removeAttribute("aria-selected");
+          button.append(...Array.from(content.childNodes));
+          button.classList.add("hm-pick-option");
+        } else button.textContent = entityName(candidate);
         button.addEventListener("pointerdown", (event) => event.preventDefault());
         button.addEventListener("click", () => selectMention(candidate));
         picker.append(button);
@@ -3844,10 +3875,343 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const homeViewerId = (): string | null => session?.user.id ?? (sampleMode ? "sample-owner" : null);
-    const currentHomePeople = (): HomePeople => mapHomePeople({ viewerId: homeViewerId(), members, agents,
-      access: accessStatuses, signals: homeWorkClaims, now: Date.now(), sample: sampleMode });
+    const currentHomePeople = (): HomePeople => mapHomePeople({ viewerId: homeViewerId(), members,
+      access: accessStatuses, signals: homeWorkClaims, agents, now: Date.now(), sample: sampleMode });
     const navigateHomeHref = (href: string): void => {
       void navigateHome(parseRoute(new URL(href, window.location.origin).search), "push");
+    };
+    const homeTodosAvailable = (): boolean => homeTodosState !== "pending" && homeTodosState !== "absent";
+    const homeTodoContext = (): HomeTodoContext => ({ workspaceId: activeWorkspaceId, people: currentHomePeople(), viewerId: homeViewerId(),
+      editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails });
+    const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
+    const homeServer = (): HomeServer | null => {
+      if (!sampleMode) return session ? createHomeServer(session) : null;
+      // Fixture data uses this sample workspace's identities. This adapter is never used by a signed-in workspace.
+      const replacements = new Map<string, string>([[IDS.workspaces.home, activeWorkspaceId], [IDS.users.tom, homeViewerId() ?? "sample-owner"]]);
+      const own = agents.filter(agent => agent.ownerUserId === homeViewerId());
+      const others = members.filter(member => member.userId !== homeViewerId());
+      for (const [index, id] of [IDS.agents.claude, IDS.agents.dot].entries()) if (own[index]) replacements.set(id, own[index].principalId);
+      if (others[0]) replacements.set(IDS.users.nikki, others[0].userId);
+      const otherAgent = agents.find(agent => agent.ownerUserId === others[0]?.userId);
+      if (otherAgent) replacements.set(IDS.agents.muse, otherAgent.principalId);
+      const remap = (value: unknown): unknown => typeof value === "string" ? replacements.get(value) ?? value
+        : Array.isArray(value) ? value.map(remap) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [replacements.get(key) ?? key, remap(item)])) : value;
+      const fixtures = remap(HOME_FIXTURES) as HomeFixtures;
+      fixtures.overview.workspaces = fixtures.overview.workspaces.filter(row => row.workspace_id === activeWorkspaceId);
+      return createFixtureHomeServer(fixtures);
+    };
+    const resetHomeWorkspace = (): void => {
+      ++homeWorkspaceGeneration; ++homeWorkspaceRead; ++homeDetailGeneration;
+      homeTodosState = "pending"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "pending";
+      homeDetailKey = ""; homeGateEditorId = null; homeTodoSave = "idle"; homeTodoReceipt = ""; homeTodoNotice = null;
+      homeObjects = { state: "pending" }; homeTodoDetails.clear(); homePolicies.clear();
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId) as { todosAvailable?: boolean } | undefined;
+      if (workspace) workspace.todosAvailable = false;
+      one<HTMLElement>("[data-home-side-slot]")?.replaceChildren();
+    };
+    const homeRefusalCopy = (reason: string): string => {
+      const copy: Record<string, string> = { owner_only: "Only its owner can change its line.", content_read_only: "Choose editor access in Lists & docs before changing a to-do.",
+        content_consent_required: "Open Lists & docs to choose your access.", workspace_access_refused: "This workspace is no longer available to you.",
+        connection_access_refused: "This connection cannot change the to-do.", human_confirmation_required: "Open Lists & docs to confirm your access.",
+        todo_not_found: "This to-do is no longer here. Reload to check.", target_not_found: "That person or agent is no longer here. Reload to check.",
+        offer_not_pending: "This request has already been answered. Reload to check.", not_decider: "This request needs its owner's answer.",
+        assignee_removed: "That agent was removed. Choose someone else.", title_invalid: "Add a title of 1 to 200 characters.",
+        gate_cycle: "These to-dos cannot wait on each other.", gate_invalid: "Check what this to-do is waiting on and try again.",
+        not_in_queue: "This to-do is no longer in the line. Reload to check.", todo_write_rate_limited: "Too many changes at once. Wait and try again." };
+      return copy[reason] ?? "Not saved. Reload to check and try again.";
+    };
+    const loadHomeWorkspace = async (): Promise<void> => {
+      const server = homeServer(); if (!server) return;
+      const workspaceId = activeWorkspaceId, generation = homeWorkspaceGeneration, read = ++homeWorkspaceRead;
+      const scope = householdScope();
+      const live = () => workspaceId === activeWorkspaceId && generation === homeWorkspaceGeneration && read === homeWorkspaceRead
+        && (scope === null ? sampleMode : householdCurrent(scope));
+      const accessTicket = scope ? accessReads.next() : null;
+      // Overview status is independent of Lists & docs access. It supplies the server work class everywhere.
+      const overviewRead = server.overview().then(overview => {
+        if (!live()) return;
+        for (const person of overview.workspaces.find(row => row.workspace_id === workspaceId)?.people ?? [])
+          for (const agent of person.agents) { const row = agents.find(row => row.principalId === agent.principal_id); if (row) row.work = agent.status; }
+        renderHomeRail(); renderHomeShell(); renderHomeSide(); renderHomeObjectPane();
+      }, () => { /* Status falls back to measured roster facts when overview is unavailable. */ });
+      try {
+        if (sampleMode) householdAccess = { workspaceId, status: "ok", contentRole: "editor" };
+        else if (scope) {
+          const access = await readHouseholdAccess(scope);
+          if (!live()) return;
+          if (accessTicket !== null && accessReads.isLatest(accessTicket) && householdCurrent(scope)) householdAccess = access;
+        }
+        const rows: TodoSummary[] = []; let offset = 0;
+        for (;;) {
+          const page = await server.listTodos(workspaceId, { scope: "all", offset, limit: 50 });
+          if (!live()) return;
+          rows.push(...page.todos);
+          if (page.next_offset === null) break;
+          if (page.next_offset <= offset) throw new Error("home_cursor_invalid");
+          offset = page.next_offset;
+        }
+        homeTodoRows = rows; homeTodosState = "ready";
+      } catch (error) {
+        if (!live()) return;
+        homeTodosState = error instanceof HomeToolsUnavailable ? "absent" : error instanceof HomeCommandRefused ? "refused" : "failed";
+        homeTodoReceipt = error instanceof HomeCommandRefused ? homeRefusalCopy(error.reason) : "Could not load to-dos. Reload to try again.";
+      }
+      await overviewRead;
+      if (!live()) return;
+      if (homeTodosState === "absent") { homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "failed"; }
+      const workspace = workspaces.find(row => row.id === workspaceId) as ({ todosAvailable?: boolean } | undefined);
+      if (workspace) workspace.todosAvailable = homeTodosAvailable();
+      renderHomeRail(); renderHomeShell(); applyHomePane();
+      if (homeRoute.view === "chat") renderFeed();
+      // The right column uses the Lists pane's exact read and refusal door.
+      try {
+        if (sampleMode) homeObjects = { state: "ready", lists: [], files: [] };
+        else if (householdAccess.status === "refused") homeObjects = { state: "refused" };
+        else if (session) {
+          const entries: ObjectCardVM[] = []; let offset = 0;
+          for (;;) {
+            const body = await householdCall(session, workspaceId)({ kind: "household_tool", tool: "object_list", arguments: { seat: HOUSEHOLD_LOCAL_SEAT, offset, limit: 100 } }, crypto.randomUUID());
+            if (!live()) return;
+            if (body.status === "refused") { homeObjects = { state: "refused" }; break; }
+            if (body.status !== "ok" || !Array.isArray(body.objects)) throw new Error("home_objects_failed");
+            for (const item of body.objects as Record<string, unknown>[]) {
+              if (item.kind !== "list" && item.kind !== "doc" && item.kind !== "file") continue;
+              entries.push({ kind: item.kind, id: String(item.object_id), title: String(item.title ?? "Untitled"), href: routeHref({ view: item.kind === "file" ? "files" : "lists", workspaceId }), meta: item.kind === "doc" ? "Doc" : item.kind === "list" ? "List" : "File", who: null });
+            }
+            if (body.next_offset === null) { homeObjects = { state: "ready", lists: entries.filter(item => item.kind !== "file"), files: entries.filter(item => item.kind === "file") }; break; }
+            if (!Number.isInteger(body.next_offset) || Number(body.next_offset) <= offset) throw new Error("home_cursor_invalid");
+            offset = Number(body.next_offset);
+          }
+        }
+      } catch { if (live()) homeObjects = { state: "failed" }; }
+      if (live()) {
+        renderHomeSide();
+        if (!sampleMode) void loadHouseholdConnections().then(() => { if (live()) { renderHomeSide(); renderHomeObjectPane(); } });
+      }
+    };
+    const renderHomeSide = (): void => {
+      const slot = one<HTMLElement>("[data-home-side-slot]");
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId);
+      if (!slot || !workspace || homeRoute.view === "catchup" || homeRoute.view === "new") { slot?.replaceChildren(); return; }
+      const ctx = homeTodoContext(), models = homeTodoModels();
+      const objectsRead = homeObjects;
+      const objects = objectsRead.state === "ready" ? { ...objectsRead, files: [...objectsRead.files,
+        ...files.filter(file => !file.tombstonedAt && !objectsRead.files.some(object => object.id === file.fileId)).map(file => ({ kind: "file" as const, id: file.fileId, title: file.name,
+          href: routeHref({ view: "files", workspaceId: workspace.id }), meta: formatAttachmentSize(file.sizeBytes), who: homeParty({ kind: file.uploadedByKind === "agent" ? "agent" : "user", id: file.uploadedBy }, ctx.people) }))] } : objectsRead;
+      const vm = { sample: sampleMode, workspaceName: workspace.name,
+        todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => ({ id: todo.id, title: todo.title, href: homeTodoCard(todo, ctx.now).href,
+          state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }) })) : [],
+          allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
+          notice: homeTodosState === "ready" ? undefined : homeTodoReceipt } : null,
+        objects, sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
+          const approval = householdConnections.filter(row => row.principal_id === agent.id).map(connectionApproval).find(Boolean);
+          return approval ? [{ agent, until: approval.expires_at ? new Date(approval.expires_at).toLocaleDateString() : null }] : [];
+        }), hrefs: { lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }), wiki: routeHref({ view: "wiki", workspaceId: workspace.id }) } };
+      replaceHomeRegion(slot, "side", [buildSideCards(document, vm, { onComplete: id => completeHomeTodo(id, true), onAddTodo: () => {
+        void navigateHome({ view: "todos", workspaceId: workspace.id }, "push").then(() => one<HTMLButtonElement>("[data-todo-add]")?.click());
+      }, onOpenLists: () => navigateHomeHref(vm.hrefs.lists) })]);
+    };
+    const homeWrite = async <T,>(run: (server: HomeServer, requestId: string) => Promise<WriteResult<T>>, receipt?: (value: T, notices: HomeNotice[]) => string): Promise<void> => {
+      if (sampleMode || homeTodoSave === "saving") return;
+      const server = homeServer(); if (!server) return;
+      const workspaceId = activeWorkspaceId, generation = homeWorkspaceGeneration, navigation = homeNavigation;
+      const live = () => workspaceId === activeWorkspaceId && generation === homeWorkspaceGeneration && navigation === homeNavigation;
+      homeTodoSave = "saving"; homeTodoReceipt = "Saving…"; renderHomeObjectPane();
+      try {
+        const result = await run(server, crypto.randomUUID());
+        if (!live()) return;
+        homeTodoSave = "idle";
+        if (result.status === "refused") { homeTodoSave = "failed"; homeTodoReceipt = homeRefusalCopy(result.reason); }
+        else if (result.status === "conflict") homeTodoReceipt = "Someone changed this to-do. Reload to check before trying again.";
+        else {
+          homeTodoReceipt = "Saved.";
+          for (const field of all<HTMLInputElement | HTMLTextAreaElement>("[data-home-route-pane] textarea, [data-home-route-pane] .hm-todos-add-form input[type=text]")) field.value = "";
+          homeTodoNotice = result.notices[0]?.status ?? null;
+          if (receipt) homeTodoReceipt = receipt(result.value, result.notices);
+          const value = result.value as Partial<Todo>;
+          if (value.todo_id && homeTodoRead?.todo.todo_id === value.todo_id) homeTodoRead.todo = value as Todo;
+          const policy = result.value as { principal_id?: string; accepts_from?: "owner" | "anyone" };
+          if (policy.principal_id && policy.accepts_from) {
+            homePolicies.set(policy.principal_id, policy.accepts_from);
+            homeTodoReceipt = `Who can give it work: ${policy.accepts_from === "owner" ? "only you" : `anyone in ${workspaces.find(row => row.id === workspaceId)?.name ?? "this workspace"}`}. Saved.`;
+          }
+          homeDetailKey = "";
+          await loadHomeWorkspace();
+        }
+      } catch (error) {
+        if (!live()) return;
+        if (error instanceof HomeToolsUnavailable) {
+          homeTodosState = "absent"; homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "failed";
+          const workspace = workspaces.find(row => row.id === workspaceId) as { todosAvailable?: boolean } | undefined;
+          if (workspace) workspace.todosAvailable = false;
+          renderHomeShell(); if (homeRoute.view === "chat") renderFeed();
+        }
+        homeTodoSave = error instanceof CommandOutcomeUnknown ? "unknown" : "failed";
+        homeTodoReceipt = error instanceof CommandOutcomeUnknown ? TODO_RESULT_UNKNOWN : error instanceof HomeCommandRefused ? homeRefusalCopy(error.reason) : TODO_SAVE_FAILED;
+      }
+      if (live()) { renderHomeObjectPane(); renderHomeSide(); }
+    };
+    const completeHomeTodo = async (id: string, done: boolean): Promise<void> => {
+      const row = homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo : homeTodoRows.find(row => row.todo_id === id);
+      if (!row) return;
+      await homeWrite((server, requestId) => server.setTodoState(activeWorkspaceId, { todo_id: id, base_version: row.version, state: done ? "done" : "open" }, requestId));
+    };
+    const steerHomeTodo = (id: string, action: SteerAction): void => {
+      const row = homeTodoRead?.todo.todo_id === id ? homeTodoRead.todo : homeTodoRows.find(row => row.todo_id === id);
+      if (row) void homeWrite((server, requestId) => server.steerQueue(activeWorkspaceId, { todo_id: id, base_version: row.version, action }, requestId), (value, notices) => {
+        if (action.kind !== "start_now") return "Saved.";
+        const ctx = homeTodoContext(), todo = mapHomeTodo(value, ctx, homeTodoRows);
+        if (todo.start) todo.start.mode = "now";
+        const copy = todoStatus(todo, { now: ctx.now, notice: notices[0]?.status ?? null,
+          receive: todo.assignee?.kind === "agent" ? peopleDialogModel().agents.find(row => row.id === (todo.assignee?.kind === "agent" ? todo.assignee.agent.id : ""))?.receive : null });
+        return [copy.line, ...copy.more].join(" ");
+      });
+    };
+    const loadHomeObject = async (): Promise<void> => {
+      const route = homeRoute;
+      if ((route.view !== "todo" && route.view !== "agent") || !route.workspaceId || homeTodosState === "pending") return;
+      const key = routeHref(route); if (key === homeDetailKey) return;
+      const server = homeServer(); if (!server) return;
+      homeDetailKey = key; const generation = ++homeDetailGeneration;
+      homeTodoRead = null; homeQueue = null; homeQueueRead = "pending";
+      const live = () => generation === homeDetailGeneration && key === routeHref(homeRoute);
+      renderHomeObjectPane();
+      if (homeTodosState === "absent") { homeQueueRead = "failed"; renderHomeObjectPane(); return; }
+      try {
+        if (route.view === "todo") {
+          const read = await server.readTodo(route.workspaceId, route.todoId); if (!live()) return;
+          const comments = [...read.comments]; let offset = read.next_comment_offset;
+          while (offset !== null) { const page = await server.listComments(route.workspaceId, { kind: "todo", id: route.todoId }, offset, 100); if (!live()) return;
+            comments.push(...page.comments); if (page.next_offset !== null && page.next_offset <= offset) throw new Error("home_cursor_invalid"); offset = page.next_offset; }
+          homeTodoRead = { todo: read.todo, comments }; homeQueueRead = "ready";
+        } else {
+          const queue = await server.agentQueue(route.workspaceId, route.agentId); if (!live()) return;
+          for (const section of ["working", "up_next", "not_yet", "requests"] as const) {
+            let offset = queue.next_offset[section];
+            while (offset !== null) { const page = await server.agentQueue(route.workspaceId, route.agentId, { section, offset, limit: 50 }); if (!live()) return;
+              queue[section].push(...page[section]); const next = page.next_offset[section]; if (next !== null && next <= offset) throw new Error("home_cursor_invalid"); offset = next; }
+          }
+          homeQueue = queue; homeQueueRead = "ready"; const row = agents.find(row => row.principalId === route.agentId); if (row) row.work = queue.status; homePolicies.set(route.agentId, queue.accepts_from);
+          renderHomeRail(); renderHomeObjectPane();
+          const detailIds = [...new Set([...queue.not_yet.filter(row => row.gate.kind === "hold"), ...queue.working,
+            ...homeTodoRows.filter(row => row.state === "done" && row.assignee?.kind === "agent" && row.assignee.id === route.agentId).sort((a, b) => Date.parse(b.state_at) - Date.parse(a.state_at)).slice(0, 5)].map(row => row.todo_id))];
+          for (let offset = 0; offset < detailIds.length; offset += 3) {
+            await Promise.all(detailIds.slice(offset, offset + 3).map(async id => {
+              try { const detail = await server.readTodo(route.workspaceId!, id); if (live()) homeTodoDetails.set(id, detail.todo); }
+              catch (error) { if (error instanceof HomeToolsUnavailable) throw error; /* Keep a measured summary when its detail fails. */ }
+            }));
+            if (!live()) return;
+          }
+        }
+      } catch (error) {
+        if (!live()) return;
+        if (error instanceof HomeToolsUnavailable) {
+          homeTodosState = "absent"; homeTodoRows = []; homeTodoRead = null; homeQueue = null;
+          const workspace = workspaces.find(row => row.id === route.workspaceId) as { todosAvailable?: boolean } | undefined;
+          if (workspace) workspace.todosAvailable = false;
+          if (homeRoute.view === "chat") renderFeed();
+        }
+        homeQueueRead = "failed";
+        homeTodoReceipt = error instanceof HomeCommandRefused ? homeRefusalCopy(error.reason) : "Could not load this page. Reload to try again.";
+        if (error instanceof HomeCommandRefused && error.reason === "todo_not_found") homeTodoReceipt = "not-found";
+      }
+      if (live()) { renderHomeShell(); renderHomeSide(); renderHomeObjectPane(); focusHomeView(); }
+    };
+    const renderHomeObjectPane = (): void => {
+      if (homeRoute.view !== "todo" && homeRoute.view !== "todos" && homeRoute.view !== "agent") return;
+      const slot = one<HTMLElement>("[data-home-route-pane]"); if (!slot) return;
+      const workspace = workspaces.find(row => row.id === activeWorkspaceId); if (!workspace) return;
+      slot.hidden = false;
+      const ctx = homeTodoContext();
+      const appendReceipt = (): void => { if (!homeTodoReceipt || homeTodoReceipt === "not-found") return;
+        const note = document.createElement("p"); note.className = "hm-todo-quiet"; note.setAttribute("role", "status"); note.textContent = homeTodoReceipt; slot.append(note); };
+      if (homeRoute.view === "agent") {
+        const id = homeRoute.agentId;
+        const candidates = [...ctx.people.groups.flatMap(group => group.agents), ...ctx.people.other];
+        const agent = candidates.find(agent => agent.id === id);
+        if (!agent) { const state = homeObjectState(id, candidates.map(agent => agent.id), homePeopleReadState);
+          if (state === "checking") homePaneMessage("Checking agents…", ""); else if (state === "failed") homePaneMessage("Could not load agents.", "Reload to try again.");
+          else replaceHomeRegion(slot, "agent-missing", [agentPage(document, { found: false, homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) })]); return; }
+        const detail = peopleDialogModel().agents.find(row => row.id === id);
+        const frame = agentActivityFrames.get(id);
+        const view = frame ? agentActivityPanelView(frame, agentActivityConnection, Date.now(), "unknown") : null;
+        const approval = detail?.access;
+        const rosterAgent = agents.find(row => row.principalId === id);
+        const receive = rosterAgent ? agentStatus({ transport: rosterAgent.transport, turnOnly: rosterAgent.turnOnly, presence: rosterAgent.presence, own: agent.yours, ownerFirstName: agent.ownerFirstName }).receive : null;
+        const vm = mapHomeAgentPage(agent, homeQueue?.principal_id === id ? homeQueue : null, homeTodoRows, ctx, workspace.name,
+          receive ?? "Message checks have not been reported.", { model: detail?.model ?? null, receive: receive ?? "Not reported", lastActive: detail?.lastActive ?? "Not reported",
+            listsAndDocs: agent.yours && detail?.accessReadState === "succeeded" ? { id: "lists", label: "Lists & docs", detail: approval ? `Allowed until ${approval.until ?? "you withdraw it"}.` : "Not allowed.", state: approval ? "on" : "off" } : null,
+            postsHere: agent.yours ? { id: "posts", label: "What it posts here", detail: "", state: "always" } : null },
+          view ? { ageLabel: view.ageLabel, phaseLabel: view.phaseLabel, toolTitle: view.toolTitle, emptyMessage: view.emptyMessage } : null);
+        vm.lineNotice = homeQueueRead !== "ready" ? homeQueueRead === "pending" ? "Checking the line…" : homeTodosState === "absent" ? "The line is not available here yet." : "Could not load the line. Reload to try again." : null;
+        if (homePolicies.has(id)) vm.workPolicy = homePolicies.get(id);
+        vm.receipt = homeTodoReceipt === "not-found" ? "" : homeTodoReceipt;
+        const manage = () => { openRosterDialog(); peopleDialogState.selected = { type: "agent", id }; renderDialogRoster(); };
+        replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: manage,
+          onFix: action => {
+            if (action === "new-key") void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
+              openConnect(); window.requestAnimationFrame(() => one<SecretHoldingAgentConnect>("agent-connect")?.requestPromptFor(id));
+            });
+            else { manage(); all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === `resume-${id}`)?.click(); }
+          },
+          onListsToggle: row => { manage(); void loadHouseholdConnections().then(() => {
+            if (activeWorkspaceId !== workspace.id) return;
+            all<HTMLButtonElement>("[data-pd-focus]").find(button => button.dataset.pdFocus === `${row.state === "on" ? "withdraw" : "allow"}-${id}`)?.click();
+          }); },
+          onWorkPolicy: value => void homeWrite((server, requestId) => server.setWorkPolicy(workspace.id, { principal_id: id, accepts_from: value }, requestId)),
+          onQueueAction: (action, row) => {
+            const line = homeQueue?.up_next ?? []; const index = line.findIndex(todo => todo.todo_id === row.todoId);
+            if (action === "up" || action === "down") steerHomeTodo(row.todoId, { kind: "move", after_todo_id: action === "up" ? line[index - 2]?.todo_id ?? null : line[index + 1]?.todo_id ?? null });
+            else if (action === "start-now") steerHomeTodo(row.todoId, { kind: "start_now" });
+            else if (action === "release") steerHomeTodo(row.todoId, { kind: "gate", gate: { kind: "none" } });
+            else { homeGateEditorId = row.todoId; void navigateHome({ view: "todo", workspaceId: workspace.id, todoId: row.todoId }, "push"); }
+          } })]); return;
+      }
+      if (homeTodosState === "absent") { slot.replaceChildren(); slot.hidden = true; return; }
+      if (homeTodosState === "refused" || homeTodosState === "failed") { homePaneMessage("Could not load to-dos.", homeTodoReceipt); return; }
+      if (homeRoute.view === "todos") {
+        replaceHomeRegion(slot, "todos", [todosPane(document, { filter: homeTodoFilter, rows: homeTodosState === "ready" ? homeTodoModels().map(todo => ({ todo, href: homeTodoCard(todo, ctx.now).href })) : null,
+          now: ctx.now, sample: sampleMode, mayAdd: ctx.editor, save: homeTodoSave, names: personNames(ctx.people.groups) }, {
+          filter: value => { homeTodoFilter = value; renderHomeObjectPane(); }, complete: (todo, done) => void completeHomeTodo(todo.id, done),
+          add: title => void homeWrite((server, requestId) => server.createTodo(workspace.id, { title }, requestId)) })]); appendReceipt(); return;
+      }
+      if (homeQueueRead === "failed" && homeTodoReceipt !== "not-found") { homePaneMessage("Could not load this to-do.", homeTodoReceipt); return; }
+      const todo = homeTodoRead ? mapHomeTodo(homeTodoRead.todo, ctx, homeTodoRows, homeTodoRead.comments) : null;
+      replaceHomeRegion(slot, "todo", [todoView(document, { workspace: { name: workspace.name, todosHref: routeHref({ view: "todos", workspaceId: workspace.id }), homeHref: routeHref({ view: "chat", workspaceId: workspace.id }) },
+        view: todo ? { kind: "ready", todo } : homeTodoReceipt === "not-found" ? { kind: "not-found" } : { kind: "loading" }, now: ctx.now,
+        people: ctx.people, openTodos: homeTodoRows.filter(row => row.state === "open" || row.state === "doing").map(row => ({ id: row.todo_id, title: row.title })),
+        facts: { goesAsRequest: id => (homePolicies.get(id) ?? "owner") === "owner",
+          lineCount: id => homeQueue?.principal_id === id ? homeQueue.up_next.length : null }, save: homeTodoSave, notice: homeTodoNotice,
+        receive: todo?.assignee?.kind === "agent" ? peopleDialogModel().agents.find(row => row.id === (todo.assignee?.kind === "agent" ? todo.assignee.agent.id : ""))?.receive : null }, {
+        back: event => { event.preventDefault(); homeBack(); }, complete: done => { if (todo) void completeHomeTodo(todo.id, done); },
+        assign: option => { if (todo && homeTodoRead) void homeWrite((server, requestId) => server.assignTodo(workspace.id, { todo_id: todo.id, base_version: homeTodoRead!.todo.version,
+          to: { kind: option.kind === "person" ? "user" : "agent", id: option.value } }, requestId)); },
+        setStart: input => { if (!todo) return;
+          let action: SteerAction;
+          if (input.mode === "now") action = { kind: "start_now" };
+          else if (input.mode === "queue") action = { kind: "gate", gate: { kind: "none" } };
+          else if (input.mode === "at") action = { kind: "gate", gate: { kind: "at", at: new Date(`${input.date}T${input.time}`).toISOString() } };
+          else action = { kind: "gate", gate: input.gate.kind === "todo" ? { kind: "after", todo_id: input.gate.todoId }
+            : input.gate.kind === "note" ? { kind: "hold", note: input.gate.note } : { kind: "at", at: new Date(`${input.gate.date}T${input.gate.time}`).toISOString() } };
+          steerHomeTodo(todo.id, action);
+        }, comment: (body, tags) => { if (!todo) return;
+          const options = tagOptions(ctx.people);
+          const mentions: Party[] = tags.flatMap(tag => { const option = options.find(option => option.value === tag.id); return option ? [{ kind: option.kind === "person" ? "user" as const : "agent" as const, id: option.value }] : []; });
+          void homeWrite((server, requestId) => server.comment(workspace.id, { target: { kind: "todo", id: todo.id }, body, mentions }, requestId));
+        } })]);
+      if (homeTodoRead?.todo.offer?.decider_user_id === ctx.viewerId && !sampleMode && ctx.editor) {
+        const offer = homeTodoRead.todo.offer, id = homeTodoRead.todo.todo_id;
+        for (const answer of ["accept", "decline"] as const) { const button = document.createElement("button"); button.className = "hm-todo-save"; button.type = "button";
+          button.textContent = answer === "accept" ? "Accept" : "Decline";
+          button.setAttribute("aria-label", `${button.textContent} ‘${todo?.title ?? "this to-do"}’`);
+          button.disabled = homeTodoSave === "saving";
+          button.addEventListener("click", () => void homeWrite((server, requestId) => server.answerRequest(workspace.id, { todo_id: id, offer_id: offer.offer_id, answer }, requestId), () => answer === "accept" ? "Accepted." : "Declined.")); slot.append(button); }
+      }
+      appendReceipt();
+      if (todo?.id === homeGateEditorId) {
+        const choice = one<HTMLInputElement>("[data-todo-start] input[value=gated]");
+        if (choice) { homeGateEditorId = null; choice.click(); }
+      }
     };
     const homeBack = (): void => {
       if (window.history.state?.homePrevious) window.history.back();
@@ -3860,7 +4224,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         await navigateHome({ view: "chat", workspaceId: entry.workspace.id }, "push");
       }
       openRosterDialog();
-      peopleDialogState.selected = { kind: "person", id };
+      peopleDialogState.selected = { type: "person", id };
       renderDialogRoster();
     };
     const renderHomeRail = (): void => {
@@ -3903,7 +4267,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const pane = homeRoute.view === "lists" || homeRoute.view === "files" || homeRoute.view === "todos" ? homeRoute.view : "chat";
       const vm: WorkspaceShellVM = { sample: sampleMode, workspaceId: workspace.id, name: workspace.name,
-        people: currentHomePeople().groups, pane, todosAvailable: false,
+        people: currentHomePeople().groups, pane, todosAvailable: (workspace as { todosAvailable?: boolean }).todosAvailable === true,
         hrefs: { chat: routeHref({ view: "chat", workspaceId: workspace.id }), todos: routeHref({ view: "todos", workspaceId: workspace.id }),
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
@@ -4025,33 +4389,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
       frame?.classList.toggle("hm-frame--catchup", home);
-      if (home) { renderHomeCatchUp(); return; }
-      if (homeRoute.view === "agent") {
-        const candidates = [...currentHomePeople().groups.flatMap(group => group.agents), ...currentHomePeople().other];
-        const linkedId = homeRoute.agentId;
-        const state = homeObjectState(linkedId, candidates.map(agent => agent.id), homePeopleReadState);
-        const agent = candidates.find(agent => agent.id === linkedId);
-        const workspaceName = workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name ?? "this workspace";
-        if (state === "checking") homePaneMessage("Checking agents…", "");
-        else if (state === "failed") {
-          homePaneMessage(`Couldn't load ${workspaceName}.`, "Open it to try again.");
-          const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Try again";
-          retry.addEventListener("click", () => { void openWorkspace(activeWorkspaceId).then(focusHomeView); });
-          routePane?.append(retry);
-        } else if (state === "missing" || !agent) {
-          const missing = homeNotFound();
-          homePaneMessage(missing.heading, "", missing);
-        }
-        else {
-          const mayManage = agent.yours || members.some(member => member.userId === homeViewerId() && member.role !== "member");
-          homePaneMessage(agent.label, mayManage ? "Open People & agents to manage this agent." : "");
-          routePane?.append(statusLine(document, agent.state, { form: "line" }));
-          const manage = document.createElement("button"); manage.type = "button"; manage.textContent = "Manage in People & agents";
-          manage.addEventListener("click", () => { openRosterDialog(); peopleDialogState.selected = { kind: "agent", id: agent.id }; renderDialogRoster(); });
-          if (!sampleMode && mayManage) routePane?.append(manage);
-        }
-      } else if (homeRoute.view === "todo" || homeRoute.view === "todos") {
-        homePaneMessage("To-dos are not available here yet.", "");
+      if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
+      renderHomeSide();
+      if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
+        renderHomeObjectPane();
+        void loadHomeObject();
       } else if (homeRoute.view === "add-agent") openAgentChoice();
       else if (homeRoute.view === "lists") activateWorkspaceView("objects");
       else if (homeRoute.view === "files") activateWorkspaceView("files");
@@ -4097,6 +4439,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         void loadHomeCatchUp(); return;
       }
       if (!("workspaceId" in route) || !route.workspaceId) return;
+      ++homeDetailGeneration; homeDetailKey = ""; homeTodoRead = null; homeQueue = null; homeQueueRead = "pending"; homeTodoSave = "idle"; homeTodoReceipt = ""; homeTodoNotice = null;
       if (activeWorkspaceId !== route.workspaceId) {
         if (sampleMode) openSampleWorkspace(workspaces.find(workspace => workspace.id === route.workspaceId)!);
         else await openWorkspace(route.workspaceId);
@@ -4113,6 +4456,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         expandedThreadIds.add(route.messageId); renderFeed();
       }
     };
+    for (const slot of all<HTMLElement>("[data-home-route-pane], [data-home-side-slot], [data-feed-list]")) slot.addEventListener("click", event => {
+      const link = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");
+      if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const url = new URL(link.href, window.location.origin);
+      if (url.origin !== window.location.origin || url.pathname !== "/app") return;
+      event.preventDefault(); navigateHomeHref(`${url.pathname}${url.search}`);
+    });
     window.addEventListener("popstate", () => {
       void navigateHome(parseRoute(window.location.search), "pop");
     });
@@ -4201,7 +4551,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               lastUsedAt: grant.lastUsedAt, issuedAt: grant.issuedAt, newHostAt: grant.newHostAt,
               suspendedAt: grant.suspendedAt, revokedAt: grant.grantRevokedAt ?? grant.revokedAt } : null }, now);
           const presence = classifyAgentPresence(agent.presence ?? null);
-          const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence }).receive;
+          const receive = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence, own, ownerFirstName: ownerName?.trim().split(/\s+/)[0] ?? null }).receive;
           const technical = [`Agent ID: ${agent.principalId}`, `Connection: ${agent.transport === "hosted_mcp" ? "Hosted MCP · OAuth connector" : agent.transport === "local" ? "Local" : "Not reported"}`];
           const presenceLine = agentPresenceLine(agent.presence); if (presenceLine) technical.push(presenceLine);
           const wakeMark = wakePathMark(agent.oldestUnobservedAt); if (wakeMark) technical.push(wakeMark);
@@ -5067,6 +5417,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (more) more.hidden = !signalHasMore;
       if (!list) return;
       list.replaceChildren();
+      const homePeople = currentHomePeople();
+      const streamWorkspace = { id: activeWorkspaceId, name: workspaces.find(row => row.id === activeWorkspaceId)?.name ?? "Workspace", href: routeHref({ view: "chat", workspaceId: activeWorkspaceId }) };
+      const fixes = homeAgentFixCards(homePeople, streamWorkspace);
+      for (const fix of fixes) {
+        const row = document.createElement("li");
+        const card = { ...fix, sample: sampleMode };
+        row.append(needsYouCard(document, card, () => {})); list.append(row);
+      }
       if (signals.length === 0) {
         humanSeenReporter.resetVisible();
         humanSeenObserver?.disconnect();
@@ -5090,13 +5448,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
         previousSignalIds.clear();
         feedWasEmpty = true;
-        showChannelView("feed-empty");
+        if (fixes.length) { const empty = document.createElement("li"); empty.textContent = "No messages yet."; list.append(empty); }
+        showChannelView(fixes.length ? "feed" : "feed-empty");
         focusComposerOnEntry();
         return;
       }
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
       const viewerId = session?.user.id ?? (sampleMode ? "sample-owner" : "");
       const visibleSignals = filterSignals(signals, signalFilter, viewerId);
+      const streamTodos = new Map((homeTodosState === "ready" ? homeTodoModels() : []).map(todo => { const card = homeTodoCard(todo, now); return [todo.id, { ...card, done: !!card.done }]; }));
       for (const button of all<HTMLButtonElement>("[data-feed-filter]")) {
         const active = button.dataset.feedFilter === signalFilter;
         button.setAttribute("aria-pressed", String(active));
@@ -5153,11 +5513,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           : signal.fromKind === "user" && people.has(signal.from)
           ? { kind: "person" as const, id: signal.from }
           : null;
-        const authorName = authorEntity
+        const homeAuthor = homeParty({ kind: signal.fromKind === "agent" ? "agent" : "user", id: signal.from }, homePeople);
+        const authorName = homeAuthor ? "label" in homeAuthor ? homeAuthor.label : homeAuthor.name : authorEntity
           ? entityName(authorEntity)
           : people.get(signal.from) ??
             (signal.fromKind === "user" ? "Team member" : historicalAgentName(signal.from) ?? "Unknown agent");
-        const avatar = document.createElement("span");
+        let avatar: HTMLElement = document.createElement("span");
         avatar.className = "dashboard__message-avatar";
         avatar.textContent = initials(authorName);
         avatar.setAttribute("aria-hidden", "true");
@@ -5248,6 +5609,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } else {
           meta.append(author, identityBadge, target, operator, badge, time);
         }
+        const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: signals.some(reply => reply.threadRootId === signal.id && reply.from === viewerId),
+          attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
+            href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
+        if (streamSignal) {
+          const authorLine = buildAuthorLine(document, streamSignal);
+          const mark = authorLine.firstElementChild; if (mark instanceof HTMLElement) { avatar = mark; avatar.classList.add("dashboard__message-avatar"); }
+          author.remove(); time.remove();
+          const authorLabel = authorLine.querySelector<HTMLElement>(".hm-author__name");
+          if (authorEntity && authorLabel) authorLabel.replaceChildren(entityControl(authorName, authorEntity, "dashboard__message-entity dashboard__message-author"));
+          body.append(authorLine);
+        }
+        const extras = streamSignal ? deriveStreamExtras(streamSignal, { workspace: streamWorkspace, todos: streamTodos }) : null;
+        if (sampleMode && extras) { if (extras.ask) Object.assign(extras.ask, { sample: true }); for (const object of [...extras.attachments, ...(extras.todo ? [extras.todo] : [])]) Object.assign(object, { sample: true }); }
         body.append(meta);
         const mentions = visualMentions.get(signal.id) ?? [];
         if (mentions.length > 0) {
@@ -5286,9 +5661,30 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!expandedSignalIds.has(signal.id)) {
           markdown.classList.add("dashboard__message-markdown--collapsed");
         }
-        body.append(markdown);
-        renderMessageAttachments(body, signal);
-        if (signal.about) {
+        if (!extras?.ask) body.append(markdown);
+        if (extras) {
+          const decoration = buildStreamExtras(document, extras, () => {
+            if (composerSending || sampleMode) return;
+            const channel = channelById(channels, signal.channelId);
+            if (canStartThread(signal, now, channel?.archivedAt != null)) {
+              setThreadReplyRoot({ id: signal.id, author: authorName, channelId: signal.channelId, until: signal.until });
+              expandedThreadIds.add(signal.id); renderFeed();
+            } else { syncComposerAddress([{ kind: signal.fromKind === "agent" ? "agent" : "person", id: signal.from }]); }
+            one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });
+          });
+          if (decoration) {
+            if (sampleMode) for (const control of decoration.querySelectorAll("button")) control.remove();
+            for (const [index, link] of Array.from(decoration.querySelectorAll<HTMLAnchorElement>("[data-stream-files] a")).entries()) {
+              const attachment = signal.attachments?.[index]; if (!attachment) continue;
+              link.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
+                void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(url => window.location.assign(url), error => setComposerStatus(readableError(error), "error")); });
+            }
+            body.append(decoration);
+          }
+        } else renderMessageAttachments(body, signal);
+        // The card is a preview; keep the complete sanitized question beneath it.
+        if (extras?.ask) body.append(markdown);
+        if (signal.about && !extras?.todo) {
           const about = document.createElement("code");
           about.className = "dashboard__message-about";
           about.textContent = signal.about;
@@ -5382,7 +5778,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          root in #mobile and again in all-signals, with no client-side resolution and no
          second query. A reply whose root is not on the loaded page keeps its own place as a
          row of its own rather than disappearing with it. */
-      for (const group of groupSignalThreads([...visibleSignals].reverse())) {
+      const groups = groupSignalThreads([...visibleSignals].reverse());
+      const byRoot = new Map(groups.map(group => [group.root.id, group]));
+      for (const entry of groupByDay(groups.map(group => group.root), now, navigator.language)) {
+        if (entry.type === "divider") { list.append(buildDayDivider(document, entry.label, entry.key)); continue; }
+        const group = byRoot.get(entry.item.id)!;
         list.append(buildMessageRow(group.root, group.root.threadRootId !== null));
         if (group.replies.length === 0) continue;
         const expanded = expandedThreadIds.has(group.root.id);
@@ -5801,6 +6201,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       catchUpGeneration += 1;
       catchUpData = [];
       homeScroll.clear();
+      resetHomeWorkspace();
       homeWorkClaims = [];
       homePeopleReadState = "pending";
       homeShellKey = "";
@@ -6402,6 +6803,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const keepShell = app.dataset.state === "channel";
       stopPendingPoll();
       activeWorkspaceId = selected.id;
+      resetHomeWorkspace();
       homeWorkClaims = [];
       homePeopleReadState = "pending";
       app.dataset.adminWorkspace = selected.id;
@@ -6487,6 +6889,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         pendingAgentsLoadFailed = nextPending.failed;
         files = nextFiles.value;
         fileLoadError = nextFiles.error;
+        void loadHomeWorkspace();
         /* Only if no newer channel read has landed since this one started. A create the
            reader made while the workspace was still opening is newer than this snapshot, and
            it stays. */
@@ -7446,7 +7849,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channel = activeChannel();
       if (!input) return;
       if (channel === null) {
-        input.placeholder = "Message everyone";
+        input.placeholder = "Write to everyone, or type @ to tag a person or an agent";
         input.setAttribute("aria-label", "Message");
         return;
       }
@@ -7983,6 +8386,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       members = [...roster.members];
       agents = [...roster.agents];
       people = new Map(members.map((member) => [member.userId, member.name]));
+      resetHomeWorkspace();
+      void loadHomeWorkspace();
     };
 
     /** The made-up channels of one sample workspace. Only the first one has any. */
@@ -9849,6 +10254,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const list = one<HTMLElement>("[data-dialog-agent-list]"), detail = one<HTMLElement>("[data-people-detail]");
       if (list) observer.observe(list); if (detail) observer.observe(detail);
       dialog?.addEventListener("close", () => {
+        renderHomeSide(); renderHomeObjectPane();
         for (const button of all<HTMLButtonElement>("[data-roster-open]")) button.setAttribute("aria-expanded", "false");
       });
     }

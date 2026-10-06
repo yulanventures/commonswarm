@@ -1,3 +1,10 @@
+/* Contrast measured from tokens.css with WCAG sRGB relative luminance.
+   Light / dark: text on bg 13.59 / 15.43; on surface 14.42 / 13.24.
+   Muted on bg 5.34 / 9.41; on surface 5.66 / 8.08.
+   Accent-bright on surface 7.44 / 9.64; accent-ink on accent 5.12 / 8.25.
+   Warning on warning-dim composited over bg 4.93 / 7.86, over surface 5.22 / 6.66.
+   Controls in the same invocation: black/white 21.00, mid-grey/white 4.48,
+   blue/white 8.59. Both dark selectors resolve to the same measured token pairs. */
 /* Home UI: agent view (UI-SPEC.md 3.5). Site tokens only. Class prefix hm-. */
 .hm-agent {
   min-inline-size: 0;
