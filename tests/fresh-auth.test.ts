@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  commandNeedsFreshInteractiveAuth,
   FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS,
   FRESH_INTERACTIVE_AUTH_SECONDS,
+  FRESH_INTERACTIVE_COMMAND_KINDS,
+  freshInteractiveAuthRefusal,
   hasFreshInteractiveAuth,
   newestInteractiveAmrSeconds,
 } from "../supabase/functions/command/fresh-auth.js";
@@ -113,6 +116,70 @@ test("fresh auth age bounds: clock skew floor and 300s ceiling", () => {
       NOW_MS,
     ),
     false,
+  );
+});
+
+test("change_role refuses a stale session on the same gate as remove_member", () => {
+  const stale = NOW_SECONDS - FRESH_INTERACTIVE_AUTH_SECONDS - 1;
+  const fresh = NOW_SECONDS - 1;
+  const removeMessage =
+    "Sign in again, then retry member removal. No membership change was recorded.";
+  const roleMessage =
+    "Sign in again, then retry the role change. No membership change was recorded.";
+
+  assert.deepEqual(
+    [...FRESH_INTERACTIVE_COMMAND_KINDS],
+    ["remove_member", "change_role"],
+  );
+  assert.equal(commandNeedsFreshInteractiveAuth("change_role"), true);
+  assert.equal(commandNeedsFreshInteractiveAuth("remove_member"), true);
+  assert.equal(commandNeedsFreshInteractiveAuth("archive_workspace"), false);
+  assert.equal(commandNeedsFreshInteractiveAuth("post_signal"), false);
+
+  assert.deepEqual(
+    freshInteractiveAuthRefusal("remove_member", "user", stale, NOW_MS),
+    { error: "fresh_auth_required", message: removeMessage },
+  );
+  assert.deepEqual(
+    freshInteractiveAuthRefusal("change_role", "user", stale, NOW_MS),
+    { error: "fresh_auth_required", message: roleMessage },
+  );
+  // A just-signed-in owner is not an authentication refusal. The reducer still decides the role.
+  assert.equal(
+    freshInteractiveAuthRefusal("change_role", "user", fresh, NOW_MS),
+    null,
+  );
+  assert.equal(
+    freshInteractiveAuthRefusal("remove_member", "user", fresh, NOW_MS),
+    null,
+  );
+  // Promoting someone else and then demoting yourself are the same command. Both miss a stale session.
+  assert.equal(
+    freshInteractiveAuthRefusal(
+      "change_role",
+      "user",
+      stale,
+      NOW_MS,
+    )?.error,
+    freshInteractiveAuthRefusal(
+      "remove_member",
+      "user",
+      stale,
+      NOW_MS,
+    )?.error,
+  );
+  // A recent timestamp on any other credential does not open the gate.
+  assert.deepEqual(
+    freshInteractiveAuthRefusal("change_role", "agent", fresh, NOW_MS),
+    { error: "fresh_auth_required", message: roleMessage },
+  );
+  assert.deepEqual(
+    freshInteractiveAuthRefusal("change_role", "user", null, NOW_MS),
+    { error: "fresh_auth_required", message: roleMessage },
+  );
+  assert.equal(
+    freshInteractiveAuthRefusal("archive_workspace", "user", stale, NOW_MS),
+    null,
   );
 });
 

@@ -75,7 +75,7 @@ import {
   withCommandCors,
 } from "./cors.ts";
 import {
-  hasFreshInteractiveAuth,
+  commandNeedsFreshInteractiveAuth, freshInteractiveAuthRefusal,
   newestInteractiveAmrSeconds,
 } from "./fresh-auth.ts";
 import {
@@ -231,6 +231,7 @@ type ConnectCommand =
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }
   | { kind: "remove_member"; user_id: string }
+  | { kind: "change_role"; user_id: string; role: WorkspaceRole }
   | { kind: "archive_workspace" }
   | {
     kind: "create_agent_principal";
@@ -441,6 +442,7 @@ type WorkspaceCommand =
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token_hash: string }
   | { kind: "remove_member"; user_id: string }
+  | { kind: "change_role"; user_id: string; role: WorkspaceRole }
   | {
     kind: "create_agent_principal";
     principal_id: string;
@@ -1049,6 +1051,7 @@ const COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
+  "change_role",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -1094,6 +1097,7 @@ const CONNECT_COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
+  "change_role",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -2471,6 +2475,26 @@ function validateCommand(
           reason: "remove_member fields are malformed",
         };
     }
+    if (cmd.kind === "change_role") {
+      const role = cmd.role;
+      return exactKeys(cmd, ["kind", "user_id", "role"]) &&
+          typeof cmd.user_id === "string" &&
+          UUID_RE.test(cmd.user_id) &&
+          (role === "owner" || role === "admin" || role === "member")
+        ? {
+          ok: true,
+          command: {
+            kind: "change_role",
+            user_id: cmd.user_id,
+            role,
+          },
+        }
+        : {
+          ok: false,
+          status: 400,
+          reason: "change_role fields are malformed",
+        };
+    }
     if (cmd.kind === "invite_member") {
       const email = normalizedEmail(cmd.email);
       const optionalKeys = Object.hasOwn(cmd, "ttl_ms") ? ["ttl_ms"] : [];
@@ -3621,6 +3645,12 @@ async function prepareWorkspaceCommand(
     };
   } else if (wire.kind === "remove_member") {
     command = { kind: "remove_member", user_id: wire.user_id };
+  } else if (wire.kind === "change_role") {
+    command = {
+      kind: "change_role",
+      user_id: wire.user_id,
+      role: wire.role,
+    };
   } else if (wire.kind === "archive_workspace") {
     command = { kind: "archive_workspace" };
   } else if (wire.kind === "revoke_agent_principal") {
@@ -3729,7 +3759,7 @@ async function prepareWorkspaceCommand(
     inviteeAlreadyMember = rows[0]?.present ?? false;
   }
   let landingAuthorityChangeResolved = true;
-  if (wire.kind === "remove_member") {
+  if (wire.kind === "remove_member" || wire.kind === "change_role") {
     const mappings = await tx<{ blocked: boolean }[]>`
       SELECT EXISTS (
         SELECT 1
@@ -3766,7 +3796,7 @@ async function prepareWorkspaceCommand(
       userId === auth.actor.user && auth.identityVerified,
     humanRights: () => [...P0_AGENT_SCOPES],
     landingAuthorityChangeResolved: (targetUserId, successorUserId) =>
-      wire.kind === "remove_member" &&
+      (wire.kind === "remove_member" || wire.kind === "change_role") &&
         targetUserId === wire.user_id &&
         successorUserId === null
         ? landingAuthorityChangeResolved
@@ -4554,6 +4584,30 @@ async function updateWorkspaceProjection(
       `;
       if (updated.length !== 1) {
         throw new Error("MemberRemoved projection did not revoke exactly one membership");
+      }
+    } else if (event.type === "MemberRoleChanged") {
+      if (
+        typeof payload.user_id !== "string" ||
+        (payload.from_role !== "owner" &&
+          payload.from_role !== "admin" &&
+          payload.from_role !== "member") ||
+        (payload.to_role !== "owner" &&
+          payload.to_role !== "admin" &&
+          payload.to_role !== "member")
+      ) {
+        throw new Error("MemberRoleChanged payload is malformed");
+      }
+      const updated = await tx<{ user_id: string }[]>`
+        UPDATE swarm.memberships
+        SET role = ${payload.to_role}
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND user_id = ${payload.user_id}::uuid
+          AND role = ${payload.from_role}
+          AND revoked_at IS NULL
+        RETURNING user_id
+      `;
+      if (updated.length !== 1) {
+        throw new Error("MemberRoleChanged projection did not change exactly one membership");
       }
     } else if (event.type === "AgentPrincipalCreated") {
       const principal = projection.principals[String(payload.principal_id)];
@@ -8110,7 +8164,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3957 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3987 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -11295,35 +11349,33 @@ async function handleTransaction(
     }
     await afterStep(7);
 
-    if (command.kind === "remove_member") {
+    if (commandNeedsFreshInteractiveAuth(command.kind)) {
       const serverTime = await tx<{ now_ms: string | number }[]>`
         SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
       `;
       const serverNowMs = Number(serverTime[0]?.now_ms);
-      if (
-        auth.credentialKind !== "user" ||
-        !hasFreshInteractiveAuth(
-          auth.interactiveAuthAtSeconds,
-          serverNowMs,
-        )
-      ) {
+      const freshAuth = freshInteractiveAuthRefusal(
+        command.kind,
+        auth.credentialKind,
+        auth.interactiveAuthAtSeconds,
+        serverNowMs,
+      );
+      if (freshAuth !== null) {
         await insertAudit(tx, {
           auth,
           commandKind: kind,
           workspaceId: route.workspaceId,
           streamId: route.streamId,
           outcome: "authn",
-          reason: "fresh_auth_required",
-          detail:
-            "Sign in again, then retry member removal. No membership change was recorded.",
+          reason: freshAuth.error,
+          detail: freshAuth.message,
           hash,
         });
         return {
           status: 401,
           body: {
-            error: "fresh_auth_required",
-            message:
-              "Sign in again, then retry member removal. No membership change was recorded.",
+            error: freshAuth.error,
+            message: freshAuth.message,
           },
         };
       }
