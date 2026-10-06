@@ -271,8 +271,8 @@ elif name=='stat':
 else: refuse()
 `;
 
-function fixture(config: Record<string, unknown> = {}) {
-  const root = mkdtempSync(join(scratch, 'case-'));
+function fixture(config: Record<string, unknown> = {}, parent = scratch) {
+  const root = mkdtempSync(join(parent, 'case-'));
   const site = join(root, 'site'), bin = join(root, 'bin'), receipts = join(root, 'receipts');
   const stage = join(root, 'stage'), proof = join(root, 'proof'), newEdge = join(root, 'edge/releases', sha);
   const put = (path: string, value: unknown) => {
@@ -487,48 +487,61 @@ const post = 'https://api.commonswarm.com/admin';
 const probes = ['ai-w4-probes'];
 const gateFailure = (method: string) => `FAIL ai-w4-probes: ${method} /admin/gate status/ACAO/cache/body-length expected 200/*/no-store/<=4096 got 200/non-wildcard-or-missing/no-store/${method === 'GET' ? 19 : 0}; Origin expected commonswarm-site got commonswarm-site; STOP`;
 
-test('C1-5 Caddy imports: production relative and absolute forms validate candidate routes with empty live sites', () => {
+test('C1-5 Caddy imports: production relative and absolute forms validate candidate routes with empty live sites', (t) => {
   // Caddy is a test prerequisite, not a daemon: only validate/adapt are called.
   const located = spawnSync('/bin/sh', ['-c', 'command -v caddy'], { encoding: 'utf8' });
-  const binary = realpathSync(process.env.C1_CADDY_BINARY || located.stdout.trim() || resolve('scratchpad/c1-5-tools/caddy'));
+  const candidate = process.env.C1_CADDY_BINARY || located.stdout.trim();
+  if (!candidate) {
+    t.skip('Caddy binary is unavailable; install caddy or set C1_CADDY_BINARY');
+    return;
+  }
+  const binary = realpathSync(candidate);
   assert.equal(spawnSync(binary, ['version'], { encoding: 'utf8' }).status, 0, 'working Caddy binary required');
-  const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
-  for (const [form, input] of [
-    ['relative', productionCaddyfile],
-    ['absolute', productionCaddyfile.replace('import sites/*.caddy', 'import /etc/caddy/sites/*.caddy')],
-  ] as const) {
-    const f = fixture({ caddyfile: input, real_caddy_binary: binary, empty_live_sites: true });
-    // Valid minimal site configs retain the real candidate generator's anchors.
-    for (const [file, bytes] of [
-      ['mcp.caddy', '(mcp_oauth_active) {\n respond /oauth-fixture "baseline"\n}\n(mcp_resource_active) {\n respond /mcp-fixture "baseline"\n}\nmcp.commonswarm.com {\n import mcp_oauth_active\n import mcp_resource_active\n' + log + '}\n'],
-      ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\n' + log + '}\n'],
+  const caddyRoot = realpathSync(mkdtempSync(join(temporaryRoot, 'admin-w45-caddy-')));
+  try {
+    const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
+    for (const [form, input] of [
+      ['relative', productionCaddyfile],
+      ['absolute', productionCaddyfile.replace('import sites/*.caddy', 'import /etc/caddy/sites/*.caddy')],
     ] as const) {
-      f.put('stage/' + file, bytes);
-      f.put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
+      const f = fixture({ caddyfile: input, real_caddy_binary: binary, empty_live_sites: true }, caddyRoot);
+      // Valid minimal site configs retain the real candidate generator's anchors.
+      for (const [file, bytes] of [
+        ['mcp.caddy', '(mcp_oauth_active) {\n respond /oauth-fixture "baseline"\n}\n(mcp_resource_active) {\n respond /mcp-fixture "baseline"\n}\nmcp.commonswarm.com {\n import mcp_oauth_active\n import mcp_resource_active\n' + log + '}\n'],
+        ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\n' + log + '}\n'],
+      ] as const) {
+        f.put('stage/' + file, bytes);
+        f.put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
+      }
+      const liveConfig = readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8');
+      const r = f.run(['ai-w4-caddy-candidate']);
+      assert.equal(r.status, 0, r.stderr + readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'));
+      pass(f, r);
+      assert.deepEqual(readdirSync(join(f.root, 'etc/caddy/sites')), [], 'live sites are empty during real validation');
+      assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), liveConfig, 'live Caddyfile bytes preserved');
+      const target = form === 'relative' ? 'sites/*.caddy' : join(f.stage, 'sites/*.caddy');
+      assert.equal(readFileSync(join(f.stage, 'Caddyfile'), 'utf8'), productionCaddyfile.replace('import sites/*.caddy', 'import ' + target));
+      assert.match(readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'), /Valid configuration/);
+      const adapted = spawnSync(binary, ['adapt', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+        cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+      });
+      assert.equal(adapted.status, 0, adapted.stderr);
+      const config = JSON.parse(adapted.stdout);
+      assert.match(JSON.stringify(config), /\/functions\/v1\/admin/);
+      assert.match(JSON.stringify(config), /127\.0\.0\.1:3490/);
+      // Negative dependency control: invalid candidate site bytes must fail real validation,
+      // even while the live directory is empty (an empty glob alone would validate).
+      f.put('stage/sites/10-commonswarm-api.caddy', 'invalid_candidate_directive {\n');
+      const invalid = spawnSync(binary, ['validate', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+        cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+      });
+      assert.notEqual(invalid.status, 0, 'validation reads candidate site files');
     }
-    const liveConfig = readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8');
-    const r = f.run(['ai-w4-caddy-candidate']);
-    assert.equal(r.status, 0, r.stderr + readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'));
-    pass(f, r);
-    assert.deepEqual(readdirSync(join(f.root, 'etc/caddy/sites')), [], 'live sites are empty during real validation');
-    assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), liveConfig, 'live Caddyfile bytes preserved');
-    const target = form === 'relative' ? 'sites/*.caddy' : join(f.stage, 'sites/*.caddy');
-    assert.equal(readFileSync(join(f.stage, 'Caddyfile'), 'utf8'), productionCaddyfile.replace('import sites/*.caddy', 'import ' + target));
-    assert.match(readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'), /Valid configuration/);
-    const adapted = spawnSync(binary, ['adapt', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
-      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
-    });
-    assert.equal(adapted.status, 0, adapted.stderr);
-    const config = JSON.parse(adapted.stdout);
-    assert.match(JSON.stringify(config), /\/functions\/v1\/admin/);
-    assert.match(JSON.stringify(config), /127\.0\.0\.1:3490/);
-    // Negative dependency control: invalid candidate site bytes must fail real validation,
-    // even while the live directory is empty (an empty glob alone would validate).
-    f.put('stage/sites/10-commonswarm-api.caddy', 'invalid_candidate_directive {\n');
-    const invalid = spawnSync(binary, ['validate', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
-      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
-    });
-    assert.notEqual(invalid.status, 0, 'validation reads candidate site files');
+  } finally {
+    assert.equal(dirname(caddyRoot), temporaryRoot);
+    assert.match(caddyRoot.slice(temporaryRoot.length + 1), /^admin-w45-caddy-[A-Za-z0-9]{6}$/);
+    const cleanup = spawnSync('rm', ['-r', '--', caddyRoot], { encoding: 'utf8' });
+    assert.equal(cleanup.status, 0, `fixture cleanup refused ${caddyRoot}: ${cleanup.stderr}`);
   }
 });
 
