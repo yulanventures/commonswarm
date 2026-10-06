@@ -1,10 +1,10 @@
 # Frozen bundle status (lane/c1-frozen-work)
 
 Branch `lane/c1-frozen-work`, based on origin/main `a5cb8251`. HezLead owns
-review and integration. Committed HEAD is `03c3c9d4`: C1-1 TODO repairs are in `1c5d4dbc`, the
+review and integration. Committed HEAD is `6ca8f36e`: C1-1 TODO repairs are in `1c5d4dbc`, the
 generator/run orders in `edf4a3bf`, C1-4 checker/ruling repairs in `69fa19f7`,
-and the first W4 Caddy production-defect repair in `03c3c9d4`.
-C1-6 below is an uncommitted patch on that exact base. This worker does not
+the first W4 Caddy production-defect repair in `03c3c9d4`, and C1-6 in `6ca8f36e`.
+C1-7 below is an uncommitted patch on that exact base. This worker does not
 commit or push. No release or production execution is claimed.
 
 ## Done
@@ -267,7 +267,7 @@ Required C1-6 final gate:
 `C1_CADDY_BINARY=/private/tmp/cs-c1-frozen/scratchpad/c1-6-tools/caddy C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
 — **169 tests, 169 pass, 0 fail/cancelled/skipped/todo, exit 0**
 (197166.405417 ms). Log: `scratchpad/c1-6-gate-final.log`; exit receipt:
-`scratchpad/c1-6-gate-final.exit`. This measures the uncommitted C1-6 patch,
+`scratchpad/c1-6-gate-final.exit`. That run measured the then-uncommitted C1-6 patch,
 not CI or production. The first C1-6 gate was 168/169, exit 1: the new generator
 test expected three selected companion failure-table rows to be adjacent.
 It now verifies each row verbatim against the companion; generator 7/7 and
@@ -275,7 +275,122 @@ then the full required gate passed. First log: `scratchpad/c1-6-gate.log`.
 `bash -n` passed all 87 marked blocks; `git diff --check` passed.
 No full suite, build, Docker, browser, commit, push or production operation ran.
 
+## C1-7 supersede lock order (prepared at 6ca8f36e)
+
+Grok round 3 at
+`/Users/yulanbot/work/c1-verify/review/runs/20261006T000331Z-941888/grok/result.md`
+found the cross-client cycle: C1-6 supersede held the approvals table and waited
+for a binding owner's account, while that owner's approval for another client
+held the account and waited to INSERT into approvals. PostgreSQL aborts one
+transaction with `40P01`.
+
+`ai-w6-client-verification` now prelocks `swarm.admin_accounts` with `FOR UPDATE
+OF a`, ordered by `owner_user_id`, for every owner in `admin_grant_bindings`
+matching the superseded client and verification version. There is no state
+filter: `guard_verified_client` visits terminal bindings too. EXISTS selects
+each account once even when an owner has several bindings. The active verified
+row is locked first, so new conforming bindings cannot appear during that
+selection. The account locks precede the approvals table lock. These extra
+binding reads and account locks run after RESET ROLE as the existing session
+principal; SET LOCAL ROLE commonswarm_admin_release is restored before the
+verification UPDATE/INSERT. No grants or function privileges change. Same-version
+and first-insert paths take neither the account prelocks nor the table lock.
+
+Lock audit (row locks unless a table/unique/FK lock is named; reentrant locks
+are retained through transaction end):
+
+| Path | Locks in acquisition order |
+| --- | --- |
+| C1-6 supersede control | cutover singleton FOR UPDATE; active verification FOR UPDATE; approvals table SHARE ROW EXCLUSIVE; approvals FOR SHARE; trigger verification FOR SHARE (already owned); **binding owner account FOR UPDATE**; grant FOR UPDATE; binding FOR UPDATE; tombstone INSERT/unique conflict check |
+| C1-7 supersede | cutover singleton FOR UPDATE; active verification FOR UPDATE; **all binding owner accounts FOR UPDATE in owner order**; approvals table SHARE ROW EXCLUSIVE; approvals FOR SHARE; restore release role; verification UPDATE (ROW EXCLUSIVE table lock, same row); for each binding in owner/grant order: verification FOR SHARE (same row), account FOR UPDATE (preowned), grant FOR UPDATE, binding FOR UPDATE; grant/binding UPDATE where live; tombstone INSERT ON CONFLICT DO NOTHING; verification INSERT/active-version unique-index check |
+| Human approve | exact verification FOR SHARE via lock_admin_client_verification; owner swarm.users FOR UPDATE; account INSERT ON CONFLICT/unique check then account FOR UPDATE; owner's grants FOR UPDATE in grant order; exact approval FOR UPDATE (ROW SHARE table lock); rate bucket INSERT/UPDATE in sorted key order; account event INSERT; grant upserts and consumed-consent/account UPDATE; approval INSERT (ROW EXCLUSIVE table lock), evidence SELECT and FK KEY SHARE checks on prelocked account/verification plus the new event; command-result INSERT |
+| Human withdraw approval | exact verification FOR SHARE; user FOR UPDATE; account INSERT/unique check and FOR UPDATE; owner's grants FOR UPDATE in grant order; exact approval FOR UPDATE; sorted rate buckets; event INSERT and grant/consent/account persistence; approval UPDATE (ROW EXCLUSIVE table lock); evidence SELECT; for each binding in grant order: verification FOR SHARE (preowned), account FOR UPDATE (preowned), grant FOR UPDATE (preowned), binding FOR UPDATE; grant/binding terminal writes and tombstone INSERT/unique conflict check; command-result INSERT |
+| Human revoke delegation | user FOR UPDATE; account INSERT/unique check and FOR UPDATE; owner's grants FOR UPDATE in grant order; membership/workspace FOR SHARE for required current rights; sorted rate buckets; event INSERT; terminal grant upsert; family trigger: live binding UPDATE, guard's grant FOR SHARE (preowned), terminal-binding trigger's verification FOR SHARE, account/grant FOR UPDATE (preowned), binding FOR UPDATE; tombstone INSERT/unique conflict check; terminal audit INSERT with FK KEY SHARE on account/grant/binding; consumed-consent/account UPDATE; command-result INSERT |
+
+Nested triggers examined: `guard_admin_binding` takes FOR SHARE on the already
+locked grant. `binding_terminal_fence` and a newly inserted tombstone's
+`tombstone_admin_family` re-enter `fence_admin_family` for the same binding,
+verification, account and grant. `admin_grant_family_fence` updates that grant's
+binding, then inserts the family tombstone and terminal audit. Each grant has
+one binding (`admin_grant_bindings.admin_grant_id` is UNIQUE), so these calls
+do not acquire a second client's verification or another owner's account.
+Audit FK KEY SHARE checks revisit the account, grant and binding. Terminal
+audit does not lock cutover; its FOR SHARE cutover lock applies only to issued
+or rotated audit. The legacy grant guard reads cutover without a row lock.
+No trigger here takes a user, membership/workspace, rate-bucket, command-result,
+issuer-key or provider-resource advisory lock.
+
+For approve/withdraw on the superseded verification, FOR SHARE waits before
+the account stage. For another client with a binding owner, C1-7 serializes at
+the account before either transaction can hold the other's later grant/binding
+or approval-write lock. Other owners have disjoint grants/bindings; their
+approval INSERT can wait on the table lock but cannot hold an account needed
+by the supersede trigger. The table lock remains broader than this client and
+version and lasts only until commit.
+
+Human revoke's general order includes a late verification lock through a
+terminal-binding trigger. On the superseded version, successful supersede
+requires all approvals withdrawn; the real withdrawal trigger has already
+terminalized the bindings and inserted tombstones. Revoke of an already
+revoked/expired grant is idempotent. A suspended grant can become revoked,
+but its already-terminal binding is excluded by the family trigger's
+`state IN ('active','pending')` UPDATE and its tombstone INSERT is a conflict
+no-op, so neither operation takes a new verification lock. A live approval
+still refuses supersede before deactivation. For another client's revoke,
+the verification lock concerns that other client; the shared owner account
+serializes its later grant/binding/tombstone/audit work. This audit establishes
+no further supersede inversion against the approve, withdraw or revoke paths
+under their real durable-state invariants; it is not a global deadlock claim.
+
+The existing migrated-schema W6 retry test now rehearses two contending
+connections with both binding-owner accounts present, including the non-input
+owner approving a different client. Only seed writes use replication mode;
+both race transactions run with every trigger and FK check enabled. The
+approve contender runs the command path's lock/evidence/INSERT SQL as
+swarm_command, not the TypeScript handler or an HTTP request. A test-only
+split of the generated DO prefix pauses supersede after the account prelock;
+resumption re-enters the unmodified generated DO in the same transaction.
+The plan contains no pause or test hook. Short observer connections read
+pg_stat_activity/pg_blocking_pids to establish the two contenders' actual wait.
+
+Focused rehearsal: **1 test, 1 pass, exit 0**. Final log:
+`scratchpad/c1-7/retry-final.log`. Both binding-owner account probes hit lock_timeout.
+The other-client approve then waited on the supersede account lock. Supersede
+committed; approve completed its guarded INSERT and committed with no deadlock.
+The exact C1-6 plan bytes at `6ca8f36e` first reproduced the inverse waits and
+PostgreSQL `40P01` in the same invocation. The earlier insertion-race control
+also remains: removing the table lock admits a fresh-owner INSERT; keeping it
+blocks that INSERT until transaction end, after which the INSERT succeeds.
+Release-role approval SELECT and account UPDATE privilege checks remain false.
+
+Generator tests: **7 tests, 7 pass, exit 0** (`scratchpad/c1-7/generator.log`).
+Required C1-7 gate:
+`C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
+— **169 tests, 169 pass, exit 0**. Log: `scratchpad/c1-7/gate-final.log`;
+exit receipt: `scratchpad/c1-7/gate-final.exit`. Gate tail:
+
+```text
+ℹ tests 169
+ℹ suites 0
+ℹ pass 169
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 210418.858542
+```
+
+The first gate was 164/169, exit 1 (`scratchpad/c1-7/gate.log` and
+`scratchpad/c1-7/gate.exit`): two added comment lines shifted the plan's quoted
+line references, and the intentional deadlock victim could exit before the
+control wrote ROLLBACK, producing EPIPE. The comment replacement now retains
+the original line count; the control queues rollback before creating the
+cycle and never writes to the victim afterward. The focused generator/retry
+checks and then the exact required gate passed after these corrections.
+`git diff --check` passed. No full suite, build, Docker, browser, commit, push
+or production operation ran. HezLead owns the cross-family check.
+
 ## Handoff
 
-HezLead owns the cross-family check and integration. C1-6 makes no commit,
+HezLead owns the cross-family check and integration. C1-7 makes no commit,
 push or production change. `VERIFY-HARNESS.md` stays outside this assignment.

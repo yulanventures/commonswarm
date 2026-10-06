@@ -406,7 +406,7 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
         const concurrent = psql(insert);
         if (blocked) { assert.notEqual(concurrent.status, 0); assert.match(concurrent.stderr, /canceling statement due to lock timeout/); }
         else ok(concurrent); // Same INSERT succeeds under the pre-fix row-only locks.
-        writer.stdin.end(blocked ? 'COMMIT;\n' : 'ROLLBACK;\n');
+        writer.stdin.end('ROLLBACK;\n');
         assert.equal(await exited, 0, errors);
         ok(psql(insert)); // Positive control: lock is released when the transaction ends.
       } finally {
@@ -417,6 +417,124 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     const supersedeSql = readFileSync(join(proof, 'client-verification.sql'), 'utf8');
     await race(supersedeSql.replace(/LOCK TABLE commonswarm_oauth\.admin_client_owner_approvals IN SHARE ROW EXCLUSIVE MODE;/, ''), false);
     await race(supersedeSql, true);
+
+    // C1-7: terminal bindings are still visited by the real deactivation trigger.
+    // Seed two binding owners (not just C1's input owner), then leave every trigger enabled.
+    const otherClient = 'https://commonswarm.com/oauth/c1-lock-control/client.json';
+    for (const [i, who] of [owner, other].entries()) {
+      const grant = `77777777-7777-4777-8777-77777777777${i}`;
+      ok(psql(`BEGIN; SET LOCAL session_replication_role=replica;
+        INSERT INTO swarm.users(user_id,display_name) VALUES('${who}','C1 lock rehearsal');
+        INSERT INTO swarm.admin_accounts(owner_user_id,stream_id) VALUES('${who}','${who}');
+        INSERT INTO swarm.admin_grants(grant_id,owner_user_id,admin_identity_id,connection_id,client_id,resource,
+          registry_version,workspace_ids,created_workspace_policy,target_rules,worker_scope_ceiling,role_ceiling,
+          renewal_limits,issuance_limits,expires_at,refresh_deadline,state,consent_receipt_id,manifest_digest,created_at,revoked_at)
+        VALUES('${grant}','${who}','${grant}','${grant}','${client}','https://api.commonswarm.com/admin',
+          2,'{}','{}','{}','{}','member','{}','{}',statement_timestamp()+interval '1 day',statement_timestamp()+interval '1 day',
+          'revoked','${grant}','${metadata}',statement_timestamp(),statement_timestamp());
+        INSERT INTO commonswarm_oauth.provider_grant_resources(provider_grant_id,resource,grant_class,owner_user_id,client_id,connection_id,admin_grant_id)
+        VALUES('c1-lock-family-${i}','https://api.commonswarm.com/admin','delegated_admin','${who}','${client}','${grant}','${grant}');
+        INSERT INTO commonswarm_oauth.admin_grant_bindings(provider_grant_id,admin_grant_id,owner_user_id,admin_identity_id,connection_id,
+          client_id,resource,registry_version,capabilities,scope_names,availability_digest,manifest_digest,verification_version,jkt,
+          consented_at,expires_at,refresh_deadline,state,terminal_at)
+        VALUES('c1-lock-family-${i}','${grant}','${who}','${grant}','${grant}','${client}','https://api.commonswarm.com/admin',
+          2,ARRAY['list_admin_grants'],ARRAY['admin:read'],'${metadata}','${metadata}',1,'${'R'.repeat(43)}',
+          statement_timestamp(),statement_timestamp()+interval '1 day',statement_timestamp()+interval '1 day','revoked',statement_timestamp());
+        INSERT INTO commonswarm_oauth.refresh_family_tombstones(grant_id,revoked_at) VALUES('c1-lock-family-${i}',statement_timestamp()); COMMIT;`));
+    }
+    ok(psql(`INSERT INTO commonswarm_oauth.admin_verified_clients
+      SELECT (jsonb_populate_record(NULL::commonswarm_oauth.admin_verified_clients,
+        to_jsonb(v)||jsonb_build_object('client_id','${otherClient}'))).* FROM commonswarm_oauth.admin_verified_clients v
+      WHERE client_id='${client}' AND verification_version=1;`));
+    const c16 = spawnSync('git', ['show', '6ca8f36e:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }); ok(c16);
+    ok(verify(2, c16.stdout, inputs.gate_receipt_sha256, false));
+    const c16Sql = readFileSync(join(proof, 'client-verification.sql'), 'utf8');
+    const lockOrderRace = async (sql: string, fixed: boolean) => {
+      const connection = (name: string) => {
+        const child = spawn(join(pg, 'psql'), ['-X', '-h', cluster, '-U', 'supabase_admin', '-d', 'postgres', '-Atq', '-v', 'ON_ERROR_STOP=1', '-f', '-']);
+        const session = { child, output: '', errors: '', exited: new Promise<number | null>(resolve => child.on('close', resolve)) };
+        child.stdout.on('data', b => { session.output += b; }); child.stderr.on('data', b => { session.errors += b; });
+        child.stdin.write(`\\set VERBOSITY verbose\nSET application_name='${name}'; SET deadlock_timeout='100ms'; SET statement_timeout='10s';\n`);
+        return session;
+      };
+      const supersede = connection('c1-7-supersede'), approve = connection('c1-7-approve');
+      const until = async (check: () => boolean, description: string) => {
+        const deadline = Date.now() + 10_000;
+        while (!check() && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+        assert.ok(check(), description + '\n' + supersede.errors + approve.errors);
+      };
+      const waits = (waiting: string, holding: string) => {
+        const r = psql(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity w JOIN pg_stat_activity h
+          ON h.pid=ANY(pg_blocking_pids(w.pid)) WHERE w.application_name='${waiting}' AND h.application_name='${holding}' AND w.wait_event_type='Lock');`);
+        ok(r); return r.stdout.trim() === 't';
+      };
+      try {
+        // Test-only pause: execute the generated DO prefix through the selected lock,
+        // close its nested IFs/DO, and keep the transaction open on psql stdin.
+        // Resumption re-enters the unmodified plan DO in that same transaction.
+        const pauseAt = fixed ? 'ORDER BY a.owner_user_id FOR UPDATE OF a;' : 'LOCK TABLE commonswarm_oauth.admin_client_owner_approvals IN SHARE ROW EXCLUSIVE MODE;';
+        const offset = sql.indexOf(pauseAt); assert.ok(offset >= 0);
+        supersede.child.stdin.write(sql.slice(0, offset + pauseAt.length) + ' END IF; END IF; END $c1$;\n\\echo supersede-paused\n');
+        await until(() => supersede.output.includes('supersede-paused'), 'supersede reached its lock pause');
+        // Both owners must be prelocked, even though only one is the C1 input owner.
+        if (fixed) {
+          for (const who of [owner, other]) {
+            const probe = psql(`BEGIN; SET LOCAL lock_timeout='100ms'; SELECT owner_user_id FROM swarm.admin_accounts WHERE owner_user_id='${who}' FOR UPDATE; ROLLBACK;`);
+            assert.notEqual(probe.status, 0); assert.match(probe.stderr, /canceling statement due to lock timeout/);
+          }
+        }
+        // Human approve SQL for a DIFFERENT client and the non-input binding owner:
+        // verification -> user -> account -> grants -> approval row -> event -> INSERT.
+        approve.child.stdin.write(`BEGIN; SET LOCAL ROLE swarm_command;
+          SELECT active FROM commonswarm_oauth.lock_admin_client_verification('${otherClient}',1);
+          SELECT user_id FROM swarm.users WHERE user_id='${other}' FOR UPDATE;
+          INSERT INTO swarm.admin_accounts(owner_user_id,stream_id) VALUES('${other}','${other}') ON CONFLICT(owner_user_id) DO NOTHING;
+          SELECT stream_id FROM swarm.admin_accounts WHERE owner_user_id='${other}' FOR UPDATE;
+          SELECT grant_id FROM swarm.admin_grants WHERE owner_user_id='${other}' ORDER BY grant_id FOR UPDATE;
+          SELECT owner_user_id FROM commonswarm_oauth.admin_client_owner_approvals WHERE owner_user_id='${other}' AND client_id='${otherClient}' AND verification_version=1 FOR UPDATE;\n\\echo approve-accounts-ready\n`);
+        if (fixed) {
+          await until(() => waits('c1-7-approve', 'c1-7-supersede'), 'approve waits for supersede account lock');
+          assert.ok(!approve.output.includes('approve-accounts-ready'), 'approval cannot pass the held account');
+        } else {
+          await until(() => approve.output.includes('approve-accounts-ready'), 'C1-6 approve holds its account');
+          // Queue rollback before creating the cycle: either victim may exit psql
+          // immediately on 40P01, so never write to that connection afterward.
+          supersede.child.stdin.end(sql.replace(/^BEGIN; /, '').replace(/COMMIT;\s*$/, '') + '\nROLLBACK;\n\\echo supersede-rolled-back\n');
+          await until(() => waits('c1-7-supersede', 'c1-7-approve'), 'C1-6 trigger waits for approve account');
+        }
+        const event = { stream_kind: 'account', owner_user_id: other, seq: 1, type: 'AdminClientApproved', actor_user: other,
+          payload: { client_id: otherClient, verification_version: 1 } };
+        approve.child.stdin.end(`INSERT INTO swarm.admin_events(owner_user_id,seq,event_id,command_id,event)
+          VALUES('${other}',1,'88888888-8888-4888-8888-888888888888','c1-lock-approve','${JSON.stringify(event)}');
+          INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,approval_event_id,approval_command_id)
+          VALUES('${other}','${otherClient}',1,'88888888-8888-4888-8888-888888888888','c1-lock-approve');
+          ${fixed ? 'COMMIT' : 'ROLLBACK'};\n\\echo approve-finished\n`);
+        if (fixed) {
+          supersede.child.stdin.end(sql.replace(/^BEGIN; /, '') + '\n\\echo supersede-committed\n');
+          assert.equal(await supersede.exited, 0, supersede.errors);
+          assert.equal(await approve.exited, 0, approve.errors);
+          assert.match(supersede.output, /supersede-committed/); assert.match(approve.output, /approve-finished/);
+          assert.doesNotMatch(supersede.errors + approve.errors, /40P01|deadlock detected/);
+          assert.equal(psql(`SELECT count(*) FROM commonswarm_oauth.admin_client_owner_approvals WHERE client_id='${otherClient}' AND owner_user_id='${other}';`).stdout.trim(), '1');
+          console.log('PASS C1-7 lock order: both binding owners locked; different-client approve waits, supersede COMMIT and real human approval INSERT complete; no deadlock');
+        } else {
+          await until(() => /40P01/.test(supersede.errors + approve.errors), 'C1-6 control reports PostgreSQL deadlock 40P01');
+          const statuses = await Promise.all([supersede.exited, approve.exited]);
+          assert.ok(statuses.some(status => status !== 0), 'deadlock aborts a contender');
+          assert.match(supersede.errors + approve.errors, /40P01.*deadlock detected/);
+          console.log('PASS C1-6 control: approvals table -> account versus account -> approvals INSERT produces PostgreSQL 40P01');
+        }
+      } finally {
+        for (const session of [supersede, approve]) {
+          if (session.child.exitCode === null && !session.child.stdin.writableEnded) session.child.stdin.end('ROLLBACK;\n');
+          await session.exited;
+        }
+      }
+    };
+    await lockOrderRace(c16Sql, false);
+    await lockOrderRace(supersedeSql, true);
+    assert.equal(psql("SELECT has_table_privilege('commonswarm_admin_release','swarm.admin_accounts','UPDATE');").stdout.trim(), 'f', 'no account-lock privilege added');
+    assert.equal(psql(`SELECT count(*) FROM commonswarm_oauth.refresh_family_tombstones WHERE grant_id LIKE 'c1-lock-family-%';`).stdout.trim(), '2', 'real deactivation fences retain both terminal families');
     ok(verify(2)); ok(verify(2));
     refused(verify(1), /FAIL ai-w6-client-verification: verification_version 1 expected reusable got superseded; use verification_version 3 for the next W6; STOP/);
     const rows = psql(`SELECT verification_version,active,withdrawn_at IS NOT NULL,coalesce(withdrawal_reason,'') FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' ORDER BY verification_version;`); ok(rows);
