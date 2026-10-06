@@ -733,3 +733,72 @@ INNER_RC=0
 The C1-14 extract uniqueness test in `tests/c1-w2-rehearsal.test.ts` passed in a separate inner run without `RUN_PG_REHEARSAL=1` (PG tests skipped). PG rehearsal is left for the Lead.
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. Frozen SHA remains `86673f1f`.
+
+## C1-16: checker round 6 (uncommitted)
+
+Prepared against committed HEAD `00e4fca4`. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent
+review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for the Lead.
+
+Changed step counts (manual and conditional rows included, as in C1-8): **none**.
+No run-order rows were added or removed.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+Harness edits (not in the allowed plan-only list; listed for the checker):
+`tests/admin-release-plan-sandbox.test.ts` first `Mac|box` token classifier,
+EXPECTED_MAC_STEPS/MUST_PASS without `ai-w7-proof`, `ai-live-controls` and
+`ai-edge-receipt`, ssh mktemp stubs for `/tmp/admin-c1.XXXXXX` and kin.
+No `scripts/c1-task-from-plan.mjs`, `scripts/c1-w2-rehearsal.sh` or
+`scripts/c1-w6-rehearsal-steps.sh` edits.
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 EDGE_MEASUREMENT_FILE as argv | done | ai-open/ai-w5-reference/ai-w6-activation-checks/ai-w6-activation-apply pass `"$EDGE_MEASUREMENT_FILE"` as argv[3] L1282, L4300, L4784, L5052 |
+| 2 revoke receipt binds grant_id + request_id | done | ai-w6-human-revoke match requires both L5932; CLI publish validates both L5968 |
+| 3 atomic receipts; incomplete does not block | done | revoke mktemp+validate+`mv -f` L5958-5970; incomplete prints `incomplete` and continues L5924-5942; owner JS stage+rename L5602-5605 |
+| 4 owner receipts bind release/window/plan/owner/action | done | reuse match L5590; producer fields L5601 |
+| 5 W5 recovery env capture + unset | done | unset then `out=$(python3 …) \|\| exit 1; eval "$out"` L4637-L4683 |
+| 6 W5 transfer compare before write | done | cmp all four files before any install L4594-4607 |
+| 7 W7 recovery generation from refresh else W6 | done | `proof/edge-measurement.json` else W6 final L6233-6240; `preserved-*-at-expected-generation` L6250 |
+| 8 no success-path `exit 0` in box blocks | done | ai-open-abort if/elif/else L6751-6799; ai-close W5 recovered `else` through last PASS then `fi`; human-revoke recovery `if/else` not `exit 0` |
+| 9 mktemp&&pointer plus abort leftover scan | done | ai-open L1373; abort pointer-absent scan L6755-6788 |
+| 10 download reuse validates parse + digest | done | ai-w6-transfer parse then `sha256sum` compare L5449-5478 |
+| 11 sandbox classifier first Mac\|box token | done (harness) | `hostRole` L41 of `tests/admin-release-plan-sandbox.test.ts`; 31 Mac blocks |
+| 12 private mktemp transfer staging | done | `/tmp/admin-c1.XXXXXX` L5428; `/tmp/admin-site-c1.XXXXXX` L4585; `/tmp/admin-site-recovery.XXXXXX` L4610; `/tmp/admin-c1-ready.XXXXXX` L4726 |
+
+Tests interrupt at the named point; frozen `00e4fca4` bytes fail the same fixture.
+
+Run-order quote pins retargeted after block growth (not new rows):
+`ai-w2-reconcile` 1913→1912; issuer rollback 2894→2893 and 3054→3053;
+`ai-w3-probes` 3396→3395; `ai-w4-rollback` host 3909→3908; W2 manual 1922→1921
+and 2988→2987; BROWSER-READY manual 5282→5270.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.VKYBdO: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.vEN7wP`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 180
+ℹ pass 179
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 208109.193125
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `00e4fca4`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.

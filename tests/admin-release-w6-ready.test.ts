@@ -370,14 +370,19 @@ async function fenceRun(LATENCY: number, stallUpload = false, budget = 0, fence:
   // is installed, no audit runs until the driver dispatches it through the existing box shell stdin.
   writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 sleep ${LATENCY}; cmd="\${@: -1}"; printf 'ssh %s\\n' "$cmd" >>"${calls}"
-${stallUpload ? 'case "$cmd" in *admin-c1-*agent.json*) exec sleep 600;; esac' : ''}
+case "$cmd" in
+ 'umask 077; mktemp -d /tmp/admin-c1.XXXXXX')
+  mkdir -p "${boxRoot}/tmp/admin-c1.dry001"; chmod 700 "${boxRoot}/tmp/admin-c1.dry001"
+  printf '/tmp/admin-c1.dry001\\n'; exit 0;;
+esac
+${stallUpload ? 'case "$cmd" in *agent.json*) exec sleep 600;; esac' : ''}
 cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
 eval "$cmd"\n`, { mode: 0o700 });
   writeFileSync(join(bin, 'scp'), `#!/bin/bash\nsleep ${LATENCY}; printf 'scp\\n' >>"${calls}"; dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"; cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
   const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(join(bin, 'node'), `#!/bin/bash
-case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls}"; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","request_id":"r","state":"revoked"}\\n';;
+case " $* " in *" src/cli.ts admin revoke "*) printf 'node revoke\\n' >>"${calls}"; req=; prev=; for a in "$@"; do if test "$prev" = --request-id; then req=$a; fi; prev=$a; done; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","request_id":"%s","state":"revoked"}\\n' "$req";;
  *" --input-type=module - "*) cat >/dev/null; printf 'node owner-check\\n' >>"${calls}";;
  *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
   const runId = '0123456789abcdef';
@@ -555,7 +560,7 @@ test('ai-w6-human-revoke: refreshes and the revoke request are bounded by the fe
     writeFileSync(join(proof, 'C1-inputs.json'), '{}');
     const calls = join(dir, 'calls'); writeFileSync(calls, '');
     writeFileSync(join(bin, 'node'), `#!/bin/bash
-case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${calls}'; test "\${REVOKE_SLEEP:-0}" = 0 || exec sleep "\${REVOKE_SLEEP}"; printf 'revoke-done\\n' >>'${calls}'; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","state":"revoked"}\\n';;
+case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke-start\\n' >>'${calls}'; test "\${REVOKE_SLEEP:-0}" = 0 || exec sleep "\${REVOKE_SLEEP}"; printf 'revoke-done\\n' >>'${calls}'; req=; prev=; for a in "$@"; do if test "$prev" = --request-id; then req=$a; fi; prev=$a; done; printf '{"grant_id":"11111111-1111-4111-8111-111111111111","request_id":"%s","state":"revoked"}\\n' "$req";;
  *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}'; test "\${PREFLIGHT_SLEEP:-0}" = 0 || exec sleep "\${PREFLIGHT_SLEEP}";;
  *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
     const go = (env: Record<string, string>) => {
@@ -637,7 +642,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
   writeFileSync(join(reusedProof, 'C1-audit.json'), JSON.stringify({ grant_id: '11111111-1111-4111-8111-111111111111' }));
   writeFileSync(join(reusedProof, 'C1-inputs.json'), '{}');
   writeFileSync(join(reusedProof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
-  writeFileSync(join(reusedProof, 'human-revoke-recovery.json'), JSON.stringify({ state: 'revoked', request_id: saved }) + '\n');
+  writeFileSync(join(reusedProof, 'human-revoke-recovery.json'), JSON.stringify({ state: 'revoked', grant_id: '11111111-1111-4111-8111-111111111111', request_id: saved }) + '\n');
   const reusedCalls = join(reusedDir, 'calls'); writeFileSync(reusedCalls, '');
   writeFileSync(join(reusedBin, 'node'), `#!/bin/bash
 case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke\\n' >>'${reusedCalls}';; *) exit 64;; esac\n`, { mode: 0o700 });
@@ -655,7 +660,7 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke\\n' >>'${reusedCall
   const mismatch = spawnSync('/bin/bash', ['-c', current], { encoding: 'utf8', timeout: 20_000,
     env: { ...process.env, C1_PROOF_DIR: mismatchProof, C1_INPUTS_FILE: join(mismatchProof, 'C1-inputs.json'), C1_SECRET_STAGE: mismatchProof, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
   assert.notEqual(mismatch.status, 0);
-  assert.match(mismatch.stderr, /retained revoke receipt expected revoked-for-saved-id got mismatch/);
+  assert.match(mismatch.stderr, /retained revoke receipt expected revoked-for-this-grant-and-saved-id got mismatch/);
 });
 
 
@@ -796,7 +801,8 @@ test('C1-14 W6b1-1: leftover upload temp is replaced and removed; empty download
   const frozenPlan = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
   assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
   const frozen = block('ai-w6-transfer', [...frozenPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!));
-  assert.match(current, /upload temp expected owner-matched-regular-file for this window and file got other/);
+  assert.match(current, /mktemp -d \/tmp\/admin-c1\.XXXXXX/);
+  assert.doesNotMatch(current, /C1_UPLOAD=\/tmp\/admin-c1-\$\{WINDOW_ID\}-/);
   assert.match(frozen, /printf -v C1_REMOTE 'test ! -e %q' "\$C1_UPLOAD"/);
   assert.match(current, /download expected nonempty got empty/);
   const windowId = 'Abc123';
@@ -819,6 +825,11 @@ test('C1-14 W6b1-1: leftover upload temp is replaced and removed; empty download
     }
     writeFileSync(join(bin, 'ssh'), `#!/bin/bash
 cmd="\${@: -1}"
+case "$cmd" in
+ 'umask 077; mktemp -d /tmp/admin-c1.XXXXXX')
+  mkdir -p "${boxRoot}/tmp/admin-c1.dry001"; chmod 700 "${boxRoot}/tmp/admin-c1.dry001"
+  printf '/tmp/admin-c1.dry001\\n'; exit 0;;
+esac
 cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
 cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
 eval "$cmd"\n`, { mode: 0o700 });
@@ -836,15 +847,142 @@ cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0
   assert.equal(readFileSync(old.leftover, 'utf8'), 'stale leftover\n');
   const cur = transfer(current, { leftover: 'file' });
   assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
-  assert.ok(!existsSync(cur.leftover), 'upload temp removed after install');
+  assert.equal(readFileSync(cur.leftover, 'utf8'), 'stale leftover\n', 'predictable leftover path is unused');
   assert.equal(readFileSync(join(cur.boxProof, 'agent.json'), 'utf8'), '{"ok":true}\n');
   const linked = transfer(current, { leftover: 'symlink' });
-  assert.notEqual(linked.r.status, 0);
-  assert.match(linked.r.stderr, /upload temp expected not-symlink got symlink/);
+  assert.equal(linked.r.status, 0, linked.r.stderr + linked.r.stdout);
+  assert.equal(readFileSync(join(linked.boxProof, 'agent.json'), 'utf8'), '{"ok":true}\n');
   const frozenEmpty = transfer(frozen, { download: 'empty', file: 'C1-fence.txt' });
   assert.notEqual(frozenEmpty.r.status, 0);
   assert.equal(readFileSync(frozenEmpty.dest, 'utf8'), '');
   const curEmpty = transfer(current, { download: 'empty', file: 'C1-fence.txt' });
   assert.equal(curEmpty.r.status, 0, curEmpty.r.stderr);
   assert.equal(readFileSync(curEmpty.dest, 'utf8'), 'from-box\n');
+});
+
+const frozen00Plan = spawnSync('git', ['show', '00e4fca4:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozen00Plan.status, 0, frozen00Plan.stderr);
+const frozen00Blocks = [...frozen00Plan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozen00Block = (id: string) => block(id, frozen00Blocks);
+
+test('C1-16: recovery revoke binds grant_id and saved request id; incomplete receipts do not block', () => {
+  const grant = '11111111-1111-4111-8111-111111111111';
+  const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const currentPy = block('ai-w6-human-revoke').match(/C1_REVOKE_RECEIPT_STATE=\$\(python3 - "\$C1_EXISTING" "\$C1_REVOKE_REQUEST_ID" "\$C1_GRANT_ID" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  const frozenPy = frozen00Block('ai-w6-human-revoke').match(/python3 - "\$C1_EXISTING" "\$C1_REVOKE_REQUEST_ID" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  const classify = (py: string, body: string, extra: string[] = []) => {
+    const file = join(root, `revoke-${digest(body).slice(0, 12)}.json`);
+    writeFileSync(file, body);
+    return spawnSync('python3', ['-', file, saved, grant, ...extra], { input: py, encoding: 'utf8' });
+  };
+  const correct = JSON.stringify({ state: 'revoked', grant_id: grant, request_id: saved }) + '\n';
+  const wrongGrant = JSON.stringify({ state: 'revoked', grant_id: '99999999-9999-4999-8999-999999999999', request_id: saved }) + '\n';
+  const missingId = JSON.stringify({ state: 'revoked', grant_id: '99999999-9999-4999-8999-999999999999' }) + '\n';
+  const wrongId = JSON.stringify({ state: 'revoked', grant_id: grant, request_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' }) + '\n';
+  assert.equal(classify(currentPy, correct).stdout.trim(), 'match');
+  assert.notEqual(classify(currentPy, wrongGrant).status, 0);
+  assert.notEqual(classify(currentPy, missingId).status, 0);
+  assert.notEqual(classify(currentPy, wrongId).status, 0);
+  assert.equal(classify(currentPy, '').stdout.trim(), 'incomplete');
+  assert.equal(classify(currentPy, '{"state":').stdout.trim(), 'incomplete');
+  assert.equal(classify(frozenPy, wrongGrant).status, 0, 'frozen 00e4fca4 accepts another grant with the saved id');
+  assert.equal(classify(frozenPy, missingId).status, 0, 'frozen 00e4fca4 accepts a missing request id');
+  assert.notEqual(classify(frozenPy, '').status, 0, 'frozen 00e4fca4 json.load of empty output dies');
+  const make = (source: string, receipt: string) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'c116-revoke-')));
+    const bin = join(dir, 'bin'), proof = join(dir, 'proof'), stage = join(dir, 'stage');
+    for (const d of [bin, proof, stage]) mkdirSync(d, { mode: 0o700 });
+    writeFileSync(join(proof, 'C1-audit.json'), JSON.stringify({ grant_id: grant }));
+    writeFileSync(join(proof, 'C1-inputs.json'), '{}');
+    writeFileSync(join(proof, 'revoke-request-id'), saved + '\n', { mode: 0o600 });
+    writeFileSync(join(proof, 'human-revoke-recovery.json'), receipt);
+    writeFileSync(join(stage, 'agent.json'), JSON.stringify({ ok: true, refused_after_fence: { http_status: 403 } }));
+    const calls = join(dir, 'calls'); writeFileSync(calls, '');
+    const realNode = spawnSync('/bin/sh', ['-c', 'command -v node'], { encoding: 'utf8' }).stdout.trim();
+    writeFileSync(join(bin, 'node'), `#!/bin/bash
+case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${calls}'; printf '{"grant_id":"${grant}","request_id":"${saved}","state":"revoked"}\\n';;
+ *" --input-type=module - "*) cat >/dev/null; printf 'preflight\\n' >>'${calls}';;
+ *) exec '${realNode}' "$@";; esac\n`, { mode: 0o700 });
+    const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
+    return { r, calls: readFileSync(calls, 'utf8'), proof };
+  };
+  const skipped = make(frozen00Block('ai-w6-human-revoke'), wrongGrant);
+  assert.equal(skipped.r.status, 0, skipped.r.stderr);
+  assert.equal(skipped.calls, '', 'frozen 00e4fca4 skipped the CLI for another grant');
+  const resent = make(block('ai-w6-human-revoke'), '{"state":');
+  assert.equal(resent.r.status, 0, resent.r.stderr + resent.r.stdout);
+  assert.match(resent.calls, new RegExp(`--request-id ${saved}`));
+  const empty = make(block('ai-w6-human-revoke'), '');
+  assert.equal(empty.r.status, 0, empty.r.stderr);
+  assert.match(empty.calls, /admin revoke/);
+});
+
+test('C1-16: W7 recovery uses the refresh generation when present; frozen 00e4fca4 always uses W6', () => {
+  const current = block('ai-w7-recovery');
+  const frozen = frozen00Block('ai-w7-recovery');
+  assert.match(current, /preserved-open-at-expected-generation/);
+  assert.match(frozen, /preserved-open-at-W6-generation/);
+  const pyOf = (source: string) => source.match(/python3 - "\$INPUTS_FILE" "\$PROOF_DIR" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  const dir = realpathSync(mkdtempSync(join(root, 'w7gen-')));
+  const home = join(dir, 'home');
+  const w6 = join(home, 'commonswarm/admin-issuance/release-proofs', `${sha}-W6-W6win1`);
+  const proof = join(dir, 'proof');
+  mkdirSync(w6, { recursive: true, mode: 0o700 });
+  mkdirSync(proof, { mode: 0o700 });
+  writeFileSync(join(w6, 'C1-finish.json'), JSON.stringify({ state: 'open', explicit_keep_open: true }) + '\n');
+  writeFileSync(join(w6, 'edge-measurement-final.json'), JSON.stringify({ release_sha: sha, generation: 15, invalidated_at: null }) + '\n');
+  writeFileSync(join(proof, 'edge-measurement.json'), JSON.stringify({ release_sha: sha, generation: 16, invalidated_at: null }) + '\n');
+  const inputs = inputFile({ ...base(), window: 'W7', w6_window_id: 'W6win1', release_sha: sha });
+  const runPy = (py: string) => spawnSync('python3', ['-', inputs, proof], {
+    input: py.split('/home/commonswarm').join(join(home, 'commonswarm')), encoding: 'utf8',
+  });
+  const cur = runPy(pyOf(current));
+  assert.equal(cur.status, 0, cur.stderr);
+  assert.equal(JSON.parse(readFileSync(join(proof, 'W7-recovery-expected.json'), 'utf8')).generation, 16);
+  const old = runPy(pyOf(frozen));
+  assert.equal(old.status, 0, old.stderr);
+  assert.equal(JSON.parse(readFileSync(join(proof, 'W7-recovery-expected.json'), 'utf8')).generation, 15);
+});
+
+test('C1-16: download reuse refuses partial C1-finish.json; frozen 00e4fca4 reuses it', () => {
+  const current = block('ai-w6-transfer');
+  const frozen = frozen00Block('ai-w6-transfer');
+  assert.match(current, /c1_download_reuse=0/);
+  assert.match(current, /name=='C1-finish.json'/);
+  const partial = '{"state":';
+  const go = (source: string) => {
+    const dir = realpathSync(mkdtempSync(join(root, 'c116-dl-')));
+    const bin = join(dir, 'bin'), boxRoot = join(dir, 'box'), proof = join(dir, 'c1-proof');
+    for (const d of [bin, boxRoot, proof]) mkdirSync(d, { recursive: true, mode: 0o700 });
+    const boxProof = join(boxRoot, `home/commonswarm/admin-issuance/release-proofs/${sha}-W6-Abc123`);
+    mkdirSync(boxProof, { recursive: true });
+    mkdirSync(join(boxRoot, 'tmp'), { recursive: true });
+    writeFileSync(join(proof, 'C1-finish.json'), partial);
+    writeFileSync(join(boxProof, 'C1-finish.json'), JSON.stringify({ state: 'open', explicit_keep_open: true }) + '\n');
+    writeFileSync(join(bin, 'ssh'), `#!/bin/bash
+cmd="\${@: -1}"
+case "$cmd" in
+ 'umask 077; mktemp -d /tmp/admin-c1.XXXXXX')
+  mkdir -p "${boxRoot}/tmp/admin-c1.dry001"; chmod 700 "${boxRoot}/tmp/admin-c1.dry001"
+  printf '/tmp/admin-c1.dry001\\n'; exit 0;;
+esac
+cmd=$(python3 '${BOX_MAPPER}' '${boxRoot}' "$cmd") || exit 1
+cmd="\${cmd//sudo -n /}"; cmd="\${cmd//install -o root -g root/install}"; mkdir -p "${boxRoot}/tmp"
+eval "$cmd"\n`, { mode: 0o700 });
+    writeFileSync(join(bin, 'scp'), `#!/bin/bash
+dest="\${@: -1}"; dest="\${dest#ops@100.115.66.74:}"; mkdir -p "${boxRoot}/tmp"
+cp "\${@: -2:1}" "$(python3 '${BOX_MAPPER}' '${boxRoot}' "$dest")"\n`, { mode: 0o700 });
+    const r = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof,
+        C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-finish.json',
+        RELEASE_SHA: sha, WINDOW_ID: 'Abc123' } });
+    return { r, dest: join(proof, 'C1-finish.json') };
+  };
+  const old = go(frozen);
+  assert.equal(old.r.status, 0, old.r.stderr);
+  assert.equal(readFileSync(old.dest, 'utf8'), partial);
+  const cur = go(current);
+  assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
+  assert.equal(JSON.parse(readFileSync(cur.dest, 'utf8')).state, 'open');
 });

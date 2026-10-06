@@ -3091,8 +3091,8 @@ test('C1-12 W5: recovery-transfer resumes matching tar and proof dir; frozen 866
   const transfer = block('ai-w5-recovery-transfer');
   assert.match(transfer, /tarfile.open\(archive,'x'\)/);
   assert.match(transfer, /retained site-recovery.tar members expected current-evidence/);
-  assert.match(transfer, /upload directory expected owner-matched/);
-  assert.match(transfer, /rm -r -- "\$upload"/);
+  assert.match(transfer, /upload directory expected \/tmp\/admin-site-c1\.XXXXXX/);
+  assert.match(transfer, /mktemp -d \/tmp\/admin-site-c1\.XXXXXX/);
   assert.doesNotMatch(frozenBlock('ai-w5-recovery-transfer'), /tarfile.open\(archive,'x'\)/);
   const py = transfer.match(/python3 - "\$SITE_EVIDENCE" "\$PREP_DIR\/site-recovery.tar" "\$INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
   const dir = mkdtempSync(join(scratch, 'w5tar-'));
@@ -3174,7 +3174,7 @@ test('C1-13 ai-open-abort PASSes when secret-stage.path is absent; frozen 86673f
 
 test('C1-13 W6a-2: receipt children see INPUTS_FILE and EDGE_MEASUREMENT_FILE under env -i', () => {
   for (const id of ['ai-open', 'ai-w5-reference', 'ai-w6-activation-checks', 'ai-w6-activation-apply']) {
-    assert.match(block(id), /env=dict\(os\.environ,PLAN_FILE=sys\.argv\[1\],INPUTS_FILE=sys\.argv\[2\],EDGE_MEASUREMENT_FILE=os\.environ\['EDGE_MEASUREMENT_FILE'\]\)/);
+    assert.match(block(id), /env=dict\(os\.environ,PLAN_FILE=sys\.argv\[1\],INPUTS_FILE=sys\.argv\[2\],EDGE_MEASUREMENT_FILE=sys\.argv\[3\]\)/);
   }
   assert.match(block('ai-edge-remeasure'), /env=dict\(os\.environ,EDGE_MEASUREMENT_FILE=out,INPUTS_FILE=inputs\)/);
   assert.match(block('ai-edge-refresh'), /EDGE_MEASUREMENT_FILE=os\.environ\.get\('EDGE_MEASUREMENT_FILE'/);
@@ -3278,6 +3278,9 @@ function runOwnerClient(source: string, proof: string, action: string) {
     state_directory: proof,
     metadata_digest: metadata,
     verification_version: 1,
+    release_sha: sha,
+    window_id: 'New123',
+    plan_sha256: 'a'.repeat(64),
   }));
   return spawnSync('node', ['--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000 });
 }
@@ -3292,6 +3295,8 @@ test('C1-14 W6B2-3: owner-client-command reuses a saved id and matching receipt;
   const receipt = (id: string) => JSON.stringify({
     status: 'PASS', command_id: id, client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json',
     verification_version: 1, metadata_digest: ownerClientJs(current).metadata, withdrawn_at: '2026-10-04T15:30:00Z',
+    release_sha: sha, window_id: 'New123', plan_sha256: 'a'.repeat(64),
+    owner_user_id: '22222222-2222-4222-8222-222222222222', action: 'withdraw',
   }) + '\n';
   const interrupted = mkdtempSync(join(scratch, 'occ-id-'));
   writeFileSync(join(interrupted, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
@@ -3319,4 +3324,176 @@ test('C1-14 W6B2-3: owner-client-command reuses a saved id and matching receipt;
   const bad = runOwnerClient(current, mismatch, 'withdraw');
   assert.notEqual(bad.status, 0);
   assert.match(bad.stderr, /retained receipt expected matching-pass-for-this-action got mismatch/);
+});
+
+const frozen00Plan = spawnSync('git', ['show', '00e4fca4:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozen00Plan.status, 0, frozen00Plan.stderr);
+const frozen00Blocks = [...frozen00Plan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozen00Block = (id: string) => frozen00Blocks.find(s => s.startsWith(`# step: ${id}\n`)) ?? '';
+const hostRoleOf = (source: string) => (/^# host: (.+)$/m.exec(source)?.[1] ?? '').match(/\b(Mac|box)\b/i)?.[1]?.toLowerCase() ?? '';
+const boxExit0 = (source: string) => source.split('\n').filter(line => /^\s*exit 0\s*$/.test(line));
+
+test('C1-16: unexported EDGE_MEASUREMENT_FILE reaches receipt children as argv; frozen 00e4fca4 reads os.environ', () => {
+  for (const id of ['ai-open', 'ai-w5-reference', 'ai-w6-activation-checks', 'ai-w6-activation-apply']) {
+    assert.match(frozen00Block(id), /EDGE_MEASUREMENT_FILE=os\.environ\['EDGE_MEASUREMENT_FILE'\]/);
+    assert.match(block(id), /python3 - "\$PLAN_FILE" "\$INPUTS_FILE" "\$EDGE_MEASUREMENT_FILE"/);
+    assert.match(block(id), /EDGE_MEASUREMENT_FILE=sys\.argv\[3\]/);
+  }
+  const envKey = spawnSync('env', ['-i', 'PATH=' + process.env.PATH, 'python3', '-c', "import os; print(os.environ['EDGE_MEASUREMENT_FILE'])"], { encoding: 'utf8' });
+  assert.notEqual(envKey.status, 0, 'frozen 00e4fca4 os.environ lookup fails without export');
+  assert.match(envKey.stderr, /KeyError|EDGE_MEASUREMENT_FILE/);
+  const argvOk = spawnSync('/bin/bash', ['-c', 'EDGE_MEASUREMENT_FILE=/tmp/edge-measurement.json; env -i PATH="$PATH" python3 -c "import sys; print(sys.argv[1])" "$EDGE_MEASUREMENT_FILE"'], { encoding: 'utf8' });
+  assert.equal(argvOk.status, 0, argvOk.stderr);
+  assert.equal(argvOk.stdout.trim(), '/tmp/edge-measurement.json');
+});
+
+test('C1-16: owner-command receipts bind release/window/plan/owner/action; frozen 00e4fca4 reuses a wrong window', () => {
+  const current = block('ai-w6-owner-client-command');
+  const frozen = frozen00Block('ai-w6-owner-client-command');
+  assert.match(current, /existing\.release_sha===c\.release_sha && existing\.window_id===c\.window_id && existing\.plan_sha256===c\.plan_sha256 && existing\.owner_user_id===c\.owner_user_id && existing\.action===action/);
+  assert.doesNotMatch(frozen, /existing\.release_sha===c\.release_sha/);
+  assert.match(current, /release_sha:c\.release_sha,window_id:c\.window_id,plan_sha256:c\.plan_sha256,owner_user_id:c\.owner_user_id,action/);
+  const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const bound = JSON.parse(JSON.stringify({
+    status: 'PASS', command_id: saved, client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json',
+    verification_version: 1, metadata_digest: ownerClientJs(current).metadata, withdrawn_at: '2026-10-04T15:30:00Z',
+    release_sha: sha, window_id: 'Other1', plan_sha256: 'a'.repeat(64),
+    owner_user_id: '22222222-2222-4222-8222-222222222222', action: 'withdraw',
+  }));
+  const dir = mkdtempSync(join(scratch, 'occ-c116-win-'));
+  writeFileSync(join(dir, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(dir, 'client-withdraw.json'), JSON.stringify(bound) + '\n', { mode: 0o600 });
+  const cur = runOwnerClient(current, dir, 'withdraw');
+  assert.notEqual(cur.status, 0);
+  assert.match(cur.stderr, /retained receipt expected matching-pass-for-this-action got mismatch/);
+  const frozenDir = mkdtempSync(join(scratch, 'occ-c116-fr-'));
+  writeFileSync(join(frozenDir, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(frozenDir, 'client-withdraw.json'), JSON.stringify({ ...bound, metadata_digest: ownerClientJs(frozen).metadata }) + '\n', { mode: 0o600 });
+  const old = runOwnerClient(frozen, frozenDir, 'withdraw');
+  assert.equal(old.status, 0, old.stderr + old.stdout);
+  assert.match(old.stdout, /reused completed receipt/);
+  for (const change of [
+    { owner_user_id: '33333333-3333-4333-8333-333333333333' },
+    { action: 'approve', approval_at: '2026-10-04T15:30:00Z' },
+    { plan_sha256: 'b'.repeat(64) },
+  ] as const) {
+    const d = mkdtempSync(join(scratch, 'occ-c116-mis-'));
+    writeFileSync(join(d, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+    writeFileSync(join(d, 'client-withdraw.json'), JSON.stringify({ ...bound, window_id: 'New123', ...change }) + '\n', { mode: 0o600 });
+    const r = runOwnerClient(current, d, 'withdraw');
+    assert.notEqual(r.status, 0, JSON.stringify(change));
+    assert.match(r.stderr, /retained receipt expected matching-pass-for-this-action got mismatch/);
+  }
+  const partial = mkdtempSync(join(scratch, 'occ-c116-part-'));
+  writeFileSync(join(partial, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(partial, 'client-withdraw.json'), '{"state":', { mode: 0o600 });
+  const resumed = runOwnerClient(current, partial, 'withdraw');
+  assert.equal(resumed.status, 0, resumed.stderr + resumed.stdout);
+  assert.equal(JSON.parse(readFileSync(join(partial, 'client-withdraw.json'), 'utf8')).command_id, saved);
+});
+
+test('C1-16: W5 recovery env refuses a failed python without keeping old vars; frozen 00e4fca4 eval can succeed', () => {
+  assert.match(frozen00Block('ai-w5-recovery-env'), /eval "\$\(python3 - "\$INPUTS_FILE"/);
+  assert.doesNotMatch(block('ai-w5-recovery-env'), /eval "\$\(python3/);
+  assert.match(block('ai-w5-recovery-env'), /unset WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR BOX_ARCHIVE_PATH SITE_RECOVERY_EVIDENCE PLAN_FILE CLOSE_RESULT/);
+  assert.match(block('ai-w5-recovery-env'), /out=\$\(python3 - "\$INPUTS_FILE" <<'PY'/);
+  assert.match(block('ai-w5-recovery-env'), /\) \|\| exit 1\neval "\$out"/);
+  const failPy = 'import sys; sys.stderr.write("FAIL ai-w5-recovery-env: INPUTS_FILE expected absolute-regular-file got other; STOP\\n"); raise SystemExit(1)';
+  const frozen = spawnSync('/bin/bash', ['-c', `set -euo pipefail
+WINDOW=old WINDOW_ID=old RELEASE_SHA=old PROOF_DIR=/old BOX_ARCHIVE_PATH=/old SITE_RECOVERY_EVIDENCE=/old PLAN_FILE=/old CLOSE_RESULT=success
+eval "$(python3 -c ${JSON.stringify(failPy)})"
+printf 'kept WINDOW=%s status=0\\n' "$WINDOW"
+`], { encoding: 'utf8' });
+  assert.equal(frozen.status, 0, frozen.stderr);
+  assert.match(frozen.stdout, /kept WINDOW=old/);
+  const current = spawnSync('/bin/bash', ['-c', `set -euo pipefail
+WINDOW=old CLOSE_RESULT=success
+unset WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR BOX_ARCHIVE_PATH SITE_RECOVERY_EVIDENCE PLAN_FILE CLOSE_RESULT
+out=$(python3 -c ${JSON.stringify(failPy)}) || exit 1
+eval "$out"
+printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
+`], { encoding: 'utf8' });
+  assert.notEqual(current.status, 0);
+  assert.doesNotMatch(current.stdout, /leaked/);
+  assert.match(current.stderr, /INPUTS_FILE expected absolute-regular-file/);
+});
+
+test('C1-16: W5 transfer compares retained bytes before any write; frozen 00e4fca4 overwrites', () => {
+  const current = block('ai-w5-recovery-transfer');
+  const frozen = frozen00Block('ai-w5-recovery-transfer');
+  assert.match(current, /Compare every retained dest with the incoming bytes BEFORE writing anything/);
+  assert.match(current, /retained %s expected byte-identical-to-upload got mismatch/);
+  assert.doesNotMatch(frozen, /byte-identical-to-upload/);
+  const dir = mkdtempSync(join(scratch, 'w5cmp-'));
+  const upload = join(dir, 'up'), dest = join(dir, 'dest');
+  mkdirSync(upload); mkdirSync(dest);
+  writeFileSync(join(upload, 'inputs.json'), 'new-bytes\n');
+  writeFileSync(join(dest, 'inputs.json'), 'old-bytes\n');
+  const body = `set -euo pipefail
+for file in inputs.json; do
+ test -f "$1/$file" && test ! -L "$1/$file" || exit 1
+ if test -e "$2/$file"; then
+  test -f "$2/$file" || exit 1
+  cmp -s "$1/$file" "$2/$file" || { printf 'FAIL ai-w5-recovery-transfer: retained %s expected byte-identical-to-upload got mismatch; STOP\\n' "$file" >&2; exit 1; }
+ fi
+done
+for file in inputs.json; do
+ if test ! -e "$2/$file"; then cp "$1/$file" "$2/$file"; fi
+done
+`;
+  const cur = spawnSync('/bin/bash', ['-c', body, 'cmp', upload, dest], { encoding: 'utf8' });
+  assert.notEqual(cur.status, 0);
+  assert.match(cur.stderr, /retained inputs.json expected byte-identical-to-upload got mismatch/);
+  assert.equal(readFileSync(join(dest, 'inputs.json'), 'utf8'), 'old-bytes\n');
+  const over = spawnSync('/bin/bash', ['-c', 'set -euo pipefail; cp "$1/inputs.json" "$2/inputs.json"', 'cp', upload, dest], { encoding: 'utf8' });
+  assert.equal(over.status, 0);
+  assert.equal(readFileSync(join(dest, 'inputs.json'), 'utf8'), 'new-bytes\n');
+});
+
+test('C1-16: box-hosted blocks have no success-path exit 0; frozen 00e4fca4 has them', () => {
+  const currentHits: string[] = [];
+  for (const source of blocks) {
+    if (hostRoleOf(source) !== 'box') continue;
+    const hits = boxExit0(source);
+    if (hits.length) currentHits.push(/^# step: (\S+)/.exec(source)![1]!);
+  }
+  assert.deepEqual(currentHits, []);
+  const frozenHits = frozen00Blocks.filter(s => hostRoleOf(s) === 'box' && boxExit0(s).length).map(s => /^# step: (\S+)/.exec(s)![1]!);
+  assert.ok(frozenHits.includes('ai-open-abort'), JSON.stringify(frozenHits));
+  assert.ok(frozenHits.includes('ai-close'), JSON.stringify(frozenHits));
+  assert.match(block('ai-close'), /if test "\$WINDOW" = W5 && test "\$CLOSE_RESULT" = recovered; then/);
+  assert.doesNotMatch(block('ai-close'), /^\s*exit 0\s*$/m);
+  assert.match(frozen00Block('ai-close'), /^\s*exit 0\s*$/m);
+});
+
+test('C1-16: host lines classify by the first Mac|box token; ai-w7-proof and ai-live-controls are box', () => {
+  const role = (host: string) => host.match(/\b(Mac|box)\b/i)?.[1]?.toLowerCase() ?? '';
+  assert.equal(role('HezLead Mac; after referenced site manifest'), 'mac');
+  assert.equal(role('box root; database read-only; Mac already ran ai-gates'), 'box');
+  assert.equal(role('box (or the W5 Mac shell); read independently produced, nonsecret window probes'), 'box');
+  assert.equal(role('box root; EDGE_RECEIPT_REMOTE=1 queries the box from the W5 Mac wrapper'), 'box');
+  assert.equal(hostRoleOf(block('ai-w7-proof')), 'box');
+  assert.equal(hostRoleOf(block('ai-live-controls')), 'box');
+  assert.equal(hostRoleOf(block('ai-edge-receipt')), 'box');
+  assert.equal(hostRoleOf(block('ai-w5-closed')), 'mac');
+});
+
+test('C1-16: abort publishes the pointer with mktemp and scans leftover stages when the pointer is absent', () => {
+  assert.match(block('ai-open'), /SECRET_STAGE=\$\(mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf '%s\\n' "\$SECRET_STAGE" >"\$PROOF_DIR\/secret-stage\.path"/);
+  assert.doesNotMatch(frozen00Block('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf/);
+  const py = block('ai-open-abort').match(/ABORT_SCAN=\$\(python3 - "\$PROOF_DIR" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+  assert.match(py, /anvil-secret\\\.\[A-Za-z0-9\]\{6\}/);
+  const tmp = mkdtempSync(join(scratch, 'abort-scan-tmp-'));
+  const proof = mkdtempSync(join(scratch, 'abort-scan-proof-'));
+  const leftover = join(tmp, 'anvil-secret.AbCdEf');
+  mkdirSync(leftover, { mode: 0o700 });
+  chmodSync(leftover, 0o700);
+  const rewritten = py.replace("os.listdir('/tmp')", `os.listdir(${JSON.stringify(tmp)})`).replace("path='/tmp/'+", `path=${JSON.stringify(tmp + '/')}+`);
+  const found = spawnSync('python3', ['-', proof], { input: rewritten, encoding: 'utf8' });
+  assert.equal(found.status, 0, found.stderr);
+  assert.match(found.stdout, /removed unrecorded secret stage\(s\): .*anvil-secret\.AbCdEf/);
+  assert.ok(!existsSync(leftover));
+  const none = spawnSync('python3', ['-', proof], { input: rewritten, encoding: 'utf8' });
+  assert.equal(none.status, 0, none.stderr);
+  assert.match(none.stdout, /no secret stage was created/);
 });

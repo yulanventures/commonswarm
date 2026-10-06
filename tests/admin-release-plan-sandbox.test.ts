@@ -38,20 +38,21 @@ const plan = readFileSync(planPath, 'utf8');
 const blocks = [...plan.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
 const stepOf = (source: string) => /^# step: (ai-[a-z0-9-]+)$/.exec(source.split('\n')[0]!)?.[1];
 const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)?.[1];
-const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
+const hostRole = (source: string) => (hostOf(source) ?? '').match(/\b(Mac|box)\b/i)?.[1]?.toLowerCase() ?? '';
+const macBlocks = blocks.filter(source => hostRole(source) === 'mac');
 const EXPECTED_MAC_STEPS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-gates', 'ai-ordinary-probes', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w5-recovery-transfer', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
-  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w7-proof', 'ai-w6-close-state', 'ai-mac-close',
+  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-recovery-transfer', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-gates', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-recovery-transfer', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
-  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w7-proof', 'ai-w6-close-state', 'ai-mac-close',
+  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that contact public ingress from Python urllib; the sandbox denies the network.
 const NETWORK_DENIED = ['ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes', 'ai-w5-closed', 'ai-w6-activation-probes'];
@@ -250,6 +251,12 @@ refuse() { printf 'c1gui stub refused unmodelled %s\\n' "$name" >&2; exit 97; }
 case "$name" in
  ssh) # Remote commands are recorded only. 'sudo -n cat FILE' prints a fixture receipt line.
   last=\${@: -1}
+  case "$last" in
+   'umask 077; mktemp -d /tmp/admin-c1.XXXXXX') printf '/tmp/admin-c1.dry001\\n'; exit 0;;
+   'umask 077; mktemp -d /tmp/admin-site-c1.XXXXXX') printf '/tmp/admin-site-c1.dry001\\n'; exit 0;;
+   'umask 077; mktemp -d /tmp/admin-site-recovery.XXXXXX') printf '/tmp/admin-site-recovery.dry001\\n'; exit 0;;
+   'umask 077; mktemp -d /tmp/admin-c1-ready.XXXXXX') printf '/tmp/admin-c1-ready.dry001\\n'; exit 0;;
+  esac
   # W2 probe upload: consume stdin and answer with the mode and digest of what arrived (nothing is stored).
   case "$last" in *ordinary-probes.json*install*/dev/stdin*) printf '600 %s\\n' "$(/usr/bin/shasum -a 256 | cut -d ' ' -f 1)"; exit 0;; esac
   if test "$last" = "sudo -n /bin/bash -s -- $C1GUI_RELEASE_SHA $C1GUI_POSTGRES_IMAGE"; then
@@ -440,7 +447,7 @@ test('gui-denied dry run: Mac host blocks are extracted completely and reconcile
   assert.deepEqual(macBlocks.map(stepOf), EXPECTED_MAC_STEPS, 'Mac host block set changed; reconcile EXPECTED_MAC_STEPS');
   const excluded = blocks.filter(s => !macBlocks.includes(s)).map(stepOf);
   assert.equal(excluded.length + macBlocks.length, blocks.length);
-  for (const source of blocks.filter(s => !macBlocks.includes(s))) assert.doesNotMatch(hostOf(source)!, /mac/i);
+  for (const source of blocks.filter(s => !macBlocks.includes(s))) assert.notEqual(hostRole(source), 'mac', `${stepOf(source)} first Mac|box token must not be Mac`);
   console.log(`# Mac blocks ${macBlocks.length} of ${blocks.length}; box-only blocks excluded: ${excluded.join(' ')}`);
 });
 
@@ -524,9 +531,6 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
   }
   const byStep = new Map(outcomes.map(o => [o.step, o]));
   for (const step of MUST_PASS) assert.equal(byStep.get(step)!.status, 0, `${step} must complete in the dry run: ${byStep.get(step)!.stderrTail}`);
-  assert.equal(byStep.get('ai-edge-receipt')!.stubCalls.length, 1);
-  assert.match(byStep.get('ai-edge-receipt')!.stubCalls[0]!, /^ssh .*sudo/,
-    'edge receipt must consume a modelled remote box observation');
   for (const step of NETWORK_DENIED) {
     const o = byStep.get(step)!;
     assert.notEqual(o.status, 0, `${step} reached the network`);
@@ -552,4 +556,21 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
   assert.ok(!existsSync(`/Users/yulanbot/work/hm37-live-release/c1-${releaseSha}-${windowId}`));
   assert.ok(!existsSync(`/Users/yulanbot/work/hm37-live-release/${releaseSha}-W5-${windowId}`));
   assert.deepEqual(readdirSync(heredocDir).filter(name => name.startsWith('sh-thd-')), [], 'here-document files left in the working directory');
+});
+
+test('C1-16 sandbox classifier: first Mac|box token, not any Mac substring', () => {
+  const role = (host: string) => host.match(/\b(Mac|box)\b/i)?.[1]?.toLowerCase() ?? '';
+  assert.equal(role('HezLead Mac; after referenced site manifest'), 'mac');
+  assert.equal(role('box root; database read-only; Mac already ran ai-gates'), 'box');
+  assert.equal(role('box (or the W5 Mac shell); read independently produced, nonsecret window probes'), 'box');
+  assert.equal(role('box root; EDGE_RECEIPT_REMOTE=1 queries the box from the W5 Mac wrapper'), 'box');
+  const byId = (id: string) => blocks.find(s => s.startsWith(`# step: ${id}\n`))!;
+  assert.equal(hostRole(byId('ai-w7-proof')), 'box');
+  assert.equal(hostRole(byId('ai-live-controls')), 'box');
+  assert.equal(hostRole(byId('ai-edge-receipt')), 'box');
+  assert.equal(hostRole(byId('ai-w5-closed')), 'mac');
+  assert.ok(!EXPECTED_MAC_STEPS.includes('ai-w7-proof'));
+  assert.ok(!EXPECTED_MAC_STEPS.includes('ai-live-controls'));
+  assert.ok(!EXPECTED_MAC_STEPS.includes('ai-edge-receipt'));
+  assert.equal(macBlocks.length, 31);
 });

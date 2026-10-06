@@ -844,7 +844,10 @@ test('release-plan-contract / w6-prepare-checkout-and-proof-guards: refuses a wr
 });
 test('release-plan-contract / w6-transfer-file-guards: refuses a missing or symlinked upload and an existing or symlinked download target', () => {
   const env = (direction: string, file: string, f: Fixture) => ({ WINDOW: 'W6', C1_TRANSFER_DIRECTION: direction, C1_TRANSFER_FILE: file, C1_PROOF_DIR: join(f.root, 'c1') });
-  const up = fixture(); up.put('c1/agent.json', '{}'); admitted(up.run(['ai-w6-transfer'], env('upload', 'agent.json', up)), 'ADMITTED ssh');
+  const up = fixture(); up.put('c1/agent.json', '{}');
+  const admittedUp = up.run(['ai-w6-transfer'], env('upload', 'agent.json', up));
+  assert.notEqual(admittedUp.status, 0); assert.match(admittedUp.stderr, /FAIL ai-w6-transfer: upload stage expected mktemp got failure; STOP/);
+  assert.ok(admittedUp.calls.some(c => c[0] === 'ssh')); assert.ok(!existsSync(up.later));
   const missing = fixture(); mkdirSync(join(missing.root, 'c1'));
   let r = missing.run(['ai-w6-transfer'], env('upload', 'agent.json', missing));
   guardRefused(missing, r, 'FAIL ai-w6-transfer: upload file expected regular-file got missing; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
@@ -856,10 +859,10 @@ test('release-plan-contract / w6-transfer-file-guards: refuses a missing or syml
   r = dangling.run(['ai-w6-transfer'], env('download', 'C1-audit.json', dangling));
   guardRefused(dangling, r, 'FAIL ai-w6-transfer: download target expected not-symlink got symlink; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
   assert.ok(!existsSync(join(dangling.root, 'absent-audit')));
-  // C1-14: nonempty dest is reused without ssh; empty dest is not published from a failed transport.
+  // C1-16: a nonempty dest is reused only after parse + source digest; this PATH has no mktemp, so a failed fetch leaves the dest.
   const reuseDown = fixture(); reuseDown.put('c1/C1-fence.txt', 'kept-fence\n');
   r = reuseDown.run(['ai-w6-transfer'], env('download', 'C1-fence.txt', reuseDown));
-  assert.equal(r.status, 0, r.stderr); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-transfer: download staging file expected created got failure; STOP/);
   assert.equal(readFileSync(join(reuseDown.root, 'c1/C1-fence.txt'), 'utf8'), 'kept-fence\n');
   const emptyDown = fixture(); mkdirSync(join(emptyDown.root, 'c1')); writeFileSync(join(emptyDown.root, 'c1/C1-fence.txt'), '');
   r = emptyDown.run(['ai-w6-transfer'], env('download', 'C1-fence.txt', emptyDown));
@@ -867,7 +870,7 @@ test('release-plan-contract / w6-transfer-file-guards: refuses a missing or syml
   assert.equal(readFileSync(join(emptyDown.root, 'c1/C1-fence.txt'), 'utf8'), '');
   const present = fixture(); present.put('c1/C1-audit.json', 'retained\n');
   r = present.run(['ai-w6-transfer'], env('download', 'C1-audit.json', present));
-  guardRefused(present, r, 'FAIL ai-w6-transfer: retained C1-audit.json expected four committed kinds got mismatch; STOP'); assert.ok(!r.calls.some(c => c[0] === 'ssh'));
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /FAIL ai-w6-transfer: download staging file expected created got failure; STOP/);
   assert.equal(readFileSync(join(present.root, 'c1/C1-audit.json'), 'utf8'), 'retained\n');
 });
 
