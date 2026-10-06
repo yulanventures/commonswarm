@@ -1,4 +1,3 @@
-import { HOUSEHOLD_JOIN_RATE_PER_HOUR } from '../_shared/protocol.js';
 import { humanInvitationTransaction } from './household-invitations.ts';
 import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
@@ -152,7 +151,7 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
-  HOUSEHOLD_LOCAL_SEAT,
+  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR,
   HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,

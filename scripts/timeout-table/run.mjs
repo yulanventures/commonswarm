@@ -138,7 +138,7 @@ export async function sourceRootForRef(repo, ref, tempRoot, resources) {
   git(repo, ["rev-parse", "--verify", `${ref}^{commit}`]);
   const root = join(tempRoot, "source-ref");
   if (resources) resources.worktreePath = root;
-  execFileSync("git", ["-C", repo, "worktree", "add", "--detach", root, ref], { stdio: ["ignore", "ignore", "ignore"] });
+  execFileSync("git", ["-C", repo, "worktree", "add", "--detach", root, ref], { stdio: ["ignore", "ignore", "pipe"] });
   if (resources) {
     try { resources.worktreePath = realpathSync(root); }
     catch { resources.worktreePath = root; }

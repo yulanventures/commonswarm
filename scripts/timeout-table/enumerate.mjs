@@ -135,7 +135,7 @@ function normalizedValue(raw, name, file, node) {
   if (name === "timeout" && file.endsWith("src/cloud/seed.ts")) {
     return { value_ms: raw * 1_000, unit_note: "postgres close timeout is seconds; converted to milliseconds" };
   }
-  if (/(_BYTES|_CHARS)$/i.test(name) || /BODY_BUDGET/i.test(name) || /bytes$/i.test(name)) {
+  if (/(_BYTES|_CHARS)$/i.test(name) || /(?:BODY|PAGE)_BUDGET/i.test(name) || /bytes$/i.test(name)) {
     return { value_ms: raw, unit_note: "non-time size budget; raw source value retained" };
   }
   if (/(_PER_MINUTE_BUDGET|_CACHE_LIMIT|_PAGE_SIZE)$/i.test(name)) {

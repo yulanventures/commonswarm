@@ -56,11 +56,13 @@ const originalBegin = api.db.begin.bind(api.db);
 try {
   await assert.rejects(originalBegin(async tx => {
     await tx.unsafe(input.schema); await tx.unsafe(input.setup);
-    // Route each real handler transaction through a PostgreSQL savepoint in
-    // this rollback fixture. No auth, decision, notice or receipt is mocked.
+    // Keep each real handler on the fixture's top-level transaction. A
+    // savepoint gives inserted rows a subtransaction xmin, which the normal
+    // directed-signal recipient guard refuses. All fixture work rolls back;
+    // no auth, decision, notice or receipt is mocked.
     api.db.begin = (async (...args: unknown[]) => {
       await tx\x60RESET ROLE\x60;
-      const result=await tx.savepoint(args.at(-1) as (sql: typeof tx) => Promise<unknown>);
+      const result=await (args.at(-1) as (sql: typeof tx) => Promise<unknown>)(tx);
       await tx\x60RESET ROLE\x60; return result;
     }) as typeof api.db.begin;
     const f = input.f;
@@ -89,6 +91,9 @@ try {
     assert.equal(assignedResult.body.notices.length,1); assert.equal(assignedResult.body.notices[0].status,'sent');
     assert.equal(await noticeSpend(),spendBefore+1,'the committed notice is metered');
     const signal=assignedResult.body.notices[0].signal_id;
+    const fresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+      FROM swarm.signals WHERE id=\x24{signal}::uuid\x60;
+    assert.equal(fresh[0]!.fresh,true,'notice uses the normal directed-signal transaction');
     const deliveries=await tx\x60SELECT signal_id FROM swarm.signal_deliveries WHERE workspace_id=\x24{f.workspace}::uuid AND recipient_agent_principal_id=\x24{f.principal}::uuid\x60;
     assert.deepEqual(deliveries.map(r=>r.signal_id),[signal]);
     const replay=await call('todo_assign',assign,request);
