@@ -398,6 +398,6 @@ export const HOUSEHOLD_CONTENT_CONSENT = HOUSEHOLD_CONTENT_OPERATIONS.map((opera
   description: (operation === 'read' ? 'Read shared objects, to-dos, comments and retained committed history.'
     : operation === 'create' ? 'Create shared objects, to-dos and comments, and reserve uploads for new files.'
       : 'Update to-dos, patch shared objects and reserve replacements against their base revisions.')
-    + ' Access applies only to the approved workspace. All current workspace members can read committed content and history.'
+    + ' Access applies only to the approved workspace. Members with access to Lists & docs can read committed content and history.'
     + (operation === 'read' ? '' : ' Editing requires your confirmed editor role; committed revisions retain human/agent attribution. Upload reservations remain pending until commit.'),
 }));

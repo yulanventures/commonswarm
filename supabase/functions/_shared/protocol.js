@@ -4654,7 +4654,7 @@ var HOUSEHOLD_TOOLS = HOUSEHOLD_TOOL_REGISTRY.map((row) => ({
 var HOUSEHOLD_CONTENT_CONSENT = HOUSEHOLD_CONTENT_OPERATIONS.map((operation) => ({
   operation,
   tools: HOUSEHOLD_TOOL_REGISTRY.filter((row) => row.operations.includes(operation)).map((row) => ({ name: row.name, description: row.description })),
-  description: (operation === "read" ? "Read shared objects, to-dos, comments and retained committed history." : operation === "create" ? "Create shared objects, to-dos and comments, and reserve uploads for new files." : "Update to-dos, patch shared objects and reserve replacements against their base revisions.") + " Access applies only to the approved workspace. All current workspace members can read committed content and history." + (operation === "read" ? "" : " Editing requires your confirmed editor role; committed revisions retain human/agent attribution. Upload reservations remain pending until commit.")
+  description: (operation === "read" ? "Read shared objects, to-dos, comments and retained committed history." : operation === "create" ? "Create shared objects, to-dos and comments, and reserve uploads for new files." : "Update to-dos, patch shared objects and reserve replacements against their base revisions.") + " Access applies only to the approved workspace. Members with access to Lists & docs can read committed content and history." + (operation === "read" ? "" : " Editing requires your confirmed editor role; committed revisions retain human/agent attribution. Upload reservations remain pending until commit.")
 }));
 
 // src/cloud/brain.ts

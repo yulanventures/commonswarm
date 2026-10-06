@@ -211,12 +211,14 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
     const reader = access(); reader.member!.content_role = 'reader';
     assert.equal(householdAccessRefusal(reader, workspace, call.operation, 100), operation === 'read' ? null : 'content_read_only');
     if ('query' in call) {
+      assert.ok(call.query.kind === 'object_list' || call.query.kind === 'object_read' || call.query.kind === 'object_history');
       const result = readHouseholdObjects(call.query, state, access(), 100);
       assert.equal(result.status, 'ok');
       if (result.status === 'ok' && result.kind === 'object_read') assert.ok(call.objectTypes.includes(result.revision.kind));
       assert.deepEqual(state, before);
       assert.equal(readOnlyHint, true);
     } else {
+      assert.ok(call.command.kind === 'create_household_object' || call.command.kind === 'update_household_object' || call.command.kind === 'reserve_household_upload' || call.command.kind === 'commit_household_upload');
       const ctx = context(state, call.command, proposals[name]!, [{ ...baseList, revision: ref('shopping') }]);
       ctx.command_id = call.request_id!;
       const denied = decideHouseholdObject(call.command, state, { ...ctx, access: reader });
@@ -253,7 +255,7 @@ test('consent groups only the matching content tools and explains workspace audi
   for (const consent of HOUSEHOLD_CONTENT_CONSENT) {
     assert.deepEqual(consent.tools.map((tool) => tool.name), expected[consent.operation]);
     assert.match(consent.description, /approved workspace/);
-    assert.match(consent.description, /members can read committed content and history/);
+    assert.match(consent.description, /Members with access to Lists & docs can read committed content and history/);
     if (consent.operation !== 'read') {
       assert.match(consent.description, /confirmed editor role/);
       assert.match(consent.description, /pending until commit/);
@@ -281,6 +283,7 @@ test('replacement upload uses update permission at both boundaries and commits a
       connection_id: 'connection-1', grant_id: 'grant-1', revoked_at: null, expires_at: 1000, purpose: 'shared', operations: ['update'] } } };
   for (const [call, status] of [[begin, 'pending'], [commit, 'committed']] as const) {
     assert.ok('command' in call);
+    assert.ok(call.command.kind === 'reserve_household_upload' || call.command.kind === 'commit_household_upload');
     assert.equal(call.operation, 'update');
     assert.equal(householdAccessRefusal(agent, workspace, call.operation, 100), null);
     const ctx = { ...context(state, call.command, prepared, [{ ...original, revision: base }]), command_id: call.request_id!, access: agent };

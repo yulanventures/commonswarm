@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
+// @ts-expect-error TS5097 — Deno edge modules use explicit .ts extensions.
 import { HOSTED_TOOL_TABLE } from '../supabase/functions/mcp/tools.ts';
 
 // These plain-JS inventories cannot import the TypeScript hosted table. Read

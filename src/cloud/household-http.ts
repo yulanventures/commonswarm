@@ -5,7 +5,7 @@ import type { HouseholdTransport } from './household-objects.js';
 import type { HouseholdToolInvocation } from '../protocol/household-tool-registry.js';
 /** Local credentials select identity. The seat field only preserves the shared
  * registry schema and is never resolved as a hosted handle by this transport. */
-import { HOUSEHOLD_LOCAL_SEAT } from '../protocol/household-tool-registry.js';
+import { HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_TOOL_REGISTRY } from '../protocol/household-tool-registry.js';
 export const LOCAL_HOUSEHOLD_SEAT = HOUSEHOLD_LOCAL_SEAT;
 
 export function householdWireRequest(invocation: HouseholdToolInvocation): { tool: string; arguments: Record<string, unknown> } {
@@ -17,6 +17,10 @@ export function householdWireRequest(invocation: HouseholdToolInvocation): { too
       arguments: { ...args, ...query } };
   }
   const { kind, ...command } = invocation.command;
+  // To-do writes have the same tool and core names, with no blob reservation.
+  if (invocation.objectTypes.includes('todo') && HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === kind && row.effect === 'commit')) {
+    return { tool: kind, arguments: { ...args, ...command } };
+  }
   if (kind === 'create_household_object') return { tool: 'object_create', arguments: { ...args, ...command } };
   if (kind === 'update_household_object') return { tool: 'object_update', arguments: { ...args, ...command } };
   if (kind === 'reserve_household_upload' && 'change' in command) return { tool: 'file_upload_begin', arguments: { ...args, object_id: command.object_id, change: command.change } };
@@ -39,7 +43,14 @@ export function createHouseholdHttpTransport(options: { target: CloudTarget;
             stream: { kind: 'workspace' }, command: { kind: 'household_tool', ...wire } })), signal,
       });
       if (response.status >= 500) throw new Error('household transport unavailable');
-      if (!response.ok) { await response.body?.cancel(); return { status: 'refused', reason: 'request_refused' }; }
+      if (!response.ok) {
+        // Only stable codes cross this boundary; raw error text can hold secrets.
+        let body: unknown;
+        try { body = await response.json(); } catch { /* A non-JSON refusal has no code. */ }
+        const data = body !== null && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+        const code = data.reason ?? data.error ?? data.code;
+        return { status: 'refused', reason: typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : 'request_refused' };
+      }
       return await response.json();
     },
   };
