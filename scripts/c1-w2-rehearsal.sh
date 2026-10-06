@@ -95,7 +95,10 @@ fi
 T=
 
 say() { printf '%s\n' "$*"; }
-die() { say "FAIL $1: $2"; exit 1; }
+# fd 3 is the harness stdout. extract() is often redirected into a block file; FAIL
+# from die must not land in that file (C1-14: two ai-close timer lines hid extract's FAIL).
+exec 3>&1
+die() { printf '%s\n' "FAIL $1: $2" >&3; exit 1; }
 
 own_dir_ok() {
   [[ "$1" =~ ^(/private)?/tmp/c1w2\.[A-Za-z0-9]{6}$ ]] || return 1
@@ -646,7 +649,7 @@ secret_step() { # label script
   if test "$status" = 0; then say "PASS $1"; return 0; fi
   # Only plan FAIL lines known to carry no secret are printed; everything else stays in the stage.
   local known
-  known=$(grep -m1 -E "^FAIL ai-w2-issuer-credential: (issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\)|issuer role expected NOLOGIN-without-password before the credential got other; run ai-w2-issuer-rollback first); STOP$" "$SECRET_STAGE/secret-step.err")
+  known=$(grep -m1 -E "^FAIL ai-w2-issuer-credential: (issuer LOGIN with this attempt's SCRAM-SHA-256 verifier expected t got [a-z]+ \(ALTER ROLE not applied\)|issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first); STOP$" "$SECRET_STAGE/secret-step.err")
   if test -n "$known"; then say "FAIL $1: $known"; exit 1; fi
   say "FAIL $1: exit status $status (diagnostics kept in the 0700 stage, not printed)"; exit 1
 }
