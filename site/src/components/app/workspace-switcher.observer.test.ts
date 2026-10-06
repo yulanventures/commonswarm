@@ -13,13 +13,28 @@ const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 const dashboard = readFileSync(join(componentDir, "LiveDashboard.astro"), "utf8");
 const appHtml = readFileSync(join(siteRoot, "dist", "app", "index.html"), "utf8");
+// The rail builder is shared with the commonswarm chunk the page imports, so the
+// HTML-linked entry no longer contains it. Follow those static imports.
+const assetChunk = (name: string): string | null => /^[^/]+\.(?:js|css)$/.test(name) ? `_astro/${name}` : null;
 const assetPaths = Array.from(
   appHtml.matchAll(/(?:src|href)="\/(_astro\/[^"?#]+\.(?:js|css))/g),
   (match) => match[1]!,
 );
-const builtAssets = assetPaths
-  .map((assetPath) => readFileSync(join(siteRoot, "dist", assetPath), "utf8"))
-  .join("\n");
+const seenAssets = new Set<string>();
+const builtChunks: string[] = [];
+for (let index = 0; index < assetPaths.length; index += 1) {
+  const assetPath = assetPaths[index]!;
+  if (seenAssets.has(assetPath) || !assetPath.startsWith("_astro/")) continue;
+  seenAssets.add(assetPath);
+  const text = readFileSync(join(siteRoot, "dist", assetPath), "utf8");
+  builtChunks.push(text);
+  if (!assetPath.endsWith(".js")) continue;
+  for (const match of text.matchAll(/(?:from|import)\s*\(?\s*["']\.\/([^"']+\.(?:js|css))["']/g)) {
+    const next = assetChunk(match[1]!);
+    if (next && !seenAssets.has(next)) assetPaths.push(next);
+  }
+}
+const builtAssets = builtChunks.join("\n");
 
 const between = (source: string, start: string, end: string): string => {
   const startAt = source.indexOf(start);

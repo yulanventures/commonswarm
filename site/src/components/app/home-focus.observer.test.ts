@@ -119,7 +119,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     import { buildPhoneTopBar, buildWorkspaceHeader, buildWorkspaceNav } from './src/lib/home-shell';
     import { renderCatchUp as buildCatchUp } from './src/lib/home-catchup';
     import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from './src/lib/home-focus';
-    import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData } from './src/lib/home-map';
+    import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, catchUpRailPeople } from './src/lib/home-map';
     import { routeHref } from './src/lib/home-route';
     import { PendingRefreshGate } from './src/lib/pending-refresh';
     import './src/styles/tokens.css'; import './src/styles/home/index.css';
