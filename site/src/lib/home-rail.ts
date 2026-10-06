@@ -95,10 +95,14 @@ export function railPersonName(person: PersonVM): string {
   return `${person.name}${person.you ? " (you)" : ""}${person.dashed ? ", invited" : ""}`;
 }
 
+/** The owner phrase the rail announces with an agent. Null when the owner has left. */
+export function railAgentOwnerPhrase(agent: AgentVM): string | null {
+  return agent.yours ? "your agent" : agent.ownerFirstName ? `${agent.ownerFirstName}’s agent` : null;
+}
+
 /** "Muse, Nikki’s agent, Idle, Active 2 hours ago". The measured detail is always in the name. */
 export function railAgentName(agent: AgentVM): string {
-  const owner = agent.yours ? "your agent" : agent.ownerFirstName ? `${agent.ownerFirstName}’s agent` : null;
-  return [agent.nestedLabel, owner, agent.state.word, agent.state.detail].filter((part) => part).join(", ");
+  return [agent.nestedLabel, railAgentOwnerPhrase(agent), agent.state.word, agent.state.detail].filter((part) => part).join(", ");
 }
 
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {

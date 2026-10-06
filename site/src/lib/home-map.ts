@@ -1,10 +1,12 @@
 /** Home integration: wire facts become UI models here, never in DOM builders. */
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
 import { agentLabel, agentTint, firstNames, initials, formatWhen } from "./home-names";
-import { identityDisplayLabel } from "./identity-label";
+import { foldIdentityName } from "./identity-label";
+import { disambiguateVisibleLabels } from "./home-visible-labels";
 import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./participant-rail";
 import { parseRoute, routeHref, type HomeRoute } from "./home-route";
 import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } from "./home-catchup";
+import { RAIL_CATCH_UP_PEOPLE_TITLE, railAgentOwnerPhrase } from "./home-rail";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
 import type { AgentWorkStatus, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
@@ -25,6 +27,27 @@ export interface HomePeopleInput {
 }
 export type HomePeople = NonNullable<RailVM["people"]>;
 
+function applyVisibleLabel(agents: AgentVM[], field: "label" | "nestedLabel"): void {
+  const next = disambiguateVisibleLabels(agents.map(agent => ({ id: agent.id, label: agent[field] })));
+  for (const agent of agents) {
+    const label = next.get(agent.id);
+    if (label !== undefined) agent[field] = label;
+  }
+}
+
+/** Agents whose rail buttons would announce the same owner share one nested-label context.
+ *  Two people both shown as "Nikki Smith" are one context; different visible owners are not. */
+function applyNestedLabels(agents: readonly AgentVM[]): void {
+  const scopes = new Map<string, AgentVM[]>();
+  for (const agent of agents) {
+    const key = foldIdentityName(railAgentOwnerPhrase(agent) ?? "\0");
+    const list = scopes.get(key);
+    if (list) list.push(agent);
+    else scopes.set(key, [agent]);
+  }
+  for (const group of scopes.values()) applyVisibleLabel(group, "nestedLabel");
+}
+
 export function mapHomePeople(input: HomePeopleInput): HomePeople {
   const names = firstNames(input.members.map(member => ({ id: member.userId, name: member.name })));
   const me = input.members.find(member => member.userId === input.viewerId);
@@ -34,7 +57,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
   const agent = (row: HomeMapAgent): AgentVM => {
     const owner = input.members.find(member => member.userId === row.ownerUserId);
     const access = input.access.find(item => item.principalId === row.principalId);
-    const name = identityDisplayLabel({ id: row.principalId, name: row.name }, input.agents.map(item => ({ id: item.principalId, name: item.name })));
+    const raw = row.name.trim() || row.principalId;
     const yours = row.ownerUserId === input.viewerId;
     const work = row.work;
     const workingOn = input.signals.filter(item => item.fromKind === "agent" && item.from === row.principalId && item.kind === "working-on" && Date.parse(item.until ?? "") > input.now)
@@ -53,8 +76,8 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
       doingTodo: work?.facts.doing ? { title: work.facts.doing.title ?? "a to-do", since: work.facts.doing.since } : null,
       workingOn: workingOn ? { body: workingOn.body, createdAt: workingOn.createdAt, until: workingOn.until! }
         : work?.facts.working_on ? { createdAt: work.facts.working_on.at, until: work.facts.working_on.until } : null };
-    const labelInput = { name, ownerId: owner ? row.ownerUserId : null, ownerName: owner?.name, ownerFirstName: names.get(row.ownerUserId), yours };
-    return { id: row.principalId, name, label: agentLabel(labelInput), nestedLabel: agentLabel(labelInput, { nested: true }),
+    const labelInput = { name: raw, ownerId: owner ? row.ownerUserId : null, ownerName: owner?.name, ownerFirstName: names.get(row.ownerUserId), yours };
+    return { id: row.principalId, name: raw, label: agentLabel(labelInput), nestedLabel: agentLabel(labelInput, { nested: true }),
       ownerId: owner ? row.ownerUserId : null, ownerFirstName: names.get(row.ownerUserId) ?? null,
       ownerInitial: owner ? Array.from(initials(owner.name))[0] ?? "" : "", yours, tint: agentTint(row.principalId),
       hosted: facts.transport === "hosted_mcp", state: homeAgentState(facts, input.now) };
@@ -64,7 +87,22 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     if (group.kind === "member") result.groups.push({ person: person(group.member), agents: group.agents.map(agent) });
     else result.other.push(...group.agents.map(agent));
   }
+  const alone = [...result.groups.flatMap(group => group.agents), ...result.other];
+  applyVisibleLabel(alone, "label");
+  applyNestedLabels(alone);
   return result;
+}
+
+/** Catch up shows the viewer's own agents from every workspace in one group.
+ *  Labels were already settled inside each workspace, so they are settled again
+ *  on the combined list. Copies keep a workspace's own labels unchanged. */
+export function catchUpRailPeople(entries: readonly { detail?: { people?: HomePeople } }[]): HomePeople {
+  const own = entries.flatMap(entry => entry.detail?.people?.groups.filter(group => group.person.you) ?? []);
+  const first = own[0];
+  const agents = [...new Map(own.flatMap(group => group.agents).map(agent => [agent.id, agent])).values()]
+    .map(agent => ({ ...agent }));
+  applyVisibleLabel(agents, "nestedLabel");
+  return { title: RAIL_CATCH_UP_PEOPLE_TITLE, other: [], groups: first ? [{ person: first.person, agents }] : [] };
 }
 
 /** Membership is checked before a workspace is opened. A foreign address falls back to boot. */
@@ -105,6 +143,8 @@ export interface CatchUpDetail {
   newMessages: number | null;
   needsYou?: NeedsYouVM[];
   needsYouComplete?: boolean;
+  /** Unexpired asks, assigned to-dos, waiting to-dos, and the viewer's own agent fixes. Omitted when this read did not measure them. */
+  measuredNeedsYou?: number;
 }
 export interface CatchUpData {
   workspace: HomeWorkspace;
@@ -114,6 +154,56 @@ export interface CatchUpData {
 export function initialCatchUpData(workspaces: readonly HomeWorkspace[]): CatchUpData[] {
   return workspaces.map((workspace, index) => ({ workspace, state: index < 8 ? "loading" : "open" }));
 }
+function homePerson(people: HomePeople, id: string): PersonVM | undefined {
+  return people.groups.find(group => group.person.id === id)?.person;
+}
+function homeAgent(people: HomePeople, id: string): AgentVM | undefined {
+  return [...people.groups.flatMap(group => group.agents), ...people.other].find(agent => agent.id === id);
+}
+function unnamedMember(): PersonVM {
+  return { id: "", name: "Workspace member", firstName: "Workspace member", initials: "", you: false, role: "member" };
+}
+function quotedTitle(title: string): string { return `‘${title}’`; }
+function todoOpen(workspaceId: string, todoId: string): NeedsYouVM["primary"] {
+  return { label: "Open", href: routeHref({ view: "todo", workspaceId, todoId }) };
+}
+/** The overview has no reliable assigner. The card names nobody and opens the to-do. */
+function assignedNeedsYouCard(todo: { todo_id: string; title: string }, workspace: NeedsYouVM["workspace"]): NeedsYouVM {
+  return { id: todo.todo_id, kind: "todo", workspace, from: unnamedMember(), when: "",
+    what: `${quotedTitle(todo.title)} is assigned to you.`,
+    primary: todoOpen(workspace.id, todo.todo_id) };
+}
+function waitingNeedsYouCard(todo: { todo_id: string; title: string; agent_id?: string | null; reason?: string }, people: HomePeople, workspace: NeedsYouVM["workspace"]): NeedsYouVM {
+  const agent = todo.agent_id ? homeAgent(people, todo.agent_id) : undefined;
+  const request = todo.reason === "request";
+  return { id: todo.todo_id, kind: request ? "request" : "todo", workspace, from: agent ?? unnamedMember(), when: "",
+    what: request ? `${quotedTitle(todo.title)} is waiting for your answer.` : `Waiting on you: ${quotedTitle(todo.title)}.`,
+    primary: todoOpen(workspace.id, todo.todo_id) };
+}
+/** A pending request replaces the assignment card for the same to-do. The id stays one counted item. */
+function pushNeed(needsYou: NeedsYouVM[], item: NeedsYouVM, replaceAssignment = false): void {
+  const index = needsYou.findIndex(existing => existing.id === item.id);
+  if (index < 0) needsYou.push(item);
+  else if (replaceAssignment && needsYou[index].kind === "todo") needsYou[index] = item;
+}
+/** Quote the ask only when its body was read. A missing preview or a departed author still gets a Reply card. */
+function askNeedsYouCard(ask: WorkspaceCatchUp["needs_you"]["asks"][number], people: HomePeople, workspace: NeedsYouVM["workspace"], signals: readonly Signal[], now: number): NeedsYouVM | null {
+  if (Date.parse(ask.until) <= now) return null;
+  const author = ask.from.kind === "agent" ? homeAgent(people, ask.from.id) : homePerson(people, ask.from.id);
+  const message = signals.find(signal => signal.id === ask.signal_id && signal.kind === "ask" && signal.from === ask.from.id);
+  const from = author ?? unnamedMember();
+  const name = "label" in from ? from.label : from.name;
+  return { id: ask.signal_id, kind: "ask", workspace, from, when: formatWhen(ask.created_at, now),
+    what: message ? `${name} asked you: ‘${message.body}’` : `${name} asked you.`,
+    primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: workspace.id, messageId: ask.signal_id }) } };
+}
+function countedNeedIds(row: WorkspaceCatchUp, now: number): Set<string> {
+  return new Set([
+    ...row.needs_you.asks.filter(ask => Date.parse(ask.until) > now).map(ask => ask.signal_id),
+    ...row.needs_you.assigned.map(todo => todo.todo_id),
+    ...row.needs_you.waiting.map(todo => todo.todo_id),
+  ]);
+}
 export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: string, now: number, sample: boolean, signals: Signal[] = []): CatchUpDetail {
   const people = mapHomePeople({ viewerId, now, sample, access: [], signals: [],
     members: row.people.map(person => ({ userId: person.user_id, name: person.display_name, role: person.role })),
@@ -122,18 +212,19 @@ export function catchUpDetailFromOverview(row: WorkspaceCatchUp, viewerId: strin
   const workspace = { id: row.workspace_id, name: row.name, href: routeHref({ view: "chat", workspaceId: row.workspace_id }) };
   const needsYou: NeedsYouVM[] = [];
   for (const ask of row.needs_you.asks) {
-    const author = ask.from.kind === "agent" ? people.groups.flatMap(group => group.agents).find(agent => agent.id === ask.from.id)
-      : people.groups.find(group => group.person.id === ask.from.id)?.person;
-    const message = signals.find(signal => signal.id === ask.signal_id && signal.kind === "ask" && signal.from === ask.from.id);
-    if (!author || !message || Date.parse(ask.until) <= now) continue;
-    needsYou.push({ id: ask.signal_id, kind: "ask", workspace, from: author,
-      what: `${"label" in author ? author.label : author.name} asked you: ‘${message.body}’`, when: formatWhen(ask.created_at, now),
-      primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: row.workspace_id, messageId: ask.signal_id }) } });
+    const card = askNeedsYouCard(ask, people, workspace, signals, now);
+    if (card) pushNeed(needsYou, card);
   }
+  for (const todo of row.needs_you.assigned) pushNeed(needsYou, assignedNeedsYouCard(todo, workspace));
+  for (const todo of row.needs_you.waiting) {
+    const card = waitingNeedsYouCard(todo, people, workspace);
+    pushNeed(needsYou, card, card.kind === "request");
+  }
+  const counted = countedNeedIds(row, now);
   return { people, signals, openTodos: row.content?.open_todos ?? null, lists: row.content?.lists ?? null,
     files: row.content?.files ?? null, newMessages: row.last_seen_at === null ? null : row.new_messages, needsYou,
-    needsYouComplete: row.needs_you.assigned.length === 0 && row.needs_you.waiting.length === 0 &&
-      row.needs_you.asks.filter(ask => Date.parse(ask.until) > now).every(ask => needsYou.some(item => item.id === ask.signal_id)) };
+    needsYouComplete: [...counted].every(id => needsYou.some(item => item.id === id)),
+    measuredNeedsYou: needsYou.length + homeAgentFixCards(people, workspace).length };
 }
 /** Reconcile against the membership list, never let an overview add an unauthorized address. */
 export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview, sample: boolean, messages: ReadonlyMap<string, Signal[]> = new Map()): CatchUpData[] {
@@ -164,6 +255,13 @@ function detailNeeds(entry: CatchUpData): NeedsYouVM[] {
   // Overview needs_you is the only answer check. swarm_read.signals hides the viewer's own
   // directed replies, so a short feed cannot prove an ask is still open.
   return items;
+}
+/** Rail badge. An overview count is the same card list the subline renders, including a Reply card for an ask whose preview or author is missing. A card list with no tally counts only when that list is complete. Null means the count was not measured. */
+export function homeNeedsYouCount(entry: CatchUpData): number | null {
+  if (entry.state !== "ready" || !entry.detail) return null;
+  if (typeof entry.detail.measuredNeedsYou === "number") return entry.detail.measuredNeedsYou;
+  if (entry.detail.needsYou === undefined || entry.detail.needsYouComplete === false) return null;
+  return detailNeeds(entry).length;
 }
 /** The frozen builder cannot express an incomplete needs-you read independently of card detail. */
 export interface HomeCatchUpVM extends CatchUpVM { emptySummary: string | null }

@@ -27,6 +27,11 @@
 .hm-route-pane h1 { overflow-wrap: anywhere; }
 .hm-route-pane :is(button, a) { display: inline-flex; align-items: center; min-block-size: 44px; padding: var(--s-2); }
 .hm-route-pane :is(button, a):focus-visible { outline: none; box-shadow: var(--focus-ring); }
+/* Navigation moves focus to the view heading. That heading is not a tab stop, so it draws no ring. */
+h1[tabindex="-1"]:focus,
+h1[tabindex="-1"]:focus-visible,
+h2[tabindex="-1"]:focus,
+h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 .hm-frame__main [data-home-channel-menu] { min-inline-size: 0; }
 .hm-frame__main .hm-frame__channel > header { min-block-size: 52px; padding: var(--s-1) var(--s-5); }
 .hm-frame__channel > header > [data-home-channel-menu]:not([hidden]) + div { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -65,6 +70,8 @@
 
 @media (width >= 64rem) {
   .hm-frame__main .hm-frame__channel > header { min-block-size: 70px; }
+  .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame.hm-frame--catchup > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {
   .hm-frame__main .hm-phone-bar { padding-inline-end: calc(44px + var(--s-3)); }

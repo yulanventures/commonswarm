@@ -153,14 +153,36 @@
   line-height: 1.5;
 }
 
+.hm-rail__agent { flex-wrap: nowrap; }
 .hm-rail__status {
+  display: inline-flex;
+  align-items: center;
   flex: none;
-  max-inline-size: 45%;
-  overflow: hidden;
   color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
   font-size: var(--t-xs);
   white-space: nowrap;
 }
+.hm-rail__status .hm-status { flex-wrap: nowrap; gap: var(--s-1); white-space: nowrap; }
+.hm-rail__status .hm-status-word { background: transparent; white-space: nowrap; }
+.hm-rail__status .hm-status[data-state="working"],
+.hm-rail__status .hm-status[data-state="disconnected"] {
+  border-radius: var(--radius-pill);
+  padding-inline: var(--s-2);
+}
+.hm-rail__status .hm-status[data-state="working"] { color: var(--chip-active-ink); background: var(--chip-active-bg); }
+.hm-rail__status .hm-status[data-state="disconnected"] { color: var(--chip-review-ink); background: var(--chip-review-bg); }
+.hm-rail__status .hm-status[data-state="idle"] { background: transparent; }
+.hm-rail__status .hm-status[data-state="working"] .hm-status-word,
+.hm-rail__status .hm-status[data-state="working"] .hm-status-shape,
+.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-word,
+.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-shape {
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+.hm-rail__status .hm-status[data-state="working"] .hm-status-shape,
+.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-shape { background: currentColor; }
+.hm-rail__status .hm-status[data-state="idle"] .hm-status-shape { background: transparent; box-shadow: none; }
 .hm-rail [data-agent-state="idle"] .hm-rail__status * { color: inherit; }
 
 .hm-rail__note {
