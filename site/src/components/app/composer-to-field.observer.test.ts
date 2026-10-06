@@ -1224,6 +1224,13 @@ test("one pass owns the address, and every handler goes through it", () => {
       "\n    });",
     ],
     ["the roster paint", "const renderRoster = (): void => {", "\n    };"],
+    /* An ask that cannot start a thread addresses its author through the same pass.
+       The click returns immediately in sample mode, and it must not assign the pair. */
+    [
+      "the ask that cannot start a thread",
+      "if (canStartThread(signal, now, channel?.archivedAt != null)) {",
+      'one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });',
+    ],
   ] as const;
   for (const [where, anchor, close] of writers) {
     const start = dashboard.indexOf(anchor);
@@ -1469,6 +1476,21 @@ test("a chosen address is a draft, even before anything is typed", () => {
     dashboard,
     /if \(body === "" && !hadAttachments && !addressChosen\) \{/,
     "the draft is dropped for an empty body whatever the reader did to the address",
+  );
+  /* A flush that runs before the pass commits — the roster is still unknown, so the pair
+     in memory is the empty one reset left behind — must not write that empty pair over the
+     stored address. The body can already be the restored draft. Writing `to: []` makes the
+     next pass treat every tag in it as a new recipient, so a chip the reader removed comes
+     back when they return. */
+  assert.match(
+    dashboard,
+    /const draftTo = composerToLive \? composerTo : storedPair\?\.to;/,
+    "an uncommitted flush writes the empty in-memory address over the stored one",
+  );
+  assert.match(
+    dashboard,
+    /if \(!composerToLive && readComposerDraft\(key\)\?\.to !== undefined\) return;/,
+    "an uncommitted flush deletes an address-only draft the next paint still needs",
   );
   /* AND THE SWITCH FLUSHES BEFORE IT CLEARS. It used to cancel the pending write, which is
      right about the timer and wrong about the draft: an edit made inside the debounce window

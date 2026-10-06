@@ -155,28 +155,19 @@ export function homeAskAnswered(askId: string, signals: readonly Signal[], viewe
   return signals.some(reply => (reply.threadRootId === askId || reply.inReplyTo === askId)
     && (reply.fromKind === "user" ? reply.from === viewerId : reply.fromKind === "agent" && ownAgentIds.includes(reply.from)));
 }
-function detailNeeds(entry: CatchUpData, viewerId: string | null, now: number): NeedsYouVM[] {
+function detailNeeds(entry: CatchUpData): NeedsYouVM[] {
   const detail = entry.detail;
   if (!detail) return [];
   const workspace = { ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }) };
-  const agents = [...detail.people.groups.flatMap(group => group.agents), ...detail.people.other];
   const items = [...(detail.needsYou ?? [])];
   items.push(...homeAgentFixCards(detail.people, workspace));
-  for (const signal of detail.signals) {
-    if (signal.kind !== "ask" || signal.to !== viewerId || !Number.isFinite(Date.parse(signal.until ?? "")) || Date.parse(signal.until ?? "") <= now || homeAskAnswered(signal.id, detail.signals, viewerId, agents.filter(agent => agent.yours).map(agent => agent.id))) continue;
-    const from = signal.fromKind === "agent" ? agents.find(agent => agent.id === signal.from)
-      : detail.people.groups.find(group => group.person.id === signal.from)?.person;
-    if (!from) continue;
-    if (items.some(item => item.id === signal.id)) continue;
-    items.push({ id: signal.id, kind: "ask", workspace, from,
-      what: `${"label" in from ? from.label : from.name} asked you: ‘${signal.body}’`, when: formatWhen(signal.createdAt, now),
-      primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: entry.workspace.id, ...(signal.channelId ? { channelId: signal.channelId } : {}), messageId: signal.id }) } });
-  }
+  // Overview needs_you is the only answer check. swarm_read.signals hides the viewer's own
+  // directed replies, so a short feed cannot prove an ask is still open.
   return items;
 }
 /** The frozen builder cannot express an incomplete needs-you read independently of card detail. */
 export interface HomeCatchUpVM extends CatchUpVM { emptySummary: string | null }
-export function mapCatchUp(data: readonly CatchUpData[], viewerId: string | null, viewerName: string, now: number, sample: boolean, expanded = false): HomeCatchUpVM {
+export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | null, viewerName: string, now: number, sample: boolean, expanded = false): HomeCatchUpVM {
   const latest = data.flatMap(entry => (entry.detail?.signals ?? []).filter(signal => signal.until === null || Date.parse(signal.until ?? "") > now).map(signal => {
     const people = entry.detail!.people;
     const author = signal.fromKind === "agent" ? [...people.groups.flatMap(group => group.agents), ...people.other].find(agent => agent.id === signal.from)
@@ -192,7 +183,7 @@ export function mapCatchUp(data: readonly CatchUpData[], viewerId: string | null
       ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.`
       : complete ? null : checks.length ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.` : "Latest",
     sample, viewerFirstName: viewerName.trim().split(/\s+/)[0] || "there", now: new Date(now).toISOString(), needsYouExpanded: expanded,
-    needsYou: data.flatMap(entry => detailNeeds(entry, viewerId, now)), latest,
+    needsYou: data.flatMap(entry => detailNeeds(entry)), latest,
     workspaces: data.map(entry => ({ ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }), state: entry.state,
       capsules: entry.detail?.people.groups ?? [], peopleSummary: entry.detail ? catchUpPeopleSummary(entry.detail.people.groups.map(group => group.person)) : "",
       openTodos: entry.detail?.openTodos ?? null, lists: entry.detail?.lists ?? null, files: entry.detail?.files ?? null,

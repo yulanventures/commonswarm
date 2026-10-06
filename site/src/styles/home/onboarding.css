@@ -791,11 +791,11 @@
 @media (width <= 52rem) {
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel > header {
     position: relative; inset: auto; pointer-events: auto; flex: none;
-    min-block-size: 52px; padding: var(--s-1) var(--s-3);
+    min-block-size: 44px; padding-block: 0; padding-inline: var(--s-3); border-block-end: 0;
   }
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed,
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more:not([hidden]) + .dashboard__feed {
-    padding-block-start: var(--s-3);
+    padding-block-start: 0;
   }
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more {
     padding-block-start: 0; margin-block-start: 0;

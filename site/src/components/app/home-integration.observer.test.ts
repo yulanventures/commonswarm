@@ -8,9 +8,11 @@ import { CommandOutcomeUnknown, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, br
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
 import { homeParty, mapHomePeople, homeAskAnswered } from '../../lib/home-map';
-import { agentLabelInSentence } from '../../lib/home-names';
+import { peopleRoleErrorCode, peopleRoleRefusal } from '../../lib/people-dialog-view';
+import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
+import { parentRoute } from '../../lib/home-route';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -333,27 +335,62 @@ test('an unknown write outcome is shown plainly; a late result never writes to t
 });
 
 
-test('role client sends the workspace command and keeps every stable refusal code', async () => {
+test('the role client posts the change_role envelope, and each reducer refusal is the spec sentence', async () => {
+  const protocol = await readFile(new URL('../../../../src/protocol/workspace-commands.ts', import.meta.url), 'utf8');
+  const start = protocol.indexOf("case 'change_role': {");
+  const body = protocol.slice(start, protocol.indexOf("case 'create_agent_principal'", start));
+  const codes = [...new Set([...body.matchAll(/domain\(\s*ctx,\s*cmd\.kind,\s*'([a-z_]+)'/g)].map(match => match[1]))].sort();
+  const spec = await readFile(new URL('../../../../docs/design/2026-10-05-consumer-home-ui/UI-SPEC.md', import.meta.url), 'utf8');
+  const section = spec.slice(spec.indexOf('### 3.6 '), spec.indexOf('### 3.7 ', spec.indexOf('### 3.6 ')));
+  const specCopy = new Map([...section.matchAll(/^\| `([a-z_]+)` \| "([^"]+)" \|$/gm)].map(match => [match[1], match[2]]));
+  assert.deepEqual([...specCopy.keys()].sort(), codes);
+  assert.equal(codes.length, 5);
   const raw = await readFile(new URL('../../lib/commonswarm.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('client.ts', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'changeWorkspaceRole');
   assert.ok(fn);
   const code = ts.transpileModule(fn.getText(ast).replace(/^export /, ''), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
   const commands: unknown[][] = [];
-  // The generic edge command response is accepted/rejected, both with HTTP 200.
-  let result = {status:200,body:{status:'accepted'} as Record<string,unknown>};
-  const context = createContext({WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => {commands.push(args);return result;} });
+  let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { status: 'rejected', ok: false, reason: codes[0] } };
+  const context = createContext({ WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
   runInContext(code, context);
-  await runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context);
-  assert.deepEqual(JSON.parse(JSON.stringify(commands)), [[{user:{id:'tom'}}, 'command', {kind:'change_role',user_id:'nikki',role:'admin'}, {workspace_id:'Home-id',stream:{kind:'workspace'}}]]);
-  for (const reason of ['last_owner','role_forbidden','member_not_found','bad_state','landing_authority_unresolved']) {
-    result = {status:200,body:{status:'rejected',reason}};
-    await assert.rejects(runInContext("changeWorkspaceRole({}, 'command', 'Home-id', 'nikki', 'admin')", context), error => error instanceof WorkspaceRoleRefused && error.code === reason);
+  const envelope = { kind: 'change_role', user_id: 'nikki', role: 'admin' };
+  for (const reason of codes) {
+    const before = commands.length;
+    result = { status: 200, body: { status: 'rejected', ok: false, reason } };
+    await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+      assert.ok(error instanceof WorkspaceRoleRefused);
+      assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get(reason));
+      return true;
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(commands[before])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
   }
-  for (const [status,body,code] of [[200,{status:'processing'},'unknown'],[403,{error:'role_forbidden'},'role_forbidden']] as const) {
-    result = {status,body};
-    await assert.rejects(runInContext("changeWorkspaceRole({}, 'command', 'Home-id', 'nikki', 'admin')", context), error => error instanceof WorkspaceRoleRefused && error.code === code);
-  }
+  assert.ok(codes.includes('role_forbidden'));
+  const forbidden = { status: 403, body: { error: 'role_forbidden' } };
+  assert.equal('reason' in forbidden.body, false);
+  const beforeForbidden = commands.length;
+  result = forbidden;
+  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+    assert.ok(error instanceof WorkspaceRoleRefused);
+    assert.equal((error as { code: string }).code, forbidden.body.error);
+    assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get('role_forbidden'));
+    return true;
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeForbidden])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
+  const processing = { status: 200, body: { status: 'processing' } };
+  assert.equal(codes.includes('unknown'), false);
+  assert.equal(specCopy.has('unknown'), false);
+  const beforeProcessing = commands.length;
+  result = processing;
+  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+    assert.ok(error instanceof WorkspaceRoleRefused);
+    assert.equal((error as { code: string }).code, 'unknown');
+    const shown = peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home');
+    assert.equal(shown, 'The role change was not confirmed. Reload to check.');
+    for (const sentence of specCopy.values()) assert.notEqual(shown, sentence);
+    return true;
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeProcessing])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
 });
 
 test('browser reads retain a top-level directed reply reference', () => {
@@ -409,6 +446,21 @@ test('an accepted role save stays successful when the roster refresh fails', asy
   await runInContext("changeRole({kind:'change-role',userId:'nikki',role:'admin'})",context);
   assert.equal(runInContext('members[0].role',context),'admin');
   assert.equal(runInContext('paints',context),1,'the accepted command updates facts even if the follow-up read fails');
+  runInContext("members[0].role='member';",context);
+  for (const blocked of [
+    "session=null; activeWorkspaceId='W'; sampleMode=false",
+    "session={user:{id:'tom'}}; activeWorkspaceId=''; sampleMode=false",
+    "session={user:{id:'tom'}}; activeWorkspaceId='W'; sampleMode=true",
+  ]) {
+    await assert.rejects(
+      () => runInContext(`${blocked}; changeRole({kind:'change-role',userId:'nikki',role:'admin'})`, context),
+      (error: unknown) => {
+        assert.equal((error as { code?: unknown }).code, 'role_unavailable');
+        return true;
+      },
+    );
+    assert.equal(runInContext('members[0].role', context), 'member', blocked);
+  }
 });
 
 test('an absent People & agents target falls back to the roster heading', async () => {
@@ -442,4 +494,63 @@ test('past agents owned by the viewer remain answerers beyond the 200-name histo
     assert.equal((await runInContext(statement,context)).size,0);
     assert.equal(ranges.length,3,'unknown viewers and samples make no read');
   }
+});
+
+test('Add agent receives the viewer first name and Home and Done leave that screen', async () => {
+  const seen: Array<{ workspaceName?: string; accountEmail?: string; viewerFirstName?: string }> = [];
+  const backs: boolean[] = [];
+  const context = createContext({
+    personFirstName,
+    parentRoute,
+    seen,
+    window: {
+      requestAnimationFrame() {},
+      history: { state: { home: true, homePrevious: true }, back() { backs.push(true); } },
+    },
+  });
+  runInContext(`
+    let sampleMode = false, activeWorkspaceId = 'W', accountLabel = 'tom@example.test';
+    let homeRoute = { view: 'add-agent', workspaceId: 'W' };
+    const workspaces = [{ id: 'W', name: 'Home' }];
+    const members = [{ userId: 'tom', name: 'Tom Langridge', role: 'owner' }];
+    const session = { user: { id: 'tom', email: 'tom@example.test', user_metadata: { user_name: 'Tom Langridge' } } };
+    const accountName = () => accountLabel;
+    const picker = { reset() {}, setContext(value) { seen.push(value); } };
+    const one = selector => selector === 'agent-host-picker' ? picker : null;
+    const navigated = [], stopped = [];
+    const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
+    const stopHostJoinWatch = () => { stopped.push('stop'); };
+    const showChannelView = () => {};
+  `, context);
+  runInContext(await dashboardFunctions(['openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
+  runInContext('openAgentChoice()', context);
+  assert.equal(seen[0]?.viewerFirstName, 'Tom');
+  assert.equal(seen[0]?.workspaceName, 'Home');
+  assert.equal(seen[0]?.accountEmail, 'tom@example.test');
+  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as Tom’s agent.');
+  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'Claude'),
+    'It joins as yours. People in Home see it as Tom’s Claude.');
+  runInContext("members.length = 0; accountLabel = 'Tom Langridge'; openAgentChoice();", context);
+  assert.equal(seen[1]?.viewerFirstName, 'Tom', 'an account name supplies the first name when the roster has not arrived');
+  runInContext("accountLabel = 'tom@example.test'; openAgentChoice();", context);
+  assert.equal(seen[2]?.viewerFirstName, '');
+  assert.equal(addAgentOwnershipLine('Home', seen[2]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as your agent.');
+  runInContext("accountLabel = 'your account'; openAgentChoice();", context);
+  assert.equal(seen[3]?.viewerFirstName, '');
+  assert.equal(addAgentOwnershipLine('Home', seen[3]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as your agent.');
+  const stopsAfterOpen = runInContext('stopped.length', context) as number;
+  const navigated = () => JSON.parse(runInContext('JSON.stringify(navigated)', context) as string) as Array<{ route: { view: string; workspaceId?: string; agentId?: string }; mode: string }>;
+  runInContext('leaveAddAgentForHome()', context);
+  assert.deepEqual(backs, [true], 'Home uses history.back when the previous entry is ours');
+  assert.deepEqual(navigated(), []);
+  runInContext('window.history.state = {}; leaveAddAgentForHome();', context);
+  assert.deepEqual(navigated()[0], { route: { view: 'catchup' }, mode: 'push' });
+  runInContext("finishJoinedAgent('orbit')", context);
+  assert.deepEqual(navigated()[1], { route: { view: 'agent', workspaceId: 'W', agentId: 'orbit' }, mode: 'push' });
+  runInContext("const before = navigated.length; finishJoinedAgent(''); globalThis.stayed = navigated.length === before;", context);
+  assert.equal(runInContext('stayed', context), true);
+  assert.equal(runInContext('stopped.length', context), stopsAfterOpen + 4, 'Home, the fallback Home, Done and an empty Done each stop the join watch');
 });

@@ -133,6 +133,22 @@ test("the invite connect footnote does not claim directed messages are public", 
   assert.doesNotMatch(INVITE_CONNECT_FOOTNOTE, /Everyone in Home sees what it posts here/u);
 });
 
+test("Home leaves Add agent, and Done opens the agent that just joined", () => {
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(picker, /data-ahp-home-back[\s\S]*?Home/);
+  assert.match(picker, /new CustomEvent\("agent-host-home", \{ bubbles: true \}\)/);
+  assert.match(picker, /data-ahp-done hidden=\{audience === "joiner"\}>Done</);
+  assert.match(
+    picker,
+    /new CustomEvent\("agent-host-done", \{\s*bubbles: true,\s*detail: \{ principalId: this\.#joinedPrincipalId \},\s*\}\)/,
+  );
+  assert.match(picker, /ownership\.textContent = addAgentOwnershipLine\(workspace, first, agentName\)/);
+  assert.match(dashboard, /addEventListener\("agent-host-home", \(\) => \{\s*leaveAddAgentForHome\(\);\s*\}\)/);
+  assert.match(dashboard, /addEventListener\("agent-host-done", \(event: Event\) => \{[\s\S]*?finishJoinedAgent\(/);
+  assert.match(dashboard, /viewerFirstName: personFirstName\(rosterName\) \|\| personFirstName\(account\)/);
+});
+
 test("showJoined does not invent a join time when joinedAt is missing", () => {
   assert.equal(agentJoinedSentence("Claude", "Home"), "Claude joined Home.");
   assert.equal(agentJoinedSentence("Claude", "Home", ""), "Claude joined Home.");

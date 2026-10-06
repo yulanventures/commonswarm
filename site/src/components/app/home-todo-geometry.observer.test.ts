@@ -7,29 +7,12 @@ import { build } from "esbuild";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { agentOrb, capsule, choiceChips, notice, personAvatar } from "../../lib/home-primitives.ts";
+import { primitiveStub } from "./home-todo-primitive-stub.ts";
 
 // Lane P builds the primitives in parallel. While home-primitives.ts is still the scaffold (its
-// bodies call pending()), the fixture bundles these stand-ins instead. They render no targets at
-// all, so every target the 44 px sweep measures is lane T's own; once P lands, the real
-// primitives are bundled and measured too.
-const primitiveStub = `
-const span = (doc, text) => { const el = doc.createElement("span"); el.dataset.hmStub = ""; el.textContent = text; return el; };
-export function personAvatar(doc, p) { return span(doc, p.initials); }
-export function agentOrb(doc, a) { return span(doc, a.name.slice(0, 1)); }
-export function capsule(doc, c) { return span(doc, c.person.name); }
-export function statusLine(doc, s) { return span(doc, s.word); }
-export function objectCard(doc, o) { return span(doc, o.title); }
-export function needsYouCard(doc) { return span(doc, ""); }
-export function choiceChips(doc, c) {
-  const set = doc.createElement("fieldset"); set.dataset.hmStub = "";
-  const legend = doc.createElement("legend"); legend.textContent = c.legend; set.append(legend);
-  for (const option of c.options) set.append(span(doc, option.label));
-  return set;
-}
-export function switchRow(doc, s) { return span(doc, s.label); }
-export function queueRow(doc, q) { return span(doc, q.title); }
-export function notice(doc, text, tone) { const el = doc.createElement("p"); el.dataset.hmStub = ""; el.dataset.tone = tone; el.textContent = text; return el; }
-`;
+// bodies call pending()), the fixture bundles the shared stand-ins instead. They render no
+// targets at all, so every target the 44 px sweep measures is lane T's own; once P lands, the
+// real primitives are bundled and measured too.
 const usedByLaneT = [personAvatar, agentOrb, capsule, choiceChips, notice];
 const pendingSource = (fn: unknown) => /\bpending\s*\(/.test(Function.prototype.toString.call(fn));
 const implemented = usedByLaneT.every((fn) => !pendingSource(fn));

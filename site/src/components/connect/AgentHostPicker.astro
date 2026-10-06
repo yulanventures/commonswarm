@@ -236,6 +236,7 @@ const notesOf = (host: AgentHost): string[] => [
     <p class="hm-ahp__lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
     <div class="hm-ahp__actions">
       <button class="hm-ahp__button" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
+      <button class="hm-ahp__button" type="button" data-ahp-done hidden={audience === "joiner"}>Done</button>
       <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-another>Add another agent</button>
     </div>
   </section>
@@ -244,7 +245,7 @@ const notesOf = (host: AgentHost): string[] => [
 </agent-host-picker>
 
 <script>
-  import { agentLabel } from "../../lib/home-names";
+  import { addAgentOwnershipLine } from "../../lib/home-names";
   import { agentJoinedSentence } from "../../lib/agent-hosts";
   const WAITING_HINT_MS = 120_000;
   const JOIN_POLL_MS = 5_000;
@@ -275,6 +276,12 @@ const notesOf = (host: AgentHost): string[] => [
       }
       this.querySelector<HTMLButtonElement>("[data-ahp-home-back]")?.addEventListener("click", () => {
         this.dispatchEvent(new CustomEvent("agent-host-home", { bubbles: true }));
+      });
+      this.querySelector<HTMLButtonElement>("[data-ahp-done]")?.addEventListener("click", () => {
+        this.dispatchEvent(new CustomEvent("agent-host-done", {
+          bubbles: true,
+          detail: { principalId: this.#joinedPrincipalId },
+        }));
       });
       for (const button of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy]")) {
         button.addEventListener("click", () => void this.#copy(button));
@@ -444,9 +451,7 @@ const notesOf = (host: AgentHost): string[] => [
       const ownership = this.querySelector<HTMLElement>("[data-ahp-ownership-line]");
       if (ownership) {
         const agentName = this.#hostId ? this.#hostName(this.#hostId) : "agent";
-        ownership.textContent = first.length > 0
-          ? `It joins as yours. People in ${workspace} see it as ${agentLabel({ name: agentName, ownerName: first })}.`
-          : `It joins as yours. People in ${workspace} see it as your ${agentName}.`;
+        ownership.textContent = addAgentOwnershipLine(workspace, first, agentName);
       }
     }
 

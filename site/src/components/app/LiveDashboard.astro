@@ -1016,7 +1016,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
-  import { agentLabelInSentence, agentTint } from "../../lib/home-names";
+  import { agentLabelInSentence, agentTint, personFirstName } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import {
@@ -3230,16 +3230,25 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             composerRecipientKnown,
           );
         if (body === "" && !hadAttachments && !addressChosen) {
+          /* The box can be empty because the pass has not committed, not because the reader
+             cleared it. Deleting then throws away an address-only draft the next paint reads. */
+          if (!composerToLive && readComposerDraft(key)?.to !== undefined) return;
           window.localStorage.removeItem(key);
           return;
         }
+        /* A flush before the pass commits must not replace the stored address with the empty
+           pair left in memory. The body can already be the restored draft while the roster is
+           still unknown; writing `to: []` there makes the next pass treat every tag as new. */
+        const storedPair = composerToLive ? null : readComposerDraft(key);
+        const draftTo = composerToLive ? composerTo : storedPair?.to;
+        const draftApplied = composerToLive ? composerToApplied : storedPair?.applied ?? [];
         window.localStorage.setItem(
           key,
           JSON.stringify({
             body,
             ...(hadAttachments ? { hadAttachments: true } : {}),
-            to: composerTo,
-            ...(composerToApplied.length === 0 ? {} : { applied: composerToApplied }),
+            ...(draftTo === undefined ? {} : { to: draftTo }),
+            ...(draftApplied.length === 0 ? {} : { applied: draftApplied }),
           }),
         );
       } catch {
@@ -3261,7 +3270,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       composerResizeFrame = 0;
       composerResizeTimer = 0;
       input.style.blockSize = "auto";
-      input.style.blockSize = `${input.scrollHeight}px`;
+      /* An empty box's scrollHeight counts a wrapped placeholder as a second line. Leave the
+         resting box on one line; typed text still grows from scrollHeight. */
+      if (input.value.length > 0) input.style.blockSize = `${input.scrollHeight}px`;
     };
     /* localStorage is synchronous, and on iOS Safari it is synchronous ACROSS PROCESSES. One
      * write per keystroke put that cost inside the keystroke. The draft only has to survive a
@@ -3781,13 +3792,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         input.value = "";
         input.style.blockSize = "auto";
       }
-      /* THIS IS NOT THE SEND PATH. The only callers are the workspace change and session
-         teardown; a send empties the box in its own handler and clears the draft on success,
-         and it deliberately keeps the caret because a FAILED send puts the body back and the
-         reader's place in it with it. What has to go here is state that belongs to the
-         workspace being left.
-         The caret, because the text it indexes is about to be replaced by another
-         workspace's draft. */
+      /* Not the send path. Callers leave the workspace or end the session: a real switch,
+         a sample switch, Catch up, and session teardown. A send empties the box itself and
+         keeps the caret, because a failed send puts that body back.
+         The caret indexes text the next workspace is about to replace. */
       composerCaretKnown = false;
       /* And the address, because it belongs to the workspace being left.
 
@@ -4379,10 +4387,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks), signals: latest };
         }
+        const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
-          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, 50),
+          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, signalPage),
           homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
         ]);
+        // Page length is not an answer check: the read hides the viewer's own directed replies.
         return { people: mapHomePeople({ viewerId: viewer, members: nextMembers.members, agents: nextAgents,
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
           openTodos: null, lists: null, files: nextFiles, newMessages: null };
@@ -4656,7 +4666,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       },
         changeRole: async change => {
           const value = session, workspaceId = activeWorkspaceId, state = peopleDialogState;
-          if (!value || !workspaceId || sampleMode) return;
+          if (!value || !workspaceId || sampleMode) {
+            throw Object.assign(new Error("The role change was not confirmed. Reload to check."), { code: "role_unavailable" });
+          }
           await changeWorkspaceRole(value, uuid(), workspaceId, change.userId, change.role);
           if (workspaceId !== activeWorkspaceId || value.user.id !== session?.user.id) { state.rolePending?.clear(); return; }
           // Refresh facts in place: opening the workspace would discard another person's role draft.
@@ -4782,8 +4794,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
       if (!dialog || dialog.open) return;
       dialog.showModal();
-      one<HTMLButtonElement>("[data-workspace-details-trigger]")
-        ?.setAttribute("aria-expanded", "true");
+      for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
+        trigger.setAttribute("aria-expanded", "true");
+      }
     };
 
     const closeWorkspaceDetailsDialog = (): void => {
@@ -7002,13 +7015,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const picker = one<HTMLElement & {
         reset?: () => void;
-        setContext?: (context: { workspaceName?: string; accountEmail?: string }) => void;
+        setContext?: (context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }) => void;
       }>("agent-host-picker");
       const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+      const rosterName = members.find((member) => member.userId === session?.user.id)?.name ?? "";
+      const account = session ? accountName(session) : "";
       picker?.reset?.();
       picker?.setContext?.({
         workspaceName: selected?.name ?? "",
-        accountEmail: session?.user.email ?? (session ? accountName(session) : ""),
+        accountEmail: session?.user.email ?? account,
+        viewerFirstName: personFirstName(rosterName) || personFirstName(account),
       });
       stopHostJoinWatch();
       showChannelView("agent-choice");
@@ -10103,10 +10119,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       closeRosterDialog();
       openInvite("channel");
     });
+    const leaveAddAgentForHome = (): void => {
+      stopHostJoinWatch();
+      homeBack();
+    };
+    const finishJoinedAgent = (agentId: string): void => {
+      stopHostJoinWatch();
+      if (!agentId || !activeWorkspaceId) return;
+      void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId }, "push");
+    };
     const hostPicker = one<HTMLElement>("agent-host-picker");
     hostPicker?.addEventListener("agent-host-selected", () => startHostJoinWatch());
     hostPicker?.addEventListener("agent-host-back", () => stopHostJoinWatch());
+    hostPicker?.addEventListener("agent-host-home", () => {
+      leaveAddAgentForHome();
+    });
     hostPicker?.addEventListener("agent-host-approve", () => activateWorkspaceView("objects"));
+    hostPicker?.addEventListener("agent-host-done", (event: Event) => {
+      const principalId = (event as CustomEvent<{ principalId?: unknown }>).detail?.principalId;
+      finishJoinedAgent(typeof principalId === "string" ? principalId : "");
+    });
     for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
       button.addEventListener("click", () => {
         const view = button.dataset.workspaceView;
@@ -10300,8 +10332,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (event.target === dialog) dialog.close();
       });
       dialog?.addEventListener("close", () => {
-        one<HTMLButtonElement>("[data-workspace-details-trigger]")
-          ?.setAttribute("aria-expanded", "false");
+        for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
+          trigger.setAttribute("aria-expanded", "false");
+        }
       });
     }
     {
@@ -13773,6 +13806,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__composer textarea::placeholder {
     color: var(--text-faint);
+    /* The resting box stays one line, so a long hint is cut off with an ellipsis. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .dashboard__composer-send {
@@ -14959,38 +14996,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       max-inline-size: 100%;
     }
 
-    /* The channel head STOPS BEING A ROW here. It is positioned over the top of the
-       transcript, so it costs the reading area no height at all, and it carries only the two
-       things a phone still needs from it: the live dot and the roster pill that opens agent
-       management. The channel name is redundant with the view switcher in the bar above —
-       "Signals" is already marked aria-current — so the titleblock is hidden from sight and
-       kept for the accessible name of this section. */
+    /* The channel menu is a row under the phone bar. It stays in the grid so the transcript
+       starts below it. The titleblock stays clipped; the menu and actions stay in this row. */
     .dashboard__channel {
       position: relative;
-      grid-template-rows: minmax(0, 1fr);
-      /* ONE height for the floating band, read by every clearance that keeps the transcript
-         out from under it. The two floating parts are not the same height: the filter row is
-         2.5rem, and the roster cluster is a 2.75rem tap target inside var(--s-1) of padding,
-         which is 3.25rem. The clearance was the filter row's 2.5rem, so at rest 12px of the
-         first message sat under the roster pill — measured at 390x844: the first row began
-         113px below the top of the app bar and the pill ended at 125px. The band is as tall
-         as its tallest part, and the clearance is the band. */
-      --feed-band-height: 3.25rem;
+      grid-template-rows: auto minmax(0, 1fr);
+      --feed-band-height: 0px;
     }
 
     .dashboard__channel-head {
-      position: absolute;
-      z-index: 4;
-      inset-block-start: 0;
-      inset-inline-end: 0;
+      position: relative;
+      z-index: 1;
+      inset: auto;
       min-block-size: 0;
-      justify-content: flex-end;
+      justify-content: flex-start;
       flex-wrap: nowrap;
       gap: var(--s-2);
-      padding: var(--s-1) var(--s-4);
-      background: none;
+      padding-block: 0;
+      padding-inline: var(--s-3);
+      background: var(--surface);
       border-block-end: 0;
-      pointer-events: none;
+      pointer-events: auto;
     }
 
     /* These two float over live text, so each one carries the same translucent backdrop the
@@ -15028,15 +15054,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       margin-inline-start: 0;
     }
 
-    /* The filter row floats too. Sticky keeps it at the top of the scroller; the negative
-       margin takes ITS OWN height back out of the flow, so the transcript passes UNDER it
-       instead of starting below it. That pair is 2.5rem and must match each other. The list's
-       top padding is NOT the same amount: it clears the whole band, whose height is the taller
-       of the two floating parts, so it is var(--feed-band-height). It is clearance at rest and
-       scrolls away with the content. */
+    /* The filter row is the next in-flow row. A negative margin would let the first message
+       start underneath it. */
     .dashboard__feed-toolbar {
+      position: relative;
       min-block-size: 2.5rem;
-      margin-block-end: -2.5rem;
+      margin-block-end: 0;
       padding-inline: var(--s-4);
       /* Room for the floating roster cluster on the opposite side of the same band. */
       padding-inline-end: 8rem;
@@ -15068,19 +15091,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       white-space: nowrap;
     }
 
-    .dashboard__feed {
-      padding-block-start: var(--feed-band-height);
-    }
-
-    .dashboard__feed-more {
-      padding-block-start: var(--feed-band-height);
-    }
-
-    /* The clearance belongs to whatever is FIRST under the floating band, and only to that.
-       "Load older updates" sits between the band and the list, so when it is showing it has
-       already cleared the band and the list's own clearance becomes a band's height of dead
-       screen between the button and the first message. Measured at 390x844 when that clearance
-       was still the filter row's 2.5rem: a 40px gap. It is --feed-band-height now. */
+    .dashboard__feed,
+    .dashboard__feed-more,
     .dashboard__feed-more:not([hidden]) + .dashboard__feed {
       padding-block-start: 0;
     }
@@ -15102,11 +15114,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       padding-inline: var(--s-2);
     }
 
-    /* The channel control appears exactly where the rail's channel list disappears. It
-       rides in the toolbar band, which floats over the transcript on a negative margin
-       equal to its own height, so it adds NO height to the header: the 73px app bar
-       remains the only standing header (2026-09-04 ruling). Its own height is the band's
-       2.5rem, so it cannot make the band taller either. */
+    /* The channel control sits in the in-flow filter row under the channel menu. */
     .dashboard__channel-switch {
       display: inline-flex;
       align-items: center;
@@ -16091,10 +16099,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   @media (max-width: 52rem) {
-    /* On a phone the channel head floats over the top of the body (--feed-band-height), and the
-       fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits about
-       10rem above the bottom edge. These views start below the band and leave room to scroll
-       every control clear of that box (after-screenshot defects 1 and 2). */
+    /* The channel head is an in-flow row, so these views do not reserve a floating band.
+       The fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits
+       about 10rem above the bottom edge; the end padding keeps every control clear of it. */
     .dashboard__setup,
     .dashboard__objects-view,
     .dashboard__host-view {

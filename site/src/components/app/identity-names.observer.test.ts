@@ -23,7 +23,7 @@ test("selections, chips, drafts and roster rows keep principal UUIDs", () => {
   assert.match(dashboard, /parseStoredIdentityRef/);
   assert.match(
     dashboard,
-    /to: composerTo/,
+    /const draftTo = composerToLive \? composerTo : storedPair\?\.to;[\s\S]{0,500}to: draftTo/,
     "a stored draft writes the UUID To: set, not the rendered label",
   );
 });

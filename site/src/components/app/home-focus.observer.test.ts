@@ -1,12 +1,67 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { focusFixture } from "./home-focus.fixture.js";
+
+type CdpSend = (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<Record<string, unknown>>;
+
+function connectDevtools(url: string): Promise<{ socket: WebSocket; send: CdpSend }> {
+  const socket = new WebSocket(url);
+  const pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+  let next = 0;
+  const send: CdpSend = (method, params = {}, sessionId) => new Promise((resolveSocket, rejectSocket) => {
+    const id = ++next;
+    pending.set(id, { resolve: resolveSocket, reject: rejectSocket });
+    socket.send(JSON.stringify({ id, method, params, sessionId }));
+  });
+  socket.addEventListener("message", (event: MessageEvent) => {
+    const message = JSON.parse(String(event.data)) as { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
+    if (!message.id || !pending.has(message.id)) return;
+    const waiter = pending.get(message.id)!;
+    pending.delete(message.id);
+    if (message.error) waiter.reject(new Error(message.error.message ?? "DevTools command failed"));
+    else waiter.resolve(message.result ?? {});
+  });
+  return new Promise((resolveSocket, rejectSocket) => {
+    socket.addEventListener("open", () => resolveSocket({ socket, send }));
+    socket.addEventListener("error", () => rejectSocket(new Error("DevTools socket failed")));
+  });
+}
+
+async function readDevtoolsPort(profile: string): Promise<{ port: string; path: string }> {
+  const file = join(profile, "DevToolsActivePort");
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    try {
+      const [port, browserPath] = (await readFile(file, "utf8")).split("\n");
+      if (port?.trim() && browserPath?.trim()) return { port: port.trim(), path: browserPath.trim() };
+    } catch {
+      // Chrome writes this file once the debugging port is listening.
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error("Chrome did not write DevToolsActivePort");
+}
+
+async function evaluate(send: CdpSend, sessionId: string, expression: string): Promise<unknown> {
+  const result = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+  const details = result.exceptionDetails as { text?: string; exception?: { description?: string } } | undefined;
+  if (details) throw new Error(details.exception?.description || details.text || "page evaluation failed");
+  return (result.result as { value?: unknown } | undefined)?.value;
+}
+
+async function removeOwnedProfile(profile: string): Promise<void> {
+  const root = resolve(tmpdir());
+  const target = resolve(profile);
+  if (target.startsWith(`${root}${sep}`) && target.includes(`${sep}commonswarm-home-focus-profile-`)) {
+    await rm(target, { recursive: true, force: true });
+  }
+}
 
 // File fixtures use the shared CI launcher; all expectations stay in the host test.
 test("home refreshes keep rail controls, view headings and workspace menu focus", { timeout: 60_000 }, async () => {
@@ -24,6 +79,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     ${setup}
     ${production()}
     renderRoster();
+    window.runFocusChecks = async () => {
     window.fixture = {
       poll,
       rename: () => { workspaces = workspaces.map(w => w.id === 'X' ? {...w,name:'Summer trip'} : w); renderRoster(); },
@@ -33,7 +89,6 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
       fillCard: () => { catchUpData[0] = {...catchUpData[0],state:'open'}; renderHomeCatchUp(); },
       repaint: () => { now += 60000; renderHomeCatchUp(); }
     };
-    (async () => {
       const checks = [];
       const assert = {
         equal: (actual, expected, name) => checks.push({ actual, expected, name }),
@@ -49,8 +104,7 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     const sequential = [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
       .filter(node => node.tabIndex >= 0 && !node.disabled && node.getClientRects().length > 0);
     assert.equal(sequential[2]?.dataset.railWorkspace, "X", "the third native keyboard target is the Trip link");
-    sequential[2].focus();
-    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "the Trip link accepts focus");
+    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "three Tab keys landed on the Trip link");
     await evaluate("window.original = document.activeElement");
     const statusTitle = () => evaluate("document.querySelector('[data-rail-agent] .hm-status').title");
     assert.equal(await statusTitle(), "Active 13 minutes ago", "initial paint exposes an aging status detail");
@@ -83,8 +137,9 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     await evaluate("document.querySelector('.hm-catchup-card').focus(); fixture.catchup()");
     assert.equal(await evaluate("document.activeElement.dataset.workspaceId"), "W", "Catch up card identity survives a data rebuild");
 
-      document.documentElement.dataset.focusChecks = btoa(unescape(encodeURIComponent(JSON.stringify(checks))));
-    })().catch(error => { document.documentElement.dataset.fixtureError = String(error); });
+      return checks;
+    };
+    document.documentElement.dataset.focusReady = "1";
   `;
   const bundle = await build({ absWorkingDir: siteRoot, bundle: true, write: false, format: "iife", platform: "browser",
     outfile: "focus.js", stdin: { contents: fixtureScript, resolveDir: siteRoot, loader: "ts" } });
@@ -97,17 +152,67 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     </style></head><body><div data-home-rail-slot></div><div data-home-workspace-shell></div>
     <div data-home-phone-nav></div><section data-home-catchup></section>
     <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
-  const { stdout } = await launchChrome(await findChrome(),
-    ["--window-size=1440,900", "--dump-dom", "--virtual-time-budget=5000", pathToFileURL(fixturePath).href],
-    { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
-  const encoded = stdout.match(/<html\b[^>]*\bdata-focus-checks="([A-Za-z0-9+/]+={0,2})"/iu)?.[1];
-  assert.ok(encoded, `focus refresh scenarios must complete: ${stdout.match(/data-fixture-error="([^"]*)"/)?.[1] ?? "no result"}`);
-  const checks: { actual: unknown; expected: unknown; name: string; different?: boolean }[] =
-    JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  assert.equal(checks.length, 23, "every focus and poll expectation must run");
-  for (const check of checks) {
-    if (check.different) assert.notDeepEqual(check.actual, check.expected, check.name);
-    else assert.deepEqual(check.actual, check.expected, check.name);
+  const profile = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
+  let socket: WebSocket | undefined;
+  let closeBrowser: (() => Promise<void>) | undefined;
+  const launched = launchChrome(await findChrome(), [
+    `--user-data-dir=${profile}`,
+    "--remote-debugging-port=0",
+    "--remote-allow-origins=*",
+    "--window-size=1440,900",
+    pathToFileURL(fixturePath).href,
+  ], { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
+  try {
+    const endpoint = await Promise.race([
+      readDevtoolsPort(profile),
+      launched.then(() => { throw new Error("Chrome exited before DevToolsActivePort was written"); }),
+    ]);
+    const connected = await connectDevtools(`ws://127.0.0.1:${endpoint.port}${endpoint.path.startsWith("/") ? endpoint.path : `/${endpoint.path}`}`);
+    socket = connected.socket;
+    closeBrowser = async () => { await connected.send("Browser.close"); };
+    const targets = await connected.send("Target.getTargets") as { targetInfos?: Array<{ targetId: string; type: string; url: string }> };
+    const page = targets.targetInfos?.find((target) => target.type === "page" && target.url.startsWith("file:"));
+    assert.ok(page, "the fixture page did not open");
+    const attached = await connected.send("Target.attachToTarget", { targetId: page.targetId, flatten: true }) as { sessionId?: string };
+    const sessionId = attached.sessionId;
+    assert.ok(sessionId, "the fixture page did not attach");
+    await connected.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId);
+    await connected.send("Page.bringToFront", {}, sessionId);
+    const readyDeadline = Date.now() + 10_000;
+    let ready = false;
+    while (Date.now() < readyDeadline) {
+      ready = await evaluate(connected.send, sessionId, "document.documentElement.dataset.focusReady === '1'") === true;
+      if (ready) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+    assert.equal(ready, true, "the fixture did not finish painting");
+    for (let step = 0; step < 3; step += 1) {
+      await connected.send("Input.dispatchKeyEvent", {
+        type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+      }, sessionId);
+      await connected.send("Input.dispatchKeyEvent", {
+        type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+      }, sessionId);
+    }
+    assert.equal(
+      await evaluate(connected.send, sessionId, "document.activeElement?.dataset?.railWorkspace ?? ''"),
+      "X",
+      "three Tab keys land on the Trip workspace",
+    );
+    const checks = await evaluate(connected.send, sessionId, "window.runFocusChecks()") as
+      { actual: unknown; expected: unknown; name: string; different?: boolean }[];
+    assert.ok(Array.isArray(checks), "focus checks did not return");
+    assert.equal(checks.length, 23, "every focus and poll expectation must run");
+    for (const check of checks) {
+      if (check.different) assert.notDeepEqual(check.actual, check.expected, check.name);
+      else assert.deepEqual(check.actual, check.expected, check.name);
+    }
+    await closeBrowser();
+    await launched;
+  } finally {
+    await closeBrowser?.().catch(() => undefined);
+    socket?.close();
+    await launched.catch(() => undefined);
+    await removeOwnedProfile(profile);
   }
-  // Retain only task-created CI fixture directories for failure inspection.
 });

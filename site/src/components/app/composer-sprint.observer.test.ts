@@ -512,23 +512,45 @@ const assertComposerSprint = (value: ComposerArtifact): void => {
     /input\.value = draft\.body;[\s\S]{0,60}composerCaretKnown = false;/,
     "caret-survival: a restored draft keeps a caret that was remembered in different text",
   );
-  /* resetComposer is NOT the send path — the only callers are the workspace change and
-     session teardown. A send empties the box in its own handler and keeps the caret on
-     purpose, because a FAILED send puts the body back and the reader's place in it with it. */
+  /* resetComposer is NOT the send path. Callers leave the workspace or end the session:
+     a real switch, a sample switch, Catch up, and session teardown. A send empties the box
+     in its own handler and keeps the caret on purpose, because a FAILED send puts the body
+     back and the reader's place in it with it. */
   assert.match(
     dashboard,
     /input\.style\.blockSize = "auto";[\s\S]{0,420}composerCaretKnown = false;/,
     "caret-survival: leaving a workspace keeps the caret it had in that workspace's text",
   );
-  /* THREE CALLERS as of 2026-09-05: the real workspace change, session teardown, and the
-     SAMPLE workspace change. The sample switch used to set the id and repaint, which is not
-     what a real switch does and so could not measure what a switch breaks; it now takes the
-     same steps in the same order. None of the three is a send. */
+  /* FOUR CALLERS: the real workspace change, the sample workspace change, Catch up (leaving
+     a workspace for the cross-workspace list), and session teardown. The sample switch used
+     to set the id and repaint, which is not what a real switch does and so could not measure
+     what a switch breaks; it now takes the same steps in the same order. Catch up tears the
+     composer down the same way, because the workspace is gone. None of the four is a send. */
   assert.equal(
     occurrences(dashboard, "resetComposer();"),
-    3,
+    4,
     "caret-survival: resetComposer has gained a caller, so check it is not the send before" +
       "the comments and messages here keep saying it is not",
+  );
+  assert.match(dashboard, /if \(!reopen\) resetComposer\(\);/, "the sample switch must reset");
+  assert.match(dashboard, /if \(changesWorkspace\) \{\s*resetComposer\(\);/, "a real switch must reset");
+  assert.match(
+    dashboard,
+    /route\.view === "catchup"\) \{[\s\S]{0,500}resetComposer\(\);/,
+    "Catch up must reset on the way out of a workspace",
+  );
+  assert.match(
+    dashboard,
+    /resetComposer\(\);\s*window\.clearTimeout\(signalExpiryTimer\);/,
+    "session teardown must reset",
+  );
+  assert.doesNotMatch(
+    dashboard.slice(
+      dashboard.indexOf('one<HTMLFormElement>("[data-composer]")?.addEventListener("submit"'),
+      dashboard.indexOf("} finally {", dashboard.indexOf('one<HTMLFormElement>("[data-composer]")?.addEventListener("submit"')),
+    ),
+    /resetComposer\(\)/,
+    "a send must not reset the composer",
   );
 
   /* EVERY DEBOUNCED TIMER DIES IN `resetComposer`, which the workspace change and session
@@ -684,8 +706,18 @@ const assertComposerSprint = (value: ComposerArtifact): void => {
   );
   assert.match(
     draft,
-    /to: composerTo,\s*\n\s*\.\.\.\(composerToApplied\.length === 0 \? \{\} : \{ applied: composerToApplied \}\),/,
-    "draft-audience: the To: set persists whole, empty included, with its applied record",
+    /const draftTo = composerToLive \? composerTo : storedPair\?\.to;/,
+    "draft-audience: a committed To: set is what gets stored",
+  );
+  assert.match(
+    draft,
+    /\.\.\.\(draftTo === undefined \? \{\} : \{ to: draftTo \}\),/,
+    "draft-audience: the To: set persists whole, empty included, and an uncommitted flush does not invent one",
+  );
+  assert.match(
+    draft,
+    /\.\.\.\(draftApplied\.length === 0 \? \{\} : \{ applied: draftApplied \}\),/,
+    "draft-audience: the applied record persists with that To: set",
   );
   assert.match(draft, /input\.value = draft\.body;/,
     "draft-restore: reload must restore the exact body");
@@ -953,8 +985,10 @@ const mutations: Mutation[] = [
   {
     name: "leaving a workspace keeps the caret it had in that workspace's text",
     key: "dashboard",
-    target: "workspace's draft. */\n      composerCaretKnown = false;",
-    replacement: "workspace's draft. */",
+    /* resetComposer drops a caret remembered in text the next workspace replaces.
+       Removing that one assignment is the failure this mutation has to reach. */
+    target: "The caret indexes text the next workspace is about to replace. */\n      composerCaretKnown = false;",
+    replacement: "The caret indexes text the next workspace is about to replace. */",
     expectedFailure: "caret-survival",
   },
   {
