@@ -9,8 +9,8 @@ import { createHouseholdTodoStore } from '../supabase/functions/command/househol
 import { executeHouseholdSurface } from '../supabase/functions/command/household-integration.js';
 const reserve = new URL('../supabase/household-todo-reserve/', import.meta.url);
 const release = new URL('../deploy/release-proofs/household-todo/', import.meta.url);
-test('to-do reserve and release contain all three exact SQL proofs', () => {
-  const names = ['20261006000001-catalog.sql', '20261006000001-rollback-catalog.sql', '20261006000001-rollback.sql'];
+test('to-do reserve and release contain all four exact SQL proofs', () => {
+  const names = ['20261006000001-catalog.sql', '20261006000001-functional.sql', '20261006000001-rollback-catalog.sql', '20261006000001-rollback.sql'];
   assert.deepEqual(readdirSync(reserve).filter(n => n.endsWith('.sql')).sort(), names);
   assert.deepEqual(readdirSync(release).filter(n => n.endsWith('.sql')).sort(), names);
   for (const name of names) assert.deepEqual(readFileSync(new URL(name, reserve)), readFileSync(new URL(name, release)), name);

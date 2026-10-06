@@ -4,7 +4,7 @@ import { test } from 'node:test';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const migration = read('supabase/migrations/20261006000002_home_overview.sql');
-const filenames = ['catalog', 'rollback', 'rollback-catalog'].map(s => `20261006000002-${s}.sql`);
+const filenames = ['catalog', 'functional', 'rollback', 'rollback-catalog'].map(s => `20261006000002-${s}.sql`);
 
 test('home overview release SQL matches the complete reserve inventory byte for byte', () => {
   assert.deepEqual(readdirSync(new URL('../supabase/home-overview-reserve/', import.meta.url)).sort(), [...filenames].sort());
