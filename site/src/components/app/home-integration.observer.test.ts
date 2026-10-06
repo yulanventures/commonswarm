@@ -4,11 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client';
-import { CommandOutcomeUnknown, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
+import { CommandOutcomeUnknown, FreshLoginRequired, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
 import { homeParty, mapHomePeople, homeAskAnswered } from '../../lib/home-map';
-import { peopleRoleErrorCode, peopleRoleRefusal } from '../../lib/people-dialog-view';
+import { peopleRoleBeginSave, peopleRoleErrorCode, peopleRoleFinishSave, peopleRoleReceipt, peopleRoleRefusal } from '../../lib/people-dialog-view';
 import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
@@ -352,7 +352,7 @@ test('the role client posts the change_role envelope, and each reducer refusal i
   const code = ts.transpileModule(fn.getText(ast).replace(/^export /, ''), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
   const commands: unknown[][] = [];
   let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { status: 'rejected', ok: false, reason: codes[0] } };
-  const context = createContext({ WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
+  const context = createContext({ WorkspaceRoleRefused, FreshLoginRequired, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
   runInContext(code, context);
   const envelope = { kind: 'change_role', user_id: 'nikki', role: 'admin' };
   for (const reason of codes) {
@@ -391,6 +391,20 @@ test('the role client posts the change_role envelope, and each reducer refusal i
     return true;
   });
   assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeProcessing])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
+  const staleSignIn = { status: 401, body: { error: 'fresh_auth_required', message: 'Sign in again, then retry the role change. No membership change was recorded.' } };
+  assert.equal(codes.includes('fresh_auth_required'), false, 'fresh sign-in is refused before the reducer');
+  assert.equal(specCopy.has('fresh_auth_required'), false);
+  const beforeStale = commands.length;
+  result = staleSignIn;
+  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+    assert.ok(error instanceof FreshLoginRequired);
+    assert.equal(error instanceof WorkspaceRoleRefused, false);
+    const shown = peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home');
+    assert.equal(shown, 'Sign in again, then retry the role change. No membership change was recorded.');
+    assert.notEqual(shown, 'The role change was not confirmed. Reload to check.');
+    return true;
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeStale])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
 });
 
 test('browser reads retain a top-level directed reply reference', () => {
@@ -441,10 +455,11 @@ test('an accepted role save stays successful when the roster refresh fails', asy
   visit(ast); assert.ok(changeRole);
   const code = ts.transpileModule(`const changeRole = ${changeRole.getText(ast)};`, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
   const context = createContext({ changeWorkspaceRole: async () => {}, memberRoster: async () => { throw new Error('read failed'); } });
-  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,members=[{userId:'nikki',role:'member'}]; const peopleDialogState={rolePending:new Map()}, uuid=()=> 'R'; let paints=0; const renderRoster=()=>{paints++;};",context);
+  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,members=[{userId:'nikki',role:'member'}],memberReauthNext='role'; const peopleDialogState={rolePending:new Map()}, uuid=()=> 'R', one=()=>null; let paints=0; const renderRoster=()=>{paints++;};",context);
   runInContext(code,context);
   await runInContext("changeRole({kind:'change-role',userId:'nikki',role:'admin'})",context);
   assert.equal(runInContext('members[0].role',context),'admin');
+  assert.equal(runInContext('memberReauthNext',context),'remove');
   assert.equal(runInContext('paints',context),1,'the accepted command updates facts even if the follow-up read fails');
   runInContext("members[0].role='member';",context);
   for (const blocked of [
@@ -461,6 +476,165 @@ test('an accepted role save stays successful when the roster refresh fails', asy
     );
     assert.equal(runInContext('members[0].role', context), 'member', blocked);
   }
+});
+
+test('a stale sign-in on role change opens the sign-in path and leaves the role unchanged', async () => {
+  const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('dashboard.ts', raw.match(/<script>([\s\S]*?)<\/script>/)![1], ts.ScriptTarget.Latest, true);
+  let changeRole: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(ast) === 'changeRole') changeRole = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(ast); assert.ok(changeRole);
+  const code = ts.transpileModule(`const changeRole = ${changeRole.getText(ast)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const shown = { reauthHidden: true, errorHidden: true, errorText: '', focused: '', roleConfirmClosed: false, peopleConfirmClosed: false };
+  const context = createContext({
+    FreshLoginRequired,
+    changeWorkspaceRole: async () => { throw new FreshLoginRequired('Sign in again, then retry the role change. No membership change was recorded.'); },
+    memberRoster: async () => { throw new Error('roster must not be read'); },
+    readableError: (error: unknown) => error instanceof Error ? error.message : 'CommonSwarm could not complete that request.',
+    one: (selector: string) => {
+      if (selector === '[data-member-reauth]') return { get hidden() { return shown.reauthHidden; }, set hidden(value: boolean) { shown.reauthHidden = value; } };
+      if (selector === '[data-member-error]') return {
+        get hidden() { return shown.errorHidden; }, set hidden(value: boolean) { shown.errorHidden = value; },
+        get textContent() { return shown.errorText; }, set textContent(value: string) { shown.errorText = value; },
+      };
+      if (selector === '[data-role-confirm]') return { close: () => { shown.roleConfirmClosed = true; } };
+      if (selector === '[data-people-confirm]') return { close: () => { shown.peopleConfirmClosed = true; } };
+      if (selector === '[data-member-reauth] button') return { focus: () => { shown.focused = selector; } };
+      return null;
+    },
+  });
+  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,members=[{userId:'nikki',role:'member'}],memberReauthNext='remove'; const peopleDialogState={rolePending:new Map()}, uuid=()=> 'R'; const renderRoster=()=>{ throw new Error('paint must not run'); };", context);
+  runInContext(code, context);
+  await assert.rejects(
+    () => runInContext("changeRole({kind:'change-role',userId:'nikki',role:'admin'})", context),
+    (error: unknown) => { assert.ok(error instanceof FreshLoginRequired); return true; },
+  );
+  assert.equal(shown.reauthHidden, false);
+  assert.equal(shown.errorHidden, false);
+  assert.equal(shown.errorText, 'Sign in again, then retry the role change. No membership change was recorded.');
+  assert.equal(shown.roleConfirmClosed, true);
+  assert.equal(shown.peopleConfirmClosed, false);
+  assert.equal(shown.focused, '[data-member-reauth] button');
+  assert.equal(runInContext('memberReauthNext', context), 'role');
+  assert.equal(runInContext('members[0].role', context), 'member');
+});
+
+const ROLE_SIGN_IN_EMAIL = 'Check your email. After signing in, return here and press Save again.';
+const REMOVE_SIGN_IN_EMAIL = 'Check your email. After signing in, return here and press Remove again.';
+
+function sourceInitializer(source: string, name: string): string {
+  const ast = ts.createSourceFile('source.ts', source, ts.ScriptTarget.Latest, true);
+  let text = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name && node.initializer) text = node.initializer.getText(ast);
+    if (ts.isPropertyAssignment(node) && node.name.getText(ast) === name) text = node.initializer.getText(ast);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.ok(text, name);
+  return text;
+}
+
+function emailReauthHandler(source: string): string {
+  const ast = ts.createSourceFile('dashboard.ts', source, ts.ScriptTarget.Latest, true);
+  let text = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'addEventListener'
+      && node.expression.expression.getText(ast).includes('data-member-reauth-email')) {
+      text = node.arguments[1]?.getText(ast) ?? '';
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.ok(text, 'email reauth handler');
+  return text;
+}
+
+test('a stale self-role save ends on sign-in, and the email names Save; removal still names Remove', async () => {
+  const dashboard = (await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8')).match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(dashboard);
+  const view = await readFile(new URL('../../lib/people-dialog-view.ts', import.meta.url), 'utf8');
+  const code = ts.transpileModule([
+    `const changeRole = ${sourceInitializer(dashboard, 'changeRole')};`,
+    `const peopleDialogAction = ${sourceInitializer(dashboard, 'peopleDialogAction')};`,
+    `const memberReauthEmailCopy = ${sourceInitializer(dashboard, 'memberReauthEmailCopy')};`,
+    `const emailReauth = ${emailReauthHandler(dashboard)};`,
+    `const refocusRole = ${sourceInitializer(view, 'refocusRole')};`,
+    `const commit = ${sourceInitializer(view, 'commit')};`,
+  ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const focusLog: string[] = [];
+  const closed: string[] = [];
+  const shown = { reauthHidden: true, errorHidden: true, errorText: '' };
+  const stored: string[] = [];
+  let roleError: unknown = new FreshLoginRequired('Sign in again, then retry the role change. No membership change was recorded.');
+  const context = createContext({
+    FreshLoginRequired,
+    peopleRoleBeginSave, peopleRoleFinishSave, peopleRoleRefusal, peopleRoleErrorCode, peopleRoleReceipt,
+    focusLog, closed,
+    changeWorkspaceRole: async () => { throw roleError; },
+    removeWorkspaceMember: async () => { throw new FreshLoginRequired(); },
+    memberRoster: async () => { throw new Error('roster must not be read'); },
+    readableError: (error: unknown) => error instanceof Error ? error.message : 'CommonSwarm could not complete that request.',
+    peopleDialogCanAct: () => true,
+    peopleDialogModel: () => ({ people: [], agents: [] }),
+    signInWithEmail: async () => {},
+    URL,
+    window: { prompt: () => 'owner@example.test', location: { origin: 'https://example.test' } },
+    sessionStorage: { setItem: (key: string) => { stored.push(key); } },
+    one: (selector: string) => {
+      if (selector === '[data-member-reauth]') return { get hidden() { return shown.reauthHidden; }, set hidden(value: boolean) { shown.reauthHidden = value; } };
+      if (selector === '[data-member-error]') return {
+        get hidden() { return shown.errorHidden; }, set hidden(value: boolean) { shown.errorHidden = value; },
+        get textContent() { return shown.errorText; }, set textContent(value: string) { shown.errorText = value; },
+      };
+      if (selector === '[data-role-confirm]') return { close: () => { closed.push('role'); } };
+      if (selector === '[data-people-confirm]') return { close: () => { closed.push('people'); } };
+      if (selector === '[data-member-reauth] button') return { focus: () => { focusLog.push('sign-in-dashboard'); } };
+      return null;
+    },
+    doc: { querySelector: (selector: string) => selector === '[data-member-reauth] button' ? { focus: () => { focusLog.push('sign-in-final'); } } : null },
+    detail: { querySelector: (selector: string) => ({ focus: () => { focusLog.push(selector.includes('data-pd-focus') ? 'role-select' : 'heading'); } }) },
+  });
+  const setup = "let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,memberReauthNext='remove';"
+    + "let members=[{userId:'tom',role:'owner',name:'Tom Langridge'}],draft={userId:'tom',role:'admin',confirming:true};"
+    + "const peopleDialogState={rolePending:new Map(),selected:{type:'person',id:'tom'}},state=peopleDialogState,uuid=()=>'R';"
+    + "const person={id:'tom',name:'Tom Langridge',role:'owner'},model={workspaceName:'Home'},agents=[],accessStatuses=[];";
+  runInContext(setup + code + "const callbacks={render(){focusLog.push('render');},changeRole(change){return changeRole(change);}};", context);
+  await runInContext("commit('admin')", context);
+  assert.deepEqual(focusLog, ['render', 'sign-in-dashboard', 'render', 'sign-in-final']);
+  assert.equal(focusLog.includes('role-select'), false);
+  assert.deepEqual(closed, ['role']);
+  assert.equal(shown.reauthHidden, false);
+  assert.equal(runInContext('memberReauthNext', context), 'role');
+  assert.equal(runInContext('members[0].role', context), 'owner');
+  assert.equal(runInContext('state.roleDraft.confirming', context), false);
+  assert.equal(runInContext('state.roleRefusal.text', context), 'Sign in again, then retry the role change. No membership change was recorded.');
+  await runInContext('emailReauth({currentTarget:{disabled:false}})', context);
+  assert.equal(shown.errorText, ROLE_SIGN_IN_EMAIL);
+  assert.equal(shown.errorText.includes('Remove'), false);
+  await assert.rejects(
+    () => runInContext("peopleDialogAction('remove-person','nikki',{disabled:false},{})", context),
+    (error: unknown) => { assert.ok(error instanceof FreshLoginRequired); return true; },
+  );
+  assert.equal(runInContext('memberReauthNext', context), 'remove');
+  assert.deepEqual(stored, ['commonswarm.pending-member-selection']);
+  assert.equal(closed.includes('people'), true);
+  await runInContext('emailReauth({currentTarget:{disabled:false}})', context);
+  assert.equal(shown.errorText, REMOVE_SIGN_IN_EMAIL);
+  assert.equal(shown.errorText.includes('Save'), false);
+  focusLog.length = 0; closed.length = 0;
+  roleError = Object.assign(new Error('ignored'), { code: 'last_owner' });
+  runInContext("peopleDialogState.rolePending=new Map(); peopleDialogState.roleRefusal=null; peopleDialogState.roleDraft=null; draft=null;", context);
+  await runInContext("commit('member')", context);
+  assert.equal(focusLog.at(-1), 'role-select');
+  assert.equal(focusLog.includes('sign-in-final'), false);
+  assert.equal(focusLog.includes('sign-in-dashboard'), false);
+  assert.deepEqual(closed, []);
+  assert.equal(shown.reauthHidden, true);
+  assert.equal(runInContext('state.roleRefusal.text', context), 'Home needs at least one owner. Make someone else an owner first.');
 });
 
 test('an absent People & agents target falls back to the roster heading', async () => {

@@ -112,6 +112,8 @@ test("every refusal is keyed on the server code and uses the workspace name and 
   assert.equal(peopleRoleRefusal("last_owner", "Nikki", "Summer trip"), "Summer trip needs at least one owner. Make someone else an owner first.");
   assert.equal(peopleRoleRefusal("last_owner", "Nikki"), "This workspace needs at least one owner. Make someone else an owner first.");
   for (const code of [null, "", "teapot"]) assert.equal(refuse(code), "The role change was not confirmed. Reload to check.");
+  assert.equal(refuse("fresh_auth_required"), "Sign in again, then retry the role change. No membership change was recorded.");
+  assert.notEqual(refuse("fresh_auth_required"), refuse(null));
 });
 test("the refusal code is read from the error's code or reason, never its message", () => {
   assert.equal(peopleRoleErrorCode(Object.assign(new Error("last_owner"), { code: "bad_state" })), "bad_state");
@@ -122,6 +124,10 @@ test("the refusal code is read from the error's code or reason, never its messag
   assert.equal(peopleRoleErrorCode({ code: 409 }), null);
   for (const odd of [null, undefined, "last_owner", 7]) assert.equal(peopleRoleErrorCode(odd), null);
   assert.equal(peopleRoleRefusal(peopleRoleErrorCode(new Error("last_owner")), "Nikki", "Home"), "The role change was not confirmed. Reload to check.");
+  const stale = new Error("The role change was not confirmed. Reload to check.");
+  stale.name = "FreshLoginRequired";
+  assert.equal(peopleRoleErrorCode(stale), "fresh_auth_required");
+  assert.equal(peopleRoleRefusal(peopleRoleErrorCode(stale), "Nikki", "Home"), "Sign in again, then retry the role change. No membership change was recorded.");
 });
 test("the change_role command's own refusal codes all have their own copy", () => {
   const source = readFileSync(new URL("../../../src/protocol/workspace-commands.ts", import.meta.url), "utf8");
