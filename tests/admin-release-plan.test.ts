@@ -50,14 +50,23 @@ const fixturePointer = join(pointerDir, 'c1-smoke.pointer');
 assert.ok(outsideHome(secretRoot) && outsideHome(realpathSync(scratch)) && outsideHome(pointerDir), 'test fixtures resolve under the real home');
 assert.match(secretRoot, /^[A-Za-z0-9/_.-]+$/, 'fixture root must be a plain path inside a Python raw string');
 const PRODUCTION_STAGE_RE = "r'/private/tmp/anvil-secret\\.";
+const PRODUCTION_BOX_STAGE_RE = "r'/tmp/anvil-secret\\.";
 const FIXTURE_STAGE_RE = `r'${secretRoot.replace(/[.-]/g, '\\$&')}/anvil-secret\\.`;
 const PRODUCTION_POINTER = '/Users/yulanbot/work/dcr-rt/c1-smoke.pointer';
 const PRODUCTION_PLAN_PATH = '"$RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md"';
 function portable(source: string, expected: { stage: number; pointer: number }) {
-  assert.equal(source.split(PRODUCTION_STAGE_RE).length - 1, expected.stage, 'production secret-window regex count');
+  const mac = source.split(PRODUCTION_STAGE_RE).length - 1;
+  const box = source.split(PRODUCTION_BOX_STAGE_RE).length - 1;
+  assert.equal(mac + box, expected.stage, 'production secret-window regex count');
   assert.equal(source.split(PRODUCTION_POINTER).length - 1, expected.pointer, 'production pointer literal count');
-  const result = source.split(PRODUCTION_STAGE_RE).join(FIXTURE_STAGE_RE).split(PRODUCTION_POINTER).join(fixturePointer);
-  assert.ok(!result.includes('/private/tmp/anvil-secret\\.') && !result.includes(PRODUCTION_POINTER));
+  // Longer Mac /private/tmp prefix first so it is not rewritten as a /tmp substring.
+  const result = source
+    .split(PRODUCTION_STAGE_RE).join(FIXTURE_STAGE_RE)
+    .split(PRODUCTION_BOX_STAGE_RE).join(FIXTURE_STAGE_RE)
+    .split(PRODUCTION_POINTER).join(fixturePointer)
+    .split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').join(`$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`)
+    .split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').join(`$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`);
+  assert.ok(!result.includes('/private/tmp/anvil-secret\\.') && !result.includes("r'/tmp/anvil-secret\\.") && !result.includes(PRODUCTION_POINTER));
   return result;
 }
 const STAGE_NAME = /^anvil-secret\.[A-Za-z0-9]{6}$/;
@@ -127,11 +136,14 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
-  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 10, 'every secret-window check keeps /private/tmp/anvil-secret (W2 probe and revoke readers each check it)');
-  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 4, 'every stage is a fresh /private/tmp/anvil-secret.XXXXXX');
+  assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 3, 'Mac secret-window checks keep /private/tmp/anvil-secret');
+  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 8, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
+  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
+  assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/c1-smoke\.pointer'/);
-  assert.match(block('ai-close'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(p\)\)/);
-  assert.match(block('ai-w2-between-probes'), /re\.fullmatch\(r'\/private\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(stage\)\)/);
+  assert.match(block('ai-w6-start'), /mktemp -d \/private\/tmp\/anvil-secret\.XXXXXX/);
+  assert.match(block('ai-close'), /re\.fullmatch\(r'\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(p\)\)/);
+  assert.match(block('ai-w2-between-probes'), /re\.fullmatch\(r'\/tmp\/anvil-secret\\\.\[A-Za-z0-9\]\{6\}',str\(stage\)\)/);
   assert.equal(block('ai-db-session').split(PRODUCTION_PLAN_PATH).length - 1, 1, 'dispatcher reads the released plan');
   assert.ok(outsideHome(secretRoot) && outsideHome(fixturePointer));
 });
@@ -182,8 +194,8 @@ test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w
     if (window === 'W2') input.probe_workspace_id = '00000000-0000-4000-8000-000000000000';
     const refused = validate(input); assert.notEqual(refused.status, 0, window); assert.match(refused.stderr, /w2_release_sha\/w2_window_id are W2b-only/);
   }
-  // W6 may bind the same-release W2b by w2b_window_id; no other window may.
-  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  // W6 binds the W2b by w2b_release_sha and w2b_window_id; that W2b may be at an EARLIER release (yYGHEd ran at a5cb8251). No other window may.
+  const w6: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   w6.approval = approval(w6, 'activate-admin-issuance-and-smoke');
   const w6good = validate(w6); assert.equal(w6good.status, 0, w6good.stderr);
   // Required for W6: at the W3-W7 release the issuer credential exists only through W2b.
@@ -192,8 +204,15 @@ test('admin release plan: W2b inputs bind the earlier W2 by w2_release_sha and w
   }
   const w6missing: Input = { ...w6 }; delete w6missing.w2b_window_id;
   const absent = validate(w6missing); assert.notEqual(absent.status, 0); assert.match(absent.stderr, /FAIL ai-inputs: W6 w2b_window_id; STOP/);
-  const w5 = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_window_id: 'Xyz789' }); assert.notEqual(w5.status, 0); assert.match(w5.stderr, /w2b_window_id is W6-only/);
-  const w2bSelf = validate({ ...w2b, w2b_window_id: 'Xyz789' }); assert.notEqual(w2bSelf.status, 0); assert.match(w2bSelf.stderr, /w2b_window_id is W6-only/);
+  for (const value of [undefined, 'a'.repeat(39), 'A'.repeat(40), 7, null]) {
+    const bad: Input = { ...w6, w2b_release_sha: value }; if (value === undefined) delete bad.w2b_release_sha;
+    const r = validate(bad); assert.notEqual(r.status, 0, String(value)); assert.match(r.stderr, /FAIL ai-inputs: W6 w2b_release_sha; STOP/);
+  }
+  // The W2b release may differ from the W6 release (the frozen release F binds the a5cb8251 W2b).
+  assert.notEqual(w6.w2b_release_sha, w6.release_sha); assert.equal(w6good.status, 0);
+  const w5sha = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_release_sha: 'd'.repeat(40) }); assert.notEqual(w5sha.status, 0); assert.match(w5sha.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
+  const w5 = validate({ ...base(), window: 'W5', rollback_decision: 'restore-service', w2b_window_id: 'Xyz789' }); assert.notEqual(w5.status, 0); assert.match(w5.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
+  const w2bSelf = validate({ ...w2b, w2b_window_id: 'Xyz789' }); assert.notEqual(w2bSelf.status, 0); assert.match(w2bSelf.stderr, /w2b_release_sha\/w2b_window_id are W6-only/);
   // Window order: W2b is followed by W3 and only then W4; nothing in W2b or the W6 binding reads W3 or W4 state.
   for (const id of ['ai-w2b-preflight', 'ai-w2-issuer-credential']) assert.doesNotMatch(block(id), /W3-probes|W4-readback|-W3-|-W4-/, id);
   assert.match(plan, /The order is W2b, W3, then W4, W5, W6, W7/);
@@ -204,7 +223,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
     ['W6', 'activate-admin-issuance-and-smoke', 'ai-w6-activation-approval'],
     ['W7', 'retire-legacy-admin-mint', 'ai-w7-approval'],
   ]) {
-    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
+    const input: Input = { ...base(), window, rollback_decision: 'close-and-reconcile', ...(window === 'W6' ? { w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' } : { w6_window_id: 'W6win1' }) };
     const noApproval = run(block(id!), { INPUTS_FILE: inputFile(input) });
     assert.notEqual(noApproval.status, 0);
     assert.match(noApproval.stderr, /explicit .* approval required/);
@@ -226,6 +245,7 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
   }
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-approval/);
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-preflight/);
+  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates/);
 });
 
 test('admin release plan: W4 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
@@ -233,7 +253,7 @@ test('admin release plan: W4 requires separate terminal fence approval and W6 re
   assert.match(validate(edge).stderr, /terminal-legacy-db-fence approval required/);
   edge.legacy_fence_approval = approval(edge, 'terminal-legacy-db-fence');
   assert.equal(validate(edge).status, 0);
-  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  const smoke: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   smoke.approval = approval(smoke, 'activate-admin-issuance-and-smoke');
   assert.equal(validate(smoke).status, 0);
   const result = run(block('ai-w6-preflight'), { INPUTS_FILE: inputFile(smoke) });
@@ -418,7 +438,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 10, pointer: 9 }));
+  writeFileSync(planCopy, portable(plan, { stage: 11, pointer: 9 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -586,15 +606,15 @@ esac
   const dispatcher = session.slice(session.indexOf('ai_run() {'), session.indexOf('ai_deadline() {'));
   // A failed database call in the real nested rollback stops before touching files/services.
   const harness = 'ai_db() { return 42; }\n' + dispatcher;
-  // Every stop owner is known. W4's two use ai-timer-guard (tested here); ai-edge-refresh, ai-w6-activation-apply and
-  // ai-w6-finish own their own re-arm traps (tested in tests/admin-release-w6-ready.test.ts).
+  // Every stop owner is known. W4's two use ai-timer-guard (tested here); ai-edge-refresh, ai-w6-activation-apply,
+  // ai-w6-finish and ai-w7-timer-hold own their own re-arm traps (tested in tests/admin-release-w6-ready.test.ts).
   const stopOwners = blocks.filter(source => /systemctl stop /.test(source)).map(source => source.split('\n')[0]).sort();
-  assert.deepEqual(stopOwners, ['# step: ai-edge-refresh', '# step: ai-w4-apply', '# step: ai-w4-rollback', '# step: ai-w6-activation-apply', '# step: ai-w6-finish'], 'unexpected stop owner');
-  const owners = blocks.filter(source => /systemctl stop /.test(source) && source.includes('ai_run ai-timer-guard\n'));
+  assert.deepEqual(stopOwners, ['# step: ai-edge-refresh', '# step: ai-w4-apply', '# step: ai-w4-rollback', '# step: ai-w6-activation-apply', '# step: ai-w6-finish', '# step: ai-w7-timer-hold'], 'unexpected stop owner');
+  const owners = blocks.filter(source => /systemctl stop /.test(source) && /^ai_run ai-timer-guard(?:\n| \|\|)/m.test(source));
   assert.equal(owners.length, 2, 'unexpected unguarded stop owner');
   for (const source of owners) {
     assert.match(source, /^\(\nset -euo pipefail/m, 'guard lifetime must be a subshell');
-    const start = source.indexOf('ai_run ai-timer-guard\n');
+    const start = source.indexOf('ai_run ai-timer-guard');
     assert.ok(start >= 0 && start < source.indexOf('systemctl stop '), source.split('\n')[0]);
     const body = '(\nset -euo pipefail\n' + source.slice(start);
     for (const failStop of [false, true]) {
@@ -615,7 +635,7 @@ esac
 });
 
 test('admin release plan: C1 owner inputs and exact workspace name refuse when absent', () => {
-  const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: 'Xyz789' };
+  const input: Input = { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: 'd'.repeat(40), w2b_window_id: 'Xyz789' };
   input.approval = approval(input, 'activate-admin-issuance-and-smoke');
   const c1 = { release_sha: input.release_sha, window_id: input.window_id, plan_sha256: input.plan_sha256,
     owner_user_id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', smoke_workspace_id: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
@@ -704,7 +724,7 @@ test('admin release plan: W6 absent or stale BROWSER-READY refuses before openin
 });
 
 test('admin release plan: keep-open defaults false and requires its own exact activation/window approval', () => {
-  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_window_id:'Xyz789'};
+  const input: Input={...base(),window:'W6',rollback_decision:'close-and-reconcile',w2b_release_sha:'d'.repeat(40),w2b_window_id:'Xyz789'};
   input.approval=approval(input,'activate-admin-issuance-and-smoke');
   assert.equal(validate(input).status,0);
   assert.notEqual(validate({...input,keep_open:true}).status,0);
@@ -784,11 +804,20 @@ test('admin release plan: D8 pointer emits only paths, consent choices and UTC e
     const r=JSON.parse(readFileSync(pointer,'utf8'));
     assert.deepEqual(Object.keys(r).sort(),['authorize_url_file','callback_file','consent_choices','expires_at']);
     assert.equal(r.authorize_url_file,join(stage,'authorize.url')); assert.equal(r.callback_file,join(stage,'callback.url'));
-    assert.equal(r.consent_choices.workspace_name,'C1 exact workspace'); assert.equal(r.consent_choices.home,false); assert.equal(r.consent_choices.full_account,true);
+    assert.equal(r.consent_choices.workspace_name,'C1 exact workspace'); assert.equal(r.consent_choices.home,false); assert.equal(r.consent_choices.full_account,false);
     const canonical=JSON.parse(spawnSync('node',['scripts/admin-smoke.mjs','--dry-run'],{encoding:'utf8'}).stdout);
     assert.deepEqual(r.consent_choices.scopes,canonical.scope.split(' ').filter((s:string)=>!['openid','offline_access'].includes(s)));
     assert.doesNotMatch(JSON.stringify(r),/https?:|eyJ|access_token|refresh_token|code_verifier|Bearer/);
+    const pointerBytes=readFileSync(pointer);
+    const stale=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(stale.status,0);
+    assert.ok(stale.stderr.includes("FAIL ai-w6-pointer: smoke pointer expected absent got present; an earlier W6 left it: run ai-w6-secret-close with that window's C1_PROOF_DIR, then retry; STOP"),stale.stderr);
+    assert.deepEqual(readFileSync(pointer),pointerBytes,'a stale pointer is retained for its window cleanup');
     removePointer();
+    symlinkSync(join(pointerDir,'missing-pointer-target'),pointer);
+    const dangling=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
+    assert.notEqual(dangling.status,0); assert.match(dangling.stderr,/FAIL ai-w6-pointer: smoke pointer expected absent got present;/);
+    assert.ok(lstatSync(pointer).isSymbolicLink()); rmSync(pointer);
     writeFileSync(c1,JSON.stringify({smoke_workspace_name:'Bearer synthetic-secret-shaped-fixture'}));
     const refused=run(source,{C1_SECRET_STAGE:stage,C1_POINTER:pointer,C1_INPUTS_FILE:c1,INPUTS_FILE:inputFile(base())});
     assert.notEqual(refused.status,0); assert.match(refused.stderr,/secret-shaped pointer/); assert.ok(!existsSync(pointer));
@@ -844,7 +873,7 @@ test('admin release plan: W1-W5 need no activation or consent approval; W4 binds
   }
 });
 
-test('admin release plan: W6 forward close accepts default CLOSED and removes its private window', () => {
+test('admin release plan: W6 close requires cleanup only after Mac start, rejects symlinks, and removes its private window', () => {
   const stage=makeStage(), proof=join(scratch,'close'), close=portable(block('ai-close'),{stage:2,pointer:0}); mkdirSync(proof);
   // Valid retained receipts: ai-close re-runs ai-live-controls on them, producer from the verified archive.
   const producerFile=join(scratch,'close-producer.mjs'), archive=join(scratch,'close-release.tar');
@@ -864,6 +893,8 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
   for(const file of ['C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
   const w6Inputs=join(scratch,'close-inputs-W6.json'); writeFileSync(w6Inputs,JSON.stringify({...base(),window:'W6',archive_sha256:archiveSha}));
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
+  const closeState=(started:boolean)=>JSON.stringify({release_sha:sha,window_id:'Abc123',plan_sha256:digest(plan),started});
+  writeFileSync(join(proof,'C1-close-state.json'),closeState(true));
   const shim=join(scratch,'close-shims'); mkdirSync(shim);
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
@@ -907,7 +938,22 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     const noCleanup=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.notEqual(noCleanup.status,0); assert.match(noCleanup.stderr,/FAIL ai-close: W6 C1-cleanup\.txt expected present got missing; STOP/);
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+    writeFileSync(join(proof,'C1-client-check.txt'),'PASS');
+    const recoveryWithoutCleanup=run(harness+close,{...env,CLOSE_RESULT:'recovered'});
+    assert.notEqual(recoveryWithoutCleanup.status,0);
+    assert.ok(recoveryWithoutCleanup.stderr.includes('FAIL ai-close: recovered W6 C1-cleanup.txt expected regular-non-symlink after secret-stage.path in C1_PROOF_DIR got missing-or-other; run ai-w6-secret-close with C1_PROOF_DIR from this window and upload C1-cleanup.txt, then retry; STOP'),recoveryWithoutCleanup.stderr);
+    assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     writeFileSync(join(proof,'C1-cleanup.txt'),'{}');
+    for(const file of ['C1-client-check.txt','C1-cleanup.txt','C1-close-state.json','C1.json','C1-finish.json']) for(const dangling of [false,true]) {
+      const saved=readFileSync(join(proof,file)); rmSync(join(proof,file));
+      const target=join(scratch,`close-link-${file}`); if(!dangling) writeFileSync(target,saved);
+      else if(existsSync(target)) rmSync(target);
+      symlinkSync(target,join(proof,file));
+      const linked=run(harness+close,{...env,CLOSE_RESULT:'recovered'});
+      assert.notEqual(linked.status,0); assert.ok(linked.stderr.includes(`FAIL ai-close: recovered W6 ${file} expected regular-non-symlink got other; STOP`),linked.stderr);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+      rmSync(join(proof,file)); writeFileSync(join(proof,file),saved);
+    }
     // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
     const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
     writeFileSync(join(proof2,'consent-pre-W1.json'),pre); writeFileSync(join(proof2,'ordinary-after.json'),liveFor('W2','after',pre));
@@ -923,6 +969,22 @@ test('admin release plan: W6 forward close accepts default CLOSED and removes it
     assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
     const result=run(harness+close,{...env,CLOSE_RESULT:'success'});
     assert.equal(result.status,0,result.stderr); assert.ok(existsSync(join(proof,'closed.txt'))); assert.ok(!existsSync(stage));
+    for(const started of [false,true]) {
+      const recoveryStage=makeStage(), recoveryProof=mkdtempSync(join(scratch,'close-recovered-w6-'));
+      try {
+        for(const file of readdirSync(proof)) {
+          if(['closed.txt','close-result.json','secret-stage.path','C1-client-check.txt','C1-cleanup.txt','C1-close-state.json','C1-no-start.txt'].includes(file)) continue;
+          writeFileSync(join(recoveryProof,file),readFileSync(join(proof,file)));
+        }
+        writeFileSync(join(recoveryProof,'secret-stage.path'),recoveryStage+'\n');
+        writeFileSync(join(recoveryProof,'C1-close-state.json'),closeState(started));
+        writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS');
+        if(started) writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS');
+        const recovered=run(harness+close,{...env,SECRET_STAGE:recoveryStage,PROOF_DIR:recoveryProof,CLOSE_RESULT:'recovered'});
+        assert.equal(recovered.status,0,recovered.stderr); assert.ok(existsSync(join(recoveryProof,'closed.txt'))); assert.ok(!existsSync(recoveryStage));
+        assert.equal(existsSync(join(recoveryProof,'C1-no-start.txt')),!started);
+      } finally { if(existsSync(recoveryStage)) removeStage(recoveryStage); }
+    }
   } finally {
     if(existsSync(stage)) removeStage(stage);
   }
@@ -994,11 +1056,16 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   r=attempt('success',['backup-gate.json','w2b-forward-catalogs.txt','issuer-credential.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: W2b w2b-preconditions\.txt expected present got missing; STOP/);
   r=attempt('recovered',[]); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
-  r=attempt('recovered',[],'f'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  r=attempt('recovered',[],'f'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  writeFileSync(join(etc,'admin-issuer-database-credentials'),'{}');
+  r=attempt('recovered',[]); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  rmSync(join(etc,'admin-issuer-database-credentials'));
+  r=attempt('recovered',['issuer-provisioning-attempted.txt'],'f'); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: recovered W2b issuer role expected NOLOGIN-without-password got other; STOP/);
   writeFileSync(join(etc,'admin-issuer-database-credentials'),'{}');
-  r=attempt('recovered',[]); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  r=attempt('recovered',['issuer-provisioning-attempted.txt']); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
   assert.match(r.result.stderr,/FAIL ai-close: recovered W2b credential file expected absent got present; STOP/);
+  rmSync(join(etc,'admin-issuer-database-credentials'));
   // W4 shares the backup gate: its success close needs backup-gate.json as well as its readback.
   r=attempt('success',['backup-gate.json','W4-readback.txt'],'t','W4'); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
   assert.equal(JSON.parse(r.record).window,'W4');
@@ -1010,6 +1077,90 @@ test('admin release plan: W2b close needs its backup gate, preconditions and iss
   assert.match(r.result.stderr,/FAIL ai-close: W4 W4-readback\.txt expected present got missing; STOP/);
 });
 
+test('same-version retry / w3-recovered-close: a recovered W3 closes only with the baseline current and image and no tree at this release', () => {
+  const root=mkdtempSync(join(scratch,'w3-close-'));
+  const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W3',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const oldSha='b'.repeat(40), baselineImage='sha256:'+'e'.repeat(64), inputs=join(root,'inputs.json');
+  writeFileSync(inputs,JSON.stringify({...base(),window:'W3',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_oauth_sha:oldSha,baseline_oauth_image:baselineImage}));
+  const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const attempt=(setup:(oauth:string)=>void,image=baselineImage)=>{
+    const oauth=realpathSync(mkdtempSync(join(root,'oauth-'))); mkdirSync(join(oauth,'releases',oldSha),{recursive:true}); symlinkSync(join(oauth,'releases',oldSha),join(oauth,'current'));
+    setup(oauth);
+    writeFileSync(join(shim,'docker'),`#!/bin/sh\ntest "$*" = "inspect --format {{.Image}} commonswarm-oauth-oauth-1" || exit 9\nprintf '%s\\n' '${image}'\n`,{mode:0o700});
+    const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/home/commonswarm/oauth').join(oauth);
+    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+    writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
+    writeFileSync(join(proof,'ordinary-recovery.json'),recovery); writeFileSync(join(proof,'inputs.json'),readFileSync(inputs));
+    const result=run(`ai_ro() { printf 't\\n'; }\n`+close,{WINDOW:'W3',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:inputs,PLAN_FILE:planPath,
+      BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:'recovered',PATH:shim+':'+process.env.PATH});
+    const closed=existsSync(join(proof,'closed.txt')); if(existsSync(stage)) removeStage(stage);
+    return {result,closed};
+  };
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  // An aside tree of this release and other releases' trees do not block the close.
+  r=attempt(o=>{ mkdirSync(join(o,'failed-attempts',sha+'-W3-Abc123'),{recursive:true}); mkdirSync(join(o,'releases','f'.repeat(40))); }); assert.equal(r.result.status,0,r.result.stderr);
+  const refusal=/FAIL ai-close: recovered W3 oauth current expected baseline and release tree expected absent got other; run ai-w3-rollback; STOP/;
+  r=attempt(o=>mkdirSync(join(o,'releases',sha))); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal); assert.doesNotMatch(r.result.stderr,/Traceback/);
+  r=attempt(o=>symlinkSync(join(o,'nowhere'),join(o,'releases',sha))); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal);
+  r=attempt(o=>{ mkdirSync(join(o,'releases',sha)); rmSync(join(o,'current')); symlinkSync(join(o,'releases',sha),join(o,'current')); }); assert.notEqual(r.result.status,0); assert.ok(!r.closed); assert.match(r.result.stderr,refusal);
+  r=attempt(()=>undefined,'sha256:'+'c'.repeat(64)); assert.notEqual(r.result.status,0); assert.ok(!r.closed);
+  assert.match(r.result.stderr,/FAIL ai-close: recovered W3 running image expected baseline got other; STOP/);
+});
+test('same-version retry / w4-recovered-close: a recovered W4 closes only with the baseline edge, baseline Caddy bytes, no drop-in and no tree at this release', () => {
+  const root=realpathSync(mkdtempSync(join(scratch,'w4-close-')));
+  const producerFile=join(root,'producer.mjs'), archive=join(root,'release.tar');
+  writeFileSync(producerFile,'export const closeFixture = "live-ordinary-controls";\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producerFile],{encoding:'utf8'});
+  assert.equal(tar.status,0,tar.stderr);
+  const producerSha=digest(readFileSync(producerFile)), archiveSha=digest(readFileSync(archive));
+  const controls={hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true};
+  const pre=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'pre-W1',measured_at:new Date(Date.now()-60_000).toISOString(),
+    producer_sha256:producerSha,controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['dcr-close-own'],cleanup:null});
+  const recovery=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W4',phase:'recovery',controls,consent_receipt_sha256:digest(pre),producer_sha256:producerSha,dcr_client_ids:['dcr-close-window']});
+  const oldSha='b'.repeat(40), bytes={mcp:'mcp baseline\n',api:'api baseline\n',file:'import sites/*.caddy\n'}, inputs=join(root,'inputs.json');
+  writeFileSync(inputs,JSON.stringify({...base(),window:'W4',rollback_decision:'restore-service',archive_sha256:archiveSha,baseline_edge_sha:oldSha,
+    baseline_mcp_caddy_sha256:digest(bytes.mcp),baseline_api_caddy_sha256:digest(bytes.api),baseline_caddyfile_sha256:digest(bytes.file)}));
+  const shim=join(root,'shims'); mkdirSync(shim); writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const attempt=(setup:(box:string)=>void)=>{
+    const box=realpathSync(mkdtempSync(join(root,'box-'))), edge=join(box,'edge'), caddy=join(box,'caddy'), systemd=join(box,'systemd');
+    mkdirSync(join(edge,'releases',oldSha),{recursive:true}); symlinkSync(join(edge,'releases',oldSha),join(edge,'current'));
+    mkdirSync(join(caddy,'sites'),{recursive:true}); writeFileSync(join(caddy,'sites/20-commonswarm-mcp.caddy'),bytes.mcp);
+    writeFileSync(join(caddy,'sites/10-commonswarm-api.caddy'),bytes.api); writeFileSync(join(caddy,'Caddyfile'),bytes.file); mkdirSync(join(systemd,'fixture.service.d'),{recursive:true});
+    setup(box);
+    const close=portable(block('ai-close'),{stage:2,pointer:0}).split('/home/commonswarm/edge').join(edge).split('/etc/caddy').join(caddy).split('/etc/systemd/system').join(systemd);
+    const stage=makeStage(), proof=mkdtempSync(join(root,'proof-'));
+    writeFileSync(join(proof,'secret-stage.path'),stage+'\n'); writeFileSync(join(proof,'consent-pre-W1.json'),pre);
+    writeFileSync(join(proof,'ordinary-recovery.json'),recovery); writeFileSync(join(proof,'inputs.json'),readFileSync(inputs));
+    const result=run(`ai_ro() { printf 't\\n'; }\n`+close,{WINDOW:'W4',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',EDGE_RECYCLE_SERVICE:'fixture.service',
+      INPUTS_FILE:inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,CLOSE_RESULT:'recovered',PATH:shim+':'+process.env.PATH});
+    const closed=existsSync(join(proof,'closed.txt')); if(existsSync(stage)) removeStage(stage);
+    return {result,closed};
+  };
+  let r=attempt(()=>undefined); assert.equal(r.result.status,0,r.result.stderr); assert.ok(r.closed);
+  r=attempt(b=>mkdirSync(join(b,'edge/failed-attempts',sha+'-W4-Abc123'),{recursive:true})); assert.equal(r.result.status,0,r.result.stderr);
+  const refusal=/FAIL ai-close: recovered W4 edge current, Caddy bytes, drop-in and release tree expected baseline-baseline-absent-absent got other; run ai-w4-rollback; STOP/;
+  for(const [name,setup] of [
+    ['tree at this release',(b:string)=>mkdirSync(join(b,'edge/releases',sha))],
+    ['current on the new tree',(b:string)=>{ mkdirSync(join(b,'edge/releases',sha)); rmSync(join(b,'edge/current')); symlinkSync(join(b,'edge/releases',sha),join(b,'edge/current')); }],
+    ['candidate Caddy left live',(b:string)=>writeFileSync(join(b,'caddy/sites/20-commonswarm-mcp.caddy'),'candidate\n')],
+    ['Caddyfile changed',(b:string)=>writeFileSync(join(b,'caddy/Caddyfile'),'other\n')],
+    ['drop-in left',(b:string)=>writeFileSync(join(b,'systemd/fixture.service.d/50-admin-measurement.conf'),'[Service]\n')],
+  ] as const) {
+    r=attempt(setup); assert.notEqual(r.result.status,0,name); assert.ok(!r.closed,name); assert.match(r.result.stderr,refusal,name); assert.doesNotMatch(r.result.stderr,/Traceback/,name);
+  }
+  // The rollback derives its paths from INPUTS and moves the tree aside only after current is back on the baseline.
+  const rollback=block('ai-w4-rollback');
+  assert.ok(rollback.indexOf('OLD_EDGE=/home/commonswarm/edge/releases/$W4_BASELINE_EDGE_SHA')<rollback.indexOf('ln -sfT "$OLD_EDGE"'));
+  assert.ok(rollback.indexOf('test "$(readlink -f /home/commonswarm/edge/current)" = "$OLD_EDGE" ||')<rollback.indexOf('RELEASE_ASIDE_PART=edge\n( ai_run ai-release-aside ) ||'));
+});
 // ---- shared W2/W2b proof validator (ai-w2b-proof-check), run from plan bytes; paths remapped only ----
 const pyJson = (value: Record<string, unknown>) => '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ': ' + JSON.stringify(value[k])).join(', ') + '}\n';
 const W2B_PRECONDITIONS_LINE = 'PASS W2b preconditions: backup gate, bound W2 proofs, ledger, checksums and forward catalogs exact; issuer NOLOGIN without password; credential absent; issuance OFF\n';
@@ -1041,7 +1192,7 @@ function proofCheckFixture(kind: 'W2' | 'W2b', bound?: { sha: string; id: string
     put('w2b-forward-catalogs.txt', 'PASS W2b forward catalogs: all five true after the issuer credential\n');
   }
   const checking: Input = kind === 'W2' ? { ...base(), window: 'W2b', w2_release_sha: target.sha, w2_window_id: target.id }
-    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_window_id: target.id, ...(bound ? { release_sha: target.sha } : {}) };
+    : { ...base(), window: 'W6', rollback_decision: 'close-and-reconcile', w2b_release_sha: target.sha, w2b_window_id: target.id };
   const inputs = join(root, 'checking-inputs.json'); writeFileSync(inputs, JSON.stringify(checking));
   const source = block('ai-w2b-proof-check').split('/home/commonswarm/admin-issuance').join(join(root, 'admin-issuance')).split('/tmp/admin-issuance-').join(join(root, 'archive-'));
   const check = (env: Record<string, string> = {}) => run(source, { PLAN_FILE: planPath, INPUTS_FILE: inputs, PROOF_CHECK_KIND: kind, ...env });
@@ -1132,9 +1283,15 @@ test('admin release plan: the shared proof validator refuses a W2b that did not 
     assert.notEqual(r.status, 0, name); assert.match(r.stderr, message, `${name}: ${r.stderr}`); assert.equal(r.stdout, '', name);
   }
   // W6 inputs without the binding refuse before reading anything.
-  const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input.w2b_window_id;
-  writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
-  assert.notEqual(r.status, 0); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/);
+  for (const key of ['w2b_window_id', 'w2b_release_sha']) {
+    const f = proofCheckFixture('W2b'); const input = JSON.parse(readFileSync(f.inputs, 'utf8')); delete input[key];
+    writeFileSync(f.inputs, JSON.stringify(input)); const r = f.check();
+    assert.notEqual(r.status, 0, key); assert.match(r.stderr, /INPUTS W2b binding expected full-sha-and-window-id got missing-or-other/, key);
+  }
+  // The W6 release does not select the W2b: inputs naming another W2b release find no proof directory.
+  const other = proofCheckFixture('W2b'); const moved = JSON.parse(readFileSync(other.inputs, 'utf8')); moved.w2b_release_sha = 'f'.repeat(40);
+  writeFileSync(other.inputs, JSON.stringify(moved)); const r = other.check();
+  assert.notEqual(r.status, 0); assert.match(r.stderr, /W2b proof directory expected directory got missing-or-symlink/);
 });
 
 test('admin release plan: the shared backup receipt check accepts only a bound, fresh, well-formed receipt', () => {
@@ -1230,6 +1387,7 @@ test('admin release plan: a false post-credential catalog reaches the REAL issue
     const root = realpathSync(mkdtempSync(join(scratch, 'fwd-rollback-')));
     const proof = join(root, 'proof'), etc = join(root, 'etc'); mkdirSync(proof); mkdirSync(etc);
     writeFileSync(join(proof, 'issuer-credential.txt'), 'PASS issuer login; credential 0440 root:986; password stays on box\n');
+    writeFileSync(join(proof, 'issuer-provisioning-attempted.txt'), '2026-10-05T00:00:00Z\n');
     writeFileSync(join(etc, 'admin-issuer-database-credentials'), '{"user":"commonswarm_admin_issuer","password":"synthetic"}\n');
     // The plan's own rollback block (credential path remapped into this test's directory). "modelled" runs it with
     // errexit off, as bash 5 does on the left of || (the mini's /bin/bash 3.2 cannot show that context itself).
@@ -1354,6 +1512,7 @@ subprocess.check_output = fixture_output
     ['/home/commonswarm/admin-issuance/releases', join(root, 'release')],
     ['/tmp/admin-issuance-', join(root, 'admin-issuance-')], ['/var/lib/commonswarm-release', join(root, 'var-lib')],
     ['$(mktemp -d /private/tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
+    ['$(mktemp -d /tmp/anvil-secret.XXXXXX)', `$(mktemp -d ${secretRoot}/anvil-secret.XXXXXX)`],
   ]) source = source.split(from).join(to);
   const imports = 'import hashlib,json,os,pathlib,re,stat,subprocess,sys,tarfile,time\n';
   assert.equal(source.split(imports).length - 1, 1);
@@ -1612,7 +1771,7 @@ test('admin release plan: W5 companion site plan comes only from the verified re
   const root = mkdtempSync(join(scratch, 'site-ref-')), prep = join(root, 'prep'), repoDir = join(root, 'site-repo');
   mkdirSync(prep); const sitePath = 'docs/evidence/2026-10-02-site-release/SITE-RELEASE.md';
   const fence = '```';
-  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
+  const sitePlan = `# Site fixture\n\n${fence}sh\n# step: site-release-shared-preflight\nW5_SITE_MARK=shared-preflight\n${fence}\n\n${fence}sh\n# step: site2-plan-inputs\nW5_SITE_MARK=from-archive\n${fence}\n\n${fence}sh\n# step: site2-02 — fixture\nprintf 'site2-02 ran\\n'\n${fence}\n`;
   const staging = join(root, 'tree'); mkdirSync(dirname(join(staging, sitePath)), { recursive: true }); writeFileSync(join(staging, sitePath), sitePlan);
   mkdirSync(dirname(join(repoDir, sitePath)), { recursive: true }); writeFileSync(join(repoDir, sitePath), sitePlan);
   const tar = join(prep, 'release.tar');
@@ -1622,7 +1781,8 @@ test('admin release plan: W5 companion site plan comes only from the verified re
   const reference = (step: string) => run(block('ai-w5-reference') + '\nprintf "mark=%s\\n" "${W5_SITE_MARK:-unset}"\n',
     { SITE_STEP: step, SITE_RELEASE_REPO: repoDir, PREP_DIR: prep, INPUTS_FILE: inputs, SITE_RELEASE_SHA: sha });
   // Positive: the archive block is evaluated in this shell (its variable persists).
-  let r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
+  let r = reference('site-release-shared-preflight'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=shared-preflight/);
+  r = reference('site2-plan-inputs'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /mark=from-archive/);
   r = reference('site2-02'); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /site2-02 ran/);
   assert.deepEqual(readdirSync(prep).sort(), ['release.tar'], 'no staged site-plan.md or site-step.sh');
   const refused = (out: ReturnType<typeof run>, text: string) => {
@@ -1678,7 +1838,7 @@ const OLD_PATHNAME_READER = `def read_regular(name):
 test('admin release plan: shared plan reader survives a path swap after its metadata check; the old pathname reader does not', () => {
   // Every site carries the same reader (quote style aside).
   const readers = [...plan.matchAll(/^def read_regular\(name\):\n(?: {4}.*\n)+/gm)].map(m => m[0].replace(/"/g, "'"));
-  assert.equal(readers.length, 21, 'one shared reader at all 21 sites (20 plan-text sites, including ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
+  assert.equal(readers.length, 22, 'one shared reader at all 22 sites (21 plan-text sites, including the W5 recovered-close validator, ai-w2b-preflight, ai-w2b-proof-check, ai-edge-remeasure, ai-edge-refresh and ai-w6-fence-driver, and ai-w2-backfill)');
   assert.equal(new Set(readers).size, 1, 'all readers identical');
   const dir = mkdtempSync(join(scratch, 'reader-swap-'));
   const shared = join(dir, 'shared-reader.py'); writeFileSync(shared, readers[0]!);
@@ -2356,6 +2516,7 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
       consent_receipt_sha256: digest(consent), producer_sha256: producerSha, dcr_client_ids: ['dcr-close-window'] });
     writeFileSync(join(proof, 'consent-pre-W1.json'), consent); writeFileSync(join(proof, 'ordinary-recovery.json'), live);
     writeFileSync(join(proof, 'secret-stage.path'), stage + '\n');
+    writeFileSync(join(proof, 'ledger-at-open.txt'), '');
     // Pre-fence STOP state: staged, revoke started but not proven, nothing applied.
     for (const [name, value] of [['probe-staged.txt', 'x\n'], ['dcr-probe-revoke-attempted.txt', 'started\n'],
       ['dcr-probe-revoke-unproven.json', JSON.stringify({ client_id: 'dcr-probe-client', revoked: false, status: 'REVOKE-UNPROVEN', reason: 'step 1 rotation refresh got transport-error-not-retried' })]] as const) writeFileSync(join(proof, name), value);
@@ -2363,7 +2524,7 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
     const shim = mkdtempSync(join(scratch, 'w2-close-shim-')); writeFileSync(join(shim, 'systemctl'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     const calls = join(proof, '..', basename(proof) + '-ai-ro');
     // Read-only database boundary: only the ledger query is modelled; admin_cutover_state must not be queried.
-    const harness = `ai_ro() { printf '%s\\n' "$*" >>'${calls}'; case "$*" in *"version LIKE '20261003%'"*) test -z "\${MUTATE_RULING:-}" || chmod 0666 "\${MUTATE_RULING}"; printf '%s\\n' "\${LEDGER_COUNT:-0}";; *) printf 'UNEXPECTED\\n'; return 1;; esac; }\n`;
+    const harness = `ai_ro() { printf '%s\\n' "$*" >>'${calls}'; case "$*" in *"version LIKE '20261003%'"*) test -z "\${MUTATE_RULING:-}" || chmod 0666 "\${MUTATE_RULING}"; if test "\${LEDGER_COUNT:-0}" = 0; then :; else printf '%s\\n' '20261003000001'; fi;; *) printf 'UNEXPECTED\\n'; return 1;; esac; }\n`;
     const env = { WINDOW: 'W2', CLOSE_RESULT: 'recovered', SECRET_STAGE: stage, PROOF_DIR: proof, EDGE_RECYCLE_TIMER: 'fixture.timer', INPUTS_FILE: inputs, PLAN_FILE: planPath,
       BOX_ARCHIVE_PATH: archive, PATH: shim + ':' + process.env.PATH };
     // A HezLead ruling file bound to this window, release, plan digest and staged client_id.
@@ -2402,7 +2563,7 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
   { const c = setup();
     try {
       const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling(), LEDGER_COUNT: '1' });
-      assert.notEqual(out.status, 0); assert.match(out.stderr, /FAIL ai-close: pre-fence W2 ledger expected no 20261003 version got other; STOP/);
+      assert.notEqual(out.status, 0); assert.match(out.stderr, /FAIL ai-close: pre-fence W2 ledger expected unchanged-from-open-capture got other; STOP/);
       assert.ok(!existsSync(join(c.proof, 'closed.txt')));
       assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')), 'no acceptance record on a refused close');
       // A valid ruling with CLOSE_RESULT withheld: the close refuses and records no acceptance.
@@ -2410,6 +2571,15 @@ test('admin release plan: W2 pre-fence close proves an empty ledger and needs a 
       const withheld = run(c.harness + c.close, env);
       assert.notEqual(withheld.status, 0); assert.match(withheld.stderr, /CLOSE_RESULT/);
       assert.ok(!existsSync(join(c.proof, 'dcr-probe-revoke-accepted.json')) && !existsSync(join(c.proof, 'closed.txt')));
+    } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
+  // Empty capture is required: a missing ledger-at-open.txt refuses.
+  { const c = setup();
+    try {
+      rmSync(join(c.proof, 'ledger-at-open.txt'));
+      const out = run(c.harness + c.close, { ...c.env, W2_REVOKE_UNPROVEN_ACCEPTED: c.ruling() });
+      assert.notEqual(out.status, 0);
+      assert.match(out.stderr, /FAIL ai-close: pre-fence W2 ledger-at-open.txt expected captured-at-open got missing; STOP/);
+      assert.ok(!existsSync(join(c.proof, 'closed.txt')));
     } finally { if (existsSync(c.stage)) removeStage(c.stage); c.cleanRulings(); } }
   // The ruling changes between the first check and the final validation (the stub flips its mode
   // during the ledger query): refused BEFORE the stage is removed; a retry with a valid ruling closes.
@@ -2646,4 +2816,507 @@ print('ok')
   // Control: a wrong password fails the same check.
   const bad = spawnSync('python3', ['-c', check.replace("scram_verifier('pencil',salt)", "scram_verifier('pencil2',salt)")], { encoding: 'utf8' });
   assert.notEqual(bad.status, 0);
+});
+
+test('recovered W6 start state measures the Mac marker and refuses regular and dangling receipt symlinks', () => {
+  const dir=mkdtempSync(join(scratch,'mac-close-state-'));
+  const input=join(dir,'inputs.json'); const d={...base(),window:'W6'}; writeFileSync(input,JSON.stringify(d));
+  const execute=()=>run(block('ai-w6-close-state'),{C1_PROOF_DIR:dir,INPUTS_FILE:input});
+  writeFileSync(join(dir,'C1-client-check.txt'),'PASS');
+  let r=execute(); assert.equal(r.status,0,r.stderr);
+  assert.equal(JSON.parse(readFileSync(join(dir,'C1-close-state.json'),'utf8')).started,false,'client-check alone never starts a runner');
+  writeFileSync(join(dir,'secret-stage.path'),'/private/tmp/synthetic-stage\n'); writeFileSync(join(dir,'runner.pid'),'2147483646\n');
+  r=execute(); assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(readFileSync(join(dir,'C1-close-state.json'),'utf8')).started,true);
+  for(const file of ['secret-stage.path','runner.pid','C1-client-check.txt','C1-cleanup.txt']) for(const dangling of [false,true]) {
+    const path=join(dir,file), target=join(dir,'link-target');
+    const saved=existsSync(path)?readFileSync(path):null; if(saved) rmSync(path);
+    if(existsSync(target)) rmSync(target); if(!dangling) writeFileSync(target,'PASS');
+    symlinkSync(target,path); r=execute(); assert.notEqual(r.status,0);
+    assert.ok(r.stderr.includes(`FAIL ai-w6-close-state: ${file} expected regular-non-symlink got other; STOP`),r.stderr);
+    rmSync(path); if(saved) writeFileSync(path,saved);
+  }
+  writeFileSync(join(dir,'runner.pid'),String(process.pid));
+  r=execute(); assert.notEqual(r.status,0); assert.match(r.stderr,/runner expected stopped got active/);
+});
+
+test('W5 recovered close requires companion closure, bound rollback/reconciliation and the original baseline current', () => {
+  const root=realpathSync(mkdtempSync(join(scratch,'w5-recovered-'))), site=join(root,'site'), bin=join(root,'bin'); mkdirSync(bin);
+  writeFileSync(join(bin,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const original=join(site,'releases','20261003T120000Z-'+base().baseline_site_sha.slice(0,12)+'-'+'1'.repeat(16));
+  mkdirSync(join(original,'app'),{recursive:true}); writeFileSync(join(original,'app/index.html'),'baseline'); symlinkSync(original,join(site,'current'));
+  const producer=join(root,'producer.mjs'), archive=join(root,'release.tar'); writeFileSync(producer,'export const fixture = true;\n');
+  const tar=spawnSync('python3',['-c','import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t: t.add(sys.argv[2],arcname="scripts/live-ordinary-controls.mjs")',archive,producer],{encoding:'utf8'}); assert.equal(tar.status,0,tar.stderr);
+  const consent=JSON.stringify({kind:'c1-consent',release_sha:sha,consent_phase:'post-W5',measured_at:new Date(Date.now()-60_000).toISOString(),producer_sha256:digest(readFileSync(producer)),controls:{cimd_consent:true,dcr_registration_consent:true},dcr_client_ids:['w5-recovery-own'],cleanup:{grants_revoked:true,dcr_clients_expiring:[{client_id:'earlier-client',expires_after:new Date(Date.now()+86400_000).toISOString()}]}});
+  const live=JSON.stringify({release_sha:sha,window_id:'Abc123',window:'W5',phase:'recovery',controls:{hosted_mcp_consent_refresh:true,dcr_registration_consent:true,cimd_consent:true,human_recovery:true,worker_command_read:true},consent_receipt_sha256:digest(consent),producer_sha256:digest(readFileSync(producer)),dcr_client_ids:['window-client']});
+  const fixture=(outcome:string)=>{
+    const proof=mkdtempSync(join(root,'proof-')), evidence=join(proof,'site-recovery'); mkdirSync(evidence);
+    const input=join(proof,'inputs.json'); writeFileSync(input,JSON.stringify({...base(),window:'W5',baseline_site_target:original,archive_sha256:digest(readFileSync(archive))}));
+    writeFileSync(join(proof,'ordinary-recovery.json'),live); writeFileSync(join(proof,'consent-post-W5.json'),consent);
+    writeFileSync(join(evidence,'GO.txt'),`SHA=${sha}\nBASE_SHA=${base().baseline_site_sha}\nHOLDS_RESOLVED=yes\n`);
+    writeFileSync(join(evidence,'deploy-status.txt'),`deploy_exit=${outcome==='rolled-back'?0:70}\nafter_read_exit=0\n`);
+    writeFileSync(join(evidence,'previous.original'),original+'\n'); writeFileSync(join(evidence,'site2-07-pin-close.txt'),`pin_released=yes\nOUTCOME=${outcome}\n`);
+    if(outcome==='rolled-back') { writeFileSync(join(evidence,'rollback-auto.txt'),'rollback_reason=public-control-failure\nrestored_release=/srv/commonswarm/site/releases/.site-window-pin-fixture\n'); writeFileSync(join(evidence,'site2-06-rollback-verify.txt'),'ROLLBACK_PUBLIC_BYTES=PASS\nuser_agent=curl/8.7.1\n'); }
+    else writeFileSync(join(evidence,'site2-04-reconciliation.txt'),'DEPLOYMENT=failed-before-switch\nRETRY=forbidden\n');
+    const seal=()=>{
+      const names=readdirSync(evidence).filter(n=>!['CLOSE.txt','manifest.json'].includes(n));
+      const manifest=JSON.stringify(names.map(path=>({path,sha256:digest(readFileSync(join(evidence,path)))}))); writeFileSync(join(evidence,'manifest.json'),manifest);
+      writeFileSync(join(evidence,'CLOSE.txt'),`CLOSED=yes\nOUTCOME=${outcome}\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(manifest)}\n`);
+    }; seal();
+    const execute=()=>run(block('ai-close').replaceAll('/srv/commonswarm/site',site),{WINDOW:'W5',CLOSE_RESULT:'recovered',INPUTS_FILE:input,PLAN_FILE:planPath,PROOF_DIR:proof,BOX_ARCHIVE_PATH:archive,SITE_RECOVERY_EVIDENCE:evidence,PATH:bin+':'+process.env.PATH});
+    return {proof,evidence,execute,seal};
+  };
+  // Execute the companion's real automatic rollback/reconciliation and box pin-close
+  // bodies against temporary files. Only SSH, host identity and GNU file flags are adapted.
+  const companion=readFileSync('docs/evidence/2026-10-02-site-release/SITE-RELEASE.md','utf8');
+  const companionBlock=(id:string)=>[...companion.matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: '+id+' —'))!;
+  writeFileSync(join(bin,'ssh'),'#!/usr/bin/env python3\nimport subprocess,sys\nr=subprocess.run(["/bin/bash","-c"," ".join(sys.argv[4:])],input=sys.stdin.buffer.read());sys.exit(r.returncode)\n',{mode:0o700});
+  writeFileSync(join(bin,'readlink'),'#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1]=="-f";print(os.path.realpath(sys.argv[2]))\n',{mode:0o700});
+  writeFileSync(join(bin,'mv'),'#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:];a=a[1:] if a[0]=="-Tf" else a;assert len(a)==2;os.replace(*a)\n',{mode:0o700});
+  writeFileSync(join(bin,'id'),'#!/bin/sh\ntest "$1" = -un || exit 1\nprintf "commonswarm\\n"\n',{mode:0o700});
+  writeFileSync(join(bin,'stat'),'#!/usr/bin/env python3\nimport os,stat,sys\nassert sys.argv[1:3]==["-c","%a"];print(format(stat.S_IMODE(os.stat(sys.argv[3]).st_mode),"o"))\n',{mode:0o700});
+  for(const outcome of ['rolled-back','failed-before-switch']) {
+    const good=fixture(outcome), windowId='20261005T120000Z', pin=join(site,'releases','.site-window-pin-'+windowId);
+    mkdirSync(join(pin,'app'),{recursive:true});writeFileSync(join(pin,'app/index.html'),'baseline');
+    writeFileSync(join(good.evidence,'previous.release'),pin+'\n');
+    const env={PATH:bin+':'+process.env.PATH,SITE_EVIDENCE:good.evidence,SITE_RELEASE_SHA:sha,SITE_WINDOW_ID:windowId,SITE_RELEASE_VERSION:'fixture'};
+    const local=(body:string)=>run(body.replaceAll('/srv/commonswarm/site',site).replace('. "$HOME/.commonswarm-site-window.env"', ':'),env);
+    if(outcome==='rolled-back') {
+      const failed=join(site,'releases','20261005T120000Z-'+sha.slice(0,12)+'-'+'2'.repeat(16));mkdirSync(join(failed,'app'),{recursive:true});writeFileSync(join(failed,'app/index.html'),'bad-public-bytes');
+      rmSync(join(site,'current'));symlinkSync(failed,join(site,'current'));writeFileSync(join(good.evidence,'after.release'),failed+'\n');
+      rmSync(join(good.evidence,'rollback-auto.txt'));
+      const rollback=local(companionBlock('site2-05'));assert.notEqual(rollback.status,0,'public control fails before network on missing app marker');
+      assert.equal(realpathSync(join(site,'current')),pin,'real companion automatic rollback restores pin');
+      assert.match(readFileSync(join(good.evidence,'rollback-auto.txt'),'utf8'),/rollback_reason=public-control-failure/);
+    } else {
+      rmSync(join(good.evidence,'site2-04-reconciliation.txt'));
+      const reconciled=local(companionBlock('site2-04-reconcile-failure'));assert.equal(reconciled.status,0,reconciled.stderr);
+      assert.match(readFileSync(join(good.evidence,'site2-04-reconciliation.txt'),'utf8'),/DEPLOYMENT=failed-before-switch/);
+    }
+    const windowFile=join(good.proof,'site-window.env');writeFileSync(windowFile,`SITE_WINDOW_ID=${windowId}\nSITE_RELEASE_SHA=${sha}\nBASELINE_DIR=${original}\n`,{mode:0o600});
+    const closeBox=/<<'BOX'\n([\s\S]*?)\nBOX/.exec(companionBlock('site2-07-manifest-close'))![1]!.replaceAll('/tmp/commonswarm-site-window.env',windowFile);
+    const pinClosed=local(`set -- '${pin}' '${original}' '${windowId}' '${outcome}' '' '' '${sha}' '${original}'\n`+closeBox);
+    assert.equal(pinClosed.status,0,pinClosed.stderr);assert.ok(!existsSync(pin),'companion pin-close removes its added pin');
+    writeFileSync(join(good.evidence,'site2-07-pin-close.txt'),pinClosed.stdout);good.seal();
+    const r=good.execute(); assert.equal(r.status,0,r.stderr);
+    assert.match(r.stdout,/CLOSED-RECOVERED W5/); assert.equal(JSON.parse(readFileSync(join(good.proof,'close-result.json'),'utf8')).result,'recovered');
+  }
+  const goFailure=fixture('failed-before-switch');
+  rmSync(join(goFailure.evidence,'GO.txt')); rmSync(join(goFailure.evidence,'deploy-status.txt')); goFailure.seal();
+  writeFileSync(join(goFailure.evidence,'site2-03-pin.txt'),'PIN=PASS\n');
+  const retainedPin=join(site,'releases','.site-window-pin-go-failure');mkdirSync(retainedPin);
+  const retainedWindow=join(goFailure.proof,'site-window.env');writeFileSync(retainedWindow,'open\n');
+  const noDeploy=goFailure.execute(); assert.notEqual(noDeploy.status,0);
+  assert.match(noDeploy.stderr,/^FAIL ai-close: recovered W5 deploy evidence expected GO.txt and site2-04 deploy-status.txt got absent or invalid; incident stays open; STOP$/m);
+  assert.ok(!existsSync(join(goFailure.proof,'closed.txt'))); assert.ok(!existsSync(join(goFailure.proof,'close-result.json')));
+  assert.ok(existsSync(retainedPin));assert.ok(existsSync(retainedWindow));
+  const goOnly=fixture('failed-before-switch');rmSync(join(goOnly.evidence,'deploy-status.txt'));goOnly.seal();
+  const statusMissing=goOnly.execute();assert.notEqual(statusMissing.status,0);assert.match(statusMissing.stderr,/incident stays open; STOP/);
+  for(const fault of ['missing-close','cleanup-failed','wrong-current','wrong-baseline','receipt-missing','receipt-altered','pin-partial','forward-outcome','receipt-symlink','bad-controls']) {
+    const f=fixture(fault==='receipt-missing'?'failed-before-switch':'rolled-back');
+    if(fault==='missing-close') rmSync(join(f.evidence,'CLOSE.txt'));
+    if(fault==='cleanup-failed') writeFileSync(join(f.evidence,'CLOSE.txt'),'CLOSED=no\n');
+    if(fault==='wrong-current') { rmSync(join(site,'current')); symlinkSync(site,join(site,'current')); }
+    if(fault==='wrong-baseline') { const input=join(f.proof,'inputs.json'); const d=JSON.parse(readFileSync(input,'utf8')); d.baseline_site_sha='0'.repeat(40); writeFileSync(input,JSON.stringify(d)); }
+    if(fault==='receipt-missing') { rmSync(join(f.evidence,'site2-04-reconciliation.txt')); f.seal(); }
+    if(fault==='receipt-altered') writeFileSync(join(f.evidence,'rollback-auto.txt'),'changed');
+    if(fault==='pin-partial') { writeFileSync(join(f.evidence,'site2-07-pin-close.txt'),'pin_released=no\n'); f.seal(); }
+    if(fault==='forward-outcome') writeFileSync(join(f.evidence,'CLOSE.txt'),readFileSync(join(f.evidence,'CLOSE.txt'),'utf8').replace('OUTCOME=rolled-back','OUTCOME=released'));
+    if(fault==='receipt-symlink') { const path=join(f.evidence,'rollback-auto.txt'); rmSync(path); symlinkSync(join(root,'absent'),path); }
+    if(fault==='bad-controls') writeFileSync(join(f.proof,'ordinary-recovery.json'),'{}');
+    const r=f.execute(); assert.notEqual(r.status,0,fault); assert.ok(!existsSync(join(f.proof,'closed.txt')),fault); assert.ok(!existsSync(join(f.proof,'close-result.json')),fault);
+    assert.match(r.stderr,fault==='bad-controls'?/retained close receipts expected valid got refused/:/recovered W5 site close, recovery receipt and current expected closed-recovered-baseline got other/);
+    if(fault==='wrong-current') { rmSync(join(site,'current')); symlinkSync(original,join(site,'current')); }
+  }
+});
+
+// Execute the actual admission block. Only host selection, the read-only marker
+// path and fixture ownership are rewritten, once each; no file under /etc is written.
+test('ai-inputs reserves STG ids by box marker and Mac box measurements, before other validation', () => {
+  const root = mkdtempSync(join(scratch, 'staging-admission.'));
+  const marker = join(root, 'marker-fixture'), inputs = join(root, 'inputs.json');
+  const evidence = join(root, 'measurements-baselines-W1.json');
+  const removeFixture = (path: string) => {
+    assert.ok(path === marker || path === evidence, 'only this test owns these two files');
+    const r = spawnSync('rm',['--',path],{encoding:'utf8'});
+    assert.equal(r.status,0,`BLOCKED by rm guard: ${r.stderr.trim()}. To resolve: leave ${path} for HezLead.`);
+  };
+  const exact = 'c1-staging-disposable-no-production';
+  const inputBase = base();
+  const original = block('ai-inputs');
+  const rewrite = (from: string, to: string, source: string) => {
+    assert.equal(source.split(from).length - 1, 1, from); return source.replace(from, to);
+  };
+  let portable = rewrite("os.open(marker_path,", `os.open(${JSON.stringify(marker)},`, original);
+  portable = rewrite("os.path.lexists(marker_path)", `os.path.lexists(${JSON.stringify(marker)})`, portable);
+  portable = rewrite('info.st_uid == 0 and info.st_gid == 0', 'info.st_uid == os.getuid() and info.st_gid in (0, os.getgid())', portable);
+  const admit = (host: 'box'|'mac', wid: string, badReceipt = false) => {
+    const d = { ...inputBase, window_id: wid };
+    if (badReceipt) d.gate_receipt_sha256 = hex;
+    writeFileSync(inputs, JSON.stringify(d));
+    return run(rewrite("sys.platform == 'darwin'", host === 'mac' ? 'True' : 'False', portable), {
+      INPUTS_FILE: inputs, PLAN_FILE: planPath, GATE_RECEIPT_FILE: receiptFile,
+    });
+  };
+  const refuse = (host: 'box'|'mac', wid: string, reason: string, badReceipt = false) => {
+    const result = admit(host, wid, badReceipt);
+    assert.equal(result.status, 1, `${host} ${wid}: ${result.stdout} ${result.stderr}`);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, `FAIL ai-inputs: ${reason}; STOP\n`);
+  };
+  const pass = (host: 'box'|'mac', wid: string) => {
+    const r = admit(host, wid); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /^PASS ai-inputs:/);
+  };
+  const prod = 'production box window_id expected non-stg-prefix got reserved-stg-prefix';
+  const malformed = 'box staging marker expected regular-root-root-0600-exact-content got malformed';
+  const staging = 'staging box window_id expected STG-plus-three-alphanumerics got other';
+  pass('box', 'L2lDaR');
+  for (const wid of ['STGabc','Stgabc','stgABC']) refuse('box', wid, prod);
+  refuse('box', 'STGabc', prod, true); // Marker check wins over a bad checker digest.
+  writeFileSync(marker, exact, { mode: 0o600 }); pass('box','STGabc');
+  for (const wid of ['L2lDaR','stgabc']) refuse('box', wid, staging);
+  chmodSync(marker, 0o644); refuse('box','STGabc',malformed); refuse('box','L2lDaR',malformed);
+  chmodSync(marker, 0o600);
+  for (const value of ['wrong-content', exact+'\n']) { writeFileSync(marker,value); refuse('box','STGabc',malformed); }
+  removeFixture(marker); symlinkSync(join(root,'missing-target'),marker); refuse('box','STGabc',malformed);
+  removeFixture(marker); writeFileSync(join(root,'existing-target'),exact,{mode:0o600});
+  symlinkSync(join(root,'existing-target'),marker); refuse('box','STGabc',malformed);
+  removeFixture(marker); writeFileSync(marker,exact,{mode:0o600});
+  const wrongOwner = rewrite('info.st_uid == os.getuid()', 'info.st_uid == -1', portable);
+  const wrong = run(rewrite("sys.platform == 'darwin'",'False',wrongOwner), { INPUTS_FILE:inputs,PLAN_FILE:planPath,GATE_RECEIPT_FILE:receiptFile });
+  assert.equal(wrong.status,1); assert.equal(wrong.stderr,`FAIL ai-inputs: ${malformed}; STOP\n`);
+
+  pass('mac','L2lDaR'); // Even with a local marker, Mac production windows are admitted.
+  refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+  const measure = () => ({
+    release_sha: sha, window:'W1', window_id:'STGabc', inputs_sha256:digest(readFileSync(inputs)),
+    baselines:{baseline_ledger_sha256:hex}, measured_at_utc:new Date().toISOString().replace(/\.\d{3}Z$/,'Z'),
+    staging_marker:{path:'/etc/commonswarm-release/STAGING-ONLY',regular:true,symlink:false,uid:0,gid:0,mode:'0600',content:exact},
+  });
+  // INPUTS is now the STG candidate from the refusal above; evidence binds those exact bytes.
+  const good = measure(); writeFileSync(evidence,JSON.stringify(good)); pass('mac','STGabc');
+  for (const change of [{mode:'0644'},{content:exact+'\n'},{symlink:true},{uid:1},{regular:false},{gid:1}]) {
+    writeFileSync(evidence,JSON.stringify({...good,staging_marker:{...good.staging_marker,...change}}));
+    refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+  }
+  writeFileSync(evidence,JSON.stringify({...good,inputs_sha256:hex}));
+  refuse('mac','STGabc','Mac staging evidence expected this-window INPUTS bytes got mismatch');
+  for (const measured_at_utc of ['2000-01-01T00:00:00Z','2099-01-01T00:00:00Z']) {
+    writeFileSync(evidence,JSON.stringify({...good,measured_at_utc}));
+    refuse('mac','STGabc','Mac staging evidence expected fresh box measurement got stale-or-future');
+  }
+  writeFileSync(evidence,JSON.stringify({...good,baselines:{baseline_ledger_sha256:'0'.repeat(64)}}));
+  refuse('mac','STGabc','Mac staging evidence expected matching box baselines got mismatch');
+  writeFileSync(evidence,JSON.stringify(good));
+  refuse('mac','stgabc','Mac staging window_id expected STG-plus-three-alphanumerics got other');
+  removeFixture(evidence); symlinkSync(join(root,'missing-measurement'),evidence);
+  refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+});
+
+// Cheapest independent ownership guard: repository code can read the marker,
+// but only external staging producers may create or modify it. This scans whole
+// blocks/files so assigning the path to a variable does not hide a later write.
+test('release blocks and scripts contain zero staging-marker writers; writer probes are refused', () => {
+  const mentions = (source: string) => source.includes('/etc/commonswarm-release') && source.includes('STAGING-ONLY');
+  const writer = (source: string) => mentions(source) && (
+    /\b(?:install|cp|tee|touch)\s/.test(source) ||
+    /(?:^|[\s;])(?:\d*)>{1,2}\s*\S/.test(source) ||
+    /\b(?:write_text|write_bytes|writeFileSync|writeFile|appendFileSync|appendFile)\s*\(/.test(source) ||
+    /\bopen\s*\([^\n]*[,(=]\s*['"](?:[wax]|[rwa][+])/i.test(source) ||
+    /\bos\.open\s*\([^\n]*(?:O_WRONLY|O_RDWR|O_CREAT|O_TRUNC)/.test(source)
+  );
+  const path = '/etc/commonswarm-release/STAGING-ONLY';
+  for (const source of [`cat '${path}'`, `pathlib.Path('${path}').read_bytes()`, `os.open('${path}',os.O_RDONLY)`]) assert.equal(writer(source),false,source);
+  for (const source of [`printf x > '${path}'`, `printf x >> '${path}'`, `install -m 0600 fixture '${path}'`,
+    `cp fixture '${path}'`, `tee '${path}'`, `touch '${path}'`, `pathlib.Path('${path}').write_text('x')`,
+    `open('${path}','wb')`, `fs.writeFileSync('${path}','x')`, `fs.promises.writeFile('${path}','x')`,
+    `p='${path}'\nprintf x > "$p"`, `p='/etc/commonswarm-release/'+'STAGING-ONLY'\nopen(p,'w')`,
+    `os.open('${path}',os.O_WRONLY|os.O_CREAT)`]) assert.equal(writer(source),true,source);
+  const files: string[] = [];
+  const walk = (dir: string) => { for (const item of readdirSync(dir,{withFileTypes:true})) {
+    const path = join(dir,item.name);
+    if (item.isDirectory()) walk(path);
+    else if (item.isFile()) files.push(path);
+  } };
+  walk(resolve('scripts'));
+  assert.ok(files.length > 0 && blocks.length > 0);
+  for (const [n,source] of blocks.entries()) assert.equal(writer(source),false,`RELEASE.md block ${n+1}`);
+  for (const path of files) assert.equal(writer(readFileSync(path,'utf8')),false,path);
+});
+
+const frozenPlan = spawnSync('git', ['show', '86673f1f:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+const frozenBlocks = [...frozenPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozenBlock = (id: string) => frozenBlocks.find(s => s.startsWith(`# step: ${id}\n`)) ?? '';
+
+test('C1-12 W4: mem_limit int() accepts quoted Compose JSON; frozen 86673f1f compares the raw value and fails', () => {
+  const py = block('ai-w4-preflight').match(/python3 - "\$SECRET_STAGE\/edge-render.json" "\$INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+  assert.match(py, /mem_bytes=int\(mem\)/);
+  assert.match(py, /mem_bytes==2147483648/);
+  assert.doesNotMatch(frozenBlock('ai-w4-preflight'), /mem_bytes=int\(mem\)/);
+  const dir = mkdtempSync(join(scratch, 'mem-'));
+  const render = join(dir, 'render.json');
+  const inputs = join(dir, 'inputs.json');
+  writeFileSync(render, JSON.stringify({ services: { 'edge-runtime': { network_mode: 'commonswarm-net', mem_limit: '2147483648', environment: { SWARM_MCP_PUBLIC_ENABLED: '1' } } } }));
+  writeFileSync(inputs, JSON.stringify({ baseline_edge_image: 'fixture-edge' }));
+  const bin = join(dir, 'bin'); mkdirSync(bin);
+  writeFileSync(join(bin, 'docker'), `#!/bin/bash
+if [[ "$*" == inspect\\ commonswarm-edge-edge-runtime-1 ]]; then printf '%s\\n' '[{"Config":{"Env":["SWARM_MCP_PUBLIC_ENABLED=1"]}}]'; exit 0; fi
+if [[ "$*" == image\\ inspect\\ * ]]; then printf '%s\\n' '[{"Config":{"Env":["SWARM_MCP_PUBLIC_ENABLED=1"]}}]'; exit 0; fi
+exit 64
+`, { mode: 0o700 });
+  const current = spawnSync('python3', ['-', render, inputs], { input: py, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.equal(current.status, 0, current.stderr);
+  const frozenPy = frozenBlock('ai-w4-preflight').match(/python3 - "\$SECRET_STAGE\/edge-render.json" "\$INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+  const old = spawnSync('python3', ['-', render, inputs], { input: frozenPy, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  assert.notEqual(old.status, 0, '86673f1f mem_limit==2147483648 must refuse quoted Compose JSON');
+});
+
+test('C1-12 W4: Caddy log anchors and metadata rewrite; frozen 86673f1f uses request>Authorization and extra /admin', () => {
+  const cand = block('ai-w4-caddy-candidate');
+  assert.match(cand, /for prefix in \['request>headers','resp_headers'\]:/);
+  assert.match(cand, /rewrite \* \/functions\/v1\/admin\/.well-known\/oauth-protected-resource\n/);
+  assert.doesNotMatch(cand, /rewrite \* \/functions\/v1\/admin\/.well-known\/oauth-protected-resource\/admin/);
+  assert.match(cand, /@admin_metadata \{\n        method GET\n        path \/\.well-known\/oauth-protected-resource\/admin/);
+  const frozen = frozenBlock('ai-w4-caddy-candidate');
+  assert.match(frozen, /for direction in \['request','resp_headers'\]:/);
+  assert.doesNotMatch(frozen, /request>headers>Authorization delete/);
+  assert.match(frozen, /rewrite \* \/functions\/v1\/admin\/.well-known\/oauth-protected-resource\/admin/);
+  const probes = block('ai-w4-probes');
+  assert.match(probes, /oauth-protected-resource\/admin',method='GET'/);
+  assert.match(probes, /expected 405 method_not_allowed/);
+  assert.doesNotMatch(frozenBlock('ai-w4-probes'), /oauth-protected-resource\/admin',method='GET'/);
+});
+
+test('C1-12 W5: recovery-transfer resumes matching tar and proof dir; frozen 86673f1f mkdir -p clobbers', () => {
+  const transfer = block('ai-w5-recovery-transfer');
+  assert.match(transfer, /tarfile.open\(archive,'x'\)/);
+  assert.match(transfer, /retained site-recovery.tar members expected current-evidence/);
+  assert.match(transfer, /upload directory expected owner-matched/);
+  assert.match(transfer, /rm -r -- "\$upload"/);
+  assert.doesNotMatch(frozenBlock('ai-w5-recovery-transfer'), /tarfile.open\(archive,'x'\)/);
+  const py = transfer.match(/python3 - "\$SITE_EVIDENCE" "\$PREP_DIR\/site-recovery.tar" "\$INPUTS_FILE" <<'PY'\n([\s\S]*?)^PY$/m)![1]!;
+  const dir = mkdtempSync(join(scratch, 'w5tar-'));
+  const evidence = join(dir, 'site'); mkdirSync(evidence);
+  const manifest = Buffer.from('[]');
+  writeFileSync(join(evidence, 'manifest.json'), manifest);
+  writeFileSync(join(evidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=rolled-back\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(manifest)}\n`);
+  const archive = join(dir, 'site-recovery.tar');
+  const inputs = join(dir, 'inputs.json'); writeFileSync(inputs, '{}');
+  const first = spawnSync('python3', ['-', evidence, archive, inputs], { input: py, encoding: 'utf8' });
+  assert.equal(first.status, 0, first.stderr);
+  const second = spawnSync('python3', ['-', evidence, archive, inputs], { input: py, encoding: 'utf8' });
+  assert.equal(second.status, 0, second.stderr + ' resume must reuse a matching exclusive-create tar');
+  writeFileSync(archive, 'not a tar');
+  const bad = spawnSync('python3', ['-', evidence, archive, inputs], { input: py, encoding: 'utf8' });
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /retained site-recovery.tar expected readable-archive got other|site-recovery.tar expected regular-non-symlink for resume/);
+});
+
+test('C1-12 W7-STAGE: box mktemp and regexes are /tmp; Mac /private/tmp stays; frozen 86673f1f used /private/tmp on the box', () => {
+  assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1);
+  assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4);
+  assert.match(block('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX/);
+  assert.match(block('ai-w6-start'), /mktemp -d \/private\/tmp\/anvil-secret\.XXXXXX/);
+  assert.match(frozenBlock('ai-open'), /mktemp -d \/private\/tmp\/anvil-secret\.XXXXXX/);
+  assert.doesNotMatch(frozenBlock('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX/);
+});
+
+function boxHostedPrivateHits(src: string) {
+  const hits: { id: string; snippet: string }[] = [];
+  for (const m of src.matchAll(/^```sh\n# step: ([^\n]+)\n# readonly: [^\n]+\n# host: ([^\n]+)\n([\s\S]*?)^```/gm)) {
+    const host = m[2]!;
+    if (!/\bbox\b/i.test(host) || /^Mac\b/.test(host)) continue;
+    const body = m[3]!;
+    let from = 0;
+    while (true) {
+      const at = body.indexOf('/private/', from);
+      if (at < 0) break;
+      const lineStart = body.lastIndexOf('\n', at) + 1;
+      const prevStart = body.lastIndexOf('\n', lineStart - 2) + 1;
+      const window = body.slice(Math.max(0, prevStart), body.indexOf('\n', at) < 0 ? body.length : body.indexOf('\n', at));
+      if (!/NEGATIVE-CONTROL/.test(window)) hits.push({ id: m[1]!, snippet: window.trim().slice(0, 160) });
+      from = at + 1;
+    }
+  }
+  return hits;
+}
+
+test('C1-13 box-hosted blocks name /private/ only in a marked negative-control list; frozen 86673f1f fails', () => {
+  assert.deepEqual(boxHostedPrivateHits(plan), []);
+  const frozenHits = boxHostedPrivateHits(frozenPlan.stdout);
+  assert.ok(frozenHits.some(h => h.id === 'ai-open' && h.snippet.includes('/private/tmp/anvil-secret')), JSON.stringify(frozenHits.slice(0, 5)));
+});
+
+test('C1-13 ai-open-abort PASSes when secret-stage.path is absent; frozen 86673f1f cats the missing path', () => {
+  const missing = mkdtempSync(join(scratch, 'abort-missing-'));
+  const abort = run(block('ai-open-abort'), { PROOF_DIR: missing });
+  assert.equal(abort.status, 0, abort.stderr);
+  assert.match(abort.stdout, /PASS ai-open-abort: no secret stage was created/);
+  assert.match(readFileSync(join(missing, 'aborted-before-mutation.txt'), 'utf8'), /no secret stage was created/);
+  const never = join(scratch, 'abort-never-created');
+  const beforeMkdir = run(block('ai-open-abort'), { PROOF_DIR: never });
+  assert.equal(beforeMkdir.status, 0, beforeMkdir.stderr);
+  assert.match(beforeMkdir.stdout, /PROOF_DIR never created/);
+  assert.ok(!existsSync(never));
+  const frozen = run(frozenBlock('ai-open-abort'), { PROOF_DIR: missing });
+  assert.notEqual(frozen.status, 0);
+  assert.match(frozen.stderr, /No such file or directory|secret-stage\.path/);
+  const stage = makeStage();
+  try {
+    const present = mkdtempSync(join(scratch, 'abort-present-'));
+    writeFileSync(join(present, 'secret-stage.path'), stage + '\n');
+    const kept = run(portable(block('ai-open-abort'), { stage: 1, pointer: 0 }), { PROOF_DIR: present });
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.ok(existsSync(join(present, 'aborted-before-mutation.txt')));
+    assert.ok(!existsSync(stage));
+  } finally { if (existsSync(stage)) removeStage(stage); }
+});
+
+test('C1-13 W6a-2: receipt children see INPUTS_FILE and EDGE_MEASUREMENT_FILE under env -i', () => {
+  for (const id of ['ai-open', 'ai-w5-reference', 'ai-w6-activation-checks', 'ai-w6-activation-apply']) {
+    assert.match(block(id), /env=dict\(os\.environ,PLAN_FILE=sys\.argv\[1\],INPUTS_FILE=sys\.argv\[2\],EDGE_MEASUREMENT_FILE=os\.environ\['EDGE_MEASUREMENT_FILE'\]\)/);
+  }
+  assert.match(block('ai-edge-remeasure'), /env=dict\(os\.environ,EDGE_MEASUREMENT_FILE=out,INPUTS_FILE=inputs\)/);
+  assert.match(block('ai-edge-refresh'), /EDGE_MEASUREMENT_FILE=os\.environ\.get\('EDGE_MEASUREMENT_FILE'/);
+  assert.match(block('ai-edge-refresh'), /INPUTS_FILE=sys\.argv\[2\]/);
+  const bare = spawnSync('env', ['-i', 'PATH=' + process.env.PATH, '/bin/bash', '-c', 'test -n "$INPUTS_FILE" -a -n "$EDGE_MEASUREMENT_FILE"'], { encoding: 'utf8' });
+  const ok = spawnSync('env', ['-i', 'PATH=' + process.env.PATH, 'INPUTS_FILE=/tmp/inputs.json', 'EDGE_MEASUREMENT_FILE=/tmp/edge.json', '/bin/bash', '-c', "test -n \"$INPUTS_FILE\" -a -n \"$EDGE_MEASUREMENT_FILE\" && printf '%s\\n' CHILD_OK"], { encoding: 'utf8' });
+  assert.notEqual(bare.status, 0);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.equal(ok.stdout.trim(), 'CHILD_OK');
+});
+
+test('C1-13 W2 refuses a complete 20261003 set before mkdir; frozen 86673f1f has no pre-open check', () => {
+  assert.match(block('ai-open'), /W2 ledger expected no complete 20261003 set before open/);
+  assert.doesNotMatch(frozenBlock('ai-open'), /W2 ledger expected no complete 20261003 set before open/);
+  const py = block('ai-open').match(/if test "\$WINDOW" = W2; then\n python3 - "\$INPUTS_FILE" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+  assert.match(py, /n=='5'/);
+  const stub = mkdtempSync(join(scratch, 'w2-preopen-'));
+  writeFileSync(join(stub, 'bash'), '#!/bin/sh\nprintf \'%s\\n\' "${C1_LEDGER_N:-0}"\n', { mode: 0o700 });
+  const runner = `import subprocess,sys\n` + py.replace("['/bin/bash'", "['" + join(stub, 'bash') + "'");
+  const inputs = join(stub, 'inputs.json');
+  writeFileSync(inputs, JSON.stringify({ release_sha: sha, baseline_postgres_image: 'sha256:' + hex }));
+  const refuse = spawnSync('python3', ['-c', runner, inputs], { encoding: 'utf8', env: { ...process.env, C1_LEDGER_N: '5' } });
+  assert.notEqual(refuse.status, 0);
+  assert.match(refuse.stderr, /W2 ledger expected no complete 20261003 set before open got 5/);
+  const allow = spawnSync('python3', ['-c', runner, inputs], { encoding: 'utf8', env: { ...process.env, C1_LEDGER_N: '0' } });
+  assert.equal(allow.status, 0, allow.stderr);
+});
+
+test('C1-13 W6 pointer is granular; producer and browser copy keep full_account false', () => {
+  assert.match(block('ai-w6-pointer'), /'full_account':False/);
+  assert.doesNotMatch(block('ai-w6-pointer'), /'workspaces:create' in scopes/);
+  assert.match(plan, /granular: workspace, scopes and home=false, full_account=false/);
+  assert.doesNotMatch(plan, /performs fresh full-account\nsecond confirmation/);
+  assert.match(frozenBlock('ai-w6-pointer'), /'workspaces:create' in scopes/);
+});
+
+function auditHarness(source: string, proof: string, aiRo: string) {
+  writeFileSync(join(proof, 'agent.json'), JSON.stringify({
+    run_id: '0123456789abcdef',
+    steps: { read_metadata_after_refresh: { result: 'pass' }, create_workspace: { command_id: 'c1_0123456789abcdef_create_workspace' } },
+  }));
+  writeFileSync(join(proof, 'C1-inputs.json'), JSON.stringify({ owner_user_id: '22222222-2222-4222-8222-222222222222' }));
+  return run(`${aiRo}\n${source}\n`, { PROOF_DIR: proof, C1_AGENT_RECEIPT: join(proof, 'agent.json'), C1_INPUTS_FILE: join(proof, 'C1-inputs.json') });
+}
+
+test('C1-14 W6B2-1: ai-w6-audit publishes C1-audit.json only after counts pass; frozen redirect leaves an empty file', () => {
+  const current = block('ai-w6-audit');
+  assert.match(current, /mktemp "\$PROOF_DIR\/C1-audit\.json\.XXXXXX"/);
+  assert.match(current, /mv -f "\$C1_AUDIT_STAGE" "\$PROOF_DIR\/C1-audit\.json"/);
+  assert.doesNotMatch(current, /ai_ro -Atq --file \/proof\/c1-audit\.sql >"\$PROOF_DIR\/C1-audit\.json"/);
+  const frozen = frozenBlock('ai-w6-audit');
+  assert.match(frozen, /ai_ro -Atq --file \/proof\/c1-audit\.sql >"\$PROOF_DIR\/C1-audit\.json"/);
+  const valid = '{"grant_id":"11111111-1111-4111-8111-111111111111","provider_grant_id":"family","audit_counts":{"init":1,"list":1,"read":1,"action":1}}\n';
+  const failRo = 'ai_ro() { return 1; }\n';
+  const passRo = 'ai_ro() { cat "$PROOF_DIR/ro.json"; }\n';
+  const failDir = mkdtempSync(join(scratch, 'audit-fail-'));
+  const frozenFail = auditHarness(frozen, failDir, failRo);
+  assert.notEqual(frozenFail.status, 0);
+  assert.equal(readFileSync(join(failDir, 'C1-audit.json'), 'utf8'), '');
+  const curFailDir = mkdtempSync(join(scratch, 'audit-cur-fail-'));
+  const curFail = auditHarness(current, curFailDir, failRo);
+  assert.notEqual(curFail.status, 0);
+  assert.ok(!existsSync(join(curFailDir, 'C1-audit.json')), 'failed query must not publish C1-audit.json');
+  const curPassDir = mkdtempSync(join(scratch, 'audit-pass-'));
+  writeFileSync(join(curPassDir, 'ro.json'), valid);
+  const curPass = auditHarness(current, curPassDir, passRo);
+  assert.equal(curPass.status, 0, curPass.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(curPassDir, 'C1-audit.json'), 'utf8')).audit_counts, { init: 1, list: 1, read: 1, action: 1 });
+});
+
+function ownerClientJs(source: string) {
+  const js = source.match(/<<'JS'\n([\s\S]*?)^JS$/m)![1]!;
+  const imports = js.split('\n').filter(l => l.startsWith('import ') && (l.includes('node:fs') || l.includes('node:crypto'))).join('\n');
+  const body = js.split('\n').filter(l => !l.startsWith('import ')).join('\n');
+  const canon = 'canonical-client';
+  const metadata = digest(canon);
+  const mocks = `
+function canonicalAdminJson(){ return ${JSON.stringify(canon)}; }
+async function credentialStore(){ return {}; }
+async function refreshedCredential(){ return { userId: '22222222-2222-4222-8222-222222222222', accessToken: 't' }; }
+function cloudTarget(url,anonKey){ return { url, anonKey }; }
+function commandEndpoint(){ return 'https://api.commonswarm.com/functions/v1/command'; }
+const CLIENT_PROTOCOL_VERSION = 1;
+function withClientBuild(x){ return x; }
+globalThis.fetch = async (url) => {
+  if (String(url).includes('client.json')) return { ok: true, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json' }) };
+  return { ok: true, json: async () => ({ status: 'accepted' }) };
+};
+`;
+  return { js: `${imports}\n${mocks}\n${body}\n`, metadata };
+}
+
+function runOwnerClient(source: string, proof: string, action: string) {
+  const { js, metadata } = ownerClientJs(source);
+  const inputs = join(proof, 'C1-inputs.json');
+  const target = join(proof, 'target.json');
+  writeFileSync(target, JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'anon' }));
+  writeFileSync(inputs, JSON.stringify({
+    owner_user_id: '22222222-2222-4222-8222-222222222222',
+    target_file: target,
+    state_directory: proof,
+    metadata_digest: metadata,
+    verification_version: 1,
+  }));
+  return spawnSync('node', ['--input-type=module', '-', inputs, proof, action], { input: js, encoding: 'utf8', timeout: 15_000 });
+}
+
+test('C1-14 W6B2-3: owner-client-command reuses a saved id and matching receipt; frozen wx-create dies on reentry', () => {
+  const current = block('ai-w6-owner-client-command');
+  const frozen = frozenBlock('ai-w6-owner-client-command');
+  assert.match(current, /reused completed receipt/);
+  assert.match(current, /flag:'wx'/);
+  assert.doesNotMatch(frozen, /reused completed receipt/);
+  const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const receipt = (id: string) => JSON.stringify({
+    status: 'PASS', command_id: id, client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json',
+    verification_version: 1, metadata_digest: ownerClientJs(current).metadata, withdrawn_at: '2026-10-04T15:30:00Z',
+  }) + '\n';
+  const interrupted = mkdtempSync(join(scratch, 'occ-id-'));
+  writeFileSync(join(interrupted, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  const frozenId = runOwnerClient(frozen, interrupted, 'withdraw');
+  assert.notEqual(frozenId.status, 0, 'frozen wx-create must die on an existing request-id');
+  const curId = mkdtempSync(join(scratch, 'occ-id-cur-'));
+  writeFileSync(join(curId, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  const curRetry = runOwnerClient(current, curId, 'withdraw');
+  assert.equal(curRetry.status, 0, curRetry.stderr + curRetry.stdout);
+  assert.equal(readFileSync(join(curId, 'withdraw-request-id'), 'utf8').trim(), saved);
+  assert.equal(JSON.parse(readFileSync(join(curId, 'client-withdraw.json'), 'utf8')).command_id, saved);
+  const done = mkdtempSync(join(scratch, 'occ-done-'));
+  writeFileSync(join(done, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(done, 'client-withdraw.json'), receipt(saved), { mode: 0o600 });
+  const reused = runOwnerClient(current, done, 'withdraw');
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.match(reused.stdout, /reused completed receipt/);
+  const frozenDone = mkdtempSync(join(scratch, 'occ-done-fr-'));
+  writeFileSync(join(frozenDone, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(frozenDone, 'client-withdraw.json'), receipt(saved), { mode: 0o600 });
+  assert.notEqual(runOwnerClient(frozen, frozenDone, 'withdraw').status, 0);
+  const mismatch = mkdtempSync(join(scratch, 'occ-mis-'));
+  writeFileSync(join(mismatch, 'withdraw-request-id'), saved + '\n', { mode: 0o600 });
+  writeFileSync(join(mismatch, 'client-withdraw.json'), receipt('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'), { mode: 0o600 });
+  const bad = runOwnerClient(current, mismatch, 'withdraw');
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /retained receipt expected matching-pass-for-this-action got mismatch/);
 });

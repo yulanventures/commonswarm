@@ -41,17 +41,17 @@ const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
   'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
-  'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
+  'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w5-recovery-transfer', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
-  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
+  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w7-proof', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-recovery-transfer', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
-  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
+  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w7-proof', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that contact public ingress from Python urllib; the sandbox denies the network.
 const NETWORK_DENIED = ['ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes', 'ai-w5-closed', 'ai-w6-activation-probes'];
@@ -156,8 +156,8 @@ function inputsFor(window: string) {
     edge_recycle_service: 'fixture-edge-recycle.service', edge_recycle_timer: 'fixture-edge-recycle.timer', edge_recycle_sha256: hex,
   };
   if (window === 'W2') d.probe_workspace_id = probeWorkspace;
-  // W6 names the same-release W2b that provisioned the issuer credential (required since lane/w2b-issuer).
-  if (window === 'W6') d.w2b_window_id = 'W2bFx1';
+  // W6 names the W2b (release and window) that provisioned the issuer credential; it may be an earlier release.
+  if (window === 'W6') { d.w2b_release_sha = 'd'.repeat(40); d.w2b_window_id = 'W2bFx1'; }
   // W7 names the same-release W6 whose C1 report it binds (lane/w6-ready).
   if (window === 'W7') d.w6_window_id = 'W6win1';
   const action = { W6: 'activate-admin-issuance-and-smoke', W7: 'retire-legacy-admin-mint' }[window];
@@ -181,6 +181,11 @@ const siteEvidence = join(scratch, 'site-evidence'); mkdirSync(siteEvidence, { m
 writeFileSync(join(siteEvidence, 'index.html'), '<!doctype html>\n');
 writeFileSync(join(siteEvidence, 'manifest.json'), JSON.stringify([{ path: 'index.html', sha256: digest('<!doctype html>\n') }]));
 writeFileSync(join(siteEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteEvidence, 'manifest.json')))}\n`);
+// Recovery transfer requires a recovered companion close, distinct from the forward
+// close above. Python creates its tar; the existing ssh/scp stubs record the transfer.
+const siteRecoveryEvidence = join(scratch, 'site-recovery-evidence'); mkdirSync(siteRecoveryEvidence, { mode: 0o700 });
+for (const name of ['index.html', 'manifest.json']) writeFileSync(join(siteRecoveryEvidence, name), readFileSync(join(siteEvidence, name)));
+writeFileSync(join(siteRecoveryEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=rolled-back\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteRecoveryEvidence, 'manifest.json')))}\n`);
 // W5 forward close (Amendments A/B): a phase-after live receipt bound to the post-W5
 // consent receipt, so ai-w5-closed passes ai-live-controls and still reaches its network step.
 const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'post-W5',
@@ -213,6 +218,12 @@ writeFileSync(c1InputsFile, JSON.stringify({
   target_file: join(c1Dir, 'target.json'), state_directory: join(c1Dir, 'state'),
 }) + '\n');
 const c1ProofDir = join(workRoot, 'hm37-live-release', `c1-${releaseSha}-${windowId}`);
+// W7 proof: C1-12 put Mac on the host line. Box helpers are PATH stubs; python3
+// reads this checkout's command/index.ts. Proof files stay under the scratch root.
+const w7ProofDir = join(scratch, 'w7-proof'); mkdirSync(w7ProofDir, { mode: 0o700 });
+const recycleTimer = 'fixture-edge-recycle.timer';
+const recycleService = 'fixture-edge-recycle.service';
+const w7Binding = JSON.stringify({ w6_window_id: 'W6win1', c1_report: '/dry-run/C1.json', c1_report_sha256: hex, final_gate: true });
 // W2 probe credentials (synthetic) at the rewritten Mac path; ai-w2-stage-probes uploads and removes them.
 mkdirSync(join(workRoot, 'c1-run'), { recursive: true, mode: 0o700 });
 writeFileSync(join(workRoot, 'c1-run', `probe-credentials-W2-${windowId}.json`), JSON.stringify({ release_sha: releaseSha, window_id: windowId,
@@ -312,11 +323,40 @@ case "$name" in
    case "$arg" in "$C1GUI_SCRATCH"/*) ;; *) printf 'c1gui rm refused %s\\n' "$arg" >&2; exit 1;; esac
   done
   exec /bin/rm "$@";;
+ systemctl)  # Recycle timer held inactive; service inactive. Other units refused.
+  case "$*" in
+   "is-active --quiet $C1GUI_EDGE_RECYCLE_TIMER") exit 1;;
+   "show -p ActiveState --value $C1GUI_EDGE_RECYCLE_SERVICE") printf 'inactive\\n'; exit 0;;
+   *) refuse;;
+  esac
+  ;;
+ ai_run)
+  case "\${1:-}" in
+   ai-w7-approval) exit 0;;
+   ai-w7-preflight) printf '%s\\n' "$C1GUI_W7_BINDING"; exit 0;;
+   *) refuse;;
+  esac
+  ;;
+ ai_ro)
+  case "$*" in
+   *'legacy_closed AND legacy_fence_evidence_ref'*) printf 't\\n'; exit 0;;
+   *'SELECT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state'*) printf 't\\n'; exit 0;;
+   *) refuse;;
+  esac
+  ;;
+ ai_deadline) exit 0;;
+ readlink)
+  if test "\${1:-}" = -f && test "\${2:-}" = /home/commonswarm/edge/current; then
+   printf '/home/commonswarm/edge/releases/%s\\n' "$C1GUI_RELEASE_SHA"; exit 0
+  fi
+  refuse
+  ;;
 esac
 refuse
 `;
 const STUBS = ['ssh', 'scp', 'rsync', 'git', 'node', 'open', 'osascript', 'google-chrome', 'chrome', 'chromium', 'chromium-browser', 'Google Chrome', 'rm',
-  'docker', 'curl', 'wget', 'op', 'psql', 'sudo', 'security', 'launchctl', 'npm', 'npx', 'cswarm'];
+  'docker', 'curl', 'wget', 'op', 'psql', 'sudo', 'security', 'launchctl', 'npm', 'npx', 'cswarm',
+  'systemctl', 'readlink', 'ai_run', 'ai_ro', 'ai_deadline'];
 writeFileSync(join(stubDir, '_dispatch'), DISPATCH, { mode: 0o755 });
 for (const name of STUBS) symlinkSync('_dispatch', join(stubDir, name));
 const realNode = realpathSync(process.execPath);
@@ -354,6 +394,7 @@ const baseEnv = () => ({
   C1GUI_PLAN: planPath, C1GUI_SITE_PLAN: sitePlanPath, C1GUI_PRODUCER: producerFile, C1GUI_ARCHIVE: archiveFile, C1GUI_REAL_NODE: realNode,
   C1GUI_POSTGRES_IMAGE: `sha256:${hex}`, C1GUI_EDGE_OBSERVED: edgeObserved,
   C1GUI_REQUEST_PLAN: requestPlan, C1GUI_CLIENT_METADATA: clientMetadata, C1GUI_AGENT_RECEIPT: agentReceipt,
+  C1GUI_EDGE_RECYCLE_TIMER: recycleTimer, C1GUI_EDGE_RECYCLE_SERVICE: recycleService, C1GUI_W7_BINDING: w7Binding,
 });
 // One argv log per block: a background child (the ai-w6-start runner) inherits its own
 // block's log, so attribution does not depend on timing.
@@ -423,13 +464,18 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
-      SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo, SITE_EVIDENCE: siteEvidence,
+      SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo,
+      SITE_EVIDENCE: step === 'ai-w5-recovery-transfer' ? siteRecoveryEvidence : siteEvidence,
       LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
       CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
       // ai-live-controls also runs in the W5 Mac shell: validate the W5 after pair, producer
       // read from the verified release tar, retained copies in a task-owned proof directory.
       ...(step === 'ai-live-controls' ? { INPUTS_FILE: inputsFor('W5'), BOX_ARCHIVE_PATH: archiveFile, PROOF_DIR: liveControlsProof } : {}),
+      ...(step === 'ai-w7-proof' ? {
+        WINDOW: 'W7', PROOF_DIR: w7ProofDir, RELEASE_ROOT: repo,
+        EDGE_RECYCLE_TIMER: recycleTimer, EDGE_RECYCLE_SERVICE: recycleService,
+      } : {}),
       // withdraw: the approve mode first requires the pointer that ai-w6-pointer publishes later.
       C1_INPUTS_FILE: c1InputsFile, C1_PROOF_DIR: c1ProofDir, C1_CLIENT_ACTION: 'withdraw',
       C1_TRANSFER_DIRECTION: 'download', C1_TRANSFER_FILE: 'C1-client-check.txt',
