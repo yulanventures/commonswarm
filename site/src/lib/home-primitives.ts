@@ -1,6 +1,7 @@
 // Pure DOM builders. Dynamic content enters only through textContent.
 import type { AgentStateVM, AgentVM, CapsuleVM, ChoiceVM, NeedsYouVM, ObjectCardVM, PersonVM, QueueRowVM, SwitchRowVM } from "./home-types";
-import { ordinal } from "./home-names";
+import { IDENTITY_LABEL_SEPARATOR } from "./identity-label";
+import { agentLabel, ordinal } from "./home-names";
 
 export type NoticeTone = "info" | "warning" | "danger" | "success";
 export type QueueAction = "up" | "down" | "start-now" | "not-yet" | "release";
@@ -32,9 +33,25 @@ export function capsuleLabel(c: CapsuleVM): string {
   return names.length ? `${c.person.firstName || c.person.name} with ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`}` : c.person.name;
 }
 export function queueMoveReceipt(title: string, position: number): string { return `Moved ‘${title}’ to ${ordinal(position)}.`; }
+/** Text the roster added after the base label it built from the name and owner. */
+function disambiguationSuffix(base: string, shown: string | undefined): string {
+  if (!shown || shown === base) return "";
+  const prefix = `${base}${IDENTITY_LABEL_SEPARATOR}`;
+  return shown.startsWith(prefix) ? shown.slice(prefix.length) : "";
+}
+/** Name, owner, the roster's id suffix, and status. The owner's full name is what the roster used when first names collide. */
+function accessibleLabelInput(a: AgentVM) {
+  return { name: a.name, ownerId: a.ownerId, ownerName: a.ownerFirstName, ownerFirstName: a.ownerFirstName,
+    yours: a.yours, ownerLeft: a.ownerId === null };
+}
 export function agentAccessibleName(a: AgentVM): string {
   const owner = a.yours ? "your agent" : a.ownerFirstName ? `${a.ownerFirstName}’s agent` : "owner left";
-  return `${a.name}, ${owner}, ${a.state.word}`;
+  const input = accessibleLabelInput(a);
+  const nested = disambiguationSuffix(agentLabel(input, { nested: true }), a.nestedLabel);
+  const alone = disambiguationSuffix(agentLabel(input), a.label);
+  const suffix = nested.length >= alone.length ? nested : alone;
+  const shown = suffix ? `${a.name}${IDENTITY_LABEL_SEPARATOR}${suffix}` : a.name;
+  return `${shown}, ${owner}, ${a.state.word}`;
 }
 
 /** Person avatar circle (24, 28, 36, 44 or 48 px). Dashed when invited and not joined. */

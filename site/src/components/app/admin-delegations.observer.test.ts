@@ -72,9 +72,9 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     const revokeButton = () => [...document.querySelectorAll("[data-admin-grants] button")].find(button => button.textContent === "Revoke grant");
     const report = result => { document.documentElement.dataset.adminObservation = btoa(unescape(encodeURIComponent(JSON.stringify(result)))); };
     (async () => {
-      await waitFor(() => !one("[data-admin-indicator]").hidden);
+      await waitFor(() => one("[data-admin-indicator]").hidden && one("[data-admin-indicator]").dataset.fullAccount === "true");
       const fullAccount = one("[data-admin-indicator]").dataset.fullAccount;
-      one("[data-admin-indicator]").click();
+      one("[data-admin-access-open]").click();
       await waitFor(() => revokeButton() && !revokeButton().disabled);
       const automaticCommands = requests.length;
       const inert = {
@@ -106,7 +106,9 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       window.adminFixtureForeignProjection(); one("[data-admin-refresh]").click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("could not be verified"));
       const foreignRowsRemoved = !one("[data-admin-grants]").textContent.includes(grant.client_id) && !one("[data-admin-clients]").textContent.includes(grant.client_id);
-      const historyEntryVisible = !one("[data-admin-indicator]").hidden;
+      const door = one("[data-admin-access-open]");
+      const historyEntryVisible = !!door && !door.hidden && one("[data-admin-indicator]").hidden
+        && one("[data-admin-indicator-title]").textContent === "Admin clients and history";
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);
       await waitFor(() => one("admin-delegations").hidden);
@@ -116,7 +118,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
   </script>`;
   const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!
     .replace("data-admin-policy={JSON.stringify(policy)}", `data-admin-policy='${JSON.stringify(policy).replaceAll("&", "&amp;").replaceAll("'", "&#39;")}'`);
-  const html = `<!doctype html><html><body>${markup}${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
+  const html = `<!doctype html><html><body>${markup}<button type="button" data-admin-access-open>Admin access and history</button>${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
   const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(request.url === "/signout" ? `<!doctype html><html><body>${setup}<script>${signOut}</script></body></html>` : html);

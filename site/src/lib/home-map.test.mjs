@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { catchUpNeedsYouMoreCount, catchUpNeedsYouVisible, catchUpSubline } from "./home-catchup.ts";
 import { homeBootRoute, resolveHomeRoute, homeViewTitle, mapHomePeople, mapHomeRail,
-  initialCatchUpData, mapCatchUp, fillCatchUpDetails, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNotFound, homeFileCount } from "./home-map.ts";
+  initialCatchUpData, mapCatchUp, fillCatchUpDetails, overviewCatchUpData, homeOverviewUnavailable, homeObjectState, catchUpDetailFromOverview, homeNeedsYouCount, homeNotFound, homeFileCount } from "./home-map.ts";
 const now = Date.parse("2026-10-05T12:00:00Z");
 const workspaces = [{ id: "W", name: "Home" }, { id: "X", name: "Trip" }];
 const input = { viewerId: "zoe", now, sample: false, access: [], signals: [],
@@ -96,23 +97,130 @@ const overviewRow = { workspace_id: "W", name: "Home", role: "owner", last_seen_
   people: [{ user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [] },
     { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] }],
   needs_you: { asks: [{ signal_id: "ask", from: { kind: "user", id: "amy" }, created_at: "2026-10-05T11:59:00Z", until: "2026-10-06T12:00:00Z" }], assigned: [], waiting: [] } };
-test("overview asks use their immutable body; missing author/body never fabricates a preview", () => {
+test("overview asks use their immutable body; a missing preview still has a Reply card and invents no quote", () => {
   const message = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "<img> Call the plumber?", createdAt: "2026-10-05T11:59:00Z" };
   const detail = catchUpDetailFromOverview(overviewRow, "zoe", now, false, [message]);
   assert.equal(detail.needsYou[0].what, "Amy asked you: ‘<img> Call the plumber?’");
   assert.equal(detail.needsYou[0].from.id, "amy");
   assert.equal(detail.needsYou[0].primary.href, "/app?w=W&m=ask");
   assert.equal(detail.needsYouComplete, true);
-  const incomplete = catchUpDetailFromOverview(overviewRow, "zoe", now, false);
-  assert.deepEqual(incomplete.needsYou, []);
-  assert.equal(incomplete.needsYouComplete, false);
+  const missing = catchUpDetailFromOverview(overviewRow, "zoe", now, false);
+  assert.equal(missing.needsYou.length, 1);
+  assert.equal(missing.needsYou[0].what, "Amy asked you.");
+  assert.equal(missing.needsYou[0].primary.label, "Reply");
+  assert.equal(missing.needsYou[0].primary.href, "/app?w=W&m=ask");
+  assert.equal(missing.needsYou[0].what.includes("‘"), false);
+  assert.equal(missing.needsYouComplete, true);
+  assert.equal(missing.measuredNeedsYou, 1);
+  const departed = { ...overviewRow, people: overviewRow.people.filter(person => person.user_id === "zoe"),
+    needs_you: { asks: [{ ...overviewRow.needs_you.asks[0], from: { kind: "user", id: "left" } }], assigned: [], waiting: [] } };
+  const unnamed = catchUpDetailFromOverview(departed, "zoe", now, false, []);
+  assert.equal(unnamed.needsYou[0].what, "Workspace member asked you.");
+  assert.equal(unnamed.needsYou[0].from.name, "Workspace member");
+  assert.equal(unnamed.needsYou[0].primary.label, "Reply");
+  assert.equal(unnamed.measuredNeedsYou, 1);
+  const quoted = catchUpDetailFromOverview(departed, "zoe", now, false, [
+    { id: "ask", kind: "ask", from: "left", fromKind: "user", body: "Sign this?", createdAt: "2026-10-05T11:59:00Z" }]);
+  assert.equal(quoted.needsYou[0].what, "Workspace member asked you: ‘Sign this?’");
+  const removedAgent = catchUpDetailFromOverview({ ...departed, needs_you: { asks: [{ ...overviewRow.needs_you.asks[0], from: { kind: "agent", id: "gone-agent" } }], assigned: [], waiting: [] } }, "zoe", now, false, []);
+  assert.equal(removedAgent.needsYou[0].what, "Workspace member asked you.");
+  assert.equal(removedAgent.needsYou[0].primary.href, "/app?w=W&m=ask");
 });
 test("overview to-do references without assignment authors never name the reader as sender or claim all-clear", () => {
   const row = { ...overviewRow, needs_you: { asks: [], assigned: [{ todo_id: "T", title: "Call plumber", state: "open", due_on: null }], waiting: [] } };
   const detail = catchUpDetailFromOverview(row, "zoe", now, false);
-  assert.deepEqual(detail.needsYou, []);
-  assert.equal(detail.needsYouComplete, false);
-  assert.equal(mapCatchUp([{ workspace: workspaces[0], state: "ready", detail }], "zoe", "Zoe", now, false).emptySummary, "Checked 1 of 1 workspace.");
+  assert.equal(detail.needsYou.length, 1);
+  assert.equal(detail.needsYou[0].kind, "todo");
+  assert.equal(detail.needsYou[0].what, "‘Call plumber’ is assigned to you.");
+  assert.equal(detail.needsYou[0].primary.label, "Open");
+  assert.equal(detail.needsYou[0].primary.href, "/app?w=W&todo=T");
+  assert.equal(detail.needsYou[0].what.includes("Zoe"), false);
+  assert.equal(detail.needsYouComplete, true);
+  const vm = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail }], "zoe", "Zoe", now, false);
+  assert.equal(vm.emptySummary, null);
+  assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
+  assert.equal(homeNeedsYouCount({ workspace: workspaces[0], state: "ready", detail }), 1);
+});
+test("one needs-you list feeds the badge, the subline and the cards, including Show N more", () => {
+  const disconnected = { work: "disconnected", facts: { transport: "local", turn_only: false, connection: "key_off",
+    last_activity_at: "2026-10-05T11:00:00Z", messages_waiting_since: null, doing: null, working_on: null } };
+  const row = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: "A", name: "Claude", status: disconnected, queue: null }] },
+    { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: "T", title: "Call the plumber", state: "open", due_on: null }] } };
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const entry = { workspace: workspaces[0], state: "ready", detail };
+  const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
+  assert.equal(homeNeedsYouCount(entry), 2);
+  assert.equal(vm.needsYou.length, 2);
+  assert.equal(catchUpSubline(vm), "2 things need you across 1 workspace.");
+  assert.deepEqual(vm.needsYou.map(item => [item.kind, item.what, item.primary.label]), [
+    ["todo", "‘Call the plumber’ is assigned to you.", "Open"],
+    ["agent-fix", "Your Claude is disconnected: key turned off.", "What to do"],
+  ]);
+  assert.equal(vm.needsYou[0].primary.href, "/app?w=W&todo=T");
+  const count = homeNeedsYouCount(entry);
+  const rail = mapHomeRail([workspaces[0]], { view: "catchup" }, null, false, new Map([["W", count]]));
+  assert.equal(rail.catchUp.needsYou, 2);
+  assert.equal(rail.workspaces[0].needsYou, 2);
+  const titles = ["One", "Two", "Three", "Four"];
+  const many = catchUpDetailFromOverview({ ...overviewRow, needs_you: { asks: [], waiting: [],
+    assigned: titles.map((title, index) => ({ todo_id: `t${index}`, title, state: "open", due_on: null })) } }, "zoe", now, false);
+  const manyEntry = { workspace: workspaces[0], state: "ready", detail: many };
+  const manyVm = mapCatchUp([manyEntry], "zoe", "Zoe", now, false);
+  assert.equal(homeNeedsYouCount(manyEntry), 4);
+  assert.equal(manyVm.needsYou.length, 4);
+  assert.equal(catchUpSubline(manyVm), "4 things need you across 1 workspace.");
+  assert.deepEqual(catchUpNeedsYouVisible(manyVm.needsYou, false).map(item => item.what), titles.slice(0, 3).map(title => `‘${title}’ is assigned to you.`));
+  assert.equal(catchUpNeedsYouMoreCount(manyVm.needsYou, false), 1);
+  assert.deepEqual(catchUpNeedsYouVisible(manyVm.needsYou, true).map(item => item.what), titles.map(title => `‘${title}’ is assigned to you.`));
+  assert.equal(catchUpNeedsYouMoreCount(manyVm.needsYou, true), 0);
+  const asks = ["a", "b", "c", "d"].map(id => ({ signal_id: id, from: { kind: "user", id: "amy" }, created_at: "2026-10-05T11:00:00Z", until: "2026-10-06T12:00:00Z" }));
+  const askDetail = catchUpDetailFromOverview({ ...overviewRow, needs_you: { asks, assigned: [], waiting: [] } }, "zoe", now, false, []);
+  const askEntry = { workspace: workspaces[0], state: "ready", detail: askDetail };
+  const askVm = mapCatchUp([askEntry], "zoe", "Zoe", now, false);
+  assert.equal(homeNeedsYouCount(askEntry), 4);
+  assert.equal(askVm.needsYou.length, 4);
+  assert.equal(catchUpSubline(askVm), "4 things need you across 1 workspace.");
+  assert.deepEqual(catchUpNeedsYouVisible(askVm.needsYou, false).map(item => item.what), ["Amy asked you.", "Amy asked you.", "Amy asked you."]);
+  assert.equal(catchUpNeedsYouMoreCount(askVm.needsYou, false), 1);
+  assert.equal(askVm.needsYou.every(item => item.what === "Amy asked you." && item.primary.label === "Reply"), true);
+});
+test("a failed ask preview, an assigned to-do and a disconnected agent share one count", () => {
+  const disconnected = { work: "disconnected", facts: { transport: "local", turn_only: false, connection: "key_off",
+    last_activity_at: "2026-10-05T11:00:00Z", messages_waiting_since: null, doing: null, working_on: null } };
+  const row = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: "A", name: "Claude", status: disconnected, queue: null }] },
+    { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: overviewRow.needs_you.asks, waiting: [], assigned: [
+    { todo_id: "T", title: "Call the plumber", state: "open", due_on: null }] } };
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false, []);
+  const entry = { workspace: workspaces[0], state: "ready", detail };
+  const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
+  assert.equal(homeNeedsYouCount(entry), 3);
+  assert.equal(vm.needsYou.length, 3);
+  assert.equal(catchUpSubline(vm), "3 things need you across 1 workspace.");
+  assert.deepEqual(vm.needsYou.map(item => [item.kind, item.what, item.primary.label]), [
+    ["ask", "Amy asked you.", "Reply"],
+    ["todo", "‘Call the plumber’ is assigned to you.", "Open"],
+    ["agent-fix", "Your Claude is disconnected: key turned off.", "What to do"],
+  ]);
+  assert.equal(vm.needsYou[0].what.includes("‘"), false);
+  assert.equal(vm.needsYou[0].primary.href, "/app?w=W&m=ask");
+  const preview = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "Sign this?", createdAt: "2026-10-05T11:59:00Z" };
+  const drawn = catchUpDetailFromOverview(row, "zoe", now, false, [preview]);
+  const drawnEntry = { workspace: workspaces[0], state: "ready", detail: drawn };
+  const drawnVm = mapCatchUp([drawnEntry], "zoe", "Zoe", now, false);
+  assert.equal(drawn.needsYou[0].what, "Amy asked you: ‘Sign this?’");
+  assert.equal(homeNeedsYouCount(drawnEntry), 3);
+  assert.equal(drawnVm.needsYou.length, 3);
+  assert.equal(catchUpSubline(drawnVm), "3 things need you across 1 workspace.");
+  const count = homeNeedsYouCount(entry);
+  const rail = mapHomeRail([workspaces[0]], { view: "catchup" }, null, false, new Map([["W", count]]));
+  assert.equal(rail.catchUp.needsYou, 3);
+  assert.equal(rail.workspaces[0].needsYou, 3);
 });
 test("overview credentials retain each measured fault and last activity without an access or presence row", () => {
   const facts = { transport: "hosted_mcp", turn_only: true, last_activity_at: "2026-10-05T10:00:00Z", messages_waiting_since: null, doing: null, working_on: null };
@@ -156,7 +264,7 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
     const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
       homeOverview: async () => overview,
       homeOverviewAsks: async (workspaceId, ids) => {
         reads.push("asks"); assert.equal(workspaceId, "W"); assert.deepEqual(Array.from(ids), ["ask"]);
@@ -176,11 +284,253 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
     assert.deepEqual([vm.workspaces[0].openTodos, vm.workspaces[0].lists, vm.workspaces[0].files], [4, 3, 2]);
     assert.deepEqual(reads, ["asks", "latest"], "both positive and failed previews reach the real loading path");
     assert.equal(vm.latest[0].excerpt, "Quotes arrived.");
-    assert.equal(context.homeOverviewCounts.get("W"), 1);
-    assert.equal(context.catchUpData[0].detail.needsYouComplete, failure === null);
-    assert.deepEqual(vm.needsYou.map(item => item.what), failure ? [] : ["Amy asked you: ‘Call the plumber?’"]);
-    assert.equal(vm.emptySummary, failure ? "Checked 1 of 1 workspace." : null);
+    assert.equal(context.homeOverviewCounts.get("W"), 1, "a failed ask preview keeps the overview's measured count");
+    assert.equal(context.catchUpData[0].detail.needsYouComplete, true);
+    assert.equal(vm.needsYou.length, 1);
+    assert.equal(vm.needsYou[0].what, failure ? "Amy asked you." : "Amy asked you: ‘Call the plumber?’");
+    assert.equal(vm.needsYou[0].primary.label, "Reply");
+    assert.equal(vm.needsYou[0].primary.href, "/app?w=W&m=ask");
+    assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
+    assert.equal(vm.emptySummary, null);
+    assert.equal(paints[1].needsYou.length, 1);
+    assert.equal(paints[1].needsYou[0].what, "Amy asked you.");
+    assert.equal(catchUpSubline(paints[1]), "1 thing needs you across 1 workspace.");
+    assert.equal(context.homeOverviewCounts.get("W"), paints[1].needsYou.length);
   }
+});
+// The to-do reducer is the assignment record. These helpers only run it; they do not describe the card.
+import { createHash } from "node:crypto";
+import { decideTodo, emptyHouseholdTodoState, reduceTodoEvents } from "../../../src/protocol/household-todos.ts";
+const todoUid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const todoAt = Date.parse("2026-10-05T12:00:00.000Z");
+function todoAccess(user, principal = null) {
+  return { workspace_id: "home", archived_at: null, boundary: { kind: "shared" },
+    actor: { user_id: user, principal_id: principal, run_id: principal ? "run" : null },
+    member: { user_id: user, workspace_id: "home", revoked_at: null, content_role: "editor", content_consent_id: "consent" },
+    credential: principal ? { kind: "agent", connection: { principal_id: principal, owner_user_id: user, workspace_id: "home",
+      connection_id: "connection", grant_id: "approval", revoked_at: null, expires_at: todoAt + 10_000,
+      operations: ["read", "create", "update"], purpose: "shared" } } : { kind: "human" } };
+}
+function todoContext(state, command, user, principal, salt) {
+  return { access: todoAccess(user, principal), now: todoAt, seq: state.last_seq + 1,
+    command_id: `command-${salt}-${state.last_seq + 1}`,
+    request_digest: createHash("sha256").update(JSON.stringify([command, user, principal, state.last_seq, salt])).digest("hex"),
+    event_ids: Array.from({ length: 8 }, (_, i) => todoUid(700000 + salt * 20 + (state.last_seq + 1) * 10 + i)),
+    todo_id: todoUid(100000 + salt), offer_id: todoUid(300000 + salt), comment_id: todoUid(400000 + salt),
+    members: ["nikki", "zoe", "tom"].map(user_id => ({ user_id, workspace_id: "home", revoked_at: null, role: "member" })),
+    agents: principal ? [{ principal_id: principal, owner_user_id: user, workspace_id: "home", revoked_at: null }] : [],
+    objects: [], identity_write_attempts: 0, workspace_write_attempts: 0 };
+}
+function committedTodo(decision) {
+  assert.equal(decision.outcome.status, "committed", decision.outcome.status === "committed" ? "" : decision.outcome.reason);
+  assert.equal("todo_id" in decision.outcome.value, true);
+  return decision.outcome.value;
+}
+/** Nikki offers the to-do; the accepter commits it. assigned_by is that accepter. */
+function offerThenAccept(offerer, accepter, title) {
+  const initial = emptyHouseholdTodoState("home", "stream");
+  const command = { kind: "todo_create", title, assign: { to: { kind: "user", id: accepter } } };
+  const offered = decideTodo(initial, command, todoContext(initial, command, offerer, null, 1));
+  const created = committedTodo(offered);
+  const pending = reduceTodoEvents(initial, offered.events);
+  const answer = { kind: "household_todo_answer", todo_id: created.todo_id, offer_id: created.offer.offer_id, answer: "accept" };
+  return committedTodo(decideTodo(pending, answer, todoContext(pending, answer, accepter, null, 2)));
+}
+/** The owner's agent assigns the to-do straight to that owner. */
+function agentAssignsToOwner(owner, principalId, title) {
+  const initial = emptyHouseholdTodoState("home", "stream");
+  const command = { kind: "todo_create", title, assign: { to: { kind: "user", id: owner } } };
+  return committedTodo(decideTodo(initial, command, todoContext(initial, command, owner, principalId, 3)));
+}
+/** The owner already holds the to-do. Another member asks that owner's agent to take it. */
+function requestWhileAssigned(owner, requester, principalId, title) {
+  const initial = emptyHouseholdTodoState("home", "stream");
+  const create = { kind: "todo_create", title, assign: { to: { kind: "user", id: owner } } };
+  const createdDecision = decideTodo(initial, create, todoContext(initial, create, owner, null, 11));
+  const created = committedTodo(createdDecision);
+  const pending = reduceTodoEvents(initial, createdDecision.events);
+  const assign = { kind: "todo_assign", todo_id: created.todo_id, base_version: created.version, to: { kind: "agent", id: principalId } };
+  const ctx = todoContext(pending, assign, requester, null, 12);
+  ctx.agents = [{ principal_id: principalId, owner_user_id: owner, workspace_id: "home", revoked_at: null }];
+  return committedTodo(decideTodo(pending, assign, ctx));
+}
+test("an accepted offer records the accepter, and the needs-you card names nobody", () => {
+  const accepted = offerThenAccept("nikki", "zoe", "Call the plumber");
+  assert.deepEqual(accepted.assigned_by, { user_id: "zoe", principal_id: null });
+  assert.equal(accepted.assignee.id, "zoe");
+  assert.equal(accepted.offer, null);
+  const acceptedRow = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [] },
+    { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: accepted.todo_id, title: accepted.title, state: "open", due_on: null, assigned_by: accepted.assigned_by }] } };
+  const acceptedDetail = catchUpDetailFromOverview(acceptedRow, "zoe", now, false);
+  const acceptedEntry = { workspace: workspaces[0], state: "ready", detail: acceptedDetail };
+  const acceptedVm = mapCatchUp([acceptedEntry], "zoe", "Zoe", now, false);
+  assert.equal(acceptedDetail.needsYou[0].what, "‘Call the plumber’ is assigned to you.");
+  assert.equal(acceptedDetail.needsYou[0].primary.label, "Open");
+  assert.equal(acceptedDetail.needsYou[0].what.includes("Nikki"), false);
+  assert.equal(homeNeedsYouCount(acceptedEntry), 1);
+  assert.equal(acceptedVm.needsYou.length, 1);
+  assert.equal(catchUpSubline(acceptedVm), "1 thing needs you across 1 workspace.");
+  const claude = todoUid(11);
+  const direct = agentAssignsToOwner("zoe", claude, "Call the plumber");
+  assert.deepEqual(direct.assigned_by, { user_id: "zoe", principal_id: claude });
+  assert.deepEqual(direct.assignee, { kind: "user", id: "zoe" });
+  const directRow = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: claude, name: "Claude", status: { work: "idle", facts: { transport: "local", turn_only: false, connection: "live",
+        last_activity_at: "2026-10-05T11:59:00Z", messages_waiting_since: null, doing: null, working_on: null } }, queue: null }] },
+    { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: [], waiting: [], assigned: [{ todo_id: direct.todo_id, title: direct.title, state: "open", due_on: null, assigned_by: direct.assigned_by }] } };
+  const directDetail = catchUpDetailFromOverview(directRow, "zoe", now, false);
+  const directEntry = { workspace: workspaces[0], state: "ready", detail: directDetail };
+  const directVm = mapCatchUp([directEntry], "zoe", "Zoe", now, false);
+  assert.equal(directDetail.needsYou[0].what, "‘Call the plumber’ is assigned to you.");
+  assert.equal(directDetail.needsYou[0].primary.label, "Open");
+  assert.equal(directDetail.needsYou[0].primary.href, `/app?w=W&todo=${direct.todo_id}`);
+  assert.equal(directDetail.needsYou[0].what.includes("Claude"), false);
+  assert.equal(directDetail.needsYou[0].what.includes("Zoe"), false);
+  assert.notEqual(directDetail.needsYou[0].from.id, claude);
+  assert.equal(homeNeedsYouCount(directEntry), 1);
+  assert.equal(directVm.needsYou.length, 1);
+  assert.equal(catchUpSubline(directVm), "1 thing needs you across 1 workspace.");
+});
+test("a pending request opens the to-do and does not answer it on the card", () => {
+  const row = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: "A", name: "Claude", status: { work: "idle", facts: { transport: "local", turn_only: false, connection: "live",
+        last_activity_at: "2026-10-05T11:59:00Z", messages_waiting_since: null, doing: null, working_on: null } }, queue: null }] },
+  ], needs_you: { asks: [], assigned: [], waiting: [
+    { todo_id: "dinner", title: "Book dinner", state: "open", due_on: null, reason: "request", agent_id: "A" },
+  ] } };
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const card = detail.needsYou[0];
+  const entry = { workspace: workspaces[0], state: "ready", detail };
+  const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
+  assert.equal(card.kind, "request");
+  assert.equal(card.what, "‘Book dinner’ is waiting for your answer.");
+  assert.equal(card.primary.label, "Open");
+  assert.equal(card.primary.href, "/app?w=W&todo=dinner");
+  assert.equal(card.secondary, undefined);
+  assert.equal(card.what.includes("Claude"), false);
+  assert.equal(card.what.includes("Accept"), false);
+  assert.equal(card.what.includes("Decline"), false);
+  assert.equal(homeNeedsYouCount(entry), vm.needsYou.length);
+  assert.equal(catchUpSubline(vm), "1 thing needs you across 1 workspace.");
+});
+test("a pending request on a to-do the viewer already holds replaces the assignment and stays one item", () => {
+  const principal = todoUid(21);
+  const pending = requestWhileAssigned("zoe", "nikki", principal, "Book dinner");
+  assert.deepEqual(pending.assignee, { kind: "user", id: "zoe" });
+  assert.equal(pending.offer.decider_user_id, "zoe");
+  assert.deepEqual(pending.offer.to, { kind: "agent", id: principal });
+  const ref = { todo_id: pending.todo_id, title: pending.title, state: pending.state, due_on: pending.due_on };
+  const row = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: principal, name: "Claude", status: { work: "idle", facts: { transport: "local", turn_only: false, connection: "live",
+        last_activity_at: "2026-10-05T11:59:00Z", messages_waiting_since: null, doing: null, working_on: null } }, queue: null }] },
+    { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: [],
+    assigned: [ref, { todo_id: "plumber", title: "Call the plumber", state: "open", due_on: null }],
+    waiting: [{ ...ref, reason: "request", agent_id: pending.offer.to.id }] } };
+  const detail = catchUpDetailFromOverview(row, "zoe", now, false);
+  const entry = { workspace: workspaces[0], state: "ready", detail };
+  const vm = mapCatchUp([entry], "zoe", "Zoe", now, false);
+  const dinner = detail.needsYou.filter(item => item.id === pending.todo_id);
+  assert.equal(dinner.length, 1);
+  assert.equal(dinner[0].kind, "request");
+  assert.equal(dinner[0].what, "‘Book dinner’ is waiting for your answer.");
+  assert.equal(dinner[0].primary.label, "Open");
+  assert.equal(dinner[0].primary.href, `/app?w=W&todo=${pending.todo_id}`);
+  assert.equal(dinner[0].secondary, undefined);
+  assert.equal(dinner[0].what.includes("assigned to you"), false);
+  assert.equal(dinner[0].what.includes("Accept"), false);
+  assert.equal(dinner[0].what.includes("Decline"), false);
+  assert.equal(dinner[0].what.includes("Nikki"), false);
+  assert.equal(dinner[0].what.includes("Claude"), false);
+  assert.equal(detail.needsYou.find(item => item.id === "plumber").what, "‘Call the plumber’ is assigned to you.");
+  assert.equal(detail.needsYou.length, 2);
+  assert.equal(detail.measuredNeedsYou, 2);
+  assert.equal(detail.needsYouComplete, true);
+  assert.equal(homeNeedsYouCount(entry), 2);
+  assert.equal(vm.needsYou.length, 2);
+  assert.equal(vm.needsYou.filter(item => item.id === pending.todo_id).length, 1);
+  assert.equal(vm.needsYou.find(item => item.id === pending.todo_id).what, "‘Book dinner’ is waiting for your answer.");
+  assert.equal(catchUpSubline(vm), "2 things need you across 1 workspace.");
+});
+test("Catch up names no assigner, skips a to-do read per card, and keeps one count", async () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let loader;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "loadHomeCatchUp") loader = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(loader);
+  const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
+  const disconnected = { work: "disconnected", facts: { transport: "local", turn_only: false, connection: "key_off",
+    last_activity_at: "2026-10-05T11:00:00Z", messages_waiting_since: null, doing: null, working_on: null } };
+  const assigned = { todo_id: "T", title: "Call the plumber", state: "open", due_on: null };
+  assert.equal(Object.hasOwn(assigned, "assigned_by"), false);
+  const recorded = offerThenAccept("nikki", "zoe", "Call the plumber").assigned_by;
+  assert.deepEqual(recorded, { user_id: "zoe", principal_id: null });
+  const row = { ...overviewRow, people: [
+    { user_id: "zoe", display_name: "Zoe", role: "owner", is_viewer: true, agents: [
+      { principal_id: "A", name: "Claude", status: disconnected, queue: null }] },
+    { user_id: "nikki", display_name: "Nikki", role: "member", is_viewer: false, agents: [] },
+    { user_id: "amy", display_name: "Amy", role: "member", is_viewer: false, agents: [] },
+  ], needs_you: { asks: overviewRow.needs_you.asks, waiting: [], assigned: [assigned] } };
+  const ask = { id: "ask", kind: "ask", from: "amy", fromKind: "user", body: "Call the plumber?", createdAt: "2026-10-05T11:59:00Z" };
+  const load = async (askFailure, todoFailure) => {
+    const paints = []; const todoReads = [];
+    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+      sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
+      homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount,
+      homeOverview: async () => ({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [row] }),
+      homeOverviewAsks: async () => { if (askFailure) throw askFailure; return [ask]; },
+      feed: async () => [],
+      homeServer: () => ({ readTodo: async (workspaceId, todoId) => {
+        todoReads.push([workspaceId, todoId]);
+        if (todoFailure) throw todoFailure;
+        return { todo: { todo_id: todoId, assigned_by: recorded } };
+      } }),
+      renderHomeCatchUp: () => paints.push({
+        vm: mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false),
+        count: context.homeOverviewCounts.get("W"),
+      }),
+    };
+    await runInNewContext(script, context);
+    return { paints, todoReads };
+  };
+  const agree = (paint, sentence) => {
+    assert.equal(paint.count, 3);
+    assert.equal(paint.vm.needsYou.length, 3);
+    assert.equal(catchUpSubline(paint.vm), "3 things need you across 1 workspace.");
+    assert.equal(paint.vm.needsYou[1].what, sentence);
+    assert.equal(paint.vm.needsYou[1].primary.label, "Open");
+    assert.equal(paint.vm.needsYou[1].primary.href, "/app?w=W&todo=T");
+  };
+  const named = await load(new Error("Read failed"), null);
+  assert.deepEqual(named.todoReads, []);
+  agree(named.paints[1], "‘Call the plumber’ is assigned to you.");
+  assert.equal(named.paints[1].vm.needsYou[0].what, "Amy asked you.");
+  agree(named.paints.at(-1), "‘Call the plumber’ is assigned to you.");
+  assert.equal(named.paints.at(-1).vm.needsYou[1].what.includes("Nikki"), false);
+  assert.equal(named.paints.at(-1).vm.needsYou[0].what, "Amy asked you.");
+  assert.equal(named.paints.at(-1).vm.needsYou[0].what.includes("‘"), false);
+  assert.equal(named.paints.at(-1).vm.needsYou[2].what, "Your Claude is disconnected: key turned off.");
+  const unnamed = await load(new TypeError("Failed to fetch"), new DOMException("Deadline", "TimeoutError"));
+  assert.deepEqual(unnamed.todoReads, []);
+  agree(unnamed.paints[1], "‘Call the plumber’ is assigned to you.");
+  agree(unnamed.paints.at(-1), "‘Call the plumber’ is assigned to you.");
+  assert.equal(unnamed.paints.at(-1).vm.needsYou[0].what, "Amy asked you.");
+  const quoted = await load(null, null);
+  assert.deepEqual(quoted.todoReads, []);
+  agree(quoted.paints.at(-1), "‘Call the plumber’ is assigned to you.");
+  assert.equal(quoted.paints.at(-1).vm.needsYou[0].what, "Amy asked you: ‘Call the plumber?’");
+  assert.equal(quoted.paints[1].vm.needsYou.length, quoted.paints.at(-1).vm.needsYou.length);
 });
 test("optional working-on reads keep loaded chat usable on returned errors, timeouts and thrown network errors", async () => {
   const source = readFileSync(new URL("./commonswarm.ts", import.meta.url), "utf8");
@@ -338,7 +688,7 @@ test("the live loader keeps the overview list and does not treat a short feed as
     const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
       sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
       homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
-      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, mapHomePeople, homeFileCount,
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, homeNeedsYouCount, mapHomePeople, homeFileCount,
       homeOverview: async () => overview,
       homeOverviewAsks: async (_workspaceId, ids) => ids.length ? [directedAsk] : [],
       feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },

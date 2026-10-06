@@ -179,7 +179,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <button class="dashboard__text-button" type="button" data-create-cancel hidden>
         Back to workspace
       </button>
-      <button class="dashboard__text-button" type="button" data-admin-access-open>Admin access and history</button>
       <button class="dashboard__text-button dashboard__signout-link" type="button" data-signout>
         Sign out
       </button>
@@ -300,8 +299,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
         <div class="hm-frame__main">
           <section data-home-catchup hidden></section>
-          <section class="hm-route-pane" data-home-route-pane hidden></section>
           <div data-home-workspace-shell></div>
+          <section class="hm-route-pane" data-home-route-pane hidden></section>
         <section class="dashboard__channel hm-frame__channel" aria-labelledby="dashboard-channel-title">
           <header class="dashboard__channel-head">
             <div data-home-channel-menu></div>
@@ -847,7 +846,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </button>
     </header>
     <div class="dashboard__workspace-details-dialog-body" data-workspace-details-content></div>
-    <button class="dashboard__text-button" type="button" data-admin-access-open data-admin-access-scope="workspace">Admin access and history</button>
   </dialog>
 
   {/* Channels: switch, create, rename, archive. A native <dialog> for the same reasons the
@@ -942,7 +940,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       </button>
     </header>
     <p class="dashboard__connected-apps-intro">Apps you approved with your CommonSwarm sign-in, such as Claude or Muse. Disconnecting an app ends access for all of its agents. Removing one agent keeps the others. Removing CommonSwarm inside the other app does not end its access here.</p>
-    <button class="dashboard__text-button" type="button" data-admin-access-open>Admin access and history</button>
     <p class="dashboard__connected-apps-status" data-connected-apps-status role="status" aria-live="polite"></p>
     <div data-connected-apps-list></div>
     <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
@@ -998,7 +995,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
-    overviewCatchUpData, catchUpDetailFromOverview, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
+    overviewCatchUpData, catchUpDetailFromOverview, homeNeedsYouCount, catchUpRailPeople, resolveHomeRoute, homeViewTitle, homeObjectState, homeNotFound, homeFileCount, type HomeReadState, type CatchUpData, type HomePeople } from "../../lib/home-map";
   import { myWorkspaces, homeOverview, homeOverviewAsks, homeWorkingOn, feed } from "../../lib/commonswarm";
   import { createHomeServer, createFixtureHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "../../lib/home/client";
   import { HOME_FIXTURES, IDS, type HomeFixtures } from "../../lib/home/fixtures";
@@ -1962,7 +1959,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         name: message ? previousName : hasWorkspace ? "" : defaultWorkspaceName(value),
         purpose: (message && (previousPurpose === "shared" || previousPurpose === "personal") ? previousPurpose : null) as HouseholdPurpose | null,
         purposes: Object.entries(PURPOSE_COPY).map(([purpose, copy]) => ({ value: purpose as HouseholdPurpose, label: copy.label, detail: CREATE_PURPOSE_DETAILS[purpose as HouseholdPurpose] })), error: message };
-      const footer = Array.from(panel.querySelectorAll<HTMLElement>("[data-admin-access-open], [data-signout], .dashboard__gateway-mark, .dashboard__account-line"));
+      const footer = Array.from(panel.querySelectorAll<HTMLElement>("[data-signout], .dashboard__gateway-mark, .dashboard__account-line"));
       panel.setAttribute("aria-labelledby", "hm-new-workspace-title");
       const mount = () => {
         const replacement = buildNewWorkspaceForm(document, vm, {
@@ -4264,12 +4261,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const slot = one<HTMLElement>("[data-home-rail-slot]");
       if (!slot) return;
       let railPeople = currentHomePeople();
-      if (homeRoute.view === "catchup") {
-        const own = catchUpData.flatMap(entry => entry.detail?.people.groups.filter(group => group.person.you) ?? []);
-        const first = own[0];
-        railPeople = { title: "You and your agents", other: [], groups: first ? [{ person: first.person,
-          agents: [...new Map(own.flatMap(group => group.agents).map(agent => [agent.id, agent])).values()] }] : [] };
-      }
+      if (homeRoute.view === "catchup") railPeople = catchUpRailPeople(catchUpData);
       const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
       const key = homeStructureKey(vm);
       if (key === homeRailKey && slot.childElementCount) {
@@ -4353,6 +4345,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const live = () => generation === catchUpGeneration && homeRoute.view === "catchup" && homeViewerId() === viewer;
       catchUpExpanded = false;
       catchUpData = initialCatchUpData(workspaces);
+      for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, null);
       renderHomeCatchUp(); // Membership cards appear before any detail read.
       if (sampleMode) {
         catchUpData = catchUpData.map(entry => ({ ...entry, state: "open" })); renderHomeCatchUp(); return;
@@ -4367,22 +4360,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!live()) return;
       if (overview) {
         catchUpData = overviewCatchUpData(catchUpData, overview, sampleMode);
-        for (const entry of catchUpData) {
-          const row = overview.workspaces.find(row => row.workspace_id === entry.workspace.id);
-          if (row && entry.detail) {
-            const measured = new Set([...row.needs_you.asks.filter(ask => Date.parse(ask.until) > Date.parse(overview.generated_at)).map(ask => ask.signal_id),
-              ...row.needs_you.assigned.map(todo => todo.todo_id), ...row.needs_you.waiting.map(todo => todo.todo_id)]);
-            const fixes = mapCatchUp([entry], viewer, "", Date.now(), sampleMode).needsYou.filter(item => item.kind === "agent-fix").length;
-            homeOverviewCounts.set(entry.workspace.id, measured.size + fixes);
-          }
-        }
+        for (const entry of catchUpData) homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
         renderHomeCatchUp();
       }
       await fillCatchUpDetails(catchUpData, async workspace => {
         const previous = catchUpData.find(entry => entry.workspace.id === workspace.id)?.detail;
         if (overview && previous) {
           const row = overview.workspaces.find(row => row.workspace_id === workspace.id)!;
-          // Missing previews leave Needs you incomplete; the loaded overview still holds.
+          // A missing preview still leaves a Reply card. Assigned cards name nobody, so this does not read each to-do.
           const asks = await homeOverviewAsks(workspace.id, row.needs_you.asks.map(ask => ask.signal_id)).catch(() => [] as Signal[]);
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks), signals: latest };
@@ -4399,6 +4384,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }, entry => {
         if (!live()) return;
         catchUpData = catchUpData.map(previous => previous.workspace.id === entry.workspace.id ? entry : previous);
+        homeOverviewCounts.set(entry.workspace.id, homeNeedsYouCount(entry));
         renderHomeCatchUp();
       });
     };
@@ -16120,14 +16106,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   @media (max-width: 52rem) {
-    /* The channel head is an in-flow row, so these views do not reserve a floating band.
-       The fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits
-       about 10rem above the bottom edge; the end padding keeps every control clear of it. */
     .dashboard__setup,
     .dashboard__objects-view,
     .dashboard__host-view {
       padding-block-start: calc(var(--feed-band-height, 3.25rem) + var(--s-2));
-      padding-block-end: 16rem;
     }
   }
 

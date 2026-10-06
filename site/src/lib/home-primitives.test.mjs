@@ -15,6 +15,8 @@ test("accessible agent names carry owner and state, not just an orb's colour", (
   assert.equal(agentAccessibleName(a), "Muse, Nikki’s agent, Idle");
   assert.equal(agentAccessibleName({ ...a, yours: true, state: { word: "Working" } }), "Muse, your agent, Working");
   assert.equal(agentAccessibleName({ ...a, ownerFirstName: null }), "Muse, owner left, Idle");
+  assert.equal(agentAccessibleName({ ...a, name: "Claude", label: "Your Claude · 3dab8f40", nestedLabel: "Claude", yours: true, state: { word: "Idle" } }), "Claude · 3dab8f40, your agent, Idle");
+  assert.equal(agentAccessibleName({ ...a, name: "Claude", label: "Your Claude", nestedLabel: "Claude" }), "Claude, Nikki’s agent, Idle");
   assert.equal(queueMoveReceipt("Book plumber", 1), "Moved ‘Book plumber’ to 1st.");
   assert.equal(queueMoveReceipt("Book plumber", 22), "Moved ‘Book plumber’ to 22nd.");
 });
