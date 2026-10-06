@@ -15,7 +15,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
-import { expectedReleaseMcpToolNames } from '../scripts/live-ordinary-controls.mjs';
+import { ORDINARY_TOOLS, expectedReleaseMcpToolNames } from '../scripts/live-ordinary-controls.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
@@ -39,7 +39,8 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const tools = await expectedReleaseMcpToolNames();
+const baselineTools = [...ORDINARY_TOOLS];
+const releaseTools = await expectedReleaseMcpToolNames();
 const windowId = 'ABC123';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
@@ -70,6 +71,7 @@ async function liveFixture(t) {
     return emit(res, 200, { token_type: 'Bearer', access_token: a, refresh_token: r, expires_in: 300, scope: 'mcp', ignored_cookie: secret() });
   };
   let signal;
+  const f = { consent: undefined, listedTools: baselineTools };
   const server = createServer(async (req, res) => {
     try {
       assert.equal(req.headers['user-agent'], 'curl/8.7.1');
@@ -128,7 +130,7 @@ async function liveFixture(t) {
             seat_id: '44444444-4444-4444-8444-444444444444', handle: 'seat_' + 'a'.repeat(32) }) }] };
         } else {
           assert.equal(body.method, 'tools/list');
-          result = { tools: tools.map(name => ({ name })) };
+          result = { tools: f.listedTools.map(name => ({ name })) };
         }
         return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
       }
@@ -176,7 +178,6 @@ async function liveFixture(t) {
   await privateWrite(join(seat, 'credential.json'), { message: 'Agent credential minted. It is bound to this run, so the agent\'s work is attributable to it.',
     status: 'accepted', principal_id: pid, token_id: randomUUID(), run_id: randomUUID(), agent_token: seatToken });
   let sequence = 0;
-  const f = { consent: undefined };
   async function run(command, extra = [], { handoff = true, outName } = {}) {
     const pointer = join(root, `pointers${sequence++}`); await mkdir(pointer, { mode: 0o700 });
     const out = outName ?? join(root, `receipt${sequence}.json`);
@@ -233,6 +234,7 @@ async function produceReceipts(t) {
   const w2b = await f.run('window', ['--window', 'W2b', '--phase', 'before']);
   assert.equal(w2b.exit, 0, w2b.output);
   for (const window of ['W3', 'W4', 'W5']) {
+    if (window === 'W5') f.listedTools = releaseTools;
     const w = await f.run('window', ['--window', window]);
     assert.equal(w.exit, 0, w.output);
   }

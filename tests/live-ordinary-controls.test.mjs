@@ -11,7 +11,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import {
-  ORDINARY_TOOLS, expectedMcpToolNames, expectedReleaseMcpToolNames, exactMcpToolSet,
+  ORDINARY_TOOLS, expectedMcpToolNames, expectedReleaseMcpToolNames, expectedToolScope, exactMcpToolSet,
   hostedFileTransportEnabled, hostedHouseholdToolNames, loadReleaseHouseholdExports,
 } from '../scripts/live-ordinary-controls.mjs';
 
@@ -22,7 +22,8 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const tools = await expectedReleaseMcpToolNames();
+const baselineTools = [...ORDINARY_TOOLS];
+const releaseTools = await expectedReleaseMcpToolNames();
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
 const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
@@ -151,7 +152,7 @@ async function fixture(t, config = {}) {
           }
         } else {
           assert.equal(body.method, 'tools/list'); assert.equal(req.headers['mcp-protocol-version'], '2025-06-18');
-          result = { tools: (config.badTools ? tools.slice(1) : tools).map(name => ({ name })) };
+          result = { tools: (config.badTools ? (config.listedTools ?? baselineTools).slice(1) : (config.listedTools ?? baselineTools)).map(name => ({ name })) };
         }
         return emit(res, 200, { jsonrpc: '2.0', id: body.id, result });
       }
@@ -310,6 +311,86 @@ test('hosted MCP catalog refuses the old 8-only list when the release has househ
   assert.ok(expected.length > ORDINARY_TOOLS.length);
   assert.equal(exactMcpToolSet(ORDINARY_TOOLS, expected), false);
   assert.equal(exactMcpToolSet(expected, ORDINARY_TOOLS), false);
+});
+
+test('expected MCP tool scope follows the invocation, not the tools/list response', () => {
+  const rows = [
+    [{ command: 'consent', phase: 'pre-W1' }, 'baseline'],
+    [{ command: 'consent', phase: 'post-W5' }, 'release'],
+    [{ command: 'probe-credentials' }, 'baseline'],
+  ];
+  for (const window of ['W1', 'W2', 'W2b', 'W3']) {
+    for (const phase of ['before', 'after', 'recovery']) {
+      rows.push([{ command: 'window', window, phase }, 'baseline']);
+    }
+  }
+  rows.push(
+    [{ command: 'window', window: 'W4', phase: 'before' }, 'baseline'],
+    [{ command: 'window', window: 'W4', phase: 'after' }, 'release'],
+    [{ command: 'window', window: 'W4', phase: 'recovery' }, 'baseline'],
+  );
+  for (const window of ['W5', 'W6', 'W7']) {
+    for (const phase of ['before', 'after', 'recovery']) {
+      rows.push([{ command: 'window', window, phase }, 'release']);
+    }
+  }
+  assert.equal(rows.length, 27);
+  for (const [invocation, scope] of rows) {
+    assert.equal(expectedToolScope(invocation), scope, JSON.stringify(invocation));
+  }
+  assert.equal(expectedToolScope({ command: 'window', window: 'W4', phase: 'recovery' }), 'baseline');
+  assert.throws(
+    () => expectedToolScope({ command: 'window', window: 'W8', phase: 'before' }),
+    e => e.message === 'control_failed'
+      && e.expected === 'baseline or release tool scope for a known command/window/phase'
+      && e.got === 'window/W8/before',
+  );
+});
+
+test('each tool scope accepts only its exact set', async () => {
+  for (const [scope, expected, other] of [
+    ['baseline', baselineTools, releaseTools],
+    ['release', releaseTools, baselineTools],
+  ]) {
+    assert.equal(exactMcpToolSet(expected, expected), true, scope);
+    assert.equal(exactMcpToolSet(other, expected), false, `${scope} rejects the other scope`);
+    assert.equal(exactMcpToolSet([...expected, 'not_a_real_tool'], expected), false, `${scope} extra`);
+    assert.equal(exactMcpToolSet(expected.slice(1), expected), false, `${scope} missing`);
+    assert.equal(exactMcpToolSet([...expected, expected[0]], expected), false, `${scope} duplicate`);
+  }
+});
+
+test('producer tools/list uses the invocation scope: W4 recovery is baseline; unknown extra or the other set fail', async t => {
+  await t.test('pre-W1 refuses the release household set', async t => {
+    const f = await fixture(t); f.config.listedTools = releaseTools;
+    const r = await f.run('consent');
+    assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.match(r.output, /FAIL cimd_consent: control expected exact ordinary MCP tool set/);
+  });
+  await t.test('W4 recovery passes the baseline set and refuses the release set', async t => {
+    const passCase = await fixture(t); await pre(passCase);
+    const passed = await passCase.run('window', ['--window', 'W4', '--phase', 'recovery']);
+    assert.equal(passed.exit, 0, passed.output);
+    const failCase = await fixture(t); await pre(failCase); failCase.config.listedTools = releaseTools;
+    const refused = await failCase.run('window', ['--window', 'W4', '--phase', 'recovery']);
+    assert.equal(refused.exit, 1, refused.output); await missing(refused.out);
+    assert.match(refused.output, /FAIL hosted_mcp_consent_refresh: control expected exact ordinary MCP tool set/);
+  });
+  await t.test('W4 after passes the release set and refuses the baseline set', async t => {
+    const failCase = await fixture(t); await pre(failCase);
+    const refused = await failCase.run('window', ['--window', 'W4', '--phase', 'after']);
+    assert.equal(refused.exit, 1, refused.output); await missing(refused.out);
+    assert.match(refused.output, /FAIL hosted_mcp_consent_refresh: control expected exact ordinary MCP tool set/);
+    const passCase = await fixture(t); await pre(passCase); passCase.config.listedTools = releaseTools;
+    const passed = await passCase.run('window', ['--window', 'W4', '--phase', 'after']);
+    assert.equal(passed.exit, 0, passed.output);
+  });
+  await t.test('post-W5 refuses the baseline set', async t => {
+    const f = await fixture(t), p = await pre(f);
+    const r = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]);
+    assert.equal(r.exit, 1, r.output); await missing(r.out);
+    assert.match(r.output, /FAIL cimd_consent: control expected exact ordinary MCP tool set/);
+  });
 });
 
 test('hosted MCP catalog excludes file-only tools unless the hosted file-transport gate is on', async () => {
@@ -521,6 +602,7 @@ test('consecutive releases succeed while live and revoked principals keep their 
     assert.ok(!collision.events.some(e => e.command === 'post_signal'));
   }
   await refusesCollision();
+  first.config.listedTools = releaseTools;
   const cleanup = await first.run('consent', ['--phase', 'post-W5', '--prior-consent', firstConsent.out]);
   assert.equal(cleanup.exit, 0, cleanup.output);
   assert.equal(cleanup.receipt.cleanup.grants_revoked, true);
@@ -691,6 +773,7 @@ test('private path and profile refusals happen before refresh, registration or n
 });
 
 async function post(f, p) {
+  f.config.listedTools = releaseTools;
   const r = await f.run('consent', ['--phase', 'post-W5', '--prior-consent', p.out]);
   assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
 }
@@ -728,6 +811,7 @@ test('post-W5 proves pre-W1 CIMD revocation before new consent and retains the n
     const preFamily = f.events.find(e => e.grant === 'authorization_code' && e.client === client).family;
     const earlierIds = [...p.receipt.dcr_client_ids];
     for (const window of ['W1', 'W2', 'W3', 'W4', 'W5']) {
+      if (window === 'W5') f.config.listedTools = releaseTools;
       const w = await f.run('window', ['--window', window]); assert.equal(w.exit, 0, w.output);
       earlierIds.push(...w.receipt.dcr_client_ids);
       assert.equal(f.events.filter(e => e.grant === 'refresh_token').at(-1).family, preFamily);

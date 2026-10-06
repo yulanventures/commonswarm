@@ -87,6 +87,25 @@ export async function expectedReleaseMcpToolNames(protocolUrl = PROTOCOL_MODULE,
   return expectedMcpToolNames(hostedHouseholdToolNames(
     protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled(env)));
 }
+// Scope comes from the invocation (command/window/phase), never from tools/list.
+// Baseline = live edge still on the pre-W4 8-tool catalog. Release = after W4's switch.
+export function expectedToolScope({ command, window, phase } = {}) {
+  const mapped = (() => {
+    if (command === 'consent' && phase === 'pre-W1') return 'baseline';
+    if (command === 'consent' && phase === 'post-W5') return 'release';
+    if (command === 'probe-credentials') return 'baseline';
+    if (command === 'window' && ['before', 'after', 'recovery'].includes(phase)) {
+      if (['W1', 'W2', 'W2b', 'W3'].includes(window)) return 'baseline';
+      if (window === 'W4') return phase === 'after' ? 'release' : 'baseline';
+      if (['W5', 'W6', 'W7'].includes(window)) return 'release';
+    }
+    return null;
+  })();
+  demand(mapped === 'baseline' || mapped === 'release',
+    'baseline or release tool scope for a known command/window/phase',
+    `${command ?? 'none'}/${window ?? 'none'}/${phase ?? 'none'}`);
+  return mapped;
+}
 
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
@@ -371,7 +390,8 @@ async function run(o) {
       headers['MCP-Protocol-Version'] = init.result.protocolVersion;
       await rpc(null, 'notifications/initialized'); const list = await rpc(2, 'tools/list', {});
       const names = list.result?.tools?.map(t => t.name);
-      const expected = await expectedReleaseMcpToolNames();
+      const scope = expectedToolScope({ command: o.command, window: o.window, phase: o.phase });
+      const expected = scope === 'baseline' ? [...ORDINARY_TOOLS] : await expectedReleaseMcpToolNames();
       demand(list.jsonrpc === '2.0' && list.id === 2 && !list.error && !list.result?.nextCursor &&
         exactMcpToolSet(names, expected), 'exact ordinary MCP tool set');
       if (claimSeat) {
