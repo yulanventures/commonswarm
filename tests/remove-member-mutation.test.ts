@@ -25,8 +25,10 @@ test("remove_member edge security seams remain reachable and fail closed", async
   );
   assert.match(source, /authClient\.auth\.getClaims\(credential\)/);
   assert.match(source, /newestInteractiveAmrSeconds\(claimsData\.claims\)/);
-  assert.match(source, /hasFreshInteractiveAuth\(/);
-  assert.match(source, /reason: "fresh_auth_required"/);
+  assert.match(source, /commandNeedsFreshInteractiveAuth\(command\.kind\)/);
+  assert.match(source, /freshInteractiveAuthRefusal\(/);
+  assert.match(source, /reason: freshAuth\.error/);
+  assert.match(source, /error: freshAuth\.error/);
   assert.match(source, /FROM swarm\.repositories/);
   assert.match(source, /landing_authority_user_id = \$\{wire\.user_id\}/);
   assert.doesNotMatch(
@@ -100,16 +102,29 @@ test("idempotency replay is resolved before remove_member fresh-auth refusal", a
   );
   assert.doesNotMatch(
     between,
-    /command\.kind === "remove_member"/,
-    "remove_member fresh-auth must not run inside the idempotency step",
+    /commandNeedsFreshInteractiveAuth|freshInteractiveAuthRefusal|command\.kind === "remove_member"|command\.kind === "change_role"/,
+    "fresh-auth must not run inside the idempotency step",
   );
-  const after = source.slice(afterStep7, afterStep7 + 900);
+  const after = source.slice(afterStep7, afterStep7 + 1400);
   assert.match(
     after,
-    /if \(command\.kind === "remove_member"\) \{\s*const serverTime = await tx/,
-    "remove_member fresh-auth must immediately follow idempotency completion",
+    /if \(commandNeedsFreshInteractiveAuth\(command\.kind\)\) \{\s*const serverTime = await tx/,
+    "fresh-auth must immediately follow idempotency completion",
   );
-  assert.match(after, /hasFreshInteractiveAuth\(/);
+  assert.match(after, /freshInteractiveAuthRefusal\(\s*command\.kind,/);
+  assert.match(after, /if \(freshAuth !== null\)/);
+  assert.match(after, /message: freshAuth\.message/);
+  assert.doesNotMatch(
+    after,
+    /command\.kind === "remove_member"|command\.kind === "change_role"/,
+    "the gate must follow the shared kind set, not one hard-coded kind",
+  );
+  const gateAt = source.indexOf("freshInteractiveAuthRefusal(", afterStep7);
+  const ledgerAt = source.indexOf("INSERT INTO swarm.idempotency_keys", gateAt);
+  assert.ok(gateAt > afterStep7 && ledgerAt > gateAt);
+  const beforeLedger = source.slice(gateAt, ledgerAt);
+  assert.match(beforeLedger, /status: 401/);
+  assert.match(beforeLedger, /return \{/);
 });
 
 test("fresh-login refusal preserves pending remove_member command id", async () => {
@@ -129,6 +144,37 @@ test("fresh-login refusal preserves pending remove_member command id", async () 
   assert.match(
     source,
     /A fresh-login refusal is explicitly not ledgered/,
+  );
+});
+
+test("change_role is registered beside remove_member and projects one membership", async () => {
+  const source = await readFile(
+    "supabase/functions/command/index.ts",
+    "utf8",
+  );
+  for (const name of ["COMMAND_KINDS", "CONNECT_COMMAND_KINDS"]) {
+    const match = source.match(
+      new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const`),
+    );
+    assert.ok(match, `${name} must exist`);
+    assert.match(
+      match[1],
+      /"change_role"/,
+      `${name} must accept change_role`,
+    );
+  }
+  assert.match(
+    source,
+    /exactKeys\(cmd, \["kind", "user_id", "role"\]\)/,
+  );
+  assert.match(
+    source,
+    /wire\.kind === "remove_member" \|\| wire\.kind === "change_role"/,
+  );
+  assert.match(
+    source,
+    /event\.type === "MemberRoleChanged"[\s\S]*?UPDATE swarm\.memberships[\s\S]*?SET role = \$\{payload\.to_role\}[\s\S]*?WHERE workspace_id = \$\{route\.workspaceId\}::uuid[\s\S]*?AND user_id = \$\{payload\.user_id\}::uuid[\s\S]*?AND role = \$\{payload\.from_role\}[\s\S]*?AND revoked_at IS NULL[\s\S]*?RETURNING user_id/,
+    "MemberRoleChanged projection must change exactly one live membership in the routed workspace",
   );
 });
 
