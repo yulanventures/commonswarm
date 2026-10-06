@@ -41,7 +41,17 @@ export interface HumanInviteFacts {
     user_id: string;
     member_live: boolean;
     preview_digest: string;
+    /** Null when this person has no membership row, or that row is still live. */
+    membership_revoked_at: number | null;
+    invitation_created_at: number;
 }
+export type LegacyHouseholdAcceptRefusal = 'invitation_recipient_mismatch' | 'recipient_consent_required';
+/** When a household boundary exists, legacy acceptance requires the verified email to equal the invited email. */
+export declare function legacyHouseholdAcceptRefusal(boundaryPresent: boolean, verifiedEmail: string | null, invitedEmail: string | null): LegacyHouseholdAcceptRefusal | null;
+export type LegacyRemovalRejoinRefusal = 'invitation_predates_removal';
+/** A legacy invitation issued after the latest removal may rejoin. One issued at
+ * or before that removal, or with no usable time, may not. */
+export declare function legacyRemovalRejoinRefusal(membershipRevokedAt: number | null, invitationCreatedAt: number): LegacyRemovalRejoinRefusal | null;
 export type HumanInviteDecision = {
     status: 'preview' | 'join' | 'already_joined';
 } | {

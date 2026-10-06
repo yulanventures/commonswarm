@@ -4,6 +4,7 @@ import type postgres from 'postgres';
 import type { HouseholdIdentity, HouseholdCredentialRecheck } from './household-objects.ts';
 import { HOUSEHOLD_CONTENT_OPERATIONS } from '../_shared/protocol.js';
 import { householdCanonical, householdSha256 } from './household-transfers.ts';
+export { pendingLinkInvitationIds, revokeRemovedMemberHousehold } from './household-member-removal.ts';
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const refused = (reason: string) => ({ status: 'refused', reason });
