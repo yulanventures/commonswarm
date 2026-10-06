@@ -41,17 +41,17 @@ const hostOf = (source: string) => /^# host: (.+)$/.exec(source.split('\n')[2]!)
 const macBlocks = blocks.filter(source => /\bMac\b/.test(hostOf(source) ?? ''));
 const EXPECTED_MAC_STEPS = [
   'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-ordinary-probes', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w3-probes', 'ai-w4-probes',
-  'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
+  'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w5-recovery-transfer', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
-  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
+  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
 const MUST_PASS = [
-  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w6-readiness',
+  'ai-inputs', 'ai-prepare', 'ai-extract', 'ai-edge-receipt', 'ai-gates', 'ai-live-controls', 'ai-w2-stage-probes', 'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-recovery-transfer', 'ai-w6-readiness',
   'ai-w6-readiness-transfer', 'ai-w6-activation-approval', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
-  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-mac-close',
+  'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
 ];
 // Blocks that contact public ingress from Python urllib; the sandbox denies the network.
 const NETWORK_DENIED = ['ai-ordinary-probes', 'ai-w3-probes', 'ai-w4-probes', 'ai-w5-closed', 'ai-w6-activation-probes'];
@@ -181,6 +181,11 @@ const siteEvidence = join(scratch, 'site-evidence'); mkdirSync(siteEvidence, { m
 writeFileSync(join(siteEvidence, 'index.html'), '<!doctype html>\n');
 writeFileSync(join(siteEvidence, 'manifest.json'), JSON.stringify([{ path: 'index.html', sha256: digest('<!doctype html>\n') }]));
 writeFileSync(join(siteEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteEvidence, 'manifest.json')))}\n`);
+// Recovery transfer requires a recovered companion close, distinct from the forward
+// close above. Python creates its tar; the existing ssh/scp stubs record the transfer.
+const siteRecoveryEvidence = join(scratch, 'site-recovery-evidence'); mkdirSync(siteRecoveryEvidence, { mode: 0o700 });
+for (const name of ['index.html', 'manifest.json']) writeFileSync(join(siteRecoveryEvidence, name), readFileSync(join(siteEvidence, name)));
+writeFileSync(join(siteRecoveryEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=rolled-back\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteRecoveryEvidence, 'manifest.json')))}\n`);
 // W5 forward close (Amendments A/B): a phase-after live receipt bound to the post-W5
 // consent receipt, so ai-w5-closed passes ai-live-controls and still reaches its network step.
 const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'post-W5',
@@ -423,7 +428,8 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
-      SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo, SITE_EVIDENCE: siteEvidence,
+      SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo,
+      SITE_EVIDENCE: step === 'ai-w5-recovery-transfer' ? siteRecoveryEvidence : siteEvidence,
       LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,
       CONSENT_RECEIPT_FILE: step === 'ai-w5-preflight' ? preConsentFile : consentFile,
       W5_CLOSED_FILE: join(w5Dir, 'closed.txt'), BROWSER_READY_FILE: browserReady,
