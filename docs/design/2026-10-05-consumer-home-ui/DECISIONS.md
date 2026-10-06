@@ -64,3 +64,8 @@ R8. Comment tags deliver a notice to the tagged people and agents once the serve
 R9. Catch up shows "N new since you last looked" per workspace when the overview read returns last_seen_at/new_messages;
     until then it shows "Latest" (UI-SPEC 3.2).
 R10. Screen word for the ordered list is "line" ("2nd in line", "Claude’s line", "Up next"); the server word is queue.
+R11 (2026-10-06, Lead, after lane S2b): Needs-you to-do cards do not name who assigned the to-do. The overview carries no
+    reliable assigner and enriching it from later reads can name the wrong person (race found by Codex). Copy:
+    "‘Call the plumber’ is assigned to you." with Open. (UI-SPEC 2.4's "Nikki assigned you ‘…’." is superseded.)
+R12 (2026-10-06, Lead): a pending request in Needs you is a card that opens the to-do, where Accept and Decline already
+    live: "‘Book dinner’ is waiting for your answer." with Open. Inline Accept/Decline on the card is a follow-up.
