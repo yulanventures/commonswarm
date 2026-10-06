@@ -113,3 +113,7 @@ tests/household-human-invitations.test.ts
 tests/hosted-name-reclaim.test.ts
 tests/household-approval.test.ts
 tests/household-approval-proofs.test.ts
+tests/household-todos.test.ts
+tests/household-todo-proofs.test.ts
+tests/home-overview-proofs.test.ts
+tests/hosted-tool-pins.test.ts
