@@ -56,15 +56,52 @@ const originalBegin = api.db.begin.bind(api.db);
 try {
   await assert.rejects(originalBegin(async tx => {
     await tx.unsafe(input.schema); await tx.unsafe(input.setup);
-    // Keep each real handler on the fixture's top-level transaction. A
-    // savepoint gives inserted rows a subtransaction xmin, which the normal
-    // directed-signal recipient guard refuses. All fixture work rolls back;
-    // no auth, decision, notice or receipt is mocked.
-    api.db.begin = (async (...args: unknown[]) => {
-      await tx\x60RESET ROLE\x60;
-      const result=await (args.at(-1) as (sql: typeof tx) => Promise<unknown>)(tx);
-      await tx\x60RESET ROLE\x60; return result;
-    }) as typeof api.db.begin;
+    // One top-level transaction, so a notice signal keeps the outer xmin.
+    // RESET ROLE clears a transaction-local role at once. Handlers also set
+    // other transaction-local settings, so each call restores those from the
+    // fixture snapshot. The hosted pre-check uses this same wrapper. Auth,
+    // decisions, notices and receipts stay real.
+    const settingQuery = "SELECT current_setting('search_path', true) AS search_path, current_setting('lock_timeout', true) AS lock_timeout, current_setting('statement_timeout', true) AS statement_timeout, current_setting('row_security', true) AS row_security, current_setting('check_function_bodies', true) AS check_function_bodies, current_setting('request.jwt.claims', true) AS jwt_claims, current_setting('cswarm.household_actor', true) AS household_actor, current_setting('cswarm.household_request', true) AS household_request, current_setting('cswarm.household_digest', true) AS household_digest, current_setting('cswarm.household_command', true) AS household_command";
+    const settingNames = { search_path: 'search_path', lock_timeout: 'lock_timeout', statement_timeout: 'statement_timeout', row_security: 'row_security', check_function_bodies: 'check_function_bodies', jwt_claims: 'request.jwt.claims', household_actor: 'cswarm.household_actor', household_request: 'cswarm.household_request', household_digest: 'cswarm.household_digest', household_command: 'cswarm.household_command' } as const;
+    type SettingKey = keyof typeof settingNames;
+    type SettingRow = Record<SettingKey, string | null>;
+    const readSettings = async (sql: typeof tx) => {
+      const [row] = await sql.unsafe<[SettingRow]>(settingQuery);
+      return row!;
+    };
+    const baseline = await readSettings(tx);
+    await tx.unsafe("SELECT set_config('role', 'swarm_command', true)");
+    const [switched] = await tx.unsafe<[{ actor: string }]>("SELECT current_user AS actor");
+    assert.equal(switched!.actor, 'swarm_command');
+    await tx.unsafe('RESET ROLE');
+    const [cleared] = await tx.unsafe<[{ actor: string; login: string }]>("SELECT current_user AS actor, session_user AS login");
+    assert.equal(cleared!.actor, cleared!.login, 'RESET ROLE clears a transaction-local role at once');
+    const restoreSession = async (sql: typeof tx) => {
+      await sql.unsafe("SELECT set_config('role', 'none', true)");
+      const live = await readSettings(sql);
+      for (const key of Object.keys(settingNames) as SettingKey[]) {
+        const prior = baseline[key] ?? '';
+        if ((live[key] ?? '') !== prior) await sql.unsafe('SELECT set_config($1, $2, true)', [settingNames[key], prior]);
+      }
+    };
+    const isolate = async <T>(run: (sql: typeof tx) => Promise<T>): Promise<T> => {
+      await restoreSession(tx);
+      let failed = false;
+      try {
+        return await run(tx);
+      } catch (error) {
+        failed = true;
+        throw error;
+      } finally {
+        if (failed) { try { await restoreSession(tx); } catch { /* the caller's error stands */ } }
+        else await restoreSession(tx);
+      }
+    };
+    const asCommand = async <T>(run: (sql: typeof tx) => Promise<T>): Promise<T> => isolate(async (sql) => {
+      await sql.unsafe("SELECT set_config('role', 'swarm_command', true), set_config('search_path', 'swarm, pg_catalog', true), set_config('lock_timeout', '5s', true)");
+      return await run(sql);
+    });
+    api.db.begin = (async (...args: unknown[]) => isolate(args.at(-1) as (sql: typeof tx) => Promise<unknown>)) as typeof api.db.begin;
     const f = input.f;
     type Result = { status: number; body: Record<string, any> };
     const envelope = (command: Record<string, unknown>, id=crypto.randomUUID(), workspace=f.workspace) => ({ command_id:id, client_version:'0.1.80', workspace_id:workspace, stream:{kind:'workspace'}, command });
@@ -72,8 +109,11 @@ try {
       userId:f.owner, email:null, displayName:'Synthetic owner', identityVerified:true, interactiveAuthAtSeconds:null });
     const capability = async (tool: string) => {
       const use = ['todo_list','todo_read','todo_queue','comment_list'].includes(tool) ? 'read' : 'command';
-      const cap = await auth.authenticateHostedSeatCapability(tx, { grantId:f.grant, providerGrantId:'synthetic-'+f.grant,
-        handle:f.handle, tool, providerStatus:async () => ({active:true}) }, use);
+      const cap = await isolate(async (sql) => {
+        await sql.unsafe('SELECT set_config($1, $2, true)', ['role', use === 'read' ? 'swarm_read' : 'swarm_command']);
+        return auth.authenticateHostedSeatCapability(sql, { grantId:f.grant, providerGrantId:'synthetic-'+f.grant,
+          handle:f.handle, tool, providerStatus:async () => ({active:true}) }, use);
+      });
       assert.ok(cap, 'live, approved hosted capability'); return cap;
     };
     const call = async (tool: string, fields: Record<string, unknown>={}, id=crypto.randomUUID(), workspace=f.workspace): Promise<Result> => {
@@ -101,6 +141,37 @@ try {
     const signals=await tx\x60SELECT count(*)::int AS n FROM swarm.signals WHERE workspace_id=\x24{f.workspace}::uuid\x60;
     assert.equal(signals[0]!.n,1,'replay posts no second signal');
     assert.equal(await noticeSpend(),spendBefore+1,'replay adds no notice spend');
+    const [privilege] = await tx.unsafe<[{ command_role: boolean; read_role: boolean }]>(
+      "SELECT has_function_privilege('swarm_command', 'swarm.resolve_hosted_seat_read_authorization(uuid,text,text)', 'EXECUTE') AS command_role, has_function_privilege('swarm_read', 'swarm.resolve_hosted_seat_read_authorization(uuid,text,text)', 'EXECUTE') AS read_role");
+    assert.equal(privilege!.command_role, false, 'command role cannot execute the hosted read resolver');
+    assert.equal(privilege!.read_role, true, 'read role can execute the hosted read resolver');
+    await isolate(async (sql) => {
+      await sql.unsafe("SELECT set_config('role', 'swarm_read', true)");
+      const [row] = await sql.unsafe<[{ principal_id: string }]>(
+        "SELECT principal_id FROM swarm.resolve_hosted_seat_read_authorization($1::uuid, $2, 'members')",
+        [f.grant, f.handle]);
+      assert.equal(row?.principal_id, f.principal, 'read role resolves the hosted reader');
+    });
+    let commandDenial = 'completed';
+    // ROLLBACK TO starts a new subtransaction and leaves the savepoint open.
+    // Release it before the next notice so that notice keeps the top-level xmin.
+    await tx.unsafe('SAVEPOINT command_denial');
+    try {
+      await tx.unsafe("SELECT set_config('role', 'swarm_command', true)");
+      await tx.unsafe(
+        "SELECT principal_id FROM swarm.resolve_hosted_seat_read_authorization($1::uuid, $2, 'members')",
+        [f.grant, f.handle]);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      commandDenial = typeof code === 'string' ? code : 'unknown';
+    }
+    await tx.unsafe('ROLLBACK TO SAVEPOINT command_denial');
+    await tx.unsafe('RELEASE SAVEPOINT command_denial');
+    assert.equal(commandDenial, '42501', 'command role is refused the hosted read resolver');
+    const [stillFresh] = await tx.unsafe<[{ fresh: boolean }]>(
+      "SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh FROM swarm.signals WHERE id=$1::uuid",
+      [signal]);
+    assert.equal(stillFresh!.fresh, true, 'resolver probe leaves the notice on the top-level transaction');
     const queue=await call('todo_queue'); assert.equal(queue.status,200); assert.equal(queue.body.status,'ok');
     assert.equal(queue.body.queue.status.work,'idle');
     assert.equal(queue.body.queue.status.facts.connection,'live');
@@ -116,11 +187,9 @@ try {
     const localIdentity={user_id:f.owner,principal_id:f.local,run_id:f.run,connection:{connection_id:f.credential,grant_id:f.run}};
     const yes=async ()=>true;
     const localWriteId=crypto.randomUUID();
-    await tx\x60SET LOCAL ROLE swarm_command\x60;
-    const localControl=await surface.executeHouseholdSurface(tx,f.workspace,localIdentity,localWriteId,
-      {kind:'household_tool',tool:'todo_create',arguments:{seat:'seat_0000000000000000000000',request_id:localWriteId,title:'Local positive control'}},yes);
+    const localControl=await asCommand(sql => surface.executeHouseholdSurface(sql,f.workspace,localIdentity,localWriteId,
+      {kind:'household_tool',tool:'todo_create',arguments:{seat:'seat_0000000000000000000000',request_id:localWriteId,title:'Local positive control'}},yes));
     assert.equal(localControl.status,'committed');
-    await tx\x60RESET ROLE\x60;
     const humanCommands=[
       {kind:'household_todo_answer',todo_id:done.todo_id,offer_id:crypto.randomUUID(),answer:'accept'},
       {kind:'household_todo_steer',todo_id:done.todo_id,base_version:done.version,action:{kind:'start_now'}},
@@ -130,11 +199,18 @@ try {
     for (const command of humanCommands) {
       const hosted=await api.handleHostedCommand(envelope(command),await capability('todo_create'));
       assert.equal(hosted.status,403); assert.deepEqual(hosted.body,{error:'forbidden'});
-      assert.deepEqual(await surface.executeHouseholdSurface(tx,f.workspace,localIdentity,crypto.randomUUID(),command,yes),
+      assert.deepEqual(await asCommand(sql => surface.executeHouseholdSurface(sql,f.workspace,localIdentity,crypto.randomUUID(),command,yes)),
         {status:'refused',reason:'human_confirmation_required'});
     }
-    const offered=committed(await call('todo_create',{title:'Sibling request',assign:{to:{kind:'agent',id:f.sibling},start:'now'}}));
+    const offeredResult=await call('todo_create',{title:'Sibling request',assign:{to:{kind:'agent',id:f.sibling},start:'now'}});
+    const offered=committed(offeredResult);
     assert.equal(offered.assignee,null); assert.equal(offered.queue_rank,null); assert.equal(offered.offer.decider_user_id,f.owner);
+    assert.equal(offeredResult.body.notices.length,1); assert.equal(offeredResult.body.notices[0].status,'sent');
+    const offeredSignal=offeredResult.body.notices[0].signal_id;
+    assert.notEqual(offeredSignal, signal);
+    const offeredFresh=await tx\x60SELECT xmin::text::bigint=(pg_current_xact_id()::text::bigint & 4294967295) AS fresh
+      FROM swarm.signals WHERE id=\x24{offeredSignal}::uuid\x60;
+    assert.equal(offeredFresh[0]!.fresh,true,'a notice after the resolver probe uses the top-level transaction');
     const answered=committed(await human(envelope({kind:'household_todo_answer',todo_id:offered.todo_id,offer_id:offered.offer.offer_id,answer:'accept'})));
     assert.equal(answered.assignee.id,f.sibling); assert.equal(answered.offer,null);
     const acceptedId=crypto.randomUUID();
