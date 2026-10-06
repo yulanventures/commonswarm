@@ -26,7 +26,7 @@ type Task = {
   header: { plan_sha256: string; window: string; mode: string; generator_version: string };
   order_evidence: Passage[];
   steps: { id: string; offset: number; length: number; start_line: number; end_line: number;
-    host: string; readonly: string; block: string; conditions: Passage[]; execution_host: string; input?: string; manual?: Passage; ambiguity?: string; readings?: { source: Passage; steps: Task["steps"] }[] }[];
+    host: string; readonly: string; block: string; conditions: Passage[]; execution_host: string; input?: string; manual?: Passage; dispatched_blocks?: Task["steps"]; ambiguity?: string; readings?: { source: Passage; steps: Task["steps"] }[] }[];
 };
 const run = (path: string, window = 'W3', mode = 'forward', output?: string) =>
   spawnSync(process.execPath, [generator, path, window, mode, ...(output ? [output] : [])], { encoding: 'utf8', timeout: 10_000 });
@@ -41,7 +41,7 @@ const explicit = (steps: string) => {
   const ids = steps.split(' → ');
   const lines = ids.map(id => JSON.stringify({ id, host: 'mac' })).join('\n');
   return '## Run orders (machine-read by scripts/c1-task-from-plan.mjs)\n\n' +
-    windows.flatMap(w => modes.map(m => `\`\`\`c1-order ${w} ${m}\n${lines}\n\`\`\`\n`)).join('\n');
+    windows.flatMap(w => modes.map(m => `\`\`\`c1-order ${w} ${m}\n${lines}\n\`\`\`\n`)).join('\n') + '\n## Blocks\n';
 };
 const refusal = (path: string, window: string, mode: string, expected: string) => {
   const result = run(path, window, mode);
@@ -73,6 +73,7 @@ function verify(task: Task, bytes: Buffer, window: string, mode: string) {
     assert.ok(step.block.split('\n').includes(step.host));
     assert.ok(step.block.split('\n').includes(step.readonly));
     for (const condition of step.conditions) quote(condition);
+    visit(step.dispatched_blocks ?? []);
   } };
   visit(task.steps);
 }
@@ -84,6 +85,7 @@ test('real plan: every one of 18 window/mode tasks retains exact blocks, manual 
     for (const step of steps) {
       if (step.id) { assert.ok(defined.has(step.id)); used.add(step.id); }
       for (const r of step.readings ?? []) visit(r.steps);
+      visit(step.dispatched_blocks ?? []);
     }
   };
   for (const window of windows) for (const mode of modes) {
@@ -158,12 +160,12 @@ test('missing orders, undefined/unaccounted steps, wrong quotes, duplicates and 
   const unaccounted = positive + block('ai-unused');
   refusal(fixture('unused.md', unaccounted), 'W3', 'forward', 'defined step not used or excluded: ai-unused');
   // Add one exclusion only, not before every block.
-  const included = unaccounted.replace('\n\n```sh', '\nnot-run: {"id":"ai-unused","reason":"helper"}\n\n```sh');
+  const included = unaccounted.replace('## Blocks', 'not-run: {"id":"ai-unused","reason":"helper"}\n## Blocks');
   assert.equal(run(fixture('excluded.md', included)).status, 0);
   const duplicate = positive + block('ai-present');
   const definitions = [...duplicate.matchAll(/^# step: ai-present$/gm)].map(m => duplicate.slice(0, m.index).split('\n').length);
   refusal(fixture('duplicate.md', duplicate), 'W3', 'forward', `duplicate step definition ai-present at plan lines ${definitions.join(' and ')}`);
-  refusal(fixture('two-orders.md', positive.replace('\n\n```sh', '\n```c1-order W3 forward\n{"id":"ai-present","host":"mac"}\n```\n\n```sh')), 'W3', 'forward', 'duplicate run order for W3 forward');
+  refusal(fixture('two-orders.md', positive.replace('## Blocks', '```c1-order W3 forward\n{"id":"ai-present","host":"mac"}\n```\n## Blocks')), 'W3', 'forward', 'duplicate run order for W3 forward');
   refusal(fixture('no-section.md', block('ai-present')), 'W3', 'forward', 'expected one Run orders section');
   refusal(control, 'W0', 'forward', 'unknown window W0');
   refusal(control, 'W3', 'retry', 'unknown mode retry');
@@ -172,8 +174,12 @@ test('missing orders, undefined/unaccounted steps, wrong quotes, duplicates and 
   const line = marker.slice(0, marker.indexOf('# step:')).split('\n').length;
   refusal(fixture('missing-marker.md', marker), 'W3', 'forward', `step ai-present missing host or readonly marker at plan line ${line}`);
   // Legacy table cannot override explicit orders inside the canonical section.
-  const legacy = '| Window | Mode | Steps |\n| W3 | forward | ai-ignored |\n' + positive;
-  assert.equal(run(fixture('legacy.md', legacy)).status, 0);
+  const legacy = positive.replace('\n\n```c1-order', '\n| Window | Mode | Steps |\n| W3 | forward | ai-ignored |\n\n```c1-order');
+  refusal(fixture('legacy.md', legacy), 'W3', 'forward', 'unrecognised run-order line at plan line 2');
+  const unknown = positive.replace('{"id":"ai-present","host":"mac"}', '{"id":"ai-present","host":"mac","typo":true}');
+  refusal(fixture('unknown.md', unknown), 'W3', 'forward', 'unknown order key typo');
+  const prose = positive.replace('\n\n```c1-order', '\nunrecognised instruction\n\n```c1-order');
+  refusal(fixture('prose.md', prose), 'W3', 'forward', 'unrecognised run-order line at plan line 2');
 });
 
 // Independent call-graph check: fixtures that replace ai_run cannot detect a missing dispatcher entry.
@@ -222,9 +228,17 @@ test('resolved run orders keep opening, recovery and concurrent audit dispatch c
   assert.ok(w5.findIndex(s => s.id === 'ai-w5-recovery-transfer') < w5.findIndex(s => s.id === 'ai-close'));
   const w6 = task('W6').steps;
   assert.ok(!w6.some(s => s.id === 'ai-w6-audit-watch'));
-  const audit = w6.find(s => s.id === 'ai-w6-audit')!;
-  assert.match(audit.input!, /ONLY after agent.json upload completed/);
-  assert.match(audit.input!, /do not dispatch twice/);
+  assert.ok(!w6.some(s => s.id === 'ai-w6-audit'), 'audit is never an executable order step');
+  const driver = w6.find(s => s.id === 'ai-w6-fence-driver')!;
+  const audit = driver.dispatched_blocks!.find(s => s.id === 'ai-w6-audit')!;
+  assert.ok(audit);
+  const json = JSON.stringify(task('W6'));
+  assert.equal(json.split(JSON.stringify(audit.block).slice(1,-1)).length - 1, 1, 'audit block bytes occur once, attached to its dispatcher');
+  const companion = readFileSync('docs/evidence/2026-10-02-site-release/SITE-RELEASE.md', 'utf8');
+  for (const step of w5) assert.equal(step.conditions.length, 1, step.id || 'manual');
+  for (const step of w5.filter(s => s.id === 'ai-w5-reference')) {
+    for (const row of step.conditions[0]!.quote.split('\n')) assert.ok(companion.includes(row), row);
+  }
   assert.ok(w6.findIndex(s => s.id === 'ai-w6-fence-driver') < w6.findIndex(s => s.input?.startsWith('C1_CLIENT_ACTION=withdraw')));
   const recovered = task('W6', 'recovered-close').steps;
   assert.ok(recovered.findIndex(s => s.id === 'ai-w6-close-state') < recovered.findIndex(s => s.id === 'ai-close'));

@@ -2822,6 +2822,8 @@ test('W5 recovered close requires companion closure, bound rollback/reconciliati
     const proof=mkdtempSync(join(root,'proof-')), evidence=join(proof,'site-recovery'); mkdirSync(evidence);
     const input=join(proof,'inputs.json'); writeFileSync(input,JSON.stringify({...base(),window:'W5',baseline_site_target:original,archive_sha256:digest(readFileSync(archive))}));
     writeFileSync(join(proof,'ordinary-recovery.json'),live); writeFileSync(join(proof,'consent-post-W5.json'),consent);
+    writeFileSync(join(evidence,'GO.txt'),`SHA=${sha}\nBASE_SHA=${base().baseline_site_sha}\nHOLDS_RESOLVED=yes\n`);
+    writeFileSync(join(evidence,'deploy-status.txt'),`deploy_exit=${outcome==='rolled-back'?0:70}\nafter_read_exit=0\n`);
     writeFileSync(join(evidence,'previous.original'),original+'\n'); writeFileSync(join(evidence,'site2-07-pin-close.txt'),`pin_released=yes\nOUTCOME=${outcome}\n`);
     if(outcome==='rolled-back') { writeFileSync(join(evidence,'rollback-auto.txt'),'rollback_reason=public-control-failure\nrestored_release=/srv/commonswarm/site/releases/.site-window-pin-fixture\n'); writeFileSync(join(evidence,'site2-06-rollback-verify.txt'),'ROLLBACK_PUBLIC_BYTES=PASS\nuser_agent=curl/8.7.1\n'); }
     else writeFileSync(join(evidence,'site2-04-reconciliation.txt'),'DEPLOYMENT=failed-before-switch\nRETRY=forbidden\n');
@@ -2833,10 +2835,52 @@ test('W5 recovered close requires companion closure, bound rollback/reconciliati
     const execute=()=>run(block('ai-close').replaceAll('/srv/commonswarm/site',site),{WINDOW:'W5',CLOSE_RESULT:'recovered',INPUTS_FILE:input,PLAN_FILE:planPath,PROOF_DIR:proof,BOX_ARCHIVE_PATH:archive,SITE_RECOVERY_EVIDENCE:evidence,PATH:bin+':'+process.env.PATH});
     return {proof,evidence,execute,seal};
   };
+  // Execute the companion's real automatic rollback/reconciliation and box pin-close
+  // bodies against temporary files. Only SSH, host identity and GNU file flags are adapted.
+  const companion=readFileSync('docs/evidence/2026-10-02-site-release/SITE-RELEASE.md','utf8');
+  const companionBlock=(id:string)=>[...companion.matchAll(/^```sh\n([\s\S]*?)^```$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: '+id+' —'))!;
+  writeFileSync(join(bin,'ssh'),'#!/usr/bin/env python3\nimport subprocess,sys\nr=subprocess.run(["/bin/bash","-c"," ".join(sys.argv[4:])],input=sys.stdin.buffer.read());sys.exit(r.returncode)\n',{mode:0o700});
+  writeFileSync(join(bin,'readlink'),'#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1]=="-f";print(os.path.realpath(sys.argv[2]))\n',{mode:0o700});
+  writeFileSync(join(bin,'mv'),'#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:];a=a[1:] if a[0]=="-Tf" else a;assert len(a)==2;os.replace(*a)\n',{mode:0o700});
+  writeFileSync(join(bin,'id'),'#!/bin/sh\ntest "$1" = -un || exit 1\nprintf "commonswarm\\n"\n',{mode:0o700});
+  writeFileSync(join(bin,'stat'),'#!/usr/bin/env python3\nimport os,stat,sys\nassert sys.argv[1:3]==["-c","%a"];print(format(stat.S_IMODE(os.stat(sys.argv[3]).st_mode),"o"))\n',{mode:0o700});
   for(const outcome of ['rolled-back','failed-before-switch']) {
-    const good=fixture(outcome), r=good.execute(); assert.equal(r.status,0,r.stderr);
+    const good=fixture(outcome), windowId='20261005T120000Z', pin=join(site,'releases','.site-window-pin-'+windowId);
+    mkdirSync(join(pin,'app'),{recursive:true});writeFileSync(join(pin,'app/index.html'),'baseline');
+    writeFileSync(join(good.evidence,'previous.release'),pin+'\n');
+    const env={PATH:bin+':'+process.env.PATH,SITE_EVIDENCE:good.evidence,SITE_RELEASE_SHA:sha,SITE_WINDOW_ID:windowId,SITE_RELEASE_VERSION:'fixture'};
+    const local=(body:string)=>run(body.replaceAll('/srv/commonswarm/site',site).replace('. "$HOME/.commonswarm-site-window.env"', ':'),env);
+    if(outcome==='rolled-back') {
+      const failed=join(site,'releases','20261005T120000Z-'+sha.slice(0,12)+'-'+'2'.repeat(16));mkdirSync(join(failed,'app'),{recursive:true});writeFileSync(join(failed,'app/index.html'),'bad-public-bytes');
+      rmSync(join(site,'current'));symlinkSync(failed,join(site,'current'));writeFileSync(join(good.evidence,'after.release'),failed+'\n');
+      rmSync(join(good.evidence,'rollback-auto.txt'));
+      const rollback=local(companionBlock('site2-05'));assert.notEqual(rollback.status,0,'public control fails before network on missing app marker');
+      assert.equal(realpathSync(join(site,'current')),pin,'real companion automatic rollback restores pin');
+      assert.match(readFileSync(join(good.evidence,'rollback-auto.txt'),'utf8'),/rollback_reason=public-control-failure/);
+    } else {
+      rmSync(join(good.evidence,'site2-04-reconciliation.txt'));
+      const reconciled=local(companionBlock('site2-04-reconcile-failure'));assert.equal(reconciled.status,0,reconciled.stderr);
+      assert.match(readFileSync(join(good.evidence,'site2-04-reconciliation.txt'),'utf8'),/DEPLOYMENT=failed-before-switch/);
+    }
+    const windowFile=join(good.proof,'site-window.env');writeFileSync(windowFile,`SITE_WINDOW_ID=${windowId}\nSITE_RELEASE_SHA=${sha}\nBASELINE_DIR=${original}\n`,{mode:0o600});
+    const closeBox=/<<'BOX'\n([\s\S]*?)\nBOX/.exec(companionBlock('site2-07-manifest-close'))![1]!.replaceAll('/tmp/commonswarm-site-window.env',windowFile);
+    const pinClosed=local(`set -- '${pin}' '${original}' '${windowId}' '${outcome}' '' '' '${sha}' '${original}'\n`+closeBox);
+    assert.equal(pinClosed.status,0,pinClosed.stderr);assert.ok(!existsSync(pin),'companion pin-close removes its added pin');
+    writeFileSync(join(good.evidence,'site2-07-pin-close.txt'),pinClosed.stdout);good.seal();
+    const r=good.execute(); assert.equal(r.status,0,r.stderr);
     assert.match(r.stdout,/CLOSED-RECOVERED W5/); assert.equal(JSON.parse(readFileSync(join(good.proof,'close-result.json'),'utf8')).result,'recovered');
   }
+  const goFailure=fixture('failed-before-switch');
+  rmSync(join(goFailure.evidence,'GO.txt')); rmSync(join(goFailure.evidence,'deploy-status.txt')); goFailure.seal();
+  writeFileSync(join(goFailure.evidence,'site2-03-pin.txt'),'PIN=PASS\n');
+  const retainedPin=join(site,'releases','.site-window-pin-go-failure');mkdirSync(retainedPin);
+  const retainedWindow=join(goFailure.proof,'site-window.env');writeFileSync(retainedWindow,'open\n');
+  const noDeploy=goFailure.execute(); assert.notEqual(noDeploy.status,0);
+  assert.match(noDeploy.stderr,/^FAIL ai-close: recovered W5 deploy evidence expected GO.txt and site2-04 deploy-status.txt got absent or invalid; incident stays open; STOP$/m);
+  assert.ok(!existsSync(join(goFailure.proof,'closed.txt'))); assert.ok(!existsSync(join(goFailure.proof,'close-result.json')));
+  assert.ok(existsSync(retainedPin));assert.ok(existsSync(retainedWindow));
+  const goOnly=fixture('failed-before-switch');rmSync(join(goOnly.evidence,'deploy-status.txt'));goOnly.seal();
+  const statusMissing=goOnly.execute();assert.notEqual(statusMissing.status,0);assert.match(statusMissing.stderr,/incident stays open; STOP/);
   for(const fault of ['missing-close','cleanup-failed','wrong-current','wrong-baseline','receipt-missing','receipt-altered','pin-partial','forward-outcome','receipt-symlink','bad-controls']) {
     const f=fixture(fault==='receipt-missing'?'failed-before-switch':'rolled-back');
     if(fault==='missing-close') rmSync(join(f.evidence,'CLOSE.txt'));

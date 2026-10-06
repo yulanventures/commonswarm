@@ -1,9 +1,11 @@
 # Frozen bundle status (lane/c1-frozen-work)
 
 Branch `lane/c1-frozen-work`, based on origin/main `a5cb8251`. HezLead owns
-review and integration. Committed HEAD is `edf4a3bf`: C1-1 TODO repairs landed
-on this branch in `1c5d4dbc`; the generator and run orders are in `edf4a3bf`.
-This worker does not commit or push. No release or production execution is claimed.
+review and integration. Committed HEAD is `03c3c9d4`: C1-1 TODO repairs are in `1c5d4dbc`, the
+generator/run orders in `edf4a3bf`, C1-4 checker/ruling repairs in `69fa19f7`,
+and the first W4 Caddy production-defect repair in `03c3c9d4`.
+C1-6 below is an uncommitted patch on that exact base. This worker does not
+commit or push. No release or production execution is claimed.
 
 ## Done
 
@@ -115,7 +117,7 @@ call with an explicit failure clause. `W6 client verification: canonical digest
 equals canonicalAdminJson; the release-role insert carries the reviewed
 constants` now supplies the owner UUID required for the approval lookup.
 
-## C1-4 verification
+## C1-4 verification (patch committed in 69fa19f7)
 
 At committed HEAD `edf4a3bf`, C1-3 reported 162/164 passing, exit 1. The two
 failures loaded HEAD as an old-behavior control after HEAD contained the fixes.
@@ -133,10 +135,11 @@ writer duplicated a rehearsal extraction anchor. The reader inventory now
 includes W5 recovery; the W5 timestamp/timer names preserve the existing anchors.
 The focused W6 PostgreSQL rehearsal then passed, followed by the final gate.
 Full logs: `scratchpad/c1-4-gate.log` and `scratchpad/c1-4-gate-final.log`.
-The result measures the prepared C1-4 patch, not committed HEAD, CI or production.
+That historical gate measured the prepared C1-4 patch, subsequently committed
+in `69fa19f7`; it did not measure CI or production.
 No full suite, build, Docker or browser was run; no commit or push was made.
 
-## C1-5 W4 Caddy import form (prepared at 69fa19f7)
+## C1-5 W4 Caddy import form (committed in 03c3c9d4)
 
 Found during staging preparation on 2026-10-05: the reviewed, scrubbed production
 `/etc/caddy/Caddyfile` uses `import sites/*.caddy`. The copy at
@@ -173,7 +176,7 @@ and accepted-plus-other target). The standalone generator file passed 7/7;
 `bash -n` passed all 87 complete plan blocks; copied production fixture byte
 equality and `git diff --check` passed.
 
-**The required gate is not green.**
+**The C1-5 gate was not green.**
 `C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
 returned **169 tests, 168 pass, 1 fail, 0 cancelled/skipped/todo, exit 1**
 (212560.580917 ms). Log: `scratchpad/c1-5-gate.log`; exit receipt:
@@ -190,16 +193,89 @@ outside the assigned import-form repair. The relative case stops there, so the
 real-Caddy absolute case and subsequent candidate-corruption control have not
 completed. No successful real candidate validation is claimed.
 
-HezLead's scope decision was requested before moving the snippet definition to
-the API candidate. No answer or authorization is inferred. The route generator
-and the failing regression remain in place for that decision. The downloaded
-binary is retained at `scratchpad/c1-5-tools/caddy`; tests accept
+C1-5 stopped at that scope boundary. HezLead then assigned the snippet-order
+repair in MAKER-C1-6.md. The original downloaded binary is retained at `scratchpad/c1-5-tools/caddy`; tests accept
 `C1_CADDY_BINARY` or `caddy` on PATH, with that local path as fallback.
 No full suite, build, Docker, browser, commit, push or production operation ran.
 HezLead owns the cross-family check.
 
+## C1-6 checker round 2 and second Caddy production defect (prepared at 03c3c9d4)
+
+The latest Grok and Cursor reviews at
+`/Users/yulanbot/work/c1-verify/review/runs/20261005T232843Z-3a3ba5`
+both failed: W5 could close a GO failure without a deploy, and W6 could
+execute its audit twice. C1-6 repairs both in the run orders and their owning
+boundaries. Every W5 recovered-close step carries its companion failure or
+closure condition; rollback-only orders carry the same failure conditions.
+`ai-close` requires manifest-bound `GO.txt` (selected and baseline SHA plus
+HOLDS_RESOLVED) and `deploy-status.txt` with `deploy_exit`, written by site2-04.
+Absent/invalid deploy evidence reports an exact FAIL line saying the incident
+stays open. A GO failure retains its pin/window. The W5 test executes the
+companion's actual public-control automatic rollback, failed-before-switch
+reconciliation and box pin-close bodies on temporary files, then the C1 close.
+SSH, host identity and GNU file flags are adapted locally; browser/public
+rollback acceptance receipts remain fixtures. No production/browser execution
+is claimed.
+
+The W6 forward audit entry is a non-executable manual dispatch record.
+Generator version 4 attaches the audit block once to the fence driver's
+`dispatched_blocks`, with `dispatched_by` naming that driver. The generated
+W6 task contains its exact audit block bytes once and has no second executable
+audit step. The parser also refuses unknown keys (including quote, site-plan
+and not-run keys), unknown section lines and legacy tables; section prose is
+outside the machine-read section.
+
+The second W4 production defect was found by C1-5's real-Caddy validation,
+after the first defect was found using the staged production Caddyfile:
+
+- First: live `import sites/*.caddy` was refused by an absolute-only check.
+  Committed repair `03c3c9d4` preserves relative imports and redirects only the
+  supported absolute form in the task-owned candidate.
+- Second: lexical `10-commonswarm-api.caddy` imported `admin_resource_active`
+  before `20-commonswarm-mcp.caddy` defined it. C1-6 defines both shared admin
+  snippets at the top of the API candidate, before either site uses them.
+  The sources remain inside `RELEASE.md` (`ai-w4-caddy-candidate`); no extra
+  installed file is added. W4 still installs/restores the same two files, so
+  rollback and the three baseline byte checks retain their exact file set.
+
+Both import forms passed real Caddy v2.11.4 (production version) validation
+and adaptation with the live sites directory empty and cwd at the live config
+directory. Candidate corruption still fails. The official Mac arm64 archive's
+SHA-512 matches the publisher checksum; the binary is retained at
+`scratchpad/c1-6-tools/caddy`. The same tests also passed v2.11.7.
+
+Supersede now locks the approval table in SHARE ROW EXCLUSIVE mode as the
+existing session principal, before checking approvals, until commit. This
+briefly blocks approval writes for all clients (a broader lock than this
+client/version), closes the insertion race and adds no grants. A two-connection
+PostgreSQL 17 rehearsal holds the generated supersede transaction open: a
+fresh-owner INSERT hits lock_timeout until commit, then succeeds; removing
+only the new lock makes that same concurrent INSERT succeed immediately.
+Seed INSERTs bypass evidence triggers only; the real schema/locking remain.
+The W5 pre-open ruling now names the full ai-live-controls execution by
+ai-w5-preflight at `$PREP_DIR/w5-live-before` with the pre-W1 consent receipt.
+
+Regression controls at committed base `03c3c9d4` failed for the intended causes:
+W5 closed the no-deploy fixture, Caddy could not import admin_resource_active,
+W6 emitted an executable audit entry, and the generator accepted a legacy
+section table. The edited files were restored byte-for-byte after these checks.
+Logs: `scratchpad/c1-6-prefix-{w5,caddy,audit,parser}.log`.
+Focused repaired tests passed: generator 7/7; W5 close 1/1; W6 retry/race 1/1;
+real-Caddy/import-refusal matrix 2/2 on each tested Caddy version.
+
+Required C1-6 final gate:
+`C1_CADDY_BINARY=/private/tmp/cs-c1-frozen/scratchpad/c1-6-tools/caddy C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh`
+— **169 tests, 169 pass, 0 fail/cancelled/skipped/todo, exit 0**
+(197166.405417 ms). Log: `scratchpad/c1-6-gate-final.log`; exit receipt:
+`scratchpad/c1-6-gate-final.exit`. This measures the uncommitted C1-6 patch,
+not CI or production. The first C1-6 gate was 168/169, exit 1: the new generator
+test expected three selected companion failure-table rows to be adjacent.
+It now verifies each row verbatim against the companion; generator 7/7 and
+then the full required gate passed. First log: `scratchpad/c1-6-gate.log`.
+`bash -n` passed all 87 marked blocks; `git diff --check` passed.
+No full suite, build, Docker, browser, commit, push or production operation ran.
+
 ## Handoff
 
-- Generator `scripts/c1-task-from-plan.mjs` and its CLI tests are committed in
-  `edf4a3bf`; C1-4 updates its resolved-order handling.
-- **VERIFY-HARNESS.md** (item 4): outside C1-4; no completion claim.
+HezLead owns the cross-family check and integration. C1-6 makes no commit,
+push or production change. `VERIFY-HARNESS.md` stays outside this assignment.

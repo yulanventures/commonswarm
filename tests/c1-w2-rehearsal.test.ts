@@ -331,7 +331,7 @@ function postFixture(): string {
   return (postFixtureDir = dir);
 }
 
-test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-version, superseded, any-owner live and missing approvals refuse', { skip: skipDb }, () => {
+test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-version, superseded, any-owner live and missing approvals refuse', { skip: skipDb }, async () => {
   const dump = postFixture(), pg = PG(), cluster = mkdtempSync('/tmp/c1w2.');
   const exec = (tool: string, args: string[]) => spawnSync(join(pg, tool), args, { encoding: 'utf8', timeout: 60_000 });
   const ok = (r: ReturnType<typeof exec>) => assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -358,10 +358,10 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     const retryBaseline = spawnSync('git', ['cat-file', '-e', '50759707^{commit}']);
     assert.equal(retryBaseline.status, 0, 'baseline commit 50759707 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 50759707)');
     const baseline = spawnSync('git', ['show', '50759707:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' }); ok(baseline);
-    const verify = (version: number, text = plan, gateDigest = inputs.gate_receipt_sha256) => {
+    const verify = (version: number, text = plan, gateDigest = inputs.gate_receipt_sha256, executeDb = true) => {
       writeFileSync(join(cluster, 'inputs.json'), JSON.stringify({ ...inputs, gate_receipt_sha256: gateDigest }));
       writeFileSync(join(proof, 'C1-inputs.json'), JSON.stringify({ ...inputs, owner_user_id: owner, verification_version: version, metadata_digest: metadata }));
-      return spawnSync('/bin/bash', [], { input: `ai_deadline() { :; }\nai_db() { "$RETRY_PSQL" -X -h "$RETRY_CLUSTER" -U supabase_admin -d postgres -v ON_ERROR_STOP=1 "$@"; }\n` + extract(text).replace('/proof/client-verification.sql', join(proof, 'client-verification.sql')),
+      return spawnSync('/bin/bash', [], { input: `ai_deadline() { :; }\nai_db() { ${executeDb ? '' : 'return 0; '}"$RETRY_PSQL" -X -h "$RETRY_CLUSTER" -U supabase_admin -d postgres -v ON_ERROR_STOP=1 "$@"; }\n` + extract(text).replace('/proof/client-verification.sql', join(proof, 'client-verification.sql')),
         encoding: 'utf8', env: { ...process.env, RETRY_PSQL: join(pg, 'psql'), RETRY_CLUSTER: cluster, WINDOW: 'W6', PROOF_DIR: proof, INPUTS_FILE: join(cluster, 'inputs.json'), C1_INPUTS_FILE: join(proof, 'C1-inputs.json') } });
     };
     ok(verify(1)); ok(verify(1));
@@ -389,6 +389,34 @@ test('c1 W6 retry: migrated schema supersedes a withdrawn owner version; same-ve
     refused(verify(2), /FAIL ai-w6-client-verification: verification_version 1 expected no live approvals from any owner got live approval; STOP/);
     assert.equal(psql(`SELECT active FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' AND verification_version=1;`).stdout.trim(), 't');
     ok(psql(`BEGIN; SET LOCAL session_replication_role=replica; UPDATE commonswarm_oauth.admin_client_owner_approvals SET withdrawn_at=statement_timestamp(),withdrawal_event_id='44444444-4444-4444-8444-444444444444',withdrawal_reason='smoke_cleanup' WHERE owner_user_id='${other}'; COMMIT;`));
+    // Two real connections: hold the plan's supersede transaction open after its
+    // checks/write. A fresh-owner INSERT must wait for commit, even with no row to lock.
+    const race = async (sql: string, blocked: boolean) => {
+      const writer = spawn(join(pg, 'psql'), ['-X', '-h', cluster, '-U', 'supabase_admin', '-d', 'postgres', '-Atq', '-v', 'ON_ERROR_STOP=1', '-f', '-']);
+      let output = '', errors = ''; writer.stdout.on('data', b => { output += b; }); writer.stderr.on('data', b => { errors += b; });
+      const exited = new Promise<number | null>(resolve => writer.on('close', resolve));
+      try {
+        writer.stdin.write(sql.replace(/COMMIT;\s*$/, '') + '\n\\echo supersede-ready\n');
+        const deadline = Date.now() + 10_000;
+        while (!output.includes('supersede-ready') && writer.exitCode === null && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+        assert.ok(output.includes('supersede-ready'), output + errors);
+        const insert = `BEGIN; SET LOCAL session_replication_role=replica; SET LOCAL lock_timeout='200ms';
+          INSERT INTO commonswarm_oauth.admin_client_owner_approvals(owner_user_id,client_id,verification_version,approval_event_id,approval_command_id)
+          VALUES('55555555-5555-4555-8555-555555555555','${client}',1,'66666666-6666-4666-8666-666666666666','race-seed'); ROLLBACK;`;
+        const concurrent = psql(insert);
+        if (blocked) { assert.notEqual(concurrent.status, 0); assert.match(concurrent.stderr, /canceling statement due to lock timeout/); }
+        else ok(concurrent); // Same INSERT succeeds under the pre-fix row-only locks.
+        writer.stdin.end(blocked ? 'COMMIT;\n' : 'ROLLBACK;\n');
+        assert.equal(await exited, 0, errors);
+        ok(psql(insert)); // Positive control: lock is released when the transaction ends.
+      } finally {
+        if (writer.exitCode === null) { writer.stdin.end('ROLLBACK;\n'); await exited; }
+      }
+    };
+    ok(verify(2, plan, inputs.gate_receipt_sha256, false));
+    const supersedeSql = readFileSync(join(proof, 'client-verification.sql'), 'utf8');
+    await race(supersedeSql.replace(/LOCK TABLE commonswarm_oauth\.admin_client_owner_approvals IN SHARE ROW EXCLUSIVE MODE;/, ''), false);
+    await race(supersedeSql, true);
     ok(verify(2)); ok(verify(2));
     refused(verify(1), /FAIL ai-w6-client-verification: verification_version 1 expected reusable got superseded; use verification_version 3 for the next W6; STOP/);
     const rows = psql(`SELECT verification_version,active,withdrawn_at IS NOT NULL,coalesce(withdrawal_reason,'') FROM commonswarm_oauth.admin_verified_clients WHERE client_id='${client}' ORDER BY verification_version;`); ok(rows);

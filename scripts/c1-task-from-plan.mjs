@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
-const VERSION = '3';
+const VERSION = '4';
 const WINDOWS = new Set(['W3', 'W4', 'W5', 'W6', 'W6e', 'W7']);
 const MODES = new Set(['forward', 'rollback', 'recovered-close']);
 class PlanError extends Error {}
@@ -56,7 +56,12 @@ function runOrders(plan, path) {
   const json = (value, line) => {
     try { return JSON.parse(value); } catch { fail(`invalid run-order JSON at plan line ${line}`); }
   };
+  const keys = (value, allowed, label) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`invalid ${label}`);
+    for (const key of Object.keys(value)) if (!allowed.includes(key)) fail(`unknown ${label} key ${key}`);
+  };
   const quote = (value, label) => {
+    keys(value, ['line', 'quote'], label);
     if (!value || !Number.isSafeInteger(value.line) || value.line < 1 || value.line > lines.length ||
         typeof value.quote !== 'string' || !value.quote.length) fail(`invalid ${label} quote`);
     const tail = lines.slice(value.line - 1).join('\n');
@@ -68,11 +73,12 @@ function runOrders(plan, path) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) fail(`invalid order entry at plan line ${line}`);
     const evidence = { start_line: line, end_line: line, quote: lines[line - 1] };
     if (row.ambiguity !== undefined) fail(`unresolved Lead ruling ${row.ambiguity} at plan line ${line}`);
+    keys(row, ['id', 'host', 'when', 'input', 'manual', 'dispatches'], 'order');
     if (!['mac', 'box'].includes(row.host)) fail(`invalid order host at plan line ${line}`);
-    const conditions = row.when ? [quote(row.when, 'when')] : [];
+    const conditions = row.when !== undefined ? [quote(row.when, 'when')] : [];
     if (row.input !== undefined && (typeof row.input !== 'string' || !row.input)) fail(`invalid input note at plan line ${line}`);
     if (row.manual) {
-      if (row.id) fail(`manual entry also names a block at plan line ${line}`);
+      if (row.id || row.dispatches) fail(`manual entry also names a block at plan line ${line}`);
       return { host: row.host, manual: quote(row.manual, 'manual'), conditions, input: row.input, order_evidence: evidence };
     }
     const block = blocks.get(row.id);
@@ -82,16 +88,28 @@ function runOrders(plan, path) {
     if (!(row.host === 'mac' ? marker.includes('mac') : /box|^he[z]?lead box/.test(marker))) {
       fail(`order host ${row.host} conflicts with step ${row.id} at plan line ${line}`);
     }
-    return { ...block, execution_host: row.host, conditions, input: row.input, order_evidence: evidence };
+    let dispatched_blocks;
+    if (row.dispatches !== undefined) {
+      if (!Array.isArray(row.dispatches) || !row.dispatches.length || new Set(row.dispatches).size !== row.dispatches.length) fail(`invalid dispatches at plan line ${line}`);
+      dispatched_blocks = row.dispatches.map(id => {
+        const dependency = blocks.get(id);
+        if (!dependency || !block.block.includes(`ai_run ${id}`)) fail(`dispatch ${id} not defined or dispatched by ${row.id}`);
+        used.add(id);
+        return { ...dependency, dispatched_by: row.id, conditions: [] };
+      });
+    }
+    return { ...block, execution_host: row.host, conditions, input: row.input, order_evidence: evidence, dispatched_blocks };
   };
   for (let n = start + 1; n < end; n++) {
     const line = lines[n];
     if (line.startsWith('site-plan: ')) {
       if (pin) fail('duplicate site plan pin');
       pin = json(line.slice(11), n + 1);
+      keys(pin, ['path', 'sha256'], 'site-plan');
       if (!pin || pin.path !== 'docs/evidence/2026-10-02-site-release/SITE-RELEASE.md' || !/^[a-f0-9]{64}$/.test(pin.sha256 ?? '')) fail('invalid site plan pin');
     } else if (line.startsWith('not-run: ')) {
       const entry = json(line.slice(9), n + 1);
+      keys(entry, ['id', 'reason'], 'not-run');
       if (!blocks.has(entry.id)) fail(`step referenced but not defined: ${entry.id}`);
       if (excluded.has(entry.id)) fail(`duplicate not-run entry ${entry.id}`);
       if (typeof entry.reason !== 'string' || !entry.reason) fail(`missing not-run reason ${entry.id}`);
@@ -110,7 +128,7 @@ function runOrders(plan, path) {
       if (n === end) fail(`unclosed run order for ${key}`);
       if (!steps.length) fail(`empty run order for ${key}`);
       orders.set(key, { steps, evidence });
-    }
+    } else if (line.trim()) fail(`unrecognised run-order line at plan line ${n + 1}`);
   }
   for (const window of WINDOWS) for (const mode of MODES) {
     if (!orders.has(`${window} ${mode}`)) fail(`missing run order for ${window} ${mode}`);

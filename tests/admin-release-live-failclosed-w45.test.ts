@@ -554,8 +554,8 @@ test('C1-5 Caddy imports: zero, duplicate, other-target and mixed imports refuse
 
 test('edge-caddy-route / canonical-api-admin-route: fails closed when canonical POST misses the verifier', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', ...probes]); pass(good, r);
-  // Caddy snippets are global: the MCP candidate defines the snippet imported by API.
-  assert.match(readFileSync(join(good.stage, 'mcp.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\n/);
+  // The lexical API candidate defines shared snippets before both sites use them.
+  assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\n/);
   assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /import admin_resource_active/);
   assert.deepEqual(requestPairs(r), [['GET', gate], ['HEAD', gate], ['POST', post]]);
   const bad = fixture({ post_status: 200 }); const refused = bad.run(['ai-w4-caddy-candidate', ...probes]);
