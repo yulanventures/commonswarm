@@ -3764,7 +3764,7 @@ test('C1-20: lost-shell recovery env reaches session and close; mismatch, wrong 
   assert.match(block('ai-mac-recovery-env'), /unset PREP_DIR/);
   assert.match(block('ai-mac-recovery-env'), /out=\$\(python3 - "\$INPUTS_FILE" <<'PY'/);
 
-  const dir = mkdtempSync(join(scratch, 'c120-box-'));
+  const dir = realpathSync(mkdtempSync(join(scratch, 'c120-box-')));  // resolve /var -> /private/var: the block checks p.resolve()==p
   const sha = 'c'.repeat(40), wid = 'Rc0v20', window = 'W2';
   const issuance = join(dir, 'home/commonswarm/admin-issuance');
   const proof = join(issuance, 'release-proofs', `${sha}-${window}-${wid}`);
@@ -3857,7 +3857,7 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
   assert.doesNotMatch(leaked.stdout, /leaked/);
   assert.match(leaked.stderr, /INPUTS_FILE expected absolute-regular-file/);
 
-  const macDir = mkdtempSync(join(scratch, 'c120-mac-'));
+  const macDir = realpathSync(mkdtempSync(join(scratch, 'c120-mac-')));  // resolved path: the block compares resolve() with the path
   const macSource = block('ai-mac-recovery-env');
   assert.equal(macSource.split('/private/tmp/').length - 1, 2);
   const remappedMac = macSource.split('/private/tmp/').join(macDir + '/');
