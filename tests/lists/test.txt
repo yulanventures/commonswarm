@@ -115,3 +115,4 @@ tests/household-approval.test.ts
 tests/household-approval-proofs.test.ts
 tests/household-member-removal.test.ts
 tests/household-managed-file-fence.test.ts
+tests/household-member-removal-backfill.test.ts
