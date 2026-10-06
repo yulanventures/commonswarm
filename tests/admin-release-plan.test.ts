@@ -3997,6 +3997,13 @@ printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
   if (existsSync(stageAfter)) removeStage(stageAfter);
 });
 
+function plannedReleaseRoot(): string {
+  const root = realpathSync(mkdtempSync(join(scratch, 'c1-planned-rel-')));
+  mkdirSync(join(root, 'supabase/migrations'), { recursive: true });
+  for (const i of [1, 2, 3, 4, 5]) writeFileSync(join(root, 'supabase/migrations', `2026100300000${i}_x.sql`), '--\n');
+  return root;
+}
+
 test('C1-22: issuer fresh accepts migration LOGIN and rollback NOLOGIN; a password still refuses', () => {
   const frozenPresent = spawnSync('git', ['cat-file', '-e', '888d130b^{commit}']);
   assert.equal(frozenPresent.status, 0, 'baseline commit 888d130b is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 888d130b)');
@@ -4097,7 +4104,7 @@ test('C1-22: lost-shell ai-db-session keeps ledger-before; five committed versio
     const liveFile = join(dir, 'live.txt');
     writeFileSync(liveFile, live);
     const harness = `ai_ro() { cat '${liveFile}'; }\n`;
-    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs, ...extra }) };
+    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs, RELEASE_ROOT: plannedReleaseRoot(), ...extra }) };
   };
   const first = runLedger(currentSlice, before);
   assert.equal(first.result.status, 0, first.result.stderr);
@@ -4241,7 +4248,7 @@ test('C1-23: re-entry accepts an unrecorded ordered prefix and refuses a gap, an
     const liveFile = join(dir, 'live.txt');
     writeFileSync(liveFile, live);
     const harness = `ai_ro() { cat '${liveFile}'; }\n`;
-    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs }) };
+    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs, RELEASE_ROOT: plannedReleaseRoot() }) };
   };
   const prefixFiles = { 'ledger-before.txt': before, 'new-migrations.json': newMigrations };
   const oldM1 = runLedger(frozenSlice, before + m1, prefixFiles);
@@ -4305,4 +4312,228 @@ test('C1-23: identity read, first-entry ledger read and unsupported-step print F
   const frozenUnsupported = run(`${frozenDispatcher}\nai_run not-on-the-allowlist; printf 'allowlist %s\\n' "$?"\n`, { RELEASE_ROOT: scratch, INPUTS_FILE: '/dev/null' });
   assert.match(frozenUnsupported.stdout, /allowlist 2/);
   assert.doesNotMatch(frozenUnsupported.stderr, /FAIL ai_run/);
+});
+
+function issuerDoBlock(sql: string): string {
+  const match = sql.match(/DO \$issuer\$([\s\S]*?)END \$issuer\$;/);
+  assert.ok(match, 'DO $issuer$ block');
+  return match[1]!;
+}
+
+function raisePredicates(block: string): string[] {
+  const expanded = block.replaceAll(
+    'creator_is_cluster_administrator',
+    '(SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user)',
+  );
+  return expanded.split(/RAISE EXCEPTION/).slice(0, -1).map(part => {
+    const starts = [...part.matchAll(/(?:^|\n)\s*(?:IF|ELSIF)\s+/g)];
+    assert.ok(starts.length, `refusal IF before RAISE in ${part.slice(-120)}`);
+    const last = starts[starts.length - 1]!;
+    return part.slice(last.index! + last[0].length).replace(/\s+THEN\s*$/, '').replace(/\s+/g, ' ').trim();
+  });
+}
+
+function existsBodies(sql: string): string[] {
+  const out: string[] = [];
+  const re = /EXISTS\s*\(/g;
+  let found;
+  while ((found = re.exec(sql))) {
+    let depth = 0;
+    const open = found.index + found[0].length - 1;
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === '(') depth++;
+      else if (sql[i] === ')') {
+        depth--;
+        if (depth === 0) {
+          out.push(sql.slice(open + 1, i).replace(/\s+/g, ' ').trim());
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+test('C1-24: issuer fresh query has a counterpart for every DO $issuer$ refusal condition', () => {
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', '2f3b7133^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit 2f3b7133 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 2f3b7133)');
+  const frozenPlan = spawnSync('git', ['show', '2f3b7133:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozenIssuer = frozenPlan.stdout.match(/^```sh\n(# step: ai-w2-issuer-credential\n[\s\S]*?)^```[ \t]*$/m)![1]!;
+  const frozenFresh = frozenIssuer.match(/ISSUER_FRESH=\$\(ai_ro -Atq --command "SELECT ([^"]+)"\)/)![1]!;
+  assert.doesNotMatch(frozenFresh, /GROUP BY roleid HAVING count\(\*\)<>1/);
+  assert.doesNotMatch(frozenFresh, /member=current_user::regrole/);
+  assert.doesNotMatch(frozenFresh, /count\(\*\) FROM pg_catalog\.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole\)=2/);
+  const migration = readFileSync(resolve('supabase/migrations/20261003000002_admin_oauth_policy.sql'), 'utf8');
+  const predicates = raisePredicates(issuerDoBlock(migration));
+  assert.ok(predicates.length >= 5, `issuer refusal conditions: ${predicates.length}`);
+  const issuer = block('ai-w2-issuer-credential');
+  const fresh = issuer.match(/ISSUER_FRESH=\$\(ai_ro -Atq --command "SELECT ([^"]+)"\)/)![1]!.replace(/\s+/g, ' ');
+  assert.match(fresh, /rolpassword IS NULL/);
+  assert.doesNotMatch(fresh, /NOT rolcanlogin/);
+  for (const predicate of predicates) {
+    for (const body of existsBodies(predicate)) {
+      if (/\brolinherit\b/.test(body) && !/pg_auth_members|pg_shdepend/.test(body)) {
+        const attrs = body.replace(/NOT rolcanlogin OR /g, '');
+        for (const attr of ['rolinherit', 'rolsuper', 'rolcreatedb', 'rolcreaterole', 'rolreplication', 'rolbypassrls']) {
+          if (new RegExp(`\\b${attr}\\b`).test(attrs)) assert.match(fresh, new RegExp(`NOT ${attr}`));
+        }
+        continue;
+      }
+      assert.ok(fresh.includes(body), `fresh missing counterpart of ${body}`);
+    }
+    if (/GROUP BY roleid HAVING count\(\*\)<>1/.test(predicate)) {
+      assert.match(fresh, /GROUP BY roleid HAVING count\(\*\)<>1/);
+    }
+    if (/\(SELECT count\(\*\) FROM pg_catalog\.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole\)<>2/.test(predicate)) {
+      assert.match(fresh, /\(SELECT count\(\*\) FROM pg_catalog\.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole\)=2/);
+    }
+    if (/bool_and\(admin_option AND NOT inherit_option AND NOT set_option\)/.test(predicate)) {
+      assert.match(fresh, /bool_and\(admin_option AND NOT inherit_option AND NOT set_option\)/);
+      assert.match(fresh, /count\(\*\)=1/);
+    }
+    if (/rolname=current_user/.test(predicate)) {
+      assert.match(fresh, /rolsuper FROM pg_catalog\.pg_roles WHERE rolname=current_user/);
+    }
+    if (/member=current_user::regrole/.test(predicate)) {
+      assert.match(fresh, /roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole/);
+    }
+  }
+  const slice = (source: string) => {
+    const start = source.indexOf('ISSUER_FRESH=$(ai_ro -Atq');
+    const end = source.indexOf('openssl rand -hex 32');
+    assert.ok(start >= 0 && end > start, 'issuer fresh slice');
+    return source.slice(start, end);
+  };
+  const allowed = [
+    { parent: 'commonswarm_oauth_runtime', admin: false, inherit: false, set: true },
+    { parent: 'swarm_command', admin: false, inherit: false, set: true },
+  ];
+  const safe = {
+    rolpassword: null, rolinherit: false, rolsuper: false, rolcreatedb: false, rolcreaterole: false,
+    rolreplication: false, rolbypassrls: false, rolcanlogin: true, outgoing: allowed,
+    incoming: [] as Array<Record<string, unknown>>, shdepend: false, creator_super: true, creator_member: false,
+  };
+  const runFresh = (source: string, role: Record<string, unknown>) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'c124-iss-')));
+    writeFileSync(join(dir, 'role.json'), JSON.stringify(role));
+    const harness = `ai_ro() { python3 - '${join(dir, 'role.json')}' "$@" <<'PY'
+import collections,json,sys
+role=json.load(open(sys.argv[1]))
+sql=sys.argv[sys.argv.index('--command')+1]
+assert "commonswarm_admin_issuer" in sql
+fresh=(role["rolpassword"] is None and not role["rolinherit"] and not role["rolsuper"]
+    and not role["rolcreatedb"] and not role["rolcreaterole"] and not role["rolreplication"]
+    and not role["rolbypassrls"])
+if "NOT rolcanlogin" in sql: fresh=fresh and not role["rolcanlogin"]
+outgoing=role.get("outgoing") or []
+incoming=role.get("incoming") or []
+if "pg_auth_members" in sql:
+    allowed={"commonswarm_oauth_runtime","swarm_command"}
+    unsafe_out=any(m["parent"] not in allowed or m.get("admin") or m.get("inherit") or not m.get("set") for m in outgoing)
+    unsafe_in=any((not m.get("admin") or m.get("inherit") or m.get("set")) for m in incoming)
+    fresh=fresh and not unsafe_out and not unsafe_in
+if "pg_shdepend" in sql: fresh=fresh and not role.get("shdepend")
+if "GROUP BY roleid HAVING count(*)<>1" in sql:
+    counts=collections.Counter(m["parent"] for m in outgoing)
+    fresh=fresh and all(c==1 for c in counts.values())
+if "(SELECT count(*) FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)=2" in sql:
+    fresh=fresh and len(outgoing)==2
+if "current_user" in sql and "rolsuper" in sql:
+    if role.get("creator_super"): fresh=fresh and not role.get("creator_member")
+    else: fresh=fresh and len(incoming)==1 and incoming[0].get("admin") and not incoming[0].get("inherit") and not incoming[0].get("set")
+print("t" if fresh else "f")
+PY
+}
+`;
+    return { dir, result: run('set -euo pipefail\n' + harness + slice(source), { PROOF_DIR: dir }) };
+  };
+  const duplicate = { ...safe, outgoing: [...allowed, { parent: 'swarm_command', admin: false, inherit: false, set: true }] };
+  const oldDup = runFresh(frozenIssuer, duplicate);
+  assert.equal(oldDup.result.status, 0, oldDup.result.stderr);
+  assert.ok(existsSync(join(oldDup.dir, 'issuer-provisioning-attempted.txt')));
+  const newDup = runFresh(issuer, duplicate);
+  assert.notEqual(newDup.result.status, 0);
+  assert.match(newDup.result.stderr, /issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP/);
+  assert.ok(!existsSync(join(newDup.dir, 'issuer-provisioning-attempted.txt')));
+  const pass = runFresh(issuer, safe);
+  assert.equal(pass.result.status, 0, pass.result.stderr);
+  assert.ok(existsSync(join(pass.dir, 'issuer-provisioning-attempted.txt')));
+  const nologin = runFresh(issuer, { ...safe, rolcanlogin: false });
+  assert.equal(nologin.result.status, 0, nologin.result.stderr);
+  const adminMember = runFresh(issuer, { ...safe, creator_member: true });
+  assert.notEqual(adminMember.result.status, 0);
+  const creatorUnsafe = runFresh(issuer, { ...safe, creator_super: false, incoming: [] });
+  assert.notEqual(creatorUnsafe.result.status, 0);
+  const creatorOk = runFresh(issuer, {
+    ...safe, creator_super: false, incoming: [{ admin: true, inherit: false, set: false }],
+  });
+  assert.equal(creatorOk.result.status, 0, creatorOk.result.stderr);
+});
+
+test('C1-24: re-entry refuses a short, reordered or foreign manifest before the prefix comparison', () => {
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', '2f3b7133^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit 2f3b7133 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 2f3b7133)');
+  const frozenPlan = spawnSync('git', ['show', '2f3b7133:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  const frozenSession = frozenPlan.stdout.match(/^```sh\n(# step: ai-db-session\n[\s\S]*?)^```[ \t]*$/m)![1]!;
+  assert.doesNotMatch(frozenSession, /expected-migration-manifest expected the release 20261003 sequence/);
+  const session = block('ai-db-session');
+  assert.match(session, /expected-migration-manifest expected the release 20261003 sequence got other/);
+  assert.match(session, /root\/'supabase\/migrations'\)\.glob\(v\+'_\*\.sql'\)/);
+  const currentSlice = (() => {
+    const start = session.indexOf('if test -f "$PROOF_DIR/ledger-before.txt"');
+    const end = session.indexOf('\nai_run() {');
+    assert.ok(start >= 0 && end > start);
+    return session.slice(start, end);
+  })();
+  const frozenSlice = (() => {
+    const start = frozenSession.indexOf('if test -f "$PROOF_DIR/ledger-before.txt"');
+    const end = frozenSession.indexOf('\nai_run() {');
+    assert.ok(start >= 0 && end > start);
+    return frozenSession.slice(start, end);
+  })();
+  const before = '20260928000003\n20261001000001\n20261002000001\n';
+  const m1 = '20261003000001\n';
+  const m2 = '20261003000002\n';
+  const five = [1, 2, 3, 4, 5].map(i => `2026100300000${i}`);
+  const record = (versions: string[]) => JSON.stringify(versions.map(v => ({
+    file: `${v}_x.sql`, sha256: 'a'.repeat(64), version: v,
+  }))) + '\n';
+  const newMigrations = record(five);
+  const m2Only = record(['20261003000002']);
+  const reordered = record(['20261003000002', '20261003000001', '20261003000003', '20261003000004', '20261003000005']);
+  const foreign = record([...five, '20261003999999']);
+  const expectedM2 = JSON.stringify({ '20261003000002': 'a'.repeat(64) }) + '\n';
+  const runLedger = (slice: string, live: string, files: Record<string, string> = {}) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'c124-led-')));
+    const inputs = join(dir, 'inputs.json');
+    writeFileSync(inputs, JSON.stringify({ baseline_ledger_sha256: digest(before) }));
+    for (const [name, value] of Object.entries(files)) writeFileSync(join(dir, name), value);
+    const liveFile = join(dir, 'live.txt');
+    writeFileSync(liveFile, live);
+    const harness = `ai_ro() { cat '${liveFile}'; }\n`;
+    return { dir, result: run('set -euo pipefail\n' + harness + slice, { PROOF_DIR: dir, INPUTS_FILE: inputs, RELEASE_ROOT: plannedReleaseRoot() }) };
+  };
+  const prefixFiles = { 'ledger-before.txt': before, 'new-migrations.json': newMigrations };
+  const oldM2 = runLedger(frozenSlice, before + m2, { 'ledger-before.txt': before, 'new-migrations.json': m2Only });
+  assert.equal(oldM2.result.status, 0, oldM2.result.stderr);
+  const newM2 = runLedger(currentSlice, before + m2, { 'ledger-before.txt': before, 'new-migrations.json': m2Only });
+  assert.notEqual(newM2.result.status, 0);
+  assert.match(newM2.result.stderr, /FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP/);
+  assert.doesNotMatch(newM2.result.stderr, /ledger-before-plus-ordered-prefix-of-new-migrations/);
+  const newM1 = runLedger(currentSlice, before + m1, prefixFiles);
+  assert.equal(newM1.result.status, 0, newM1.result.stderr);
+  assert.equal(readFileSync(join(newM1.dir, 'ledger-at-recovery.txt'), 'utf8'), before + m1);
+  const newReorder = runLedger(currentSlice, before + m1, { 'ledger-before.txt': before, 'new-migrations.json': reordered });
+  assert.notEqual(newReorder.result.status, 0);
+  assert.match(newReorder.result.stderr, /FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP/);
+  assert.doesNotMatch(newReorder.result.stderr, /ledger-before-plus-ordered-prefix-of-new-migrations/);
+  const newForeign = runLedger(currentSlice, before + m1, { 'ledger-before.txt': before, 'new-migrations.json': foreign });
+  assert.notEqual(newForeign.result.status, 0);
+  assert.match(newForeign.result.stderr, /FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP/);
+  const expectedShort = runLedger(currentSlice, before + m2, { 'ledger-before.txt': before, 'expected-migrations.json': expectedM2 });
+  assert.notEqual(expectedShort.result.status, 0);
+  assert.match(expectedShort.result.stderr, /FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP/);
+  assert.doesNotMatch(expectedShort.result.stderr, /ledger-before-plus-ordered-prefix-of-new-migrations/);
 });

@@ -1546,20 +1546,20 @@ if test -f "$PROOF_DIR/ledger-before.txt" && test ! -L "$PROOF_DIR/ledger-before
  test "$LEDGER_SHA256" = "$EXPECTED_LEDGER_SHA256" || { printf 'FAIL ai-db-session: ledger-before.txt digest expected inputs baseline_ledger_sha256 got other; STOP\n' >&2; exit 1; }
  ai_ro -Atq --command 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' >"$PROOF_DIR/ledger-at-recovery.txt" || { printf 'FAIL ai-db-session: ledger-at-recovery expected readable got failure; STOP\n' >&2; exit 1; }
  chmod 0600 "$PROOF_DIR/ledger-at-recovery.txt"
- python3 - "$PROOF_DIR" <<'PY' || { printf 'FAIL ai-db-session: ledger-at-recovery.txt expected ledger-before-plus-ordered-prefix-of-new-migrations got other; STOP\n' >&2; exit 1; }
+ python3 - "$PROOF_DIR" "$RELEASE_ROOT" <<'PY' || exit 1
 import json,pathlib,sys
-p=pathlib.Path(sys.argv[1])
-before=(p/'ledger-before.txt').read_text().splitlines()
-live=(p/'ledger-at-recovery.txt').read_text().splitlines()
-expected=[]
+p,root=map(pathlib.Path,sys.argv[1:3]); planned=['2026100300000'+str(i) for i in range(1,6)]
+if any(len(list((root/'supabase/migrations').glob(v+'_*.sql')))!=1 for v in planned): raise SystemExit('FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP')
+before=(p/'ledger-before.txt').read_text().splitlines(); live=(p/'ledger-at-recovery.txt').read_text().splitlines(); expected=[]; seen=False
 newf,expf=p/'new-migrations.json',p/'expected-migrations.json'
 if newf.is_file() and not newf.is_symlink():
-    expected=[r['version'] for r in json.loads(newf.read_text())]
+    expected=[r['version'] for r in json.loads(newf.read_text())]; seen=True
 elif expf.is_file() and not expf.is_symlink():
-    data=json.loads(expf.read_text())
-    expected=[v for v in ['2026100300000'+str(i) for i in range(1,6)] if v in data]
+    data=json.loads(expf.read_text()); expected=[v for v in planned if v in data]; seen=True
+    if any(str(k).startswith('20261003') and k not in planned for k in data): expected=['*']
+if seen and expected!=planned: raise SystemExit('FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP')
 added=live[len(before):]
-if live[:len(before)]!=before or added!=expected[:len(added)]: raise SystemExit(1)
+if live[:len(before)]!=before or added!=expected[:len(added)]: raise SystemExit('FAIL ai-db-session: ledger-at-recovery.txt expected ledger-before-plus-ordered-prefix-of-new-migrations got other; STOP')
 PY
 else
  test ! -e "$PROOF_DIR/ledger-before.txt" && test ! -L "$PROOF_DIR/ledger-before.txt" || { printf 'FAIL ai-db-session: ledger-before.txt expected absent-or-regular got other; STOP\n' >&2; exit 1; }
@@ -3023,9 +3023,9 @@ esac
 ai_deadline
 test ! -e /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got present; STOP\n' >&2; exit 1; }
 test ! -L /etc/commonswarm-oauth/admin-issuer-database-credentials || { printf 'FAIL ai-w2-issuer-credential: issuer credential file expected absent got symlink; STOP\n' >&2; exit 1; }
-# The mutation boundary: no password, migration attributes (NOINHERIT, NOCREATEDB,
-# NOCREATEROLE, not super/replication/bypassrls), LOGIN or NOLOGIN, allowed SET memberships only, no shdepend a/o. A password or extra privileged SET refuses.
-ISSUER_FRESH=$(ai_ro -Atq --command "SELECT rolpassword IS NULL AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.member JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid WHERE r.rolname='commonswarm_admin_issuer' AND (parent.rolname NOT IN ('commonswarm_oauth_runtime','swarm_command') OR m.admin_option OR m.inherit_option OR NOT m.set_option)) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.roleid WHERE r.rolname='commonswarm_admin_issuer' AND (NOT m.admin_option OR m.inherit_option OR m.set_option)) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid='commonswarm_admin_issuer'::regrole AND deptype IN ('a','o')) FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-credential: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
+# The mutation boundary: no password, full DO $issuer$ refusal set (attributes, memberships,
+# creator, duplicates, exactly two, no shdepend a/o). LOGIN or NOLOGIN. A password or extra edge refuses.
+ISSUER_FRESH=$(ai_ro -Atq --command "SELECT rolpassword IS NULL AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.member JOIN pg_catalog.pg_roles parent ON parent.oid=m.roleid WHERE r.rolname='commonswarm_admin_issuer' AND (parent.rolname NOT IN ('commonswarm_oauth_runtime','swarm_command') OR m.admin_option OR m.inherit_option OR NOT m.set_option)) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.roleid WHERE r.rolname='commonswarm_admin_issuer' AND (NOT m.admin_option OR m.inherit_option OR m.set_option)) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid='commonswarm_admin_issuer'::regrole AND deptype IN ('a','o')) AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole GROUP BY roleid HAVING count(*)<>1) AND (SELECT count(*) FROM pg_catalog.pg_auth_members WHERE member='commonswarm_admin_issuer'::regrole)=2 AND CASE WHEN (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user) THEN NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole) ELSE (SELECT count(*)=1 AND coalesce(bool_and(admin_option AND NOT inherit_option AND NOT set_option),false) FROM pg_catalog.pg_auth_members WHERE roleid='commonswarm_admin_issuer'::regrole AND member=current_user::regrole) END FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';") || { printf 'FAIL ai-w2-issuer-credential: issuer role readback expected success got failure; STOP\n' >&2; exit 1; }
 test "$ISSUER_FRESH" = t || { printf 'FAIL ai-w2-issuer-credential: issuer role expected fresh-without-password before the credential got other; run ai-w2-issuer-rollback first; STOP\n' >&2; exit 1; }
 # Ownership marker BEFORE any mutation: rollback and recovered close consult this file.
 date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/issuer-provisioning-attempted.txt" || { printf 'FAIL ai-w2-issuer-credential: issuer-provisioning-attempted.txt expected written got failure; STOP\n' >&2; exit 1; }

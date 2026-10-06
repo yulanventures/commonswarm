@@ -1262,3 +1262,68 @@ INNER_RC=0
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). Three new tests (issuer memberships; unrecorded prefix / digest re-entry; identity/ledger/unsupported FAIL lines). D-030 still reaches every test file. No commit or push. HEAD remains `21af6cb8`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
 
+## C1-24: checker round 13 (Codex FAIL, 2 blockers) on C1-23 (uncommitted)
+
+Prepared against committed HEAD `2f3b7133` (worktree `lane/c1-frozen-work`). No commit,
+push, production operation, full suite, build, Docker or browser. HezLead owns
+independent review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for
+the Lead.
+
+Run-order quote pins were not shifted: the issuer SELECT and the recovery
+Python stay on the same lines.
+
+### Defect 1: issuer fresh omits the rest of DO $issuer$ (RELEASE.md:3028)
+
+`ISSUER_FRESH` still allows LOGIN or NOLOGIN without a password and keeps the
+C1-23 attribute, outgoing/incoming option, and `pg_shdepend` predicates. It now
+also applies the rest of `DO $issuer$` at
+`supabase/migrations/20261003000002_admin_oauth_policy.sql`: duplicate-edge
+rejection (`GROUP BY roleid HAVING count(*)<>1`), exactly two outgoing
+memberships, and the creator-membership checks (`:63` administrator, `:67`
+non-superuser admin-only edge). `rolcanlogin` stays either value. The structural
+test extracts each `RAISE EXCEPTION` condition from the migration and requires
+a counterpart in the plan query.
+
+| Test | file:line | Pre-change at `2f3b7133` |
+| --- | --- | --- |
+| second grantor SET edge on `swarm_command` refuses | `tests/admin-release-plan.test.ts:4353` | PASS; writes `issuer-provisioning-attempted.txt` |
+| migration two outgoing SET memberships pass (LOGIN or NOLOGIN) | `tests/admin-release-plan.test.ts:4353` | not enforced (no count/duplicate) |
+| superuser creator membership refuses; non-superuser admin-only edge passes | `tests/admin-release-plan.test.ts:4353` | not enforced |
+| every `DO $issuer$` refusal has a fresh-query counterpart | `tests/admin-release-plan.test.ts:4353` | missing `GROUP BY` / `count(*)=2` / `current_user::regrole` |
+
+### Defect 2: recovery accepts an incomplete retained manifest (RELEASE.md:1549)
+
+Re-entry derives the planned `20261003` sequence from
+`$RELEASE_ROOT/supabase/migrations/2026100300000{1-5}_*.sql` (the same glob
+`ai-w2-preflight` uses) and requires `new-migrations.json`, else
+`expected-migrations.json`, to equal that sequence exactly. A short, reordered
+or foreign manifest prints
+`FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP`
+before the prefix comparison.
+
+| Test | file:line | Pre-change at `2f3b7133` |
+| --- | --- | --- |
+| `new-migrations.json` with only M2, live baseline+M2, refuses before prefix | `tests/admin-release-plan.test.ts:4470` | PASS (prefix of the short list) |
+| true five-version `new-migrations.json` with M1 committed passes | `tests/admin-release-plan.test.ts:4470` | PASS (already a prefix of five) |
+| reordered five-version manifest refuses before prefix | `tests/admin-release-plan.test.ts:4470` | PASS if live is a prefix of that order |
+| `expected-migrations.json` with only M2 refuses before prefix | `tests/admin-release-plan.test.ts:4470` | PASS (filtered list is `[M2]`) |
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.kxpCLZ: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.XXXXXX`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 196
+ℹ pass 195
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 201025.371916
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (issuer DO $issuer$ parity and duplicate/creator refusals; short/reordered/foreign manifest before prefix). D-030 still reaches every test file. No commit or push. HEAD remains `2f3b7133`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
