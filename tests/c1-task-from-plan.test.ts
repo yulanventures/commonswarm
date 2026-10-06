@@ -282,8 +282,8 @@ test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admi
     assert.ok(recovered.findIndex(s => s.id === 'ai-w2-issuer-rollback') < recovered.findIndex(s => s.id === 'ai-close'), `${window}: rollback before close`);
   }
   assert.equal(task('W2', 'forward').steps.length, 21);
-  assert.equal(task('W2', 'recovered-close').steps.length, 11);
-  assert.equal(task('W2b', 'recovered-close').steps.length, 9);
+  assert.equal(task('W2', 'recovered-close').steps.length, 13);
+  assert.equal(task('W2b', 'recovered-close').steps.length, 11);
   for (const mode of modes) {
     const steps = task('W2b', mode).steps;
     assert.equal(steps[0]!.conditions[0]!.quote, 'Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back.');
@@ -304,7 +304,7 @@ test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admi
   assert.equal(task('W5', 'recovered-close').steps.length, 10);
   assert.equal(task('W7', 'forward').steps.length, 22);
   assert.equal(task('W7', 'rollback').steps.length, 2);
-  assert.equal(task('W7', 'recovered-close').steps.length, 8);
+  assert.equal(task('W7', 'recovered-close').steps.length, 10);
 });
 
 test('C1-12 W5 recovered-close generated task under bash -u reaches ai-close with recovery-env variables set', () => {
@@ -375,4 +375,35 @@ test('C1-18: run-order manuals never quote a FAIL line or name a defined ai- ste
   const runManual = 'Ownership marker BEFORE any mutation\n' + positive.replaceAll('{"id":"ai-present","host":"mac"}',
     '{"host":"box","manual":{"line":1,"quote":"Ownership marker BEFORE any mutation"},"input":"Run ai-present only when a marker exists"}');
   refusal(fixture('run-manual.md', runManual), 'W3', 'forward', 'manual names defined step ai-present as something to Run at plan line 5');
+});
+
+test('C1-20: recovered-close lost-shell ai-db-session has ai-recovery-env immediately before it', () => {
+  const task = (window: string) => {
+    const result = run(planPath, window, 'recovered-close');
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout) as Task;
+  };
+  const lost = ['W1', 'W2', 'W2b', 'W3', 'W4', 'W6', 'W6e', 'W7'];
+  for (const window of lost) {
+    const steps = task(window).steps;
+    const session = steps.findIndex(s => s.id === 'ai-db-session' && s.input?.includes('Only if original box shell was lost'));
+    assert.ok(session > 0, window);
+    assert.equal(steps[session - 1]!.id, 'ai-recovery-env', window);
+    assert.match(steps[session - 1]!.input ?? '', /Only if original box shell was lost/);
+    const macClose = steps.findIndex(s => s.id === 'ai-mac-close');
+    assert.equal(steps[macClose - 1]!.id, 'ai-mac-recovery-env', window);
+    assert.match(steps[macClose - 1]!.input ?? '', /Only if original Mac shell was lost/);
+  }
+  const w5 = task('W5').steps;
+  assert.ok(!w5.some(s => s.id === 'ai-recovery-env' || s.id === 'ai-db-session'));
+  assert.ok(w5.some(s => s.id === 'ai-w5-recovery-env'));
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', 'cd46463c^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit cd46463c is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin cd46463c)');
+  const frozen = spawnSync('git', ['show', 'cd46463c:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozen.status, 0, frozen.stderr);
+  assert.doesNotMatch(frozen.stdout, /# step: ai-recovery-env/);
+  assert.doesNotMatch(frozen.stdout, /# step: ai-mac-recovery-env/);
+  const frozenW2 = frozen.stdout.match(/```c1-order W2 recovered-close\n([\s\S]*?)```/)![1]!;
+  assert.doesNotMatch(frozenW2, /ai-recovery-env/);
+  assert.match(frozenW2, /"id":"ai-db-session"/);
 });

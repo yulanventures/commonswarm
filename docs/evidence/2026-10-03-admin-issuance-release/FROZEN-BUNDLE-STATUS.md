@@ -971,3 +971,68 @@ INNER_RC=0
 ```
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). One new test (HEAD-baseline guard); D-030 still reaches every test file. No commit or push. HEAD remains `5eec4d5b`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-20: plan-defined recovery env for lost-shell recovered close (uncommitted)
+
+Prepared against committed HEAD `cd46463c`. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent
+review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for the Lead.
+
+Changed step counts (manual and conditional rows included, as in C1-8):
+recovered-close +2 on every window that had a lost-shell `ai-db-session`
+(W1, W2, W2b, W3, W4, W6, W6e, W7). W5 recovered-close stays 10
+(`ai-w5-recovery-env`). Forward and rollback unchanged.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8→10 |
+| W2 | 21 | 5 | 11→13 |
+| W2b | 19 | 3 | 9→11 |
+| W3 | 20 | 2 | 8→10 |
+| W4 | 21 | 3 | 9→11 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15→17 |
+| W6e | 2 | 2 | 15→17 |
+| W7 | 22 | 2 | 8→10 |
+
+Ruling 2 (line 650) now names Mac-shell loss: `ai-mac-recovery-env` then
+`ai-mac-close`. Quote pins after the run-order inserts (+16) and the two
+new blocks (+112): abort host 6883→6899; LOG 6951→7079; lost-shell session
+632→648; One closer 635→651; W2 apply-time 642→658.
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 box `ai-recovery-env` | done | L6956–7018; unset then `out=$(python3 …) \|\| exit 1; eval "$out"`; sets WINDOW/WINDOW_ID/RELEASE_SHA/PROOF_DIR/RELEASE_ROOT/BOX_ARCHIVE_PATH and SECRET_STAGE only from a valid pointer |
+| 2 Mac `ai-mac-recovery-env` | done | L7022–7059; single `/private/tmp/admin-issuance-prep.??????` whose `release.tar` digest equals inputs `archive_sha256`; zero or several refuse |
+| 3 recovered-close orders | done | `ai-recovery-env` immediately before lost-shell `ai-db-session`; `ai-mac-recovery-env` immediately before `ai-mac-close`; W5 keeps `ai-w5-recovery-env` |
+| 4 generator invariant | done | `scripts/c1-task-from-plan.mjs` refuses a recovered-close lost-shell `ai-db-session` without `ai-recovery-env` immediately before it |
+| 5 EXPECTED_MAC_STEPS | done | `ai-mac-recovery-env` before `ai-mac-close`; Mac block count 31→32; not in MUST_PASS |
+
+Tests (pre-change: `cd46463c` has no `# step: ai-recovery-env` / `# step: ai-mac-recovery-env`; recovered-close orders had no `ai-recovery-env` immediately before lost-shell `ai-db-session`):
+
+| Test | file:line | Pre-change |
+| --- | --- | --- |
+| recovered-close lost-shell `ai-db-session` has `ai-recovery-env` immediately before it | `tests/c1-task-from-plan.test.ts:380` | absent; `cd46463c` W2 recovered-close has `ai-db-session` and no `ai-recovery-env` |
+| lost-shell recovery env reaches session and close; mismatch, wrong id, absent stage and prep dirs refuse | `tests/admin-release-plan.test.ts:3753` | absent; `block('ai-recovery-env')` would fail uniqueness |
+| W2/W2b/W7 recovered-close lengths | `tests/c1-task-from-plan.test.ts:285–307` | 11 / 9 / 8 |
+| box secret-window regex count | `tests/admin-release-plan.test.ts:147` | 8 (`r'/tmp/anvil-secret\.`) |
+| whole-plan portable stage count | `tests/admin-release-plan.test.ts:448` | 11 |
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.fvtJSA: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.tLqvpC`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 189
+ℹ pass 188
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 219380.886125
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (extracted recovery-env; generator order). D-030 still reaches every test file. No commit or push. HEAD remains `cd46463c`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.

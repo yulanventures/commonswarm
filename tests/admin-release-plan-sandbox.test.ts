@@ -45,7 +45,7 @@ const EXPECTED_MAC_STEPS = [
   'ai-w5-preflight', 'ai-w5-reference', 'ai-w5-closed', 'ai-w5-recovery-transfer', 'ai-w6-readiness', 'ai-w6-readiness-transfer',
   'ai-w6-activation-approval', 'ai-w6-activation-probes', 'ai-w6-c1-inputs', 'ai-w6-preflight', 'ai-w6-prepare', 'ai-w6-transfer',
   'ai-w6-owner-client-command', 'ai-w6-start', 'ai-w6-pointer', 'ai-w6-agent-receipt', 'ai-w6-fence-driver', 'ai-w6-human-revoke',
-  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-close',
+  'ai-w6-report', 'ai-w6-secret-close', 'ai-w7-approval', 'ai-w6-close-state', 'ai-mac-recovery-env', 'ai-mac-close',
 ];
 // Blocks that the dry run must drive to exit 0. This proves the harness reaches the
 // command paths instead of refusing every block at its first line.
@@ -572,5 +572,5 @@ test('C1-16 sandbox classifier: first Mac|box token, not any Mac substring', () 
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-w7-proof'));
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-live-controls'));
   assert.ok(!EXPECTED_MAC_STEPS.includes('ai-edge-receipt'));
-  assert.equal(macBlocks.length, 31);
+  assert.equal(macBlocks.length, 32);
 });

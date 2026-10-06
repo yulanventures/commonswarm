@@ -144,7 +144,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
 test('admin release plan: production secret window and pointer stay pinned; fixtures are portable rewrites only', () => {
   // The executed fixtures rewrite these literals; the plan must still carry them.
   assert.equal(plan.split(PRODUCTION_STAGE_RE).length - 1, 3, 'Mac secret-window checks keep /private/tmp/anvil-secret');
-  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 8, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
+  assert.equal(plan.split(PRODUCTION_BOX_STAGE_RE).length - 1, 10, 'box secret-window checks use /tmp/anvil-secret (Ubuntu has no /private)');
   assert.equal(plan.split('$(mktemp -d /private/tmp/anvil-secret.XXXXXX)').length - 1, 1, 'Mac stage is a fresh /private/tmp/anvil-secret.XXXXXX');
   assert.equal(plan.split('$(mktemp -d /tmp/anvil-secret.XXXXXX)').length - 1, 4, 'box stages are a fresh /tmp/anvil-secret.XXXXXX');
   assert.match(block('ai-w6-pointer'), /assert str\(pointer\)=='\/Users\/yulanbot\/work\/dcr-rt\/c1-smoke\.pointer'/);
@@ -445,7 +445,7 @@ urllib.request.build_opener=lambda *args: Opener()
   // The dispatcher extracts nested blocks from the plan on disk; give it the
   // portable rewrite of the whole plan (only the secret-window regex changes).
   const planCopy = join(root, 'RELEASE.md');
-  writeFileSync(planCopy, portable(plan, { stage: 11, pointer: 9 }));
+  writeFileSync(planCopy, portable(plan, { stage: 13, pointer: 9 }));
   const released = block('ai-db-session').split('ai_run() {\n')[1]!.split('\nai_deadline() {')[0]!;
   assert.equal(released.split(PRODUCTION_PLAN_PATH).length - 1, 1);
   const dispatcher = released.split(PRODUCTION_PLAN_PATH).join(`'${planCopy}'`);
@@ -3748,4 +3748,145 @@ test('C1-18: attestation isolation refuses c1-staging on production and pins 202
   assert.equal(prodStill.status, 0, prodStill.stderr);
   assert.match(prodStill.stdout, /PASS ai-w2-backfill/);
   removeMarker();
+});
+
+test('C1-20: lost-shell recovery env reaches session and close; mismatch, wrong id, absent stage and prep dirs refuse', () => {
+  const frozenPresent = spawnSync('git', ['cat-file', '-e', 'cd46463c^{commit}']);
+  assert.equal(frozenPresent.status, 0, 'baseline commit cd46463c is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin cd46463c)');
+  const frozenPlan = spawnSync('git', ['show', 'cd46463c:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+  assert.equal(frozenPlan.status, 0, frozenPlan.stderr);
+  assert.doesNotMatch(frozenPlan.stdout, /# step: ai-recovery-env/);
+  assert.doesNotMatch(frozenPlan.stdout, /# step: ai-mac-recovery-env/);
+  assert.match(block('ai-recovery-env'), /unset WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR RELEASE_ROOT BOX_ARCHIVE_PATH SECRET_STAGE/);
+  assert.match(block('ai-recovery-env'), /out=\$\(python3 - "\$INPUTS_FILE" "\$REC_WINDOW" "\$REC_WINDOW_ID" <<'PY'/);
+  assert.match(block('ai-recovery-env'), /\) \|\| exit 1\neval "\$out"/);
+  assert.doesNotMatch(block('ai-recovery-env'), /^\s*exit 0\s*$/m);
+  assert.match(block('ai-mac-recovery-env'), /unset PREP_DIR/);
+  assert.match(block('ai-mac-recovery-env'), /out=\$\(python3 - "\$INPUTS_FILE" <<'PY'/);
+
+  const dir = mkdtempSync(join(scratch, 'c120-box-'));
+  const sha = 'c'.repeat(40), wid = 'Rc0v20', window = 'W2';
+  const issuance = join(dir, 'home/commonswarm/admin-issuance');
+  const proof = join(issuance, 'release-proofs', `${sha}-${window}-${wid}`);
+  const releaseRoot = join(issuance, 'releases', sha);
+  mkdirSync(proof, { recursive: true, mode: 0o700 });
+  chmodSync(proof, 0o700);
+  mkdirSync(releaseRoot, { recursive: true, mode: 0o700 });
+  writeFileSync(join(releaseRoot, 'RELEASE_SHA'), sha + '\n');
+  const archiveNs = mkdtempSync(join(dir, 'archives-'));
+  const archive = join(archiveNs, `admin-issuance-${sha}-${wid}.tar`);
+  writeFileSync(archive, 'reviewed-archive-bytes\n', { mode: 0o600 });
+  chmodSync(archive, 0o600);
+  const inputs = {
+    window, release_sha: sha, window_id: wid,
+    archive_sha256: digest(readFileSync(archive)),
+  };
+  const operatorInputs = join(dir, 'inputs.json');
+  writeFileSync(operatorInputs, JSON.stringify(inputs));
+  writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs));
+  const stageNs = mkdtempSync(join(dir, 'secret-ns-'));
+  const stage = join(stageNs, 'anvil-secret.Ab12Cd');
+  mkdirSync(stage, { mode: 0o700 });
+  chmodSync(stage, 0o700);
+  const source = block('ai-recovery-env');
+  assert.equal(source.split('/home/commonswarm/admin-issuance').length - 1, 2);
+  assert.equal(source.split('/tmp/admin-issuance-').length - 1, 1);
+  assert.equal(source.split("r'/tmp/anvil-secret\\.").length - 1, 2);
+  const remapped = source
+    .split('/home/commonswarm/admin-issuance').join(issuance)
+    .split('/tmp/admin-issuance-').join(archiveNs + '/admin-issuance-')
+    .split("r'/tmp/anvil-secret\\.").join(`r'${stageNs.replace(/[.-]/g, '\\$&')}/anvil-secret\\.`);
+  const stubs = `reached_ai_db_session() {
+  : "\${WINDOW:?}" "\${WINDOW_ID:?}" "\${RELEASE_SHA:?}" "\${PROOF_DIR:?}" "\${RELEASE_ROOT:?}" "\${BOX_ARCHIVE_PATH:?}" "\${INPUTS_FILE:?}"
+  printf 'REACHED ai-db-session WINDOW=%s PROOF_DIR=%s RELEASE_ROOT=%s BOX_ARCHIVE_PATH=%s SECRET_STAGE=%s\\n' \\
+    "$WINDOW" "$PROOF_DIR" "$RELEASE_ROOT" "$BOX_ARCHIVE_PATH" "\${SECRET_STAGE-unset}"
+}
+reached_ai_close() {
+  : "\${WINDOW:?}" "\${WINDOW_ID:?}" "\${RELEASE_SHA:?}" "\${PROOF_DIR:?}" "\${RELEASE_ROOT:?}" "\${BOX_ARCHIVE_PATH:?}"
+  printf 'REACHED ai-close WINDOW=%s PROOF_DIR=%s RELEASE_ROOT=%s BOX_ARCHIVE_PATH=%s SECRET_STAGE=%s\\n' \\
+    "$WINDOW" "$PROOF_DIR" "$RELEASE_ROOT" "$BOX_ARCHIVE_PATH" "\${SECRET_STAGE-unset}"
+}
+`;
+  const go = (extra: Record<string, string>, pointer?: string) => {
+    if (existsSync(join(proof, 'secret-stage.path'))) rmSync(join(proof, 'secret-stage.path'));
+    if (pointer !== undefined) writeFileSync(join(proof, 'secret-stage.path'), pointer + '\n', { mode: 0o600 });
+    const env: NodeJS.ProcessEnv = { ...process.env, INPUTS_FILE: operatorInputs, WINDOW: window, WINDOW_ID: wid, ...extra };
+    for (const key of ['RELEASE_SHA', 'PROOF_DIR', 'RELEASE_ROOT', 'BOX_ARCHIVE_PATH', 'SECRET_STAGE', 'PREP_DIR']) delete env[key];
+    return spawnSync('/bin/bash', ['-u'], { input: stubs + remapped + '\nreached_ai_db_session\nreached_ai_close\n', encoding: 'utf8', env });
+  };
+
+  const withStage = go({}, stage);
+  assert.equal(withStage.status, 0, withStage.stderr + withStage.stdout);
+  assert.match(withStage.stdout, /PASS ai-recovery-env: WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR RELEASE_ROOT BOX_ARCHIVE_PATH SECRET_STAGE set from existing proof/);
+  assert.match(withStage.stdout, /REACHED ai-db-session/);
+  assert.match(withStage.stdout, /REACHED ai-close/);
+  assert.match(withStage.stdout, new RegExp(`PROOF_DIR=${proof.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(withStage.stdout, new RegExp(`SECRET_STAGE=${stage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+  const absent = go({});
+  assert.equal(absent.status, 0, absent.stderr + absent.stdout);
+  assert.match(absent.stdout, /PASS ai-recovery-env: WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR RELEASE_ROOT BOX_ARCHIVE_PATH set from existing proof/);
+  assert.doesNotMatch(absent.stdout, /SECRET_STAGE set from existing proof/);
+  assert.match(absent.stdout, /SECRET_STAGE=unset/);
+  assert.match(absent.stdout, /REACHED ai-close/);
+
+  writeFileSync(join(proof, 'inputs.json'), JSON.stringify({ ...inputs, window_id: 'other1' }));
+  const mismatch = go({});
+  assert.notEqual(mismatch.status, 0);
+  assert.match(mismatch.stderr, /transferred inputs.json expected identical-to-INPUTS_FILE got mismatch/);
+  assert.doesNotMatch(mismatch.stdout, /REACHED ai-db-session/);
+  writeFileSync(join(proof, 'inputs.json'), JSON.stringify(inputs));
+
+  const wrongId = go({ WINDOW_ID: 'Wrong1' });
+  assert.notEqual(wrongId.status, 0);
+  assert.match(wrongId.stderr, /operator WINDOW_ID expected inputs window_id got mismatch/);
+  assert.doesNotMatch(wrongId.stdout, /REACHED/);
+
+  const wrongWindow = go({ WINDOW: 'W1' });
+  assert.notEqual(wrongWindow.status, 0);
+  assert.match(wrongWindow.stderr, /operator WINDOW expected inputs window got mismatch/);
+
+  const leaked = spawnSync('/bin/bash', ['-c', `set -euo pipefail
+WINDOW=old WINDOW_ID=old RELEASE_SHA=old PROOF_DIR=/old RELEASE_ROOT=/old BOX_ARCHIVE_PATH=/old SECRET_STAGE=/old
+unset WINDOW WINDOW_ID RELEASE_SHA PROOF_DIR RELEASE_ROOT BOX_ARCHIVE_PATH SECRET_STAGE
+out=$(python3 -c 'import sys; sys.stderr.write("FAIL ai-recovery-env: INPUTS_FILE expected absolute-regular-file got other; STOP\\n"); raise SystemExit(1)') || exit 1
+eval "$out"
+printf 'leaked WINDOW=%s\\n' "\${WINDOW-unset}"
+`], { encoding: 'utf8' });
+  assert.notEqual(leaked.status, 0);
+  assert.doesNotMatch(leaked.stdout, /leaked/);
+  assert.match(leaked.stderr, /INPUTS_FILE expected absolute-regular-file/);
+
+  const macDir = mkdtempSync(join(scratch, 'c120-mac-'));
+  const macSource = block('ai-mac-recovery-env');
+  assert.equal(macSource.split('/private/tmp/').length - 1, 2);
+  const remappedMac = macSource.split('/private/tmp/').join(macDir + '/');
+  const tarBytes = Buffer.from('mac-prep-archive\n');
+  const macInputs = join(macDir, 'inputs.json');
+  writeFileSync(macInputs, JSON.stringify({ archive_sha256: digest(tarBytes) }));
+  const runMac = () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, INPUTS_FILE: macInputs };
+    delete env.PREP_DIR;
+    return spawnSync('/bin/bash', ['-u'], { input: remappedMac + '\nprintf "PREP_DIR=%s\\n" "$PREP_DIR"\n', encoding: 'utf8', env });
+  };
+  const zero = runMac();
+  assert.notEqual(zero.status, 0);
+  assert.match(zero.stderr, /PREP_DIR expected one matching-prep-dir got zero/);
+
+  const one = join(macDir, 'admin-issuance-prep.One001');
+  mkdirSync(one, { mode: 0o700 });
+  chmodSync(one, 0o700);
+  writeFileSync(join(one, 'release.tar'), tarBytes, { mode: 0o600 });
+  const okMac = runMac();
+  assert.equal(okMac.status, 0, okMac.stderr + okMac.stdout);
+  assert.match(okMac.stdout, /PASS ai-mac-recovery-env: PREP_DIR set from matching prep directory/);
+  assert.match(okMac.stdout, new RegExp(`PREP_DIR=${one.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+  const two = join(macDir, 'admin-issuance-prep.Two002');
+  mkdirSync(two, { mode: 0o700 });
+  chmodSync(two, 0o700);
+  writeFileSync(join(two, 'release.tar'), tarBytes, { mode: 0o600 });
+  const several = runMac();
+  assert.notEqual(several.status, 0);
+  assert.match(several.stderr, /PREP_DIR expected one matching-prep-dir got several/);
 });

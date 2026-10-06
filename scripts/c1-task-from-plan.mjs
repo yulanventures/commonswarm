@@ -147,6 +147,19 @@ function runOrders(plan, path) {
       if (!blocks.has(m[1])) fail(`step referenced but not defined: ${m[1]}`);
     }
   }
+  for (const [key, order] of orders) {
+    if (!key.endsWith(' recovered-close')) continue;
+    for (let i = 0; i < order.steps.length; i++) {
+      const step = order.steps[i];
+      if (step.id === 'ai-db-session' && typeof step.input === 'string' &&
+          step.input.includes('Only if original box shell was lost')) {
+        const prev = order.steps[i - 1];
+        if (!prev || prev.id !== 'ai-recovery-env') {
+          fail(`lost-shell ai-db-session missing ai-recovery-env immediately before at ${key}`);
+        }
+      }
+    }
+  }
   if (used.has('ai-w5-reference') && !pin) fail('missing site plan F pin');
   if (pin) {
     // Resolve the pinned repository-relative path from the release plan's repo root.
