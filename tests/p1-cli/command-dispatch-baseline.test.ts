@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { encodeInviteLink, type InviteLinkPayload } from "../../src/cloud/invite-link.js";
 import { credentialStore } from "../../src/cloud/storage.js";
+import { HOUSEHOLD_TOOL_REGISTRY } from "../../src/protocol/household-tool-registry.js";
 import { usage } from "../../src/cli.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
@@ -74,6 +75,7 @@ function dispatchBaselineShard(): number | null {
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
+  ...[...HOUSEHOLD_TOOL_REGISTRY.map(row => row.name), "refusal"].map(key => ({ key: `object.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   ...["grants", "history", "revoke", "refusal"].map(key => ({ key: `admin.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   // Item K's profile routes run through the focused dispatcher baseline below.
   ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
@@ -167,6 +169,7 @@ async function commandEntryCoverage(): Promise<readonly CommandEntryCoverage[]> 
  * refusal coverage.
  */
 const GROUP_REFUSAL_SITES = [
+  "object",
   "admin",
   "mcp",
   "receive",
@@ -596,7 +599,9 @@ function selectedErrorFixtures(
 }
 
 async function fixtures(): Promise<Fixture[]> {
-  const core = coreFixtures();
+  const core = [...coreFixtures(), ...HOUSEHOLD_TOOL_REGISTRY.map(row => ({
+    id: `object.${row.name}`, argv: ["object", row.name, "--profile", "<PROFILE>"],
+  }))];
   const coverage = await commandEntryCoverage();
   const generated = [
     ...hostSessionFixtures(coverage, core),
@@ -937,7 +942,10 @@ async function runFixture(root: string, origin: string, fixture: Fixture): Promi
 }
 
 test("the command dispatcher matches the recorded behavior baseline", { timeout: 600_000 }, async () => {
-  // UPDATE_DISPATCH_BASELINE=help refreshes only generated help and new admin
+  // L4 adds ten registry-driven to-do/comment commands. Object-group refusal
+  // inventories and help therefore expand; every existing route still refuses
+  // or dispatches through the same handler.
+  // UPDATE_DISPATCH_BASELINE=help refreshes only generated help and new admin/household
   // refusals without a socket. Existing non-help behavior must stay byte-identical;
   // UPDATE_DISPATCH_BASELINE=1 remains the complete network-backed generator.
   if (process.env.UPDATE_DISPATCH_BASELINE === "help") {
@@ -951,19 +959,30 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
       const rows: BaselineRow[] = [];
       for (const fixture of allFixtures) {
         const prior = byId.get(fixture.id);
-        if (prior && ![prior.stdout, prior.stderr].some(value => /^cswarm <VERSION> \(protocol /mu.test(value))) {
+        if (prior) {
           assert.deepEqual(prior.argv, fixture.argv, fixture.id);
-          rows.push(prior);
+          // Version output shares help's heading but is only one line. The
+          // previous help refresh expanded it into usage text. Re-measure
+          // these two socket-free routes to repair their recorded outputs.
+          if (fixture.argv[0] === "--version" || fixture.argv[0] === "-v") {
+            rows.push(await runFixture(root, "http://127.0.0.1:9", fixture));
+            continue;
+          }
+          // Help is generated once from the public usage entry point. Re-running
+          // every historical refusal here also executes unrelated slow routes.
+          const help = usage().replace(/^cswarm [^ ]+/, 'cswarm <VERSION>') + '\n';
+          const refresh = (value: string) => value.replace(/^cswarm <VERSION> \(protocol [^\n]+\n\nUsage:\n[\s\S]*$/mu, help);
+          rows.push({ ...prior, stdout: refresh(prior.stdout), stderr: refresh(prior.stderr) });
           continue;
         }
-        if (!prior) assert.equal(fixture.argv[0], "admin", "help refresh only adds admin routes");
+        if (!prior) assert.ok(["admin", "object"].includes(fixture.argv[0]!), "help refresh only adds admin/household routes");
         const row = await runFixture(root, "http://127.0.0.1:9", fixture);
         if (prior) assert.deepEqual(
           { ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) },
           { ...prior, stdout: withoutGeneratedHelp(prior.stdout), stderr: withoutGeneratedHelp(prior.stderr) },
           `existing behavior changed: ${fixture.id}`,
         );
-        else assert.equal(row.exitCode, 1, `new admin route must refuse: ${fixture.id}`);
+        else assert.equal(row.exitCode, 1, `new admin/household route must refuse: ${fixture.id}`);
         rows.push(row);
       }
       await writeFile(baselinePath, `${JSON.stringify(rows, null, 2)}\n`);

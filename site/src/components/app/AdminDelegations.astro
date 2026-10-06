@@ -219,14 +219,14 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
         const full = account.active.full_account_count;
         const count = account.active.grant_count, workspaceCount = workspace?.active.grant_count ?? 0;
         indicatorView = count > 0 || workspaceCount === 0 ? "account" : "workspace";
-        button.hidden = false; button.dataset.fullAccount = String(full > 0);
+        button.hidden = true; button.dataset.fullAccount = String(full > 0);
         one<HTMLElement>("[data-admin-indicator-title]").textContent = full ? `${full} full-account admin ${full === 1 ? "grant" : "grants"} active` :
           count > 0 ? `${count} active admin ${count === 1 ? "grant" : "grants"} in your account` : workspaceCount > 0 ? `${workspaceCount} active admin ${workspaceCount === 1 ? "grant" : "grants"} in this workspace` : "Admin clients and history";
         const expiry = full ? account.active.full_account_expires_at : account.active.expires_at ?? workspace?.active.expires_at;
         one<HTMLElement>("[data-admin-indicator-detail]").textContent = count === 0 && workspaceCount === 0 ? "Review client approvals, previous grants or history." : `${full ? "Full-account grants: earliest expiry" : "Earliest expiry"} ${expiry ?? "unavailable"}.${count > 0 && workspaceCount > 0 ? ` This workspace: ${workspaceCount} active grants.` : ""} View actions or revoke.`;
       } catch {
         if (generation !== at || ticket !== indicatorGeneration) return;
-        button.hidden = false;
+        button.hidden = true;
         one<HTMLElement>("[data-admin-indicator-title]").textContent = "Admin access status unavailable";
         one<HTMLElement>("[data-admin-indicator-detail]").textContent = "Review access or try again.";
       }
@@ -307,7 +307,7 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
 
 <style>
   admin-delegations[hidden], [hidden] { display: none !important; }
-  .admin-indicator { position: fixed; z-index: 30; left: 1rem; bottom: 4.5rem; max-width: min(15rem, calc(100vw - 2rem)); text-align: left; display: grid; gap: .3rem; box-shadow: var(--shadow-md); }
+  .admin-indicator { display: none !important; }
   admin-delegations :global(button) { font: inherit; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-interactive); border-radius: .5rem; padding: .6rem .85rem; cursor: pointer; }
   admin-delegations :global(button:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
   admin-delegations :global(button:disabled) { opacity: .6; cursor: wait; }
@@ -329,7 +329,4 @@ const policy = { version: ADMIN_REGISTRY_VERSION, digest: adminAvailabilityDiges
   admin-delegations :global(th), admin-delegations :global(td) { text-align: left; vertical-align: top; padding: .6rem; border: 1px solid var(--border); overflow-wrap: anywhere; }
   admin-delegations :global(th) { background: var(--surface-2); }
   [data-admin-status] { min-height: 1.5em; }
-  @media (max-width: 52rem) {
-    .admin-indicator { left: auto; right: .75rem; bottom: 10rem; max-width: min(20rem, calc(100vw - 1.5rem)); }
-  }
 </style>

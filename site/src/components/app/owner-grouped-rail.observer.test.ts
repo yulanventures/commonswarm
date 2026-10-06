@@ -20,16 +20,17 @@ test("the live participant renderer sorts and nests agents under owner rows", as
       { principal_id: "a-agent", name: "alpha", owner_user_id: "a-alex" },
       { principal_id: "orphan-a", name: "orphan alpha", owner_user_id: "another-member" },
     ],
+    "mara",
   );
 
   assert.deepEqual(
     rail.groups.map((group) => group.heading),
-    ["alex", "Alex", "Mara", "Zoe", "Owner unavailable"],
+    ["Mara", "alex", "Alex", "Zoe", "Other agents"],
   );
-  assert.equal(rail.groups[0]?.hasNestedList, true);
-  assert.deepEqual(rail.groups[0]?.agents, ["alpha", "beta", "zeta"]);
+  assert.equal(rail.groups[1]?.hasNestedList, true);
+  assert.deepEqual(rail.groups[1]?.agents, ["alpha", "beta", "zeta"]);
   assert.equal(rail.directAgentCount, 0, "agent rows must never be flattened beside owner groups");
-  assert.deepEqual(rail.groups.at(-1)?.agents, ["orphan alpha", "orphan zeta"]);
+  assert.deepEqual(rail.groups.at(-1)?.agents, ["orphan alpha (owner left)", "orphan zeta (owner left)"]);
 });
 
 test("empty and missing owner ids render in a visible fallback group", async () => {
@@ -39,8 +40,8 @@ test("empty and missing owner ids render in a visible fallback group", async () 
   ]);
 
   assert.equal(rail.groups.length, 1, "an agents-only workspace must not render empty");
-  assert.equal(rail.groups[0]?.heading, "Owner unavailable");
-  assert.deepEqual(rail.groups[0]?.agents, ["Empty owner", "Missing owner"]);
+  assert.equal(rail.groups[0]?.heading, "Other agents");
+  assert.deepEqual(rail.groups[0]?.agents, ["Empty owner (owner left)", "Missing owner (owner left)"]);
 });
 
 test("duplicate agent names stay distinct by UUID suffix in the rail", async () => {
@@ -74,9 +75,13 @@ test("a member with zero agents has no empty nested list", async () => {
 });
 
 test("LiveDashboard uses the observed roster normalizer and renderer", () => {
-  assert.match(dashboard, /result\.push\(\.\.\.rosterAgentsFromRows\(page\)\)/);
   assert.match(
     dashboard,
-    /renderSidebarParticipants\(participantList, members, agents, initials\)/,
+    /result\.push\(\.\.\.rosterAgentsFromRows\(page\)\.map\(agent => \(\{ \.\.\.agent, joinedAt:/,
   );
+  assert.match(
+    dashboard,
+    /const vm = mapHomeRail\(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts\)/,
+  );
+  assert.match(dashboard, /buildHomeRail\(document, vm,/);
 });

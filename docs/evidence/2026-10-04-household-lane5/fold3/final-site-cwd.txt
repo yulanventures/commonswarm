@@ -1,0 +1,12 @@
+✔ sign-out and a different human clear invitation rows and suppress a late private inbox result (0.561125ms)
+✔ a delayed preview cannot replace the newly selected invitation; no acceptance occurs before the human chooses (0.148583ms)
+✔ changed disclosure requires a fresh review and cannot be automatically accepted (0.118458ms)
+✔ browser recipient invitation entry bundles without Node-only CLI build dependencies (21.432875ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 93.87275

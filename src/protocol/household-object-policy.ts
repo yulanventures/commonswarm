@@ -28,7 +28,8 @@ export interface HouseholdConnectionFacts {
   connection_id: string;
   grant_id: string;
   revoked_at: number | null;
-  expires_at: number;
+  /** NULL approvals last until withdrawn; local approvals retain token expiry. */
+  expires_at: number | null;
   operations: readonly HouseholdContentOperation[];
   /** Private/shared purposes use different connections and principals. */
   purpose: 'personal' | 'shared';
@@ -74,7 +75,7 @@ export function householdAccessRefusal(
     if (!facts.actor.principal_id || facts.actor.principal_id !== connection.principal_id
       || connection.owner_user_id !== member.user_id || connection.workspace_id !== workspaceId
       || !connection.connection_id || !connection.grant_id || connection.revoked_at !== null
-      || !Number.isFinite(connection.expires_at) || connection.expires_at <= now
+      || (connection.expires_at !== null && (!Number.isFinite(connection.expires_at) || connection.expires_at <= now))
       || connection.purpose !== facts.boundary.kind || !connection.operations.includes(operation)) {
       return 'connection_access_refused';
     }

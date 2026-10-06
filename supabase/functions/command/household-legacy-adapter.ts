@@ -3,11 +3,11 @@
  * Legacy upload creation requires a protected staged attachment: declarations
  * alone cannot reserve verified household content. Integration must supply it.
  */
-import type { HouseholdAccessFacts, HouseholdContentOperation } from '../../../src/protocol/household-object-policy.js';
-import type { HouseholdContent, HouseholdOutcome, HouseholdRevision, HouseholdRevisionRef } from '../../../src/protocol/household-object-events.js';
-import type { HouseholdObjectCommand, HouseholdObjectDecision, HouseholdReadQuery, HouseholdReadResult } from '../../../src/protocol/household-objects.js';
-import type { HouseholdIdentity, HouseholdProposal } from './household-objects.js';
-import type { FileCommand } from './file-artifacts.js';
+import type { HouseholdAccessFacts, HouseholdContentOperation } from '../_shared/household-object-policy.d.ts';
+import type { HouseholdContent, HouseholdOutcome, HouseholdRevision, HouseholdRevisionRef } from '../_shared/household-object-events.d.ts';
+import type { HouseholdObjectCommand, HouseholdObjectDecision, HouseholdReadQuery, HouseholdReadResult } from '../_shared/household-objects.d.ts';
+import type { HouseholdIdentity, HouseholdProposal } from './household-objects.ts';
+import type { FileCommand } from './file-artifacts.ts';
 
 export type LegacyHouseholdCommand = FileCommand
   | { kind: 'brain_put'; topic: string; markdown: string; if_version: number | null }
@@ -44,8 +44,8 @@ type RecordedResult = Exclude<LegacyHouseholdResult, { status: 'unknown' | 'ok' 
 export interface LegacyHouseholdOperations<Tx> {
   /** Reuse the existing canonical namespace and transfer helpers. Injecting
    * them keeps this module independent of generated edge bundle wiring. */
-  brain: Pick<typeof import('../../../src/cloud/brain.js'), 'brainFileName' | 'brainTopicFromFileName'>;
-  transfers: Pick<typeof import('./household-transfers.js'), 'householdCanonical' | 'householdSha256'>;
+  brain: { brainFileName(value: string): string; brainTopicFromFileName(value: string): string | null };
+  transfers: Pick<typeof import('./household-transfers.ts'), 'householdCanonical' | 'householdSha256'>;
   /** Serialize workspace/identity/request ledger, bindings and core writes.
    * Events, projection, legacy ledger and audit commit or roll back together.
    * No result may resolve before the database commit has been acknowledged. */

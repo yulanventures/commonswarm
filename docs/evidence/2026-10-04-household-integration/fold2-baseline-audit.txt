@@ -1,0 +1,4 @@
+PASS: compared HEAD 92a21537 recorded fixtures with the help-generator output.
+1403 existing rows keep identical argv, exitCode, handlers and output after removing only cswarm object help blocks and object credential guidance.
+368 existing help rows changed; 65 new household rows; 0 removed rows; 1468 total.
+No fixture was hand-edited. UPDATE_DISPATCH_BASELINE=help generated both JSON files.

@@ -1,0 +1,78 @@
+# SERVER-PLAN amendments, round 1 (CSwarm Lead, 2026-10-05 ~21:50Z)
+
+Refute round 1 (Codex gpt-6.1-sol, Cursor Composer 2.5, Cursor Grok 4.6; all read-only): 3 x FAIL.
+Reports: ~/work/cswarm-vision/home-ui/lanes/plan-refute/{codex,composer,cursor-grok}.txt.
+These amendments override SERVER-PLAN.md where they differ. Every server lane reads both.
+
+## Blocking findings and their answers
+AM1 (Codex B1, "now" bypasses human-only steering). Front-of-line placement is steering. `start:'now'` on
+    todo_create/todo_assign takes effect ONLY for a HUMAN credential (no agent principal) of the assignee agent's owner.
+    From any agent credential (including the owner's other agents) or any other person, `now` becomes an OFFER decided
+    by the owner (same as SERVER-PLAN C "others asking now"). An agent credential may assign to an agent only at the
+    back of its line or with a gate, and only when that agent's accepts_from allows it; otherwise it is an offer.
+    `household_todo_steer` stays human-only. Tests: an approved agent of the owner assigning `now` to a sibling agent
+    gets an offer, not a front placement (with a positive control: the owner's human credential does reorder).
+AM2 (Codex B2, local CLI/MCP adapters). New lane L6 owns the local adapters: src/cloud/household-http.ts (new write
+    kinds), src/cloud/household-objects.ts or a new src/cloud/household-todos.ts (decoders for to-do/comment/queue
+    results; no blob revision required for to-dos), src/mcp/household-tools.ts, and the CLI wiring in src/cli.ts that
+    the registry drives. L6 runs after L4 and proves a local round trip in a test (create -> assign -> queue -> start
+    -> done) against an injected transport.
+AM3 (Codex B3, queue response size). Lists and the queue return SUMMARIES, never notes or comments:
+    TodoSummary = { todo_id, version, title, state, due_on, assignee, offer (without gate note), gate kind + clear,
+    queue_position, comment_count, state_at }. todo_queue takes `section?: 'working'|'up_next'|'not_yet'|'requests'`,
+    `offset`, `limit <= 50` and returns per-section `next_offset`; todo_list limit <= 50. Details come only from
+    todo_read (one to-do, comments paged at <= 20). Every read response is checked against a 48 KiB budget in the store
+    and truncates the page (setting next_offset) before it can exceed the hosted MCP limit; a test builds a worst case
+    (200 items, 200-char multibyte titles) and asserts every page < 48 KiB. contract.ts changes accordingly (Lead edits
+    contract.ts; L5 maps to it).
+AM4 (Cursor Grok B1, L2 cannot typecheck before L4). Re-sequence and re-own the generation step:
+    L1 (pure core) -> L2 owns: migration 000001 + reserve/proofs + supabase/functions/command/household-todos.ts store
+    + the export line in src/protocol/index.ts + scripts/build-admin-types.mjs roots/count + the regenerated
+    supabase/functions/_shared/*.d.ts and protocol.js (npm run build:command-core). L3 runs IN PARALLEL with L2 and owns
+    ONLY migration 000002 (overview SQL) + its reserve/proofs + the pure proofs test (no TypeScript store).
+    household-activity.ts moves to L4. L4 runs after L2 and L3 merge. L6 after L4.
+
+## Non-blocking findings folded in
+AM5 (Codex 5) The to-do events table mirrors the household stream's envelope integrity checks (JSON object shape,
+    payload workspace_id/seq/event_id equal to their columns), as 20261004000002:12.
+AM6 (Codex 4) "Last looked" = max first-seen receipt counts only NEW MESSAGES reliably. Catch up shows "N new messages
+    since you last looked" (messages only); to-do/object activity is listed as "Latest", not counted as new.
+AM7 (Cursor Grok 3) Grants: events/comments/receipts get SELECT, INSERT for swarm_command (the catalog proof is the
+    spec), unlike household_object_events (INSERT only).
+AM8 (Cursor Grok 4) home_overview is VOLATILE and evaluates gates with statement_timestamp().
+AM9 (Cursor Grok 5) Offers: CHECK (offer_user IS NULL OR offer_principal IS NULL) and exactly one of them when offer_id
+    is set.
+AM10 (Composer B1) Not a conflict: HomeServer.startTodo is the HUMAN site client and always names todo_id; the agent
+    registry tool todo_start may omit it (take the first of its own up_next). Both stay.
+AM11 (Codex 6) Every lane names each new test file in its report; the Lead alone registers them in tests/lists/* and
+    package.json.
+AM12 (Cursor Grok NB1) A working-on post is itself a recent action. Accepted, because the UI words it as the agent's
+    own statement ("Said it’s working on ‘X’ · 2 minutes ago") and it lapses after 30 minutes without another action.
+Citation slips reported by Composer/Cursor Grok (wrong line numbers) change no design; lanes verify lines themselves.
+
+## Round 2 (Codex FAIL on AM3; Cursor Grok PASS with 5 non-blocking) — answers
+AM13 (Codex r2 B1; Cursor Grok r2 NB1) The page budget is measured on the WORST transport form, not the store object:
+    bytes(UTF-8 of JSON.stringify(JSON.stringify(page))) <= 28 KiB. That bounds the hosted MCP envelope (a JSON text
+    field inside a JSON-RPC body, default limit 64 KiB, mcp/index.ts:85, protocol.ts:332/359) and the local MCP cap
+    (32 KiB, src/mcp/tools.ts:16) with headroom. The store truncates the page at the last row that fits and sets
+    next_offset. Tests: multibyte titles, titles of 200 quotation marks, titles of 200 backslashes, and a comment page
+    of 20 x 4000 quote characters; each page's double-serialized size <= 28 KiB, and a positive control proves
+    truncation happened (next_offset set).
+AM14 (Cursor Grok r2 NB5) todo_queue with no `section` fills sections in the order working, up_next, not_yet, requests
+    until the budget; the first section that is cut gets a non-null next_offset, and every later section that was not
+    loaded at all is returned empty with next_offset 0. A caller pages one section at a time with `section`.
+AM15 (Cursor Grok r2 NB2/NB4) SERVER-PLAN C's assignment table row "agent A | any credential of A's owner" is REPLACED
+    by AM1 (human credential only for `now`). L4 regenerates the generated bundle once after its registry edits; L2 is
+    the first writer, L4 the second, never at the same time.
+
+## Round 3 (Codex FAIL: an indivisible oversized record) — answer
+AM16 Notes (<= 4000) and comment bodies (<= 4000) may not contain control characters except newline (U+000A) and
+    tab (U+0009): a CHECK in the migration (like the title check) and the same refusal in the decider (notes_invalid /
+    comment_invalid). Worst case per character after double serialization is then 4 bytes (quote, backslash, a 4-byte
+    UTF-8 code point per 2 UTF-16 units), so one to-do with maximum notes or one maximum comment stays near 17 KiB, under
+    the 28 KiB budget. Progress rule: every page returns at least its first row even when the budget is tight; todo_read
+    always returns the to-do and then as many comments as fit (possibly none, with next_comment_offset set);
+    comment_list always returns at least one comment. Tests add 4000 control-free worst-case notes and comments
+    (quotes, backslashes, newlines, emoji) and a rejected U+0001 case with a positive control.
+Consensus: rounds 1-3 found 5 blocking points (AM1, AM2, AM3, AM4, AM13/AM16); every one is answered here and is
+    verified by the lane checkers and tests that implement it (L1b, L2, L2b). Record: lanes/plan-refute/.

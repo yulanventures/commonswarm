@@ -1,0 +1,25 @@
+✔ a boundary cannot enable the legacy file redirect; only its exact server opt-in can (269.751167ms)
+✔ household_legacy is unreachable with its gate off even in a managed workspace (238.224667ms)
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+✔ unfinished hosted file tools are absent and cannot execute unless their server gate is explicitly on (46.860667ms)
+✔ hosted content admission accepts valid patches and rejects model-supplied transfers before execution (0.797708ms)
+✔ protected attachment parser carries bytes separately and refuses foreign metadata and extra parts (14.574ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 654.208167

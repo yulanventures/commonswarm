@@ -1,0 +1,24 @@
+
+> cloud-swarm@0.1.80 check:tests
+> tsc -p tsconfig.tests.json
+
+site/tests/chrome.ts(176,17): error TS2769: No overload matches this call.
+  Overload 1 of 8, '(file: string, args: readonly string[] | null | undefined, options: ExecFileOptionsWithBufferEncoding, callback?: ((error: ExecFileException | null, stdout: NonSharedBuffer, stderr: NonSharedBuffer) => void) | undefined): ChildProcess', gave the following error.
+    Type '"utf8"' is not assignable to type '"buffer"'.
+  Overload 2 of 8, '(file: string, args: readonly string[] | null | undefined, options: ExecFileOptionsWithStringEncoding, callback?: ((error: ExecFileException | null, stdout: string, stderr: string) => void) | undefined): ChildProcess', gave the following error.
+    Object literal may only specify known properties, and 'detached' does not exist in type 'ExecFileOptionsWithStringEncoding'.
+  Overload 3 of 8, '(file: string, args: readonly string[] | null | undefined, options: ExecFileOptions | null | undefined, callback: ((error: ExecFileException | null, stdout: string | NonSharedBuffer, stderr: string | NonSharedBuffer) => void) | null | undefined): ChildProcess', gave the following error.
+    Object literal may only specify known properties, and 'detached' does not exist in type 'ExecFileOptions'.
+site/tests/chrome.ts(178,7): error TS7006: Parameter 'error' implicitly has an 'any' type.
+site/tests/chrome.ts(178,14): error TS7006: Parameter 'stdout' implicitly has an 'any' type.
+site/tests/chrome.ts(178,22): error TS7006: Parameter 'stderr' implicitly has an 'any' type.
+supabase/functions/_shared/hosted-seat-auth.ts(1,27): error TS2307: Cannot find module 'npm:postgres@3.4.9' or its corresponding type declarations.
+supabase/functions/mcp/claim-seat.ts(1,27): error TS2307: Cannot find module 'npm:postgres@3.4.9' or its corresponding type declarations.
+tests/admin-release-plan.test.ts(1333,29): error TS2352: Conversion of type '{ version: string; evidence_kind: string; released_sha: string; file: string; sha256: string; }[]' to type '[Record<string, string>, Record<string, string>]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Target requires 2 element(s) but source may have fewer.
+tests/p1-cli/h0-link-join-limits.ts(10,8): error TS2440: Import declaration conflicts with local declaration of 'ts'.
+npm notice
+npm notice New major version of npm available! 11.19.0 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice

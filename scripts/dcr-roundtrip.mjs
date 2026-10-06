@@ -13,12 +13,20 @@ const REQUEST_MS = 10_000;
 const CONSENT_MS = 25 * 60_000;
 const VERSION = '2025-06-18';
 const SCOPES = new Set(['openid', 'offline_access', 'mcp']);
-const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on']);
+// Must match supabase/functions/mcp/tools.ts after this release. The service-free
+// DCR exercise test compares this explicit release inventory with the hosted table.
+const TOOL_NAMES = new Set(['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on',
+  'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+  'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+  'todo_update', 'todo_assign', 'todo_start', 'todo_set_state']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HANDLE = /^seat_[A-Za-z0-9_-]{22,64}$/u;
 const SHAPE_KEYS = new Set(['grant_id', 'seat_id', 'handle', 'workspace_id', 'principal_id',
   'name', 'transport', 'turn_only', 'members', 'agents', 'signal_id', 'kind', 'created_at',
-  'in_reply_to', 'batch_id', 'signals', 'cursor', 'acknowledged_batch_id', 'error', 'reused']);
+  'in_reply_to', 'batch_id', 'signals', 'cursor', 'acknowledged_batch_id', 'error', 'reused',
+  'status', 'object_id', 'revision', 'objects', 'next_offset', 'revisions', 'content',
+  'value', 'notices', 'request_id', 'replayed', 'todo', 'todos', 'comments', 'next_comment_offset',
+  'owner_user_id', 'content_access', 'accepts_from', 'read_at', 'queue', 'working', 'up_next', 'not_yet', 'requests']);
 
 function parseOptions(args) {
   const options = { dryRun: false, exerciseTools: false, workspaceId: undefined };
@@ -131,6 +139,11 @@ function safeToolReceipt(row) {
 // This intentionally supports only the bounded schema vocabulary used by these tools.
 function matchesSchema(value, schema) {
   if (!schema || typeof schema !== 'object') return false;
+  if (schema.oneOf) return schema.oneOf.filter(choice => matchesSchema(value, choice)).length === 1;
+  if (Object.hasOwn(schema, 'const') && value !== schema.const) return false;
+  if (schema.type === 'null') return value === null;
+  if (schema.type === 'boolean') return typeof value === 'boolean';
+  if (schema.type === 'integer') return Number.isSafeInteger(value) && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity);
   if (schema.enum && !schema.enum.includes(value)) return false;
   if (schema.not?.enum?.includes(value)) return false;
   if (schema.type === 'string') return typeof value === 'string' &&
@@ -219,6 +232,67 @@ async function exerciseHostedTools(catalog, workspaceId, rpc, receipts) {
   requireThat(UUID.test(note.signal_id) && note.kind === 'note', 'exercise_signal_failed');
   const work = await call('working_on', { seat: a, body: 'Checking the synthetic review checklist.', request_id: requestId('work') });
   requireThat(UUID.test(work.signal_id) && work.kind === 'working_on', 'exercise_signal_failed');
+  const objectId = `review_doc_${run}`;
+  const markdown = 'Synthetic directory review document.';
+  const created = await call('object_create', { seat: a, request_id: requestId('object_create'),
+    object_id: objectId, title: `Directory Review ${run}`, content: { kind: 'doc', markdown } });
+  requireThat(created.status === 'committed' && created.object_id === objectId, 'exercise_object_failed');
+  const listed = await call('object_list', { seat: a, offset: 0, limit: 100 });
+  requireThat(listed.status === 'ok' && Array.isArray(listed.objects), 'exercise_object_failed');
+  const read = await call('object_read', { seat: a, object_id: objectId });
+  requireThat(read.status === 'ok' && read.revision?.revision?.workspace_id === workspaceId &&
+    read.revision.revision.object_id === objectId && read.content?.markdown === markdown, 'exercise_object_failed');
+  const updated = await call('object_update', { seat: a, request_id: requestId('object_update'),
+    object_id: objectId, base: read.revision.revision,
+    patch: { kind: 'doc', splices: [{ start: 0, before: markdown, after: 'Synthetic review complete.' }] } });
+  requireThat(updated.status === 'committed' && updated.object_id === objectId, 'exercise_object_failed');
+  const history = await call('object_history', { seat: a, object_id: objectId, offset: 0, limit: 10 });
+  requireThat(history.status === 'ok' && Array.isArray(history.revisions), 'exercise_object_failed');
+  const readUpdated = await call('object_read', { seat: a, object_id: objectId });
+  requireThat(readUpdated.status === 'ok' && readUpdated.content?.markdown === 'Synthetic review complete.',
+    'exercise_readback_failed');
+  const todoCreated = await call('todo_create', { seat: a, request_id: requestId('todo_create'),
+    title: `Synthetic review ${run}`, notes: 'Check the synthetic to-do tools.' });
+  const committedTodo = (result, todoId) => {
+    requireThat(result.status === 'committed' && UUID.test(result.value?.todo_id) &&
+      (todoId === undefined || result.value.todo_id === todoId) &&
+      Number.isSafeInteger(result.value.version) && result.value.version >= 1, 'exercise_todo_failed');
+    return result.value;
+  };
+  let todo = committedTodo(todoCreated);
+  const todoId = todo.todo_id;
+  const todoList = await call('todo_list', { seat: a, scope: 'all', offset: 0, limit: 50 });
+  requireThat(Array.isArray(todoList.todos), 'exercise_todo_failed');
+  const todoRead = await call('todo_read', { seat: a, todo_id: todoId, comment_offset: 0 });
+  requireThat(todoRead.todo?.todo_id === todoId && todoRead.todo.title === todo.title &&
+    todoRead.todo.notes === 'Check the synthetic to-do tools.' && Array.isArray(todoRead.comments), 'exercise_readback_failed');
+  const target = { kind: 'todo', id: todoId };
+  const commentBody = 'Synthetic to-do review comment.';
+  const commented = await call('todo_comment', { seat: a, request_id: requestId('todo_comment'), target, body: commentBody });
+  requireThat(commented.status === 'committed' && UUID.test(commented.value?.comment_id) &&
+    commented.value.target?.id === todoId && commented.value.body === commentBody, 'exercise_todo_failed');
+  const commentList = await call('comment_list', { seat: a, target, offset: 0, limit: 20 });
+  requireThat(Array.isArray(commentList.comments) && commentList.comments.some(c =>
+    c.comment_id === commented.value.comment_id && c.body === commentBody), 'exercise_readback_failed');
+  const afterComment = await call('todo_read', { seat: a, todo_id: todoId, comment_offset: 0 });
+  requireThat(afterComment.status === 'ok' && afterComment.todo?.todo_id === todoId &&
+    Number.isSafeInteger(afterComment.todo.version) && afterComment.todo.version >= 1, 'exercise_readback_failed');
+  todo = committedTodo(await call('todo_update', { seat: a, request_id: requestId('todo_update'), todo_id: todoId,
+    base_version: afterComment.todo.version, title: 'Synthetic to-do review complete.' }), todoId);
+  requireThat(todo.title === 'Synthetic to-do review complete.', 'exercise_readback_failed');
+  todo = committedTodo(await call('todo_assign', { seat: a, request_id: requestId('todo_assign'), todo_id: todoId,
+    base_version: todo.version, to: { kind: 'agent', id: identityA.principal_id }, start: 'queue' }), todoId);
+  requireThat(todo.assignee?.kind === 'agent' && todo.assignee.id === identityA.principal_id && todo.offer === null,
+    'exercise_todo_failed');
+  const queue = await call('todo_queue', { seat: a, principal_id: identityA.principal_id,
+    section: 'up_next', offset: 0, limit: 50 });
+  requireThat(queue.status === 'ok' && Array.isArray(queue.queue?.up_next) &&
+    queue.queue.up_next.some(t => t.todo_id === todoId), 'exercise_todo_failed');
+  todo = committedTodo(await call('todo_start', { seat: a, request_id: requestId('todo_start'), todo_id: todoId }), todoId);
+  requireThat(todo.state === 'doing', 'exercise_todo_failed');
+  todo = committedTodo(await call('todo_set_state', { seat: a, request_id: requestId('todo_set_state'),
+    todo_id: todoId, base_version: todo.version, state: 'done' }), todoId);
+  requireThat(todo.state === 'done', 'exercise_todo_failed');
   // No release/delete tool exists. Do not ACK: a batch can also include existing workspace signals.
 }
 

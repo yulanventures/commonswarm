@@ -159,7 +159,7 @@ const frameScript = `<script>
         value: doc.querySelector("[data-composer-input]")?.value,
         /* THE WORKSPACE AND THE FEED, because a switch step waits on both and a payload that
            named neither could not tell which half of it had not arrived. */
-        workspace: doc.querySelector("[data-sidebar-workspace-name]")?.textContent,
+        workspace: doc.querySelector('[data-rail-workspace][aria-current="page"] .hm-rail__name')?.textContent,
         rows: doc.querySelectorAll("[data-feed-list] > li").length,
         panel: doc.querySelector("live-dashboard")?.dataset.state,
       }));
@@ -175,6 +175,7 @@ const frameScript = `<script>
     await ready();
     const input = () => doc.querySelector("[data-composer-input]");
     const list = () => doc.querySelector("[data-feed-list]");
+    const messageRows = () => [...list().children].filter(row => row.hasAttribute("data-signal-id"));
     const noteText = () => doc.querySelector("[data-composer-to-note]")?.textContent ?? "";
     const chipNames = () => [...doc.querySelectorAll("[data-composer-to-chip]")]
       .map((chip) => chip.querySelector("[data-composer-to-promote]")?.textContent ?? "");
@@ -204,14 +205,14 @@ const frameScript = `<script>
       }
     };
     const send = async (body) => {
-      const before = list().children.length;
+      const before = messageRows().length;
       type(body);
       doc.querySelector("[data-composer]").requestSubmit();
-      await waitFor(() => list().children.length > before, "the posted row");
+      await waitFor(() => messageRows().length > before, "the posted row");
       await new Promise((resolve) => view.setTimeout(resolve, 80));
       return {
-        rowsAdded: list().children.length - before,
-        rowTarget: list().lastElementChild?.querySelector(".dashboard__message-target")
+        rowsAdded: messageRows().length - before,
+        rowTarget: messageRows().at(-1)?.querySelector(".dashboard__message-target")
           ?.textContent?.trim() ?? "",
       };
     };
@@ -316,14 +317,14 @@ const frameScript = `<script>
        and presses Enter inside that window would send to a set that had not caught up unless
        the submit runs the pass first. */
     await clearTo();
-    const beforeAtOnce = list().children.length;
+    const beforeAtOnce = messageRows().length;
     type("@Lumen ship it now");
     doc.querySelector("[data-composer]").requestSubmit();
-    await waitFor(() => list().children.length > beforeAtOnce, "the row sent straight after a tag");
+    await waitFor(() => messageRows().length > beforeAtOnce, "the row sent straight after a tag");
     await new Promise((resolve) => view.setTimeout(resolve, 80));
     const taggedThenSentAtOnce = {
       chips: chipNames(),
-      rowTarget: list().lastElementChild?.querySelector(".dashboard__message-target")
+      rowTarget: messageRows().at(-1)?.querySelector(".dashboard__message-target")
         ?.textContent?.trim() ?? "",
     };
 
@@ -423,14 +424,16 @@ const frameScript = `<script>
        round of this lane closed a door on one of those three moments and the next round found
        another, because the address and the body were kept in step by hand across them. */
     const switchTo = async (workspaceId, workspaceName) => {
-      doc.querySelector("[data-workspace-menu-trigger]").click();
       await waitFor(
-        () => doc.querySelector('[data-workspace-id="' + workspaceId + '"]') !== null,
-        "the workspace menu",
+        () => {
+          const row = doc.querySelector('[data-home-workspace-list] [data-rail-workspace="' + workspaceId + '"]');
+          return row !== null && row.offsetParent !== null;
+        },
+        "the permanent workspace list",
       );
-      doc.querySelector('[data-workspace-id="' + workspaceId + '"]').click();
+      doc.querySelector('[data-home-workspace-list] [data-rail-workspace="' + workspaceId + '"]').click();
       await waitFor(
-        () => doc.querySelector("[data-sidebar-workspace-name]")?.textContent === workspaceName &&
+        () => doc.querySelector('[data-rail-workspace="' + workspaceId + '"][aria-current="page"] .hm-rail__name')?.textContent === workspaceName &&
           doc.querySelectorAll("[data-feed-list] > li").length > 0,
         "the workspace named " + workspaceName,
       );
@@ -639,9 +642,9 @@ const frameScript = `<script>
     const unsentBodySurvivesSwitch = { value: input().value, chips: chipNames() };
     /* AND SENDING IT AGAIN POSTS IT ONCE, which is the double-post this family produced twice:
        a message that came back as a draft and was sent a second time under a fresh command id. */
-    const rowsBeforeResend = list().children.length;
+    const rowsBeforeResend = messageRows().length;
     doc.querySelector("[data-composer]").requestSubmit();
-    await settleFor(() => list().children.length > rowsBeforeResend);
+    await settleFor(() => messageRows().length > rowsBeforeResend);
     await new Promise((resolve) => view.setTimeout(resolve, 200));
     const resentOnce = {
       rows: rowsCarrying("written in the field lab"),
@@ -1221,6 +1224,13 @@ test("one pass owns the address, and every handler goes through it", () => {
       "\n    });",
     ],
     ["the roster paint", "const renderRoster = (): void => {", "\n    };"],
+    /* An ask that cannot start a thread addresses its author through the same pass.
+       The click returns immediately in sample mode, and it must not assign the pair. */
+    [
+      "the ask that cannot start a thread",
+      "if (canStartThread(signal, now, channel?.archivedAt != null)) {",
+      'one<HTMLTextAreaElement>("[data-composer-input]")?.focus({ preventScroll: true });',
+    ],
   ] as const;
   for (const [where, anchor, close] of writers) {
     const start = dashboard.indexOf(anchor);
@@ -1466,6 +1476,21 @@ test("a chosen address is a draft, even before anything is typed", () => {
     dashboard,
     /if \(body === "" && !hadAttachments && !addressChosen\) \{/,
     "the draft is dropped for an empty body whatever the reader did to the address",
+  );
+  /* A flush that runs before the pass commits — the roster is still unknown, so the pair
+     in memory is the empty one reset left behind — must not write that empty pair over the
+     stored address. The body can already be the restored draft. Writing `to: []` makes the
+     next pass treat every tag in it as a new recipient, so a chip the reader removed comes
+     back when they return. */
+  assert.match(
+    dashboard,
+    /const draftTo = composerToLive \? composerTo : storedPair\?\.to;/,
+    "an uncommitted flush writes the empty in-memory address over the stored one",
+  );
+  assert.match(
+    dashboard,
+    /if \(!composerToLive && readComposerDraft\(key\)\?\.to !== undefined\) return;/,
+    "an uncommitted flush deletes an address-only draft the next paint still needs",
   );
   /* AND THE SWITCH FLUSHES BEFORE IT CLEARS. It used to cancel the pending write, which is
      right about the timer and wrong about the draft: an edit made inside the debounce window

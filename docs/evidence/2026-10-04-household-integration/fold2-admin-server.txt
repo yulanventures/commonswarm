@@ -1,0 +1,37 @@
+/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+✖ admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls (7.91775ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 139.278708
+
+✖ failing tests:
+
+test at tests/p1-server/admin-issuer-privileges.test.ts:100:3
+✖ admin-issuer-privileges: enumerate reachable roles, options, ownership and direct grants against literal allowlist with mutation controls (7.91775ms)
+  Error: Command failed: docker ps --format {{.Names}}
+  /Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+  docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+  
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at databaseContainer (/Users/yulanbot/work/cswarm-vision/lanes/hh-int-packet/tests/support/admin-schema-db.ts:30:17)
+      at emptyApplicationSchema (/Users/yulanbot/work/cswarm-vision/lanes/hh-int-packet/tests/support/admin-schema-db.ts:43:47)
+      at runSql (/Users/yulanbot/work/cswarm-vision/lanes/hh-int-packet/tests/support/admin-schema-db.ts:53:23)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-int-packet/tests/p1-server/admin-issuer-privileges.test.ts:126:3)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25) {
+    status: 127,
+    signal: null,
+    output: [ null, '', '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n' ],
+    pid: 46762,
+    stdout: '',
+    stderr: '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n'
+  }

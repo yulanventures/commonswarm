@@ -24,6 +24,10 @@ import { findChrome, launchChrome } from "../../../tests/chrome.js";
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 const dashboard = readFileSync(join(componentDir, "LiveDashboard.astro"), "utf8");
+const homeRail = readFileSync(join(siteRoot, "src/lib/home-rail.ts"), "utf8");
+const homeRailCss = readFileSync(join(siteRoot, "src/styles/home/rail.css"), "utf8");
+const homeShellCss = readFileSync(join(siteRoot, "src/styles/home/shell.css"), "utf8");
+const tokensCss = readFileSync(join(siteRoot, "src/styles/tokens.css"), "utf8");
 const dashboardStyle = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
 assert.ok(dashboardStyle, "LiveDashboard must expose its stylesheet to the geometry fixture");
 const appHtml = readFileSync(join(siteRoot, "dist", "app", "index.html"), "utf8");
@@ -55,14 +59,13 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
     renderParticipantRailFixture(member, rows(50)),
   ]);
   const rail = (name: string, participantRows: string): string => `
-    <aside class="dashboard__rail" data-rail="${name}">
-      <div class="dashboard__workspace-control">
-        <button class="dashboard__workspace-trigger">CommonSwarm Build</button>
+    <aside class="hm-shell__rail" data-rail="${name}">
+      <div class="hm-rail">
+        <nav class="hm-rail__nav"><a class="hm-rail__link">Catch up</a><h2 class="hm-rail__heading">Workspaces</h2></nav>
+        <section class="hm-rail__people"><h2 class="hm-rail__heading">People &amp; agents</h2>
+          <ul class="hm-rail__people-list" data-list="${name}">${participantRows}</ul>
+        </section>
       </div>
-      <section class="dashboard__rail-section dashboard__rail-section--participants">
-        <div class="dashboard__rail-label-row"><h2>PEOPLE &amp; AGENTS</h2></div>
-        <ul class="dashboard__sidebar-agent-list" data-list="${name}">${participantRows}</ul>
-      </section>
     </aside>`;
   const html = `<!doctype html>
 <html>
@@ -88,9 +91,9 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
       }
       * { box-sizing: border-box; }
       body { margin: 0; font-family: Arial, sans-serif; }
-      ${dashboardStyle}
+      ${tokensCss} ${homeShellCss} ${homeRailCss}
       .fixture { display: flex; align-items: flex-start; gap: 2rem; }
-      .fixture .dashboard__rail { inline-size: 18.5rem; }
+      .fixture .hm-shell__rail { inline-size: 17.5rem; }
     </style>
   </head>
   <body>
@@ -140,76 +143,22 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
   }
 };
 
-test("the workspace shell groups people with their nested agents in one bounded list", () => {
-  for (const token of [
-    /* ~~"STREAMS"~~ retired 2026-09-05. `stream` is the event log on the wire and in
-       SWARM-CLOUD.md 2.1, and this heading was the only place the app showed that word to a
-       reader. The rail now lists CHANNELS, with all-signals above them as the whole feed
-       rather than a channel among them. */
-    "CHANNELS",
-    "PEOPLE &amp; AGENTS",
-    /* ~~"# all-signals"~~ retired 2026-09-05. The rail builds that name from
-       ALL_SIGNALS_SLUG now, so the literal survived in ONE place: the comment recording the
-       change. A review arm pointed out that this token had stopped inventorying the shell
-       and started inventorying a comment, which would go red if the comment were deleted and
-       stay green if the rail stopped showing the name. It is the generating expression now,
-       the same move the header test one file down already made. */
-    "<span>{ALL_SIGNALS_SLUG}</span>",
-    "Every agent belongs to a person. Workspace-owned agents are not supported yet.",
-    "data-sidebar-participant-list",
-  ]) {
-    assert.ok(dashboard.includes(token), `dashboard shell is missing ${token}`);
-  }
-  const participantListRules = Array.from(
-    dashboard.matchAll(/\.dashboard__sidebar-agent-list\s*\{([\s\S]*?)\}/g),
-    (match) => match[1],
-  ).join("\n");
-  assert.match(
-    participantListRules,
-    /max-block-size:\s*14rem;[\s\S]*?overflow-y:\s*auto;/,
-    "the participant rail must retain its maximum height and its own vertical scroll",
-  );
-  assert.doesNotMatch(
-    participantListRules,
-    /(?:^|\n)\s*block-size:\s*14rem;/,
-    "a short participant list must shrink to its content",
-  );
-  assert.match(
-    dashboard,
-    /renderSidebarParticipants\(participantList, members, agents, initials\)/,
-  );
-  assert.equal(
-    [...dashboard.matchAll(/<button\b[^>]*data-workspace-menu-trigger[^>]*>/g)].length,
-    1,
-    "the rail renders one workspace control",
-  );
-  assert.doesNotMatch(
-    dashboard,
-    /dashboard__workspace-switcher/,
-    "the superseded Workspaces rail section must not return beside the top control",
-  );
-  const privacyResetStart = dashboard.indexOf("const resetWorkspaceSessionState");
-  const privacyResetEnd = dashboard.indexOf("armLiveFeed =", privacyResetStart);
-  assert.notEqual(privacyResetStart, -1, "privacy-reset start anchor must resolve");
-  assert.notEqual(privacyResetEnd, -1, "privacy-reset end anchor must resolve");
-  const privacyReset = dashboard.slice(
-    privacyResetStart,
-    privacyResetEnd,
-  );
-  for (const selector of [
-    "data-sidebar-workspace-name",
-    "data-sidebar-participant-list",
-    "data-broadcast-count",
-    "data-direct-count",
-  ]) {
-    assert.ok(privacyReset.includes(selector), `privacy reset must clear ${selector}`);
-  }
-  assert.doesNotMatch(
-    dashboard,
-    /data-sidebar-(?:people|agent)-(?:list|count)/,
-    "the superseded flat participant lists and duplicate visible counts must stay retired",
-  );
-  assert.match(privacyReset, /renderRoster\(\);/);
+test("the rail carries one bounded workspace list and nested people without management doors", () => {
+  assert.match(dashboard, /data-home-rail-slot/);
+  for (const hook of ["homeCatchUp", "homeWorkspaceList", "sidebarParticipantList"]) assert.ok(homeRail.includes(hook));
+  assert.match(homeRailCss, /\.hm-rail__people-list \{[\s\S]*?min-block-size: 0;[\s\S]*?overflow-y: auto/);
+  assert.doesNotMatch(homeRailCss, /block-size: 14rem/);
+  assert.match(dashboard, /const vm = mapHomeRail\(workspaces, homeRoute, railPeople/);
+  assert.match(dashboard, /buildHomeRail\(document, vm,/);
+  assert.equal((homeRail.match(/list.dataset.homeWorkspaceList/g) ?? []).length, 1);
+  assert.doesNotMatch(dashboard.slice(dashboard.indexOf('<aside class="dashboard__rail'), dashboard.indexOf('<div class="hm-frame__main"')), /data-channel-list|data-workspace-menu-trigger|data-add-agent/);
+  const reset = dashboard.slice(dashboard.indexOf("const resetWorkspaceSessionState"), dashboard.indexOf("armLiveFeed =", dashboard.indexOf("const resetWorkspaceSessionState")));
+  for (const hook of ["data-home-catchup", "data-home-route-pane", "data-home-workspace-shell", "data-home-phone-nav", "data-home-rail-slot", "data-sidebar-participant-list", "data-broadcast-count", "data-direct-count"]) assert.ok(reset.includes(hook), hook);
+  assert.match(reset, /catchUpData = \[\]/);
+  assert.match(reset, /catchUpGeneration \+= 1/);
+  assert.match(reset, /homeScroll.clear\(\)/);
+  assert.match(reset, /renderRoster\(\);/);
+  assert.doesNotMatch(homeRail, /sidebarPeopleList|sidebarAgentList/);
 });
 
 test("the participant list shrinks when short and fills+scrolls the rail when long", async () => {
@@ -237,11 +186,15 @@ test("the participant list shrinks when short and fills+scrolls the rail when lo
 test("the channel header says what the immutable all-signals view is", () => {
   assert.match(
     dashboard,
-    /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h1>/,
+    /data-channel-name tabindex="-1">\{channelLabel\(ALL_SIGNALS_SLUG\)\}<\/h2>/,
   );
-  assert.ok(
-    dashboard.includes("Intent posted by every agent in this workspace. Immutable, and never a claim."),
+  /* Redesign 2026-10-04: plain words. The view is still the immutable whole feed; the head
+     now says so in a household reader's words, in the markup and in the script that repaints it. */
+  assert.equal(
+    [...dashboard.matchAll(/Messages from everyone in this workspace, people and agents\./g)].length,
+    2,
   );
+  assert.doesNotMatch(dashboard, /Intent posted by every agent/);
 });
 
 test("loaded-signal filters and counts classify person, agent, and broadcast targets", () => {
@@ -389,21 +342,17 @@ test("sidebar counts come from loaded signals and the shared field ships both sc
   );
 });
 
-test("participant navigation uses human presence and agent model identity", async () => {
+test("participant navigation has no person presence dot and gives agents measured status and owner labels", async () => {
   const rail = await renderParticipantRailFixture(
     [{ userId: "dana", name: "Dana Rivera", role: "owner" }],
-    [
-      { principal_id: "atlas", name: "Atlas", model: "Claude Opus", transport: "local", turn_only: false, owner_user_id: "dana" },
-      { principal_id: "orphan", name: "Orphan", model: "GPT-5", transport: "hosted_mcp", turn_only: true, owner_user_id: "former" },
-    ],
-  );
-
-  assert.match(rail.innerHtml, /dashboard__presence-dot/);
-  assert.match(rail.innerHtml, /dashboard__sidebar-model-glyph/);
-  assert.match(rail.innerHtml, />Claude Opus</);
-  assert.match(rail.innerHtml, />Local</);
-  assert.match(rail.innerHtml, />Hosted MCP</);
-  assert.match(rail.innerHtml, />operated by Owner unavailable</);
-  assert.doesNotMatch(rail.innerHtml, /dashboard__sidebar-agent-avatar/);
-  assert.doesNotMatch(rail.innerHtml, />AGENT</);
+    [{ principal_id: "atlas", name: "Atlas", transport: "local", owner_user_id: "dana" },
+      { principal_id: "orphan", name: "Orphan", transport: "hosted_mcp", owner_user_id: "former" }], "dana");
+  assert.doesNotMatch(rail.innerHtml, /presence-dot/);
+  assert.equal((rail.innerHtml.match(/class="hm-agent-orb"/g) ?? []).length, 2);
+  assert.equal((rail.innerHtml.match(/class="hm-status-word">Idle</g) ?? []).length, 2);
+  assert.match(rail.innerHtml, /No activity reported yet/);
+  assert.match(rail.innerHtml, /Orphan \(owner left\)/);
+  assert.match(rail.innerHtml, /Other agents/);
+  assert.doesNotMatch(rail.innerHtml, />Hosted MCP<|>Local</);
+  assert.doesNotMatch(rail.innerHtml, /data-remove-agent|data-resume-agent|data-get-agent-prompt/);
 });

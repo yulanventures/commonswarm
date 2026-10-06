@@ -1,0 +1,148 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Main.dc.html": {
+      "expand": "fill",
+      "h": 1100,
+      "is_interactive": true,
+      "title": "Catch up",
+      "w": 1360,
+      "x": 0,
+      "y": 0
+    },
+    "New-Space.dc.html": {
+      "expand": "fill",
+      "h": 1100,
+      "is_interactive": true,
+      "title": "Start a space",
+      "w": 1360,
+      "x": 2880,
+      "y": 0
+    },
+    "Phone-Join.dc.html": {
+      "h": 844,
+      "is_interactive": true,
+      "title": "Nikki joins",
+      "w": 390,
+      "x": 0,
+      "y": 1840
+    },
+    "Phone-Connect.dc.html": {
+      "h": 844,
+      "title": "Nikki connects her Muse",
+      "w": 390,
+      "x": 470,
+      "y": 1840
+    },
+    "Phone-Space.dc.html": {
+      "h": 844,
+      "title": "Checking in",
+      "w": 390,
+      "x": 940,
+      "y": 1840
+    },
+    "Phone-Sharing.dc.html": {
+      "h": 844,
+      "is_interactive": true,
+      "title": "What an agent shares",
+      "w": 390,
+      "x": 1410,
+      "y": 1840
+    },
+    "Space.dc.html": {
+      "expand": "fill",
+      "h": 1400,
+      "is_interactive": true,
+      "title": "A shared space",
+      "w": 1360,
+      "x": 1440,
+      "y": 0
+    },
+    "Members.dc.html": {
+      "expand": "fill",
+      "h": 1120,
+      "is_interactive": true,
+      "title": "People and agents in a space",
+      "w": 1360,
+      "x": 0,
+      "y": 3104
+    },
+    "Add-Agent.dc.html": {
+      "expand": "fill",
+      "h": 1320,
+      "is_interactive": true,
+      "title": "Add an agent",
+      "w": 760,
+      "x": 1440,
+      "y": 3104
+    },
+    "Agent.dc.html": {
+      "expand": "fill",
+      "h": 1380,
+      "is_interactive": true,
+      "title": "An agent: seats and queue",
+      "w": 1360,
+      "x": 2280,
+      "y": 3104
+    },
+    "Todo.dc.html": {
+      "expand": "fill",
+      "h": 1400,
+      "is_interactive": true,
+      "title": "A to-do: assign and tag",
+      "w": 760,
+      "x": 3720,
+      "y": 3104
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-10-05T16:52:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "canvas"
+  },
+  "notes": {
+    "phone": {
+      "kind": "title1",
+      "maxW": 1800,
+      "text": "Phone: join, connect, check in, share",
+      "w": 240,
+      "x": 0,
+      "y": 1540
+    },
+    "web": {
+      "kind": "title1",
+      "maxW": 4240,
+      "text": "Web: catch up, a shared space, starting one",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "manage": {
+      "kind": "title1",
+      "maxW": 4480,
+      "text": "People and agents: manage, connect, queue, assign",
+      "w": 240,
+      "x": 0,
+      "y": 2804
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Space.dc.html",
+    "New-Space.dc.html",
+    "Phone-Join.dc.html",
+    "Phone-Connect.dc.html",
+    "Phone-Space.dc.html",
+    "Phone-Sharing.dc.html",
+    "Members.dc.html",
+    "Add-Agent.dc.html",
+    "Agent.dc.html",
+    "Todo.dc.html"
+  ],
+  "pages": [],
+  "title": "CommonSwarm Home"
+}

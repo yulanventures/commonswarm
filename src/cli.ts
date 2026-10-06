@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { HOUSEHOLD_TOOL_REGISTRY, type Schema } from "./protocol/household-tool-registry.js";
+import { HouseholdObjectClient } from "./cloud/household-objects.js";
+import { createHouseholdHttpTransport, LOCAL_HOUSEHOLD_SEAT } from "./cloud/household-http.js";
 import { randomUUID } from "node:crypto";
 import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main-routing.js";
 import { signalDuration } from "./cloud/signal-duration.js";
@@ -650,7 +653,7 @@ export const KNOWN_FLAGS = new Set([
   "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel", "before", "grant-id",
-  "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
+  "help", "input-file", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
   "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "parent", "thread",
@@ -961,6 +964,7 @@ Credential selection for command/dogfood:
                             file put, file ls, file get, file rm, file restore,
                             brain ls, brain get, brain put
                                           read and command, nothing persisted -- either form
+                            object        read and command, nothing persisted -- either form
                             feedback      command only, nothing persisted     -- either form
                             command, dogfood
                                           task protocol commands              -- either form
@@ -9764,7 +9768,7 @@ type AgentCommandHandler = (args: Arguments) => Promise<void>;
 
 export interface AgentCommandArgumentSchema {
   type: "object";
-  properties: Record<string, { type: "string" | "boolean" | "array"; items?: { type: "string" } }>;
+  properties: Record<string, Schema>;
   additionalProperties: false;
 }
 
@@ -10189,7 +10193,30 @@ async function runProfileLs(args: Arguments): Promise<void> {
 export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 export const ADMIN_READ_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "limit", "before", "json"] as const;
 export const ADMIN_REVOKE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "grant-id", "request-id", "json"] as const;
+export const HOUSEHOLD_INPUT_ACCEPTED_FLAGS = [...agentFlags, "input-file"] as const;
+
+async function runHouseholdObject(args: Arguments): Promise<void> {
+  const context = await fileContext(args, HOUSEHOLD_INPUT_ACCEPTED_FLAGS, 2);
+  const inputPath = args.required("input-file");
+  const input = JSON.parse(readFileSync(inputPath, "utf8"));
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new UsageError("--input-file must contain an object of tool arguments");
+  const client = new HouseholdObjectClient(createHouseholdHttpTransport({ target: context.cloud,
+    authenticate: async () => ({ credential: context.selected.bearer, fetcher: context.selected.fetcher }) }), context.selected.selectedWorkspace);
+  const result = await client.prepare(args.positionals[1]!, { seat: LOCAL_HOUSEHOLD_SEAT, ...input },
+    { upload: { reservation_id: "server_pending", expires_at: 0 } }).send();
+  process.stdout.write(JSON.stringify(result) + "\n");
+  if (["refused", "unknown", "conflict"].includes(result.status)) process.exitCode = 1;
+}
+
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
+  object: group(Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [row.name, commandEntry({
+    tool: row.name, mcp: true, handler: runHouseholdObject, description: row.description, mutates: row.effect !== "read",
+    flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true,
+    help: [`cswarm object ${row.name} --input-file <path> [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`],
+  })])), args => args.positionals[1], (_args, names) => new UsageError(`cswarm object takes ${formatOrList(names)}`), {
+    refusalPolicy: { flags: HOUSEHOLD_INPUT_ACCEPTED_FLAGS, ...EXPAND_PROFILE },
+  }),
+
   admin: group({
     grants: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "List your admin grants.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin grants [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
     history: commandEntry({ ...noTool("human admin recovery; never a model tool"), handler: runAdminRead, description: "See your account actions or workspace admin history.", mutates: false, flags: ADMIN_READ_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm admin history [--workspace-id <uuid>] [--limit <n>] [--before <cursor>] [--json]"] }),
@@ -10402,6 +10429,7 @@ function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly stri
 }
 
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  ...Object.fromEntries(HOUSEHOLD_TOOL_REGISTRY.map(row => [`object.${row.name}`, HOUSEHOLD_INPUT_ACCEPTED_FLAGS])),
   "admin.grants": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.history": ADMIN_READ_ACCEPTED_FLAGS,
   "admin.revoke": ADMIN_REVOKE_ACCEPTED_FLAGS,
@@ -10543,7 +10571,7 @@ export function agentToolsForTransport(transport: AgentCommandTransport): AgentT
       tools.push({
         name: entry.tool,
         description: entry.description,
-        inputSchema: entry.argumentSchema,
+        inputSchema: (HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === entry.tool)?.inputSchema as AgentCommandArgumentSchema | undefined) ?? entry.argumentSchema,
         mutates: entry.mutates,
         flags: entry.flags,
       });

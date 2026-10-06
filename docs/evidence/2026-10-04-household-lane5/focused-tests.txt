@@ -1,0 +1,37 @@
+env HOME="$T" node --import tsx --test tests/household-human-invitations.test.ts tests/p1-cli/human-invitations.test.ts tests/p1-cli/admin-routine.test.ts tests/p1-cli/admin-protocol-bundle.test.ts site/src/lib/human-invitations.test.mjs site/src/components/invite/member-invite.observer.test.ts
+
+✔ invite payload is strict, canonical, and fragment-only (1.509833ms)
+✔ invite target is pinned and auth resume storage is erasable (0.52975ms)
+✔ /invite retains fragment hygiene and requires independent human consent (7.285667ms)
+✔ sign-out and a different human clear invitation rows and suppress a late private inbox result (0.753042ms)
+✔ a delayed preview cannot replace the newly selected invitation; no acceptance occurs before the human chooses (0.183833ms)
+✔ changed disclosure requires a fresh review and cannot be automatically accepted (0.131625ms)
+✔ only the intended signed-in human can choose shared membership after current disclosure (1.381542ms)
+✔ consumed invitation retries do not revive removed members or borrow a different recipient identity (0.081584ms)
+✔ delegated account replay retains one consumed invitation and never refunds issuance (0.288042ms)
+✔ migration 06 carries the exact reserve inverse and release copies while preserving existing authority data (5.925875ms)
+✔ v2 consent, grant projection and digest retain the exact capability snapshot (2.365709ms)
+✔ the generated edge bundle can issue a consented account grant and refuses a worker grant (1.035583ms)
+✔ the generated bundle enforces separate routine creation permission and folds both streams (1.907708ms)
+✔ v2 consent, grant projection and digest retain the exact capability snapshot (2.557041ms)
+✔ routine workspace creation requires its separate scope and new spaces inherit only confirmed operations (2.020292ms)
+✔ connection preparation persists one pending target without seats or credentials, and retries do not slide expiry (1.028292ms)
+✔ pending enrollment validates permission and target beside a valid control (1.091458ms)
+✔ cancellation and expiry never revive a target or refund the lifetime attempt budget (1.270375ms)
+✔ human parent termination and workspace withdrawal stop pending attempts and retain history (1.45075ms)
+✔ connection response renders current pending or cancelled state and refuses expired intake without exposing extra fields (0.435917ms)
+✔ routine seat provisioning preserves delegated attribution, own targets, worker ceilings and runtime delivery (1.043ms)
+✔ routine renewal and undelivered replacement preserve horizons, ancestry, scopes and lifetime spend (0.938458ms)
+✔ routine invitations bind recipients and member role, clip expiry, consume budgets, and revoke without refunds (1.157625ms)
+✔ routine revoke preserves history, is a no-op twice, and refuses expired grants and lost rights (1.051542ms)
+✔ recipient transport refreshes identity and retries an uncertain join with the same consent/request without credentials in the body (15.8155ms)
+✔ inbox delivery carries only the human session and no caller-chosen recipient/account selector (0.770042ms)
+✔ an acceptance response that still says pending cannot become a joined receipt (0.443542ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 27
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 201.335958

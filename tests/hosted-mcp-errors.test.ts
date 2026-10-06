@@ -6,6 +6,8 @@ import { createMcpProtocolHandler } from "../supabase/functions/mcp/protocol.ts"
 // @ts-expect-error TS5097: exercise the production adapter through tsx.
 import { commandOutput, readOutput, HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
 import type { HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+// @ts-expect-error TS5097: exercise the enforcing Deno catalog through tsx.
+import { HOSTED_TOOL_TABLE } from "../supabase/functions/mcp/tools.ts";
 
 const seat = "seat_ABCDEFGHIJKLMNOPQRSTUV";
 const uuid = "11111111-1111-4111-8111-111111111111";
@@ -69,7 +71,7 @@ test("hosted command and read failures return exact stable codes and safe recove
     ["credential_kind_forbidden", "This connection cannot perform this operation. Reconnect your CommonSwarm account and approve workspace access."],
     ["unauthenticated", "Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry."],
     ["hosted_seat_forbidden", "This seat is unavailable to your connection. Call claim_seat and use its returned handle; if access is still denied, ask a workspace admin to restore your membership and reconnect."],
-    ["hosted_seat_revoked", "This seat has been revoked and cannot be restored. Call claim_seat with another name and a new request_id; reconnect if access is denied."],
+    ["hosted_seat_revoked", "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name."],
     ["hosted_seat_name_invalid", "The seat name is invalid. Use 1 to 80 characters with no surrounding spaces or control characters."],
     ["hosted_seat_name_taken", "That seat name is taken in this workspace. Call claim_seat with another name and a new request_id."],
     ["hosted_seat_limit_reached", "This connection has reached its seat limit. Reuse a seat returned by claim_seat, or ask a workspace admin to revoke an unused seat."],
@@ -173,9 +175,10 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   const serve = handler(async () => { executed++; return { ok: true }; });
   const response = await serve(request("private-token", { seat }));
   assert.equal(response.status, 400);
+  assert.equal(HOSTED_TOOL_TABLE.length, 23, "eight core tools, five object tools and ten to-do/comment tools");
   assert.deepEqual(await response.json(), { jsonrpc: "2.0", id: 1, error: {
     code: -32602,
-    message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members) and arguments as a JSON object.",
+    message: `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map(tool => tool.name).join(", ")}) and arguments as a JSON object.`,
   } });
   assert.equal(executed, 0);
   assert.equal((await serve(request("whoami", { seat }))).status, 200);

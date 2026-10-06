@@ -1,0 +1,16 @@
+✔ a flag that does not exist is reported as unknown, not as misused (81.843084ms)
+✔ a real flag missing its value still says so — the two must stay distinguishable (78.484083ms)
+✔ KNOWN_FLAGS preserves historical bare-flag refusal wording (885.989083ms)
+✔ --help states the credential contract as a PROPERTY, and names both strict cases (87.903958ms)
+✔ every subcommand taking --agent-token-stdin is accounted for in its description (87.422041ms)
+✔ every advertised stdin credential site also advertises the file form (113.013125ms)
+✔ agent token file accepts 0600, refuses 0644, and missing has a distinct code (171.481542ms)
+✔ --agent-token-stdin still authenticates the same whoami path (146.887208ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1863.165541

@@ -1,0 +1,29 @@
+
+> cloud-swarm@0.1.80 check:edge
+> deno check --config supabase/functions/command/deno.json supabase/functions/command/index.ts supabase/functions/read/index.ts supabase/functions/capability/index.ts supabase/functions/activity/index.ts supabase/functions/h0/index.ts supabase/functions/mcp/index.ts supabase/functions/admin/index.ts deploy/edge-runtime/main/index.ts
+
+Download https://registry.npmjs.org/@supabase%2fsupabase-js
+Download https://registry.npmjs.org/postgres
+Download https://registry.npmjs.org/@supabase/supabase-js/-/supabase-js-2.110.8.tgz
+Download https://registry.npmjs.org/postgres/-/postgres-3.4.9.tgz
+Download https://registry.npmjs.org/@supabase/postgrest-js/-/postgrest-js-2.110.8.tgz
+Download https://registry.npmjs.org/@supabase/realtime-js/-/realtime-js-2.110.8.tgz
+Download https://registry.npmjs.org/@supabase/auth-js/-/auth-js-2.110.8.tgz
+Download https://registry.npmjs.org/@supabase/storage-js/-/storage-js-2.110.8.tgz
+Download https://registry.npmjs.org/@supabase/functions-js/-/functions-js-2.110.8.tgz
+Download https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz
+Download https://registry.npmjs.org/@supabase/phoenix/-/phoenix-0.4.5.tgz
+Download https://registry.npmjs.org/iceberg-js/-/iceberg-js-0.8.1.tgz
+Check supabase/functions/command/index.ts
+Check supabase/functions/read/index.ts
+Check supabase/functions/capability/index.ts
+Check supabase/functions/activity/index.ts
+Check supabase/functions/h0/index.ts
+Check supabase/functions/mcp/index.ts
+Check supabase/functions/admin/index.ts
+Check deploy/edge-runtime/main/index.ts
+npm notice
+npm notice New major version of npm available! 11.19.0 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice

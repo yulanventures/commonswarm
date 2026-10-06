@@ -87,14 +87,15 @@ test("site identity removal stays distinct from cancelling pending access", asyn
   );
 
   assert.match(dashboard, /revokeAgentPrincipal\(/);
-  assert.match(dashboard, /dataset\.removeAgent/);
+  const view = await readFile("site/src/lib/people-dialog-view.ts", "utf8");
+  assert.match(view, /actionButton\("remove-agent", agent,[^\n]*"data-remove-agent"\)/);
   assert.match(
-    dashboard,
-    /ends its identity and every live credential/,
+    view,
+    /Its identity and every connection will end/,
   );
   assert.match(
-    dashboard,
-    /Clearing a Copy prompt only hides the secret/,
+    connect,
+    /clearPrompt\(notify = true\)\s*\{\s*this\.finishPrompt\("done", notify\)/,
   );
   assert.match(commonswarm, /kind: "revoke_agent_principal"/);
   assert.match(commonswarm, /kind: "revoke_agent_token"/);

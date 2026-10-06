@@ -1,5 +1,7 @@
 import { modelFamily, modelGlyphSvg } from './model-glyph.js';
 import { identityDisplayLabel } from './identity-label.js';
+import { agentStatus } from './agent-status.js';
+import type { AgentPresenceRow } from '../../../src/cloud/agent-presence.js';
 
 export interface RailMember {
   userId: string;
@@ -13,6 +15,9 @@ export interface RailAgent {
   ownerUserId: string;
   model?: string | null;
   transport?: "local" | "hosted_mcp";
+  turnOnly?: boolean;
+  /** undefined: the server gave no view; null: no row yet (see agent-status.ts). */
+  presence?: AgentPresenceRow | null;
 }
 
 export interface RosterAgent extends RailAgent {
@@ -44,14 +49,22 @@ const compareMembers = <TMember extends RailMember>(left: TMember, right: TMembe
 const compareAgents = <TAgent extends RailAgent>(left: TAgent, right: TAgent): number =>
   compareText(left.name, right.name) || compareText(left.principalId, right.principalId);
 
+export interface ParticipantOrderOptions {
+  /** The signed-in person. Their group comes first; everyone else stays alphabetical. */
+  viewerId?: string | null;
+}
+
 /** Keeps every workspace member and agent visible while making ownership structural. */
 export const groupParticipantsByOwner = <
   TMember extends RailMember,
   TAgent extends RailAgent,
->(members: TMember[], agents: TAgent[]): ParticipantGroup<TMember, TAgent>[] => {
+>(members: TMember[], agents: TAgent[], options: ParticipantOrderOptions = {}): ParticipantGroup<TMember, TAgent>[] => {
   const memberIds = new Set(members.map((member) => member.userId));
+  const viewerId = options.viewerId ?? null;
+  const viewerFirst = (left: TMember, right: TMember): number =>
+    viewerId === null ? 0 : Number(right.userId === viewerId) - Number(left.userId === viewerId);
   const groups: ParticipantGroup<TMember, TAgent>[] = [...members]
-    .sort(compareMembers)
+    .sort((left, right) => viewerFirst(left, right) || compareMembers(left, right))
     .map((member) => ({
       kind: "member",
       member,
@@ -71,7 +84,7 @@ export const groupParticipantsByOwner = <
 /** Normalizes roster rows without discarding agents whose owner cannot be resolved. */
 export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
   rows
-    .map((row) => ({
+    .map<RosterAgent>((row) => ({
       principalId: String(row.principal_id ?? ''),
       name: String(row.name ?? 'Unnamed agent'),
       model: row.model == null ? null : String(row.model),
@@ -90,6 +103,7 @@ export const renderSidebarParticipants = <
   members: TMember[],
   agents: TAgent[],
   initials: (name: string) => string,
+  options: ParticipantOrderOptions = {},
 ): void => {
   const document = participantList.ownerDocument;
   participantList.replaceChildren();
@@ -117,11 +131,14 @@ export const renderSidebarParticipants = <
     name.textContent = label;
     name.title = label;
     copy.append(name);
-    const transport = document.createElement('span');
-    transport.textContent = agent.transport === 'hosted_mcp'
-      ? 'Hosted MCP'
-      : 'Local';
-    copy.append(transport);
+    /* One plain status instead of the wire transport (Tom's plain-words rule). The transport
+       stays in the profile panel for support. */
+    const status = agentStatus({ transport: agent.transport, turnOnly: agent.turnOnly, presence: agent.presence });
+    const statusLine = document.createElement('span');
+    statusLine.className = 'dashboard__sidebar-agent-status';
+    statusLine.dataset.agentStatus = status.kind;
+    statusLine.textContent = status.chip;
+    copy.append(statusLine);
     if (agent.model) {
       const model = document.createElement('span');
       model.textContent = agent.model;
@@ -137,7 +154,7 @@ export const renderSidebarParticipants = <
     return row;
   };
 
-  for (const group of groupParticipantsByOwner(members, agents)) {
+  for (const group of groupParticipantsByOwner(members, agents, options)) {
     const groupItem = document.createElement('li');
     groupItem.className = 'dashboard__sidebar-owner-group';
     const personRow = document.createElement('div');
@@ -152,10 +169,7 @@ export const renderSidebarParticipants = <
       avatar.className = 'dashboard__sidebar-person-avatar';
       avatar.textContent = initials(group.member.name);
       avatar.setAttribute('aria-hidden', 'true');
-      const presence = document.createElement('span');
-      presence.className = 'dashboard__presence-dot';
-      presence.setAttribute('aria-hidden', 'true');
-      avatarWrap.append(avatar, presence);
+      avatarWrap.append(avatar);
       const copy = document.createElement('span');
       copy.className = 'dashboard__sidebar-participant-copy';
       const name = document.createElement('strong');

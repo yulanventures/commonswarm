@@ -8,18 +8,18 @@ import type postgres from 'postgres';
 import type {
   HouseholdAttribution, HouseholdBlob, HouseholdContent, HouseholdObjectState,
   HouseholdRevision, HouseholdRevisionRef,
-} from '../../../src/protocol/household-object-events.js';
-import type { HouseholdAccessFacts, HouseholdContentOperation } from '../../../src/protocol/household-object-policy.js';
-import type { HouseholdObjectCommand, HouseholdVerifiedContent, HouseholdReadQuery } from '../../../src/protocol/household-objects.js';
-import type { HouseholdStorage } from './household-transfers.js';
+} from '../_shared/household-object-events.d.ts';
+import type { HouseholdAccessFacts, HouseholdContentOperation } from '../_shared/household-object-policy.d.ts';
+import type { HouseholdObjectCommand, HouseholdVerifiedContent, HouseholdReadQuery } from '../_shared/household-objects.d.ts';
+import type { HouseholdStorage } from './household-transfers.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-type Core = Pick<typeof import('../../../src/protocol/household-objects.js'),
+type Core = Pick<typeof import('../_shared/household-objects.d.ts'),
   'decideHouseholdObject' | 'reduceHouseholdObjectStream' | 'readHouseholdObjects' | 'emptyHouseholdObjectState' | 'householdObjectUsage'>
-  & Pick<typeof import('../../../src/protocol/household-object-policy.js'),
+  & Pick<typeof import('../_shared/household-object-policy.d.ts'),
     'householdAccessRefusal' | 'HOUSEHOLD_LIVE_REVISION_LIMIT' | 'HOUSEHOLD_VERSION_BYTE_LIMIT'
     | 'HOUSEHOLD_IDENTITY_WRITE_HOURLY_LIMIT' | 'HOUSEHOLD_WORKSPACE_WRITE_HOURLY_LIMIT'>;
-type Transfers = typeof import('./household-transfers.js');
+type Transfers = typeof import('./household-transfers.ts');
 
 /** Already-authenticated identity, never copied from model parameters. The
  * recheck verifies the actual human session or agent credential/handle, including
@@ -57,6 +57,7 @@ export function createHouseholdObjectStore(dependencies: {
   /** Reuse fileContentAllowed from file-artifacts.ts. */
   fileContentAllowed: (name: string, contentType: string) => boolean;
   recheckCredential: HouseholdCredentialRecheck;
+  newFileIdentity?: (objectId: string) => { file_id: string; name: string };
 }) {
   const { core, transfers, storage, recheckCredential } = dependencies;
 
@@ -87,7 +88,7 @@ export function createHouseholdObjectStore(dependencies: {
         connection_id: String(connection.connection_id), grant_id: String(connection.grant_id), workspace_id: workspaceId,
         principal_id: identity.principal_id, owner_user_id: identity.user_id,
         operations: connection.operations as HouseholdContentOperation[], purpose: connection.purpose as 'personal' | 'shared',
-        revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at)!,
+        revoked_at: stamp(connection.revoked_at), expires_at: stamp(connection.expires_at),
       } };
     } else if (identity.connection !== null || identity.run_id !== null) return null;
     const [clock] = await tx`SELECT clock_timestamp() AS now`;
@@ -151,7 +152,7 @@ export function createHouseholdObjectStore(dependencies: {
       throw new transfers.HouseholdTransferError('content_invalid');
     }
     const proposalDigest = bytes ? await transfers.householdSha256(bytes) : null;
-    const digest = await transfers.householdSha256(new TextEncoder().encode(transfers.householdCanonical({ command,
+    const digest = await transfers.householdSha256(new TextEncoder().encode(transfers.householdCanonical({ command: command.kind === 'reserve_household_upload' ? { ...command, expires_at: 0 } : command,
       proposal: proposal ? { content: proposal.content, sha256: proposalDigest } : null })));
     const current = await state(tx, workspaceId, true);
     const previous = current.receipts[JSON.stringify([identity.principal_id ?? identity.user_id, requestId])];
@@ -173,7 +174,7 @@ export function createHouseholdObjectStore(dependencies: {
       if (revision) contents.push(await content(tx, workspaceId, revision));
     }
     let prepared: HouseholdVerifiedContent | null = null;
-    let slot: { fileId: string; versionId: string; versionN: number; path: string; newFile: boolean } | null = null;
+    let slot: { fileId: string; versionId: string; versionN: number; path: string; newFile: boolean; name?: string } | null = null;
     if (command.kind === 'commit_household_upload') {
       const reservation = own(current.reservations, command.reservation_id);
       // No byte access until the same owner/connection and operation are checked.
@@ -191,13 +192,14 @@ export function createHouseholdObjectStore(dependencies: {
     } else if (command.kind !== 'release_household_upload' && proposal && bytes) {
       if (command.object_id.length > 255) throw new transfers.HouseholdTransferError('content_invalid');
       const [binding] = await tx`SELECT file_id FROM swarm.household_object_bindings WHERE workspace_id=${workspaceId}::uuid AND object_id=${command.object_id}`;
-      const fileId = binding ? String(binding.file_id) : crypto.randomUUID();
+      const legacyFile = !binding ? dependencies.newFileIdentity?.(command.object_id) : undefined;
+      const fileId = binding ? String(binding.file_id) : legacyFile?.file_id ?? crypto.randomUUID();
       const [max] = await tx`SELECT coalesce(max(version_n),0) AS n FROM swarm.file_versions WHERE workspace_id=${workspaceId}::uuid AND file_id=${fileId}::uuid`;
       const versionId = crypto.randomUUID();
       // Preserve the workspace/file/version hierarchy, using an immutable
       // version ID for new keys. A DB rollback after PUT must never cause the
       // next attempt to reuse an orphan's key and get stuck behind upsert-off.
-      slot = { fileId, versionId, versionN: Number(max!.n) + 1, path: `${workspaceId}/${fileId}/${versionId}`, newFile: !binding };
+      slot = { fileId, versionId, versionN: Number(max!.n) + 1, path: `${workspaceId}/${fileId}/${versionId}`, newFile: !binding, name: legacyFile?.name };
       prepared = { workspace_id: workspaceId, object_id: command.object_id, revision: base,
         blob: { storage_key: slot.path, size_bytes: bytes.byteLength, sha256: proposalDigest! }, content: proposal.content };
     }
@@ -217,7 +219,7 @@ export function createHouseholdObjectStore(dependencies: {
       // or projection survives. A rolled-back object is collected by orphan GC.
       if (slot.newFile) {
         await tx`INSERT INTO swarm.files(file_id,workspace_id,name,created_by_kind,created_by,household_managed)
-          VALUES (${slot.fileId}::uuid,${workspaceId}::uuid,${`household--${slot.fileId}.json`},${identity.principal_id ? 'agent' : 'user'},${identity.principal_id ?? identity.user_id}::uuid,true)`;
+          VALUES (${slot.fileId}::uuid,${workspaceId}::uuid,${slot.name ?? `household--${slot.fileId}.json`},${identity.principal_id ? 'agent' : 'user'},${identity.principal_id ?? identity.user_id}::uuid,true)`;
         await tx`INSERT INTO swarm.household_object_bindings(workspace_id,object_id,file_id) VALUES (${workspaceId}::uuid,${prepared.object_id},${slot.fileId}::uuid)`;
       }
       await tx`INSERT INTO swarm.file_versions(version_id,file_id,workspace_id,version_n,state,size_bytes,sha256,content_type,storage_path,uploaded_by_kind,uploaded_by)
@@ -295,5 +297,5 @@ export function createHouseholdObjectStore(dependencies: {
     // hosts carry it as a protected attachment, not a signed URL/model string.
     return { status: 'ok' as const, metadata: result, bytes };
   }
-  return { write, read, readBytes };
+  return { write, read, readBytes, access, state };
 }

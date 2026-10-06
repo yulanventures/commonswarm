@@ -147,20 +147,18 @@ test("the profile file accepts either released shape and rejects an extra key", 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-/* The app's switcher must show the id, because that is the half a person cannot otherwise see.
- * Pinned against the built artifact is the job of the site observers; here we pin the source. */
-test("the app's workspace switcher shows the id beside the name", () => {
-  const dashboard = read("site/src/components/app/LiveDashboard.astro");
-  /* Anchored on the two structural ends of the option builder, not on a character budget: the
-   * first version allowed 900 characters and a comment added here pushed the real span to
-   * 1,010, so the control failed for its own reason rather than the code's. A lazy match to the
-   * next `button.append` is bounded by the structure itself. */
-  /* Anchor on the SWITCHER, not on the first `createElement("span")` in the file — that one is
-   * the members list. A Grok arm noted the old start-anchor was not unique and worked only
-   * because the id lines happen to exist nowhere else today. */
-  const block = /dashboard__workspace-button[\s\S]*?button\.append\(label, check\)/
-    .exec(dashboard)?.[0];
-  assert.ok(block, "the workspace switcher's option rendering is no longer recognisable");
-  assert.match(block!, /identifier\.textContent = workspace\.id/, "the switcher no longer shows the workspace id");
-  assert.match(block!, /label\.append\(identifier\)/, "the id is built but never attached to the option");
+/* The rail identifies duplicate names with a short UUID beside the name. */
+test("the app's workspace list shows the id beside ambiguous names", async () => {
+  const { railWorkspaceIdentifier } = await import("../../site/src/lib/home-rail.ts");
+  const rows = [
+    { id: "4f63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Home", href: "?w=A", current: true, needsYou: null },
+    { id: "ab63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Home", href: "?w=B", current: false, needsYou: null },
+    { id: "ff63d2b0-8d95-4ea3-b46a-ac573cebc432", name: "Trip", href: "?w=C", current: false, needsYou: null },
+  ];
+  assert.equal(railWorkspaceIdentifier(rows[0], rows), "4f63d2b0");
+  assert.equal(railWorkspaceIdentifier(rows[1], rows), "ab63d2b0");
+  assert.equal(railWorkspaceIdentifier(rows[2], rows), null);
+  const rail = read("site/src/lib/home-rail.ts");
+  assert.match(rail, /identifier\.title = workspace\.id/);
+  assert.match(rail, /row\.append\(identifier\)/, "the identifying id must be attached beside the name");
 });

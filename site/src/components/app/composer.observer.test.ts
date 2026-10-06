@@ -37,7 +37,7 @@ test("composer defaults to broadcast and keeps signal language", () => {
   assert.match(markup, /maxlength=\{SIGNAL_BODY_MAX\}/);
   assert.match(dashboard, /import \{ SIGNAL_BODY_MAX \} from/);
   assert.doesNotMatch(markup, /maxlength="8000"/);
-  assert.match(markup, /placeholder="What are you about to do\?"/);
+  assert.match(markup, /placeholder="Write to everyone, or type @ to tag a person or an agent"/);
   assert.doesNotMatch(markup, /Message #general|Message #all-signals/i);
   assert.doesNotMatch(markup, /only .* sees|will see|private|lock/i);
   /* ~~`assert.doesNotMatch(markup, /emoji|reaction|thread/i)`~~ This gate was retired for

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -7,14 +7,7 @@ import { test } from "node:test";
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 const dashboard = readFileSync(join(componentDir, "LiveDashboard.astro"), "utf8");
-const appHtml = readFileSync(join(siteRoot, "dist", "app", "index.html"), "utf8");
-const assetPaths = Array.from(
-  appHtml.matchAll(/(?:src|href)="\/(_astro\/[^"?#]+\.(?:js|css))/g),
-  (match) => match[1]!,
-);
-const builtAssets = assetPaths
-  .map((assetPath) => readFileSync(join(siteRoot, "dist", assetPath), "utf8"))
-  .join("\n");
+const builtAppPath = join(siteRoot, "dist", "app", "index.html");
 const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? "";
 const declarations = style.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -48,7 +41,18 @@ test("the dashboard consumes the shared site tokens without a local colour syste
   assert.doesNotMatch(declarations, /color-scheme:\s*light\b/);
 });
 
-test("the emitted dashboard CSS carries the token system's light and dark paths", () => {
+test("the emitted dashboard CSS carries the token system's light and dark paths", {
+  skip: !process.env.CI && !existsSync(builtAppPath) ? "site/dist is absent; compiled CSS verification runs after the CI build" : false,
+}, () => {
+  const appHtml = readFileSync(builtAppPath, "utf8");
+  const assetPaths = Array.from(
+    appHtml.matchAll(/(?:src|href)="\/(_astro\/[^"?#]+\.(?:js|css))/g),
+    (match) => match[1]!,
+  );
+  const builtAssets = assetPaths
+    .map((assetPath) => readFileSync(join(siteRoot, "dist", assetPath), "utf8"))
+    .join("\n");
+  assert.ok(assetPaths.length > 0, "the built app must reference emitted assets");
   assert.match(builtAssets, /--elev-0:/);
   assert.match(builtAssets, /\.dashboard\{[^}]*background:var\(--bg\)/);
   assert.match(builtAssets, /@media\s*\(prefers-color-scheme:\s*dark\)/);

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Add one of your agents</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&amp;family=Instrument+Sans:wght@400..700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#17231C}a:hover{color:#2F4438}
+</style>
+</helmet>
+<div style="min-height: 100vh; box-sizing: border-box; padding: 20px clamp(16px, 4vw, 32px) 32px; background: #FCFDFA; color: #17231C; font-family: 'Instrument Sans', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 16px; line-height: 1.45">
+<div style="max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px">
+
+<div>
+<a href="Members.dc.html" style="display: inline-flex; align-items: center; gap: 6px; min-height: 44px; color: #4F5E54; text-decoration: none; font-size: 15px; font-weight: 600">
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#4F5E54" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3L5 8l5 5"></path></svg>
+<span>People and agents in Home</span>
+</a>
+<h1 style="margin: 4px 0 0; font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 36px; line-height: 1.05; letter-spacing: -0.025em">Add one of your agents</h1>
+<p style="margin: 8px 0 0; font-size: 17px; color: #4F5E54; text-wrap: pretty">It joins as yours. Other people connect their own, the same way, from their own account.</p>
+</div>
+
+<section>
+<div style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 21px; letter-spacing: -0.01em">1. Which assistant?</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px">
+<button type="button" aria-pressed="{{claudeOn}}" onClick="{{claudePick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{claudeBg}}; color: {{claudeFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">Claude</button>
+<button type="button" aria-pressed="{{chatgptOn}}" onClick="{{chatgptPick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{chatgptBg}}; color: {{chatgptFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">ChatGPT</button>
+<button type="button" aria-pressed="{{grokOn}}" onClick="{{grokPick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{grokBg}}; color: {{grokFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">Grok</button>
+<button type="button" aria-pressed="{{museOn}}" onClick="{{musePick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{museBg}}; color: {{museFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">Muse</button>
+<button type="button" aria-pressed="{{dotOn}}" onClick="{{dotPick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{dotBg}}; color: {{dotFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">dot</button>
+<button type="button" aria-pressed="{{otherOn}}" onClick="{{otherPick}}" style="min-height: 46px; padding: 0 18px; border: 1.5px solid #17231C; border-radius: 999px; background: {{otherBg}}; color: {{otherFg}}; font: inherit; font-weight: 600; font-size: 15px; cursor: pointer">Something else</button>
+</div>
+</section>
+
+<section>
+<label style="display: flex; flex-direction: column; gap: 10px">
+<span style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 21px; letter-spacing: -0.01em">2. Name its seat</span>
+<input type="text" value="{{seat}}" style="width: 100%; min-height: 52px; padding: 0 16px; box-sizing: border-box; border: 1.5px solid #17231C; border-radius: 14px; background: #FFFFFF; font: inherit; font-size: 18px; font-weight: 600; color: #17231C">
+</label>
+<p style="margin: 8px 0 0; font-size: 14px; color: #4F5E54; text-wrap: pretty">{{seatHelp}}</p>
+</section>
+
+<section>
+<div style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 21px; letter-spacing: -0.01em">3. Put a session in the seat</div>
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; margin-top: 12px; padding: 16px 18px; background: #EEF2EA; border-radius: 16px">
+<div style="flex: 1 1 320px; min-width: 0; text-wrap: pretty">{{howLine}}</div>
+<button type="button" onClick="{{connect}}" style="min-height: 48px; padding: 0 22px; border: 0; border-radius: 999px; background: #17231C; color: #EEF2EA; font: inherit; font-weight: 700; font-size: 15px; cursor: pointer">{{openLabel}}</button>
+</div>
+
+<div style="margin-top: 14px; font-size: 14px; font-weight: 600; color: #4F5E54">Or paste this into any assistant that can add a connector</div>
+<div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin-top: 8px; padding: 14px 16px; background: #17231C; border-radius: 14px">
+<div style="flex: 1 1 320px; min-width: 0; color: #EEF2EA; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere">{{prompt}}</div>
+<button type="button" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #5C6F63; border-radius: 999px; background: transparent; color: #EEF2EA; font: inherit; font-weight: 700; font-size: 14px; cursor: pointer">Copy</button>
+</div>
+
+<div style="display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 16px; background: {{waitBg}}; border-radius: 14px; font-weight: 600">
+<span style="width: 10px; height: 10px; border-radius: 50%; flex: none; background: {{waitDot}}; border: 1.5px solid #17231C; box-sizing: border-box"></span>
+<span>{{waitLine}}</span>
+</div>
+</section>
+
+<section>
+<div style="font-family: 'Bricolage Grotesque', 'Trebuchet MS', system-ui, sans-serif; font-weight: 700; font-size: 21px; letter-spacing: -0.01em">4. What it can do in Home</div>
+
+<div style="margin-top: 12px; font-weight: 600">Who can give it work</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px">
+<button type="button" aria-pressed="{{anyoneOn}}" onClick="{{anyonePick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{anyoneBg}}; color: {{anyoneFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">Anyone in Home</button>
+<button type="button" aria-pressed="{{meOn}}" onClick="{{mePick}}" style="min-height: 44px; padding: 0 16px; border: 1.5px solid #17231C; border-radius: 999px; background: {{meBg}}; color: {{meFg}}; font: inherit; font-weight: 600; font-size: 14px; cursor: pointer">Only me</button>
+</div>
+
+<div style="margin-top: 16px; border-top: 1px solid #E3E9DD">
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px">
+<span>Shares what you post in Home</span>
+<span style="font-size: 13px; font-weight: 700; color: #4F5E54">Always</span>
+</div>
+<button type="button" role="switch" aria-checked="{{busyOn}}" onClick="{{busyToggle}}" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 52px; padding: 0; border: 0; border-top: 1px solid #E3E9DD; background: transparent; color: #17231C; font: inherit; text-align: left; cursor: pointer">
+<span>Shares free or busy on your calendar</span>
+<span style="width: 44px; height: 26px; border-radius: 999px; box-sizing: border-box; padding: 3px; flex: none; display: inline-flex; background: {{busyTrack}}"><span style="width: 20px; height: 20px; border-radius: 50%; margin-left: {{busyShift}}; background: {{busyKnob}}"></span></span>
+</button>
+<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; border-top: 1px solid #E3E9DD">
+<span>Asks you before it pays, books or messages anyone outside Home</span>
+<span style="font-size: 13px; font-weight: 700; color: #4F5E54">Always</span>
+</div>
+</div>
+</section>
+
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding-top: 20px; border-top: 1px solid #D3DBCC">
+<a href="Members.dc.html" style="display: inline-flex; align-items: center; min-height: 52px; padding: 0 28px; border-radius: 999px; background: #D4F04A; color: #17231C; text-decoration: none; font-weight: 700; font-size: 17px">Add to Home</a>
+<span style="flex: 1 1 240px; font-size: 14px; color: #4F5E54">You can change any of this later, or take it out of Home.</span>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":760,"height":1320}}'>
+class Component extends DCLogic {
+state = { pick: 'claude', connected: false, from: 'anyone', busy: true };
+renderVals() {
+const s = this.state || {};
+const pick = s.pick || 'claude';
+const connected = !!s.connected;
+const from = s.from || 'anyone';
+const busy = s.busy !== false;
+const names = { claude: 'Claude', chatgpt: 'ChatGPT', grok: 'Grok', muse: 'Muse', dot: 'dot', other: 'your assistant' };
+const v = {};
+Object.keys(names).forEach((k) => {
+const on = pick === k;
+v[k + 'On'] = on;
+v[k + 'Bg'] = on ? '#17231C' : 'transparent';
+v[k + 'Fg'] = on ? '#EEF2EA' : '#17231C';
+v[k + 'Pick'] = () => this.setState({ pick: k, connected: false });
+});
+const name = names[pick];
+const seat = pick === 'other' ? 'Assistant' : name;
+const piece = pick === 'chatgpt' ? 'app' : 'connector';
+v.seat = seat;
+v.seatHelp = "People will see it as Tom's " + seat + '. The seat keeps its name, queue and history even when no session is in it. Want two ' + seat + ' sessions working side by side? Add a second seat with its own name.';
+v.howLine = pick === 'other'
+? 'No one-tap setup for this one. Use the prompt below. It works in any assistant that can add a connector.'
+: 'Open ' + name + ' and add the CommonSwarm ' + piece + '. You sign in as Tom, which is what makes it yours, and it takes this seat.';
+v.openLabel = pick === 'other' ? 'Mark as connected' : 'Open ' + name;
+v.prompt = 'Add the CommonSwarm connector at https://mcp.commonswarm.com/mcp and sign in as Tom. Then claim the seat named "' + seat + '" in the Home space. Pairing code: 7QF-2MK';
+v.connect = () => this.setState({ connected: true });
+v.waitLine = connected
+? 'Connected. A ' + name + ' session took the seat at 11:32 am.'
+: 'Waiting for a session to take the seat. The pairing code is good for 10 minutes.';
+v.waitBg = connected ? '#D4F04A' : '#F1F5EC';
+v.waitDot = connected ? '#17231C' : 'transparent';
+['anyone', 'me'].forEach((k) => {
+const on = from === k;
+v[k + 'On'] = on;
+v[k + 'Bg'] = on ? '#17231C' : 'transparent';
+v[k + 'Fg'] = on ? '#EEF2EA' : '#17231C';
+v[k + 'Pick'] = () => this.setState({ from: k });
+});
+v.busyOn = busy;
+v.busyTrack = busy ? '#17231C' : '#8A978C';
+v.busyKnob = busy ? '#D4F04A' : '#FFFFFF';
+v.busyShift = busy ? '18px' : '0px';
+v.busyToggle = () => this.setState({ busy: !busy });
+return v;
+}
+}
+</script>
+</body>
+</html>

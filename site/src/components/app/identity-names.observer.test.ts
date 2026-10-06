@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+const peopleView = readFileSync(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 const connect = readFileSync(
   new URL("../connect/AgentConnect.astro", import.meta.url),
@@ -14,14 +15,15 @@ const agentConnect = readFileSync(
 
 test("selections, chips, drafts and roster rows keep principal UUIDs", () => {
   assert.match(dashboard, /dataset\.composerToChip = recipientKey\(entity\)/);
-  assert.match(dashboard, /dataset\.agentRow = agent\.principalId/);
+  assert.match(dashboard, /return \{ id: agent\.principalId, name: identityDisplayLabel/);
+  assert.match(peopleView, /dataset\.agentRow = agent\.id/);
   assert.match(dashboard, /mentionOptionId\(candidate\)/);
   assert.match(dashboard, /identityDisplayLabel/);
   assert.match(dashboard, /resolveStoredIdentityRefs/);
   assert.match(dashboard, /parseStoredIdentityRef/);
   assert.match(
     dashboard,
-    /to: composerTo/,
+    /const draftTo = composerToLive \? composerTo : storedPair\?\.to;[\s\S]{0,500}to: draftTo/,
     "a stored draft writes the UUID To: set, not the rendered label",
   );
 });

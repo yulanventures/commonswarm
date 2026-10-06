@@ -29,13 +29,24 @@ import { LISTENER_PROMPT_TIMEOUT_MS } from "../../src/listener/types.js";
 
 const repo = resolve(import.meta.dirname, "../..");
 
+test("home page budget is inventoried as bytes and never as a measured wait", async () => {
+  const [row] = enumerateText("fixture.ts", "const PAGE_BUDGET = 28 * 1024;");
+  assert.equal(row.value_ms, 28_672);
+  assert.equal(row.unit_note, "non-time size budget; raw source value retained");
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const entry = mappingForRef(mapping, "HEAD").rows["site/src/lib/home/client.ts:PAGE_BUDGET"];
+  assert.equal(entry.class, "local");
+  assert.equal(entry.operation.class, "not-run");
+  assert.deepEqual(entry.endpoints, []);
+});
+
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5288-5293; src/cloud/wake-lease.ts:69,72");
+  assert.equal(row.citation, "src/cli.ts:5292-5297; src/cloud/wake-lease.ts:69,72");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5287, 5293).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(cli.slice(5291, 5297).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
   assert.match(lease[68]!, /timeoutMs\?: number/);
   assert.match(lease[71]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });
@@ -770,7 +781,7 @@ function porcelainWorktrees(gitRepo: string): string[] {
   return listed.split("\n").filter(line => line.startsWith("worktree ")).map(line => line.slice("worktree ".length));
 }
 
-async function waitForFile(path: string, timeoutMs = 15_000) {
+async function waitForFile(path: string, timeoutMs = 15_000, diagnostic = () => "") {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
@@ -780,7 +791,7 @@ async function waitForFile(path: string, timeoutMs = 15_000) {
       await new Promise(resolve => setTimeout(resolve, 15));
     }
   }
-  throw new Error(`timed out waiting for ${path}`);
+  throw new Error(`timed out waiting for ${path}: ${diagnostic()}`);
 }
 
 type ExitPaths = {
@@ -794,6 +805,14 @@ type ExitPaths = {
 async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "exit13" | "sigterm" | "sighup" | "sigint") {
   const home = await mkdtemp(join(tmpdir(), "timeout-table-home-"));
   t.after(() => { rmSync(home, { recursive: true, force: true }); });
+  // Cleanup needs a real worktree, but never writes the checkout's shared
+  // Git metadata. Give each child a tiny, disposable source repository.
+  const gitRepo = join(home, "source-repo");
+  await mkdir(gitRepo);
+  execFileSync("git", ["init", "-q", gitRepo], { stdio: "ignore" });
+  execFileSync("git", ["-C", gitRepo, "-c", "user.name=Cleanup fixture",
+    "-c", "user.email=cleanup@commonswarm.local", "-c", "core.hooksPath=/dev/null",
+    "commit", "--allow-empty", "--no-gpg-sign", "-qm", "Synthetic cleanup source"], { stdio: "ignore" });
   const profileDir = join(home, "profile-src");
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   await chmod(profileDir, 0o700);
@@ -811,7 +830,7 @@ async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "e
   }), { mode: 0o600 });
   const marker = join(home, "marker.json");
   const fixture = join(repo, "tests/p1-cli/timeout-table-exit-fixture.mjs");
-  const child = spawn(process.execPath, [fixture, mode, marker, profile, repo], {
+  const child = spawn(process.execPath, [fixture, mode, marker, profile, gitRepo], {
     cwd: home,
     env: { PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/local/bin", HOME: home },
     stdio: ["ignore", "ignore", "pipe"],
@@ -829,7 +848,7 @@ async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "e
   t.after(() => {
     if (!paths) return;
     try {
-      execFileSync("git", ["-C", repo, "worktree", "remove", "--force", paths.worktreePath], {
+      execFileSync("git", ["-C", gitRepo, "worktree", "remove", "--force", paths.worktreePath], {
         stdio: ["ignore", "ignore", "ignore"],
         timeout: 10_000,
       });
@@ -837,71 +856,72 @@ async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "e
     try { rmSync(paths.tempRoot, { recursive: true, force: true }); } catch { /* already gone */ }
   });
   return {
-    child, closed, marker, credential, credentialBody,
+    child, closed, marker, credential, credentialBody, gitRepo,
     get stderr() { return stderr; },
     get paths() { return paths; },
     set paths(value: ExitPaths | null) { paths = value; },
   };
 }
 
-async function assertArtifactsPresent(paths: ExitPaths) {
+async function assertArtifactsPresent(paths: ExitPaths, gitRepo: string) {
   assert.equal((await stat(paths.tempRoot)).isDirectory(), true);
   assert.equal((await stat(paths.copyRoot)).isDirectory(), true);
   assert.equal((await stat(paths.profilePath)).isFile(), true);
   assert.equal((await stat(paths.credentialFile)).isFile(), true);
   assert.ok(
-    porcelainWorktrees(repo).includes(paths.worktreePath),
+    porcelainWorktrees(gitRepo).includes(paths.worktreePath),
     `worktree not registered: ${paths.worktreePath}`,
   );
 }
 
-async function assertArtifactsGone(paths: ExitPaths) {
+async function assertArtifactsGone(paths: ExitPaths, gitRepo: string) {
   await assert.rejects(stat(paths.tempRoot), { code: "ENOENT" });
   await assert.rejects(stat(paths.copyRoot), { code: "ENOENT" });
   await assert.rejects(stat(paths.profilePath), { code: "ENOENT" });
   await assert.rejects(stat(paths.credentialFile), { code: "ENOENT" });
   assert.ok(
-    !porcelainWorktrees(repo).includes(paths.worktreePath),
+    !porcelainWorktrees(gitRepo).includes(paths.worktreePath),
     `worktree still registered: ${paths.worktreePath}`,
   );
+  assert.equal(porcelainWorktrees(gitRepo).length, 1, "the source checkout survives cleanup");
 }
 
 test("unexpected exit 13 removes the profile copy and the git worktree", async t => {
   const session = await spawnExitFixture(t, "exit13");
-  await waitForFile(session.marker);
+  await waitForFile(session.marker, 15_000, () => session.stderr);
   session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
-  await assertArtifactsPresent(session.paths);
+  await assertArtifactsPresent(session.paths, session.gitRepo);
   await writeFile(`${session.marker}.go`, "go", { mode: 0o600 });
   const [code, signal] = await session.closed;
   assert.equal(signal, null, session.stderr);
   assert.equal(code, 13, session.stderr);
-  await assertArtifactsGone(session.paths);
+  await assertArtifactsGone(session.paths, session.gitRepo);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 
 test("SIGTERM removes the profile copy and the git worktree", async t => {
   const session = await spawnExitFixture(t, "sigterm");
-  await waitForFile(session.marker);
+  await waitForFile(session.marker, 15_000, () => session.stderr);
   session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
-  await assertArtifactsPresent(session.paths);
+  await assertArtifactsPresent(session.paths, session.gitRepo);
   session.child.kill("SIGTERM");
   const [code, signal] = await session.closed;
   assert.equal(signal, null, session.stderr);
   assert.equal(code, 143, session.stderr);
-  await assertArtifactsGone(session.paths);
+  await assertArtifactsGone(session.paths, session.gitRepo);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 
 test("SIGHUP removes the profile copy and the git worktree", async t => {
   const session = await spawnExitFixture(t, "sighup");
-  await waitForFile(session.marker);
+  await waitForFile(session.marker, 15_000, () => session.stderr);
   session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
-  await assertArtifactsPresent(session.paths);
+  await assertArtifactsPresent(session.paths, session.gitRepo);
   session.child.kill("SIGHUP");
   const [code, signal] = await session.closed;
   assert.equal(signal, null, session.stderr);
   assert.equal(code, 129, session.stderr);
-  await assertArtifactsGone(session.paths);
+  await assertArtifactsGone(session.paths, session.gitRepo);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 
@@ -919,14 +939,14 @@ test("finalizeRunResources deletes the temp root before uninstalling signals", a
 
 test("SIGINT removes the profile copy and the git worktree", async t => {
   const session = await spawnExitFixture(t, "sigint");
-  await waitForFile(session.marker);
+  await waitForFile(session.marker, 15_000, () => session.stderr);
   session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
-  await assertArtifactsPresent(session.paths);
+  await assertArtifactsPresent(session.paths, session.gitRepo);
   session.child.kill("SIGINT");
   const [code, signal] = await session.closed;
   assert.equal(signal, null, session.stderr);
   assert.equal(code, 130, session.stderr);
-  await assertArtifactsGone(session.paths);
+  await assertArtifactsGone(session.paths, session.gitRepo);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 

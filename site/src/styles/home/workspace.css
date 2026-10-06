@@ -1,0 +1,66 @@
+/* Home UI: workspace styles (UI-SPEC.md 3.3, lane W): the right column cards and the stream decorations.
+   Site tokens only: no raw hex, no local colour variables. Every colour pair below is a token pair that
+   tokens.css already measures on --surface (cards) and --elev-0 (page), in both themes, so dark mode needs no
+   override here. Targets are 44 px or more; motion is colour only and is off under reduced motion. */
+
+/* ---- Right column ---- */
+.hm-side { display: flex; flex-direction: column; gap: var(--gap-grid); min-width: 0; font-family: var(--font-sans); color: var(--text); }
+.hm-side-card { box-sizing: border-box; min-width: 0; padding: var(--pad-card-sm); background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
+.hm-side-card__title { margin: 0 0 var(--s-2); font-family: var(--font-display); font-size: var(--t-lg); line-height: var(--lh-lg);
+  font-weight: var(--weight-display); letter-spacing: var(--track-head); color: var(--text); overflow-wrap: anywhere; }
+.hm-side-card__body { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.hm-side-card__empty, .hm-side-card__line { margin: 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--text-muted); overflow-wrap: anywhere; }
+.hm-side-card__line { color: var(--text); }
+.hm-side-card__foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--gap-inline); }
+.hm-side-card--link { padding: var(--s-1) var(--pad-card-sm); }
+
+.hm-side-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.hm-side-list__item { min-width: 0; padding: var(--s-1) 0; }
+.hm-side-list__item + .hm-side-list__item, .hm-todo-row + .hm-todo-row { border-top: 1px solid var(--border); }
+
+/* ---- To-do rows: a 44 px checkbox, then the title and its status line ---- */
+.hm-todo-row { display: flex; align-items: flex-start; gap: var(--s-1); min-width: 0; }
+.hm-todo-row__check { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 2.75rem; min-height: 2.75rem; cursor: pointer; }
+.hm-todo-row__box { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.hm-todo-row__mark { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: 1.25rem; height: 1.25rem; border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border-interactive); background: var(--surface); color: var(--accent-ink); pointer-events: none; }
+.hm-todo-row__tick { opacity: 0; }
+.hm-todo-row__box:checked + .hm-todo-row__mark { background: var(--accent); border-color: var(--accent); }
+.hm-todo-row__box:checked + .hm-todo-row__mark .hm-todo-row__tick { opacity: 1; }
+.hm-todo-row__box:focus-visible + .hm-todo-row__mark { box-shadow: var(--focus-ring); }
+.hm-todo-row__text { display: flex; flex: 1 1 auto; flex-direction: column; justify-content: center; gap: 0; min-width: 0; min-height: 2.75rem; padding: var(--s-1) 0; color: var(--text); text-decoration: none; border-radius: var(--radius); }
+.hm-todo-row__text:hover .hm-todo-row__title { text-decoration: underline; }
+.hm-todo-row__text:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-todo-row__title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: var(--t-sm); line-height: var(--lh-sm); font-weight: var(--weight-medium); }
+.hm-todo-row__sub { overflow-wrap: anywhere; font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
+
+/* ---- Links and buttons in the cards ---- */
+.hm-side-link, .hm-side-button { display: inline-flex; align-items: center; box-sizing: border-box; min-width: 2.75rem; min-height: 2.75rem; padding: 0 var(--s-2); border-radius: var(--radius);
+  font: inherit; font-size: var(--t-sm); font-weight: var(--weight-medium); line-height: var(--lh-sm); text-decoration: none; cursor: pointer; }
+.hm-side-link { color: var(--accent-bright); }
+.hm-side-link:hover { text-decoration: underline; }
+.hm-side-button { border: 1px solid var(--border-interactive); background: var(--surface); color: var(--text); }
+.hm-side-button--primary { align-self: flex-start; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.hm-side-link:focus-visible, .hm-side-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ---- Stream: day dividers ---- */
+.hm-day { display: flex; align-items: center; gap: var(--s-3); margin: var(--s-4) 0 var(--s-2); padding: 0; list-style: none; color: var(--text-muted); font-size: var(--t-xs); line-height: var(--lh-xs);
+  font-weight: var(--weight-semibold); letter-spacing: var(--track-xs); }
+.hm-day::before, .hm-day::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
+.hm-day__label { flex: none; padding: var(--s-1) var(--s-3); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); }
+
+/* ---- Stream: author line ---- */
+.hm-author { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-width: 0; font-size: var(--t-sm); line-height: var(--lh-sm); }
+.hm-author__name { min-width: 0; overflow-wrap: anywhere; font-weight: var(--weight-semibold); color: var(--text); }
+.hm-author__you { padding: 0 var(--s-2); border: 1px solid var(--border-interactive); border-radius: var(--radius-pill); font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
+.hm-author__when { font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
+
+/* ---- Stream: cards under a message ---- */
+.hm-extras { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; margin-top: var(--s-2); }
+.hm-extras__files { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.hm-extras__ask, .hm-extras__object { min-width: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .hm-side-link, .hm-side-button, .hm-todo-row__mark { transition: color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard); }
+}

@@ -19,6 +19,11 @@ import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactP
 import { FILE_MAX_VERSION_BYTES, FileCommandRefused, FileTransportError } from "../cloud/files.js";
 import { ASK_PARENT_CONTEXT_SENTENCE, defaultAskParent } from "../cloud/ask-chain-context.js";
 
+import { validateHouseholdToolArguments, HouseholdToolInputError } from "../protocol/household-tool-registry.js";
+import { HOUSEHOLD_MCP_TOOLS, createHouseholdMcpTools } from "./household-tools.js";
+import { HouseholdObjectClient } from "../cloud/household-objects.js";
+import { createHouseholdHttpTransport } from "../cloud/household-http.js";
+
 export { mapMcpError } from "./errors.js";
 
 export interface McpServerOptions { profilePath: string; hostSessionId?: string }
@@ -110,6 +115,15 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
     // A check response records its shown asks only after stdout accepts the response.
     // Do not let the next tool call race that durable turn context.
     await responseCommit;
+    if (HOUSEHOLD_MCP_TOOLS.some(row => row.name === request.params.name)) {
+      try { validateHouseholdToolArguments(request.params.name, request.params.arguments ?? {}); }
+      catch (error) { if (error instanceof HouseholdToolInputError) throw new McpError(ErrorCode.InvalidParams, error.code); throw error; }
+      const client = new HouseholdObjectClient(createHouseholdHttpTransport({ target: profileTarget(profile),
+        authenticate: async () => { const auth = await authenticated(); return { credential: auth.token, fetcher: auth.fetcher }; } }), profile.workspace_id);
+      const result = await createHouseholdMcpTools(client).call(request.params.name, request.params.arguments ?? {},
+        { upload: { reservation_id: "server_pending", expires_at: 0 } }, { signal: extra.signal });
+      return { isError: result.isError, content: [...result.content] };
+    }
     const tool = MCP_TOOL_TABLE.find(row => row.name === request.params.name);
     if (!tool) throw new McpError(ErrorCode.InvalidParams, "Unknown CommonSwarm tool.");
     let args: Record<string, string>;

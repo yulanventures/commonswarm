@@ -1,3 +1,5 @@
+import { humanInvitationTransaction } from './household-invitations.ts';
+import { parseHouseholdAttachment, HouseholdAttachmentError } from "./household-attachments.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import type { HostedCommandInput, CommandResult } from "./contract.d.ts";
@@ -73,7 +75,7 @@ import {
   withCommandCors,
 } from "./cors.ts";
 import {
-  hasFreshInteractiveAuth,
+  commandNeedsFreshInteractiveAuth, freshInteractiveAuthRefusal,
   newestInteractiveAmrSeconds,
 } from "./fresh-auth.ts";
 import {
@@ -121,11 +123,16 @@ import {
   fileRestore,
   fileTombstone,
   fileVersionCommit,
-  fileVersionCreate,
+  fileVersionCreate, householdManagedFileRefusal,
   validateFileCommand,
   type FileCommand,
   type FileStorage,
 } from "./file-artifacts.ts";
+import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
+import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
+import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
+import type { HouseholdTodoNoticePort } from './household-todos.ts';
+import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
   parseSignalAttachmentRefs,
@@ -144,6 +151,8 @@ import {
 // frozen TypeScript core. This checked-in bundle is regenerated directly from
 // src/protocol/index.ts by build:command-core; it is not a second implementation.
 import {
+  HOUSEHOLD_LOCAL_SEAT, HOUSEHOLD_JOIN_RATE_PER_HOUR,
+  HouseholdToolInputError,
   applyCommand,
   canonicalPrincipal,
   decideWorkspace,
@@ -164,10 +173,11 @@ import {
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
   PRINCIPAL_NAME_TAKEN,
-  publicHostedCommandForbidden,
+  publicHostedCommandForbidden, legacyHouseholdAcceptRefusal, legacyRemovalRejoinRefusal,
   reduceHostedAuthority,
 } from "../_shared/protocol.js";
 import {
+  revalidateHouseholdSeat,
   hostedCapabilityTool,
   revalidateHostedGrantCommand,
   revalidateHostedSeatCommand,
@@ -221,6 +231,7 @@ type ConnectCommand =
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }
   | { kind: "remove_member"; user_id: string }
+  | { kind: "change_role"; user_id: string; role: WorkspaceRole }
   | { kind: "archive_workspace" }
   | {
     kind: "create_agent_principal";
@@ -431,6 +442,7 @@ type WorkspaceCommand =
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token_hash: string }
   | { kind: "remove_member"; user_id: string }
+  | { kind: "change_role"; user_id: string; role: WorkspaceRole }
   | {
     kind: "create_agent_principal";
     principal_id: string;
@@ -1039,6 +1051,7 @@ const COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
+  "change_role",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -1059,6 +1072,8 @@ const COMMAND_KINDS = [
   "release_wake_lease",
   TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
+  ...HOUSEHOLD_SURFACE_KINDS,
+  "household_legacy",
 ] as const;
 const TASK_COMMAND_KINDS = [
   "create",
@@ -1082,6 +1097,7 @@ const CONNECT_COMMAND_KINDS = [
   "remove_member",
   "archive_workspace",
   "create_agent_principal",
+  "change_role",
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
@@ -1110,6 +1126,8 @@ const WORKSPACE_COMMAND_KINDS = [
   "release_wake_lease",
   TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
+  ...HOUSEHOLD_SURFACE_KINDS,
+  "household_legacy",
 ] as const;
 import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
 import { ADMIN_RESOURCE, ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
@@ -1290,7 +1308,7 @@ interface AuthContext {
    */
   agentFirstUse: boolean;
   identityVerified: boolean;
-  /** Bookkeeping for the §8 disposable-domain speed bump; never authorization. */
+  /** Verified recipient address for human invite review; also used by the §8 disposable-domain speed bump. */
   email: string | null;
   /** Newest interactive AMR timestamp from verified claims for this JWT. */
   interactiveAuthAtSeconds: number | null;
@@ -1488,6 +1506,10 @@ async function readBody(
   | { ok: true; body: RequestBody; byteLength: number }
   | { ok: false; response: Response }
 > {
+  if (request.headers.get("content-type")?.startsWith("multipart/form-data;")) {
+    try { const attached = await parseHouseholdAttachment(request); return { ok: true, body: { ...attached.body, household_attachment: attached.attachment }, byteLength: attached.attachment.length }; }
+    catch (error) { if (error instanceof HouseholdAttachmentError) return { ok: false, response: json(error.status, { error: "household_attachment_refused" }) }; throw error; }
+  }
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { ok: false, response: json(413, { error: "payload_too_large" }) };
@@ -2451,6 +2473,26 @@ function validateCommand(
           ok: false,
           status: 400,
           reason: "remove_member fields are malformed",
+        };
+    }
+    if (cmd.kind === "change_role") {
+      const role = cmd.role;
+      return exactKeys(cmd, ["kind", "user_id", "role"]) &&
+          typeof cmd.user_id === "string" &&
+          UUID_RE.test(cmd.user_id) &&
+          (role === "owner" || role === "admin" || role === "member")
+        ? {
+          ok: true,
+          command: {
+            kind: "change_role",
+            user_id: cmd.user_id,
+            role,
+          },
+        }
+        : {
+          ok: false,
+          status: 400,
+          reason: "change_role fields are malformed",
         };
     }
     if (cmd.kind === "invite_member") {
@@ -3603,6 +3645,12 @@ async function prepareWorkspaceCommand(
     };
   } else if (wire.kind === "remove_member") {
     command = { kind: "remove_member", user_id: wire.user_id };
+  } else if (wire.kind === "change_role") {
+    command = {
+      kind: "change_role",
+      user_id: wire.user_id,
+      role: wire.role,
+    };
   } else if (wire.kind === "archive_workspace") {
     command = { kind: "archive_workspace" };
   } else if (wire.kind === "revoke_agent_principal") {
@@ -3710,8 +3758,8 @@ async function prepareWorkspaceCommand(
     `;
     inviteeAlreadyMember = rows[0]?.present ?? false;
   }
-  let landingAuthorityChangeResolved = true;
-  if (wire.kind === "remove_member") {
+  let landingAuthorityChangeResolved = true, pendingForRemoval: readonly string[] = [];
+  if (wire.kind === "remove_member" || wire.kind === "change_role") {
     const mappings = await tx<{ blocked: boolean }[]>`
       SELECT EXISTS (
         SELECT 1
@@ -3721,7 +3769,7 @@ async function prepareWorkspaceCommand(
           AND archived_at IS NULL
       ) AS blocked
     `;
-    landingAuthorityChangeResolved = !(mappings[0]?.blocked ?? true);
+    landingAuthorityChangeResolved = !(mappings[0]?.blocked ?? true); if (wire.kind === "remove_member") pendingForRemoval = await pendingLinkInvitationIds(tx, route.workspaceId, wire.user_id);
   }
 
   let nextSeq = headSeq;
@@ -3748,11 +3796,11 @@ async function prepareWorkspaceCommand(
       userId === auth.actor.user && auth.identityVerified,
     humanRights: () => [...P0_AGENT_SCOPES],
     landingAuthorityChangeResolved: (targetUserId, successorUserId) =>
-      wire.kind === "remove_member" &&
+      (wire.kind === "remove_member" || wire.kind === "change_role") &&
         targetUserId === wire.user_id &&
         successorUserId === null
         ? landingAuthorityChangeResolved
-        : true,
+        : true, pendingInvitationIds: (userId) => wire.kind === "remove_member" && userId === wire.user_id ? pendingForRemoval : [],
     // Present only for a renewal that resolved a predecessor. Left undefined
     // otherwise so the reducer refuses `renewal_unsupported` instead of
     // deciding against a fabricated fact.
@@ -4433,7 +4481,7 @@ async function updateWorkspaceProjection(
   tx: Sql,
   route: Route,
   prepared: PreparedWorkspace,
-  events: readonly EventEnvelope[],
+  events: readonly EventEnvelope[], requestDigest: string,
 ): Promise<WorkspaceState> {
   let projection = prepared.state;
   for (const event of events) {
@@ -4526,7 +4574,7 @@ async function updateWorkspaceProjection(
       ) {
         throw new Error("MemberRemoved payload is malformed");
       }
-      const updated = await tx<{ user_id: string }[]>`
+      await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
         WHERE workspace_id = ${route.workspaceId}::uuid
@@ -4536,6 +4584,30 @@ async function updateWorkspaceProjection(
       `;
       if (updated.length !== 1) {
         throw new Error("MemberRemoved projection did not revoke exactly one membership");
+      }
+    } else if (event.type === "MemberRoleChanged") {
+      if (
+        typeof payload.user_id !== "string" ||
+        (payload.from_role !== "owner" &&
+          payload.from_role !== "admin" &&
+          payload.from_role !== "member") ||
+        (payload.to_role !== "owner" &&
+          payload.to_role !== "admin" &&
+          payload.to_role !== "member")
+      ) {
+        throw new Error("MemberRoleChanged payload is malformed");
+      }
+      const updated = await tx<{ user_id: string }[]>`
+        UPDATE swarm.memberships
+        SET role = ${payload.to_role}
+        WHERE workspace_id = ${route.workspaceId}::uuid
+          AND user_id = ${payload.user_id}::uuid
+          AND role = ${payload.from_role}
+          AND revoked_at IS NULL
+        RETURNING user_id
+      `;
+      if (updated.length !== 1) {
+        throw new Error("MemberRoleChanged projection did not change exactly one membership");
       }
     } else if (event.type === "AgentPrincipalCreated") {
       const principal = projection.principals[String(payload.principal_id)];
@@ -8092,7 +8164,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3939 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3987 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -8963,7 +9035,7 @@ type SignalAttachmentResolution =
  * Pins only readable, committed versions from the routed workspace. The file
  * and version locks keep tombstone/purge from crossing the signal insert.
  */
-async function resolveSignalAttachments(
+export async function resolveSignalAttachments(
   tx: Sql,
   route: Route,
   refs: readonly SignalAttachmentRef[],
@@ -8995,15 +9067,15 @@ async function resolveSignalAttachments(
       file_id: string;
       name: string;
       tombstoned_at: Date | null;
-      purged_at: Date | null;
+      purged_at: Date | null; household_managed: boolean;
     }[]>`
-      SELECT file_id, name, tombstoned_at, purged_at
+      SELECT file_id, name, tombstoned_at, purged_at, household_managed
       FROM swarm.files
       WHERE file_id = ${ref.file_id}::uuid
         AND workspace_id = ${route.workspaceId}::uuid
       FOR SHARE
     `;
-    const file = files[0];
+    const file = files[0]; if (file?.household_managed === true) { const managed = householdManagedFileRefusal("signal"); return { ok: false, status: managed.status, error: managed.error, reason: managed.reason, message: managed.message }; }
     if (
       file === undefined || file.tombstoned_at !== null ||
       file.purged_at !== null
@@ -9095,6 +9167,31 @@ type PostSignalOutcome =
   | { status: "inserted"; signal: SignalRecord }
   | { status: "thread_horizon" }
   | { status: "chain_refused"; error: AskChainRefusal };
+
+/** Fixed-content notices share signal targeting, rate and delivery truth.
+ * The to-do store owns replay and invokes this port at most once per command. */
+function householdNotice(route: Route, auth: AuthContext): HouseholdTodoNoticePort {
+  let attempted = false;
+  return async (tx, workspaceId, identity, notice) => {
+    if (attempted) throw new RangeError("A household command may post at most one notice.");
+    attempted = true;
+    if (workspaceId !== route.workspaceId || identity.user_id !== auth.actor.user || identity.principal_id !== auth.actor.agent_principal)
+      throw new Error("Household notice identity mismatch.");
+    const command: SignalCommand = { kind: "post_signal", signal_kind: notice.kind,
+      body: notice.body, about: notice.about, to_user_id: null, to: [...notice.to] };
+    const target = await resolveSignalWriteTarget(tx, route, auth, command);
+    if (target === null) return { to: notice.to, status: "not_sent", reason: "recipient_not_live" };
+    const rate = await enforceSignalRate(tx, auth, workspaceId, command, target);
+    if (rate !== null) return { to: notice.to, status: "not_sent", reason: "signal_rate_limited" };
+    const posted = await postSignal(tx, route, auth, command, target, [], {
+      channelId: null, threadRootId: null, broadcastToChannel: false,
+      untilMs: SIGNAL_DEFAULT_UNTIL_MS[notice.kind], untilCeiling: null, untilExplicit: false,
+    });
+    if (posted.status !== "inserted") throw new Error("Household notice insertion failed.");
+    await chargeSpend(tx, "signal_post");
+    return { to: notice.to, status: "sent", signal_id: posted.signal.id };
+  };
+}
 
 async function postSignal(
   tx: Sql,
@@ -9515,6 +9612,7 @@ export interface HostedHumanManagementIdentity {
 
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
   const command = record(body.command);
+  if (command?.kind === "household_tool") return command.tool === tool;
   if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
@@ -9906,7 +10004,7 @@ async function handleHostedManagement(
     workspace_consented: existingConsent,
     all_required_consents: allRequired[0]?.consents === true,
     all_required_memberships: allRequired[0]?.memberships === true,
-    exact_name_principal_ids: [],
+    exact_name_principals: [],
     live_seat_count: 0,
   }, {
     now: frame.now,
@@ -10202,11 +10300,21 @@ async function claimHostedSeat(
       WHERE hs.grant_id = ${grant.grant_id}::uuid
         AND hs.workspace_id = ${route.workspaceId}::uuid
         AND hs.name = ${input.command.name}
+        AND hs.revoked_at IS NULL
+        AND h.revoked_at IS NULL
+        AND p.revoked_at IS NULL
+        AND p.transport = 'hosted_mcp'
+        AND p.turn_only = true
+      ORDER BY hs.seat_id
       LIMIT 1
       FOR UPDATE OF hs, h, p
     `;
-    const exactPrincipals = await tx<{ principal_id: string }[]>`
-      SELECT principal_id
+    const exactPrincipals = await tx<{
+      principal_id: string;
+      owner_user_id: string;
+      revoked: boolean;
+    }[]>`
+      SELECT principal_id, owner_user_id, revoked_at IS NOT NULL AS revoked
       FROM swarm.agent_principals
       WHERE workspace_id = ${route.workspaceId}::uuid
         AND name = ${input.command.name}
@@ -10217,6 +10325,23 @@ async function claimHostedSeat(
       FROM swarm.hosted_mcp_seats
       WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
     `;
+    // Live seats of this grant left behind by the app's generic Remove for this exact name and
+    // owner. A successful reclaim closes exactly these before its insert, so they do not count
+    // against the limit for this claim. Read as rows, not a count: the one principal-ceiling
+    // count stays in lockAndCountLivePrincipals (tests/p1-cli/agent-join-credential.test.ts).
+    const reclaimableSeats = await tx<{ seat_id: string }[]>`
+      SELECT hs.seat_id
+      FROM swarm.hosted_mcp_seats AS hs
+      JOIN swarm.agent_principals AS p
+        ON p.principal_id = hs.principal_id AND p.workspace_id = hs.workspace_id
+      WHERE hs.grant_id = ${grant.grant_id}::uuid
+        AND hs.workspace_id = ${route.workspaceId}::uuid
+        AND hs.revoked_at IS NULL
+        AND p.revoked_at IS NOT NULL
+        AND p.name = ${input.command.name}
+        AND p.owner_user_id = ${grant.owner_user_id}::uuid
+    `;
+    const liveSeatCount = Number(seatCountRows[0]?.live ?? "0") - reclaimableSeats.length;
     const seatId = crypto.randomUUID();
     const principalId = crypto.randomUUID();
     const handle = `seat_${randomBase64Url(18)}`;
@@ -10260,8 +10385,8 @@ async function claimHostedSeat(
       workspace_consented: grant.workspace_consented,
       all_required_consents: true,
       all_required_memberships: true,
-      exact_name_principal_ids: exactPrincipals.map((row) => row.principal_id),
-      live_seat_count: Number(seatCountRows[0]?.live ?? "0"),
+      exact_name_principals: exactPrincipals,
+      live_seat_count: liveSeatCount,
     }, {
       now: frame.now,
       actor: { user: grant.owner_user_id, agent_principal: null, run: null },
@@ -10271,7 +10396,7 @@ async function claimHostedSeat(
       stream_id: route.streamId,
       nextSeq: () => ++nextSeq,
       nextEventId: () => crypto.randomUUID(),
-    }) as Decision & { reuse?: typeof existingRows[number] };
+    }) as Decision & { reuse?: typeof existingRows[number]; reclaimed_principal_ids?: readonly string[] };
 
     const auditAuth: HostedGrantAuditContext = {
       credentialKind: "hosted_grant",
@@ -10297,11 +10422,12 @@ async function claimHostedSeat(
     }
 
     const reused = decision.reuse;
+    let closedSeatIds: string[] = [];
     if (reused === undefined) {
       if (livePrincipals >= FREE_TIER_PRINCIPAL_LIMIT) {
         return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
       }
-      if (Number(seatCountRows[0]?.live ?? "0") >= HOSTED_MCP_SEAT_LIMIT) {
+      if (liveSeatCount >= HOSTED_MCP_SEAT_LIMIT) {
         return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT } };
       }
       const hostedProjection = reduceHostedAuthority(null, decision.events[0]);
@@ -10320,6 +10446,28 @@ async function claimHostedSeat(
           workspacePrincipal.transport !== foldedPrincipal.transport ||
           workspacePrincipal.turn_only !== foldedPrincipal.turn_only) {
         throw new Error("hosted and workspace principal folds disagree");
+      }
+      if (decision.reclaimed_principal_ids?.length) {
+        // The app's generic principal removal can leave hosted rows live.
+        // Close only seats of the reclaimed principals; their history stays intact.
+        const closedSeats = await tx<{ seat_id: string }[]>`
+          UPDATE swarm.hosted_mcp_seats
+          SET revoked_at = ${new Date(frame.now)}
+          WHERE workspace_id = ${route.workspaceId}::uuid
+            AND principal_id = ANY(${decision.reclaimed_principal_ids}::uuid[])
+            AND revoked_at IS NULL
+          RETURNING seat_id
+        `;
+        closedSeatIds = closedSeats.map((seat) => seat.seat_id).sort();
+        if (closedSeatIds.length) {
+          await tx`
+            UPDATE swarm.hosted_mcp_seat_handles
+            SET revoked_at = ${new Date(frame.now)}
+            WHERE workspace_id = ${route.workspaceId}::uuid
+              AND seat_id = ANY(${closedSeatIds}::uuid[])
+              AND revoked_at IS NULL
+          `;
+        }
       }
       await tx`
         INSERT INTO swarm.agent_principals (
@@ -10386,6 +10534,10 @@ async function claimHostedSeat(
       workspaceId: route.workspaceId,
       streamId: route.streamId,
       outcome: reused ? "replayed" : "accepted",
+      ...(decision.reclaimed_principal_ids?.length ? {
+        reason: "hosted_seat_name_reclaimed",
+        detail: `reclaimed=${decision.reclaimed_principal_ids.length}; closed_seats=${closedSeatIds.length}; principal_ids=${decision.reclaimed_principal_ids.join(",")}; closed_seat_ids=${closedSeatIds.join(",")}`,
+      } : {}),
       hash,
     });
     return { status: 200, body: { status: "accepted", ...response } };
@@ -10413,6 +10565,7 @@ async function handleTransaction(
 
     const hostedSeat = hostedSeatCapability === null
       ? null
+      : kind === "household_tool" ? await revalidateHouseholdSeat(tx, hostedSeatCapability, setTransaction)
       : await revalidateHostedSeatCommand(tx, hostedSeatCapability);
     if (hostedSeatCapability !== null && hostedSeat === null) {
       return { status: 403, body: { error: "forbidden" } };
@@ -10441,6 +10594,19 @@ async function handleTransaction(
         "unverified principal",
       );
       return { status: 401, body: { error: "unauthenticated" } };
+    }
+    if (kind === 'household_invitation') {
+      if (typeof body.command_id !== 'string' || typeof body.client_version !== 'string' || body.workspace_id !== undefined || body.stream !== undefined) return { status: 400, body: { error: 'invalid_request' } };
+      if (auth.credentialKind !== 'user' || auth.agent !== null || !auth.identityVerified) return { status: 403, body: { error: 'human_sign_in_required' } };
+      const [configuration] = await tx`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+      const comparison = typeof configuration?.value === 'string' ? compareSemver(body.client_version, configuration.value) : null;
+      if (comparison === null) return { status: 400, body: { error: 'invalid_request' } };
+      if (comparison < 0) return { status: 426, body: { error: 'client_outdated' } };
+      const bucket = await incrementRateBucket(tx, `human-invitation:${auth.actor.user}`, HOUSEHOLD_JOIN_RATE_PER_HOUR);
+      if (bucket.count > HOUSEHOLD_JOIN_RATE_PER_HOUR) return { status: 429, body: { error: 'rate_limited', retry_after: bucket.resetsAt } };
+      return await humanInvitationTransaction(tx, commandId, body.command,
+        auth.credentialKind === 'user' && auth.agent === null && auth.actor.user !== null
+          ? { user_id: auth.actor.user, email: auth.email, verified: auth.identityVerified } : null);
     }
     if (HOSTED_MANAGEMENT_KINDS.has(kind)) {
       return await handleHostedManagement(tx, body, auth);
@@ -10597,6 +10763,15 @@ async function handleTransaction(
       });
       return { status: 403, body: { error: isDeliveryCommand ? "delivery_unavailable" : "forbidden" } };
     }
+    if (kind === "accept_invitation") {
+      // Fast path only. The same boundary and email comparison runs again under the locks.
+      // A workspace with a household boundary must match the verified email; others do not.
+      const early = await legacyAcceptEarlyRefusal(tx, route, auth, invitationRouteHash);
+      if (early !== null) {
+        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: 'authz', reason: early.error });
+        return { status: 403, body: { error: early.error, message: early.message } };
+      }
+    }
     /* Dispatched HERE — after the route and the revocation sweep, before
        validateCommand — for two reasons. It needs route.workspaceId and
        route.streamId, which pre-route handlers have to look up for themselves,
@@ -10675,6 +10850,48 @@ async function handleTransaction(
       }
       return { status: 200, body: { ok: true, status: "accepted", event_ids: [],
         events: [], ...result } };
+    }
+    if ((HOUSEHOLD_SURFACE_KINDS as readonly string[]).includes(kind) || kind === "household_legacy") {
+      if (kind === "household_legacy" && !HOUSEHOLD_FEATURE_GATES.legacyCommand) {
+        return { status: 403, body: { error: "household_legacy_disabled" } };
+      }
+      if (!COMMAND_ID_RE.test(commandId) || typeof body.client_version !== "string") return { status: 400, body: { error: "invalid_request" } };
+      const [config] = await tx`SELECT value FROM swarm.config WHERE key='min_client_version'`;
+      const order = typeof config?.value === "string" ? compareSemver(body.client_version, config.value) : null;
+      if (order === null || order < 0) return { status: 426, body: { error: "upgrade_required" } };
+      const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,
+        connection: hostedSeat ? { connection_id: hostedSeat.seat_id, grant_id: hostedSeat.grant_id }
+          : auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
+      const recheck = async (checkTx: Sql) => {
+        if (hostedSeatCapability) {
+          const seat = await revalidateHouseholdSeat(checkTx, hostedSeatCapability, setTransaction);
+          return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
+        }
+        return !await revoked(checkTx, auth, route);
+      };
+      try {
+        const surface = record(body.command)!;
+        if (kind === "household_tool" && record(surface.arguments)?.seat !== (hostedSeat?.handle ?? HOUSEHOLD_LOCAL_SEAT)) return { status: 403, body: { error: "forbidden" } };
+        if (kind === "household_legacy") {
+          const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+          if (!boundary) return { status: 200, body: { status: "refused", reason: "workspace_not_managed" } };
+          const legacy = record(surface.command);
+          if (!legacy || ![...FILE_COMMAND_KINDS,"brain_put","brain_get","brain_history"].includes(String(legacy.kind))) return { status: 400, body: { error: "invalid_request" } };
+        }
+        const output = kind === "household_legacy"
+          ? await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId, command: surface.command as never,
+            ...(surface.base_revision ? { base_revision: surface.base_revision as never } : {}) }, identity, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined)
+          : kind === "household_permissions"
+          ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
+          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth));
+        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
+          outcome: output.status === "refused" ? "authz" : "accepted",
+          reason: output.status === "refused" ? String(output.reason) : null });
+        return { status: 200, body: output };
+      } catch (error) {
+        if (error instanceof HouseholdToolInputError) return { status: 400, body: { status: "refused", reason: error.code } };
+        throw error;
+      }
     }
     const validation = validateCommand(body.command);
     const configRows = await tx<{ value: unknown }[]>`
@@ -10841,6 +11058,16 @@ async function handleTransaction(
       (FILE_COMMAND_KINDS as readonly string[]).includes(
         validation.command.kind,
       );
+    if (isFileCommand && HOUSEHOLD_FEATURE_GATES.legacyFileRedirect) {
+      const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+      if (boundary) {
+        const identity = { user_id: auth.actor.user!, principal_id: auth.actor.agent_principal, run_id: auth.actor.run,
+          connection: auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
+        const result = await executeHouseholdLegacy(tx, { workspace_id: route.workspaceId, request_id: commandId,
+          command: validation.command as FileCommand }, identity, async checkTx => !await revoked(checkTx, auth, route));
+        return { status: 200, body: result as unknown as Record<string, unknown> };
+      }
+    }
     if (
       auth.agent !== null &&
       !isRenewal &&
@@ -11122,35 +11349,33 @@ async function handleTransaction(
     }
     await afterStep(7);
 
-    if (command.kind === "remove_member") {
+    if (commandNeedsFreshInteractiveAuth(command.kind)) {
       const serverTime = await tx<{ now_ms: string | number }[]>`
         SELECT floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
       `;
       const serverNowMs = Number(serverTime[0]?.now_ms);
-      if (
-        auth.credentialKind !== "user" ||
-        !hasFreshInteractiveAuth(
-          auth.interactiveAuthAtSeconds,
-          serverNowMs,
-        )
-      ) {
+      const freshAuth = freshInteractiveAuthRefusal(
+        command.kind,
+        auth.credentialKind,
+        auth.interactiveAuthAtSeconds,
+        serverNowMs,
+      );
+      if (freshAuth !== null) {
         await insertAudit(tx, {
           auth,
           commandKind: kind,
           workspaceId: route.workspaceId,
           streamId: route.streamId,
           outcome: "authn",
-          reason: "fresh_auth_required",
-          detail:
-            "Sign in again, then retry member removal. No membership change was recorded.",
+          reason: freshAuth.error,
+          detail: freshAuth.message,
           hash,
         });
         return {
           status: 401,
           body: {
-            error: "fresh_auth_required",
-            message:
-              "Sign in again, then retry member removal. No membership change was recorded.",
+            error: freshAuth.error,
+            message: freshAuth.message,
           },
         };
       }
@@ -12122,7 +12347,7 @@ async function handleTransaction(
       };
     }
 
-    await beforeStep(8);
+    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); }
     const streamRows = await tx<{ head_seq: string | number }[]>`
       SELECT head_seq
       FROM swarm.streams
@@ -12405,7 +12630,7 @@ async function handleTransaction(
         prepared.state,
         prepared.command,
         prepared.ctx,
-      ) as Decision;
+      ) as Decision; const lockedRefusal = decision.ok && prepared.command.kind === "accept_invitation" ? await legacyAcceptLockedFence(tx, route, auth, prepared.invitationHash) : null; if (lockedRefusal !== null) { await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: "authz", reason: lockedRefusal.error, hash }); return { status: 403, body: { error: lockedRefusal.error, message: lockedRefusal.message } }; }
       if (
         decision.ok &&
         prepared.command.kind === "accept_invitation" &&
@@ -12585,7 +12810,7 @@ async function handleTransaction(
 
     await beforeStep(12);
     if (prepared !== null) {
-      await updateWorkspaceProjection(tx, route, prepared, outcome.events);
+      await updateWorkspaceProjection(tx, route, prepared, outcome.events, hash);
     } else {
       await updateProjection(
         tx,
@@ -14299,4 +14524,97 @@ export async function handleAdminWorkerCommand(
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort);
   }
+}
+
+function legacyAcceptRefusalMessage(reason: string): string {
+  if (reason === "invitation_recipient_mismatch") {
+    return "This invitation is for a different verified email. Nothing was changed.";
+  }
+  if (reason === "invitation_predates_removal") {
+    return "This invitation was issued before the member was removed. Nothing was changed.";
+  }
+  return "Open the invitation in /invite and review it as yourself.";
+}
+
+function stampMillis(value: Date | string | null | undefined): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") return new Date(value).getTime();
+  return Number.NaN;
+}
+
+/** Repeats the household boundary check after both rows are locked. */
+export async function legacyAcceptLockedFence(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  invitationHash: Uint8Array | null,
+): Promise<{ error: string; message: string } | null> {
+  const [boundary] = await tx<{ purpose: string }[]>`
+    SELECT purpose FROM swarm.household_workspace_boundaries
+    WHERE workspace_id = ${route.workspaceId}::uuid
+    FOR SHARE
+  `;
+  const invited = invitationHash === null ? [] : await tx<{
+    email: string | null;
+    created_at: Date | string | null;
+  }[]>`
+    SELECT i.email, i.created_at
+    FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash}
+      AND i.workspace_id = ${route.workspaceId}::uuid
+    FOR SHARE
+  `;
+  const members = auth.actor.user === null ? [] : await tx<{ revoked_at: Date | string | null }[]>`
+    SELECT m.revoked_at
+    FROM swarm.memberships AS m
+    WHERE m.workspace_id = ${route.workspaceId}::uuid
+      AND m.user_id = ${auth.actor.user}::uuid
+    FOR SHARE
+  `;
+  const boundaryRefusal = legacyHouseholdAcceptRefusal(
+    boundary !== undefined,
+    normalizedEmail(auth.email),
+    normalizedEmail(invited[0]?.email ?? null),
+  );
+  if (boundaryRefusal !== null) {
+    return { error: boundaryRefusal, message: legacyAcceptRefusalMessage(boundaryRefusal) };
+  }
+  const member = members[0];
+  const revokedAt = member === undefined || member.revoked_at === null
+    ? null
+    : stampMillis(member.revoked_at);
+  const removalRefusal = legacyRemovalRejoinRefusal(
+    revokedAt,
+    stampMillis(invited[0]?.created_at),
+  );
+  if (removalRefusal !== null) {
+    return { error: removalRefusal, message: legacyAcceptRefusalMessage(removalRefusal) };
+  }
+  return null;
+}
+
+export async function legacyAcceptEarlyRefusal(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  invitationHash: Uint8Array | null,
+): Promise<{ error: string; message: string } | null> {
+  const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+  if (!boundary) return null;
+  const invited = invitationHash === null ? [] : await tx<{ email: string | null }[]>`
+    SELECT i.email, i.created_at
+    FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash}
+      AND i.workspace_id = ${route.workspaceId}::uuid
+  `;
+  const refusal = legacyHouseholdAcceptRefusal(
+    true,
+    normalizedEmail(auth.email),
+    normalizedEmail(invited[0]?.email ?? null),
+  );
+  return refusal === null ? null : { error: refusal, message: legacyAcceptRefusalMessage(refusal) };
+}
+
+interface WorkspaceDecideCtx {
+  pendingInvitationIds?(user_id: string): readonly string[];
 }

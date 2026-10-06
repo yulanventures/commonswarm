@@ -1,0 +1,12 @@
+
+> cloud-swarm@0.1.80 prebuild
+> rm -rf dist
+
+
+> cloud-swarm@0.1.80 build
+> tsc
+
+
+> cloud-swarm@0.1.80 postbuild
+> chmod 755 dist/cli.js
+

@@ -18,7 +18,7 @@ import {
   threadRootBlock,
   threadRootBlockText,
 } from "./thread-reply.js";
-import { ALL_SIGNALS_SLUG } from "./channels.js";
+import { ALL_SIGNALS_SLUG, channelLabel } from "./channels.js";
 
 /*
  * Who may start a thread, and every sentence the reply bar says.
@@ -182,16 +182,17 @@ test("the bar names the root and the channel it is in, and never guesses a place
      that view moves this sentence with it. */
   assert.equal(
     threadReplyTargetText("Orbit", { kind: "unfiled" }),
-    `Replying to Orbit in #${ALL_SIGNALS_SLUG}.`,
+    `Replying to Orbit in ${channelLabel(ALL_SIGNALS_SLUG)}.`,
   );
+  assert.equal(channelLabel(ALL_SIGNALS_SLUG), "All messages");
   /* AND THE UNKNOWN CASE NAMES NO PLACE AT ALL. It must not borrow the unfiled sentence. */
   const unknown = threadReplyTargetText("Orbit", { kind: "unknown" });
-  assert.doesNotMatch(unknown, new RegExp(`#${ALL_SIGNALS_SLUG}`));
+  assert.doesNotMatch(unknown, new RegExp(channelLabel(ALL_SIGNALS_SLUG)));
   assert.doesNotMatch(unknown, /#/);
   assert.match(unknown, /channel list did not load/);
   assert.match(unknown, /filed where the thread is/);
   assert.notEqual(unknown, threadReplyTargetText("Orbit", { kind: "unfiled" }));
-  assert.equal(threadReplyPlaceLabel({ kind: "unfiled" }), `#${ALL_SIGNALS_SLUG}`);
+  assert.equal(threadReplyPlaceLabel({ kind: "unfiled" }), channelLabel(ALL_SIGNALS_SLUG));
   assert.equal(threadReplyPlaceLabel({ kind: "channel", slug: "mobile" }), "#mobile");
 });
 

@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { agentEntityView } from "../../lib/entity-panel";
 import { rosterAgentsFromRows } from "../../lib/participant-rail";
 
+const peopleView = readFileSync(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 
 test("agent roster normalizes and labels local and hosted MCP transports", () => {
@@ -16,7 +17,8 @@ test("agent roster normalizes and labels local and hosted MCP transports", () =>
     ["local", false],
     ["hosted_mcp", true],
   ]);
-  assert.match(dashboard, /agent\.transport === "hosted_mcp" \? "Hosted MCP" : "Local"/);
+  assert.match(dashboard, /Connection: \$\{agent\.transport === "hosted_mcp" \? "Hosted MCP · OAuth connector" : agent\.transport === "local" \? "Local" : "Not reported"/);
+  assert.match(peopleView, /"Technical details"[\s\S]*for \(const value of agent\.technical\)/);
   assert.match(dashboard, /"Model", details\.model[\s\S]*"Transport", details\.transport/);
   assert.match(dashboard, /\.select\("principal_id,name,model,transport,turn_only,/);
 });

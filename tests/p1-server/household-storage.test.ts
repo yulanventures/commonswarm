@@ -302,7 +302,23 @@ function requireProof(variable: 'catalog_ok' | 'rollback_ok', expected: boolean)
 test('catalogs detect privilege drift and reverse rollbacks restore the pre-lane catalog inside one rolled-back transaction', () => {
   const containers = execFileSync('docker', ['ps','--format','{{.Names}}'], { encoding: 'utf8' }).trim().split('\n').filter(name => /^supabase_db_/.test(name));
   assert.equal(containers.length, 1, 'one local database required');
-  let script = 'BEGIN;\n';
+  // Undo 05000001 before 015. The live function body is the removal migration,
+  // so the 015 catalog is false until that body is restored.
+  const removalProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-member-removal/20261005000001-${suffix}.sql`, import.meta.url), 'utf8');
+  // Undo 015 before 06 and 05 to restore the exact pre-lane catalogs.
+  const approvalProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-approval/20261004000015-${suffix}.sql`, import.meta.url), 'utf8');
+  // Remove the dependent 06 delivery function before undoing the 05 overlay.
+  const inviteProof = (suffix: string) => readFileSync(new URL(`../../deploy/release-proofs/household-invites/20261004000006-${suffix}.sql`, import.meta.url), 'utf8');
+  // Migration 05 intentionally widens the lane-2 confirmation tables. Undo its
+  // overlay first to test the original exact catalogs; this entire drill rolls back.
+  let script = 'BEGIN;\n' + removalProof('catalog') + requireProof('catalog_ok',true)
+    + removalProof('rollback') + removalProof('rollback-catalog') + requireProof('rollback_ok',true)
+    + approvalProof('catalog') + requireProof('catalog_ok',true)
+    + approvalProof('rollback') + approvalProof('rollback-catalog') + requireProof('rollback_ok',true)
+    + inviteProof('catalog') + requireProof('catalog_ok',true)
+    + inviteProof('rollback') + inviteProof('rollback-catalog') + requireProof('rollback_ok',true)
+    + proof('20261004000005','catalog') + requireProof('catalog_ok',true)
+    + proof('20261004000005','rollback') + proof('20261004000005','rollback-catalog') + requireProof('rollback_ok',true);
   for (const id of ids) script += proof(id,'catalog') + requireProof('catalog_ok',true);
   // Permission tables are read/locked only in lane 2. Each widening and loss of
   // the required key-column lock grant must independently fail the release proof.

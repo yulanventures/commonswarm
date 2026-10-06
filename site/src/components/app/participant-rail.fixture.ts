@@ -24,13 +24,14 @@ export interface ParticipantRailSnapshot {
 export const renderParticipantRailFixture = async (
   members: RailMember[],
   rows: RosterAgentRow[],
+  viewerId: string | null = null,
 ): Promise<ParticipantRailSnapshot> => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-participant-rail-"));
   const fixture = join(directory, "index.html");
   const bundle = await build({
     absWorkingDir: siteRoot,
     bundle: true,
-    entryPoints: ["src/lib/participant-rail.ts"],
+    stdin: { contents: 'export { mapHomePeople } from "./src/lib/home-map.ts"; export { buildHomeRail } from "./src/lib/home-rail.ts"; export { rosterAgentsFromRows } from "./src/lib/participant-rail.ts";', resolveDir: siteRoot },
     format: "iife",
     globalName: "ParticipantRail",
     platform: "browser",
@@ -41,31 +42,28 @@ export const renderParticipantRailFixture = async (
   const html = `<!doctype html>
 <html>
   <body>
-    <ul class="dashboard__sidebar-agent-list" data-sidebar-participant-list></ul>
+    <!-- The production builder owns the complete rail. -->
     <script>${script}</script>
     <script>
       const members = ${JSON.stringify(members)};
       const rows = ${JSON.stringify(rows)};
-      const list = document.querySelector("[data-sidebar-participant-list]");
-      const initials = (name) => name.trim().split(/\\s+/).filter(Boolean).slice(0, 2)
-        .map((part) => part[0]).join("").toUpperCase();
-      ParticipantRail.renderSidebarParticipants(
-        list,
-        members,
-        ParticipantRail.rosterAgentsFromRows(rows),
-        initials,
-      );
+      const people = ParticipantRail.mapHomePeople({ members, agents: ParticipantRail.rosterAgentsFromRows(rows),
+        viewerId: ${JSON.stringify(viewerId)}, access: [], signals: [], now: 1791201600000, sample: false });
+      const rail = ParticipantRail.buildHomeRail(document, { sample: false, people, workspaces: [],
+        catchUp: { href: '/app?v=catchup', current: false, needsYou: null } }, { openPerson: () => {}, openAgent: () => {} });
+      document.body.prepend(rail);
+      const list = rail.querySelector('[data-sidebar-participant-list]');
       const snapshot = {
-        directAgentCount: list.querySelectorAll(":scope > .dashboard__sidebar-agent").length,
+        directAgentCount: list.querySelectorAll(":scope > .hm-rail__agent-item").length,
         groups: Array.from(list.children).map((group) => ({
-          agents: Array.from(group.querySelectorAll(".dashboard__sidebar-agent strong"))
+          agents: Array.from(group.querySelectorAll(".hm-rail__agent .hm-rail__name"))
             .map((row) => row.textContent),
-          hasNestedList: Boolean(group.querySelector(":scope > .dashboard__sidebar-owner-agents")),
-          heading: group.querySelector(":scope > .dashboard__sidebar-person strong")?.textContent ?? "",
+          hasNestedList: Boolean(group.querySelector(":scope > .hm-rail__agents")),
+          heading: group.querySelector(":scope > .hm-rail__person .hm-rail__name, :scope > .hm-rail__other-head")?.textContent ?? "",
         })),
         innerHtml: list.innerHTML,
       };
-      document.documentElement.dataset.fixture = btoa(JSON.stringify(snapshot));
+      document.documentElement.dataset.fixture = btoa(unescape(encodeURIComponent(JSON.stringify(snapshot))));
     </script>
   </body>
 </html>`;

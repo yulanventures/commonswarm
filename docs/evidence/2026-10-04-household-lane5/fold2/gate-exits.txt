@@ -1,0 +1,14 @@
+core	0
+build	0
+edge	0
+check-tests	2
+focused	0
+timeout	1
+server	1
+harness-parse	0
+diff-check	0
+timeout-final	0
+client-regression-before	1
+browser-mutation	1
+client-browser-after	0
+release-bundle	0

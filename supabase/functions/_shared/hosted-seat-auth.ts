@@ -1,10 +1,12 @@
 import type postgres from "npm:postgres@3.4.9";
 
+import { HOUSEHOLD_TOOL_REGISTRY } from "./protocol.js";
+
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check"] as const;
-export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members"] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect !== "read").map(row => row.name)] as const;
+export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", ...HOUSEHOLD_TOOL_REGISTRY.filter(row => row.effect === "read").map(row => row.name)] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
 export type HostedSeatCommandTool = typeof HOSTED_SEAT_COMMAND_TOOLS[number];
@@ -113,6 +115,8 @@ async function resolveSeat(
     ? (HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes(binding.tool)
     : (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(binding.tool);
   if (!allowed || !seatTool(binding.tool) || !await providerActive(binding)) return null;
+  const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === binding.tool);
+  const databaseTool = content ? (use === "command" ? "note" : "members") : binding.tool;
   const rows = use === "command" && binding.tool === "check"
     ? await tx<ResolvedHostedSeat[]>`
       SELECT * FROM swarm.resolve_hosted_mcp_check_authorization(
@@ -125,14 +129,14 @@ async function resolveSeat(
       SELECT * FROM swarm.resolve_hosted_seat_command_authorization(
         ${binding.grantId}::uuid,
         ${binding.handle},
-        ${binding.tool}
+        ${databaseTool}
       )
     `
     : await tx<ResolvedHostedSeat[]>`
       SELECT * FROM swarm.resolve_hosted_seat_read_authorization(
         ${binding.grantId}::uuid,
         ${binding.handle},
-        ${binding.tool}
+        ${databaseTool}
       )
     `;
   const row = rows[0];
@@ -194,4 +198,32 @@ export async function revalidateHostedSeatRead(
 
 export function hostedCapabilityTool(capability: HostedCapability): string | null {
   return bindings.get(capability)?.tool ?? null;
+}
+
+/** Content still requires its separate member and connection consent in the store. */
+export async function revalidateHostedSeatContent(tx: Sql, capability: HostedSeatCapability): Promise<ResolvedHostedSeat | null> {
+  const binding = bindings.get(capability);
+  if (binding?.kind !== "hosted_seat") return null;
+  const tool = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === binding.tool);
+  return tool ? await resolveSeat(tx, binding, tool.effect === "read" ? "read" : "command") : null;
+}
+
+/** Household content tables are granted to swarm_command, so a read stays in
+ * that transaction. The read resolver is executable by swarm_read only: take
+ * that role for this call, then restore the command role before any store
+ * statement. Writes keep the command resolver. */
+export async function revalidateHouseholdSeat(
+  tx: Sql,
+  capability: HostedSeatCapability,
+  restoreCommandRole: (tx: Sql) => Promise<void>,
+): Promise<ResolvedHostedSeat | null> {
+  const name = hostedCapabilityTool(capability);
+  const reading = HOUSEHOLD_TOOL_REGISTRY.some((row) => row.name === name && row.effect === "read");
+  if (!reading) return await revalidateHostedSeatContent(tx, capability);
+  await tx`SELECT set_config('role', 'swarm_read', true)`;
+  try {
+    return await revalidateHostedSeatContent(tx, capability);
+  } finally {
+    await restoreCommandRole(tx);
+  }
 }

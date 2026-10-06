@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 // @ts-expect-error TS5097: Deno source extension is required.
 import { HOSTED_TOOL_TABLE, validateHostedToolArguments } from '../../supabase/functions/mcp/tools.ts';
@@ -11,6 +12,19 @@ const script = fileURLToPath(new URL('../../scripts/dcr-roundtrip.mjs', import.m
 const fixture = new URL('../support/dcr-exercise-fixture.ts', import.meta.url).href;
 const workspace = '12345678-1234-4234-8234-123456789abc';
 const privateValue = 'PRIVATE_RESPONSE_CONTENT_TOKEN_abcdefgh';
+// Extra calls: three negative probes, a second claim/identity/check and an
+// object readback and a to-do version refresh after commenting. The remaining
+// calls cover each advertised tool once.
+const exerciseCallCount = HOSTED_TOOL_TABLE.length + 8;
+
+test('release probe explicit inventory matches the registry-driven hosted catalog', () => {
+  const source = readFileSync(script, 'utf8');
+  const inventory = source.match(/const TOOL_NAMES = new Set\(\[([\s\S]*?)\]\);/u);
+  assert.ok(inventory, 'release probe keeps its explicit inventory');
+  const names = [...inventory[1]!.matchAll(/'([^']+)'/gu)].map(match => match[1]);
+  assert.equal(names.length, 23, 'eight core tools, five object tools and ten to-do/comment tools');
+  assert.deepEqual(new Set(names), new Set(HOSTED_TOOL_TABLE.map(tool => tool.name)));
+});
 async function run(scenario = 'success') {
   const preload = 'data:text/javascript,' + encodeURIComponent(
     `globalThis.__exerciseScenario = ${JSON.stringify(scenario)}; await import(${JSON.stringify(fixture)});`);
@@ -45,7 +59,8 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   const { code, receipt, calls } = await run();
   assert.equal(code, 0);
   assert.equal(receipt.ok, true);
-  assert.equal(calls.length, 14);
+  assert.equal(calls.length, exerciseCallCount);
+  assert.equal(calls.length, 31, 'the release probe calls all 23 tools plus eight dependency/negative probes');
   const negatives = new Set([0, 1, 6]);
   const positives = calls.filter((_, i) => !negatives.has(i));
   assert.deepEqual(new Set(positives.map(c => c.name)), new Set(HOSTED_TOOL_TABLE.map(t => t.name)));
@@ -64,10 +79,33 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   assert.equal(ask.arguments.recipients[0].id, '00000000-0000-4000-8000-000000000002');
   assert.equal(reply.arguments.signal_id, '00000000-0000-4000-8000-000000000010');
   assert.deepEqual(calls[12].arguments.recipients, ask.arguments.recipients);
+  const update = calls.find(c => c.name === 'object_update')!;
+  assert.deepEqual(update.arguments.base, { workspace_id: workspace, object_id: update.arguments.object_id, token: 'r'.repeat(32) });
+  assert.ok(!calls.some(c => ['file_read', 'file_upload_begin', 'file_upload_commit'].includes(c.name)));
   assert.ok(calls.filter(c => c.name === 'check').every(c => !('ack' in c.arguments)));
+  const todoCreate = calls.find(c => c.name === 'todo_create')!;
+  const todoRead = calls.find(c => c.name === 'todo_read')!;
+  const todoComment = calls.find(c => c.name === 'todo_comment')!;
+  const todoAssign = calls.find(c => c.name === 'todo_assign')!;
+  const todoDone = calls.find(c => c.name === 'todo_set_state')!;
+  assert.equal(todoCreate.arguments.seat, todoRead.arguments.seat);
+  assert.equal(todoComment.arguments.target.id, todoRead.arguments.todo_id);
+  assert.equal(todoAssign.arguments.todo_id, todoRead.arguments.todo_id);
+  assert.equal(todoAssign.arguments.to.id, '00000000-0000-4000-8000-000000000001');
+  assert.equal(todoAssign.arguments.start, 'queue', 'agent assignment avoids human-only front placement');
+  assert.equal(todoDone.arguments.todo_id, todoRead.arguments.todo_id);
+  assert.equal(todoDone.arguments.state, 'done');
+  assert.equal(todoDone.arguments.base_version, 5, 'comment, update, assign and start each advance the created version');
+  assert.ok(receipt.tool_calls.some((r: any) => r.tool === 'todo_set_state' && r.ok));
+  assert.deepEqual(receipt.tool_calls.find((r: any) => r.tool === 'todo_queue').result_shape, ['queue', 'status']);
   const ids = positives.map(c => c.arguments.request_id).filter(Boolean);
   assert.equal(new Set(ids).size, ids.length);
-  for (const value of positives.flatMap(c => Object.values(c.arguments)).filter(v => typeof v === 'string')) {
+  for (const value of positives.flatMap(c => {
+    const schema = HOSTED_TOOL_TABLE.find(t => t.name === c.name)!.inputSchema as any;
+    // Public enum words (for example "up_next") can also be safe shape keys.
+    return Object.entries(c.arguments).filter(([key, value]) => typeof value === 'string' &&
+      !schema.properties[key]?.enum?.includes(value)).map(([, value]) => value);
+  })) {
     assert.ok(!JSON.stringify(receipt).includes(value as string), 'receipt must omit full handles, IDs and content');
   }
   for (const row of receipt.tool_calls) {
@@ -80,11 +118,23 @@ test('exercise CLI calls every live tool with schema-valid arguments and synthet
   assert.ok(receipt.tool_calls.some((r: any) => r.result_shape.includes('[redacted-key]')));
 });
 
+test('exercise refreshes the to-do version after comments before changing details', async () => {
+  const result = await run('comment_version_advanced');
+  assert.equal(result.code, 0);
+  assert.equal(result.receipt.ok, true);
+  const updateIndex = result.calls.findIndex(c => c.name === 'todo_update');
+  assert.equal(result.calls[updateIndex - 1].name, 'todo_read');
+  assert.equal(result.calls[updateIndex].arguments.base_version, 3, 'two committed comments advance the created version');
+  assert.equal(result.calls.find(c => c.name === 'todo_set_state')!.arguments.base_version, 6);
+});
+
 for (const [scenario, reason, maxCalls] of [
   ['wrong_workspace', 'exercise_workspace_failed', 3],
   ['schema_changed', 'exercise_schema_failed', 2],
   ['negative_succeeds', 'exercise_unexpected_outcome', 1],
   ['transport_failure', 'request_or_runtime_failed', 13],
+  ['unexpected_tool', 'exercise_catalog_failed', 0],
+  ['missing_tool', 'exercise_catalog_failed', 0],
 ] as const) {
   test(`exercise CLI fails closed on ${scenario} and retains redacted partial receipts`, async () => {
     const result = await run(scenario);

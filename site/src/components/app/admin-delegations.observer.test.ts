@@ -20,6 +20,12 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     format: "iife", platform: "browser", define: { "import.meta.env": JSON.stringify({ PUBLIC_SUPABASE_URL: "https://api.test.invalid", PUBLIC_SUPABASE_ANON_KEY: "synthetic-public-key" }) },
   })).outputFiles[0]!.text;
   const bundle = await bundleScript(script);
+  const menu = await bundleScript(`import { buildWorkspaceMenu } from "../../lib/home-shell";
+    document.body.append(buildWorkspaceMenu(document, {
+      sample: false, workspaceId: "W", name: "Home", people: [], pane: "chat",
+      hrefs: { chat: "/app", todos: "/app", lists: "/app", files: "/app", wiki: "/app", workspaces: "/app" },
+      menu: { settings: true, adminAccess: true },
+    }, { openPeople() {}, menu() {} }, "hm-ws"));`);
   const signOut = await bundleScript('import { client } from "../../lib/commonswarm"; void client()!.auth.signOut({ scope: "local" });');
   const id = "11111111-1111-4111-8111-111111111111", time = new Date(Date.now() + 86400000).toISOString();
   const user = { id, aud: "authenticated", role: "authenticated", email: "synthetic@example.test", app_metadata: {}, user_metadata: {}, created_at: time };
@@ -72,9 +78,11 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
     const revokeButton = () => [...document.querySelectorAll("[data-admin-grants] button")].find(button => button.textContent === "Revoke grant");
     const report = result => { document.documentElement.dataset.adminObservation = btoa(unescape(encodeURIComponent(JSON.stringify(result)))); };
     (async () => {
-      await waitFor(() => !one("[data-admin-indicator]").hidden);
+      await waitFor(() => one("[data-admin-indicator]").hidden && one("[data-admin-indicator]").dataset.fullAccount === "true");
       const fullAccount = one("[data-admin-indicator]").dataset.fullAccount;
-      one("[data-admin-indicator]").click();
+      one("#hm-ws-menu-trigger").click();
+      await waitFor(() => one("#hm-ws-menu") && !one("#hm-ws-menu").hidden);
+      one("[data-admin-access-open]").click();
       await waitFor(() => revokeButton() && !revokeButton().disabled);
       const automaticCommands = requests.length;
       const inert = {
@@ -106,7 +114,13 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
       window.adminFixtureForeignProjection(); one("[data-admin-refresh]").click();
       await waitFor(() => one("[data-admin-status]").textContent.includes("could not be verified"));
       const foreignRowsRemoved = !one("[data-admin-grants]").textContent.includes(grant.client_id) && !one("[data-admin-clients]").textContent.includes(grant.client_id);
-      const historyEntryVisible = !one("[data-admin-indicator]").hidden;
+      one("#hm-ws-menu-trigger").click();
+      const door = one("[data-admin-access-open]");
+      const historyEntryVisible = !!one("#hm-ws-menu-trigger") && !one("#hm-ws-menu-trigger").hidden
+        && !!one("#hm-ws-menu") && !one("#hm-ws-menu").hidden
+        && !!door && !door.hidden && door.dataset.adminAccessScope === "workspace"
+        && door.textContent === "Admin access and history"
+        && one("[data-admin-indicator]").hidden;
       // A second document signs out through the real auth client and broadcasts to this view.
       const other = document.createElement("iframe"); other.src = "/signout"; document.body.append(other);
       await waitFor(() => one("admin-delegations").hidden);
@@ -116,7 +130,7 @@ test("admin account view keeps hostile labels inert and reuses an uncertain revo
   </script>`;
   const markup = source.replace(/^---[\s\S]*?---\n/u, "").split("<script>")[0]!
     .replace("data-admin-policy={JSON.stringify(policy)}", `data-admin-policy='${JSON.stringify(policy).replaceAll("&", "&amp;").replaceAll("'", "&#39;")}'`);
-  const html = `<!doctype html><html><body>${markup}${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
+  const html = `<!doctype html><html><body>${markup}<script>${menu}</script>${setup}${seed}<script>${bundle}</script>${observe}</body></html>`;
   const server = createServer((request, response) => {
     response.writeHead(200, { "Content-Type": "text/html" });
     response.end(request.url === "/signout" ? `<!doctype html><html><body>${setup}<script>${signOut}</script></body></html>` : html);
