@@ -132,6 +132,7 @@ import {
 import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
 import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
+import type { HouseholdTodoNoticePort } from './household-todos.ts';
 import { provisionHouseholdPermissions } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
@@ -9114,6 +9115,31 @@ type PostSignalOutcome =
   | { status: "thread_horizon" }
   | { status: "chain_refused"; error: AskChainRefusal };
 
+/** Fixed-content notices share signal targeting, rate and delivery truth.
+ * The to-do store owns replay and invokes this port at most once per command. */
+function householdNotice(route: Route, auth: AuthContext): HouseholdTodoNoticePort {
+  let attempted = false;
+  return async (tx, workspaceId, identity, notice) => {
+    if (attempted) throw new RangeError("A household command may post at most one notice.");
+    attempted = true;
+    if (workspaceId !== route.workspaceId || identity.user_id !== auth.actor.user || identity.principal_id !== auth.actor.agent_principal)
+      throw new Error("Household notice identity mismatch.");
+    const command: SignalCommand = { kind: "post_signal", signal_kind: notice.kind,
+      body: notice.body, about: notice.about, to_user_id: null, to: [...notice.to] };
+    const target = await resolveSignalWriteTarget(tx, route, auth, command);
+    if (target === null) return { to: notice.to, status: "not_sent", reason: "recipient_not_live" };
+    const rate = await enforceSignalRate(tx, auth, workspaceId, command, target);
+    if (rate !== null) return { to: notice.to, status: "not_sent", reason: "signal_rate_limited" };
+    const posted = await postSignal(tx, route, auth, command, target, [], {
+      channelId: null, threadRootId: null, broadcastToChannel: false,
+      untilMs: SIGNAL_DEFAULT_UNTIL_MS[notice.kind], untilCeiling: null, untilExplicit: false,
+    });
+    if (posted.status !== "inserted") throw new Error("Household notice insertion failed.");
+    await chargeSpend(tx, "signal_post");
+    return { to: notice.to, status: "sent", signal_id: posted.signal.id };
+  };
+}
+
 async function postSignal(
   tx: Sql,
   route: Route,
@@ -10804,7 +10830,7 @@ async function handleTransaction(
             ...(surface.base_revision ? { base_revision: surface.base_revision as never } : {}) }, identity, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined)
           : kind === "household_permissions"
           ? await provisionHouseholdPermissions(tx, route.workspaceId, identity, commandId, surface, recheck)
-          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined);
+          : await executeHouseholdSurface(tx, route.workspaceId, identity, commandId, surface, recheck, body.household_attachment instanceof Uint8Array ? body.household_attachment : undefined, householdNotice(route, auth));
         await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId,
           outcome: output.status === "refused" ? "authz" : "accepted",
           reason: output.status === "refused" ? String(output.reason) : null });

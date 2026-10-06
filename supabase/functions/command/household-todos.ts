@@ -7,11 +7,7 @@ import type postgres from 'postgres';
 import type { HouseholdIdentity } from './household-objects.ts';
 import type { HouseholdAccessFacts } from '../_shared/household-object-policy.d.ts';
 import type { HouseholdTodoState, Todo, TodoCommand, TodoComment, TodoGate, Party, TodoNotice, TodoOutcome } from '../_shared/household-todos.d.ts';
-import type { AgentWorkFacts as PolicyAgentWorkFacts } from '../_shared/household-todo-policy.d.ts';
-
-type AgentWorkFacts = Omit<PolicyAgentWorkFacts, 'connection'> & {
-  connection: PolicyAgentWorkFacts['connection'] | 'connection_off';
-};
+import type { AgentWorkFacts } from '../_shared/household-todo-policy.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 type Core = Pick<typeof import('../_shared/household-todos.d.ts'), 'decideTodo' | 'reduceTodoEvents' | 'emptyHouseholdTodoState' | 'evaluateGate'>
@@ -170,7 +166,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
     let cursor = offset;
     while (cursor < rows.length && items.length < limit) {
       items.push(rows[cursor]!);
-      if (pageBytes(make(cursor + 1 < rows.length ? cursor + 1 : null)) > PAGE_BUDGET) {
+      if (pageBytes({ status: 'ok', ...make(cursor + 1 < rows.length ? cursor + 1 : null) as Record<string, unknown> }) > PAGE_BUDGET) {
         // AM16 bounds valid singleton rows. Retain the first row even if an
         // unexpected stored value exceeds that bound, so paging still advances.
         if (items.length > minimumRows) items.pop();
@@ -279,7 +275,7 @@ export function createHouseholdTodoStore({ core, access, notice }: { core: Core;
       for (const section of sectionNames) {
         if (query.section && query.section !== section || cut) { next_offset[section] = 0; continue; }
         const minimumRows = sectionNames.some(name => loaded[name].length > 0) ? 0 : 1;
-        next_offset[section] = page(sections[section].map(t => summary(t, current, now)), query.section ? offset : 0, limit, loaded[section], n => ({ ...metadata, ...loaded, next_offset: { ...next_offset, [section]: n } }), minimumRows);
+        next_offset[section] = page(sections[section].map(t => summary(t, current, now)), query.section ? offset : 0, limit, loaded[section], n => ({ queue: { ...metadata, ...loaded, next_offset: { ...next_offset, [section]: n } } }), minimumRows);
         if (next_offset[section] !== null) cut = true;
       }
       result = { ...metadata, ...loaded, next_offset };

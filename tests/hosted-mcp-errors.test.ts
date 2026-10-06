@@ -6,6 +6,8 @@ import { createMcpProtocolHandler } from "../supabase/functions/mcp/protocol.ts"
 // @ts-expect-error TS5097: exercise the production adapter through tsx.
 import { commandOutput, readOutput, HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
 import type { HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+// @ts-expect-error TS5097: exercise the enforcing Deno catalog through tsx.
+import { HOSTED_TOOL_TABLE } from "../supabase/functions/mcp/tools.ts";
 
 const seat = "seat_ABCDEFGHIJKLMNOPQRSTUV";
 const uuid = "11111111-1111-4111-8111-111111111111";
@@ -173,9 +175,10 @@ test("unknown tool names receive a safe tools/call correction with the existing 
   const serve = handler(async () => { executed++; return { ok: true }; });
   const response = await serve(request("private-token", { seat }));
   assert.equal(response.status, 400);
+  assert.equal(HOSTED_TOOL_TABLE.length, 23, "eight core tools, five object tools and ten to-do/comment tools");
   assert.deepEqual(await response.json(), { jsonrpc: "2.0", id: 1, error: {
     code: -32602,
-    message: "Invalid tools/call params. Send name (claim_seat, whoami, check, ask, note, reply, working_on, members, object_list, object_read, object_history, object_create, object_update) and arguments as a JSON object.",
+    message: `Invalid tools/call params. Send name (${HOSTED_TOOL_TABLE.map(tool => tool.name).join(", ")}) and arguments as a JSON object.`,
   } });
   assert.equal(executed, 0);
   assert.equal((await serve(request("whoami", { seat }))).status, 200);

@@ -6,6 +6,7 @@
 import { type HouseholdContentOperation } from './household-object-policy.d.ts';
 import { type HouseholdObjectType } from './household-object-events.d.ts';
 import type { HouseholdObjectCommand, HouseholdReadQuery } from './household-objects.d.ts';
+import type { TodoCommand, Party, TodoComment } from './household-todos.d.ts';
 export declare const HOUSEHOLD_LOCAL_SEAT = "seat_0000000000000000000000";
 type Arguments = Record<string, unknown>;
 export type Schema = {
@@ -16,6 +17,7 @@ export type Schema = {
     items?: Schema;
     minLength?: number;
     maxLength?: number;
+    maxItems?: number;
     pattern?: string;
     minimum?: number;
     maximum?: number;
@@ -33,10 +35,32 @@ export interface HouseholdToolHostContext {
         expires_at: number;
     };
 }
-type CoreOperation = {
-    query: HouseholdReadQuery;
+export type HouseholdTodoReadQuery = {
+    kind: 'todo_list';
+    scope: 'open' | 'all';
+    assignee?: Party;
+    offset?: number;
+    limit?: number;
 } | {
-    command: HouseholdObjectCommand;
+    kind: 'todo_read';
+    todo_id: string;
+    comment_offset?: number;
+} | {
+    kind: 'comment_list';
+    target: TodoComment['target'];
+    offset?: number;
+    limit?: number;
+} | {
+    kind: 'todo_queue';
+    principal_id?: string;
+    section?: 'working' | 'up_next' | 'not_yet' | 'requests';
+    offset?: number;
+    limit?: number;
+};
+type CoreOperation = {
+    query: HouseholdReadQuery | HouseholdTodoReadQuery;
+} | {
+    command: HouseholdObjectCommand | TodoCommand;
 };
 type Effect = 'read' | 'commit' | 'reserve';
 /** The sole inventory: validation, MCP schemas/hints and consent use these rows. */
@@ -46,7 +70,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "object_list";
@@ -56,7 +80,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "object_read";
@@ -66,7 +90,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "object_history";
@@ -76,7 +100,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "object_create";
@@ -86,7 +110,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "object_update";
@@ -96,7 +120,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "file_read";
@@ -106,7 +130,7 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "file_upload_begin";
@@ -116,23 +140,129 @@ export declare const HOUSEHOLD_TOOL_REGISTRY: readonly [{
     operation: (args: Arguments) => HouseholdContentOperation;
     title: string;
     operations: readonly HouseholdContentOperation[];
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
     effect: Effect;
     toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
     name: "file_upload_commit";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_list";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_read";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_queue";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "comment_list";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_create";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_comment";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_update";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_assign";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_start";
+}, {
+    inputSchema: Schema;
+    description: string;
+    operation: (args: Arguments) => HouseholdContentOperation;
+    title: string;
+    operations: readonly HouseholdContentOperation[];
+    objectTypes: readonly (HouseholdObjectType | "todo")[];
+    effect: Effect;
+    toCore: (args: Arguments, context: HouseholdToolHostContext) => CoreOperation;
+    name: "todo_set_state";
 }];
 export type HouseholdToolName = typeof HOUSEHOLD_TOOL_REGISTRY[number]['name'];
 export declare class HouseholdToolInputError extends Error {
     readonly code: 'unknown_tool' | 'invalid_arguments' | 'revision_binding_mismatch' | 'host_context_required';
     constructor(code: 'unknown_tool' | 'invalid_arguments' | 'revision_binding_mismatch' | 'host_context_required');
 }
+/** Human-only HTTP commands use the same closed schema validator as tools. */
+export declare function validateHouseholdHumanCommand(value: unknown): TodoCommand | {
+    kind: 'household_activity';
+    since: string;
+    limit: number;
+};
 export declare function validateHouseholdToolArguments(name: string, value: unknown): Arguments;
 export declare function householdToolOperation(name: string, value: unknown): HouseholdContentOperation;
 export type HouseholdToolInvocation = CoreOperation & {
     seat: string;
     workspace_id: string;
     operation: HouseholdContentOperation;
-    objectTypes: readonly HouseholdObjectType[];
+    objectTypes: readonly (HouseholdObjectType | 'todo')[];
     request_id?: string;
 };
 /** Does not grant permission or execute I/O. The integration must authorize the
@@ -141,7 +271,7 @@ export type HouseholdToolInvocation = CoreOperation & {
  */
 export declare function householdToolInvocation(name: string, value: unknown, context: HouseholdToolHostContext): HouseholdToolInvocation;
 export declare const HOUSEHOLD_TOOLS: {
-    name: "object_list" | "object_read" | "object_history" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
+    name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
     title: string;
     description: string;
     inputSchema: Schema;
@@ -159,7 +289,7 @@ export declare const HOUSEHOLD_TOOLS: {
 export declare const HOUSEHOLD_CONTENT_CONSENT: {
     operation: "create" | "update" | "read";
     tools: {
-        name: "object_list" | "object_read" | "object_history" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
+        name: "object_list" | "object_read" | "object_history" | "todo_create" | "todo_update" | "todo_assign" | "todo_start" | "todo_set_state" | "todo_comment" | "todo_list" | "todo_read" | "comment_list" | "todo_queue" | "object_create" | "object_update" | "file_read" | "file_upload_begin" | "file_upload_commit";
         description: string;
     }[];
     description: string;

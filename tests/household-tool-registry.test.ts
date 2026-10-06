@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import {
   HOUSEHOLD_CONTENT_CONSENT, HOUSEHOLD_TOOLS, householdToolInvocation,
-  householdToolOperation, HouseholdToolInputError, validateHouseholdToolArguments,
+  householdToolOperation, HouseholdToolInputError, validateHouseholdToolArguments, validateHouseholdHumanCommand,
   type HouseholdToolName,
 } from '../src/protocol/household-tool-registry.js';
 import {
@@ -33,6 +33,16 @@ const examples: Record<HouseholdToolName, Record<string, unknown>> = {
   file_read: { seat, object_id: 'file', revision: ref('file', 2) },
   file_upload_begin: { ...request, object_id: 'new-file', change: { kind: 'create', title: 'Attachment', content: file } },
   file_upload_commit: { ...request, reservation_id: 'upload-1', operation: 'create' },
+  todo_list: { seat, scope: 'open', offset: 0, limit: 50 },
+  todo_read: { seat, todo_id: '00000000-0000-4000-8000-000000000001', comment_offset: 0 },
+  todo_queue: { seat, section: 'up_next', offset: 0, limit: 50 },
+  comment_list: { seat, target: { kind: 'doc', id: 'recipes' }, offset: 0, limit: 20 },
+  todo_create: { ...request, title: 'Buy bread', notes: 'Plain text', due_on: null },
+  todo_comment: { ...request, target: { kind: 'doc', id: 'recipes' }, body: 'Try this', mentions: [] },
+  todo_update: { ...request, todo_id: '00000000-0000-4000-8000-000000000001', base_version: 1, notes: 'Updated' },
+  todo_assign: { ...request, todo_id: '00000000-0000-4000-8000-000000000001', base_version: 1, to: null },
+  todo_start: { ...request },
+  todo_set_state: { ...request, todo_id: '00000000-0000-4000-8000-000000000001', base_version: 1, state: 'done' },
 };
 const contracts = [
   ['object_list', 'object_list', 'read', true],
@@ -45,9 +55,9 @@ const contracts = [
   ['file_upload_commit', 'commit_household_upload', 'create', false],
 ] as const;
 
-test('all eight proposed tool contracts validate and map to lane 1 with spec hints and rights', () => {
-  assert.equal(HOUSEHOLD_TOOLS.length, 8);
-  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 8);
+test('all eighteen tool contracts validate and map to lane 1 with spec hints and rights', () => {
+  assert.equal(HOUSEHOLD_TOOLS.length, 18);
+  assert.equal(new Set(HOUSEHOLD_TOOLS.map((tool) => tool.name)).size, 18);
   for (const [name, kind, permission, readOnlyHint] of contracts) {
     assert.deepEqual(validateHouseholdToolArguments(name, examples[name]), examples[name]);
     const invocation = householdToolInvocation(name, examples[name], host);
@@ -235,9 +245,9 @@ test('mapped calls execute the real core: reads preserve state; begin reserves; 
 
 test('consent groups only the matching content tools and explains workspace audience and retained history', () => {
   const expected = {
-    read: ['object_list', 'object_read', 'object_history', 'file_read'],
-    create: ['object_create', 'file_upload_begin', 'file_upload_commit'],
-    update: ['object_update', 'file_upload_begin', 'file_upload_commit'],
+    read: ['object_list', 'object_read', 'object_history', 'file_read', 'todo_list', 'todo_read', 'todo_queue', 'comment_list'],
+    create: ['object_create', 'file_upload_begin', 'file_upload_commit', 'todo_create', 'todo_comment'],
+    update: ['object_update', 'file_upload_begin', 'file_upload_commit', 'todo_update', 'todo_assign', 'todo_start', 'todo_set_state'],
   };
   assert.equal(HOUSEHOLD_CONTENT_CONSENT.length, 3);
   for (const consent of HOUSEHOLD_CONTENT_CONSENT) {
@@ -291,4 +301,54 @@ test('replacement upload uses update permission at both boundaries and commits a
   assert.equal(state.objects.file!.history.length, 2);
   assert.deepEqual(state.objects.file!.history[1]!.parent, base);
   assert.deepEqual(state.objects.file!.history[1]!.file_metadata, replacement);
+});
+
+// SERVER-PLAN C adds ten sibling tools: their independent examples exercise the
+// advertised schema and mapping, without treating a to-do as a blob revision.
+test('to-do tools map paged reads and versioned writes with content permissions', () => {
+  const expected = [
+    ['todo_list', 'read'], ['todo_read', 'read'], ['todo_queue', 'read'], ['comment_list', 'read'],
+    ['todo_create', 'create'], ['todo_comment', 'create'], ['todo_update', 'update'],
+    ['todo_assign', 'update'], ['todo_start', 'update'], ['todo_set_state', 'update'],
+  ] as const;
+  for (const [name, operation] of expected) {
+    const invocation = householdToolInvocation(name, examples[name], host);
+    const { seat: _seat, request_id: _request, ...fields } = examples[name];
+    assert.deepEqual('query' in invocation ? invocation.query : invocation.command, { kind: name, ...fields });
+    assert.deepEqual(invocation.objectTypes, ['todo']);
+    assert.equal(invocation.operation, operation);
+    assert.equal(invocation.request_id, operation === 'read' ? undefined : 'request_1');
+    assert.match(HOUSEHOLD_TOOLS.find(row => row.name === name)!.description, /untrusted data/);
+    refused(name, { ...examples[name], workspace_id: 'other' });
+    if (operation !== 'read') { const { request_id: _id, ...missing } = examples[name]; refused(name, missing); }
+  }
+  for (const name of ['todo_list', 'todo_queue', 'comment_list'] as const) {
+    validateHouseholdToolArguments(name, examples[name]);
+    refused(name, { ...examples[name], limit: name === 'comment_list' ? 21 : 51 });
+    refused(name, { ...examples[name], offset: -1 });
+  }
+  validateHouseholdToolArguments('todo_queue', { seat, principal_id: '00000000-0000-4000-8000-000000000001' });
+  refused('todo_read', { ...examples.todo_read, comment_offset: -1 });
+  refused('todo_comment', { ...examples.todo_comment, mentions: Array.from({ length: 9 }, () => ({ kind: 'user', id: '00000000-0000-4000-8000-000000000001' })) });
+  assert.match(HOUSEHOLD_TOOLS.find(row => row.name === 'todo_start')!.description, /without locking anything/);
+  for (const row of HOUSEHOLD_CONTENT_CONSENT) assert.match(row.description, /to-dos/);
+});
+
+test('human-only HTTP schemas refuse extra identity fields and invalid action or paging input', () => {
+  const todo_id = '00000000-0000-4000-8000-000000000001';
+  const valid = [
+    { kind: 'household_todo_answer', todo_id, offer_id: todo_id, answer: 'accept' },
+    { kind: 'household_todo_steer', todo_id, base_version: 1, action: { kind: 'move', after_todo_id: null } },
+    { kind: 'household_agent_work_policy', principal_id: todo_id, accepts_from: 'owner' },
+    { kind: 'household_activity', since: '2026-10-05T00:00:00Z', limit: 100 },
+  ];
+  for (const command of valid) {
+    assert.deepEqual(validateHouseholdHumanCommand(command), command);
+    assert.throws(() => validateHouseholdHumanCommand({ ...command, actor_user: todo_id }), HouseholdToolInputError);
+  }
+  for (const invalid of [
+    { ...valid[1], action: { kind: 'move' } }, { ...valid[1], action: { kind: 'unknown' } },
+    { ...valid[2], accepts_from: 'all' }, { ...valid[3], limit: 101 },
+    { ...valid[0], answer: 'replaced' }, { kind: 'todo_start' },
+  ]) assert.throws(() => validateHouseholdHumanCommand(invalid), HouseholdToolInputError);
 });

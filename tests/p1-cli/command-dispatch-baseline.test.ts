@@ -942,6 +942,9 @@ async function runFixture(root: string, origin: string, fixture: Fixture): Promi
 }
 
 test("the command dispatcher matches the recorded behavior baseline", { timeout: 600_000 }, async () => {
+  // L4 adds ten registry-driven to-do/comment commands. Object-group refusal
+  // inventories and help therefore expand; every existing route still refuses
+  // or dispatches through the same handler.
   // UPDATE_DISPATCH_BASELINE=help refreshes only generated help and new admin/household
   // refusals without a socket. Existing non-help behavior must stay byte-identical;
   // UPDATE_DISPATCH_BASELINE=1 remains the complete network-backed generator.
@@ -956,9 +959,13 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
       const rows: BaselineRow[] = [];
       for (const fixture of allFixtures) {
         const prior = byId.get(fixture.id);
-        if (prior && ![prior.stdout, prior.stderr].some(value => /^cswarm <VERSION> \(protocol /mu.test(value))) {
+        if (prior) {
           assert.deepEqual(prior.argv, fixture.argv, fixture.id);
-          rows.push(prior);
+          // Help is generated once from the public usage entry point. Re-running
+          // every historical refusal here also executes unrelated slow routes.
+          const help = usage().replace(/^cswarm [^ ]+/, 'cswarm <VERSION>') + '\n';
+          const refresh = (value: string) => value.replace(/^cswarm <VERSION> \(protocol [^\n]+\n[\s\S]*$/mu, help);
+          rows.push({ ...prior, stdout: refresh(prior.stdout), stderr: refresh(prior.stderr) });
           continue;
         }
         if (!prior) assert.ok(["admin", "object"].includes(fixture.argv[0]!), "help refresh only adds admin/household routes");
