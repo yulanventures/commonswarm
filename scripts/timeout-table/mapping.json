@@ -3491,6 +3491,20 @@
             "removes": [],
             "reason": "Requires the recipient human session. The agent-profile timeout runner cannot exercise this transport."
           }
+        },
+        "site/src/lib/home/client.ts:PAGE_BUDGET": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "site/src/lib/home/client.ts:341,361",
+          "detail": "Non-time byte budget for double-serialized household response pages (28 KiB).",
+          "operation": {
+            "name": "home-page-size",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Size bound, not a wait."
+          }
         }
       }
     }

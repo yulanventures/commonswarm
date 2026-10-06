@@ -13,6 +13,10 @@ const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privi
 // Household audit INSERT: append command outcomes and digests; the command path never reads this ledger.
 // Household bindings SELECT/INSERT: resolve or establish stable object-to-file identity.
 // Household artifacts SELECT/INSERT/UPDATE: verify retained bytes, register versions and settle reservations.
+// To-do projections/policies SELECT/INSERT/UPDATE; events/comments/receipts
+// SELECT/INSERT (AM7). These fifteen command-parent grants are intentional;
+// swarm_admin retains ownership and history mutation remains forbidden.
+// The human overview/predicate add no issuer or PUBLIC grants.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.

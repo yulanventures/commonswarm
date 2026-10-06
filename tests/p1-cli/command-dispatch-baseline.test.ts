@@ -961,10 +961,17 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
         const prior = byId.get(fixture.id);
         if (prior) {
           assert.deepEqual(prior.argv, fixture.argv, fixture.id);
+          // Version output shares help's heading but is only one line. The
+          // previous help refresh expanded it into usage text. Re-measure
+          // these two socket-free routes to repair their recorded outputs.
+          if (fixture.argv[0] === "--version" || fixture.argv[0] === "-v") {
+            rows.push(await runFixture(root, "http://127.0.0.1:9", fixture));
+            continue;
+          }
           // Help is generated once from the public usage entry point. Re-running
           // every historical refusal here also executes unrelated slow routes.
           const help = usage().replace(/^cswarm [^ ]+/, 'cswarm <VERSION>') + '\n';
-          const refresh = (value: string) => value.replace(/^cswarm <VERSION> \(protocol [^\n]+\n[\s\S]*$/mu, help);
+          const refresh = (value: string) => value.replace(/^cswarm <VERSION> \(protocol [^\n]+\n\nUsage:\n[\s\S]*$/mu, help);
           rows.push({ ...prior, stdout: refresh(prior.stdout), stderr: refresh(prior.stderr) });
           continue;
         }

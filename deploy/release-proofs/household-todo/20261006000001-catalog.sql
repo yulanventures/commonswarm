@@ -17,5 +17,5 @@ WITH expected(name, privileges) AS (VALUES
  AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=c.oid AND attnum > 0 AND NOT attisdropped AND attacl IS NOT NULL)
  AND (SELECT count(*) = CASE WHEN e.name IN ('household_todo_events','household_comments','household_todo_receipts') THEN 1 ELSE 0 END FROM pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal AND tgenabled='O' AND tgtype=27 AND tgfoid='swarm.prevent_append_only_mutation()'::regprocedure)
  AS ok FROM expected e LEFT JOIN pg_class c ON c.oid=to_regclass('swarm.'||e.name))
-SELECT count(*)=6 AND coalesce(bool_and(ok),false) AS catalog_ok FROM checks
+SELECT (SELECT count(*)=6 AND coalesce(bool_and(ok),false) FROM checks) AS catalog_ok
 \gset
