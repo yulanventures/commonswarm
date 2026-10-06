@@ -914,3 +914,60 @@ INNER_RC=0
 ```
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). No new test file (D-030 unchanged). No commit or push. HEAD remains `6f4a0ac9`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-19: checker round 8 (uncommitted)
+
+Prepared against committed HEAD `5eec4d5b`. No commit, push, production
+operation, full suite, build, Docker or browser. HezLead owns independent
+review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for the Lead.
+C1-17 and C1-18 changes are kept.
+
+Changed step counts (manual and conditional rows included, as in C1-8): **none**.
+No run-order rows were added or removed.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 10 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 22 | 2 | 8 |
+
+No `scripts/c1-task-from-plan.mjs` edits.
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 pin C1-17 baselines to 6f4a0ac9 | done | `git show HEAD:` replaced with `6f4a0ac9` plus `cat-file` absence message; guard test refuses `git show HEAD:` / `'HEAD:docs/` as a comparison baseline |
+| 2 attestation metadata must be strings | done | `ai-w2-backfill` isolation: present pointer, written_by, reason, attested_by, attested_at must be strings before checks; list/object pointer and list written_by refuse; production rows still pass |
+| 3 W5 tree compares dirs and symlinks | done | retained dest walk uses `dirnames+filenames`; tar files/dirs/symlinks compared; extra directory and extra directory-symlink refuse |
+| 4 staging-marker writer alias | done | exemption allow-lists `backfill.json` / `backfill-evidence.json` by name; `(proof/'STAGING-ONLY').write_text` after any `proof=` path is a writer |
+
+Run-order quote pins retargeted after isolation (+2) and W5 comparison (+8), not new rows:
+abort host 6873→6883; LOG 6941→6951; `ai-w6-secret-close` 6187→6197;
+W5 recovered prose 4564→4566; site2 table 4560→4562 and 4561→4563;
+`ai-w4-timer-recovery` 3974→3976; `ai-w3-probes` 3461→3463; issuer
+rollback 2959→2961, 3119→3121, recovered marker 2987→2989;
+BROWSER-READY 5363→5373; browser worker 5789→5799; dispatch 5928→5938.
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.3k4xHB: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.xxp88P`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 187
+ℹ pass 186
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 211609.328625
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). One new test (HEAD-baseline guard); D-030 still reaches every test file. No commit or push. HEAD remains `5eec4d5b`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.

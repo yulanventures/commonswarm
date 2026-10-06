@@ -864,6 +864,12 @@ const frozen00Plan = spawnSync('git', ['show', '00e4fca4:docs/evidence/2026-10-0
 assert.equal(frozen00Plan.status, 0, frozen00Plan.stderr);
 const frozen00Blocks = [...frozen00Plan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
 const frozen00Block = (id: string) => block(id, frozen00Blocks);
+const frozen6fPresent = spawnSync('git', ['cat-file', '-e', '6f4a0ac9^{commit}']);
+assert.equal(frozen6fPresent.status, 0, 'baseline commit 6f4a0ac9 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 6f4a0ac9)');
+const frozen6fPlan = spawnSync('git', ['show', '6f4a0ac9:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozen6fPlan.status, 0, frozen6fPlan.stderr);
+const frozen6fBlocks = [...frozen6fPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozen6fBlock = (id: string) => block(id, frozen6fBlocks);
 
 test('C1-16: recovery revoke binds grant_id and saved request id; incomplete receipts do not block', () => {
   const grant = '11111111-1111-4111-8111-111111111111';
@@ -918,13 +924,11 @@ case " $* " in *" src/cli.ts admin revoke "*) printf 'revoke %s\\n' "$*" >>'${ca
   assert.match(empty.calls, /admin revoke/);
 });
 
-test('C1-17: completed human-revoke.json plus a partial recovery receipt PASSes without parsing the partial; HEAD 6f4a0ac9 dies', () => {
+test('C1-17: completed human-revoke.json plus a partial recovery receipt PASSes without parsing the partial; frozen 6f4a0ac9 dies', () => {
   const grant = '11111111-1111-4111-8111-111111111111';
   const saved = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
-  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
-  assert.equal(headPlan.status, 0, headPlan.stderr);
-  const headRevoke = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-w6-human-revoke\n'))!;
-  assert.doesNotMatch(headRevoke, /incomplete\/human-revoke-recovery/);
+  const oldRevoke = frozen6fBlock('ai-w6-human-revoke');
+  assert.doesNotMatch(oldRevoke, /incomplete\/human-revoke-recovery/);
   const makeBoth = (source: string) => {
     const dir = realpathSync(mkdtempSync(join(root, 'c117-both-')));
     const bin = join(dir, 'bin'), proof = join(dir, 'proof'), stage = join(dir, 'stage');
@@ -944,8 +948,8 @@ exit 64
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, C1_PROOF_DIR: proof, C1_INPUTS_FILE: join(proof, 'C1-inputs.json'), C1_SECRET_STAGE: stage, C1_RUNNER_PID: '2147483646', C1_RECOVERY_REVOKE: '1' } });
     return { r, calls: readFileSync(calls, 'utf8'), proof };
   };
-  const old = makeBoth(headRevoke);
-  assert.notEqual(old.r.status, 0, 'HEAD 6f4a0ac9 parsed the partial recovery receipt');
+  const old = makeBoth(oldRevoke);
+  assert.notEqual(old.r.status, 0, 'frozen 6f4a0ac9 parsed the partial recovery receipt');
   assert.match(old.r.stderr, /JSONDecodeError|Expecting|recovery revoke expected revoked-for-this-grant-and-saved-id/);
   const cur = makeBoth(block('ai-w6-human-revoke'));
   assert.equal(cur.r.status, 0, cur.r.stderr + cur.r.stdout);
@@ -957,14 +961,11 @@ exit 64
   assert.match(cur.r.stdout, /RECOVERY ai-w6-human-revoke: .*NOT C1 refusal proof/);
 });
 
-test('C1-17: W7 recovery consumes the opening receipt ai-open retains from refresh; HEAD 6f4a0ac9 never produces it', () => {
+test('C1-17: W7 recovery consumes the opening receipt ai-open retains from refresh; frozen 6f4a0ac9 never produces it', () => {
   const persistPy = block('ai-open').match(/python3 - "\$EDGE_MEASUREMENT_FILE" "\$PROOF_DIR\/edge-measurement-open.json" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
   const recovery = block('ai-w7-recovery');
-  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
-  assert.equal(headPlan.status, 0, headPlan.stderr);
-  const headBlocks = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
-  const headOpen = headBlocks.find(s => s.startsWith('# step: ai-open\n'))!;
-  const headRecovery = headBlocks.find(s => s.startsWith('# step: ai-w7-recovery\n'))!;
+  const headOpen = frozen6fBlock('ai-open');
+  const headRecovery = frozen6fBlock('ai-w7-recovery');
   assert.doesNotMatch(headOpen, /edge-measurement-open\.json/);
   assert.match(headRecovery, /edge-measurement\.json/);
   assert.match(recovery, /edge-measurement-open\.json/);
@@ -1008,7 +1009,7 @@ ai_ro() { case "$*" in *release_generation=${opts.live}*) printf 't\\n';; *) pri
   assert.equal(JSON.parse(readFileSync(join(w16.proof, 'W7-recovery-expected.json'), 'utf8')).generation, 16);
   assert.match(pass16.stdout, /SHELL_ALIVE/);
   const head16 = recover(headRecovery, { ...w16, live: 16 });
-  assert.notEqual(head16.status, 0, 'HEAD 6f4a0ac9 selects W6 generation 15 while live is 16');
+  assert.notEqual(head16.status, 0, 'frozen 6f4a0ac9 selects W6 generation 15 while live is 16');
   assert.match(head16.stderr, /preserved-open-at-expected-generation|W6 measured OPEN\/CLOSED state expected preserved/);
 
   const w15 = w7world(15);

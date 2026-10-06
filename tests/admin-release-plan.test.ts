@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 
 const directory = resolve('docs/evidence/2026-10-03-admin-issuance-release');
@@ -3028,8 +3028,8 @@ test('release blocks and scripts contain zero staging-marker writers; writer pro
   // Isolation in ai-w2-backfill reads the marker O_RDONLY in a block that also
   // writes PROOF_DIR receipts and reads inputs.json. Those are not marker writes.
   const withoutProofIo = (source: string) => source
-    .replace(/\(proof\/'[^']+'\)\.(?:write_text|write_bytes)\s*\(/g, '(')
-    .replace(/>"\$PROOF_DIR\/[^"]+"/g, '')
+    .replace(/\(proof\/'(?:backfill\.json|backfill-evidence\.json)'\)\.(?:write_text|write_bytes)\s*\(/g, '(')
+    .replace(/>"\$PROOF_DIR\/(?!STAGING-ONLY)[^"]+"/g, '')
     .replace(/json\.load\(open\(inputs\)\)/g, 'json.load(READ(inputs))');
   const writer = (source: string) => mentions(source) && (
     /\b(?:install|cp|tee|touch)\s/.test(source) ||
@@ -3044,7 +3044,8 @@ test('release blocks and scripts contain zero staging-marker writers; writer pro
     `cp fixture '${path}'`, `tee '${path}'`, `touch '${path}'`, `pathlib.Path('${path}').write_text('x')`,
     `open('${path}','wb')`, `fs.writeFileSync('${path}','x')`, `fs.promises.writeFile('${path}','x')`,
     `p='${path}'\nprintf x > "$p"`, `p='/etc/commonswarm-release/'+'STAGING-ONLY'\nopen(p,'w')`,
-    `os.open('${path}',os.O_WRONLY|os.O_CREAT)`]) assert.equal(writer(source),true,source);
+    `os.open('${path}',os.O_WRONLY|os.O_CREAT)`,
+    `proof=pathlib.Path('/etc/commonswarm-release'); (proof/'STAGING-ONLY').write_text('x')`]) assert.equal(writer(source),true,source);
   const files: string[] = [];
   const walk = (dir: string) => { for (const item of readdirSync(dir,{withFileTypes:true})) {
     const path = join(dir,item.name);
@@ -3346,6 +3347,12 @@ const frozen00Plan = spawnSync('git', ['show', '00e4fca4:docs/evidence/2026-10-0
 assert.equal(frozen00Plan.status, 0, frozen00Plan.stderr);
 const frozen00Blocks = [...frozen00Plan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
 const frozen00Block = (id: string) => frozen00Blocks.find(s => s.startsWith(`# step: ${id}\n`)) ?? '';
+const frozen6fPresent = spawnSync('git', ['cat-file', '-e', '6f4a0ac9^{commit}']);
+assert.equal(frozen6fPresent.status, 0, 'baseline commit 6f4a0ac9 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 6f4a0ac9)');
+const frozen6fPlan = spawnSync('git', ['show', '6f4a0ac9:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozen6fPlan.status, 0, frozen6fPlan.stderr);
+const frozen6fBlocks = [...frozen6fPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozen6fBlock = (id: string) => frozen6fBlocks.find(s => s.startsWith(`# step: ${id}\n`)) ?? '';
 const hostRoleOf = (source: string) => (/^# host: (.+)$/m.exec(source)?.[1] ?? '').match(/\b(Mac|box)\b/i)?.[1]?.toLowerCase() ?? '';
 const boxExit0 = (source: string) => source.split('\n').filter(line => /^\s*exit 0\s*$/.test(line));
 
@@ -3466,15 +3473,14 @@ done
   assert.equal(readFileSync(join(dest, 'inputs.json'), 'utf8'), 'new-bytes\n');
 });
 
-test('C1-17: W5 recovery-transfer compares retained tree list and digests to the tar before extract; HEAD 6f4a0ac9 extracts anyway', () => {
+test('C1-17: W5 recovery-transfer compares retained tree list and digests to the tar before extract; frozen 6f4a0ac9 extracts anyway', () => {
   const current = block('ai-w5-recovery-transfer');
   const py = current.match(/python3 - "\$upload" "\$dest" <<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
   assert.match(py, /retained site-recovery tree expected tar-file-list-and-digests/);
-  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
-  assert.equal(headPlan.status, 0, headPlan.stderr);
-  const head = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-w5-recovery-transfer\n'))!;
-  assert.match(head, /tar --no-same-owner -xf "\$upload" -C "\$dest"/);
-  assert.doesNotMatch(head, /tar-file-list-and-digests/);
+  assert.match(py, /dirnames\+filenames/);
+  const old = frozen6fBlock('ai-w5-recovery-transfer');
+  assert.match(old, /tar --no-same-owner -xf "\$upload" -C "\$dest"/);
+  assert.doesNotMatch(old, /tar-file-list-and-digests/);
   const dir = mkdtempSync(join(scratch, 'c117-w5tree-'));
   const evidence = join(dir, 'site'); mkdirSync(evidence);
   writeFileSync(join(evidence, 'CLOSE.txt'), 'CLOSED=yes\n');
@@ -3497,6 +3503,17 @@ test('C1-17: W5 recovery-transfer compares retained tree list and digests to the
   const extra = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
   assert.notEqual(extra.status, 0);
   assert.match(extra.stderr, /extra=extra\.txt/);
+  rmSync(join(dest, 'extra.txt'));
+  mkdirSync(join(dest, 'extra-dir'));
+  const extraDir = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
+  assert.notEqual(extraDir.status, 0);
+  assert.match(extraDir.stderr, /extra=extra-dir/);
+  rmSync(join(dest, 'extra-dir'), { recursive: true, force: true });
+  mkdirSync(join(dir, 'other-dir'));
+  symlinkSync(join(dir, 'other-dir'), join(dest, 'extra-dirlink'));
+  const extraLink = spawnSync('python3', ['-', archive, dest], { input: py, encoding: 'utf8' });
+  assert.notEqual(extraLink.status, 0);
+  assert.match(extraLink.stderr, /extra=extra-dirlink/);
 });
 
 test('C1-16: box-hosted blocks have no success-path exit 0; frozen 00e4fca4 has them', () => {
@@ -3532,14 +3549,12 @@ test('C1-16: abort publishes the pointer with mktemp in the same statement', () 
   assert.doesNotMatch(frozen00Block('ai-open'), /mktemp -d \/tmp\/anvil-secret\.XXXXXX\) && printf/);
 });
 
-test('C1-17: abort lists another window\'s recorded empty stage and deletes nothing; HEAD 6f4a0ac9 removes it', () => {
+test('C1-17: abort lists another window\'s recorded empty stage and deletes nothing; frozen 6f4a0ac9 removes it', () => {
   const current = block('ai-open-abort');
   assert.match(current, /no secret stage was recorded; candidates listed for manual review/);
   assert.doesNotMatch(current, /os\.rmdir|removed unrecorded|st_mtime/);
-  const headPlan = spawnSync('git', ['show', 'HEAD:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
-  assert.equal(headPlan.status, 0, headPlan.stderr);
-  const headAbort = [...headPlan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!).find(s => s.startsWith('# step: ai-open-abort\n'))!;
-  assert.match(headAbort, /os\.rmdir\(path\)/);
+  const oldAbort = frozen6fBlock('ai-open-abort');
+  assert.match(oldAbort, /os\.rmdir\(path\)/);
   const tmpNs = mkdtempSync(join(scratch, 'c117-abort-tmp-'));
   const otherProof = mkdtempSync(join(scratch, 'c117-other-proof-'));
   const ourProof = mkdtempSync(join(scratch, 'c117-our-proof-'));
@@ -3548,10 +3563,10 @@ test('C1-17: abort lists another window\'s recorded empty stage and deletes noth
   chmodSync(otherStage, 0o700);
   writeFileSync(join(otherProof, 'secret-stage.path'), otherStage + '\n');
   const go = (source: string) => run(remapAbortTmp(source, tmpNs) + "\nprintf 'SHELL_ALIVE\\n'\n", { PROOF_DIR: ourProof });
-  const old = go(headAbort);
+  const old = go(oldAbort);
   assert.equal(old.status, 0, old.stderr);
   assert.match(old.stdout, /removed unrecorded secret stage\(s\): .*anvil-secret\.AbCdEf/);
-  assert.ok(!existsSync(otherStage), 'HEAD 6f4a0ac9 deleted the other window stage');
+  assert.ok(!existsSync(otherStage), 'frozen 6f4a0ac9 deleted the other window stage');
   mkdirSync(otherStage, { mode: 0o700 });
   chmodSync(otherStage, 0o700);
   const cur = go(current);
@@ -3562,6 +3577,25 @@ test('C1-17: abort lists another window\'s recorded empty stage and deletes noth
   assert.ok(existsSync(otherStage), 'other window stage must remain');
   assert.equal(readFileSync(join(otherProof, 'secret-stage.path'), 'utf8').trim(), otherStage);
   assert.match(readFileSync(join(ourProof, 'aborted-before-mutation.txt'), 'utf8'), /candidates listed for manual review/);
+});
+
+test('tests never use HEAD as an immutable comparison baseline', () => {
+  const gitShowHead = ['git', 'show', 'HEAD'].join(' ') + ':';
+  const hits: string[] = [];
+  const walk = (dir: string) => {
+    for (const item of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, item.name);
+      if (item.isDirectory()) walk(path);
+      else if (item.isFile() && /\.(?:[cm]?js|ts)$/.test(item.name)) {
+        const source = readFileSync(path, 'utf8');
+        if (source.includes(gitShowHead) || /['"]HEAD:(?:docs|tests|src|scripts|site)\//.test(source)) {
+          hits.push(relative(resolve('.'), path).split(sep).join('/'));
+        }
+      }
+    }
+  };
+  walk(resolve('tests'));
+  assert.deepEqual(hits, [], `HEAD is not an immutable baseline: ${hits.join(', ')}`);
 });
 
 test('C1-18: recovered-close extracted rollback then close; no marker leaves issuer untouched', () => {
@@ -3698,5 +3732,20 @@ test('C1-18: attestation isolation refuses c1-staging on production and pins 202
   const stagingOnStaging = go(versions.map(v => stagingRow(v)), true);
   assert.equal(stagingOnStaging.status, 0, stagingOnStaging.stderr);
   assert.match(stagingOnStaging.stdout, /PASS ai-w2-backfill/);
+  const listPointer = go([{ ...productionRows[0]!, pointer: ['c1-staging/run-id/W2'] }, productionRows[1]!], false);
+  assert.notEqual(listPointer.status, 0);
+  assert.match(listPointer.stderr, /FAIL ai-w2-backfill: attestation pointer for 20260916000001 expected string got non-string; STOP/);
+  assert.ok(!existsSync(join(proof, 'backfill-evidence.json')));
+  const objectPointer = go([{ ...productionRows[0]!, pointer: { path: 'c1-staging/run-id/W2' } }, productionRows[1]!], false);
+  assert.notEqual(objectPointer.status, 0);
+  assert.match(objectPointer.stderr, /FAIL ai-w2-backfill: attestation pointer for 20260916000001 expected string got non-string; STOP/);
+  assert.ok(!existsSync(join(proof, 'backfill-evidence.json')));
+  const listWritten = go([{ ...productionRows[0]!, written_by: ['c1-staging/run-id/W2'] }, productionRows[1]!], false);
+  assert.notEqual(listWritten.status, 0);
+  assert.match(listWritten.stderr, /FAIL ai-w2-backfill: attestation written_by for 20260916000001 expected string got non-string; STOP/);
+  assert.ok(!existsSync(join(proof, 'backfill-evidence.json')));
+  const prodStill = go(productionRows, false);
+  assert.equal(prodStill.status, 0, prodStill.stderr);
+  assert.match(prodStill.stdout, /PASS ai-w2-backfill/);
   removeMarker();
 });
