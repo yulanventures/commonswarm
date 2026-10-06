@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { resolveHomeRoute } from "../../lib/home-map";
 import {
   CHANNEL_SLUG_MAX,
   RESERVED_CHANNEL_SLUGS,
@@ -256,8 +257,10 @@ test("the URL round-trips the workspace and the channel by id", () => {
   assert.match(rename, /The id does not change/);
   /* ?w= is a convenience and never an authorization: it is honoured only when it names a
      workspace already in this reader's own memberships. */
-  const boot = between(dashboard, "const requestedWorkspaceId =", "await openWorkspace(bootWorkspace.id);");
-  assert.match(boot, /workspaces\.find\(\(workspace\) => workspace\.id === requestedWorkspaceId\) \?\?/);
+  assert.match(dashboard, /await navigateHome\(resolveHomeRoute\(window.location.search, workspaces\), "replace"\)/);
+  const memberships = [{ id: "home", name: "Home" }, { id: "trip", name: "Trip" }];
+  assert.deepEqual(resolveHomeRoute("?w=trip&c=plans", memberships), { view: "chat", workspaceId: "trip", channelId: "plans" });
+  assert.deepEqual(resolveHomeRoute("?w=foreign&c=plans", memberships), { view: "catchup" });
 });
 
 test("the URL is written on every workspace open, and a ?c= belongs to its own ?w=", () => {

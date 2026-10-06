@@ -23,6 +23,7 @@ type Geometry = {
   sampleSteerButtons: number;
   sampleManage: number;
   banner: string;
+  bannerTone: string;
   foreignFixButtons: number;
   fixSentenceCount: number;
   foreignPosts: number;
@@ -159,7 +160,8 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
         root.replaceChildren();
         const cut = HomeAgent.agentPage(document, disconnected, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {} });
         root.append(cut);
-        const banner = cut.querySelector('[data-hm-banner]') ? cut.querySelector('[data-hm-banner]').textContent : '';
+        const bannerTone = cut.querySelector('[data-hm-banner] .hm-notice-tone').textContent;
+        const banner = cut.querySelector('[data-hm-banner]') ? cut.querySelector('[data-hm-banner] .hm-notice-text').textContent : '';
         root.replaceChildren();
         const preview = HomeAgent.agentPage(document, sample, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {} });
         root.append(preview);
@@ -184,7 +186,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           readonlySteerButtons,
           sampleSteerButtons,
           sampleManage,
-          banner,
+          banner, bannerTone,
           foreignFixButtons,
           fixSentenceCount,
           foreignPosts,
@@ -220,6 +222,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       assert.equal(geometry.fixSentenceCount, 1, "What to do owns the fix sentence; the status pill must not repeat it");
       assert.equal(geometry.foreignPosts, 0, "the locked posts row is only for your own agent");
       assert.equal(geometry.unreportedActivity, 0, "no activity section until activity was reported");
+      assert.equal(geometry.bannerTone, "Attention: ");
       assert.equal(geometry.banner, "Disconnected: key turned off. Nothing in its line moves until it reconnects.");
       assert.equal(geometry.missingTitle, "Nothing with this link in Home.");
     }

@@ -47,6 +47,11 @@ export function agentLabel(agent: AgentLabelInput, opts: { nested?: boolean; peo
   return agent.yours || agent.own ? `Your ${name}` : owner ? `${owner}’s ${name}` : name;
 }
 
+/** Sentence fragments retain an agent's name, lowering only the possessive word. */
+export function agentLabelInSentence(label: string): string {
+  return label.replace(/^Your\s/u, "your ");
+}
+
 export function initials(name: string): string {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2)
     .map(part => Array.from(part)[0] ?? "").join("").toLocaleUpperCase();

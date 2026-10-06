@@ -5,6 +5,7 @@ import { PURPOSE_COPY } from "./household-access.ts";
 import {
   newWorkspaceCanCreate,
   newWorkspacePeopleHint,
+  newWorkspacePersonalWarning,
   newWorkspacePreviewTitle,
   newWorkspacePurposeChoices,
   newWorkspaceShowsInviteSlot,
@@ -25,6 +26,12 @@ test("the invite slot hides only for a personal workspace", () => {
   assert.equal(newWorkspaceShowsInviteSlot(null), true);
   assert.equal(newWorkspaceShowsInviteSlot("shared"), true);
   assert.equal(newWorkspaceShowsInviteSlot("personal"), false);
+});
+
+test("Just me warns that the choice is permanent; shared and unchosen forms show no warning", () => {
+  assert.equal(newWorkspacePersonalWarning("personal"), "Just me cannot be changed later, and nobody can be invited to this workspace. To share with people later, create another workspace.");
+  assert.equal(newWorkspacePersonalWarning("shared"), "");
+  assert.equal(newWorkspacePersonalWarning(null), "");
 });
 
 test("create needs a name and a purpose, with nothing assumed", () => {

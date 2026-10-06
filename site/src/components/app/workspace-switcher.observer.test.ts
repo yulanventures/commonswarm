@@ -62,7 +62,7 @@ test("workspace links use native keyboard navigation; Show more exposes its stat
   assert.match(rail, /index !== currentIndex/);
 });
 test("creation reuse, Back and session reset preserve the surrounding dashboard state", () => {
-  const create = between(dashboard, "const renderCreate =", "const renderWorkspaceError =");
+  const create = between(dashboard, "const createFromIntent =", "/* THE SAMPLE ROSTER");
   for (const rule of [/input.disabled = false/, /button.disabled = false/, /button.removeAttribute\("aria-busy"\)/, /button.textContent = "Create workspace"/]) assert.match(create, rule);
   const reset = between(dashboard, "const resetWorkspaceSessionState =", "armLiveFeed =");
   assert.match(reset, /data-home-rail-slot/);

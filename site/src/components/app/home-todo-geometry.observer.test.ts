@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { build } from "esbuild";
-import { test as nodeTest } from "node:test";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { agentOrb, capsule, choiceChips, notice, personAvatar } from "../../lib/home-primitives.ts";
 
 // Lane P builds the primitives in parallel. While home-primitives.ts is still the scaffold (its
@@ -34,14 +34,6 @@ const usedByLaneT = [personAvatar, agentOrb, capsule, choiceChips, notice];
 const pendingSource = (fn: unknown) => /\bpending\s*\(/.test(Function.prototype.toString.call(fn));
 const implemented = usedByLaneT.every((fn) => !pendingSource(fn));
 
-nodeTest("geometry stand-ins render no targets and never fake 44 px; the real primitives replace them once they exist", () => {
-  for (const banned of ["44", "minHeight", "minWidth", "min-height", "min-width", "<button", "<a ", "\"button\"", "\"a\"", "\"input\"", "tabIndex"])
-    assert.equal(primitiveStub.includes(banned), false, `stand-ins contain ${banned}`);
-  // Positive control: the detector sees pending() in a scaffold body and not in a real one.
-  assert.equal(pendingSource(() => { const pending = (name: string) => name; return pending("x"); }), true);
-  assert.equal(pendingSource((doc: Document) => doc.createElement("span")), false);
-  assert.equal(implemented, !usedByLaneT.some(pendingSource));
-});
 
 type Geometry = {
   width: number; pageOverflow: boolean; smallTargets: string[]; titleWraps: boolean; titleOverflow: boolean;

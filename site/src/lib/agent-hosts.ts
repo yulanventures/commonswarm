@@ -99,7 +99,8 @@ export function joinSentence(agentName: string): string {
 export function agentJoinedSentence(agentName: string, workspaceName: string, joinedAt?: string): string {
   const joined = joinedAt ? new Date(joinedAt) : null;
   const time = joined && Number.isFinite(joined.getTime())
-    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(joined)
+    ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).formatToParts(joined)
+      .map(part => part.type === "dayPeriod" ? part.value.toLocaleLowerCase() : part.value).join("")
     : null;
   return time
     ? `${agentName} joined ${workspaceName} at ${time}.`
@@ -347,7 +348,7 @@ export function privacyNote(hostName: string): string {
 
 /** Said once on every host page; hosted agents are turn-only. */
 export const TURN_ONLY_NOTE =
-  "Your agent checks messages when you chat with it. It does not wake up on its own.";
+  "It does not check for messages on its own; it sees them when you chat with it.";
 
 /** Said once on every host page; menu names are the vendors' documented ones. */
 export const MENU_LABELS_NOTE = "Menu names come from each app's help pages and can differ in your version.";

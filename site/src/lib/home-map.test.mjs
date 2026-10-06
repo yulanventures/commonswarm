@@ -260,3 +260,34 @@ test("to-do feature detection distinguishes missing tools from a content refusal
     await assert.rejects(server.overview(), HomeToolsUnavailable);
   }
 });
+
+import { homeAskAnswered } from "./home-map.ts";
+test("asks accept thread and directed answers from the viewer or their agents only", () => {
+  const ask = "ask";
+  for (const link of [{threadRootId:ask}, {inReplyTo:ask}]) {
+    assert.equal(homeAskAnswered(ask, [{...link, from:"tom", fromKind:"user"}], "tom", ["orbit"]), true);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"orbit", fromKind:"agent"}], "tom", ["orbit"]), true);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"nikki", fromKind:"user"}], "tom", ["orbit"]), false);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"muse", fromKind:"agent"}], "tom", ["orbit"]), false);
+  }
+  assert.equal(homeAskAnswered(ask, [{inReplyTo:"other",from:"tom",fromKind:"user"}], "tom", []), false);
+});
+test("the fix card names the measured fault in the spec's sentence", () => {
+  const agent = {id:"dot",label:"Your dot",yours:true,state:{attention:true,word:"Disconnected",detail:"Key turned off"}};
+  assert.equal(homeAgentFixCards({groups:[{agents:[agent]}],other:[]},{id:"W",name:"Home",href:"?w=W"})[0].what,
+    "Your dot is disconnected: key turned off.");
+});
+
+test("tags highlight by default; only delivered to-do comments notify", () => {
+  assert.equal(mapHomeTodo(todoRow(), todoCtx()).tagDelivers, false);
+  assert.equal(mapHomeTodo(todoRow(), todoCtx({tagDelivers: false})).tagDelivers, false);
+  assert.equal(mapHomeTodo(todoRow(), todoCtx({tagDelivers: true})).tagDelivers, true);
+});
+
+
+test("workspace identifiers extend past a shared UUID prefix", async () => {
+  const { railWorkspaceIdentifier } = await import('./home-rail.ts');
+  const memberships = [{id:'12345678-1111-4000-8000-000000000001',name:'Home'},{id:'12345678-2111-4000-8000-000000000002',name:'home'}];
+  assert.equal(railWorkspaceIdentifier(memberships[0],memberships),'12345678-1');
+  assert.equal(railWorkspaceIdentifier(memberships[1],memberships),'12345678-2');
+});

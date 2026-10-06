@@ -196,7 +196,7 @@ const assertComposerSprint = (value: ComposerArtifact): void => {
   const reset = between(
     dashboard,
     "const resetComposer =",
-    "const workspaceMenuItems =",
+    "const openNewWorkspace =",
     "composer-reset",
   );
   const viewport = between(

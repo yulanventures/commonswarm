@@ -781,3 +781,38 @@
     transition: none;
   }
 }
+
+.hm-ahp__selected-check { display: none; }
+.hm-ahp__chip-btn[aria-pressed="true"] .hm-ahp__selected-check { display: inline; }
+.hm-new-workspace__preview-title, .hm-new-workspace__preview-list, .hm-ahp__title, .hm-ahp__lead { overflow-wrap: anywhere; }
+.hm-new-workspace__field input { box-sizing: border-box; }
+
+/* Keep the phone header in flow after the legacy component's scoped styles. */
+@media (width <= 52rem) {
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel > header {
+    position: relative; inset: auto; pointer-events: auto; flex: none;
+    min-block-size: 52px; padding: var(--s-1) var(--s-3);
+  }
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed,
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more:not([hidden]) + .dashboard__feed {
+    padding-block-start: var(--s-3);
+  }
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more {
+    padding-block-start: 0; margin-block-start: 0;
+  }
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__host-view {
+    padding-block: var(--s-6);
+  }
+}
+
+.hm-pane-title {
+  margin: 0 0 var(--s-4); font-family: var(--font-display); font-size: var(--t-2xl);
+  line-height: var(--lh-2xl); font-weight: var(--weight-display); letter-spacing: var(--track-head);
+  color: var(--text); overflow-wrap: anywhere;
+}
+.hm-frame .dashboard__brain-view > .hm-pane-title { grid-column: 1 / -1; }
+
+.hm-rail__identifier { min-inline-size: 0; font-size: var(--t-2xs); color: var(--text-muted); overflow-wrap: anywhere; }
+
+.hm-new-workspace__purpose-check { visibility: hidden; }
+.hm-new-workspace__purpose-card input:checked ~ .hm-new-workspace__purpose-check { visibility: visible; }

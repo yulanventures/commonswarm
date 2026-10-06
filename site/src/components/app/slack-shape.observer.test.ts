@@ -148,7 +148,8 @@ test("the rail carries one bounded workspace list and nested people without mana
   for (const hook of ["homeCatchUp", "homeWorkspaceList", "sidebarParticipantList"]) assert.ok(homeRail.includes(hook));
   assert.match(homeRailCss, /\.hm-rail__people-list \{[\s\S]*?min-block-size: 0;[\s\S]*?overflow-y: auto/);
   assert.doesNotMatch(homeRailCss, /block-size: 14rem/);
-  assert.match(dashboard, /buildHomeRail\(document, mapHomeRail\(workspaces, homeRoute, railPeople/);
+  assert.match(dashboard, /const vm = mapHomeRail\(workspaces, homeRoute, railPeople/);
+  assert.match(dashboard, /buildHomeRail\(document, vm,/);
   assert.equal((homeRail.match(/list.dataset.homeWorkspaceList/g) ?? []).length, 1);
   assert.doesNotMatch(dashboard.slice(dashboard.indexOf('<aside class="dashboard__rail'), dashboard.indexOf('<div class="hm-frame__main"')), /data-channel-list|data-workspace-menu-trigger|data-add-agent/);
   const reset = dashboard.slice(dashboard.indexOf("const resetWorkspaceSessionState"), dashboard.indexOf("armLiveFeed =", dashboard.indexOf("const resetWorkspaceSessionState")));

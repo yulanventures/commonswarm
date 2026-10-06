@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { browserTest as test, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 /*
  * Lane R geometry (UI-SPEC 1.1, 3.3 "Many people", 6). CI only: browserTest skips unless

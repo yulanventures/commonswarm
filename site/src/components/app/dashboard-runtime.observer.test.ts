@@ -129,7 +129,7 @@ test("workspace creation and active-feed expiry cannot outlive their session", (
   const channelView = between(dashboard, "const showChannelView =", "const accountName =");
   const createSubmit = between(
     dashboard,
-    'one<HTMLFormElement>("[data-create-form]")',
+    'const submitWorkspaceCreate =',
     'for (const button of all<HTMLButtonElement>("[data-signout]"))',
   );
 

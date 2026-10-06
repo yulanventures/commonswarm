@@ -138,7 +138,8 @@ test("workspace settings is a modal dialog outside the scrolling rail", async ()
   );
   assert.equal(settingsTag?.[1], "dialog", "the settings surface must use native dialog");
 
-  const railStart = dashboard.indexOf('<aside class="dashboard__rail"');
+  const railTag = dashboard.match(/<aside\b[^>]*\bclass="[^"\n]*\bdashboard__rail\b[^"\n]*"[^>]*>/);
+  const railStart = railTag?.index ?? -1;
   const railEnd = dashboard.indexOf("</aside>", railStart);
   assert.ok(railStart >= 0 && railEnd > railStart, "the dashboard rail must be enumerable");
   assert.doesNotMatch(

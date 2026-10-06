@@ -51,3 +51,11 @@ test("timestamps use the viewer's local day and locale; bad timestamps stay unkn
   assert.equal(formatWhen("invalid", now), "Time unavailable");
   for (const [hour, expected] of [[0,"Good morning"],[11,"Good morning"],[12,"Good afternoon"],[17,"Good afternoon"],[18,"Good evening"],[23,"Good evening"]]) assert.equal(greeting(new Date(2026, 9, 5, hour)), expected);
 });
+
+import { agentLabelInSentence } from "./home-names.ts";
+test("mid-sentence possessives lower your without changing an agent name", () => {
+  assert.equal(agentLabelInSentence("Your Orbit"), "your Orbit");
+  assert.equal(agentLabelInSentence("Nikki’s Muse"), "Nikki’s Muse");
+  assert.equal(agentLabelInSentence("Yourself"), "Yourself");
+  assert.equal(agentLabel({name:"Orbit", yours:true}), "Your Orbit");
+});

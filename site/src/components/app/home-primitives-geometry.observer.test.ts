@@ -4,7 +4,8 @@ import { mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { browserTest, findChrome, launchChrome } from "../../../tests/chrome.js";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { homeFixture } from "./home-fixture.js";
 
 const script = String.raw`
@@ -59,7 +60,7 @@ const metrics = { width:innerWidth, overflow:document.documentElement.scrollWidt
 document.documentElement.dataset.metrics=btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
 `;
 
-browserTest("home primitives have 44px targets, plain hostile text and explicit states at 320 and 390", { timeout: 60_000 }, async () => {
+test("home primitives have 44px targets, plain hostile text and explicit states at 320 and 390", { timeout: 60_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-primitives-"));
   const fixture = join(directory, "index.html");
   try {

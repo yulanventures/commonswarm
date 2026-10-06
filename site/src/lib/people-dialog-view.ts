@@ -18,9 +18,10 @@ export type PeopleDialogRole = PeopleDialogPerson["role"];
 export interface PeopleDialogRoleChange { kind: "change-role"; userId: string; role: PeopleDialogRole }
 /** Open the dialog with one person or one agent selected. */
 export interface PeopleDialogFocus { kind: "person" | "agent"; id: string }
-/** `roleDraft`, `roleReceipt`, `rolePending` and `focusApplied` are builder-owned and optional, so a state literal without them stays valid. */
+/** Role drafts, outcomes, pending saves and initial focus are builder-owned and optional. */
 export interface PeopleDialogState { selected: { type: "agent" | "person"; id: string } | null; collapsed: Set<string>; showAllAttention: boolean; query: string;
   roleDraft?: { userId: string; role: PeopleDialogRole; confirming: boolean; error?: string } | null; roleReceipt?: { userId: string; text: string } | null;
+  roleRefusal?: { userId: string; name: string; text: string } | null;
   /** One entry per person whose role change is in flight. The entry object is the save's identity. */
   rolePending?: Map<string, { role: PeopleDialogRole }>; focusApplied?: string | null }
 export interface PeopleDialogOptions {
@@ -237,14 +238,19 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const commit = async (next: PeopleDialogRole) => {
       if (!callbacks.changeRole) return;
       const save = peopleRoleBeginSave(state, person.id, next); if (!save) return;
+      if (state.roleReceipt?.userId === person.id) state.roleReceipt = null;
+      if (state.roleRefusal?.userId === person.id) state.roleRefusal = null;
       state.roleDraft = { userId: person.id, role: next, confirming: draft?.confirming === true };
       callbacks.render();
       let refusal: string | null = null;
       try { await callbacks.changeRole({ kind: "change-role", userId: person.id, role: next }); }
       catch (error) { refusal = peopleRoleRefusal(peopleRoleErrorCode(error), person.name, model.workspaceName); }
       if (!peopleRoleFinishSave(state, person.id, save)) return;
-      if (refusal === null) { state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
-      else state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
+      if (refusal === null) { if (state.roleDraft?.userId === person.id) state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
+      else {
+        state.roleRefusal = { userId: person.id, name: person.name, text: refusal };
+        if (state.selected?.type === "person" && state.selected.id === person.id) state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
+      }
       callbacks.render(); refocusRole(person.id, `role-${person.id}`);
     };
     const facts = node(doc, "dl", "pd-fact-sheet"); const row = node(doc, "div", "pd-fact-row");
@@ -254,7 +260,8 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     const picked = () => roles.find((role) => role === choose.value) ?? person.role;
     choose.value = draft && roles.includes(draft.role) ? draft.role : person.role; choose.disabled = locked;
     const value = node(doc, "dd"); value.append(choose);
-    const error = node(doc, "p", "pd-error", draft?.error); error.dataset.roleError = person.id; error.setAttribute("role", "alert"); error.hidden = !draft?.error || locked;
+    const refusal = state.roleRefusal?.userId === person.id ? state.roleRefusal.text : null;
+    const error = node(doc, "p", "pd-error", refusal ?? undefined); error.dataset.roleError = person.id; error.setAttribute("role", "alert"); error.hidden = !refusal || locked;
     const save = button(doc, locked ? "Saving…" : "Save", () => {
       if (state.rolePending?.has(person.id)) return;
       const next = picked(); if (next === person.role) return;
@@ -262,7 +269,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       else void commit(next);
     }, "pd-text-button"); save.dataset.changeRole = person.id; save.dataset.pdFocus = `save-role-${person.id}`; save.disabled = locked || picked() === person.role;
     if (locked) save.setAttribute("aria-busy", "true");
-    choose.addEventListener("change", () => { save.disabled = locked || picked() === person.role; state.roleDraft = { userId: person.id, role: picked(), confirming: false }; error.hidden = true; });
+    choose.addEventListener("change", () => { save.disabled = locked || picked() === person.role; state.roleDraft = { userId: person.id, role: picked(), confirming: false }; if (state.roleRefusal?.userId === person.id) state.roleRefusal = null; error.hidden = true; });
     const action = node(doc, "dd", "pd-fact-action"); action.append(save); row.append(label, value, action); facts.append(row); holder.append(facts, error);
     const copy = draft?.confirming && person.own ? peopleRoleSelfConfirmCopy(person.role, draft.role) : null;
     if (draft && copy) {
@@ -394,7 +401,14 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
   const inviteError = node(doc, "p", "pd-error"); inviteError.dataset.dialogAccessError = ""; inviteError.setAttribute("role", "alert"); inviteError.hidden = true;
   invited.append(invitedTitle, inviteList, load, inviteError); root.append(invited);
 
-  if (state.roleReceipt && (state.selected?.type !== "person" || state.roleReceipt.userId !== state.selected.id)) state.roleReceipt = null;
+  if (state.roleReceipt && (state.selected?.type !== "person" || state.roleReceipt.userId !== state.selected.id)) {
+    const receipt = node(doc, "p", "pd-receipt", state.roleReceipt.text);
+    receipt.dataset.roleReceipt = ""; receipt.setAttribute("role", "status"); root.append(receipt);
+  }
+  if (state.roleRefusal && (state.selected?.type !== "person" || state.roleRefusal.userId !== state.selected.id)) {
+    const refusal = node(doc, "p", "pd-error", `${state.roleRefusal.name}: ${state.roleRefusal.text}`);
+    refusal.dataset.roleError = state.roleRefusal.userId; refusal.setAttribute("role", "alert"); root.append(refusal);
+  }
   if (state.roleDraft && (state.selected?.type !== "person" || state.roleDraft.userId !== state.selected.id)) state.roleDraft = null;
   const selected = state.selected?.type === "agent" ? model.agents.find((agent) => agent.id === state.selected?.id) : model.people.find((person) => person.id === state.selected?.id);
   if (!selected) state.selected = null;
