@@ -10,6 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import {
+  ORDINARY_TOOLS, expectedMcpToolNames, expectedReleaseMcpToolNames, exactMcpToolSet,
+  hostedFileTransportEnabled, hostedHouseholdToolNames, loadReleaseHouseholdExports,
+} from '../scripts/live-ordinary-controls.mjs';
+
 const script = fileURLToPath(new URL('../scripts/live-ordinary-controls.mjs', import.meta.url));
 const preload = 'data:text/javascript;base64,' + Buffer.from((await readFile(new URL('./support/live-ordinary-controls-transport.mjs', import.meta.url), 'utf8'))
   .replace("'https://commonswarm.com'", "'https://yulanventures.com'")).toString('base64');
@@ -17,7 +22,7 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const tools = await expectedReleaseMcpToolNames();
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');
 const uid = '11111111-1111-4111-8111-111111111111', wid = 'c2ea0541-f56d-4c73-bf71-56c5405c4934';
@@ -271,6 +276,67 @@ function consentSchema(r, phase, producer) {
 async function pre(f) {
   const r = await f.run('consent'); assert.equal(r.exit, 0, r.output); f.consent = r.out; return r;
 }
+
+const FILE_ONLY = ['file_read', 'file_upload_begin', 'file_upload_commit'];
+const RELEASE_HOUSEHOLD = [
+  'object_list', 'object_read', 'object_history', 'object_create', 'object_update',
+  'todo_list', 'todo_read', 'todo_queue', 'comment_list', 'todo_create', 'todo_comment',
+  'todo_update', 'todo_assign', 'todo_start', 'todo_set_state',
+];
+
+test('hosted MCP catalog accepts the 7bb28420 ordinary-plus-household set', async () => {
+  const protocol = await loadReleaseHouseholdExports();
+  const household = hostedHouseholdToolNames(protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, false);
+  const expected = expectedMcpToolNames(household);
+  assert.deepEqual(ORDINARY_TOOLS, ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on']);
+  assert.deepEqual(household, RELEASE_HOUSEHOLD);
+  assert.deepEqual(expected, [...ORDINARY_TOOLS, ...RELEASE_HOUSEHOLD]);
+  assert.equal(exactMcpToolSet(expected, expected), true);
+  assert.deepEqual(await expectedReleaseMcpToolNames(), expected);
+});
+
+test('hosted MCP catalog refuses a list missing an ordinary tool', async () => {
+  const expected = await expectedReleaseMcpToolNames();
+  assert.equal(exactMcpToolSet(expected.filter(name => name !== 'whoami'), expected), false);
+});
+
+test('hosted MCP catalog refuses a list with an unknown extra tool', async () => {
+  const expected = await expectedReleaseMcpToolNames();
+  assert.equal(exactMcpToolSet([...expected, 'not_a_real_tool'], expected), false);
+});
+
+test('hosted MCP catalog refuses the old 8-only list when the release has household tools', async () => {
+  const expected = await expectedReleaseMcpToolNames();
+  assert.ok(expected.length > ORDINARY_TOOLS.length);
+  assert.equal(exactMcpToolSet(ORDINARY_TOOLS, expected), false);
+  assert.equal(exactMcpToolSet(expected, ORDINARY_TOOLS), false);
+});
+
+test('hosted MCP catalog excludes file-only tools unless the hosted file-transport gate is on', async () => {
+  const protocol = await loadReleaseHouseholdExports();
+  const closed = hostedHouseholdToolNames(protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, false);
+  const open = hostedHouseholdToolNames(protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, true);
+  assert.deepEqual(closed.filter(name => FILE_ONLY.includes(name)), []);
+  assert.deepEqual(FILE_ONLY.every(name => closed.includes(name)), false);
+  assert.ok(FILE_ONLY.every(name => open.includes(name)));
+  assert.equal(hostedFileTransportEnabled({}), false);
+  assert.equal(hostedFileTransportEnabled({ SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: '0' }), false);
+  assert.equal(hostedFileTransportEnabled({ SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: '1' }), true);
+  const gated = expectedMcpToolNames(open);
+  assert.equal(exactMcpToolSet(await expectedReleaseMcpToolNames(undefined, {}), gated), false);
+  assert.equal(exactMcpToolSet(gated, await expectedReleaseMcpToolNames(undefined, { SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT: '1' })), true);
+  const tiny = hostedHouseholdToolNames(
+    [{ name: 'list_docs' }, { name: 'file_read' }],
+    [{ name: 'list_docs', objectTypes: ['list'] }, { name: 'file_read', objectTypes: ['file'] }],
+    false,
+  );
+  assert.deepEqual(tiny, ['list_docs']);
+  assert.deepEqual(hostedHouseholdToolNames(
+    [{ name: 'list_docs' }, { name: 'file_read' }],
+    [{ name: 'list_docs', objectTypes: ['list'] }, { name: 'file_read', objectTypes: ['file'] }],
+    true,
+  ), ['list_docs', 'file_read']);
+});
 
 test('probe-credentials exclusively writes the binding secret schema, rotates the shared human store once and durably hands off DCR', async t => {
   const f = await fixture(t), p = await pre(f);

@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFile, writeFile, chmod, mkdir, stat, lstat, mkdtemp, rm } from 'node:fs/promises';
+import { expectedReleaseMcpToolNames } from '../scripts/live-ordinary-controls.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(repo, 'scripts/live-ordinary-controls.mjs');
@@ -38,7 +39,7 @@ const issuer = 'https://mcp.commonswarm.com', api = 'https://api.commonswarm.com
 const client = 'https://yulanventures.com/oauth/c1-controls/client.json';
 const redirect = 'https://c1-controls.invalid/callback', resource = `${issuer}/mcp`;
 const release = 'a'.repeat(40), scope = 'openid offline_access mcp';
-const tools = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const tools = await expectedReleaseMcpToolNames();
 const windowId = 'ABC123';
 const hash = b => createHash('sha256').update(b).digest('hex');
 const b64hash = b => createHash('sha256').update(b).digest('base64url');

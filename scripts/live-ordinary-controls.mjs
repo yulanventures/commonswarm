@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open, lstat, realpath, readdir, readFile, rename } from 'node:fs/promises';
 import { dirname, resolve, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -23,7 +24,8 @@ const REDIRECT = 'https://c1-controls.invalid/callback';
 const SCOPE = 'openid offline_access mcp';
 const UA = 'curl/8.7.1';
 const VERSION = '2025-06-18';
-const TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+export const ORDINARY_TOOLS = ['claim_seat', 'whoami', 'members', 'ask', 'check', 'reply', 'note', 'working_on'];
+const PROTOCOL_MODULE = new URL('../supabase/functions/_shared/protocol.js', import.meta.url);
 const seatName = release => `c1-controls-runner-${release.slice(0, 8)}`;
 const uuidOK = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) &&
   id !== '00000000-0000-4000-8000-000000000000';
@@ -40,6 +42,51 @@ class Failure extends Error {
   constructor(expected, got) { super('control_failed'); this.expected = expected; this.got = got; }
 }
 const demand = (ok, expected, got = 'contract mismatch') => { if (!ok) throw new Failure(expected, got); };
+
+// tools.ts admits HOUSEHOLD_TOOLS minus file-only rows unless hostedFileTransport.
+// HOUSEHOLD_FEATURE_GATES lives in household-feature-gates.ts, not protocol.js.
+export const hostedFileTransportEnabled = (env = process.env) => env.SWARM_HOUSEHOLD_HOSTED_FILE_TRANSPORT === '1';
+export function hostedHouseholdToolNames(tools, registry, hostedFileTransport) {
+  demand(Array.isArray(tools) && Array.isArray(registry), 'release household tool registry', 'invalid protocol exports');
+  const names = [];
+  const seen = new Set();
+  for (const tool of tools) {
+    demand(tool && typeof tool.name === 'string' && tool.name.length > 0, 'named household tool', 'invalid household tool');
+    demand(!seen.has(tool.name) && !ORDINARY_TOOLS.includes(tool.name), 'unique household tool names', 'duplicate tool name');
+    const definition = registry.find(row => row && row.name === tool.name);
+    demand(definition && Array.isArray(definition.objectTypes), 'household registry row', 'missing household registry row');
+    seen.add(tool.name);
+    if (hostedFileTransport || !definition.objectTypes.every(kind => kind === 'file')) names.push(tool.name);
+  }
+  return names;
+}
+export function expectedMcpToolNames(householdNames) {
+  demand(Array.isArray(householdNames) && householdNames.every(n => typeof n === 'string' && n.length > 0),
+    'household tool names', 'invalid household names');
+  const expected = [...ORDINARY_TOOLS, ...householdNames];
+  demand(new Set(expected).size === expected.length, 'unique MCP tool names', 'duplicate tool name');
+  return expected;
+}
+export function exactMcpToolSet(listed, expected) {
+  return Array.isArray(listed) && Array.isArray(expected) &&
+    listed.length === expected.length &&
+    new Set(listed).size === expected.length &&
+    new Set(expected).size === expected.length &&
+    expected.every(n => listed.includes(n));
+}
+export async function loadReleaseHouseholdExports(protocolUrl = PROTOCOL_MODULE) {
+  let protocol;
+  try { protocol = await import(protocolUrl.href ?? protocolUrl); }
+  catch { throw new Failure('release HOUSEHOLD_TOOLS and HOUSEHOLD_TOOL_REGISTRY', 'protocol import failed'); }
+  demand(Array.isArray(protocol.HOUSEHOLD_TOOLS) && Array.isArray(protocol.HOUSEHOLD_TOOL_REGISTRY),
+    'release HOUSEHOLD_TOOLS and HOUSEHOLD_TOOL_REGISTRY', 'missing protocol exports');
+  return protocol;
+}
+export async function expectedReleaseMcpToolNames(protocolUrl = PROTOCOL_MODULE, env = process.env) {
+  const protocol = await loadReleaseHouseholdExports(protocolUrl);
+  return expectedMcpToolNames(hostedHouseholdToolNames(
+    protocol.HOUSEHOLD_TOOLS, protocol.HOUSEHOLD_TOOL_REGISTRY, hostedFileTransportEnabled(env)));
+}
 
 function options(args) {
   const o = { command: args.shift(), requestMs: 10_000, consentMs: 1_500_000, totalMs: 3_300_000 };
@@ -324,8 +371,9 @@ async function run(o) {
       headers['MCP-Protocol-Version'] = init.result.protocolVersion;
       await rpc(null, 'notifications/initialized'); const list = await rpc(2, 'tools/list', {});
       const names = list.result?.tools?.map(t => t.name);
-      demand(list.jsonrpc === '2.0' && list.id === 2 && !list.error && !list.result?.nextCursor && Array.isArray(names) &&
-        names.length === TOOLS.length && new Set(names).size === TOOLS.length && TOOLS.every(n => names.includes(n)), 'exact ordinary MCP tool set');
+      const expected = await expectedReleaseMcpToolNames();
+      demand(list.jsonrpc === '2.0' && list.id === 2 && !list.error && !list.result?.nextCursor &&
+        exactMcpToolSet(names, expected), 'exact ordinary MCP tool set');
       if (claimSeat) {
         leg = 'seat_setup';
         const name = seatName(release), requestId = seatRequestId(release, o['workspace-id']);
@@ -570,10 +618,12 @@ async function run(o) {
     catch { process.stderr.write('FAIL receipt: output expected fresh 0600 receipt got file failure; STOP\n'); process.exitCode = 1; }
   }
 }
-try {
-  const o = options(process.argv.slice(2));
-  demand(Number(process.versions.node.split('.')[0]) >= 22, 'Node 22 or newer');
-  if (o.dry) process.stdout.write(JSON.stringify(plan(o), null, 2) + '\n'); else await run(o);
-} catch (e) {
-  process.stderr.write(`FAIL options: invocation expected ${e instanceof Failure ? e.expected : 'valid invocation'} got ${e instanceof Failure ? e.got : 'invalid invocation'}; STOP\n`); process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    const o = options(process.argv.slice(2));
+    demand(Number(process.versions.node.split('.')[0]) >= 22, 'Node 22 or newer');
+    if (o.dry) process.stdout.write(JSON.stringify(plan(o), null, 2) + '\n'); else await run(o);
+  } catch (e) {
+    process.stderr.write(`FAIL options: invocation expected ${e instanceof Failure ? e.expected : 'valid invocation'} got ${e instanceof Failure ? e.got : 'invalid invocation'}; STOP\n`); process.exitCode = 1;
+  }
 }
