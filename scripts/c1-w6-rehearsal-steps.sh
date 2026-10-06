@@ -100,8 +100,8 @@ def inputs(window,wid,**extra):
        'baseline_edge_image':image,'baseline_postgres_image':pg,'baseline_site_sha':sha,'gate_receipt_sha256':gate,
        'edge_recycle_service':'rehearsal-edge-recycle.service','edge_recycle_timer':'rehearsal-edge-recycle.timer'}
     d.update(extra); return d
-for name,d in [('inputs-W4.json',inputs('W4',w4)),('inputs-W6.json',inputs('W6',w6,w2b_window_id='W2brh1',keep_open=False)),
-               ('inputs-W6-keep.json',inputs('W6',w6,w2b_window_id='W2brh1',keep_open=True)),('inputs-W7.json',inputs('W7',w7,w6_window_id=w6)),
+for name,d in [('inputs-W4.json',inputs('W4',w4)),('inputs-W6.json',inputs('W6',w6,w2b_release_sha='d'*40,w2b_window_id='W2brh1',keep_open=False)),
+               ('inputs-W6-keep.json',inputs('W6',w6,w2b_release_sha='d'*40,w2b_window_id='W2brh1',keep_open=True)),('inputs-W7.json',inputs('W7',w7,w6_window_id=w6)),
                ('inputs-W7-other.json',inputs('W7',w7,w6_window_id='W6zzz9'))]:
     (root/name).write_text(json.dumps(d,sort_keys=True)+'\n')
 PY
@@ -323,7 +323,7 @@ INPUTS_FILE=$W6_INPUTS expect_fail ai-edge-receipt:stale-generation "$T/blocks/w
 # ---------------- W6 activation checks (DB part) and G4 ----------------
 x ai-w6-activation-checks from "test \"\$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')\" = 0" >"$T/blocks/w6-activation-checks.sh"
 x ai-w6-activation-checks lines '# The recycle hook re-verifies W4' "printf 'PASS W6 DB release identity" >"$T/blocks/w6-g4.sh"
-say "EMUL ai-w6-activation-checks: readiness, approval, gates, W2b provenance, oauth image label not run; DB, measurement, archive and G4 run"
+say "EMUL ai-w6-activation-checks: readiness, approval, gates, W2b provenance, issuer live re-verification, oauth image label not run; DB, measurement, archive and G4 run"
 PROOF_DIR=$W6_PROOF INPUTS_FILE=$W6_INPUTS step ai-w6-activation-checks:db-measurement-g4 "$T/blocks/w6-activation-checks.sh"
 RECYCLE_ARCHIVE=$W6R/tmp/admin-issuance-$RELEASE_SHA-$W4_ID.tar
 mv "$RECYCLE_ARCHIVE" "$RECYCLE_ARCHIVE.moved" || exit 1
