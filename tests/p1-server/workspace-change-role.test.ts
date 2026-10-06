@@ -396,7 +396,7 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
     WHERE type = 'MemberRoleChanged'
       AND payload->>'user_id' = ${f.promoted.id}
   `;
-  assert.deepEqual(events, [{
+  assert.deepEqual(Array.from(events, (r) => ({ ...r })), [{
     workspace_id: f.workspaceA,
     user_id: f.promoted.id,
     from_role: "member",
@@ -425,7 +425,7 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
       AND outcome IN ('accepted', 'replayed')
     ORDER BY outcome
   `;
-  assert.deepEqual(replayAudit, [
+  assert.deepEqual(Array.from(replayAudit, (r) => ({ ...r })), [
     { outcome: "accepted", reason: null },
     { outcome: "replayed", reason: null },
   ]);
@@ -508,7 +508,7 @@ test("change_role promotes a member and refuses the stable reasons", { timeout: 
       AND command_kind = 'change_role'
       AND actor_agent_principal = ${f.agentPrincipal}::uuid
   `;
-  assert.deepEqual(agentAudit, [{ outcome: "authz", reason: "forbidden" }]);
+  assert.deepEqual(Array.from(agentAudit, (r) => ({ ...r })), [{ outcome: "authz", reason: "forbidden" }]);
   assert.equal((await liveRoles(f.workspaceA))[f.promoted.id], "admin");
   assert.equal(await roleChangeCount(f.workspaceA), 1);
 
