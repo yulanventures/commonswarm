@@ -2898,3 +2898,117 @@ test('W5 recovered close requires companion closure, bound rollback/reconciliati
     if(fault==='wrong-current') { rmSync(join(site,'current')); symlinkSync(original,join(site,'current')); }
   }
 });
+
+// Execute the actual admission block. Only host selection, the read-only marker
+// path and fixture ownership are rewritten, once each; no file under /etc is written.
+test('ai-inputs reserves STG ids by box marker and Mac box measurements, before other validation', () => {
+  const root = mkdtempSync(join(scratch, 'staging-admission.'));
+  const marker = join(root, 'marker-fixture'), inputs = join(root, 'inputs.json');
+  const evidence = join(root, 'measurements-baselines-W1.json');
+  const removeFixture = (path: string) => {
+    assert.ok(path === marker || path === evidence, 'only this test owns these two files');
+    const r = spawnSync('rm',['--',path],{encoding:'utf8'});
+    assert.equal(r.status,0,`BLOCKED by rm guard: ${r.stderr.trim()}. To resolve: leave ${path} for HezLead.`);
+  };
+  const exact = 'c1-staging-disposable-no-production';
+  const inputBase = base();
+  const original = block('ai-inputs');
+  const rewrite = (from: string, to: string, source: string) => {
+    assert.equal(source.split(from).length - 1, 1, from); return source.replace(from, to);
+  };
+  let portable = rewrite("os.open(marker_path,", `os.open(${JSON.stringify(marker)},`, original);
+  portable = rewrite("os.path.lexists(marker_path)", `os.path.lexists(${JSON.stringify(marker)})`, portable);
+  portable = rewrite('info.st_uid == 0 and info.st_gid == 0', 'info.st_uid == os.getuid() and info.st_gid == os.getgid()', portable);
+  const admit = (host: 'box'|'mac', wid: string, badReceipt = false) => {
+    const d = { ...inputBase, window_id: wid };
+    if (badReceipt) d.gate_receipt_sha256 = hex;
+    writeFileSync(inputs, JSON.stringify(d));
+    return run(rewrite("sys.platform == 'darwin'", host === 'mac' ? 'True' : 'False', portable), {
+      INPUTS_FILE: inputs, PLAN_FILE: planPath, GATE_RECEIPT_FILE: receiptFile,
+    });
+  };
+  const refuse = (host: 'box'|'mac', wid: string, reason: string, badReceipt = false) => {
+    const result = admit(host, wid, badReceipt);
+    assert.equal(result.status, 1, `${host} ${wid}: ${result.stdout} ${result.stderr}`);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, `FAIL ai-inputs: ${reason}; STOP\n`);
+  };
+  const pass = (host: 'box'|'mac', wid: string) => {
+    const r = admit(host, wid); assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, /^PASS ai-inputs:/);
+  };
+  const prod = 'production box window_id expected non-stg-prefix got reserved-stg-prefix';
+  const malformed = 'box staging marker expected regular-root-root-0600-exact-content got malformed';
+  const staging = 'staging box window_id expected STG-plus-three-alphanumerics got other';
+  pass('box', 'L2lDaR');
+  for (const wid of ['STGabc','Stgabc','stgABC']) refuse('box', wid, prod);
+  refuse('box', 'STGabc', prod, true); // Marker check wins over a bad checker digest.
+  writeFileSync(marker, exact, { mode: 0o600 }); pass('box','STGabc');
+  for (const wid of ['L2lDaR','stgabc']) refuse('box', wid, staging);
+  chmodSync(marker, 0o644); refuse('box','STGabc',malformed); refuse('box','L2lDaR',malformed);
+  chmodSync(marker, 0o600);
+  for (const value of ['wrong-content', exact+'\n']) { writeFileSync(marker,value); refuse('box','STGabc',malformed); }
+  removeFixture(marker); symlinkSync(join(root,'missing-target'),marker); refuse('box','STGabc',malformed);
+  removeFixture(marker); writeFileSync(join(root,'existing-target'),exact,{mode:0o600});
+  symlinkSync(join(root,'existing-target'),marker); refuse('box','STGabc',malformed);
+  removeFixture(marker); writeFileSync(marker,exact,{mode:0o600});
+  const wrongOwner = rewrite('info.st_uid == os.getuid()', 'info.st_uid == -1', portable);
+  const wrong = run(rewrite("sys.platform == 'darwin'",'False',wrongOwner), { INPUTS_FILE:inputs,PLAN_FILE:planPath,GATE_RECEIPT_FILE:receiptFile });
+  assert.equal(wrong.status,1); assert.equal(wrong.stderr,`FAIL ai-inputs: ${malformed}; STOP\n`);
+
+  pass('mac','L2lDaR'); // Even with a local marker, Mac production windows are admitted.
+  refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+  const measure = () => ({
+    release_sha: sha, window:'W1', window_id:'STGabc', inputs_sha256:digest(readFileSync(inputs)),
+    baselines:{baseline_ledger_sha256:hex}, measured_at_utc:new Date().toISOString().replace(/\.\d{3}Z$/,'Z'),
+    staging_marker:{path:'/etc/commonswarm-release/STAGING-ONLY',regular:true,symlink:false,uid:0,gid:0,mode:'0600',content:exact},
+  });
+  // INPUTS is now the STG candidate from the refusal above; evidence binds those exact bytes.
+  const good = measure(); writeFileSync(evidence,JSON.stringify(good)); pass('mac','STGabc');
+  for (const change of [{mode:'0644'},{content:exact+'\n'},{symlink:true},{uid:1},{regular:false},{gid:1}]) {
+    writeFileSync(evidence,JSON.stringify({...good,staging_marker:{...good.staging_marker,...change}}));
+    refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+  }
+  writeFileSync(evidence,JSON.stringify({...good,inputs_sha256:hex}));
+  refuse('mac','STGabc','Mac staging evidence expected this-window INPUTS bytes got mismatch');
+  for (const measured_at_utc of ['2000-01-01T00:00:00Z','2099-01-01T00:00:00Z']) {
+    writeFileSync(evidence,JSON.stringify({...good,measured_at_utc}));
+    refuse('mac','STGabc','Mac staging evidence expected fresh box measurement got stale-or-future');
+  }
+  writeFileSync(evidence,JSON.stringify({...good,baselines:{baseline_ledger_sha256:'0'.repeat(64)}}));
+  refuse('mac','STGabc','Mac staging evidence expected matching box baselines got mismatch');
+  writeFileSync(evidence,JSON.stringify(good));
+  refuse('mac','stgabc','Mac staging window_id expected STG-plus-three-alphanumerics got other');
+  removeFixture(evidence); symlinkSync(join(root,'missing-measurement'),evidence);
+  refuse('mac','STGabc','Mac staging evidence expected valid box marker got missing-or-malformed');
+});
+
+// Cheapest independent ownership guard: repository code can read the marker,
+// but only external staging producers may create or modify it. This scans whole
+// blocks/files so assigning the path to a variable does not hide a later write.
+test('release blocks and scripts contain zero staging-marker writers; writer probes are refused', () => {
+  const mentions = (source: string) => source.includes('/etc/commonswarm-release') && source.includes('STAGING-ONLY');
+  const writer = (source: string) => mentions(source) && (
+    /\b(?:install|cp|tee|touch)\s/.test(source) ||
+    /(?:^|[\s;])(?:\d*)>{1,2}\s*\S/.test(source) ||
+    /\b(?:write_text|write_bytes|writeFileSync|writeFile|appendFileSync|appendFile)\s*\(/.test(source) ||
+    /\bopen\s*\([^\n]*[,(=]\s*['"](?:[wax]|[rwa][+])/i.test(source) ||
+    /\bos\.open\s*\([^\n]*(?:O_WRONLY|O_RDWR|O_CREAT|O_TRUNC)/.test(source)
+  );
+  const path = '/etc/commonswarm-release/STAGING-ONLY';
+  for (const source of [`cat '${path}'`, `pathlib.Path('${path}').read_bytes()`, `os.open('${path}',os.O_RDONLY)`]) assert.equal(writer(source),false,source);
+  for (const source of [`printf x > '${path}'`, `printf x >> '${path}'`, `install -m 0600 fixture '${path}'`,
+    `cp fixture '${path}'`, `tee '${path}'`, `touch '${path}'`, `pathlib.Path('${path}').write_text('x')`,
+    `open('${path}','wb')`, `fs.writeFileSync('${path}','x')`, `fs.promises.writeFile('${path}','x')`,
+    `p='${path}'\nprintf x > "$p"`, `p='/etc/commonswarm-release/'+'STAGING-ONLY'\nopen(p,'w')`,
+    `os.open('${path}',os.O_WRONLY|os.O_CREAT)`]) assert.equal(writer(source),true,source);
+  const files: string[] = [];
+  const walk = (dir: string) => { for (const item of readdirSync(dir,{withFileTypes:true})) {
+    const path = join(dir,item.name);
+    if (item.isDirectory()) walk(path);
+    else if (item.isFile()) files.push(path);
+  } };
+  walk(resolve('scripts'));
+  assert.ok(files.length > 0 && blocks.length > 0);
+  for (const [n,source] of blocks.entries()) assert.equal(writer(source),false,`RELEASE.md block ${n+1}`);
+  for (const path of files) assert.equal(writer(readFileSync(path,'utf8')),false,path);
+});

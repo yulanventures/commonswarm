@@ -1,10 +1,10 @@
 # Frozen bundle status (lane/c1-frozen-work)
 
 Branch `lane/c1-frozen-work`, based on origin/main `a5cb8251`. HezLead owns
-review and integration. Committed HEAD is `6ca8f36e`: C1-1 TODO repairs are in `1c5d4dbc`, the
+review and integration. Committed HEAD is `d965371b`: C1-1 TODO repairs are in `1c5d4dbc`, the
 generator/run orders in `edf4a3bf`, C1-4 checker/ruling repairs in `69fa19f7`,
-the first W4 Caddy production-defect repair in `03c3c9d4`, and C1-6 in `6ca8f36e`.
-C1-7 below is an uncommitted patch on that exact base. This worker does not
+the first W4 Caddy production-defect repair in `03c3c9d4`, C1-6 in `6ca8f36e`,
+and C1-7 in `d965371b`. C1-8 below is an uncommitted patch on that exact base. This worker does not
 commit or push. No release or production execution is claimed.
 
 ## Done
@@ -394,3 +394,112 @@ or production operation ran. HezLead owns the cross-family check.
 
 HezLead owns the cross-family check and integration. C1-7 makes no commit,
 push or production change. `VERIFY-HARNESS.md` stays outside this assignment.
+
+
+## C1-8: W1/W2/W2b run orders and STG reservation (2026-10-05)
+
+Uncommitted patch on `d965371b`, limited to RELEASE.md, this status file,
+`scripts/c1-task-from-plan.mjs`, `tests/c1-task-from-plan.test.ts` and
+`tests/admin-release-plan.test.ts`. No commit, push, production operation,
+full suite, build, Docker or browser ran. HezLead owns independent review.
+
+| Assigned item | Result | File:line |
+| --- | --- | --- |
+| A: W1 × forward/rollback/recovered-close | Done; common admission/open/session, backup gate and ordinary controls; additive recovery has no mutation block | RELEASE.md:166 |
+| A: W2 × all three modes | Done; stage/preflight/fenced apply/reconcile/probes/issuer; recovery quotes STOP/retain/no retry/no automatic reserve and never dispatches apply or reserve | RELEASE.md:200 |
+| A: W2b × all three modes | Done; the table's precondition is the first when in each mode; backup/preflight/issuer/forward catalogs; failure uses issuer rollback | RELEASE.md:246 |
+| A: generator and complete accounting | Done; version 5 emits all 27 tasks, with byte-exact blocks and quoted lines; 87 definitions = 70 used (including nested dispatches) + 17 excluded helpers | scripts/c1-task-from-plan.mjs:9; tests/c1-task-from-plan.test.ts:81 |
+| B1/B4: marker and production producer contract | Done as plan text; regular non-symlink root:root 0600, exactly 35 ASCII bytes, c1-staging-disposable-no-production, no newline; production producers redraw /^stg/i ids | RELEASE.md:40 |
+| B2: box admission before other validation | Done; absent marker refuses all /^stg/i; valid marker requires uppercase STG plus three alphanumerics; malformed/unreadable/symlink marker always refuses with a fixed FAIL line | RELEASE.md:713 |
+| B3: Mac admission via existing box measurement carrier | Done; no new INPUTS key; ordinary ids need no evidence; STG requires fresh, exact-input-bound marker measurement | RELEASE.md:686 |
+| B5: zero-writer scan | Done; scans every RELEASE.md shell block and every regular file under scripts; negative writer probes cover redirections, install, cp, tee, touch, Python and Node writes, including a variable-bound path | tests/admin-release-plan.test.ts:2988 |
+| B6: executable admission checks | Done; all requested production/staging/Mac cases, malformed mode/content/owner/symlink, plus newline, dangling symlink, bad binding/baselines and stale/future evidence | tests/admin-release-plan.test.ts:2904 |
+| Physical staging marker and producer evidence | Not created or changed here: external staging producers alone own writes. No box operation or producer change was assigned | RELEASE.md:42 |
+| W2 lost-session post-commit recovery conflict | Not repaired; retained literal STOP behavior, no workaround selected; see below | RELEASE.md:190 and RELEASE.md:1453 |
+
+The machine-read section is RELEASE.md:162 through RELEASE.md:584.
+Counts include manual and conditional rows, including failure-only aborts;
+they are not counts of unconditionally executed commands. W6e still uses W6
+INPUTS.
+
+| Window | Forward | Rollback | Recovered close |
+| --- | ---: | ---: | ---: |
+| W1 | 16 | 1 | 8 |
+| W2 | 21 | 5 | 11 |
+| W2b | 19 | 3 | 9 |
+| W3 | 20 | 2 | 8 |
+| W4 | 21 | 3 | 9 |
+| W5 | 25 | 4 | 9 |
+| W6 | 54 | 7 | 15 |
+| W6e | 2 | 2 | 15 |
+| W7 | 21 | 2 | 8 |
+
+No alternative W1/W2/W2b run order was selected. The W2 incomplete-prefix
+case is explicit: ai-w2-reconcile records schema-prefix.json and exits STOP
+(RELEASE.md:2781). The generated recovered-close order never authorizes
+skipping that refusal. A pre-fence close uses ai-close's existing
+zero-new-ledger check; a complete prefix with failed initial issuer
+provisioning retains the schema and rolls back only that credential.
+
+One definite existing conflict remains for a LOST box session after a W2
+commit. Execution ruling 2 requires a new persistent root shell and the whole
+ai-db-session block (RELEASE.md:190). That block writes ledger-before.txt
+and requires its hash to equal INPUTS baseline_ledger_sha256
+(RELEASE.md:1453). After any new ledger commit, it STOPs before
+establishing ai_run, so that new shell cannot reach ai-w2-reconcile through
+the prescribed whole-block route. The two possible readings are (1) run the
+whole prescribed block and retain that refusal, or (2) initialize recovery
+helpers without the original baseline check. No marked block or ruling
+authorizes (2); no bypass, alternate block or INPUTS change was chosen.
+HezLead must rule or assign a repair if successful post-commit recovery in a
+replacement shell is required. This is separate from the original-shell
+recovery order and was not exercised as a live incident.
+
+The Mac reads INPUTS_FILE's existing sibling box evidence
+`measurements-baselines-<window>.json` (the retained production preparation
+carrier uses baselines/ledger/measured_at_utc). For STG, it also requires that
+measurement's release_sha/window/window_id and inputs_sha256 to bind the exact
+INPUTS bytes, matching reported baselines, an age of 0–300 seconds and the exact
+staging_marker object defined in the Inputs section. It never reads the Mac's
+marker to authorize STG and never requires STG for a production window. The
+external staging producer must now retain that bound marker measurement in
+this carrier; the current producer was read, not modified or run. A missing
+measurement fails closed. No INPUTS schema key was added.
+
+Tests protect the generator's release-artifact contract, marker admission
+at the real extracted block boundary, and external-only marker ownership.
+Host selection, the marker read path and test-fixture ownership are rewritten
+once each for portable fixture execution; tests never write the real /etc path.
+New fixture-file removals invoke the installed rm guard. A baseline control
+executed HEAD's exact ai-inputs Python and confirmed it accepted STGabc without
+staging evidence (exit 0); current tests refuse it alongside a passing ordinary
+id. Control receipt: `scratchpad/c1-8/baseline-control.log`.
+
+Focused admission/ownership check: **2 tests, 2 pass, exit 0**. Generator
+check: **8 tests, 8 pass, exit 0**; the final gate repeats all eight against the
+final plan bytes, including every condition on manual rows. The final named
+gate (no skipped tests):
+
+```sh
+C1_GATE_EXTRA=tests/c1-task-from-plan.test.ts bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh
+```
+
+**172 tests, 172 pass, exit 0**. Log: `scratchpad/c1-8/gate.log`;
+exit receipt: `scratchpad/c1-8/gate.exit`. The earlier gate also passed
+172/172; its receipts are gate-initial.log and gate-initial.exit in that folder.
+Final gate tail:
+
+```text
+ℹ tests 172
+ℹ suites 0
+ℹ pass 172
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 209445.336125
+```
+
+`git diff --check` passed. No in-scope item is awaiting a tool/service refusal.
+The external producer handoff and the existing W2 replacement-session conflict
+are stated above; neither is a claim that this patch has run on a box.

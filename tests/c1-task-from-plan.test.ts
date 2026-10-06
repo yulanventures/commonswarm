@@ -35,7 +35,7 @@ const fixture = (name: string, value: string | Buffer) => {
 };
 const block = (id: string, command = 'printf hello\n') =>
   `\n\n\`\`\`sh\n# step: ${id}\n# readonly: yes\n# host: Mac\n${command}\`\`\`\n`;
-const windows = ['W3', 'W4', 'W5', 'W6', 'W6e', 'W7'];
+const windows = ['W1', 'W2', 'W2b', 'W3', 'W4', 'W5', 'W6', 'W6e', 'W7'];
 const modes = ['forward', 'rollback', 'recovered-close'];
 const explicit = (steps: string) => {
   const ids = steps.split(' → ');
@@ -65,6 +65,7 @@ function verify(task: Task, bytes: Buffer, window: string, mode: string) {
       for (const reading of step.readings!) { quote(reading.source); visit(reading.steps); }
       continue;
     }
+    for (const condition of step.conditions) quote(condition);
     if (step.manual) { quote(step.manual); continue; }
     assert.deepEqual(Buffer.from(step.block), bytes.subarray(step.offset, step.offset + step.length));
     assert.equal(bytes.subarray(0, step.offset).toString('utf8').split('\n').length, step.start_line);
@@ -72,13 +73,12 @@ function verify(task: Task, bytes: Buffer, window: string, mode: string) {
     assert.ok(step.block.startsWith(`# step: ${step.id}\n`));
     assert.ok(step.block.split('\n').includes(step.host));
     assert.ok(step.block.split('\n').includes(step.readonly));
-    for (const condition of step.conditions) quote(condition);
     visit(step.dispatched_blocks ?? []);
   } };
   visit(task.steps);
 }
 
-test('real plan: every one of 18 window/mode tasks retains exact blocks, manual text and conditions at their offsets', () => {
+test('real plan: every one of 27 window/mode tasks retains exact blocks, manual text and conditions at their offsets', () => {
   const defined = new Set([...text.matchAll(/^# step: (ai-[a-z0-9-]+)$/gm)].map(m => m[1]));
   const used = new Set<string>();
   const visit = (steps: Task['steps']) => {
@@ -242,4 +242,38 @@ test('resolved run orders keep opening, recovery and concurrent audit dispatch c
   assert.ok(w6.findIndex(s => s.id === 'ai-w6-fence-driver') < w6.findIndex(s => s.input?.startsWith('C1_CLIENT_ACTION=withdraw')));
   const recovered = task('W6', 'recovered-close').steps;
   assert.ok(recovered.findIndex(s => s.id === 'ai-w6-close-state') < recovered.findIndex(s => s.id === 'ai-close'));
+});
+
+test('W1/W2/W2b orders preserve additive recovery, the W2 fence and the W2b admission condition', () => {
+  const task = (window: string, mode: string) => {
+    const result = run(planPath, window, mode); assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout) as Task;
+  };
+  for (const w of ['W1','W2','W2b']) assert.ok(task(w,'forward').steps.every(s => !s.id?.startsWith('ai-w3-')), w);
+  const w1 = task('W1', 'forward').steps;
+  assert.ok(w1.findIndex(s => s.id === 'ai-open') < w1.findIndex(s => s.id === 'ai-w1-backup-gate'));
+  assert.ok(w1.findIndex(s => s.id === 'ai-w1-backup-gate') < w1.findIndex(s => s.id === 'ai-close'));
+  const forward = task('W2', 'forward').steps;
+  const ids = forward.map(s => s.id);
+  for (const [before, after] of [['ai-db-session','ai-w2-stage-probes'], ['ai-w2-stage-probes','ai-w2-preflight'],
+    ['ai-w2-preflight','ai-w2-apply'], ['ai-w2-apply','ai-w2-reconcile'],
+    ['ai-w2-reconcile','ai-w2-probes'], ['ai-w2-probes','ai-w2-issuer-credential']]) {
+    assert.ok(ids.indexOf(before!) >= 0 && ids.indexOf(before!) < ids.indexOf(after!), `${before} before ${after}`);
+  }
+  assert.match(forward.find(s => s.id === 'ai-w2-apply')!.conditions[0]!.quote, />= 600 s/);
+  for (const mode of ['rollback','recovered-close']) {
+    const steps = task('W2', mode).steps;
+    assert.equal(steps[0]!.manual!.quote, 'Failure: STOP, reconcile the committed prefix, retain it; no retry or automatic reserve.');
+    assert.ok(steps.some(s => s.id === 'ai-w2-reconcile' && s.input?.includes('do not continue this order')));
+    assert.ok(steps.every(s => !s.id || !['ai-open','ai-w2-apply','ai-w2-preflight'].includes(s.id)));
+    assert.ok(steps.some(s => s.manual?.quote.includes('production schema rollback is authorized')));
+    assert.equal(steps.some(s => s.id === 'ai-close'), mode === 'recovered-close');
+  }
+  for (const mode of modes) {
+    const steps = task('W2b', mode).steps;
+    assert.equal(steps[0]!.conditions[0]!.quote, 'Only when W2 committed and reconciled all five migrations but its issuer credential failed and was rolled back.');
+    assert.ok(steps.every(s => !s.id?.startsWith('ai-w2-stage') && !s.id?.startsWith('ai-w2-backfill') && s.id !== 'ai-w2-apply'));
+  }
+  const w2b = task('W2b', 'forward').steps.map(s => s.id);
+  assert.ok(w2b.indexOf('ai-w2-issuer-credential') < w2b.indexOf('ai-w2b-forward-catalogs'));
 });

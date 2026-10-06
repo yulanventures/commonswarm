@@ -6,8 +6,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
-const VERSION = '4';
-const WINDOWS = new Set(['W3', 'W4', 'W5', 'W6', 'W6e', 'W7']);
+const VERSION = '5';
+const WINDOWS = new Set(['W1', 'W2', 'W2b', 'W3', 'W4', 'W5', 'W6', 'W6e', 'W7']);
 const MODES = new Set(['forward', 'rollback', 'recovered-close']);
 class PlanError extends Error {}
 const fail = (reason) => { throw new PlanError(`FAIL c1-task-from-plan: ${reason}; STOP`); };
