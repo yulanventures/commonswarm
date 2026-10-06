@@ -1118,6 +1118,8 @@ export async function workspaceFiles(workspaceId: string): Promise<WorkspaceFile
 export interface FileDownload {
   url: string;
   contentWarning: string;
+  /** Conservative signed-link expiry, as Unix time in milliseconds. */
+  expiresAt?: number;
 }
 
 export interface BrowserSignalAttachmentRef {
@@ -1292,6 +1294,7 @@ export async function fileDownloadUrl(
   fileId: string,
   version: number | null = null,
 ): Promise<FileDownload> {
+  const requestedAt = Date.now();
   const { status, body } = await postCommand(
     session,
     commandId,
@@ -1318,6 +1321,11 @@ export async function fileDownloadUrl(
   return {
     // S1 returns a path relative to the deployment the browser already trusts.
     url: new URL(path, `${d.url.replace(/\/+$/, "")}/`).href,
+    ...(typeof body.download_url_expires_in_seconds === "number" &&
+      Number.isFinite(body.download_url_expires_in_seconds) &&
+      body.download_url_expires_in_seconds >= 0
+      ? { expiresAt: requestedAt + body.download_url_expires_in_seconds * 1000 }
+      : {}),
     contentWarning: typeof body.content_warning === "string"
       ? body.content_warning
       : FILE_CONTENT_WARNING,

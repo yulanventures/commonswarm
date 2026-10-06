@@ -1034,6 +1034,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
+    canPreviewChatImage,
+    ChatImagePreviewCache,
+    chatImagePreviewFailure,
+  } from "../../lib/chat-image-preview";
+  import {
     ClientTooOld,
     CommandOutcomeUnknown,
     EmailAddressRejected,
@@ -1681,7 +1686,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let focusedComposerWorkspaceId = "";
     const visualMentions = new Map<string, EntityRef[]>();
     const expandedSignalIds = new Set<string>();
-    const attachmentObjectUrls = new Map<string, string>();
+    const attachmentPreviewUrls = new ChatImagePreviewCache();
     const deliveryReceiptCache = new Map<string, BrowserDeliveryReceiptCacheEntry>();
     let deliveryReceiptRefreshOwner = "";
     let humanSeenObserver: IntersectionObserver | null = null;
@@ -5300,21 +5305,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (el) el.scrollTop = el.scrollHeight;
     };
 
-    const attachmentKey = (fileId: string, version: number): string =>
-      `${fileId}:${version}`;
-
     const freshAttachmentDownload = async (
       fileId: string,
       version: number,
-    ): Promise<string> => {
+    ) => {
       if (!session || !activeWorkspaceId) throw new SessionExpired();
-      return (await fileDownloadUrl(
+      return fileDownloadUrl(
         session,
         uuid(),
         activeWorkspaceId,
         fileId,
         version,
-      )).url;
+      );
     };
 
     const renderMessageAttachments = (body: HTMLElement, signal: Signal): void => {
@@ -5325,7 +5327,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       list.dataset.messageAttachments = String(attachments.length);
       for (const attachment of attachments) {
         const card = document.createElement("article");
-        const inlineImage = /^(image\/(png|jpeg|gif|webp))$/.test(attachment.content_type);
+        const inlineImage = canPreviewChatImage(attachment.content_type);
         card.className = `dashboard__attachment-card${
           inlineImage ? " dashboard__attachment-card--image" : ""
         }`;
@@ -5334,25 +5336,36 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const image = document.createElement("img");
           image.alt = attachment.name;
           image.loading = "lazy";
-          const key = attachmentKey(attachment.file_id, attachment.version_n);
-          const cachedUrl = attachmentObjectUrls.get(key);
+          image.referrerPolicy = "no-referrer";
+          let failures = 0;
+          let signing = false;
+          const unavailable = (): void => {
+            image.alt = `${attachment.name} preview unavailable`;
+            card.dataset.previewState = "unavailable";
+          };
           const load = async (): Promise<void> => {
-            if (image.src) return;
+            if (signing) return;
+            signing = true;
+            const signedAt = Date.now();
             try {
-              const signedUrl = await freshAttachmentDownload(
+              const signed = await freshAttachmentDownload(
                 attachment.file_id,
                 attachment.version_n,
               );
-              const response = await fetch(signedUrl);
-              if (!response.ok) throw new Error(`HTTP ${response.status}`);
-              const objectUrl = URL.createObjectURL(await response.blob());
-              attachmentObjectUrls.set(key, objectUrl);
-              if (image.isConnected) image.src = objectUrl;
+              if (!image.isConnected) return;
+              attachmentPreviewUrls.remember(
+                attachment.file_id, attachment.version_n, signed, signedAt,
+              );
+              image.src = signed.url;
             } catch {
-              image.alt = `${attachment.name} preview unavailable`;
-              card.dataset.previewState = "unavailable";
+              if (image.isConnected) unavailable();
+            } finally {
+              signing = false;
             }
           };
+          const cachedUrl = attachmentPreviewUrls.get(
+            attachment.file_id, attachment.version_n, Date.now(),
+          );
           if (cachedUrl) {
             image.src = cachedUrl;
           } else if ("IntersectionObserver" in window) {
@@ -5365,6 +5378,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           } else {
             void load();
           }
+          image.addEventListener("load", () => {
+            image.alt = attachment.name;
+            delete card.dataset.previewState;
+          });
+          image.addEventListener("error", () => {
+            attachmentPreviewUrls.forget(attachment.file_id, attachment.version_n);
+            if (chatImagePreviewFailure(failures++) === "retry") void load();
+            else unavailable();
+          });
           card.append(image);
         }
         const details = document.createElement("div");
@@ -5381,10 +5403,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const oldLabel = download.textContent;
           download.textContent = "Getting link…";
           try {
-            window.location.assign(await freshAttachmentDownload(
+            window.location.assign((await freshAttachmentDownload(
               attachment.file_id,
               attachment.version_n,
-            ));
+            )).url);
           } catch (error) {
             setComposerStatus(readableError(error), "error");
           } finally {
@@ -6335,8 +6357,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       deliveryReceiptRefreshOwner = "";
       humanSeenReporter.resetVisible();
       humanSeenObserver?.disconnect();
-      for (const url of attachmentObjectUrls.values()) URL.revokeObjectURL(url);
-      attachmentObjectUrls.clear();
+      attachmentPreviewUrls.clear();
       files = [];
       fileLoadError = "";
       signalCursor = null;
