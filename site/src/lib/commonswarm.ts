@@ -2778,7 +2778,7 @@ export async function homeOverviewAsks(workspaceId: string, ids: readonly string
   for (let offset = 0; offset < ids.length; offset += 50) {
     const { data, error } = await readWithDeadline("Catch up messages", signal => api.schema("swarm_read")
       .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId).eq("kind", "ask")
-      .in("signal_id", ids.slice(offset, offset + 50)).abortSignal(signal));
+      .in("id", ids.slice(offset, offset + 50)).abortSignal(signal));
     if (error) throw new Error("Catch up messages could not be checked.");
     rows.push(...(data ?? []).map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
   }
@@ -2797,7 +2797,7 @@ export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
       const { data, error } = await readWithDeadline("agent work", signal => api.schema("swarm_read")
         .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId)
         .eq("kind", "working-on").gt("until", cutoff).order("created_at", { ascending: false })
-        .order("signal_id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
+        .order("id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
       if (error) return []; // No read means no work claim; never guess Working.
       const page = data ?? [];
       rows.push(...page.map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
