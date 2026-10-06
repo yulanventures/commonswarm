@@ -17,19 +17,24 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { KONG_FUNCTION_NOT_FOUND_BODY } from "../../deploy/edge-runtime/main/router.js";
+import { createClient } from "@supabase/supabase-js";
 import {
   DOCKER_UNAVAILABLE,
+  DUMMY_DATABASE_URL,
+  DUMMY_HTTP_URL,
   awaitHealth,
   bootFunction,
   classifyWorkerBoot,
   composeEdgeRuntimeImage,
   composePath,
   dockerAvailable,
+  dummyEdgeEnv,
   functionsRoot,
   listFunctionDirectories,
   rewriteFunctionsBind,
   rewritePublishedPort,
   startComposeEdgeRuntime,
+  type EdgeRuntimeHandle,
 } from "../support/edge-runtime-function-boot.js";
 
 function guardedRemove(directory: string): void {
@@ -60,6 +65,38 @@ test("runtime 5xx boot failure is distinct from a function 401 or 404", () => {
   );
 });
 
+function parseDummyEnv(source: string): Map<string, string> {
+  const values = new Map<string, string>();
+  for (const line of source.split("\n")) {
+    if (!line) continue;
+    const eq = line.indexOf("=");
+    assert.ok(eq > 0, `dummy env line must be NAME=value: ${line}`);
+    values.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+  return values;
+}
+
+test("dummy edge env uses syntactically valid non-routable URLs", () => {
+  const values = parseDummyEnv(dummyEdgeEnv());
+  assert.equal(values.get("SUPABASE_URL"), DUMMY_HTTP_URL);
+  assert.equal(values.get("SWARM_DATABASE_URL"), DUMMY_DATABASE_URL);
+  assert.equal(values.get("SUPABASE_DB_URL"), DUMMY_DATABASE_URL);
+  const urlTyped = [...values.entries()].filter(([name]) => name.endsWith("_URL"));
+  assert.ok(urlTyped.length > 0, "dummy env must include URL-typed variables");
+  for (const [, value] of urlTyped) {
+    assert.match(value, /^(https?|postgres):\/\//);
+    assert.ok(new URL(value));
+  }
+  const client = createClient(DUMMY_HTTP_URL, "dummy-supabase_anon_key", {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  assert.equal(typeof client.auth, "object");
+  assert.throws(
+    () => createClient("dummy-supabase_url", "dummy-supabase_anon_key"),
+    /Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL/,
+  );
+});
+
 test("compose.yaml is the edge-runtime image pin and functions are listed from disk", () => {
   const source = readFileSync(composePath, "utf8");
   const image = composeEdgeRuntimeImage(source);
@@ -87,9 +124,12 @@ test("every edge function boots in the self-hosted edge-runtime image", { timeou
   assert.ok(names.length > 0, "supabase/functions must list function directories");
   assert.equal(names.includes("_shared"), false);
   const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "edge-runtime-boot.")));
-  t.after(() => guardedRemove(workDir));
-  const runtime = startComposeEdgeRuntime({ workDir });
-  t.after(() => runtime.close());
+  let runtime: EdgeRuntimeHandle | undefined;
+  t.after(() => {
+    runtime?.close();
+    guardedRemove(workDir);
+  });
+  runtime = startComposeEdgeRuntime({ workDir });
   await awaitHealth(runtime.baseUrl);
   const failures: string[] = [];
   for (const name of names) {
@@ -109,7 +149,11 @@ test("a function with a bare unmapped specifier fails the boot check", { timeout
     return;
   }
   const workDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "edge-runtime-boot-neg.")));
-  t.after(() => guardedRemove(workDir));
+  let runtime: EdgeRuntimeHandle | undefined;
+  t.after(() => {
+    runtime?.close();
+    guardedRemove(workDir);
+  });
   const copy = join(workDir, "functions");
   mkdirSync(copy, { recursive: true });
   cpSync(functionsRoot, copy, { recursive: true });
@@ -117,9 +161,13 @@ test("a function with a bare unmapped specifier fails the boot check", { timeout
     join(copy, "activity", "index.ts"),
     'import "c1-27-unmapped-specifier";\nDeno.serve(() => new Response("should not boot"));\n',
   );
-  const runtime = startComposeEdgeRuntime({ workDir, functionsRoot: copy });
-  t.after(() => runtime.close());
+  runtime = startComposeEdgeRuntime({ workDir, functionsRoot: copy });
   await awaitHealth(runtime.baseUrl);
   const result = await bootFunction(runtime, "activity");
   assert.equal(result.classification.ok, false, `negative control booted: HTTP ${result.status} ${result.body.slice(0, 200)}`);
+  assert.match(
+    `${result.body}\n${result.logSlice}`,
+    /c1-27-unmapped-specifier/,
+    `negative control failed without naming c1-27-unmapped-specifier: HTTP ${result.status} body=${result.body.slice(0, 200)}`,
+  );
 });

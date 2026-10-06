@@ -64,13 +64,31 @@ export function listFunctionDirectories(root = functionsRoot): string[] {
     .sort();
 }
 
+/** Non-routable HTTP dummy. supabase-js 2.110.8 requires a valid HTTP(S) URL. */
+export const DUMMY_HTTP_URL = "http://127.0.0.1:9";
+/** Non-routable database dummy. Functions construct `postgres` at module init. */
+export const DUMMY_DATABASE_URL = "postgres://dummy:dummy@127.0.0.1:9/dummy";
+
+/** URL-typed names the workers read while the isolate is created. */
+const INIT_DATABASE_URL_VARS = new Set(["SWARM_DATABASE_URL", "SUPABASE_DB_URL"]);
+
+function dummyValueFor(name: string): string {
+  if (name === "SWARM_SELF_SERVE") return "1";
+  if (INIT_DATABASE_URL_VARS.has(name)) return DUMMY_DATABASE_URL;
+  if (name.endsWith("_URL")) return DUMMY_HTTP_URL;
+  return `dummy-${name.toLowerCase()}`;
+}
+
 export function dummyEdgeEnv(): string {
-  const lines = REQUIRED_MAIN_ENV.map((name) => (
-    name === "SWARM_SELF_SERVE" ? `${name}=1` : `${name}=dummy-${name.toLowerCase()}`
-  ));
-  lines.push("SWARM_DATABASE_URL=postgres://dummy:dummy@127.0.0.1:9/dummy");
-  lines.push(`${MCP_PUBLIC_ENABLED_ENV}=1`);
-  return `${lines.join("\n")}\n`;
+  const values = new Map<string, string>();
+  for (const name of REQUIRED_MAIN_ENV) {
+    values.set(name, dummyValueFor(name));
+  }
+  for (const name of INIT_DATABASE_URL_VARS) {
+    values.set(name, dummyValueFor(name));
+  }
+  values.set(MCP_PUBLIC_ENABLED_ENV, "1");
+  return `${[...values.entries()].map(([name, value]) => `${name}=${value}`).join("\n")}\n`;
 }
 
 export type BootClassification =
@@ -221,6 +239,7 @@ export interface FunctionBootResult {
   functionName: string;
   status: number;
   body: string;
+  logSlice: string;
   classification: BootClassification;
 }
 
@@ -241,6 +260,7 @@ export async function bootFunction(
     functionName,
     status: response.status,
     body,
+    logSlice,
     classification: classifyWorkerBoot(response.status, body, logSlice),
   };
 }
