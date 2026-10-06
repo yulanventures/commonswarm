@@ -35,12 +35,14 @@ function coreHost() {
     async execute(invocation) {
       calls++;
       if ('query' in invocation) {
+        assert.ok(invocation.query.kind === 'object_list' || invocation.query.kind === 'object_read' || invocation.query.kind === 'object_history');
         const metadata = readHouseholdObjects(invocation.query, state, currentAccess, 100);
         if (metadata.status !== 'ok' || metadata.kind !== 'object_read') return metadata;
         const value = contents.find(item => item.revision?.token === metadata.revision.revision.token)!;
         return { status: 'ok', metadata, bytes: new TextEncoder().encode(JSON.stringify(value.content)) };
       }
       const command = invocation.command;
+      assert.ok(command.kind === 'create_household_object' || command.kind === 'update_household_object' || command.kind === 'reserve_household_upload' || command.kind === 'commit_household_upload');
       const object_id = 'object_id' in command ? command.object_id : 'shopping';
       const base = command.kind === 'update_household_object' ? command.base : null;
       const proposal: HouseholdContent = command.kind === 'create_household_object' ? command.content
@@ -97,7 +99,7 @@ test('workspace/object/exact opaque revision are bound on both request and read 
   const host = coreHost();
   const initial = await host.client.prepare('object_create', create()).send();
   assert.equal(initial.status, 'committed');
-  if (initial.status !== 'committed') return;
+  assert.ok(initial.status === 'committed' && 'revision' in initial);
   for (const base of [ref(initial.revision.token, 'another-object'), ref(initial.revision.token, 'shopping', 'private-space')]) {
     assert.throws(() => host.client.prepare('object_update', update(base)), HouseholdToolInputError);
   }
@@ -120,13 +122,13 @@ test('workspace/object/exact opaque revision are bound on both request and read 
 test('stale patch preserves a draft and never retries blindly; reviewed patch uses a fresh ID', async () => {
   const host = coreHost();
   const initial = await host.client.prepare('object_create', create()).send();
-  if (initial.status !== 'committed') assert.fail('initial write must commit');
+  assert.ok(initial.status === 'committed' && 'revision' in initial, 'initial object write must commit');
   const current = await host.client.prepare('object_update', update(initial.revision, 'first_001')).send();
-  if (current.status !== 'committed') assert.fail('first update must commit');
+  assert.ok(current.status === 'committed' && 'revision' in current, 'first object update must commit');
   const stale = host.client.prepare('object_update', update(initial.revision, 'stale_001', 'tea and bread'));
   const conflict = await stale.send();
   assert.equal(conflict.status, 'conflict');
-  if (conflict.status !== 'conflict') return;
+  assert.ok(conflict.status === 'conflict' && 'draft_id' in conflict);
   assert.deepEqual(conflict.current, current.revision);
   assert.ok(host.state().drafts[conflict.draft_id]);
   const calls = host.calls();

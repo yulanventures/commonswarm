@@ -9,6 +9,7 @@ import {
 import type {
   HouseholdContent, HouseholdObjectType, HouseholdRevisionRef,
 } from '../protocol/household-object-events.js';
+import { decodeHouseholdTodoResponse, type HouseholdTodoClientResult } from './household-todos.js';
 
 export interface HouseholdTransport {
   /** Return a store decision, read result, or readBytes result. The host must
@@ -30,6 +31,7 @@ export interface HouseholdRevisionView {
   command_id: string;
 }
 export type HouseholdClientResult =
+  | HouseholdTodoClientResult
   | { status: 'committed'; request_id: string; object_id: string; revision: HouseholdRevisionRef }
   | { status: 'pending'; request_id: string; object_id: string; reservation_id: string }
   | { status: 'conflict'; request_id: string; object_id: string; current: HouseholdRevisionRef; draft_id: string }
@@ -158,6 +160,7 @@ function decodeResponse(value: unknown, invocation: HouseholdToolInvocation): Ho
   const request_id = invocation.request_id;
   if (data.status === 'refused') return { status: 'refused', ...(request_id ? { request_id } : {}),
     reason: text(data.reason) && /^[a-z][a-z0-9_]{0,63}$/.test(data.reason) ? data.reason : 'request_refused' };
+  if (invocation.objectTypes.includes('todo')) return decodeHouseholdTodoResponse(data, invocation, envelope) ?? invalid();
   if ('command' in invocation) {
     const command = invocation.command;
     const object = 'object_id' in command ? command.object_id : undefined;

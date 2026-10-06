@@ -23,16 +23,19 @@ function householdMcpResult(result: HouseholdClientResult): HouseholdMcpResult {
   const next_action = result.status === 'unknown'
     ? result.request_id ? 'Retry identical input with the same request_id to recover the recorded outcome.' : 'Retry the read.'
     : result.status === 'pending' ? 'The upload is reserved; no revision is committed. Complete the protected upload, then call file_upload_commit with a new request_id.'
-    : result.status === 'conflict' ? 'Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id.'
+    : result.status === 'conflict' ? 'kind' in result && result.kind === 'todo'
+      ? 'Read the current to-do and review the change. Submit it with the current version and a new request_id.'
+      : 'Recover the retained draft, read the current revision, and review the merge. Submit the reviewed patch with a new request_id.'
     : result.status === 'refused' ? 'Resolve the refusal before submitting another request.'
     : result.status === 'ok' && result.kind === 'object_read' && result.revision.kind === 'file'
       ? 'File metadata is available. Use the host protected attachment channel for bytes; access must be rechecked.' : null;
   const output = { ...result, next_action };
   const raw = JSON.stringify(output);
-  if (Buffer.byteLength(raw) <= MCP_RESULT_MAX_BYTES) return {
-    isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict',
-    content: [{ type: 'text', text: raw }],
-  };
+  const response = { isError: result.status === 'refused' || result.status === 'unknown' || result.status === 'conflict',
+    content: [{ type: 'text' as const, text: raw }] };
+  // AM13 budgets the escaped text inside the transport envelope. The server's
+  // 28 KiB pages fit this local 32 KiB cap, including cursors and next_action.
+  if (Buffer.byteLength(JSON.stringify(response)) <= MCP_RESULT_MAX_BYTES) return response;
   // Do not hide a committed write or suggest retrying it merely to fit a cap.
   const summary = { status: result.status === 'ok' ? 'refused' : result.status,
     ...(result.status === 'ok' ? { reason: 'result_too_large' } : {}),
