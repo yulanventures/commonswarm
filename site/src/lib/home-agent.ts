@@ -1,5 +1,6 @@
 import {
   agentOrb,
+  choiceChips,
   notice,
   queueRow,
   statusLine,
@@ -98,12 +99,16 @@ export interface AgentFoundVM {
   facts: AgentFactsVM;
   activity: AgentActivityVM | null;
   may: AgentPageMay;
+  workPolicy?: "owner" | "anyone";
+  receipt?: string;
+  lineNotice?: string | null;
 }
 
 /** Local to this lane: home-types.ts has no page VM. */
 export type AgentPageVM = AgentNotFoundVM | AgentFoundVM;
 
 export interface AgentPageCallbacks {
+  onWorkPolicy?: (value: "owner" | "anyone") => void;
   onManage?: (agent: AgentVM) => void;
   onQueueAction?: (action: QueueAction, row: QueueRowVM) => void;
   onFix?: (action: NonNullable<AgentStateVM["fix"]["action"]>, agent: AgentVM) => void;
@@ -198,8 +203,9 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   ownership.dataset.hmOwnership = "";
   intro.append(title, ownership);
   const statusWrap = el(doc, "div", "hm-agent__status");
-  statusWrap.append(statusLine(doc, agent.state, { form: "pill" }));
-  statusWrap.append(el(doc, "p", "hm-agent__status-detail", agent.state.detail));
+  // The fix is rendered once in What to do, alongside its available action.
+  statusWrap.append(statusLine(doc, { ...agent.state, attention: false }, { form: "pill" }));
+
   const receive = el(doc, "p", "hm-agent__receive", vm.receive);
   receive.dataset.hmReceive = "";
   intro.append(statusWrap, receive);
@@ -235,7 +241,8 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   const line = el(doc, "div", "hm-agent__line");
   const empty = agentLineEmpty(vm);
 
-  if (empty) {
+  if (vm.lineNotice) line.append(el(doc, "p", "hm-agent__meta", vm.lineNotice));
+  if (empty && !vm.lineNotice) {
     const vacant = el(doc, "p", "hm-agent__empty", emptyLine(agent.nestedLabel));
     vacant.dataset.hmEmpty = "";
     line.append(vacant);
@@ -339,9 +346,14 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     }));
     facts.append(lists);
   }
-  if (vm.facts.postsHere) facts.append(switchRow(doc, vm.facts.postsHere, () => {}));
+  if (agent.yours && vm.facts.postsHere) facts.append(switchRow(doc, vm.facts.postsHere, () => {}));
+  if (agent.yours && vm.workPolicy) { const policy = { name: `hm-work-policy-${agent.id}`, legend: "Who can give it work",
+    value: vm.workPolicy, options: [{ value: "owner" as const, label: "Only you" }, { value: "anyone" as const, label: `Anyone in ${vm.workspaceName}` }], sample: vm.sample }; facts.append(choiceChips(doc, policy,
+    value => { if (value === "owner" || value === "anyone") callbacks.onWorkPolicy?.(value); })); }
+  if (vm.receipt) { const receipt = el(doc, "p", "hm-agent__meta", vm.receipt); receipt.setAttribute("role", "status"); facts.append(receipt); }
   aside.append(facts);
 
+  if (vm.activity) {
   const activity = el(doc, "section", "hm-agent__activity");
   activity.dataset.hmActivity = "";
   activity.setAttribute("aria-labelledby", "hm-agent-activity");
@@ -356,6 +368,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   }
   activity.append(slot);
   aside.append(activity);
+  }
 
   if (canAct) {
     const manage = actionButton(doc, AGENT_COPY.manage, "hm-agent__manage", () => {

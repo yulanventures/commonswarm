@@ -25,12 +25,18 @@ export function homeFocusTargetKey(requested: string, available: readonly string
 
 /** Add identities at the integration boundary without changing the shared builders' API. */
 function markFocusKeys(root: HTMLElement, region: string): void {
-  for (const element of root.querySelectorAll<HTMLElement>("a[href], button, h1, h2, [tabindex]")) {
+  for (const element of root.querySelectorAll<HTMLElement>("a[href], button, input, textarea, select, h1, h2, [tabindex]")) {
     const needs = element.closest<HTMLElement>("[data-needs-you]");
     const latest = element.closest<HTMLElement>("[data-latest-id]");
+    const queue = element.closest<HTMLElement>("[data-queue-id]");
     const context = element.closest<HTMLElement>("[data-home-phone-bar], [data-home-workspace-header], [data-home-workspace-nav]");
     let kind: string; let id: string; let action: string | undefined;
-    if (element.id) { kind = "element"; id = element.id; }
+    if (queue && element.dataset.queueAction) { kind = "queue"; id = queue.dataset.queueId!; action = element.dataset.queueAction; }
+    else if (element.matches("input, textarea, select")) {
+      kind = "field"; id = [...element.attributes].filter(attribute => attribute.name.startsWith("data-") && attribute.name !== "data-home-focus-key").map(attribute => attribute.name).join("|")
+        || `${element.tagName}:${element.getAttribute("name") ?? ""}:${element.getAttribute("type") ?? ""}:${element.closest("form")?.className ?? ""}`;
+    }
+    else if (element.id) { kind = "element"; id = element.id; }
     else if (needs) { kind = "needs"; id = needs.dataset.needsYou!; action = element.dataset.primary; }
     else if (latest) { kind = "latest"; id = latest.dataset.latestId!; }
     else if (element.hasAttribute("data-rail-workspace") || element.hasAttribute("data-workspace-id")) {
@@ -57,8 +63,16 @@ export function replaceHomeRegion(slot: HTMLElement, region: string, children: H
     const openMenu = slot.querySelector<HTMLElement>('[aria-haspopup="menu"][aria-expanded="true"]');
     if (openMenu) requested = openMenu.dataset.homeFocusKey ?? requested;
   }
+  const drafts = new Map<string, { value: string; start: number | null; end: number | null }>();
+  if (region === "todo" || region === "todos") for (const field of slot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("textarea, input[type=text]")) {
+    if (field.dataset.homeFocusKey) drafts.set(field.dataset.homeFocusKey, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+  }
   for (const child of children) markFocusKeys(child, region);
   slot.replaceChildren(...children);
+  for (const field of slot.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("textarea, input[type=text]")) {
+    const draft = drafts.get(field.dataset.homeFocusKey ?? "");
+    if (draft) { field.value = draft.value; field.setSelectionRange(draft.start, draft.end); }
+  }
   if (!hadFocus) return;
   const visible = (element: HTMLElement) => !element.closest("[hidden]") && element.getClientRects().length > 0;
   const controls = Array.from(slot.querySelectorAll<HTMLElement>("[data-home-focus-key]")).filter(visible);

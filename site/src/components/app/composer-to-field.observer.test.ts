@@ -159,7 +159,7 @@ const frameScript = `<script>
         value: doc.querySelector("[data-composer-input]")?.value,
         /* THE WORKSPACE AND THE FEED, because a switch step waits on both and a payload that
            named neither could not tell which half of it had not arrived. */
-        workspace: doc.querySelector("[data-sidebar-workspace-name]")?.textContent,
+        workspace: doc.querySelector('[data-rail-workspace][aria-current="page"] .hm-rail__name')?.textContent,
         rows: doc.querySelectorAll("[data-feed-list] > li").length,
         panel: doc.querySelector("live-dashboard")?.dataset.state,
       }));
@@ -175,6 +175,7 @@ const frameScript = `<script>
     await ready();
     const input = () => doc.querySelector("[data-composer-input]");
     const list = () => doc.querySelector("[data-feed-list]");
+    const messageRows = () => [...list().children].filter(row => row.hasAttribute("data-signal-id"));
     const noteText = () => doc.querySelector("[data-composer-to-note]")?.textContent ?? "";
     const chipNames = () => [...doc.querySelectorAll("[data-composer-to-chip]")]
       .map((chip) => chip.querySelector("[data-composer-to-promote]")?.textContent ?? "");
@@ -204,14 +205,14 @@ const frameScript = `<script>
       }
     };
     const send = async (body) => {
-      const before = list().children.length;
+      const before = messageRows().length;
       type(body);
       doc.querySelector("[data-composer]").requestSubmit();
-      await waitFor(() => list().children.length > before, "the posted row");
+      await waitFor(() => messageRows().length > before, "the posted row");
       await new Promise((resolve) => view.setTimeout(resolve, 80));
       return {
-        rowsAdded: list().children.length - before,
-        rowTarget: list().lastElementChild?.querySelector(".dashboard__message-target")
+        rowsAdded: messageRows().length - before,
+        rowTarget: messageRows().at(-1)?.querySelector(".dashboard__message-target")
           ?.textContent?.trim() ?? "",
       };
     };
@@ -316,14 +317,14 @@ const frameScript = `<script>
        and presses Enter inside that window would send to a set that had not caught up unless
        the submit runs the pass first. */
     await clearTo();
-    const beforeAtOnce = list().children.length;
+    const beforeAtOnce = messageRows().length;
     type("@Lumen ship it now");
     doc.querySelector("[data-composer]").requestSubmit();
-    await waitFor(() => list().children.length > beforeAtOnce, "the row sent straight after a tag");
+    await waitFor(() => messageRows().length > beforeAtOnce, "the row sent straight after a tag");
     await new Promise((resolve) => view.setTimeout(resolve, 80));
     const taggedThenSentAtOnce = {
       chips: chipNames(),
-      rowTarget: list().lastElementChild?.querySelector(".dashboard__message-target")
+      rowTarget: messageRows().at(-1)?.querySelector(".dashboard__message-target")
         ?.textContent?.trim() ?? "",
     };
 
@@ -423,14 +424,16 @@ const frameScript = `<script>
        round of this lane closed a door on one of those three moments and the next round found
        another, because the address and the body were kept in step by hand across them. */
     const switchTo = async (workspaceId, workspaceName) => {
-      doc.querySelector("[data-workspace-menu-trigger]").click();
       await waitFor(
-        () => doc.querySelector('[data-workspace-id="' + workspaceId + '"]') !== null,
-        "the workspace menu",
+        () => {
+          const row = doc.querySelector('[data-home-workspace-list] [data-rail-workspace="' + workspaceId + '"]');
+          return row !== null && row.offsetParent !== null;
+        },
+        "the permanent workspace list",
       );
-      doc.querySelector('[data-workspace-id="' + workspaceId + '"]').click();
+      doc.querySelector('[data-home-workspace-list] [data-rail-workspace="' + workspaceId + '"]').click();
       await waitFor(
-        () => doc.querySelector("[data-sidebar-workspace-name]")?.textContent === workspaceName &&
+        () => doc.querySelector('[data-rail-workspace="' + workspaceId + '"][aria-current="page"] .hm-rail__name')?.textContent === workspaceName &&
           doc.querySelectorAll("[data-feed-list] > li").length > 0,
         "the workspace named " + workspaceName,
       );
@@ -639,9 +642,9 @@ const frameScript = `<script>
     const unsentBodySurvivesSwitch = { value: input().value, chips: chipNames() };
     /* AND SENDING IT AGAIN POSTS IT ONCE, which is the double-post this family produced twice:
        a message that came back as a draft and was sent a second time under a fresh command id. */
-    const rowsBeforeResend = list().children.length;
+    const rowsBeforeResend = messageRows().length;
     doc.querySelector("[data-composer]").requestSubmit();
-    await settleFor(() => list().children.length > rowsBeforeResend);
+    await settleFor(() => messageRows().length > rowsBeforeResend);
     await new Promise((resolve) => view.setTimeout(resolve, 200));
     const resentOnce = {
       rows: rowsCarrying("written in the field lab"),

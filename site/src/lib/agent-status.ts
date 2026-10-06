@@ -115,7 +115,7 @@ export function agentStatus(input: AgentStatusInput, now = Date.now()): AgentSta
 export type PeopleAgentStatusKind = AgentStatusKind | "key-off" | "key-ended" | "paused" | "stale-messages" | "key-ends-soon" | "new-computer";
 export interface PeopleAgentStatusInput extends AgentStatusInput {
   /** Optional server overview facts; absent for the existing People dialog. */
-  connection?: "live" | "removed" | "key_off" | "key_ended" | "paused";
+  connection?: "live" | "removed" | "connection_off" | "key_off" | "key_ended" | "paused";
   grant?: GrantRiskInput | null;
   oldestUnobservedAt?: string | null;
   app?: string | null;
@@ -202,14 +202,15 @@ export function homeAgentState(input: HomeAgentStatusInput, now = input.now ?? D
   const recent = Number.isFinite(lastAction) && lastAction <= now && now - lastAction <= WORK_RECENT_MS;
   const workingOn = input.workingOn && Date.parse(input.workingOn.until) > now ? input.workingOn : null;
   const base = agentStatus(credentialInput, now);
-  const disconnected = base.kind === "removed" || base.kind === "suspended" || ["key-off", "key-ended", "paused"].includes(people.kind);
+  const connectionOff = input.connection === "connection_off";
+  const disconnected = connectionOff || base.kind === "removed" || base.kind === "suspended" || ["key-off", "key-ended", "paused"].includes(people.kind);
   const kind = disconnected ? "disconnected" : input.serverWork ?? (people.kind === "stale-messages" ? "disconnected"
     : recent && (input.doingTodo || workingOn) ? "working" : "idle");
   let word: AgentStateVM["word"] = kind === "working" ? "Working" : kind === "disconnected" ? "Disconnected" : "Idle";
   let detail: string;
   // The server supplies the work class; credential facts still need their own detail and fix.
   if (disconnected) {
-    detail = ["key-off", "key-ended", "paused"].includes(people.kind) ? people.label : base.chip;
+    detail = connectionOff ? "Connection turned off" : ["key-off", "key-ended", "paused"].includes(people.kind) ? people.label : base.chip;
   } else if (kind === "disconnected") {
     if (people.kind === "stale-messages") {
       word = "Not picking up";
@@ -240,6 +241,7 @@ export function homeAgentState(input: HomeAgentStatusInput, now = input.now ?? D
     : attention && (disconnected || people.attention)
     ? { ...people.fix, sentence: people.sentence }
     : { action: null, allowed: false, askWho: null, sentence: "" } as AgentStateVM["fix"];
+  if (connectionOff) Object.assign(fix, { action: null, allowed: false, sentence: input.own ? "Connect it again from its app." : `Ask ${input.ownerFirstName ?? "its owner"} to connect it again.` });
   if (kind === "disconnected" && !people.attention && !disconnected) fix.sentence = "Connect it again from its app.";
   return { kind, word, detail, attention, fix, receive };
 }

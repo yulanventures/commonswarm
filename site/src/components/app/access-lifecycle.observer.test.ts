@@ -74,7 +74,8 @@ test("a failed pending read leaves the workspace pending section available", { t
   assert.match(peopleView, /dataset.pendingLoadNote/);
   assert.match(peopleView, /Invited: could not load/);
   assert.equal(pendingReadWiring(source).length, 4);
-  assert.match(source, /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed/);
+  assert.match(source, /pendingFailed: pendingAgentsLoadFailed/);
+  assert.match(peopleView, /invited\.hidden = model\.sample \|\| \(!invites\.length && !model\.pendingFailed\)/);
 });
 
 function pendingReadWiring(source: string): number[] {

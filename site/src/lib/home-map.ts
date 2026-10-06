@@ -144,17 +144,19 @@ export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview,
       : { ...entry, state: "failed" };
   });
 }
+export function homeAgentFixCards(people: HomePeople, workspace: NeedsYouVM['workspace']): NeedsYouVM[] {
+  return [...people.groups.flatMap(group => group.agents), ...people.other].filter(agent => agent.yours && agent.state.attention).map(agent => ({
+    id: `${workspace.id}:${agent.id}`, kind: 'agent-fix', workspace, from: agent, what: `${agent.label}: ${agent.state.detail}.`, when: '',
+    primary: { label: 'What to do', href: routeHref({ view: 'agent', workspaceId: workspace.id, agentId: agent.id }) },
+  }));
+}
 function detailNeeds(entry: CatchUpData, viewerId: string | null, now: number): NeedsYouVM[] {
   const detail = entry.detail;
   if (!detail) return [];
   const workspace = { ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }) };
   const agents = [...detail.people.groups.flatMap(group => group.agents), ...detail.people.other];
   const items = [...(detail.needsYou ?? [])];
-  for (const agent of agents.filter(agent => agent.yours && agent.state.attention)) {
-    items.push({ id: `${entry.workspace.id}:${agent.id}`, kind: "agent-fix", workspace, from: agent,
-      what: `${agent.label}: ${agent.state.detail}.`, when: "", primary: { label: "What to do",
-        href: routeHref({ view: "agent", workspaceId: entry.workspace.id, agentId: agent.id }) } });
-  }
+  items.push(...homeAgentFixCards(detail.people, workspace));
   for (const signal of detail.signals) {
     if (signal.kind !== "ask" || signal.to !== viewerId || !Number.isFinite(Date.parse(signal.until ?? "")) || Date.parse(signal.until ?? "") <= now || detail.signals.some(reply => reply.threadRootId === signal.id && reply.from === viewerId)) continue;
     const from = signal.fromKind === "agent" ? agents.find(agent => agent.id === signal.from)
@@ -218,4 +220,92 @@ export function homeNotFound(): { heading: string; label: string; href: string }
 /** Removed files still occupy the read page; their rows do not count as current files. */
 export function homeFileCount(rows: readonly { tombstonedAt: string | null }[]): number | null {
   return rows.length >= 500 ? null : rows.filter(row => !row.tombstonedAt).length;
+}
+
+// Local integration models: the wire read has no UI permission flags or page models.
+import type { Actor, Todo, TodoSummary, Comment, Party, AgentQueue } from './home/contract';
+import type { TodoVM, ObjectCardVM, QueueRowVM } from './home-types';
+import type { AgentFoundVM } from './home-agent';
+import { ownershipLine, notYetTodoGate, notYetNoteGate, setTimeCopy } from './home-agent-copy';
+import { todoSubline } from './home-todo-copy';
+export interface HomeTodoContext { workspaceId: string; people: HomePeople; viewerId: string | null; editor: boolean; sample: boolean; now: number; details?: ReadonlyMap<string, Todo> }
+export function homeParty(party: Party | null, people: HomePeople): PersonVM | AgentVM | null {
+  if (!party) return null;
+  return party.kind === 'agent' ? [...people.groups.flatMap(group => group.agents), ...people.other].find(agent => agent.id === party.id) ?? null
+    : people.groups.find(group => group.person.id === party.id)?.person ?? null;
+}
+function homeActor(actor: Actor, people: HomePeople): PersonVM | AgentVM {
+  return homeParty({ kind: actor.principal_id ? 'agent' : 'user', id: actor.principal_id ?? actor.user_id }, people)
+    ?? { id: actor.user_id, name: 'Workspace member', firstName: 'Workspace member', initials: '', you: false, role: 'member' };
+}
+/** Missing summary metadata stays unknown; it is never attributed to the viewer. */
+export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known: readonly TodoSummary[] = [], comments: readonly Comment[] = []): TodoVM {
+  const full = 'created_by' in row ? row : null;
+  const party = row.offer?.to ?? row.assignee;
+  const who = homeParty(party, ctx.people);
+  const agent = who && 'label' in who ? who : null;
+  const me = ctx.people.groups.find(group => group.person.you)?.person;
+  const elevated = me?.role === 'owner' || me?.role === 'admin';
+  const edit = ctx.editor && !ctx.sample;
+  const open = row.state === 'open' || row.state === 'doing';
+  const steer = edit && open && !!agent?.yours && !row.offer;
+  const canComplete = edit && (row.assignee === null || row.assignee.kind === 'user' && row.assignee.id === ctx.viewerId
+    || !!homeParty(row.assignee, ctx.people) && 'label' in homeParty(row.assignee, ctx.people)! && (homeParty(row.assignee, ctx.people) as AgentVM).yours
+    || full?.created_by.user_id === ctx.viewerId || elevated);
+  const gate = full?.gate ?? row.gate;
+  const clear = full ? full.gate_clear : 'clear' in row.gate ? row.gate.clear : false;
+  const gateId = gate.kind === 'after' && 'todo_id' in gate ? gate.todo_id : null;
+  const prerequisite = known.find(todo => todo.todo_id === gateId);
+  const gateVM: TodoVM['start'] = !agent ? null : { mode: gate.kind === 'at' && !clear ? 'at' : gate.kind !== 'none' && !clear ? 'gated' : 'queue',
+    position: row.queue_position, at: gate.kind === 'at' && 'at' in gate ? gate.at : null,
+    gate: gate.kind === 'after' && gateId ? { kind: 'todo', todo: { id: gateId, title: prerequisite?.title ?? 'another to-do',
+      href: routeHref({ view: 'todo', workspaceId: ctx.workspaceId, todoId: gateId }), done: prerequisite?.state === 'done' } }
+      : gate.kind === 'at' && 'at' in gate && gate.at ? { kind: 'time', at: gate.at }
+      : gate.kind === 'hold' ? { kind: 'note', note: 'note' in gate ? gate.note ?? 'Waiting for release' : 'Waiting for release' } : null };
+  const decider = row.offer ? ctx.people.groups.find(group => group.person.id === row.offer!.decider_user_id)?.person : null;
+  return { id: row.todo_id, workspaceId: ctx.workspaceId, title: row.title, notes: full?.notes ?? '', state: row.state,
+    addedBy: full ? homeActor(full.created_by, ctx.people) : homeActor({ user_id: '', principal_id: null }, ctx.people), addedAt: full?.created_at ?? '', due: row.due_on,
+    assignee: who ? 'label' in who ? { kind: 'agent', agent: who } : { kind: 'person', person: who } : null,
+    start: gateVM, request: row.offer ? { status: 'pending', ownerFirstName: decider?.firstName ?? 'its owner' } : null,
+    doneBy: full && row.state === 'done' ? homeActor(full.state_by, ctx.people) : null, doneAt: row.state === 'done' ? row.state_at : null,
+    receipt: null, sample: ctx.sample, may: { edit, assign: edit && open, start: steer, reorder: steer, complete: !!canComplete, comment: edit },
+    comments: comments.map(comment => ({ id: comment.comment_id, author: homeActor(comment.author, ctx.people), at: comment.created_at, body: comment.body,
+      tags: comment.mentions.flatMap(party => { const who = homeParty(party, ctx.people); return who ? [{ id: party.id, label: 'label' in who ? who.label : who.name }] : []; }) })), tagDelivers: true };
+}
+export function homeTodoCard(todo: TodoVM, now: number): ObjectCardVM {
+  return { kind: 'todo', id: todo.id, title: todo.title, href: routeHref({ view: 'todo', workspaceId: todo.workspaceId, todoId: todo.id }),
+    meta: todoSubline(todo, { now }), who: todo.assignee?.kind === 'agent' ? todo.assignee.agent : todo.assignee?.person ?? null, done: todo.state === 'done' };
+}
+export function mapHomeAgentPage(agent: AgentVM, queue: AgentQueue | null, rows: readonly TodoSummary[], ctx: HomeTodoContext,
+  workspaceName: string, receive: string, facts: AgentFoundVM['facts'], activity: AgentFoundVM['activity']): AgentFoundVM {
+  const mapped = (row: TodoSummary) => {
+    const detail = ctx.details?.get(row.todo_id);
+    return mapHomeTodo(detail?.version === row.version ? detail : row, ctx, rows);
+  };
+  const card = (row: TodoSummary) => homeTodoCard(mapped(row), ctx.now);
+  const queueRow = (row: TodoSummary, index: number, gated = false): QueueRowVM => {
+    const o = card(row); const may = !ctx.sample && ctx.editor && agent.yours;
+    return { todoId: row.todo_id, position: row.queue_position ?? index + 1, title: row.title, href: o.href, meta: o.meta,
+      may: { up: may && !gated && index > 0, down: may && !gated && index < (queue?.up_next.length ?? 0) - 1,
+        startNow: may, notYet: may && !gated, release: may && gated } };
+  };
+  const doing = queue?.working[0];
+  const held = queue?.not_yet.filter(row => row.gate.kind !== 'at') ?? [];
+  const at = queue?.not_yet.filter(row => row.gate.kind === 'at') ?? [];
+  return { found: true, sample: ctx.sample, homeHref: routeHref({ view: 'chat', workspaceId: ctx.workspaceId }), agent,
+    ownership: agent.ownerFirstName ? ownershipLine(agent.ownerFirstName, agent.yours) : 'Owner left', workspaceName, receive,
+    doingNow: doing ? { todoId: doing.todo_id, title: doing.title, href: card(doing).href, meta: card(doing).meta, detail: '' } : null,
+    upNext: (queue?.up_next ?? []).map((row, i) => queueRow(row, i)),
+    notYet: held.map((row, i) => {
+      const gate = mapped(row).start?.gate;
+      return { ...queueRow(row, i, true), gate: row.gate.kind === 'after'
+        ? notYetTodoGate(rows.find(todo => todo.todo_id === row.gate.todo_id)?.title ?? 'another to-do', agent.nestedLabel)
+        : notYetNoteGate(gate?.kind === 'note' ? gate.note : 'Waiting for release') };
+    }).concat((queue?.requests ?? []).map((row, index) => ({ ...queueRow(row, index, true),
+        gate: 'Request pending', may: { up: false, down: false, startNow: false, notYet: false, release: false } }))),
+    atSetTime: at.map(row => ({ todoId: row.todo_id, title: row.title, href: card(row).href,
+      whenLine: setTimeCopy(agent.nestedLabel, formatWhen(row.gate.at ?? '', ctx.now)) })),
+    doneRecently: rows.filter(row => row.state === 'done' && row.assignee?.kind === 'agent' && row.assignee.id === agent.id)
+      .sort((a, b) => Date.parse(b.state_at) - Date.parse(a.state_at)).slice(0, 5).map(row => ({ todoId: row.todo_id, title: row.title, href: card(row).href, meta: card(row).meta })),
+    facts, activity, may: { steer: !!queue && ctx.editor && agent.yours }, ...(queue ? { workPolicy: queue.accepts_from } : {}) };
 }

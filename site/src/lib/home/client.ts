@@ -158,7 +158,16 @@ async function householdSurface(
   return checkedCommandBody(status, body);
 }
 
+export class HomeToolsUnavailable extends Error {
+  constructor() { super('home_tools_unavailable'); this.name = 'HomeToolsUnavailable'; }
+}
+/** Detect absence by owned response codes, never by error prose. */
+export function homeToolsMissing(body: Record<string, unknown>): boolean {
+  return [body.error, body.code, body.reason].some(code => code === 'unknown_tool' || code === 'unknown_household_tool' || code === 'PGRST202' || code === '42883');
+}
+
 function checkedCommandBody(status: number, body: Record<string, unknown>): Record<string, unknown> {
+  if (homeToolsMissing(body)) throw new HomeToolsUnavailable();
   if (status !== 200 && !(body.status === 'refused' && isTodoRefusal(body.reason))) {
     throw new Error('home_request_failed');
   }
@@ -173,6 +182,7 @@ export function createHomeServer(session: Session, deps: Partial<HomeServerDeps>
       const c = resolved.client();
       if (!c) throw new Error('home_no_deployment');
       const { data, error } = await c.schema('swarm_read').rpc('home_overview');
+      if (error && homeToolsMissing({ code: error.code })) throw new HomeToolsUnavailable();
       if (error) throw new Error('home_overview_failed');
       if (!record(data) || typeof data.viewer_user_id !== 'string' || typeof data.generated_at !== 'string' || !Array.isArray(data.workspaces)) throw new Error('home_overview_malformed');
       return data as unknown as HomeOverview;

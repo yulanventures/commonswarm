@@ -72,6 +72,7 @@ const frameScript = `<script>
     );
     const input = doc.querySelector("[data-composer-input]");
     const list = doc.querySelector("[data-feed-list]");
+    const messageRows = () => [...list.children].filter(row => row.hasAttribute("data-signal-id"));
     /* THE To: SET SURVIVES A SEND on purpose, so a step that needs a broadcast has to empty
        it. Doing that through the chip's own remove control makes this a live control of the
        affordance as well as a set-up step. */
@@ -113,21 +114,22 @@ const frameScript = `<script>
       input.setSelectionRange(input.value.length, input.value.length);
       input.dispatchEvent(new view.InputEvent("input", { bubbles: true, inputType: "insertText" }));
       await waitFor(() => !doc.querySelector("[data-mention-picker]")?.hidden, "mention picker");
-      const beforeRows = list.children.length;
+      const beforeRows = messageRows().length;
       const event = pressEnter(extra);
       await new Promise((resolve) => view.setTimeout(resolve, 0));
       return {
         enterPrevented: event.defaultPrevented,
-        submitted: list.children.length !== beforeRows,
+        submitted: messageRows().length !== beforeRows,
         value: input.value,
       };
     };
     const sendWith = async (modifier, body) => {
       type(body);
-      const before = list.children.length;
+      const before = messageRows().length;
       pressEnter({ [modifier]: true });
-      await settle(() => list.children.length > before);
-      const row = list.children.length === before + 1 ? list.lastElementChild : null;
+      await settle(() => messageRows().length > before);
+      const rows = messageRows();
+      const row = rows.length === before + 1 ? rows.at(-1) : null;
       return {
         kind: row?.querySelector(".dashboard__message-kind")?.textContent?.trim() ?? "",
         recipient: row?.querySelector(".dashboard__message-target")?.textContent?.trim() ?? "",
@@ -141,12 +143,12 @@ const frameScript = `<script>
          models the stale frame the keydown branch must handle: open UI, zero live candidates. */
       input.value = "@no-such-recipient";
       input.setSelectionRange(input.value.length, input.value.length);
-      const before = list.children.length;
+      const before = messageRows().length;
       pressEnter({ metaKey: true });
-      await settle(() => list.children.length > before);
+      await settle(() => messageRows().length > before);
       return {
         pickerHidden: doc.querySelector("[data-mention-picker]")?.hidden === true,
-        submitted: list.lastElementChild?.querySelector(".dashboard__message-markdown")?.textContent ===
+        submitted: messageRows().at(-1)?.querySelector(".dashboard__message-markdown")?.textContent ===
           "@no-such-recipient",
       };
     };
@@ -163,14 +165,14 @@ const frameScript = `<script>
 
     /* ONE SIGNAL for the whole set. Two names in To: used to be two rows; the row count and
        the single target are what would fail if the send went back to posting per tag. */
-    const beforeSend = list.children.length;
+    const beforeSend = messageRows().length;
     type(second.value + "ship it");
     pressEnter();
-    await settle(() => list.children.length > beforeSend);
+    await settle(() => messageRows().length > beforeSend);
     await new Promise((resolve) => view.setTimeout(resolve, 60));
     const oneSignal = {
-      added: list.children.length - beforeSend,
-      target: list.lastElementChild?.querySelector(".dashboard__message-target")
+      added: messageRows().length - beforeSend,
+      target: messageRows().at(-1)?.querySelector(".dashboard__message-target")
         ?.textContent?.trim() ?? "",
       chipsAfterSend: chipNames(),
     };
@@ -181,27 +183,27 @@ const frameScript = `<script>
       note: doc.querySelector("[data-composer-to-note]")?.textContent ?? "",
     };
 
-    const beforeBroadcast = list.children.length;
+    const beforeBroadcast = messageRows().length;
     type("no tags here, so this goes to the room");
     pressEnter();
-    await settle(() => list.children.length > beforeBroadcast);
+    await settle(() => messageRows().length > beforeBroadcast);
     const broadcast = {
-      added: list.children.length - beforeBroadcast,
-      target: list.lastElementChild?.querySelector(".dashboard__message-target")?.textContent?.trim() ?? "",
+      added: messageRows().length - beforeBroadcast,
+      target: messageRows().at(-1)?.querySelector(".dashboard__message-target")?.textContent?.trim() ?? "",
     };
 
     type("sent with enter");
-    const beforePlain = list.children.length;
+    const beforePlain = messageRows().length;
     const plain = pressEnter();
     await new Promise((resolve) => view.setTimeout(resolve, 0));
     const plainEnter = {
       prevented: plain.defaultPrevented,
-      submitted: list.children.length === beforePlain + 1 &&
-        list.lastElementChild?.querySelector(".dashboard__message-markdown")?.textContent === "sent with enter",
+      submitted: messageRows().length === beforePlain + 1 &&
+        messageRows().at(-1)?.querySelector(".dashboard__message-markdown")?.textContent === "sent with enter",
     };
 
     type("line one");
-    const beforeShift = list.children.length;
+    const beforeShift = messageRows().length;
     const shift = new view.KeyboardEvent("keydown", {
       bubbles: true,
       cancelable: true,
@@ -216,7 +218,7 @@ const frameScript = `<script>
     const shiftEnter = {
       insertedNewline: input.value === "line one\\n",
       prevented: shift.defaultPrevented,
-      submitted: list.children.length !== beforeShift,
+      submitted: messageRows().length !== beforeShift,
     };
     const metaEnter = await sendWith("metaKey", "@River sent with command enter");
     const ctrlEnter = await sendWith("ctrlKey", "@River sent with control enter");

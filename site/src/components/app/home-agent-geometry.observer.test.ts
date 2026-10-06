@@ -4,91 +4,13 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { join } from "node:path";
-import { test as nodeTest } from "node:test";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { findChrome, launchChrome } from "../../../tests/chrome.js";
-import {
-  agentOrb,
-  notice,
-  queueRow,
-  statusLine,
-  switchRow,
-} from "../../lib/home-primitives.ts";
-
-const primitiveStub = `
-export function personAvatar(doc) { return doc.createElement("span"); }
-export function agentOrb(doc, a, opts) {
-  const el = doc.createElement("span");
-  el.dataset.hmOrb = "";
-  el.style.cssText = "display:inline-flex;inline-size:"+opts.size+"px;block-size:"+opts.size+"px;flex:none;";
-  el.textContent = a.name;
-  return el;
-}
-export function capsule(doc) { return doc.createElement("span"); }
-export function statusLine(doc, s) {
-  const el = doc.createElement("div");
-  el.dataset.hmStatus = s.kind;
-  el.textContent = s.word + " " + s.detail;
-  return el;
-}
-export function objectCard(doc) { return doc.createElement("a"); }
-export function needsYouCard(doc) { return doc.createElement("article"); }
-export function choiceChips(doc) { return doc.createElement("fieldset"); }
-export function switchRow(doc, s, onToggle) {
-  if (s.state === "always" || s.state === "never") {
-    const p = doc.createElement("p");
-    p.textContent = s.label + " " + (s.state === "always" ? "Always" : "Never");
-    return p;
-  }
-  const button = doc.createElement("button");
-  button.type = "button";
-  button.setAttribute("role", "switch");
-  button.setAttribute("aria-checked", s.state === "on" ? "true" : "false");
-  button.textContent = s.label;
-  button.addEventListener("click", () => onToggle(s));
-  return button;
-}
-export function queueRow(doc, q, onAction) {
-  const li = doc.createElement("li");
-  const link = doc.createElement("a");
-  link.href = q.href;
-  link.textContent = q.title;
-  li.append(link);
-  const buttons = [
-    ["up", "up", "Move up"],
-    ["down", "down", "Move down"],
-    ["startNow", "start-now", "Start now"],
-    ["notYet", "not-yet", "Not yet"],
-    ["release", "release", "Release"],
-  ];
-  for (const [flag, action, label] of buttons) {
-    if (!q.may[flag]) continue;
-    const button = doc.createElement("button");
-    button.type = "button";
-    button.textContent = label;
-    button.addEventListener("click", () => onAction(action, q));
-    li.append(button);
-  }
-  return li;
-}
-export function notice(doc, text) {
-  const el = doc.createElement("p");
-  el.textContent = text;
-  return el;
-}
-`;
-
-const implemented = [queueRow, switchRow, notice, agentOrb, statusLine].every(
-  (fn) => !/\bpending\s*\(/.test(Function.prototype.toString.call(fn)),
-);
-
 type Geometry = {
   width: number;
   overflow: boolean;
   laneTouchTargets: boolean;
   primitiveTouchTargets: boolean;
-  usedRealPrimitives: boolean;
-  stubForcesTouchSize: boolean;
   hostileElements: number;
   hostileText: boolean;
   hostileInTitle: boolean;
@@ -102,23 +24,13 @@ type Geometry = {
   sampleManage: number;
   banner: string;
   foreignFixButtons: number;
+  fixSentenceCount: number;
+  foreignPosts: number;
+  unreportedActivity: number;
   missingTitle: string;
 };
 
-nodeTest("geometry stubs never pin 44px; the observer uses real primitives once they exist", () => {
-  assert.equal(primitiveStub.includes("minHeight"), false);
-  assert.equal(primitiveStub.includes("minWidth"), false);
-  assert.equal(primitiveStub.includes("44px"), false);
-  const pending = [queueRow, switchRow, notice, agentOrb, statusLine].some(
-    (fn) => /\bpending\s*\(/.test(Function.prototype.toString.call(fn)),
-  );
-  assert.equal(implemented, !pending);
-});
-
 test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile text as text", { timeout: 60_000 }, async () => {
-  assert.equal(primitiveStub.includes("minHeight"), false);
-  assert.equal(primitiveStub.includes("minWidth"), false);
-  assert.equal(primitiveStub.includes("44px"), false);
   const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-agent-geometry-"));
   const fixture = join(directory, "index.html");
   const bundle = await build({
@@ -129,18 +41,9 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
     globalName: "HomeAgent",
     platform: "browser",
     write: false,
-    plugins: implemented ? [] : [{
-      name: "lane-a-primitive-stubs",
-      setup(plugin) {
-        plugin.onLoad({ filter: /home-primitives\.ts$/ }, () => ({ contents: primitiveStub, loader: "ts" }));
-      },
-    }],
   });
   const script = bundle.outputFiles[0]?.text;
   assert.ok(script);
-  if (!implemented) {
-    assert.equal(/min(?:Height|Width)\s*=\s*"44px"/.test(script), false);
-  }
   const tokens = await readFile(new URL("../../styles/tokens.css", import.meta.url), "utf8");
   const primitivesCss = await readFile(new URL("../../styles/home/primitives.css", import.meta.url), "utf8");
   const css = await readFile(new URL("../../styles/home/agent.css", import.meta.url), "utf8");
@@ -152,7 +55,6 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       <script>${script}</script><script>
       (async () => {
         const hostile = '<img src=x onerror="document.title=1">';
-        const usedRealPrimitives = ${implemented ? "true" : "false"};
         const mayOn = { up: true, down: true, startNow: true, notYet: true, release: true };
         const mayOff = { up: false, down: false, startNow: false, notYet: false, release: false };
         const state = (kind, word, detail, attention, fix) => ({
@@ -199,7 +101,7 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           upNext: [{ todoId: 'one', position: 1, title: 'Order filters', href: '#one', meta: 'From Nikki', may: mayOn }],
           notYet: [{ todoId: 'hold', position: 0, title: 'Hold', href: '#hold', meta: 'From Nikki', gate: 'On hold until Friday.', may: mayOn }],
           atSetTime: [], doneRecently: [],
-          facts: { model: 'Muse Spark', receive: 'Checks messages when Nikki chats with it.', lastActive: 'Active 2 hours ago', listsAndDocs: { id: 'lists', label: 'Lists & docs', detail: '', state: 'on' }, postsHere: null },
+          facts: { model: 'Muse Spark', receive: 'Checks messages when Nikki chats with it.', lastActive: 'Active 2 hours ago', listsAndDocs: { id: 'lists', label: 'Lists & docs', detail: '', state: 'on' }, postsHere: {id:'posts',label:'What it posts here',detail:'',state:'always'} },
           activity: { ageLabel: 'No frames received', phaseLabel: null, toolTitle: null, emptyMessage: 'No activity frames received' },
           may: { steer: true },
         };
@@ -234,10 +136,6 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
         const laneTouchTargets = meetsTouch(visible(page, '.hm-agent__todo-link, .hm-agent__home, .hm-agent__action, .hm-agent__manage'));
         const primitiveNodes = visible(page, '[data-hm-up-next] button, [data-hm-not-yet] button, [data-hm-lists] button, [data-hm-lists] [role="switch"]');
         const primitiveTouchTargets = meetsTouch(primitiveNodes);
-        const stubForcesTouchSize = !usedRealPrimitives && primitiveNodes.some((node) => {
-          const box = node.getBoundingClientRect();
-          return box.height >= 44 && box.width >= 44;
-        });
         const hostileElements = page.querySelectorAll('img').length;
         const hostileText = page.textContent.includes(hostile);
         const hostileInTitle = page.querySelector('h1').textContent.includes(hostile);
@@ -254,6 +152,10 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
         root.append(other);
         const readonlySteerButtons = other.querySelectorAll('[data-hm-up-next] button, [data-hm-not-yet] button').length;
         const foreignFixButtons = other.querySelectorAll('[data-hm-fix-action]').length;
+        const fixSentenceCount = other.textContent.split('Ask Nikki to resume it.').length - 1;
+        const foreignPosts = other.querySelectorAll('[data-switch-id="posts"]').length;
+        root.replaceChildren(HomeAgent.agentPage(document, {...working,activity:null}, {}));
+        const unreportedActivity = root.querySelectorAll('[data-hm-activity]').length;
         root.replaceChildren();
         const cut = HomeAgent.agentPage(document, disconnected, { onManage() {}, onQueueAction() {}, onFix() {}, onListsToggle() {} });
         root.append(cut);
@@ -271,8 +173,6 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           overflow,
           laneTouchTargets,
           primitiveTouchTargets,
-          usedRealPrimitives,
-          stubForcesTouchSize,
           hostileElements,
           hostileText,
           hostileInTitle,
@@ -286,6 +186,9 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
           sampleManage,
           banner,
           foreignFixButtons,
+          fixSentenceCount,
+          foreignPosts,
+          unreportedActivity,
           missingTitle: lost.querySelector('h1').textContent,
         };
         document.documentElement.dataset.metrics = btoa(unescape(encodeURIComponent(JSON.stringify(metrics))));
@@ -300,13 +203,8 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       const geometry = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Geometry;
       assert.equal(geometry.width, width);
       assert.equal(geometry.overflow, false, `${width}px must not overflow horizontally`);
-      assert.equal(geometry.usedRealPrimitives, implemented);
       assert.equal(geometry.laneTouchTargets, true, `${width}px lane-owned agent controls meet the 44px minimum`);
-      if (implemented) {
-        assert.equal(geometry.primitiveTouchTargets, true, `${width}px queue and switch controls from home-primitives meet the 44px minimum`);
-      } else {
-        assert.equal(geometry.stubForcesTouchSize, false, `${width}px stubs must not pin queue or switch controls at 44px`);
-      }
+      assert.equal(geometry.primitiveTouchTargets, true, `${width}px real queue and switch controls meet the independent 44px minimum`);
       assert.equal(geometry.hostileElements, 0);
       assert.equal(geometry.hostileText, true);
       assert.equal(geometry.hostileInTitle, true);
@@ -319,6 +217,9 @@ test("Agent view meets 44px targets, wraps at 320 and 390, and keeps hostile tex
       assert.equal(geometry.sampleSteerButtons, 0);
       assert.equal(geometry.sampleManage, 0);
       assert.equal(geometry.foreignFixButtons, 0);
+      assert.equal(geometry.fixSentenceCount, 1, "What to do owns the fix sentence; the status pill must not repeat it");
+      assert.equal(geometry.foreignPosts, 0, "the locked posts row is only for your own agent");
+      assert.equal(geometry.unreportedActivity, 0, "no activity section until activity was reported");
       assert.equal(geometry.banner, "Disconnected: key turned off. Nothing in its line moves until it reconnects.");
       assert.equal(geometry.missingTitle, "Nothing with this link in Home.");
     }

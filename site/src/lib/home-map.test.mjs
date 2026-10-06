@@ -197,3 +197,66 @@ test("optional working-on reads keep loaded chat usable on returned errors, time
   }
   assert.equal(calls, 4, "positive and negative controls all reach the status read");
 });
+
+test("a chat-app connection turned off stays Disconnected and never asks for a key", () => {
+  const people = mapHomePeople({ ...input, agents: [{ ...input.agents[0], work: { work: "disconnected", facts: { transport: "hosted_mcp", turn_only: true,
+    connection: "connection_off", last_activity_at: "2026-10-05T11:59:00Z", messages_waiting_since: null, doing: null, working_on: null } } }] });
+  const state = people.groups[0].agents[0].state;
+  assert.equal(state.word, "Disconnected");
+  assert.equal(state.detail, "Connection turned off");
+  assert.equal(state.fix.action, null);
+  assert.doesNotMatch(state.fix.sentence, /key/i);
+  const workspace = { id: "W", name: "Home", href: "/app?w=W" };
+  const fixes = homeAgentFixCards(people, workspace);
+  assert.equal(fixes.length, 1); assert.equal(fixes[0].primary.href, "/app?w=W&agent=A");
+  people.groups[0].agents[0].yours = false;
+  assert.deepEqual(homeAgentFixCards(people, workspace), [], "someone else's connection never asks the viewer to fix it");
+});
+
+import { mapHomeTodo, mapHomeAgentPage, homeAgentFixCards } from "./home-map.ts";
+const todoRow = (fields = {}) => ({ todo_id: "T", version: 2, title: "Book plumber", state: "open", due_on: null, assignee: { kind: "agent", id: "A" },
+  offer: null, gate: { kind: "none", clear: true, todo_id: null, at: null }, queue_position: 2, comment_count: 0, state_at: "2026-10-05T11:30:00Z", ...fields });
+const todoCtx = (fields = {}) => ({ workspaceId: "W", people: mapHomePeople(input), viewerId: "zoe", editor: true, sample: false, now, ...fields });
+test("to-do summaries preserve unknown authors, gates and requests; steering stays with the owner", () => {
+  const mine = mapHomeTodo(todoRow(), todoCtx());
+  assert.equal(mine.start.position, 2); assert.equal(mine.may.start, true);
+  assert.equal(mine.addedAt, ""); assert.equal(mine.addedBy.you, false);
+  const other = mapHomeTodo(todoRow({ assignee: { kind: "agent", id: "B" } }), todoCtx());
+  assert.equal(other.may.start, false); assert.equal(other.may.reorder, false);
+  const pending = mapHomeTodo(todoRow({ offer: { offer_id: "O", to: { kind: "agent", id: "B" }, decider_user_id: "amy", start: "queue" } }), todoCtx());
+  assert.equal(pending.request.ownerFirstName, "Amy"); assert.equal(pending.may.start, false);
+  const gated = mapHomeTodo(todoRow({ gate: { kind: "after", clear: false, todo_id: "Q", at: null } }), todoCtx(), [todoRow({ todo_id: "Q", title: "Get quotes" })]);
+  assert.equal(gated.start.mode, "gated"); assert.equal(gated.start.gate.todo.title, "Get quotes");
+  const timed = mapHomeTodo(todoRow({ gate: { kind: "at", clear: false, todo_id: null, at: "2026-10-06T09:00:00Z" } }), todoCtx());
+  assert.equal(timed.start.mode, "at"); assert.equal(timed.start.at, "2026-10-06T09:00:00Z");
+  for (const ctx of [todoCtx({ editor: false }), todoCtx({ sample: true })]) assert.deepEqual(mapHomeTodo(todoRow(), ctx).may,
+    { edit: false, assign: false, start: false, reorder: false, complete: false, comment: false });
+});
+test("Agent page maps the measured sections and takes work policy from the server", () => {
+  const ctx = todoCtx(); const agent = ctx.people.groups[0].agents[0];
+  const queue = { accepts_from: "owner", working: [todoRow({ state: "doing" })], up_next: [todoRow({ todo_id: "N", queue_position: 1 })],
+    not_yet: [todoRow({ todo_id: "H", gate: { kind: "hold", clear: false, todo_id: null, at: null } })], requests: [] };
+  const page = mapHomeAgentPage(agent, queue, [todoRow({ state: "done" })], ctx, "Home", "Checks messages when you chat with it.", {}, null);
+  assert.equal(page.doingNow.title, "Book plumber"); assert.equal(page.upNext[0].position, 1);
+  assert.equal(page.notYet[0].may.release, true); assert.equal(page.doneRecently.length, 1); assert.equal(page.workPolicy, "owner");
+  ctx.details = new Map([["H", { ...queue.not_yet[0], gate: { kind: "hold", note: "waiting on the landlord" }, gate_clear: false,
+    notes: "", created_by: { user_id: "zoe", principal_id: null }, created_at: "2026-10-05T11:00:00Z", state_by: { user_id: "zoe", principal_id: null } }]]);
+  assert.equal(mapHomeAgentPage(agent, queue, [], ctx, "Home", "", {}, null).notYet[0].gate, "On hold: waiting on the landlord");
+  ctx.details.get("H").version = 1;
+  assert.equal(mapHomeAgentPage(agent, queue, [], ctx, "Home", "", {}, null).notYet[0].gate, "On hold: Waiting for release", "a cached older version cannot describe the current gate");
+  const foreign = mapHomeAgentPage(ctx.people.groups[1].agents[0], queue, [], ctx, "Home", "", {}, null);
+  assert.equal(foreign.may.steer, false); assert.equal(foreign.upNext[0].may.startNow, false);
+});
+
+import { createHomeServer, HomeToolsUnavailable, HomeCommandRefused } from "./home/client.ts";
+test("to-do feature detection distinguishes missing tools from a content refusal and a working read", async () => {
+  const session = { user: { id: "zoe" } };
+  const read = (status, body) => createHomeServer(session, { postCommand: async () => ({ status, body }) }).listTodos("W", { scope: "all", offset: 0, limit: 50 });
+  for (const reason of ["unknown_tool", "unknown_household_tool"]) await assert.rejects(read(400, { status: "refused", reason }), HomeToolsUnavailable);
+  await assert.rejects(read(200, { status: "refused", reason: "content_consent_required" }), HomeCommandRefused);
+  assert.deepEqual(await read(200, { status: "ok", todos: [todoRow()], next_offset: null }), { todos: [todoRow()], next_offset: null });
+  for (const code of ["PGRST202", "42883"]) {
+    const server = createHomeServer(session, { client: () => ({ schema: () => ({ rpc: async () => ({ data: null, error: { code } }) }) }) });
+    await assert.rejects(server.overview(), HomeToolsUnavailable);
+  }
+});

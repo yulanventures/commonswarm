@@ -22,7 +22,7 @@ export type SideTodoState = "open" | "doing" | "done" | "dropped";
 export interface SideTodoVM { id: string; title: string; href: string; state: SideTodoState; mayComplete: boolean; subline: string }
 
 /** `null` means the to-dos read is absent: every To-dos surface is then absent too (UI-SPEC 3.3 states). */
-export interface SideTodosVM { items: SideTodoVM[]; allHref: string; canAdd: boolean }
+export interface SideTodosVM { items: SideTodoVM[]; allHref: string; canAdd: boolean; notice?: string }
 
 /**
  * The Lists & docs read has four measured states. Only a measured refusal shows the door; a read that is
@@ -95,7 +95,8 @@ function section(doc: Document, key: string, title: string): { root: HTMLElement
   const body = node(doc, "div", "hm-side-card__body");
   root.append(heading, body); return { root, body };
 }
-function link(doc: Document, text: string, href: string, hook: string): HTMLAnchorElement {
+function link(doc: Document, text: string, href: string, hook: string, sample = false): HTMLElement {
+  if (sample) return node(doc, "span", "hm-side-link", text);
   const anchor = node(doc, "a", "hm-side-link", text); anchor.href = href; anchor.dataset.sideLink = hook; return anchor;
 }
 function cardList(doc: Document, items: readonly ObjectCardVM[], label: string): HTMLUListElement {
@@ -127,7 +128,7 @@ function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: Si
     (label.querySelector(".hm-todo-row__mark") as HTMLElement).append(check(doc));
     row.append(label);
   }
-  const text = node(doc, "a", "hm-todo-row__text"); text.href = item.href; text.dataset.sideTodoLink = item.id;
+  const text = sample ? node(doc, "span", "hm-todo-row__text") : Object.assign(node(doc, "a", "hm-todo-row__text"), { href: item.href }); text.dataset.sideTodoLink = item.id;
   const title = node(doc, "span", "hm-todo-row__title", item.title); title.title = item.title;
   text.append(title);
   if (item.subline) text.append(node(doc, "span", "hm-todo-row__sub", item.subline));
@@ -138,8 +139,9 @@ function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: Si
 export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement | null {
   if (!vm.todos) return null;
   const { root, body } = section(doc, "todos", "To-dos");
-  const { shown } = sideOpenTodos(vm.todos.items);
-  if (shown.length === 0) body.append(node(doc, "p", "hm-side-card__empty", "No open to-dos."));
+  const { shown, more } = sideOpenTodos(vm.todos.items);
+  if (vm.todos.notice) body.append(node(doc, "p", "hm-side-card__empty", vm.todos.notice));
+  else if (shown.length === 0) body.append(node(doc, "p", "hm-side-card__empty", "No open to-dos."));
   else { const list = node(doc, "ul", "hm-side-list hm-side-list--todos"); list.setAttribute("aria-label", "Open to-dos");
     for (const item of shown) list.append(todoRow(doc, item, vm.sample, callbacks)); body.append(list); }
   const foot = node(doc, "div", "hm-side-card__foot");
@@ -147,7 +149,8 @@ export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCa
     const add = node(doc, "button", "hm-side-button", "+ Add a to-do"); add.type = "button"; add.dataset.sideAddTodo = "";
     add.addEventListener("click", () => callbacks.onAddTodo()); foot.append(add);
   }
-  foot.append(link(doc, "All to-dos", vm.todos.allHref, "todos")); body.append(foot);
+  if (more) foot.append(node(doc, "span", "hm-side-card__empty", `${more} more`));
+  foot.append(link(doc, "All to-dos", vm.todos.allHref, "todos", vm.sample)); body.append(foot);
   return root;
 }
 
@@ -173,9 +176,9 @@ export function buildObjectsCards(doc: Document, vm: SideCardsVM, callbacks: Sid
   if (objects.state !== "ready") return [objectsDoor(doc, vm, callbacks)];
   const make = (key: "lists" | "files", title: string, items: ObjectCardVM[], allText: string): HTMLElement => {
     const { root, body } = section(doc, key, title);
-    const { shown } = sideCapObjects(items);
-    body.append(shown.length ? cardList(doc, shown, title) : node(doc, "p", "hm-side-card__empty", key === "lists" ? "No lists or docs yet." : "No files yet."));
-    const foot = node(doc, "div", "hm-side-card__foot"); foot.append(link(doc, allText, vm.hrefs[key], key)); body.append(foot);
+    const { shown, more } = sideCapObjects(items);
+    body.append(shown.length ? cardList(doc, vm.sample ? shown.map(item => Object.assign({ ...item }, { sample: true })) : shown, title) : node(doc, "p", "hm-side-card__empty", key === "lists" ? "No lists or docs yet." : "No files yet."));
+    const foot = node(doc, "div", "hm-side-card__foot"); if (more) foot.append(node(doc, "span", "hm-side-card__empty", `${more} more`)); foot.append(link(doc, allText, vm.hrefs[key], key, vm.sample)); body.append(foot);
     return root;
   };
   return [make("lists", "Lists", objects.lists, "All lists"), make("files", "Files", objects.files, "All files")];
@@ -194,6 +197,6 @@ export function buildSideCards(doc: Document, vm: SideCardsVM, callbacks: SideCa
   const column = node(doc, "div", "hm-side"); column.dataset.homeSide = ""; if (vm.sample) column.dataset.sample = "true";
   const todos = buildTodosCard(doc, vm, callbacks); if (todos) column.append(todos);
   column.append(...buildObjectsCards(doc, vm, callbacks), buildSharedCard(doc, vm));
-  const wiki = node(doc, "div", "hm-side-card hm-side-card--link"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki")); column.append(wiki);
+  const wiki = node(doc, "div", "hm-side-card hm-side-card--link"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); column.append(wiki);
   return column;
 }

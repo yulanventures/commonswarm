@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { test as sourceTest } from "node:test";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { MESSAGE_MARKDOWN_LIMITS } from "../../lib/message-markdown.js";
 import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.js";
@@ -9,13 +10,17 @@ import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.j
 let snapshotPromise: ReturnType<typeof runBrainViewFixture> | undefined;
 const getSnapshot = (): ReturnType<typeof runBrainViewFixture> => snapshotPromise ??= runBrainViewFixture();
 
-test("the dashboard wires a Brain tab to the existing file read and put paths", () => {
+sourceTest("Wiki is reachable from the workspace menu and right column using the existing file read and put paths", () => {
   const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
-  assert.equal(
-    [...dashboard.matchAll(/data-workspace-view="brain"/g)].length,
-    2,
-    "Brain must be reachable from the desktop rail and the mobile view switcher",
-  );
+  const shell = readFileSync(new URL("../../lib/home-shell.ts", import.meta.url), "utf8");
+  const sideCards = readFileSync(new URL("../../lib/home-side-cards.ts", import.meta.url), "utf8");
+  assert.match(shell, /item: "wiki" as const, label: "Wiki"/);
+  assert.match(shell, /if \(item === "wiki"\) button\.dataset\.workspaceView = "brain"/);
+  assert.match(dashboard, /if \(item === "wiki"\) navigateHomeHref\(vm\.hrefs\.wiki\)/);
+  assert.match(sideCards, /link\(doc, "Wiki", vm\.hrefs\.wiki, "wiki", vm\.sample\)/);
+  assert.equal([...dashboard.matchAll(/wiki: routeHref\(\{ view: "wiki", workspaceId: workspace\.id \}\)/g)].length, 2,
+    "the workspace menu and right column both link to this workspace's Wiki");
+  assert.match(dashboard, /homeRoute\.view === "wiki"\) activateWorkspaceView\("brain"\)/);
   assert.match(dashboard, /data-channel-view="brain"/);
   assert.match(dashboard, /brainTopics\(files, workspaceFileUploaderName\)/);
   assert.match(dashboard, /data-brain-raw-toggle/);

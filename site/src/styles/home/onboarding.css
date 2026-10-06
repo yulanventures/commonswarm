@@ -581,7 +581,7 @@
   border-color: var(--border-interactive);
 }
 
-.hm-ahp__button--quiet:hover {
+:is(.hm-ahp__button--quiet):hover {
   background: var(--surface-2);
   border-color: var(--border-interactive);
 }

@@ -37,7 +37,6 @@ import {
   THREAD_ROOT_BLOCKS,
   threadReplyBroadcastLabel,
   threadReplyCountLabel,
-  threadReplyTargetText,
   threadRootBlockText,
 } from "../../lib/thread-reply.js";
 
@@ -54,7 +53,6 @@ const serverSuite = readFileSync(
   join(repoRoot, "tests", "p1-server", "chat-signals.test.ts"),
   "utf8",
 );
-const appHtml = readFileSync(join(siteRoot, "dist", "app", "index.html"), "utf8");
 
 const between = (source: string, start: string, end: string): string => {
   const startAt = source.indexOf(start);
@@ -353,6 +351,7 @@ test("the To: row draws the set the send posts, and is locked while a reply is w
 
 test("the app ships the reply bar, its window line and its broadcast control", () => {
   /* THE BUILT ARTIFACT, not the source: Astro has to have shipped the markup. */
+  const appHtml = readFileSync(join(siteRoot, "dist", "app", "index.html"), "utf8");
   assert.match(appHtml, /data-composer-reply\b/);
   assert.match(appHtml, /data-composer-reply-target-text/);
   assert.match(appHtml, /data-composer-reply-window/);
@@ -621,11 +620,11 @@ const frameScript = `<script>
        its own array, which is the one place a client-side narrowing is honest, because the
        sample IS the whole set. */
     const openChannel = async (channelId) => {
-      /* BY ID, NOT BY LABEL. The rail writes the slug and the phone's switch list writes
-         "#slug", so a text match would find one surface at one width and neither at the other;
-         the id is what selectChannel actually takes. All-signals is the empty id. Only a
-         VISIBLE control is clicked: the switch list lives inside a dialog that is closed at
-         this width, and clicking a hidden button would measure nothing. */
+      /* Open the stream-header menu before choosing by id. All-signals is the empty id;
+         only a visible control measures the same navigation a reader can use. */
+      const trigger = () => doc.querySelector('[data-home-channel-menu] .hm-channel-menu__trigger');
+      if (trigger()?.getAttribute("aria-expanded") === "false") trigger().click();
+      await waitFor(() => trigger()?.getAttribute("aria-expanded") === "true", "the channel menu");
       const button = [...doc.querySelectorAll('[data-channel-place]')]
         .filter((control) => control.offsetParent !== null)
         .find((control) => control.dataset.channelPlace === channelId);
@@ -798,7 +797,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     assert.deepEqual(measured.replyBar, {
       hidden: false,
       broadcastChip: THREAD_REPLY_CHIP_LABEL,
-      target: threadReplyTargetText("Orbit", { kind: "unfiled" }),
+      target: "Replying to Your Orbit in All messages.",
       /* The sample rows do not expire, so there is no ceiling to state and the line collapses
          rather than saying "never". */
       windowLine: "",
@@ -843,18 +842,18 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     assert.deepEqual(measured.cancelled, {
       hidden: true,
       toChips: ["Orbit", "River"],
-      placeholder: "Message everyone",
+      placeholder: "Write to everyone, or type @ to tag a person or an agent",
     }, "cancelled: the held pair comes back, and the body's own tag joins it");
 
     /* BROADCAST IS OFFERED ONLY WHERE THERE IS A CHANNEL TO BROADCAST TO. */
     assert.deepEqual(measured.replyUnfiled, {
       broadcastHidden: true,
-      target: threadReplyTargetText("Orbit", { kind: "unfiled" }),
+      target: "Replying to Your Orbit in All messages.",
     }, "replyUnfiled: an unfiled thread has nowhere to broadcast, so there is no control");
     assert.deepEqual(measured.replyInChannel, {
       broadcastHidden: false,
       broadcastLabel: threadReplyBroadcastLabel("mobile"),
-      target: threadReplyTargetText("River", { kind: "channel", slug: "mobile" }),
+      target: "Replying to Your River in #mobile.",
     }, "replyInChannel: the control names the channel it would send to");
 
     /* THE SEND. One reply under its root, no new top-level row, and the composer goes back to
@@ -888,7 +887,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
       measured.sentReply.toChips.length > 0,
       "sentReply: the comparison above must not be two empty sets",
     );
-    assert.equal(measured.sentReply.placeholder, "Message everyone");
+    assert.equal(measured.sentReply.placeholder, "Write to everyone, or type @ to tag a person or an agent");
 
     /* ── THE COMPOSITION CLAIM, MEASURED ───────────────────────────────────────────────
        The #mobile root and its replies read the same in the channel and in all-signals. The
