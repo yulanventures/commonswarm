@@ -1182,3 +1182,83 @@ INNER_RC=0
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (extracted issuer fresh; extracted session re-entry). D-030 still reaches every test file. No commit or push. HEAD remains `888d130b`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
 
+## C1-23: checker round 12 (Codex FAIL, 3 blockers) on C1-22 (uncommitted)
+
+Prepared against committed HEAD `21af6cb8` (worktree `lane/c1-frozen-work`). No commit,
+push, production operation, full suite, build, Docker or browser. HezLead owns
+independent review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for
+the Lead.
+
+Run-order quote pins after the session insert (+3) were shifted: 1975→1978,
+1984→1987, 2999→3002, 3027→3030, 3159→3162, 3501→3504, 4014→4017, 4600→4603,
+4601→4604, 4604→4607, 5411→5414, 5837→5840, 5976→5979, 6235→6238, 6921→6924,
+7112→7115.
+
+### Defect 1: issuer fresh omits membership restrictions (RELEASE.md:3028)
+
+`ISSUER_FRESH` still allows LOGIN or NOLOGIN without a password and keeps the
+C1-22 attribute set. It now also applies the migration predicates at
+`supabase/migrations/20261003000002_admin_oauth_policy.sql:50-56` plus
+`pg_shdepend` deptype `a`/`o`: outgoing memberships only in
+`commonswarm_oauth_runtime` and `swarm_command` (no ADMIN, no INHERIT, SET
+true); incoming memberships only with those allowed options; no direct
+privileges or ownership.
+
+| Test | file:line | Pre-change at `21af6cb8` |
+| --- | --- | --- |
+| extra privileged SET membership (postgres SET) refuses | `tests/admin-release-plan.test.ts:4131` | PASS; writes `issuer-provisioning-attempted.txt` |
+| migration outgoing SET memberships pass | `tests/admin-release-plan.test.ts:4131` | not enforced (attributes-only query) |
+| `pg_shdepend` a/o refuses | `tests/admin-release-plan.test.ts:4131` | not enforced |
+
+### Defect 2: recovery can miss a committed but unrecorded migration (RELEASE.md:1549)
+
+Re-entry no longer reads `apply-durations.txt`, `schema-prefix.json`, or
+`schema-committed.txt` (those can be written after COMMIT). Live must equal
+`ledger-before.txt` plus an ordered prefix (empty through all) of
+`new-migrations.json`, else `expected-migrations.json` 20261003 versions.
+`ai-w2-reconcile` still records the live prefix afterward.
+
+| Test | file:line | Pre-change at `21af6cb8` |
+| --- | --- | --- |
+| M1 committed without a post-COMMIT record passes | `tests/admin-release-plan.test.ts:4202` | FAIL `ledger-before-or-ledger-before-plus-window-committed` |
+| all five with `new-migrations.json` pass | `tests/admin-release-plan.test.ts:4202` | FAIL unless `schema-committed.txt` / durations / prefix is present |
+| M2 without M1 refuses | `tests/admin-release-plan.test.ts:4202` | FAIL (same family; now the prefix FAIL line) |
+| unexpected version refuses | `tests/admin-release-plan.test.ts:4202` | FAIL `window-committed`; now prefix FAIL line |
+| all five with only `schema-committed.txt` refuses | `tests/admin-release-plan.test.ts:4202` | PASS (trusted a post-COMMIT receipt) |
+
+### Defect 3: re-entry bypasses the baseline digest (RELEASE.md:1544)
+
+Re-entry hashes the retained `ledger-before.txt` against INPUTS
+`baseline_ledger_sha256` before writing `ledger-at-recovery.txt`.
+
+| Test | file:line | Pre-change at `21af6cb8` |
+| --- | --- | --- |
+| unexpected first-entry ledger refuses on re-entry | `tests/admin-release-plan.test.ts:4202` | PASS (`live == before`, digest skipped) |
+
+### Non-blocking 3: explicit FAIL lines (RELEASE.md:1541, 1566, 1575)
+
+| Test | file:line | Pre-change at `21af6cb8` |
+| --- | --- | --- |
+| identity read FAIL line | `tests/admin-release-plan.test.ts:4276` | `ai_ro -q --file /proof/identity.sql >/dev/null` (silent set -e) |
+| first-entry ledger read FAIL line | `tests/admin-release-plan.test.ts:4276` | redirect with no `\|\| FAIL` |
+| unsupported-step FAIL line | `tests/admin-release-plan.test.ts:4276` | `*) return 2` (status 2, no FAIL line) |
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.Q0TRAA: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.b9VdGG`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 194
+ℹ pass 193
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 285530.639958
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). Three new tests (issuer memberships; unrecorded prefix / digest re-entry; identity/ledger/unsupported FAIL lines). D-030 still reaches every test file. No commit or push. HEAD remains `21af6cb8`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+

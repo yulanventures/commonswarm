@@ -74,11 +74,12 @@ elif name=='ai_ro':
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
     if args[2]=="SELECT rolcanlogin AND rolpassword IS NOT NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';":
         output(cfg.get('issuer_login','t')); raise SystemExit(0)
-    if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';","SELECT rolpassword IS NULL AND NOT rolinherit AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
-    if 'pg_authid' in args[2]:
+    if args[2]=='SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;':
+        output(cfg.get('readonly','t')); raise SystemExit(0)
+    if 'pg_authid' in args[2] and "rolname='commonswarm_admin_issuer'" in args[2] and 'rolpassword IS NULL' in args[2]:
         if cfg.get('readback_failed'): raise SystemExit(1)
         output(cfg.get('readback','t')); raise SystemExit(0)
-    output(cfg.get('readonly','t'))
+    refuse()
 elif name=='ai_db_secret_file':
     # The plan's mounted-file helper: the SQL file (in the stage) reaches the database; stdin is never read.
     if len(args)!=1: refuse()
