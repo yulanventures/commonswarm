@@ -1,3 +1,4 @@
+import { HOUSEHOLD_TOOLS } from "../protocol/household-tool-registry.js";
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
 import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
@@ -38,7 +39,7 @@ export const MCP_TOOL_TABLE = [
   { name: "file_put", description: "Upload a local file. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, path: absolutePath, name: string(255, 1) }, ["request_id", "path"]), mapResult: (value: object) => value },
   { name: "brain_put", description: "Upload a local Markdown file as a brain topic. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, topic: string(200, 1), path: absolutePath, if_version: { type: "integer" as const, minimum: 0 } }, ["request_id", "topic", "path"]), mapResult: (value: object) => value },
 ] as const;
-export const MCP_TOOLS = MCP_TOOL_TABLE.map(({ mapResult: _mapResult, ...tool }) => tool);
+export const MCP_TOOLS = [...MCP_TOOL_TABLE.map(({ mapResult: _mapResult, ...tool }) => tool), ...HOUSEHOLD_TOOLS];
 
 export type McpToolName = typeof MCP_TOOL_TABLE[number]["name"];
 

@@ -1,0 +1,115 @@
+import type { AgentStateVM, QueueRowVM } from "./home-types";
+
+/** Typographic apostrophe used in every possessive on this view. */
+export const APOSTROPHE = "\u2019";
+const LSQUOTE = "\u2018";
+const RSQUOTE = "\u2019";
+
+export const AGENT_COPY = {
+  whatToDo: "What to do",
+  doingNow: "Doing now",
+  upNext: "Up next",
+  notYet: "Not yet",
+  atSetTime: "At a set time",
+  doneRecently: "Done recently",
+  facts: "Facts",
+  recentActivity: "Recent activity",
+  manage: "Manage in People & agents",
+  model: "Model",
+  receiveFact: "How it gets messages",
+  lastActive: "Last active",
+  listsAndDocs: "Lists & docs",
+  postsHere: "What it posts here",
+  postsHereAlways: "Always",
+  notFound: "Nothing with this link in Home.",
+  homeLink: "Home",
+  release: "Release",
+  resume: "Resume",
+  newKey: "Get a new key",
+  emptyAssign: "Assign it a to-do from any to-do page.",
+} as const;
+
+const NO_STEER: QueueRowVM["may"] = {
+  up: false, down: false, startNow: false, notYet: false, release: false,
+};
+
+export function possessive(name: string): string {
+  return `${name}${APOSTROPHE}s`;
+}
+
+export function quotedTitle(title: string): string {
+  return `${LSQUOTE}${title}${RSQUOTE}`;
+}
+
+export function ownershipLine(ownerFirstName: string, yours: boolean): string {
+  const line = `${possessive(ownerFirstName)} agent`;
+  return yours ? `${line} (you)` : line;
+}
+
+export function disconnectedBanner(detail: string): string {
+  const reason = detail.length ? `${detail.charAt(0).toLocaleLowerCase()}${detail.slice(1)}` : "disconnected";
+  return `Disconnected: ${reason}. Nothing in its line moves until it reconnects.`;
+}
+
+export function emptyLine(agentName: string): string {
+  return `Nothing in ${possessive(agentName)} line. ${AGENT_COPY.emptyAssign}`;
+}
+
+export function footerNote(agentName: string, workspaceName: string): string {
+  return `This page shows ${agentName} in ${workspaceName}.`;
+}
+
+/** R4. Never "starts at". The to-do joins the line; the agent reads it later. */
+export function setTimeCopy(agentName: string, when: string): string {
+  return `Joins ${possessive(agentName)} line at ${when}. ${agentName} sees it the next time it checks.`;
+}
+
+export function notYetTodoGate(title: string, agentName: string): string {
+  return `On hold until ${quotedTitle(title)} is done. It stays out of ${possessive(agentName)} line until then, or until someone releases it.`;
+}
+
+export function notYetTimeGate(when: string): string {
+  return `On hold until ${when}.`;
+}
+
+export function notYetNoteGate(note: string): string {
+  return `On hold: ${note}`;
+}
+
+export function fixActionLabel(action: AgentStateVM["fix"]["action"]): string | null {
+  if (action === "resume") return AGENT_COPY.resume;
+  if (action === "new-key") return AGENT_COPY.newKey;
+  return null;
+}
+
+/** Resume / Get a new key only on the viewer's own agent, never in sample mode. */
+export function fixControlAllowed(yours: boolean, sample: boolean, allowed: boolean): boolean {
+  return yours && !sample && allowed;
+}
+
+export function agentLineEmpty(sections: {
+  doingNow: unknown;
+  upNext: readonly unknown[];
+  notYet: readonly unknown[];
+  atSetTime: readonly unknown[];
+}): boolean {
+  return !sections.doingNow
+    && sections.upNext.length === 0
+    && sections.notYet.length === 0
+    && sections.atSetTime.length === 0;
+}
+
+/** R7: steering is for the agent's owner, and never in sample mode. */
+export function steeringMay(
+  yours: boolean,
+  sample: boolean,
+  pageSteer: boolean,
+  rowMay: QueueRowVM["may"],
+): QueueRowVM["may"] {
+  if (sample || !yours || !pageSteer) return { ...NO_STEER };
+  return { ...rowMay };
+}
+
+export function doneRecentlyLimit<T>(rows: readonly T[], limit = 5): T[] {
+  return rows.slice(0, limit);
+}

@@ -15,7 +15,7 @@ const MESSAGES = {
   credential_kind_forbidden: "This connection cannot perform this operation. Reconnect your CommonSwarm account and approve workspace access.",
   unauthenticated: "Your connection is no longer authenticated. Reconnect your CommonSwarm account and retry.",
   hosted_seat_forbidden: SEAT_MESSAGE,
-  hosted_seat_revoked: "This seat has been revoked and cannot be restored. Call claim_seat with another name and a new request_id; reconnect if access is denied.",
+  hosted_seat_revoked: "This seat was removed and cannot be restored. Call claim_seat with a new request_id to get a new seat; its owner may reuse the same name.",
   hosted_seat_name_invalid: "The seat name is invalid. Use 1 to 80 characters with no surrounding spaces or control characters.",
   hosted_seat_name_taken: "That seat name is taken in this workspace. Call claim_seat with another name and a new request_id.",
   hosted_seat_limit_reached: "This connection has reached its seat limit. Reuse a seat returned by claim_seat, or ask a workspace admin to revoke an unused seat.",

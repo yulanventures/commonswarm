@@ -1,7 +1,7 @@
 // Household v1 object core. The transactional adapter authenticates, locks,
 // loads exact immutable base bytes and verifies staged bytes before deciding.
 // It commits events, projections, protected artifacts and audit together.
-// This module performs no I/O and is deliberately not exported by index.ts yet.
+// This module performs no I/O.
 import { SCHEMA_VERSION } from './events.js';
 import { StreamIntegrityError, UnknownEventTypeError } from './reducer.js';
 import {
@@ -163,7 +163,7 @@ export function householdObjectUsage(state: HouseholdObjectState): { object_coun
  * replacement with a superficially current revision stapled onto it. Splices
  * are non-overlapping UTF-16 offsets into the base, never sequential offsets.
  */
-function applyPatch(base: HouseholdContent, patch: HouseholdPatch, blob: HouseholdBlob): HouseholdContent | null {
+export function applyHouseholdPatch(base: HouseholdContent, patch: HouseholdPatch, blob: HouseholdBlob): HouseholdContent | null {
   if (!patch || patch.kind !== base.kind) return null;
   if (base.kind === 'doc' && patch.kind === 'doc') {
     if (!Array.isArray(patch.splices)) return null;
@@ -349,7 +349,7 @@ export function decideHouseholdObject(
     if (!historical) return refuse('revision_not_found');
     const content = contentFor(ctx, historical);
     if (!content) return refuse('verified_base_required');
-    const proposed = applyPatch(content, change.patch, historical.blob);
+    const proposed = applyHouseholdPatch(content, change.patch, historical.blob);
     if (!proposed || !sameContent(proposed, prepared.content)) return refuse('patch_base_mismatch');
     if (change.title && (change.title.before !== historical.title || !identifier(change.title.after))) return refuse('patch_base_mismatch');
     title = change.title?.after ?? historical.title;

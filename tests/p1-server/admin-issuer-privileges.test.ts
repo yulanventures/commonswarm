@@ -5,14 +5,18 @@ import { randomUUID } from 'node:crypto';
 import { catalog, dbAssert, refuses, repoSql, runSql } from '../support/admin-schema-db.js';
 
 const allowlist = JSON.parse(readFileSync(new URL('../support/admin-issuer-privileges.json', import.meta.url), 'utf8'));
-// Household permissions: SELECT plus one key column's UPDATE for FOR SHARE;
-// lane 2 never writes these tables. The optional sixth allowlist field records
+// Household permissions: lane 2 reads with FOR SHARE; M5 permits provisioning
+// INSERTs and narrowly scoped consent updates. Forbidden writes remain probed. The optional sixth allowlist field records
 // the PostgreSQL 17 lock requirement; only the first five fields describe an ACL.
 // Household stream SELECT/INSERT/UPDATE: load, initialize and persist the reducer projection and sequence.
 // Household events INSERT: append committed reducer events; authorized history reads the stream projection.
 // Household audit INSERT: append command outcomes and digests; the command path never reads this ledger.
 // Household bindings SELECT/INSERT: resolve or establish stable object-to-file identity.
 // Household artifacts SELECT/INSERT/UPDATE: verify retained bytes, register versions and settle reservations.
+// To-do projections/policies SELECT/INSERT/UPDATE; events/comments/receipts
+// SELECT/INSERT (AM7). These fifteen command-parent grants are intentional;
+// swarm_admin retains ownership and history mutation remains forbidden.
+// The human overview/predicate add no issuer or PUBLIC grants.
 const literal = JSON.stringify(allowlist.map((entry: unknown[]) => entry.slice(0, 5))).replaceAll("'", "''");
 // Enumerate explicit ACLs across the whole database, not a selected set of known
 // tables. The saved schemas belong to runSql's rollback-only isolation fixture.
@@ -149,17 +153,19 @@ REVOKE EXECUTE ON FUNCTION pg_temp.assert_issuer() FROM PUBLIC;
 SELECT pg_temp.assert_issuer();
 ${dbAssert('SELECT count(*)>200 FROM issuer_acl_inventory', 'enumeration positive control includes existing command and runtime grants')}
 ${[
-  ['household_workspace_boundaries','workspace_id','purpose'],
-  ['household_member_content_roles','workspace_id','content_role'],
-  ['household_content_connections','connection_id','purpose'],
-].map(([table,key,nonkey]) => `
+  ['household_workspace_boundaries','workspace_id','purpose','workspace_id'],
+  ['household_member_content_roles','workspace_id','user_id','workspace_id,content_role,content_consent_id,confirmed_at,revoked_at'],
+  ['household_content_connections','connection_id','purpose','connection_id,operations,consent_receipt_id,expires_at,revoked_at'],
+].map(([table,key,nonkey,updateColumns]) => `
 SET LOCAL ROLE swarm_command;
 SELECT * FROM swarm.${table} WHERE false FOR SHARE;
-${refuses(`INSERT INTO swarm.${table} SELECT * FROM swarm.${table} WHERE false`,'42501')}
+INSERT INTO swarm.${table} SELECT * FROM swarm.${table} WHERE false;
+${table === 'household_member_content_roles' ? 'UPDATE swarm.' + table + ' SET content_role=content_role WHERE false;'
+  : table === 'household_content_connections' ? 'UPDATE swarm.' + table + ' SET operations=operations WHERE false;' : ''}
 ${refuses(`UPDATE swarm.${table} SET ${nonkey}=${nonkey} WHERE false`,'42501')}
 RESET ROLE;
 SAVEPOINT household_lock_control;
-REVOKE UPDATE (${key}) ON swarm.${table} FROM swarm_command;
+REVOKE UPDATE (${updateColumns}) ON swarm.${table} FROM swarm_command;
 SET LOCAL ROLE swarm_command;
 SELECT * FROM swarm.${table} WHERE false;
 ${refuses(`SELECT * FROM swarm.${table} WHERE false FOR SHARE`,'42501')}
@@ -169,7 +175,7 @@ SET LOCAL ROLE swarm_command;
 SELECT * FROM swarm.${table} WHERE false FOR SHARE;
 RESET ROLE;
 SELECT pg_temp.assert_issuer();
-${[`INSERT`,`INSERT (${key})`,`UPDATE`,`UPDATE (${nonkey})`,`UPDATE (${key}) WITH GRANT OPTION`].map(privilege => {
+${[`DELETE`,`INSERT (${key})`,`UPDATE`,`UPDATE (${nonkey})`,`UPDATE (${key}) WITH GRANT OPTION`].map(privilege => {
   const grant = privilege.endsWith(' WITH GRANT OPTION')
     ? `GRANT UPDATE (${key}) ON swarm.${table} TO swarm_command WITH GRANT OPTION;`
     : `GRANT ${privilege} ON swarm.${table} TO swarm_command;`;

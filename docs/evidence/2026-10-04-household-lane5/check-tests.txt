@@ -1,0 +1,11 @@
+Compared with the integration packet's recorded baseline diagnostics (not a new baseline execution).
+Exact diagnostic lines match: 8
+
+site/tests/chrome.ts(176,17): error TS2769: No overload matches this call.
+site/tests/chrome.ts(178,7): error TS7006: Parameter 'error' implicitly has an 'any' type.
+site/tests/chrome.ts(178,14): error TS7006: Parameter 'stdout' implicitly has an 'any' type.
+site/tests/chrome.ts(178,22): error TS7006: Parameter 'stderr' implicitly has an 'any' type.
+supabase/functions/_shared/hosted-seat-auth.ts(1,27): error TS2307: Cannot find module 'npm:postgres@3.4.9' or its corresponding type declarations.
+supabase/functions/mcp/claim-seat.ts(1,27): error TS2307: Cannot find module 'npm:postgres@3.4.9' or its corresponding type declarations.
+tests/admin-release-plan.test.ts(1333,29): error TS2352: Conversion of type '{ version: string; evidence_kind: string; released_sha: string; file: string; sha256: string; }[]' to type '[Record<string, string>, Record<string, string>]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+tests/p1-cli/h0-link-join-limits.ts(10,8): error TS2440: Import declaration conflicts with local declaration of 'ts'.

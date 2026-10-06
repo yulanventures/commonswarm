@@ -8,7 +8,7 @@ import {
   signInDoors,
 } from "../../lib/auth-providers.js";
 
-test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal", async () => {
+test("signed-out /app onramp is cold-stranger, provider-first, free, final-legal", async () => {
   const source = await readFile(
     new URL("./LiveDashboard.astro", import.meta.url),
     "utf8",
@@ -20,14 +20,17 @@ test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal
   const panel = source.slice(panelStart, panelEnd);
 
   assert.match(panel, /data-signed-out-onramp/);
-  assert.match(panel, /Sign up free or log in<\/h1>/);
-  assert.match(panel, /<p class="dashboard__eyebrow">CommonSwarm<\/p>/);
+  /* Redesign 2026-10-04: the first screen says what CommonSwarm is for a household, and the
+     brand lockup replaces the eyebrow that repeated the text wordmark. */
+  assert.match(panel, /Your agents, together\.<\/h1>/);
+  assert.match(panel, /<Wordmark href="\/" class="dashboard__gateway-mark" \/>/);
+  assert.match(panel, /Each person signs in as themselves\./);
   assert.match(panel, /Continue with \{signInMethods\}\./);
   assert.match(
     source,
     /const signInMethods = signInDoors\(await enabledProvidersForBuild\(\{/,
   );
-  assert.match(panel, /The free plan includes 10 workspaces and requires no card\./);
+  assert.match(panel, /Free, no card\./);
   assert.doesNotMatch(panel, /open the same account/);
   assert.doesNotMatch(panel, /workspaces you belong to/i);
   assert.doesNotMatch(panel, /invitation/i);
@@ -65,7 +68,8 @@ test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal
 
   assert.match(panel, /href="\/terms"/);
   assert.match(panel, /href="\/privacy"/);
-  assert.match(panel, /drafts published for review \(not yet in force\)/);
+  assert.match(panel, /By continuing you agree to the/);
+  assert.doesNotMatch(panel, /not yet in force/);
   assert.doesNotMatch(panel, /by using this service you agree/i);
 
   /*

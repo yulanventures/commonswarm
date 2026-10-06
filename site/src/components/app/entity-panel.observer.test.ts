@@ -75,11 +75,12 @@ test("the right panel navigates ownership and exposes the complete agent state",
   assert.match(renderer, /\{ kind: "agent", id: agent\.principalId \}/);
   assert.doesNotMatch(renderer, /D-04[0-9]/, "known issues require a generated committed source");
   assert.doesNotMatch(renderer, /only .* sees|private|lock icon/i);
-  assert.match(
-    dashboard,
-    /\.dashboard__frame--entity-panel\s*\{[\s\S]*grid-template-columns:\s*var\(--dashboard-rail\) minmax\(0, 1fr\) minmax\(18rem, 22rem\)/,
-    "desktop panel must take its own grid column instead of covering the feed",
-  );
+  const css = readFileSync(new URL("../../styles/home/integration.css", import.meta.url), "utf8");
+  assert.match(css, /grid-template-columns: 17.5rem minmax\(0, 1fr\) minmax\(18rem, 22rem\)/);
+  assert.match(css, /\.hm-frame__side \{ grid-column: 3; grid-row: 1/);
+  assert.match(css, /\.hm-frame__profile.*grid-column: 3; grid-row: 1/);
+  assert.match(css, /:has\(> \.hm-frame__profile:not\(\[hidden\]\)\).*\.hm-frame__side \{ display: none/,
+    "opening Profile replaces cards in the same third column");
 });
 
 test("the agent panel puts the private live frame above saved credential fields", () => {

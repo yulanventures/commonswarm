@@ -420,6 +420,7 @@ export function reduceAdminAuthority(previous: AdminAccountState | null, event: 
       reason_code: attempt.reason_code ?? String(p.reason_code),
     } } };
   }
+  if (event.type === 'AdminMemberInvitationAccepted' && (event.actor_user !== p.recipient_user_id || event.admin_identity_id !== null || event.actor_agent_principal !== null)) throw new Error('human invitation acceptance requires the recipient actor');
   if ((ADMIN_ROUTINE_EVENT_TYPES as readonly string[]).includes(event.type)) return { ...state, routine: reduceAdminRoutine(state.routine, event) };
   if (event.type === 'AdminConsentPrepared') {
     const c = { ...p, session_binding: '', consumed_at: null } as unknown as AdminConsent;

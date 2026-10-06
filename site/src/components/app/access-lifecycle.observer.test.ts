@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import ts from "typescript";
+import { runInNewContext } from "node:vm";
+import * as hostCatalog from "../../lib/agent-hosts";
 import { PendingRefreshGate } from "../../lib/pending-refresh";
 import { isInviteSubmitCurrent } from "../../lib/invite-submit";
 import {
@@ -15,6 +17,8 @@ import type {
   PendingAgentAccess,
   PendingMemberInvite,
 } from "../../lib/commonswarm";
+
+const peopleView = await readFile(new URL("../../lib/people-dialog-view.ts", import.meta.url), "utf8");
 
 test("server pending rows show invitation age and disappear with the next snapshot", { timeout: 2_000 }, () => {
   const issuedAt = "2026-09-24T12:00:00Z";
@@ -67,9 +71,11 @@ test("a failed pending read leaves the workspace pending section available", { t
   }
   assert.deepEqual(await loadPendingAccess(async () => ["row"]), { rows: ["row"], failed: false });
   const source = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
-  assert.match(source, /data-pending-load-note hidden>Invited, not connected: could not load/);
+  assert.match(peopleView, /dataset.pendingLoadNote/);
+  assert.match(peopleView, /Invited: could not load/);
   assert.equal(pendingReadWiring(source).length, 4);
-  assert.match(source, /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed/);
+  assert.match(source, /pendingFailed: pendingAgentsLoadFailed/);
+  assert.match(peopleView, /invited\.hidden = model\.sample \|\| \(!invites\.length && !model\.pendingFailed\)/);
 });
 
 function pendingReadWiring(source: string): number[] {
@@ -118,18 +124,93 @@ const agentConnect = await readFile(
   new URL("../../lib/agent-connect.ts", import.meta.url),
   "utf8",
 );
+const picker = await readFile(
+  new URL("../connect/AgentHostPicker.astro", import.meta.url),
+  "utf8",
+);
 const identityLabel = await readFile(
   new URL("../../lib/identity-label.ts", import.meta.url),
   "utf8",
 );
 
-test("Add an agent asks who controls it before minting", () => {
-  assert.match(dashboard, /Who runs this agent\?/);
-  assert.match(dashboard, /data-agent-owner-self/);
-  assert.match(dashboard, /data-agent-owner-teammate/);
+interface PickerNode {
+  tag: string;
+  props: Record<string, unknown>;
+  children: unknown[];
+}
+
+/** Evaluate the actual template's lists and attributes as a tree, without Astro or a DOM. */
+function pickerElements(audience: "setter" | "joiner", tag = "button"): PickerNode[] {
+  const frontmatter = picker.match(/^---\n([\s\S]*?)\n---/)?.[1];
+  assert.ok(frontmatter);
+  const ast = ts.createSourceFile("picker.ts", frontmatter, ts.ScriptTarget.Latest, true);
+  const declarations = ast.statements.filter((node) => !ts.isImportDeclaration(node))
+    .map((node) => node.getText(ast)).join("\n");
+  const template = picker.replace(/^---[\s\S]*?\n---\n/, "").split("<script>")[0];
+  const js = ts.transpileModule(`${declarations}\n(${template.trim()});`, {
+    fileName: "picker.tsx",
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React, jsxFactory: "element" },
+  }).outputText;
+  const tree = runInNewContext(js, {
+    ...hostCatalog,
+    Astro: { props: { audience } },
+    element: (tag: string, props: Record<string, unknown> | null, ...children: unknown[]) =>
+      ({ tag, props: props ?? {}, children }),
+  });
+  const buttons: PickerNode[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (!node || typeof node !== "object" || !("tag" in node)) return;
+    const element = node as PickerNode;
+    if (element.tag === tag) buttons.push(element);
+    element.children.forEach(visit);
+  };
+  visit(tree);
+  return buttons;
+}
+
+test("Add an agent asks which app the agent lives in; the key flow and the person invite keep their doors", () => {
+  /* Redesign 2026-10-04: "Who runs this agent? I do / A teammate does" became a picker of the
+     apps agents live in (AgentHostPicker). The two doors it used keep their hooks: the
+     "Terminal agent" tile carries data-agent-owner-self (opens the key flow) and the picker's
+     invite link carries data-agent-owner-teammate (opens the person invite). Comments are
+     stripped, because the source records the retired question in one. */
+  const markup = dashboard.replace(/\{\/\*[\s\S]*?\*\/\}/g, " ");
+  assert.doesNotMatch(markup, /Who runs this agent\?/);
+  assert.match(dashboard, /<AgentHostPicker audience="setter"/);
+  const buttons = pickerElements("setter");
+  const terminal = buttons.filter((button) => button.props["data-ahp-host"] === "terminal");
+  assert.equal(terminal.length, 1, "the setter renders one Terminal agent chip");
+  assert.equal(terminal[0]!.props["data-agent-owner-self"], "",
+    "the actual Terminal chip must expose the key-flow hook, including in More apps");
+  assert.deepEqual(buttons.filter((button) => button.props["data-agent-owner-self"] !== undefined)
+    .map((button) => button.props["data-ahp-host"]), ["terminal"]);
+  assert.ok(buttons.some((button) => button.props["data-ahp-host"] === "claude"));
+  assert.equal(pickerElements("joiner").some((button) => button.props["data-ahp-host"] === "terminal"), false);
+  assert.match(picker, /data-agent-owner-teammate>Invite someone</);
+  assert.match(dashboard, /\[data-agent-owner-self\]"\)\?\.addEventListener\("click", openConnect\)/);
+  assert.match(dashboard, /\[data-agent-owner-teammate\]"\)\?\.addEventListener\(/);
   assert.match(dashboard, /data-add-agent\]"\)\?\.addEventListener\("click", openAgentChoice\)/);
   assert.match(dashboard, /inviteWorkspaceMember/);
   assert.match(dashboard, /memberInviteUrl/);
+});
+
+test("desktop sign-in fallback in the picker names the rendered Terminal route", () => {
+  const expected = "Sign-in from desktop apps may not work yet. If it fails, go back to Which app? and choose Terminal agent under More apps.";
+  const text = (node: unknown): string => {
+    if (Array.isArray(node)) return node.map(text).join("");
+    if (node && typeof node === "object" && "children" in node) return text((node as PickerNode).children);
+    return typeof node === "string" ? node : "";
+  };
+  const notes = pickerElements("setter", "li").map(text);
+  assert.equal(notes.filter((note) => note === expected).length, 3,
+    "Claude Code, Codex and Cursor must each show the usable fallback");
+  assert.ok(pickerElements("setter", "summary").some((node) => text(node) === "More apps"));
+  assert.ok(pickerElements("setter").some((node) => text(node).trim() === "← Which app?"));
+  assert.ok(pickerElements("setter").some((node) => node.props["data-ahp-host"] === "terminal"
+    && node.props["data-agent-owner-self"] === ""));
+  assert.equal(pickerElements("joiner", "li").map(text).includes(expected), false,
+    "an audience with no Terminal chip must not get the Terminal shortcut");
 });
 
 /*
@@ -220,7 +301,7 @@ test("workspace access shows pending rows and explicit agent identity", () => {
   assert.match(dashboard, /revokeWorkspaceInvitation/);
   assert.match(dashboard, /revokeAgentToken/);
   assert.match(dashboard, /Model not specified/);
-  assert.match(dashboard, /owned by/);
+  assert.match(peopleView, /agent.ownerName/);
   assert.match(dashboard, /markAgentAvatar/);
   assert.match(dashboard, /--avatar-hue/);
 });
@@ -763,23 +844,17 @@ test("the Live chip shows only while the feed poll can be armed", () => {
   );
 });
 
-test("the Agents dialog carries Pending access at every width from one renderer", () => {
+test("the People & agents dialog and rail share one pending row model", () => {
   /* The section's hooks, its h3 under the dialog's h2, and a unique labelledby. */
-  assert.match(dashboard, /data-dialog-access-section/);
-  assert.match(dashboard, /data-dialog-access-list/);
-  assert.match(dashboard, /data-dialog-access-count/);
-  assert.match(dashboard, /data-dialog-access-error/);
-  assert.match(
-    dashboard,
-    /<h3[\s\S]*id="dashboard-roster-pending-title"[\s\S]*Pending access/,
-  );
-  assert.equal(
-    dashboard.match(/dashboard-roster-pending-title/g)?.length,
-    2,
-    "the id appears once as id and once as aria-labelledby — never duplicated",
-  );
+  assert.match(peopleView, /dataset.dialogAccessSection/);
+  assert.match(peopleView, /dataset.dialogAccessList/);
+  assert.match(peopleView, /dataset.dialogAccessCount/);
+  assert.match(peopleView, /dataset.dialogAccessError/);
+  assert.match(peopleView, /node\(doc, "h3", "pd-muted", "Invited · "\)/);
+  assert.equal(peopleView.match(/dashboard-roster-pending-title/g)?.length, 2,
+    "the generated id has one title and one aria-labelledby");
 
-  /* ONE row-model call feeds BOTH lists; mirrors of one state, never two states. */
+  /* Both renderers use the same row-model function over the same server state. */
   const render = dashboard.slice(
     dashboard.indexOf("const renderPendingAccess ="),
     dashboard.indexOf("const signalPage ="),
@@ -793,10 +868,13 @@ test("the Agents dialog carries Pending access at every width from one renderer"
   assert.equal(
     rowModel.match(/pendingAccessRows\(/g)?.length,
     1,
-    "one row-model call feeds both lists",
+    "one row-model definition feeds both renderers",
   );
   assert.match(render, /railList\?\.replaceChildren\(buildRows/);
-  assert.match(render, /dialogList\?\.replaceChildren\(buildRows/);
+  assert.match(render, /renderDialogRoster\(\);/);
+  const dialogModel = dashboard.slice(dashboard.indexOf("const peopleDialogModel ="), dashboard.indexOf("const syncPeopleDialogLayout ="));
+  assert.match(dialogModel, /invites: currentPendingAccessRows\(\)\.map/);
+  assert.doesNotMatch(render, /dialogList|dialogSection|dialogCount|focusedPending\.surface/, "the rail renderer never captures or rebuilds dialog nodes");
   assert.match(
     render,
     /row\.kind === "invite"[\s\S]*revokeWorkspaceInvitation\(session, uuid\(\), row\.workspaceId, row\.id\)[\s\S]*revokeAgentToken\(session, uuid\(\), row\.workspaceId, row\.id\)/,
@@ -809,11 +887,10 @@ test("the Agents dialog carries Pending access at every width from one renderer"
     /candidate\.dataset\.pendingKind === focusedPending\.kind[\s\S]*candidate\.dataset\.pendingId === focusedPending\.id/,
     "an unchanged refresh restores the exact focused pending action",
   );
-  assert.match(
-    render,
-    /data-add-agent-dialog[\s\S]*focus\(\{ preventScroll: true \}\)/,
-    "a consumed focused row moves focus to a stable control inside the dialog",
-  );
+  assert.match(peopleView, /target \?\? \(focusWithinDetail[\s\S]*data-add-agent-dialog[\s\S]*dashboard-roster-title/,
+    "the dialog renderer repairs replaced controls inside its own focus surface");
+  assert.match(dashboard, /action === "cancel-invite"[\s\S]*dashboard-roster-pending-title[\s\S]*action === "remove-person"[\s\S]*pd-person-disclosure/,
+    "completed person and invite actions focus a remaining person or the Invited heading");
   assert.match(render, /dashboard__pending-access-row/);
   assert.match(
     render,
@@ -831,11 +908,11 @@ test("the Agents dialog carries Pending access at every width from one renderer"
     /\.dashboard__pending-access-row\s*>\s*\.dashboard__text-button\s*\{[\s\S]*white-space:\s*nowrap/,
     "the pending-row action keeps Cancel horizontal at rail and phone widths",
   );
-  /* The dialog is the only pending surface at every width. */
+  /* The dialog pending section stays available at every width. */
   const visibleAtEveryWidth = /\.dashboard__roster-dialog-pending\s*\{\s*display: grid;/;
   // Discriminating control: the pre-item-J base rule hid the section at desktop.
   assert.doesNotMatch(dashboard, /\.dashboard__roster-dialog-pending\s*\{\s*display:\s*none/,
-    "no base rule hides the only pending surface at desktop");
+    "no base rule hides the dialog pending surface at desktop");
   assert.match(
     dashboard,
     visibleAtEveryWidth,

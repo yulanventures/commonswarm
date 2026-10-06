@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { HOUSEHOLD_TOOL_REGISTRY } from "../../src/protocol/household-tool-registry.js";
 import { MCP_TOOLS } from "../../src/mcp/tools.js";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -430,7 +431,11 @@ test("every help entry references a handler flag constant instead of a copied li
   const rows = new Map(declaration.initializer.properties.filter((item): item is ts.PropertyAssignment | ts.GetAccessorDeclaration => ts.isPropertyAssignment(item) || ts.isGetAccessorDeclaration(item)).map(item => [
     item.name.getText(source).replace(/^"|"$/g, ""), ts.isPropertyAssignment(item) ? item.initializer.getText(source) : item.getText(source),
   ]));
-  assert.deepEqual([...rows.keys()].sort(), entries().map(row => row.key).sort());
+  const spreads = declaration.initializer.properties.filter(ts.isSpreadAssignment);
+  assert.equal(spreads.length, 1);
+  assert.match(spreads[0]!.expression.getText(source), /Object\.fromEntries\(HOUSEHOLD_TOOL_REGISTRY\.map/);
+  assert.match(spreads[0]!.expression.getText(source), /HOUSEHOLD_INPUT_ACCEPTED_FLAGS/);
+  assert.deepEqual([...rows.keys(), ...HOUSEHOLD_TOOL_REGISTRY.map(row => `object.${row.name}`)].sort(), entries().map(row => row.key).sort());
   for (const [key, value] of rows) {
     assert.match(value, /(?:ACCEPTED_FLAGS|CHECK_FLAGS|RECEIVE_COMMON_FLAGS)/, key);
     const property = declaration.initializer.properties.find(item => (ts.isPropertyAssignment(item) || ts.isGetAccessorDeclaration(item)) && item.name.getText(source).replace(/^"|"$/g, "") === key);

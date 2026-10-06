@@ -1,3 +1,4 @@
+import { HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import {
   commandAllowedOrigins,
   commandPreflight,
@@ -132,6 +133,8 @@ interface RenewalGrantReadRequest {
   workspace_id: string;
 }
 
+interface HumanInvitationsReadRequest { resource: "human_invitations"; }
+
 interface PendingAccessReadRequest {
   resource: "pending_access";
   workspace_id: string;
@@ -233,9 +236,10 @@ function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
   RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
-  WakeLeaseReadRequest | AdminReadRequest | null {
+  WakeLeaseReadRequest | AdminReadRequest | HumanInvitationsReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (body.resource === "human_invitations" && exactKeys(body, ["resource"])) return { resource: "human_invitations" };
   if (isAdminReadResource(body.resource)) return adminReadRequest(body);
   if (body.resource === "agent_wake_lease" &&
       exactKeys(body, ["resource", "workspace_id"]) &&
@@ -443,6 +447,21 @@ async function handle(
         .some((key) => Object.hasOwn(parsed, key))) {
     return json(403, { error: "forbidden" });
   }
+  // Household reads use the private content store and its credential rechecks.
+  // The ordinary swarm_read transaction below retains its existing role contract.
+  const contentBody = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  if (contentBody && ["household", "household_draft", "household_access"].includes(String(contentBody.resource))) {
+    if (typeof contentBody.workspace_id !== "string" || !UUID_RE.test(contentBody.workspace_id)) return json(400, { error: "invalid_request" });
+    let command: Record<string, unknown>;
+    if (contentBody.resource === "household") {
+      if (!HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === contentBody.tool && row.effect === "read")) return json(403, { error: "forbidden" });
+      command = { kind: "household_tool", tool: contentBody.tool, arguments: contentBody.arguments };
+    } else command = { kind: contentBody.resource, ...(contentBody.resource === "household_draft" ? { draft_id: contentBody.draft_id } : {}) };
+    const content = await import("../command/index.ts");
+    return await content.handleRequest(new Request(request.url, { method: "POST", headers: request.headers,
+      body: JSON.stringify({ command_id: `read_${crypto.randomUUID()}`, client_version: "0.1.80",
+        workspace_id: contentBody.workspace_id, stream: { kind: "workspace" }, command }) }));
+  }
   const body = parseBody(parsed);
   if (body === null) {
     /* parseBody returns a bare null, so its refusals carry no sentence. That is
@@ -462,6 +481,20 @@ async function handle(
     return json(400, {
       error: "invalid_request",
       ...(slugProblem === null ? {} : { message: slugProblem }),
+    });
+  }
+  if (body.resource === 'human_invitations') {
+    if (AGENT_TOKEN_RE.test(token)) return json(403, { error: 'credential_kind_forbidden' });
+    const { data, error } = await authClient.auth.getUser(token);
+    if (error || !data.user || !UUID_RE.test(data.user.id)) return json(401, { error: 'unauthenticated' });
+    if (data.user.email_confirmed_at === undefined || data.user.email_confirmed_at === null) {
+      return json(403, { error: 'human_sign_in_required' });
+    }
+    return await withReadTransaction(async tx => {
+      await setReadTransaction(tx);
+      await tx`SELECT set_config('request.jwt.claims',${JSON.stringify({sub: data.user!.id,role:'authenticated'})},true)`;
+      const invitations = await tx`SELECT * FROM swarm_read.human_invitations()`;
+      return json(200, { invitations });
     });
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);
@@ -1028,6 +1061,7 @@ async function handle(
 }
 
 export type HostedReadInput =
+  | { resource: "household"; workspace_id: string; tool: string; arguments: Record<string, unknown> }
   | { resource: "whoami"; workspace_id: string }
   | { resource: "members"; workspace_id: string }
   | {
@@ -1065,6 +1099,13 @@ export async function handleHostedRead(
     return { status: 400, body: { error: "invalid_request" } };
   }
   const tool = hostedCapabilityTool(capability);
+  if (input.resource === "household") {
+    if (tool !== input.tool || !HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === tool && row.effect === "read")) return { status: 403, body: { error: "forbidden" } };
+    const content = await import("../command/index.ts");
+    return await content.handleHostedCommand({ command_id: `read_${crypto.randomUUID()}`, client_version: "0.1.80",
+      workspace_id: input.workspace_id, stream: { kind: "workspace" },
+      command: { kind: "household_tool", tool, arguments: input.arguments } }, capability);
+  }
   if ((input.resource === "whoami" && tool !== "whoami") ||
       (input.resource === "members" && tool !== "members") ||
       (input.resource === "signals" && tool !== "check")) {

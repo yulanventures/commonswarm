@@ -51,7 +51,10 @@ test("the unfiltered view's name is one the edge refuses for a real channel", ()
      the assertion rather than a comment saying it, because the app depends on it. */
   assert.ok(isReservedChannelSlug(ALL_SIGNALS_SLUG));
   assert.ok(RESERVED_CHANNEL_SLUGS.includes(ALL_SIGNALS_SLUG));
-  assert.equal(channelLabel(ALL_SIGNALS_SLUG), "#all-signals");
+  /* The person-facing label of the whole feed is "All messages" (redesign 2026-10-04, Tom's
+     plain-words rule); a real channel keeps "#slug", and the slug itself stays reserved. */
+  assert.equal(channelLabel(ALL_SIGNALS_SLUG), "All messages");
+  assert.equal(channelLabel("mobile"), "#mobile");
 });
 
 test("every rule sentence the app shows is the edge's own, not a copy", () => {

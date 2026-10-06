@@ -101,6 +101,8 @@ test("the client build helper owns the source and every command envelope uses it
     "src/cloud/delivery.ts",
     "src/cloud/feedback.ts",
     "src/cloud/files.ts",
+    "src/cloud/household-http.ts",
+    "src/cloud/human-invitations.ts",
     "src/cloud/renewal.ts",
     "src/cloud/session-client.ts",
     "src/cloud/wake-lease.ts",

@@ -1,0 +1,22 @@
+/* Home UI: people styles. Owned by one lane (see UI-SPEC.md section 6). Site tokens only.
+   Additions to the People & agents dialog (UI-SPEC 3.6): the Role select and its self-change confirm.
+   The dialog's own CSS lives in LiveDashboard.astro; these rules reuse its .pd-fact-row, .pd-text-button, .pd-error and .pd-confirm. */
+.hm-role { margin-block-end: var(--s-3); }
+.hm-role-select {
+  inline-size: 100%; min-inline-size: 0; min-block-size: 44px; padding: var(--s-2) var(--s-3);
+  background: var(--canvas); color: var(--text); border: 1px solid var(--border-interactive); border-radius: var(--radius);
+  font: inherit; font-size: var(--t-sm); cursor: pointer;
+}
+.hm-role-select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-role-select:disabled { cursor: default; color: var(--text-muted); }
+.hm-role .pd-text-button { min-block-size: 44px; }
+.hm-role .pd-text-button:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+.hm-role .pd-text-button:disabled { color: var(--text-muted); cursor: default; text-decoration: none; }
+.hm-role .pd-error { margin-block: var(--s-2) 0; }
+/* The self-change question is a nested alertdialog; the dialog's own .pd-confirm rules size and place it. */
+.hm-role-question { margin: 0; font-size: var(--t-lg); line-height: 1.4; overflow-wrap: anywhere; }
+.hm-role-actions { flex-wrap: wrap; }
+.hm-role-actions .dashboard__button { min-block-size: 44px; white-space: normal; }
+.hm-role-actions .dashboard__button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-role-actions .dashboard__button:disabled { cursor: default; }
+@media (max-width: 52rem) { .hm-role-select { font-size: var(--t-base); } }

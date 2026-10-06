@@ -1,0 +1,128 @@
+✔ workspace switching clears household content and ignores an earlier authenticated load (1.385083ms)
+✔ a refused content read shows confirmation guidance and makes no object request (0.182166ms)
+{"event":"command_pre_auth_failure","command_kind":"unknown","outcome":"validation","reason":"invalid command_id"}
+✔ ordinary command import and requests create only the existing pool; first admin request creates and reuses its proof pool (139.788ms)
+{"event":"command_pre_auth_failure","command_kind":"unknown","outcome":"validation","reason":"invalid command_id"}
+{"event":"command_pre_auth_failure","command_kind":"post_signal","outcome":"authn","reason":"unverified user token"}
+{"event":"command_pre_auth_failure","command_kind":"post_signal","outcome":"authn","reason":"unverified user token"}
+✔ ordinary DPoP and long Bearer retain command validation and GoTrue; only admin resource or credential enters admin admission (56.526375ms)
+▶ Claude initialization negotiates versions before initialized and tools/list
+  ✔ 2025-03-26, initialize header absent (21.065375ms)
+  ✔ 2025-03-26, initialize header present (2.135417ms)
+  ✔ 2025-06-18, initialize header absent (1.2965ms)
+  ✔ 2025-06-18, initialize header present (1.433875ms)
+  ✔ 2025-11-25, initialize header absent (1.142833ms)
+  ✔ 2025-11-25, initialize header present (1.356ms)
+  ✔ 2099-01-01, initialize header absent (1.026334ms)
+  ✔ 2099-01-01, initialize header present (1.000459ms)
+✔ Claude initialization negotiates versions before initialized and tools/list (38.312916ms)
+▶ tools/list preserves coordination titles, safety annotations and OAuth security schemes after 2025-06-18 negotiation
+  ✔ claim_seat (0.112416ms)
+  ✔ whoami (0.0265ms)
+  ✔ check (0.023ms)
+  ✔ ask (0.018833ms)
+  ✔ note (0.017958ms)
+  ✔ reply (0.017542ms)
+  ✔ working_on (0.021625ms)
+  ✔ members (0.016625ms)
+✔ tools/list preserves coordination titles, safety annotations and OAuth security schemes after 2025-06-18 negotiation (2.258208ms)
+✔ tool auth errors carry safe WWW-Authenticate metadata while ordinary errors and success do not (1.899041ms)
+▶ tools/list accepts optional cursor and metadata without pagination
+  ✔ omitted params (0.648042ms)
+  ✔ empty compatibility control (0.506292ms)
+  ✔ cursor (0.616084ms)
+  ✔ empty metadata (0.62975ms)
+  ✔ progress metadata (0.466ms)
+  ✔ cursor and metadata (0.46775ms)
+  ✔ unknown key (0.310333ms)
+  ✔ unknown key with cursor (0.304458ms)
+  ✔ non-object null (0.412792ms)
+  ✔ non-object [] (0.33875ms)
+  ✔ non-object "x" (0.218709ms)
+  ✔ non-object 1 (0.214ms)
+  ✔ non-object false (0.293291ms)
+  ✔ invalid cursor null (0.550709ms)
+  ✔ invalid cursor 1 (0.3335ms)
+  ✔ invalid cursor [] (0.325334ms)
+  ✔ invalid cursor {} (0.266625ms)
+  ✔ invalid metadata null (0.243667ms)
+  ✔ invalid metadata 1 (0.333167ms)
+  ✔ invalid metadata [] (0.294459ms)
+  ✔ invalid metadata "x" (0.260792ms)
+✔ tools/list accepts optional cursor and metadata without pagination (9.915833ms)
+{"event":"request_failed","error_code":"unauthorized","method":null}
+{"event":"request_failed","error_code":"tool_failed","method":"tools/call"}
+{"event":"request_failed","error_code":"tool_failed","method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":"origin_not_allowed","method":null}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"feature_disabled","method":null}
+{"event":"request_failed","error_code":"request_too_large","method":null}
+{"event":"request_failed","error_code":-32603,"method":"tools/call"}
+✔ MCP denials log only stable error codes and known method names (5.347792ms)
+✔ protected-resource metadata and the unauthenticated challenge name exact URLs (0.298333ms)
+✔ hosted tool table is closed and exposes no local or credential operations (0.227917ms)
+✔ claim_seat advertises and accepts an omitted workspace_id beside an explicit control (1.081167ms)
+✔ claim_seat routes through the grant home and preserves explicit consent checks (3.359334ms)
+✔ signal bodies accept multiline whitespace and refuse other control characters (0.196459ms)
+✔ origin and schema denials include authenticated positive controls (0.332375ms)
+✔ worker dark gate refuses protected-resource metadata before serving it (0.068083ms)
+✔ public access defaults dark for every MCP and metadata method (0.562166ms)
+{"event":"request_failed","error_code":"too_many_requests","method":null}
+{"event":"request_failed","error_code":"request_timeout","method":"tools/call"}
+{"event":"request_failed","error_code":"too_many_requests","method":null}
+✔ body, response, duration, and concurrency limits deny beside a small positive control (34.111292ms)
+✔ runtime dispatch stays in process and names both durable revocation boundaries (0.748167ms)
+✔ a boundary cannot enable the legacy file redirect; only its exact server opt-in can (361.978166ms)
+✔ household_legacy is unreachable with its gate off even in a managed workspace (237.477209ms)
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+{"event":"request_failed","error_code":-32602,"method":"tools/call"}
+✔ unfinished hosted file tools are absent and cannot execute unless their server gate is explicitly on (43.498167ms)
+✔ hosted content admission accepts valid patches and rejects model-supplied transfers before execution (1.045542ms)
+✔ protected attachment parser carries bytes separately and refuses foreign metadata and extra parts (17.60025ms)
+✔ brain translation commits through real core with immutable human/agent attribution and original request ID (10.144708ms)
+✔ legacy retry recovers one durable result despite changed current bindings; changed payload or attachment fails (2.979333ms)
+✔ stale legacy integer and opaque bases preserve exact losing drafts; missing base cannot clobber (2.0675ms)
+✔ protected upload begins pending, verifies size/digest, commits once and preserves file attribution (1.695625ms)
+✔ reservation commit checks stale bases again and retains proposed bytes (1.258083ms)
+✔ reserved brain filename preserves the legacy raw digest while the core commits a canonical doc (0.526459ms)
+✔ reader, foreign workspace/binding, forged actor and revoked retry refusals accompany valid controls (0.611875ms)
+✔ update-only connection ceiling works without create rights and cannot recover a create receipt (0.772875ms)
+✔ transaction failure is unknown; rollback and lost commit acknowledgement recover safely on exact retry (0.833875ms)
+✔ history keeps opaque revision/provenance and unsupported legacy deletion never claims success (0.879667ms)
+✔ all eight proposed tool contracts validate and map to lane 1 with spec hints and rights (1.261666ms)
+✔ malformed input and authority/transport injection are refused with valid controls (4.588833ms)
+✔ typed list/doc content and every patch variant accept valid examples and refuse malformed structure (0.434625ms)
+✔ revisions bind reads, updates and replacements to the object and authenticated workspace (0.387417ms)
+✔ mapped calls execute the real core: reads preserve state; begin reserves; commit creates one revision (3.961917ms)
+✔ consent groups only the matching content tools and explains workspace audience and retained history (0.296958ms)
+✔ replacement upload uses update permission at both boundaries and commits against the exact file base (1.186209ms)
+✔ local household HTTP dispatch preserves exact request IDs and binds reads and writes to the profile workspace (26.866459ms)
+✔ CLI publishes every registry operation with the reviewed input-file route (136.983209ms)
+ℹ tests 80
+ℹ suites 0
+ℹ pass 80
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 768.28275

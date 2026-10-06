@@ -1,0 +1,49 @@
+/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+✖ human invite delivery grants only recipient function execution and its exact inverse preserves existing authority rows (4.665792ms)
+✖ real human join adapter serializes consumption, preserves independent consent, refuses revoked access and rolls back failed joins (622.892875ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 0
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 715.660416
+
+✖ failing tests:
+
+test at tests/p1-server/household-human-invitations.test.ts:1:394
+✖ human invite delivery grants only recipient function execution and its exact inverse preserves existing authority rows (4.665792ms)
+  Error: Command failed: docker ps --format {{.Names}}
+  /Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+  docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+  
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at databaseContainer (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:30:17)
+      at emptyApplicationSchema (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:43:47)
+      at runSql (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:53:23)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-human-invitations.test.ts:10:3)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25) {
+    status: 127,
+    signal: null,
+    output: [ null, '', '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n' ],
+    pid: 39526,
+    stdout: '',
+    stderr: '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n'
+  }
+
+test at tests/p1-server/household-human-invitations.test.ts:22:8
+✖ real human join adapter serializes consumption, preserves independent consent, refuses revoked access and rolls back failed joins (622.892875ms)
+  Error: Local Supabase is unavailable; this server proof requires the authorized CI stack.
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-human-invitations.test.ts:36:17)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:969:18)
+      at Test.postRun (node:internal/test_runner/test:1537:19)
+      at Test.run (node:internal/test_runner/test:1462:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3)

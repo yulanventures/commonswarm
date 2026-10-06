@@ -1,0 +1,7 @@
+
+  dist-release/cswarm  3.0mb ⚠️
+
+⚡ Done in 41ms
+built   dist-release/cswarm  (3.0M)
+version 0.1.80  — verified by running the artifact
+sha256  364787bb719dff4b03febe10cee3c88d7ce0dcea158e3c642085fe637cbe9bbf

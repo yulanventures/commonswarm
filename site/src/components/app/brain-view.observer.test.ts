@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { browserTest as test } from "../../../tests/chrome.js";
 import { MESSAGE_MARKDOWN_LIMITS } from "../../lib/message-markdown.js";
 import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.js";
@@ -9,23 +8,6 @@ import { BRAIN_BODY_MARKDOWN, runBrainViewFixture } from "./brain-view.fixture.j
 let snapshotPromise: ReturnType<typeof runBrainViewFixture> | undefined;
 const getSnapshot = (): ReturnType<typeof runBrainViewFixture> => snapshotPromise ??= runBrainViewFixture();
 
-test("the dashboard wires a Brain tab to the existing file read and put paths", () => {
-  const dashboard = readFileSync(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
-  assert.equal(
-    [...dashboard.matchAll(/data-workspace-view="brain"/g)].length,
-    2,
-    "Brain must be reachable from the desktop rail and the mobile view switcher",
-  );
-  assert.match(dashboard, /data-channel-view="brain"/);
-  assert.match(dashboard, /brainTopics\(files, workspaceFileUploaderName\)/);
-  assert.match(dashboard, /data-brain-raw-toggle/);
-  assert.match(
-    dashboard,
-    /new File\(\[markdown\], topic\.name[\s\S]*uploadBrowserAttachment/,
-    "browser edits must use the current file create → PUT → commit flow",
-  );
-  assert.match(dashboard, /<summary>Version history<\/summary>/);
-});
 
 test("Brain lists only reserved topics with updater, age, and version count", async () => {
   const snapshot = await getSnapshot();

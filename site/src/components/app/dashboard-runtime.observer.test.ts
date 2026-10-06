@@ -129,7 +129,7 @@ test("workspace creation and active-feed expiry cannot outlive their session", (
   const channelView = between(dashboard, "const showChannelView =", "const accountName =");
   const createSubmit = between(
     dashboard,
-    'one<HTMLFormElement>("[data-create-form]")',
+    'const submitWorkspaceCreate =',
     'for (const button of all<HTMLButtonElement>("[data-signout]"))',
   );
 
@@ -148,12 +148,12 @@ test("workspace creation and active-feed expiry cannot outlive their session", (
   assert.match(createSubmit, /const savedIntent = readCreateIntent\(session\.user\.id\)/);
   assert.match(
     createSubmit,
-    /const intent: CreateIntent = savedIntent\?\.name === name[\s\S]*\? savedIntent[\s\S]*workspaceId: uuid\(\)[\s\S]*commandId: uuid\(\)/,
+    /const intent: CreateIntent = savedIntent\?\.name === name && savedIntent\.purpose === purpose[\s\S]*\? savedIntent[\s\S]*workspaceId: uuid\(\)[\s\S]*commandId: uuid\(\)/,
   );
   assert.equal(
     create.match(/if \(!isCurrent\(\)\) return/g)?.length,
-    3,
-    "success, failure, and cleanup must all reject a stale create completion",
+    4,
+    "creation, permissions, failure, and cleanup must all reject a stale create completion",
   );
   assert.match(
     feed,

@@ -53,6 +53,7 @@ interface ApplyOptions {
   verified?: boolean;
   humanRights?: readonly string[];
   landingResolved?: boolean;
+  pendingInvitationIds?: (user_id: string) => readonly string[];
 }
 
 function makeWorld() {
@@ -94,6 +95,9 @@ function makeWorld() {
         'issue_grant',
       ],
       landingAuthorityChangeResolved: () => options.landingResolved ?? true,
+      ...(options.pendingInvitationIds
+        ? { pendingInvitationIds: options.pendingInvitationIds }
+        : {}),
       nextSeq: () => ++seq,
       nextEventId: () => `we-${++eventId}`,
     };
@@ -662,6 +666,48 @@ describe('membership and no-orphan authority', () => {
       ),
       'landing_authority_unresolved',
     );
+  });
+
+  it('remove_member revokes that person\'s pending invitations and refuses a stale id', () => {
+    const world = makeWorld();
+    world.create();
+    world.invite('bob', 'member', 'invite-bob', 'hash-bob');
+    world.invite('bob', 'member', 'invite-bob-sibling', 'hash-bob-sibling');
+    world.invite('carol');
+    assert.equal(
+      world.apply(
+        { kind: 'accept_invitation', token_hash: 'hash-bob' },
+        { actor: human('bob') },
+      ).ok,
+      true,
+    );
+    const stale = world.apply(
+      { kind: 'remove_member', user_id: 'bob' },
+      { pendingInvitationIds: () => ['invite-bob', 'invite-bob'] },
+    );
+    rejected(stale, 'invitation_not_live');
+    assert.equal(world.state()!.members.bob.revoked_at, null);
+    assert.equal(world.state()!.invitations['invite-bob-sibling'].revoked_at, null);
+
+    const removed = world.apply(
+      { kind: 'remove_member', user_id: 'bob' },
+      {
+        pendingInvitationIds: () => ['invite-bob-sibling', 'invite-bob-sibling'],
+        now: NOW + 70_000,
+      },
+    );
+    assert.equal(removed.ok, true);
+    if (removed.ok) {
+      assert.deepEqual(
+        removed.events.map((event) => event.type),
+        ['InvitationRevoked', 'MemberRemoved'],
+      );
+    }
+    const after = world.state()!;
+    assert.equal(after.invitations['invite-bob-sibling'].revoked_at, NOW + 70_000);
+    assert.equal(after.invitations['invite-carol'].revoked_at, null);
+    assert.equal(after.members.bob.revoked_at, NOW + 70_000);
+    assert.equal(after.invitations['invite-bob'].consumed_at !== null, true);
   });
 
   it('change_role accepts and protects ownership transitions', () => {
@@ -1602,6 +1648,9 @@ describe('agent session proof exemption', () => {
     for (const kind of quotedStrings(arrayBlock(sources.commandSrc, 'CHANNEL_COMMAND_KINDS'))) {
       kinds.add(kind);
     }
+    const householdSrc = readFileSync(join(repoRoot, 'supabase/functions/command/household-integration.ts'), 'utf8');
+    const householdKinds = arrayBlock(householdSrc, 'HOUSEHOLD_SURFACE_KINDS');
+    for (const match of householdKinds.matchAll(/'([a-z0-9_]+)'/g)) kinds.add(match[1]);
     for (const kind of exportedKindConstants(sources.fileSrc)) kinds.add(kind);
     for (const kind of exportedKindConstants(sources.deliverySrc)) kinds.add(kind);
     for (const kind of exportedKindConstants(sources.receiptsSrc)) kinds.add(kind);

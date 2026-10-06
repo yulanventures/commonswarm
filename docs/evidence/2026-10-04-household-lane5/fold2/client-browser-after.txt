@@ -1,0 +1,15 @@
+✔ sign-out and a different human clear invitation rows and suppress a late private inbox result (0.652375ms)
+✔ a delayed preview cannot replace the newly selected invitation; no acceptance occurs before the human chooses (0.172292ms)
+✔ changed disclosure requires a fresh review and cannot be automatically accepted (0.118375ms)
+✔ browser recipient invitation entry bundles without Node-only CLI build dependencies (25.454875ms)
+✔ recipient transport refreshes identity and retries an uncertain join with the same consent/request without credentials in the body (9.599459ms)
+✔ inbox delivery carries only the human session and no caller-chosen recipient/account selector (0.346042ms)
+✔ an acceptance response that still says pending cannot become a joined receipt (0.17625ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 108.858334

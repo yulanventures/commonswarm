@@ -1,62 +1,137 @@
 ---
-import AgentConnect from "../connect/AgentConnect.astro";
+/*
+ * /invite: the page a household member opens from a private link.
+ *
+ * WHO READS IT. The second person in a household. She is not a developer, so every sentence
+ * here is in household words: who invited her, what she will see, what stays private, what she
+ * can do. The protocol words stay out of this file (a test fails if they come back).
+ *
+ * THE ORDER. Sign in as herself, review and join, then connect her own agents on step 2 when
+ * she preset one on the review card. Host steps come from agent-hosts.ts; no keys, no commands.
+ *
+ * THE ACCESS CHOICE. The two roles and their sentences come from household-access.ts, the same
+ * module the dashboard reads, so the two screens cannot describe a role differently. Nothing is
+ * preselected: she picks one and ticks the box before the join is allowed.
+ *
+ * STYLING CHILD COMPONENTS. ProviderButtons renders its own buttons, and Astro scopes this
+ * page's CSS only to elements written in this file. The button and provider-list rules are
+ * therefore reached through :global() under .invite-onramp.
+ */
+import { CONTENT_ROLES, CONTENT_ROLE_COPY } from "../../lib/household-access";
+import { INVITE_CONNECT_FOOTNOTE, inviteAssistantHosts } from "../../lib/agent-hosts";
 import ProviderButtons from "../auth/ProviderButtons.astro";
+import Wordmark from "../Wordmark.astro";
+import "../../styles/home/onboarding.css";
+
+const assistantHosts = inviteAssistantHosts();
 ---
 
 <invite-onramp class="invite-onramp" data-state="loading">
-  <a class="invite-onramp__wordmark" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
+  <div class="invite-onramp__brand"><Wordmark href="/" /></div>
 
   <section class="invite-onramp__panel" data-view="loading" role="status" aria-live="polite">
     <span class="invite-onramp__spinner" aria-hidden="true"></span>
     <p>Opening your invitation…</p>
   </section>
 
-  <section class="invite-onramp__panel" data-view="unusable" hidden>
+  <section class="invite-onramp__panel invite-onramp__card" data-view="unusable" hidden>
     <p class="invite-onramp__eyebrow">Invitation unavailable</p>
-    <h1>This link can’t be used.</h1>
+    <h1 class="invite-onramp__title">This link can’t be used.</h1>
     <p data-unusable-message>
       It may have expired, been cancelled, or already been used. Ask the sender for a new link.
     </p>
     <a class="invite-onramp__button invite-onramp__button--quiet" href="/">What is CommonSwarm?</a>
   </section>
 
-  <section class="invite-onramp__panel" data-view="auth" hidden>
-    <p class="invite-onramp__eyebrow">Private workspace invitation</p>
-    <h1><span data-inviter>A teammate</span> invited you to <span data-workspace>a workspace</span>.</h1>
-    <p>
-      Join their shared agent feed, then connect an AI agent you control. Signing in starts
-      your free CommonSwarm account if you are new. No card.
+  <section class="invite-onramp__panel invite-onramp__card" data-view="auth" hidden>
+    <h1 class="invite-onramp__title"><span data-inviter>A teammate</span> invited you to <span data-workspace>a workspace</span>.</h1>
+    <p class="invite-onramp__lead">
+      Sign in as yourself to accept. New to CommonSwarm? Signing in creates your free account.
     </p>
-    <ol class="invite-onramp__steps" aria-label="What happens next">
-      <li><span>1</span>Sign in</li>
-      <li><span>2</span>Join the workspace</li>
-      <li><span>3</span>Copy one prompt to your agent</li>
+    <ol class="invite-onramp__steps" role="list" aria-label="What happens next">
+      <li><span>1</span>Sign in as yourself</li>
+      <li><span>2</span>Choose what you share</li>
+      <li><span>3</span>Connect your own agents</li>
     </ol>
+    <ProviderButtons
+      buttonClass="invite-onramp__button invite-onramp__button--quiet"
+      listClass="invite-onramp__providers"
+    >
+      <div slot="after" class="invite-onramp__divider" aria-hidden="true"><span>or</span></div>
+    </ProviderButtons>
     <form class="invite-onramp__auth" data-email-form>
       <label for="invite-email">Email address</label>
       <input id="invite-email" type="email" autocomplete="email" required placeholder="you@example.com" />
       <button class="invite-onramp__button" type="submit">Email me a sign-in link</button>
     </form>
-    <ProviderButtons
-      buttonClass="invite-onramp__button invite-onramp__button--quiet"
-      listClass="invite-onramp__providers"
-    >
-      <div slot="before" class="invite-onramp__divider" aria-hidden="true"><span>or</span></div>
-    </ProviderButtons>
     <p class="invite-onramp__status" data-auth-status role="status" aria-live="polite"></p>
     <p class="invite-onramp__error" data-auth-error role="alert" hidden></p>
   </section>
 
-  <section class="invite-onramp__panel" data-view="sender" hidden>
-    <p class="invite-onramp__eyebrow">This link is for your teammate</p>
-    <h1>Send the invitation. Don’t join it yourself.</h1>
-    <p>
-      You already own this invitation. Copy the short link and send it to the teammate who
-      should connect their agent.
-    </p>
+  <section class="invite-onramp__panel invite-onramp__card" data-view="sender" hidden>
+    <h1 class="invite-onramp__title">This link is for the person you invited.</h1>
+    <p class="invite-onramp__lead">Send it to them; don't open it yourself.</p>
     <button class="invite-onramp__button" type="button" data-copy-sender>Copy invite link</button>
     <p class="invite-onramp__status" data-sender-status role="status" aria-live="polite"></p>
     <a class="invite-onramp__button invite-onramp__button--quiet" href="/app">Back to the workspace</a>
+  </section>
+
+  <section class="invite-onramp__panel invite-onramp__card" data-view="review" hidden aria-labelledby="invite-review-title">
+    <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>Home</span>.</h1>
+
+    <div class="invite-onramp__facts">
+      <h2 class="invite-onramp__facet">Who is here</h2>
+      <p data-review-audience></p>
+      <h2 class="invite-onramp__facet">What you will see</h2>
+      <p data-review-disclosure></p>
+      <p class="invite-onramp__private"><strong>What stays private:</strong> your other workspaces.</p>
+    </div>
+
+    <fieldset class="invite-onramp__choices">
+      <legend>Your access</legend>
+      <div class="invite-onramp__choice-list">
+        {CONTENT_ROLES.map((role) => (
+          <label class="invite-onramp__choice">
+            <input type="radio" name="invite-content-role" value={role} data-content-role />
+            <span>
+              <strong>{CONTENT_ROLE_COPY[role].label}</strong>
+              <small>{CONTENT_ROLE_COPY[role].detail}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+
+    <fieldset class="invite-onramp__choices">
+      <legend>Which assistant will you bring?</legend>
+      <div class="invite-onramp__assistant-list">
+        {assistantHosts.map((host) => (
+          <label class="invite-onramp__choice invite-onramp__assistant">
+            <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
+            <span>
+              <strong>{host.name}</strong>
+              <small>{host.maker}</small>
+            </span>
+          </label>
+        ))}
+        <label class="invite-onramp__choice invite-onramp__assistant">
+          <input type="radio" name="invite-assistant" value="just-me" data-assistant-host />
+          <span><strong>Just me for now</strong></span>
+        </label>
+      </div>
+    </fieldset>
+
+    <label class="invite-onramp__consent">
+      <input type="checkbox" data-independent-consent />
+      <span>I'm joining as myself.</span>
+    </label>
+    <p class="invite-onramp__hint" data-review-hint role="alert" hidden></p>
+
+    <div class="invite-onramp__actions">
+      <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home</span></span></button>
+      <a class="invite-onramp__button invite-onramp__button--quiet" href="/app">Not now</a>
+    </div>
+    <p class="invite-onramp__fineprint" data-review-expiry></p>
   </section>
 
   <section class="invite-onramp__panel" data-view="joining" hidden role="status" aria-live="polite">
@@ -64,9 +139,9 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     <p>Joining <strong data-workspace>a workspace</strong>…</p>
   </section>
 
-  <section class="invite-onramp__panel" data-view="join-error" hidden>
+  <section class="invite-onramp__panel invite-onramp__card" data-view="join-error" hidden>
     <p class="invite-onramp__eyebrow">Connection interrupted</p>
-    <h1>Let’s check the invitation again.</h1>
+    <h1 class="invite-onramp__title">Let’s check the invitation again.</h1>
     <p>
       CommonSwarm could not confirm whether you joined. Your invitation is still saved
       safely in this browser.
@@ -74,20 +149,29 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     <button class="invite-onramp__button" type="button" data-retry-join>Try again</button>
   </section>
 
-  <section class="invite-onramp__connect" data-view="connect" hidden>
-    <div class="invite-onramp__receipt">
-      <span aria-hidden="true">✓</span>
-      <p>
-        You joined <strong data-workspace>a workspace</strong>.
-        Now connect an agent you control.
-      </p>
+  <section class="invite-onramp__connect hm-invite-connect" data-view="connect" hidden>
+    <p class="hm-invite-connect__step" data-connect-step-label hidden>Step 2 of 2</p>
+    <div class="hm-invite-connect__capsule" data-connect-capsule hidden aria-label="You and your assistant">
+      <span class="hm-invite-connect__person" data-connect-initials aria-hidden="true"></span>
+      <span class="hm-invite-connect__agent" aria-hidden="true"></span>
     </div>
-    <AgentConnect eyebrow="Your agent" />
+    <p class="hm-invite-connect__status" data-connect-status hidden></p>
+    <h1 class="hm-invite-connect__title invite-onramp__title" data-connect-title tabindex="-1">Connect your assistant.</h1>
+    <ol class="hm-ahp__steps" data-connect-steps hidden></ol>
+    <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
+    <a class="invite-onramp__button" data-connect-open hidden rel="nofollow">Open assistant</a>
+    <button class="hm-invite-connect__copy-link" type="button" data-connect-copy hidden>Copy the connect prompt instead</button>
+    <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+    <div class="invite-onramp__receipt" data-connect-receipt>
+      <span class="invite-onramp__receipt-mark" aria-hidden="true">✓</span>
+      <h2 class="invite-onramp__receipt-title">You're in <span data-workspace>a workspace</span>.</h2>
+    </div>
+    <a class="invite-onramp__button" href="/app">Open the workspace</a>
   </section>
 
-  <section class="invite-onramp__panel" data-view="complete" hidden>
+  <section class="invite-onramp__panel invite-onramp__card" data-view="complete" hidden>
     <p class="invite-onramp__eyebrow">You’re in</p>
-    <h1 data-complete-title>Agent access is ready.</h1>
+    <h1 class="invite-onramp__title" data-complete-title>Agent access is ready.</h1>
     <p>
       Open the workspace to see the shared channel. Pending agent access remains visible
       there until the agent first connects or you cancel it.
@@ -98,16 +182,14 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
 
 <script>
   import {
-    CommandOutcomeUnknown,
     EmailAddressRejected,
     EmailRateLimited,
-    acceptWorkspaceInvitation,
     currentSession,
+    client,
     deployment,
     myWorkspaces,
     signInWithEmail,
     signInWithProvider,
-    uuid,
   } from "../../lib/commonswarm";
   import { authProvider, listSentence } from "../../lib/auth-providers";
   import {
@@ -120,12 +202,32 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     type MemberInvitePayload,
   } from "../../lib/member-invite";
 
+  import { browserHumanInvitations, HumanInviteRefused } from '../../lib/human-invitations';
+  import type { HumanInvitePreview } from '../../../../src/cloud/human-invitations';
+  import {
+    AGENT_CONNECTOR_ADDRESS,
+    AGENT_HOST_STATUS_LABELS,
+    DESKTOP_SIGN_IN_NOTE,
+    INVITE_CONNECT_FOOTNOTE,
+    MENU_LABELS_NOTE,
+    TURN_ONLY_NOTE,
+    inviteAssistantHosts,
+    joinSentence,
+    privacyNote,
+    type AgentHost,
+    type AgentHostStep,
+  } from "../../lib/agent-hosts";
   const host = document.querySelector<HTMLElement>("invite-onramp");
   if (host) {
     const one = <T extends Element>(selector: string): T | null => host.querySelector<T>(selector);
     let payload: MemberInvitePayload | null = null;
     let resumeId = "";
     let senderLink = "";
+    let authGeneration = 0;
+    let authUser: string | null = null;
+    let authEmail: string | null = null;
+    let preview: HumanInvitePreview | null = null;
+    let prepared: ReturnType<ReturnType<typeof browserHumanInvitations>['prepareAcceptance']> | null = null;
 
     /*
      * The provider names for prose, read off the BUTTONS THAT ARE ON THIS PAGE.
@@ -177,20 +279,218 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       show("unusable");
     };
 
-    const continueToAgent = (workspaceId: string, workspaceName: string): void => {
-      const connect = one<HTMLElement>("agent-connect");
-      connect?.setAttribute("workspace-id", workspaceId);
-      connect?.setAttribute("workspace-name", workspaceName);
+    /*
+     * The review's access choice. Two radio cards in a fieldset, each tagged data-content-role;
+     * the chosen role is whichever one is checked. Nothing is checked until she picks one.
+     */
+    const roleChoices = (): HTMLInputElement[] =>
+      [...host.querySelectorAll<HTMLInputElement>("[data-content-role]")];
+    const assistantChoices = (): HTMLInputElement[] =>
+      [...host.querySelectorAll<HTMLInputElement>("[data-assistant-host]")];
+    const chosenRole = (): string => roleChoices().find((choice) => choice.checked)?.value ?? "";
+    const chosenAssistant = (): string =>
+      assistantChoices().find((choice) => choice.checked)?.value ?? "";
+    const consentBox = (): HTMLInputElement => one<HTMLInputElement>("[data-independent-consent]")!;
+    const reviewHint = (): HTMLElement => one<HTMLElement>("[data-review-hint]")!;
+    const lockReview = (locked: boolean): void => {
+      consentBox().disabled = locked;
+      for (const choice of roleChoices()) choice.disabled = locked;
+      for (const choice of assistantChoices()) choice.disabled = locked;
+    };
+    const resetReview = (): void => {
+      lockReview(false);
+      consentBox().checked = false;
+      for (const choice of roleChoices()) choice.checked = false;
+      for (const choice of assistantChoices()) choice.checked = false;
+      reviewHint().hidden = true;
+    };
+    const reviewReady = (): boolean => {
+      const role = chosenRole();
+      return preview !== null && consentBox().checked && (role === "reader" || role === "editor");
+    };
+
+    const assistantCatalog = inviteAssistantHosts();
+    const assistantStorageKey = (workspaceId: string): string => `invite-assistant:${workspaceId}`;
+    const viewerInitials = (name: string): string =>
+      name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 1).toLocaleUpperCase() || "Y";
+
+    const connectNotes = (host: AgentHost): string[] => {
+      const connects = (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
+      return [
+        ...(connects ? [TURN_ONLY_NOTE, privacyNote(host.id === "other-app" ? "that app" : host.name)] : []),
+        ...(host.desktopSignIn ? [DESKTOP_SIGN_IN_NOTE.joiner] : []),
+        ...host.notes,
+        MENU_LABELS_NOTE,
+      ];
+    };
+
+    const fillConnectStep = (workspaceName: string, hostId: string): void => {
+      const connectHost = assistantCatalog.find((entry) => entry.id === hostId) ?? null;
+      const stepLabel = one<HTMLElement>("[data-connect-step-label]");
+      const capsule = one<HTMLElement>("[data-connect-capsule]");
+      const title = one<HTMLElement>("[data-connect-title]");
+      const steps = one<HTMLOListElement>("[data-connect-steps]");
+      const notes = one<HTMLUListElement>("[data-connect-notes]");
+      const status = one<HTMLElement>("[data-connect-status]");
+      const open = one<HTMLAnchorElement>("[data-connect-open]");
+      const copy = one<HTMLButtonElement>("[data-connect-copy]");
+      const footnote = one<HTMLElement>("[data-connect-footnote]");
+      const receipt = one<HTMLElement>("[data-connect-receipt]");
+      const showAssistant = connectHost !== null && hostId !== "just-me";
+      if (stepLabel) stepLabel.hidden = !showAssistant;
+      if (capsule) capsule.hidden = !showAssistant;
+      if (footnote) footnote.hidden = !showAssistant;
+      if (receipt) receipt.hidden = showAssistant;
+      if (!showAssistant) {
+        if (title) title.textContent = `You're in ${workspaceName}.`;
+        if (steps) steps.hidden = true;
+        if (notes) notes.hidden = true;
+        if (status) status.hidden = true;
+        if (open) open.hidden = true;
+        if (copy) copy.hidden = true;
+        return;
+      }
+      const first = authEmail?.split("@")[0] ?? "You";
+      if (title) title.textContent = `Connect ${connectHost.name}.`;
+      const initialsNode = one<HTMLElement>("[data-connect-initials]");
+      if (initialsNode) initialsNode.textContent = viewerInitials(first);
+      if (status) {
+        if (connectHost.status) {
+          status.textContent = AGENT_HOST_STATUS_LABELS[connectHost.status];
+          status.dataset.status = connectHost.status;
+          status.hidden = false;
+        } else {
+          status.hidden = true;
+        }
+      }
+      const prompt = connectHost.steps.find((step) => step.say)?.say ?? joinSentence(connectHost.name);
+      let promptElement: HTMLElement | null = null;
+      if (steps) {
+        steps.hidden = false;
+        steps.replaceChildren();
+        const renderStep = (step: AgentHostStep): HTMLLIElement => {
+          const item = document.createElement("li");
+          item.className = "hm-ahp__step";
+          const paragraph = document.createElement("p");
+          paragraph.textContent = step.text
+            .replaceAll("{workspace}", workspaceName)
+            .replaceAll("{email}", authEmail ?? "your account");
+          item.append(paragraph);
+          if (step.address) {
+            const row = document.createElement("div");
+            row.className = "hm-ahp__copyable";
+            const code = document.createElement("code");
+            code.className = "hm-ahp__value";
+            code.textContent = AGENT_CONNECTOR_ADDRESS;
+            row.append(code);
+            item.append(row);
+          }
+          if (step.code) {
+            const row = document.createElement("div");
+            row.className = "hm-ahp__copyable";
+            const code = document.createElement("pre");
+            code.className = "hm-ahp__value";
+            code.textContent = step.code;
+            row.append(code);
+            item.append(row);
+          }
+          if (step.say) {
+            const row = document.createElement("div");
+            row.className = "hm-ahp__copyable hm-ahp__copyable--say";
+            const quote = document.createElement("q");
+            quote.className = "hm-ahp__value";
+            quote.textContent = step.say;
+            if (!promptElement && step.say === prompt) promptElement = quote;
+            row.append(quote);
+            item.append(row);
+          }
+          if (step.link) {
+            const link = document.createElement("a");
+            link.className = "hm-ahp__button";
+            link.href = step.link.href;
+            link.rel = "nofollow";
+            link.textContent = step.link.label;
+            item.append(link);
+          }
+          return item;
+        };
+        for (const step of connectHost.steps) steps.append(renderStep(step));
+      }
+      if (notes) {
+        const lines = connectNotes(connectHost);
+        notes.hidden = lines.length === 0;
+        notes.replaceChildren();
+        for (const line of lines) {
+          const item = document.createElement("li");
+          item.textContent = line;
+          notes.append(item);
+        }
+      }
+      const linkStep = connectHost.steps.find((step) => step.link);
+      if (open) {
+        if (linkStep?.link) {
+          open.href = linkStep.link.href;
+          open.textContent = `Open ${connectHost.name}`;
+          open.hidden = false;
+        } else {
+          open.hidden = true;
+        }
+      }
+      if (copy) {
+        copy.hidden = false;
+        copy.onclick = async () => {
+          let copied = false;
+          try {
+            await navigator.clipboard.writeText(prompt);
+            copied = true;
+          } catch {
+            if (!promptElement && steps) {
+              promptElement = document.createElement("q");
+              promptElement.className = "hm-ahp__value";
+              promptElement.textContent = prompt;
+              steps.append(promptElement);
+            }
+            const target = promptElement;
+            if (target) {
+              const range = document.createRange();
+              range.selectNodeContents(target);
+              const selection = window.getSelection();
+              selection?.removeAllRanges();
+              selection?.addRange(range);
+            }
+          }
+          copy.textContent = copied ? "Copied" : "Select and copy";
+        };
+      }
+      if (footnote) footnote.textContent = INVITE_CONNECT_FOOTNOTE;
+    };
+
+    const continueToAgent = (workspaceId: string, workspaceName: string, hostId = chosenAssistant()): void => {
+      for (const node of host.querySelectorAll<HTMLElement>('[data-view="connect"] [data-workspace]')) {
+        node.textContent = workspaceName;
+      }
+      if (hostId) {
+        try {
+          sessionStorage.setItem(assistantStorageKey(workspaceId), hostId);
+        } catch {
+          // The connect step still works for this visit without persistence.
+        }
+      }
+      fillConnectStep(workspaceName, hostId);
       const next = new URL("/invite", window.location.origin);
       next.searchParams.set("joined", workspaceId);
       history.replaceState(null, "", next);
       show("connect");
     };
 
-    const accept = async (): Promise<void> => {
+    const accept = async (confirmed = false): Promise<void> => {
       if (!payload) return unusable();
+      const sender = payload.inviter_display_name;
       const session = await currentSession();
       if (!session) return show("auth");
+      authUser = session.user.id;
+      authEmail = session.user.email ?? null;
+      const generation = authGeneration;
       if (payload.inviter_user_id === session.user.id) {
         senderLink = memberInviteUrl(window.location.origin, payload);
         return show("sender");
@@ -200,25 +500,48 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
         const existing = (await myWorkspaces()).find(
           (workspace) => workspace.id === payload?.workspace_id,
         );
+        if (generation !== authGeneration) return;
         if (existing) {
           forgetInvite(resumeId, localStorage);
           continueToAgent(existing.id, existing.name);
           return;
         }
-        const accepted = await acceptWorkspaceInvitation(
-          session,
-          `web_${uuid()}`,
-          payload.invitation_token,
-        );
-        const workspaceId = accepted.workspaceId || payload.workspace_id;
-        const workspaceName = accepted.workspaceName || payload.workspace_name;
+        const invitations = browserHumanInvitations();
+        if (!confirmed) {
+          prepared = null;
+          const value = await invitations.preview({source:'link',token:payload.invitation_token});
+          if (generation !== authGeneration) return;
+          if (value.status === 'joined') return continueToAgent(value.workspace_id, value.workspace_name);
+          preview = value;
+          for (const node of host.querySelectorAll<HTMLElement>('[data-review-workspace]')) {
+            node.textContent = value.workspace_name;
+          }
+          for (const node of host.querySelectorAll<HTMLElement>("[data-join-workspace-name]")) {
+            node.textContent = value.workspace_name;
+          }
+          one<HTMLElement>('[data-review-audience]')!.textContent = value.audience.map(m => `${m.display_name} (${m.role})`).join(', ');
+          one<HTMLElement>('[data-review-disclosure]')!.textContent = value.disclosure;
+          one<HTMLElement>('[data-review-expiry]')!.textContent = 'This invitation expires ' + new Date(value.expires_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) + '.';
+          resetReview();
+          return show('review');
+        }
+        const role = chosenRole();
+        if (!preview || !consentBox().checked || (role !== 'reader' && role !== 'editor')) return show('review');
+        lockReview(true);
+        prepared ??= invitations.prepareAcceptance({source:'link',token:payload.invitation_token},preview,role);
+        const accepted = await prepared.send();
+        if (generation !== authGeneration) return;
+        const workspaceId = String(accepted.workspace_id);
+        const workspaceName = String(accepted.workspace_name);
         forgetInvite(resumeId, localStorage);
         continueToAgent(workspaceId, workspaceName);
       } catch (error) {
+        if (generation !== authGeneration) return;
         try {
           const recovered = (await myWorkspaces()).find(
             (workspace) => workspace.id === payload?.workspace_id,
           );
+          if (generation !== authGeneration) return;
           if (recovered) {
             forgetInvite(resumeId, localStorage);
             continueToAgent(recovered.id, recovered.name);
@@ -227,11 +550,12 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
         } catch {
           // The saved invitation remains available for an explicit retry.
         }
-        if (error instanceof CommandOutcomeUnknown) {
+        if (error instanceof HumanInviteRefused && error.reason === 'review_changed') { preview = null; prepared = null; return await accept(); }
+        if (!(error instanceof HumanInviteRefused)) {
           show("join-error");
           return;
         }
-        unusable();
+        unusable(`This invitation could not be accepted. It may have expired, or it may have been sent to a different email address. If you were just invited, ask ${sender} to check who can see the workspace.`);
       }
     };
 
@@ -266,10 +590,19 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       if (!payload) {
         const joinedId = url.searchParams.get("joined") ?? "";
         const session = await currentSession();
+        authEmail = session?.user.email ?? null;
         const joined = session
           ? (await myWorkspaces()).find((workspace) => workspace.id === joinedId)
           : null;
-        if (joined) return continueToAgent(joined.id, joined.name);
+        if (joined) {
+          let hostId = "";
+          try {
+            hostId = sessionStorage.getItem(assistantStorageKey(joined.id)) ?? "";
+          } catch {
+            hostId = "";
+          }
+          return continueToAgent(joined.id, joined.name, hostId);
+        }
         return unusable();
       }
       fillLabels(payload);
@@ -345,19 +678,51 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     }
 
     one<HTMLButtonElement>("[data-retry-join]")?.addEventListener("click", () => {
-      void accept();
+      void accept(true);
+    });
+
+    /*
+     * Joining needs a chosen role and the ticked box. If either is missing, say which one
+     * and stop here: sending the click on would flash the "Joining" screen and then quietly
+     * return to this one.
+     */
+    one<HTMLButtonElement>("[data-confirm-join]")?.addEventListener("click", () => {
+      if (reviewReady()) {
+        reviewHint().hidden = true;
+        void accept(true);
+        return;
+      }
+      const noRole = chosenRole() === "";
+      const noBox = !consentBox().checked;
+      const hint = reviewHint();
+      hint.textContent = noRole && noBox
+        ? "Choose your access and tick the box to join."
+        : noRole
+        ? "Choose your access to join."
+        : "Tick the box to confirm you are joining as yourself.";
+      hint.hidden = false;
+      (noRole ? roleChoices()[0] : consentBox())?.focus();
+    });
+
+    one<HTMLElement>('[data-view="review"]')?.addEventListener("change", () => {
+      if (reviewReady()) reviewHint().hidden = true;
     });
 
     one<HTMLButtonElement>("[data-copy-sender]")?.addEventListener("click", async () => {
       const status = one<HTMLElement>("[data-sender-status]");
       try {
         await navigator.clipboard.writeText(senderLink);
-        if (status) status.textContent = "Copied. Send it to your teammate.";
+        if (status) status.textContent = "Copied. Send it to the person you invited.";
       } catch {
-        if (status) status.textContent = "Your browser blocked copy. Return to the workspace and create a new link.";
+        if (status) status.textContent = "Your browser blocked copy. Go back to the workspace and create a new link.";
       }
     });
 
+    /*
+     * Nothing on this page emits this event now that the one-time key flow is not part of the
+     * joiner's path. The "complete" view and this listener stay so the page keeps one state
+     * machine; they are the only way back in if that flow is ever added again.
+     */
     host.addEventListener("commonswarm:agent-secret-cleared", (event) => {
       const reason = (event as CustomEvent<{ reason?: unknown }>).detail?.reason;
       const title = one<HTMLElement>("[data-complete-title]");
@@ -369,6 +734,15 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
       show("complete");
     });
 
+    client()?.auth.onAuthStateChange((event, session) => {
+      const user = session?.user.id ?? null;
+      if (event === 'SIGNED_OUT' || authUser !== null && user !== authUser) {
+        ++authGeneration; preview = null; prepared = null; payload = null;
+        unusable('Sign in as the invited person and reopen the invitation.');
+      }
+      authUser = user;
+      authEmail = session?.user.email ?? null;
+    });
     void boot();
   }
 </script>
@@ -376,21 +750,17 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
 <style>
   .invite-onramp {
     min-block-size: 100svh;
-    inline-size: min(100% - var(--gutter) * 2, 46rem);
+    inline-size: min(100% - var(--gutter) * 2, 38rem);
     margin-inline: auto;
-    padding-block: clamp(var(--s-8), 8vw, var(--s-16));
+    padding-block: clamp(var(--s-6), 6vw, var(--s-16));
     display: grid;
     align-content: center;
-    gap: var(--s-8);
+    gap: var(--s-6);
   }
 
-  .invite-onramp__wordmark {
+  .invite-onramp__brand {
+    min-inline-size: 0;
     justify-self: start;
-    color: var(--text);
-    font-size: var(--t-lg);
-    font-weight: var(--weight-head);
-    letter-spacing: var(--track-tight);
-    text-decoration: none;
   }
 
   .invite-onramp__panel,
@@ -398,6 +768,9 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     min-inline-size: 0;
     display: grid;
     gap: var(--s-5);
+    color: var(--text-muted);
+    font-size: var(--t-base);
+    line-height: var(--lh-base);
   }
 
   .invite-onramp__panel[hidden],
@@ -405,40 +778,54 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     display: none;
   }
 
-  .invite-onramp__eyebrow {
-    margin: 0;
+  /* Cards: white surface, 20px corners, one quiet shadow (Daylight Orbs). */
+  .invite-onramp__card {
+    padding: var(--s-6);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+  }
+
+  .invite-onramp .invite-onramp__eyebrow {
     color: var(--accent-bright);
     font-size: var(--t-xs);
+    line-height: var(--lh-xs);
     font-weight: var(--weight-semibold);
     letter-spacing: var(--track-eyebrow);
     text-transform: uppercase;
   }
 
-  .invite-onramp h1 {
-    max-inline-size: 18ch;
+  .invite-onramp__title,
+  .invite-onramp__receipt-title {
     margin: 0;
-    font-size: var(--t-3xl);
-    line-height: 1.02;
-    letter-spacing: var(--track-head);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-weight: var(--weight-head);
     text-wrap: balance;
+    overflow-wrap: anywhere;
   }
 
-  .invite-onramp h1:focus {
+  .invite-onramp__title {
+    font-size: var(--t-2xl);
+    line-height: var(--lh-2xl);
+    letter-spacing: var(--track-head);
+  }
+
+  .invite-onramp__title:focus,
+  .invite-onramp__receipt-title:focus {
     outline: none;
     box-shadow: none;
   }
 
-  .invite-onramp p {
-    max-inline-size: 62ch;
-    margin: 0;
-    color: var(--text-muted);
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
+  .invite-onramp .invite-onramp__lead {
+    max-inline-size: 52ch;
   }
 
   .invite-onramp__steps {
     display: grid;
     gap: var(--s-3);
+    margin: 0;
     padding: 0;
     list-style: none;
   }
@@ -448,20 +835,107 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     align-items: center;
     gap: var(--s-3);
     color: var(--text);
+    font-weight: var(--weight-medium);
   }
 
-  .invite-onramp__steps span,
-  .invite-onramp__receipt > span {
+  .invite-onramp__steps span {
     inline-size: 1.75rem;
     block-size: 1.75rem;
     display: grid;
     place-items: center;
     flex: none;
     color: var(--accent-bright);
-    border: 1px solid var(--border-strong);
+    background: var(--accent-dim);
     border-radius: var(--radius-pill);
-    font-size: var(--t-xs);
+    font-size: var(--t-sm);
     font-weight: var(--weight-semibold);
+  }
+
+  /* Sign-in choices. The buttons come from ProviderButtons, so they are reached with :global. */
+  .invite-onramp :global(.invite-onramp__providers) {
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .invite-onramp :global(.invite-onramp__providers .invite-onramp__button) {
+    inline-size: 100%;
+  }
+
+  .invite-onramp :global(.invite-onramp__button) {
+    min-block-size: 3rem;
+    inline-size: fit-content;
+    max-inline-size: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--s-3) var(--s-6);
+    color: var(--accent-ink);
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-pill);
+    font: inherit;
+    font-size: var(--t-base);
+    font-weight: var(--weight-semibold);
+    line-height: 1.3;
+    text-align: center;
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+
+  /* One element inside the button holds "Join" and the workspace name together. As separate
+     children of an inline-flex button they become separate flex items and the space between
+     them is dropped. */
+  .invite-onramp__label {
+    min-inline-size: 0;
+  }
+
+  .invite-onramp :global(.invite-onramp__button):hover {
+    color: var(--accent-ink);
+    background: var(--accent-bright);
+    border-color: var(--accent-bright);
+  }
+
+  .invite-onramp :global(.invite-onramp__button--quiet) {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--border-interactive);
+  }
+
+  .invite-onramp :global(.invite-onramp__button--quiet):hover {
+    color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--border-interactive);
+  }
+
+  .invite-onramp :global(.invite-onramp__button):disabled {
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border-color: var(--border);
+    cursor: not-allowed;
+  }
+
+  .invite-onramp :global(.invite-onramp__button):focus-visible,
+  .invite-onramp__choice input:focus-visible,
+  .invite-onramp__consent input:focus-visible {
+    outline: 2px solid transparent;
+    box-shadow: var(--focus-ring);
+  }
+
+  .invite-onramp__divider {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+  }
+
+  .invite-onramp__divider::before,
+  .invite-onramp__divider::after {
+    content: "";
+    block-size: 1px;
+    flex: 1;
+    background: var(--border-strong);
   }
 
   .invite-onramp__auth {
@@ -476,79 +950,181 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
   }
 
   .invite-onramp__auth input {
-    min-block-size: 2.75rem;
+    min-block-size: 3rem;
     inline-size: 100%;
     padding: var(--s-3) var(--s-4);
     color: var(--text);
-    background: var(--elev-1);
+    background: var(--surface);
     border: 1px solid var(--border-interactive);
     border-radius: var(--radius);
     font: inherit;
   }
 
-  .invite-onramp__button {
-    min-block-size: 2.75rem;
-    inline-size: fit-content;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: var(--s-3) var(--s-5);
-    color: var(--accent-ink);
-    background: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius);
-    font: inherit;
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .invite-onramp__providers {
-    display: grid;
-    gap: var(--s-3);
-    justify-items: start;
-  }
-
-  .invite-onramp__button--quiet {
-    color: var(--text);
-    background: transparent;
-    border-color: var(--border-strong);
-  }
-
-  .invite-onramp__button:focus-visible,
   .invite-onramp__auth input:focus-visible {
-    outline: none;
+    border-color: var(--accent);
+    outline: 2px solid transparent;
     box-shadow: var(--focus-ring);
   }
 
-  .invite-onramp__divider {
+  .invite-onramp .invite-onramp__status {
+    min-block-size: 1.4em;
+    font-size: var(--t-sm);
+  }
+
+  .invite-onramp .invite-onramp__error,
+  .invite-onramp .invite-onramp__hint {
+    padding: var(--s-3) var(--s-4);
+    color: var(--text);
+    background: var(--danger-dim);
+    border-radius: var(--radius);
+    font-size: var(--t-sm);
+  }
+
+  /* Review card. */
+  .invite-onramp__facts {
+    display: grid;
+    gap: var(--s-2);
+  }
+
+  .invite-onramp .invite-onramp__facet {
+    margin: var(--s-2) 0 0;
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: var(--t-xs);
+    line-height: var(--lh-xs);
+    font-weight: var(--weight-semibold);
+    letter-spacing: var(--track-eyebrow);
+    text-transform: uppercase;
+  }
+
+  .invite-onramp__facts p {
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .invite-onramp__choices {
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .invite-onramp__choices legend {
+    padding: 0;
+    margin-block-end: var(--s-3);
+    color: var(--text);
+    font-family: var(--font-display);
+    font-weight: var(--weight-head);
+  }
+
+  .invite-onramp__choice-list {
+    display: grid;
+    gap: var(--s-3);
+  }
+
+  .invite-onramp__choice {
+    min-block-size: 3.5rem;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s-3);
+    padding: var(--s-4);
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-interactive);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+
+  .invite-onramp__choice:has(input:checked) {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .invite-onramp__choice:has(input:focus-visible) {
+    box-shadow: var(--focus-ring);
+  }
+
+  .invite-onramp__choice input,
+  .invite-onramp__consent input {
+    inline-size: 1.25rem;
+    block-size: 1.25rem;
+    flex: none;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+
+  .invite-onramp__choice input {
+    margin-block-start: 0.15rem;
+  }
+
+  .invite-onramp__choice span {
+    display: grid;
+    min-inline-size: 0;
+  }
+
+  .invite-onramp__choice strong {
+    font-weight: var(--weight-semibold);
+  }
+
+  .invite-onramp__choice small {
+    color: var(--text-muted);
+    font-size: var(--t-sm);
+    line-height: var(--lh-sm);
+  }
+
+  .invite-onramp__consent {
+    min-block-size: 2.75rem;
     display: flex;
     align-items: center;
     gap: var(--s-3);
-    color: var(--text-faint);
-    font-size: var(--t-xs);
+    color: var(--text);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
   }
 
-  .invite-onramp__divider::before,
-  .invite-onramp__divider::after {
-    content: "";
-    block-size: 1px;
-    flex: 1;
-    background: var(--border);
+  .invite-onramp__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-3);
   }
 
-  .invite-onramp__status {
-    min-block-size: 1.4em;
-    font-size: var(--t-sm) !important;
+  .invite-onramp__actions .invite-onramp__button {
+    flex: 1 1 11rem;
   }
 
-  .invite-onramp__error {
-    padding: var(--s-3);
-    color: var(--text) !important;
-    background: var(--danger-dim);
-    border-radius: var(--radius);
-    font-size: var(--t-sm) !important;
+  .invite-onramp .invite-onramp__fineprint {
+    font-size: var(--t-sm);
+  }
+
+  /* After joining: a short receipt, then the shared agent picker. */
+  .invite-onramp__receipt {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    padding: var(--s-4) var(--s-5);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .invite-onramp__receipt-mark {
+    inline-size: 2rem;
+    block-size: 2rem;
+    display: grid;
+    place-items: center;
+    flex: none;
+    color: var(--success);
+    background: var(--success-dim);
+    border-radius: var(--radius-pill);
+    font-weight: var(--weight-semibold);
+  }
+
+  .invite-onramp__receipt-title {
+    font-size: var(--t-lg);
+    line-height: var(--lh-lg);
+    letter-spacing: var(--track-xl);
   }
 
   .invite-onramp__spinner {
@@ -560,20 +1136,22 @@ import ProviderButtons from "../auth/ProviderButtons.astro";
     animation: invite-spin 0.8s linear infinite;
   }
 
-  .invite-onramp__receipt {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    padding: var(--s-4);
-    border-block: 1px solid var(--border);
-  }
-
   @keyframes invite-spin {
     to { transform: rotate(1turn); }
   }
 
+  @media (max-width: 40rem) {
+    .invite-onramp {
+      align-content: start;
+    }
+  }
+
   @media (max-width: 30rem) {
-    .invite-onramp__button {
+    .invite-onramp__card {
+      padding: var(--s-5);
+    }
+
+    .invite-onramp :global(.invite-onramp__button) {
       inline-size: 100%;
     }
   }

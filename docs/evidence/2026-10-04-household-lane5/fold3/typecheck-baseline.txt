@@ -1,0 +1,1 @@
+Eight diagnostic lines byte-identical to fold2/check-tests.txt; check:tests remains exit 2.

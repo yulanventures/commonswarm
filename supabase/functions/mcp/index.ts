@@ -1,3 +1,4 @@
+import { HOUSEHOLD_TOOL_REGISTRY } from "../_shared/protocol.js";
 import postgres from "npm:postgres@3.4.9";
 import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
@@ -187,7 +188,8 @@ async function seatCapability(
   binding: SeatBinding,
   tool: Exclude<HostedToolName, "claim_seat">,
 ): Promise<HostedSeatCapability | null> {
-  const use = tool === "whoami" || tool === "members" ? "read" : "command";
+  const content = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool);
+  const use = tool === "whoami" || tool === "members" || content?.effect === "read" ? "read" : "command";
   return await authDb.begin("isolation level read committed", async (tx) => {
     await setRole(tx, use === "read" ? "swarm_read" : "swarm_command");
     return await authenticateHostedSeatCapability(tx, {
@@ -249,6 +251,16 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
   if (binding === null) throw new HostedToolFailure("hosted_seat_forbidden");
   const capability = await seatCapability(call.token, binding, call.name);
   if (capability === null) throw new HostedToolFailure("hosted_seat_forbidden");
+  if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === call.name)) {
+    const row = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === call.name)!;
+    const result = row.effect === "read"
+      ? await handleHostedRead({ resource: "household", workspace_id: binding.workspaceId, tool: call.name, arguments: args }, capability)
+      : await handleHostedCommand({ command_id: args.request_id ?? `read_${crypto.randomUUID()}`,
+      client_version: "0.1.80", workspace_id: binding.workspaceId, stream: { kind: "workspace" },
+      command: { kind: "household_tool", tool: call.name, arguments: args } }, capability);
+    if (result.status !== 200) throw new HostedToolFailure("hosted_seat_forbidden");
+    return result.body;
+  }
   if (call.name === "whoami" || call.name === "members") {
     const output = readOutput(await handleHostedRead({
       resource: call.name,
@@ -294,7 +306,7 @@ async function executeTool(call: HostedToolCall): Promise<Record<string, unknown
     return commandOutput(result);
   }
   return commandOutput(await handleHostedCommand(
-    hostedCommand(call.name, args, binding.workspaceId),
+    hostedCommand(call.name as "ask" | "note" | "reply" | "working_on", args, binding.workspaceId),
     capability,
   ));
 }

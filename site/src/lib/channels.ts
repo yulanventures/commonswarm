@@ -55,8 +55,15 @@ export interface WorkspaceChannel {
 /** What the feed is filtered to. `null` is the unfiltered view. */
 export type ActiveChannel = WorkspaceChannel | null;
 
-/** The rail and the head write a channel the same way: one hash, one slug. */
-export const channelLabel = (slug: string): string => `#${slug}`;
+/**
+ * The rail and the head write a channel the same way. Channels read as "#slug"; the
+ * unfiltered view reads "All messages" (Tom's plain-words rule, 2026-09-11: a person sees
+ * messages, not signals).
+ * The wire name stays ALL_SIGNALS_SLUG, which the edge reserves; only the label changed.
+ */
+export const ALL_MESSAGES_LABEL = "All messages";
+export const channelLabel = (slug: string): string =>
+  slug === ALL_SIGNALS_SLUG ? ALL_MESSAGES_LABEL : `#${slug}`;
 
 /** Live channels only, in the order a reader scans them. */
 export const liveChannels = (

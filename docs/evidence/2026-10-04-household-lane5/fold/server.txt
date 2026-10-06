@@ -1,0 +1,291 @@
+/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+✖ human invite delivery grants only recipient function execution and its exact inverse preserves existing authority rows (6.824458ms)
+✖ real human join adapter serializes consumption, preserves independent consent, refuses revoked access and rolls back failed joins (929.991542ms)
+✖ same-base writers serialize, retain losing bytes privately, and recover exact retries without new revisions or counters (0.430333ms)
+✖ reader, missing consent, foreign workspace, personal boundary and revoked membership refuse metadata, writes and bytes with authorized controls (0.043917ms)
+✖ file reservations recheck base at commit, verify actual stored digest, and keep conflicts quota-counted (0.032333ms)
+✖ agent operation ceilings and parent hosted-grant withdrawal fence reads, history, writes, retry and bytes (0.039208ms)
+✖ quota and name reservations serialize with legacy storage and retained expired declarations (0.042125ms)
+✖ the five-hundred-name cap includes tombstones and serializes distinct creates (0.030417ms)
+✖ durable shared write ceilings refuse new revisions while exact retry and reservation release remain available (0.035209ms)
+✖ rolling history keeps retired bytes readable and protected from the legacy purge job (0.031375ms)
+✖ storage failure and credential withdrawal during I/O produce no committed rows or event (0.0515ms)
+✖ terminal artifact facts and private reducer events reject mutation at the database boundary (0.059667ms)
+✖ catalogs detect privilege drift and reverse rollbacks restore the pre-lane catalog inside one rolled-back transaction (0.029209ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 0
+ℹ fail 13
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1029.301708
+
+✖ failing tests:
+
+test at tests/p1-server/household-human-invitations.test.ts:1:394
+✖ human invite delivery grants only recipient function execution and its exact inverse preserves existing authority rows (6.824458ms)
+  Error: Command failed: docker ps --format {{.Names}}
+  /Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted
+  docker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.
+  
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at databaseContainer (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:30:17)
+      at emptyApplicationSchema (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:43:47)
+      at runSql (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/support/admin-schema-db.ts:53:23)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-human-invitations.test.ts:10:3)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25) {
+    status: 127,
+    signal: null,
+    output: [ null, '', '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n' ],
+    pid: 6502,
+    stdout: '',
+    stderr: '/Users/yulanbot/.local/bin/docker: line 5: /Users/Shared/docker-shim.log: Operation not permitted\ndocker is disabled on this Mac mini (Tom, 2026-09-26): container work runs in CI or on the box. Ask HezLead.\n'
+  }
+
+test at tests/p1-server/household-human-invitations.test.ts:22:8
+✖ real human join adapter serializes consumption, preserves independent consent, refuses revoked access and rolls back failed joins (929.991542ms)
+  Error: Local Supabase is unavailable; this server proof requires the authorized CI stack.
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-human-invitations.test.ts:36:17)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:969:18)
+      at Test.postRun (node:internal/test_runner/test:1537:19)
+      at Test.run (node:internal/test_runner/test:1462:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3)
+
+test at tests/p1-server/household-storage.test.ts:2:1073
+✖ same-base writers serialize, retain losing bytes privately, and recover exact retries without new revisions or counters (0.430333ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:2:3827
+✖ reader, missing consent, foreign workspace, personal boundary and revoked membership refuse metadata, writes and bytes with authorized controls (0.043917ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:2:5766
+✖ file reservations recheck base at commit, verify actual stored digest, and keep conflicts quota-counted (0.032333ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:2:9135
+✖ agent operation ceilings and parent hosted-grant withdrawal fence reads, history, writes, retry and bytes (0.039208ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:6:1521
+✖ quota and name reservations serialize with legacy storage and retained expired declarations (0.042125ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:7:1022
+✖ the five-hundred-name cap includes tombstones and serializes distinct creates (0.030417ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:9:494
+✖ durable shared write ceilings refuse new revisions while exact retry and reservation release remain available (0.035209ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:9:2010
+✖ rolling history keeps retired bytes readable and protected from the legacy purge job (0.031375ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:9:3079
+✖ storage failure and credential withdrawal during I/O produce no committed rows or event (0.0515ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:9:4992
+✖ terminal artifact facts and private reducer events reject mutation at the database boundary (0.059667ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }
+
+test at tests/p1-server/household-storage.test.ts:15:39
+✖ catalogs detect privilege drift and reverse rollbacks restore the pre-lane catalog inside one rolled-back transaction (0.029209ms)
+  Error: Command failed: supabase status -o json
+      at genericNodeError (node:internal/errors:999:15)
+      at wrappedFn (node:internal/errors:544:14)
+      at checkExecSyncError (node:child_process:942:11)
+      at execFileSync (node:child_process:978:15)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-server/household-storage.test.ts:28:22)
+      at TestHook.runInAsyncScope (node:async_hooks:226:14)
+      at TestHook.run (node:internal/test_runner/test:1397:25)
+      at TestHook.run (node:internal/test_runner/test:1741:18)
+      at TestHook.run (node:internal/util:581:20)
+      at Test.createHook (node:internal/test_runner/test:1112:33) {
+    status: 1,
+    signal: null,
+    output: [ null, '', null ],
+    pid: 6508,
+    stdout: '',
+    stderr: null
+  }

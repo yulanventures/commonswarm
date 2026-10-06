@@ -1,0 +1,30 @@
+✖ browser recipient invitation entry bundles without Node-only CLI build dependencies (50.51275ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 130.565209
+
+✖ failing tests:
+
+test at site/src/lib/human-invitations.test.mjs:30:1
+✖ browser recipient invitation entry bundles without Node-only CLI build dependencies (50.51275ms)
+  Error: Build failed with 2 errors:
+  src/cloud/client-build.ts:1:29: ERROR: Could not resolve "node:fs"
+  src/cloud/config.ts:1:27: ERROR: Could not resolve "node:crypto"
+      at failureErrorWithLog (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:1748:15)
+      at /Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:1207:25
+      at /Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:1159:52
+      at buildResponseToResult (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:1205:7)
+      at /Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:1232:16
+      at responseCallbacks.<computed> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:884:9)
+      at handleIncomingPacket (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:939:12)
+      at Socket.readFromStdout (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/site/node_modules/esbuild/lib/main.js:862:7)
+      at Socket.emit (node:events:514:20)
+      at addChunk (node:internal/streams/readable:568:12) {
+    errors: [ { detail: undefined, id: '', location: [Object], notes: [Array], pluginName: '', text: 'Could not resolve "node:fs"' }, { detail: undefined, id: '', location: [Object], notes: [Array], pluginName: '', text: 'Could not resolve "node:crypto"' } ],
+    warnings: []
+  }

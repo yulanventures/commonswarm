@@ -101,7 +101,7 @@ export const FILE_CREATE_RATE_LIMIT_PER_HOUR = 600;
 export const FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR = 2000;
 
 export const FILE_BUCKET = "swarm-files";
-export const FILE_DOWNLOAD_URL_TTL_SECONDS = 300;
+export const FILE_DOWNLOAD_URL_TTL_SECONDS = 300; // Removal does not recall URLs already issued; they expire within 300 seconds.
 /** ★R8: shipped on download and list payloads — agents read bytes, and an
  * attachment disposition protects only browsers. */
 export const FILE_CONTENT_WARNING =
@@ -466,6 +466,28 @@ function refuse(
   return { ok: false, refusal: { status, error, message, reason } };
 }
 
+/** Legacy file and signal paths never become a second way into Lists & docs.
+ * Those rows are reachable only through household tools, which recheck the
+ * content role. A content check here would authorize the same bytes for
+ * anyone who already holds that role. */
+export const HOUSEHOLD_MANAGED_FILE = "household_managed_file";
+
+export function householdManagedFileRefusal(surface: "file" | "signal"): {
+  status: 403;
+  error: typeof HOUSEHOLD_MANAGED_FILE;
+  message: string;
+  reason: string;
+} {
+  return {
+    status: 403,
+    error: HOUSEHOLD_MANAGED_FILE,
+    message: surface === "signal"
+      ? "This file belongs to Lists & docs. Use those tools. Nothing was posted."
+      : "This file belongs to Lists & docs. Use those tools. Nothing was changed.",
+    reason: "household managed file is reached only through household tools",
+  };
+}
+
 /**
  * Storage operations the handlers need; index.ts binds them to the REST API.
  * Signed URLs are returned as RELATIVE paths (under /storage/v1) and clients
@@ -582,6 +604,7 @@ export async function fileVersionCreate(
   const existing = await tx<
     {
       file_id: string;
+      household_managed: boolean;
       tombstoned_at: Date | null;
       current_version: number;
       live_version_count: string;
@@ -590,6 +613,7 @@ export async function fileVersionCreate(
   >`
     SELECT
       f.file_id,
+      f.household_managed,
       f.tombstoned_at,
       f.current_version,
       (
@@ -617,6 +641,9 @@ export async function fileVersionCreate(
     FOR UPDATE OF f
   `;
   const file = existing[0];
+  if (file !== undefined && file.household_managed === true) {
+    return { ok: false, refusal: householdManagedFileRefusal("file") };
+  }
   if (file !== undefined && file.tombstoned_at !== null) {
     return refuse(
       409,
@@ -780,14 +807,17 @@ export async function fileVersionCommit(
   // Concurrent commits of two DIFFERENT pending versions lock different
   // version rows and would each pass the live-version count (review P1), so
   // commit serializes per FILE first — the same lock create takes.
-  const fileLock = await tx<{ file_id: string }[]>`
-    SELECT file_id FROM swarm.files
+  const fileLock = await tx<{ file_id: string; household_managed: boolean }[]>`
+    SELECT file_id, household_managed FROM swarm.files
     WHERE file_id = ${cmd.file_id}::uuid
       AND workspace_id = ${workspaceId}::uuid
     FOR UPDATE
   `;
   if (fileLock.length === 0) {
     return refuse(404, "file_not_found", "no such file in this workspace", "compound key miss");
+  }
+  if (fileLock[0]?.household_managed === true) {
+    return { ok: false, refusal: householdManagedFileRefusal("file") };
   }
   const storedCommitEarly = await ledgerRecheck();
   if (storedCommitEarly?.hit === "conflict") {
@@ -1033,6 +1063,16 @@ export async function fileDownloadUrl(
   cmd: FileDownloadUrlCommand,
   storage: FileStorage,
 ): Promise<FileOutcome<Record<string, unknown>>> {
+  // A Lists & docs row refuses before any version join or signed URL, including
+  // a tombstoned or versionless row the join would otherwise report as missing.
+  const managedRows = await tx<{ household_managed: boolean }[]>`
+    SELECT household_managed FROM swarm.files
+    WHERE file_id = ${cmd.file_id}::uuid
+      AND workspace_id = ${workspaceId}::uuid
+  `;
+  if (managedRows[0]?.household_managed === true) {
+    return { ok: false, refusal: householdManagedFileRefusal("file") };
+  }
   // ★R1 compound key. Tombstoned files refuse new URLs (outstanding ones die
   // on their own 5-minute clock, which the tombstone response says).
   const rows = await tx<
@@ -1134,9 +1174,15 @@ export async function fileTombstone(
   ledgerRecheck: LedgerRecheck,
 ): Promise<FileOutcome<Record<string, unknown>>> {
   const rows = await tx<
-    { name: string; tombstoned_at: Date | null; created_by: string; created_by_kind: string }[]
+    {
+      name: string;
+      household_managed: boolean;
+      tombstoned_at: Date | null;
+      created_by: string;
+      created_by_kind: string;
+    }[]
   >`
-    SELECT name, tombstoned_at, created_by, created_by_kind
+    SELECT name, household_managed, tombstoned_at, created_by, created_by_kind
     FROM swarm.files
     WHERE file_id = ${cmd.file_id}::uuid
       AND workspace_id = ${workspaceId}::uuid
@@ -1145,6 +1191,9 @@ export async function fileTombstone(
   const file = rows[0];
   if (file === undefined) {
     return refuse(404, "file_not_found", "no such file in this workspace", "compound key miss");
+  }
+  if (file.household_managed === true) {
+    return { ok: false, refusal: householdManagedFileRefusal("file") };
   }
   const storedTombstone = await ledgerRecheck();
   if (storedTombstone?.hit === "conflict") {
@@ -1199,6 +1248,7 @@ export async function fileRestore(
   const rows = await tx<
     {
       name: string;
+      household_managed: boolean;
       tombstoned_at: Date | null;
       created_by: string;
       created_by_kind: string;
@@ -1207,7 +1257,7 @@ export async function fileRestore(
     }[]
   >`
     SELECT
-      f.name, f.tombstoned_at, f.created_by, f.created_by_kind,
+      f.name, f.household_managed, f.tombstoned_at, f.created_by, f.created_by_kind,
       -- The DATABASE clock decides the window (review: Date.now() skew could
       -- refuse inside the announced window or allow a late restore).
       (
@@ -1229,6 +1279,9 @@ export async function fileRestore(
   const file = rows[0];
   if (file === undefined) {
     return refuse(404, "file_not_found", "no such file in this workspace", "compound key miss");
+  }
+  if (file.household_managed === true) {
+    return { ok: false, refusal: householdManagedFileRefusal("file") };
   }
   const storedRestore = await ledgerRecheck();
   if (storedRestore?.hit === "conflict") {

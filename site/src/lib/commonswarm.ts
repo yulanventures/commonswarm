@@ -1,3 +1,5 @@
+import { homeOverviewUnavailable } from "./home-map";
+import type { HomeOverview } from "./home/contract";
 /*
  * The browser client. This file is the whole of the web app's contact with the backend.
  *
@@ -708,6 +710,23 @@ export async function revokeAgentToken(
   }
 }
 
+/** Resume is an existing human-interactive command; server facts are re-read after it. */
+export async function resumeRenewalGrant(
+  session: Session, commandId: string, workspaceId: string, renewalGrantId: string,
+): Promise<void> {
+  const { status, body } = await postCommand(session, commandId,
+    { kind: "resume_renewal_grant", renewal_grant_id: renewalGrantId },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } },
+    "The result is unknown. Reload to check whether this key resumed.");
+  if (status === 200 && body.status === "accepted") return;
+  // Current server returns only error=forbidden; the detailed reason stays in its audit.
+  const reason = body.reason ?? body.error;
+  const copy = reason === "forbidden"
+    ? "This key cannot be resumed with your current access. Nothing was changed."
+    : "Resume was not confirmed. Reload to check this key before trying again.";
+  throw new Error(copy);
+}
+
 export interface PendingMemberInvite {
   workspaceId: string;
   invitationId: string;
@@ -1099,6 +1118,8 @@ export async function workspaceFiles(workspaceId: string): Promise<WorkspaceFile
 export interface FileDownload {
   url: string;
   contentWarning: string;
+  /** Conservative signed-link expiry, as Unix time in milliseconds. */
+  expiresAt?: number;
 }
 
 export interface BrowserSignalAttachmentRef {
@@ -1273,6 +1294,7 @@ export async function fileDownloadUrl(
   fileId: string,
   version: number | null = null,
 ): Promise<FileDownload> {
+  const requestedAt = Date.now();
   const { status, body } = await postCommand(
     session,
     commandId,
@@ -1299,6 +1321,11 @@ export async function fileDownloadUrl(
   return {
     // S1 returns a path relative to the deployment the browser already trusts.
     url: new URL(path, `${d.url.replace(/\/+$/, "")}/`).href,
+    ...(typeof body.download_url_expires_in_seconds === "number" &&
+      Number.isFinite(body.download_url_expires_in_seconds) &&
+      body.download_url_expires_in_seconds >= 0
+      ? { expiresAt: requestedAt + body.download_url_expires_in_seconds * 1000 }
+      : {}),
     contentWarning: typeof body.content_warning === "string"
       ? body.content_warning
       : FILE_CONTENT_WARNING,
@@ -1309,6 +1336,23 @@ export interface CreatedWorkspace {
   workspaceId: string;
   streamId: string;
   name: string;
+}
+
+/** Role refusals retain the command's stable reason for the People & agents dialog. */
+export class WorkspaceRoleRefused extends Error {
+  constructor(readonly code: string) { super("The role change was not confirmed. Reload to check."); this.name = "WorkspaceRoleRefused"; }
+}
+export async function changeWorkspaceRole(session: Session, commandId: string, workspaceId: string,
+  userId: string, role: "owner" | "admin" | "member"): Promise<void> {
+  const { status, body } = await postCommand(session, commandId, { kind: "change_role", user_id: userId, role },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 401 && body.error === "fresh_auth_required") {
+    throw new FreshLoginRequired(
+      "Sign in again, then retry the role change. No membership change was recorded.",
+    );
+  }
+  if (status === 200 && body.status === "accepted") return;
+  throw new WorkspaceRoleRefused(typeof body.reason === "string" ? body.reason : typeof body.error === "string" ? body.error : "unknown");
 }
 
 /**
@@ -1409,6 +1453,8 @@ export interface Signal {
   channelId: string | null;
   /** The message this reply's thread starts from, or `null` for a message of its own. */
   threadRootId: string | null;
+  /** A top-level directed answer to an ask; separate from thread identity. */
+  inReplyTo?: string | null;
   /** A thread reply the author also sent to the channel. Always false on a root. */
   broadcastToChannel: boolean;
 }
@@ -2298,7 +2344,7 @@ export async function reportBrowserSignalsSeen(
  */
 export const BROWSER_SIGNAL_COLUMNS =
   "id,from,from_kind,to,to_agent,kind,body,about,until,created_at,attachments," +
-  "channel_id,thread_root_id,broadcast_to_channel";
+  "channel_id,thread_root_id,broadcast_to_channel,in_reply_to";
 
 /**
  * One row of `swarm_read.signals` as the browser holds it. Both readers call
@@ -2325,6 +2371,7 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
     createdAt: String(row.created_at ?? ""),
     channelId: text(row.channel_id),
     threadRootId: text(row.thread_root_id),
+    inReplyTo: text(row.in_reply_to),
     broadcastToChannel: row.broadcast_to_channel === true,
   };
 }
@@ -2702,24 +2749,71 @@ export async function browserDeliveryReceipts(
 export async function myWorkspaces(): Promise<{ id: string; name: string }[]> {
   const c = client();
   if (!c) throw new NoDeployment();
-  const { data, error } = await readWithDeadline(
-    "your workspaces",
-    (signal) =>
-      c
-        .schema("swarm_read")
-        .from("workspaces")
-        .select("workspace_id,name,archived_at")
-        .is("archived_at", null)
-        .limit(50)
-        .abortSignal(signal),
-  );
-  if (error) throw new Error(error.message);
-  return (data ?? [])
-    .map((row) => ({
-      id: String(row.workspace_id ?? ""),
-      name: String(row.name ?? row.workspace_id ?? ""),
-    }))
-    .filter((w) => w.id.length > 0);
+  const workspaces: { id: string; name: string }[] = [];
+  const pageSize = 50;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await readWithDeadline("your workspaces", signal => c
+      .schema("swarm_read").from("workspaces").select("workspace_id,name,archived_at")
+      .is("archived_at", null).order("name", { ascending: true }).order("workspace_id", { ascending: true })
+      .range(offset, offset + pageSize - 1).abortSignal(signal));
+    if (error) throw new Error(error.message);
+    const page = data ?? [];
+    workspaces.push(...page.map(row => ({ id: String(row.workspace_id ?? ""),
+      name: String(row.name ?? row.workspace_id ?? "") })).filter(workspace => workspace.id.length > 0));
+    if (page.length < pageSize) return workspaces;
+  }
+}
+
+/** Optional rollout read. Missing RPCs use the older workspace reads; other failures stay failures. */
+export async function homeOverview(): Promise<HomeOverview | null> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  const result = await readWithDeadline("Catch up", signal =>
+    api.schema("swarm_read").rpc("home_overview").abortSignal(signal));
+  if (result.error) {
+    if (homeOverviewUnavailable(result.status, result.error.code)) return null;
+    throw new Error("Catch up could not be checked.");
+  }
+  return result.data as HomeOverview;
+}
+
+/** Ask previews use immutable bodies from the selected workspace, including older messages. */
+export async function homeOverviewAsks(workspaceId: string, ids: readonly string[]): Promise<Signal[]> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  if (!ids.length) return [];
+  const rows: Signal[] = [];
+  for (let offset = 0; offset < ids.length; offset += 50) {
+    const { data, error } = await readWithDeadline("Catch up messages", signal => api.schema("swarm_read")
+      .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId).eq("kind", "ask")
+      .in("id", ids.slice(offset, offset + 50)).abortSignal(signal));
+    if (error) throw new Error("Catch up messages could not be checked.");
+    rows.push(...(data ?? []).map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
+  }
+  return rows;
+}
+
+/** Dedicated work read: an agent's active claim must not depend on the latest chat page. */
+export async function homeWorkingOn(workspaceId: string): Promise<Signal[]> {
+  const api = client();
+  if (!api) throw new NoDeployment();
+  try {
+    const rows: Signal[] = [];
+    const cutoff = new Date().toISOString();
+    const pageSize = 200;
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await readWithDeadline("agent work", signal => api.schema("swarm_read")
+        .from("signals").select(BROWSER_SIGNAL_COLUMNS).eq("workspace_id", workspaceId)
+        .eq("kind", "working-on").gt("until", cutoff).order("created_at", { ascending: false })
+        .order("id", { ascending: false }).range(offset, offset + pageSize - 1).abortSignal(signal));
+      if (error) return []; // No read means no work claim; never guess Working.
+      const page = data ?? [];
+      rows.push(...page.map(row => browserSignalFromRow(row as unknown as Record<string, unknown>)));
+      if (page.length < pageSize) return rows;
+    }
+  } catch {
+    return []; // An optional status read cannot hide messages already loaded.
+  }
 }
 
 /** A v4 uuid from the platform CSPRNG; used for both workspace ids and command ids. */

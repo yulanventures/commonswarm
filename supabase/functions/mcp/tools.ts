@@ -2,6 +2,18 @@ import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: Deno requires the source extension; Node tests import this module through tsx.
 import { SIGNAL_UNSAFE_GLOBAL_RE } from "../_shared/signal-text.ts";
 
+import { HOUSEHOLD_TOOLS, HOUSEHOLD_TOOL_REGISTRY, validateHouseholdToolArguments, HouseholdToolInputError } from "../_shared/protocol.js";
+// @ts-ignore TS5097: Node tests import this Deno module through tsx.
+import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
+
+// The registry includes prepared file definitions. Hosted admission excludes
+// file-only tools until protected byte transport has been completed and reviewed.
+const hostedHouseholdTools = HOUSEHOLD_TOOLS.filter(tool => {
+  const definition = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === tool.name)!;
+  return HOUSEHOLD_FEATURE_GATES.hostedFileTransport ||
+    !definition.objectTypes.every((kind: string) => kind === "file");
+});
+
 const UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$";
 const HANDLE_PATTERN = "^seat_[A-Za-z0-9_-]{22,64}$";
 const REQUEST_ID_PATTERN = "^[A-Za-z0-9_-]{8,72}$";
@@ -85,6 +97,7 @@ export const HOSTED_TOOL_TABLE = [
     annotations: { title: "List workspace participants", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: objectSchema({ seat: handle }, ["seat"]),
   },
+  ...hostedHouseholdTools.map(row => ({ ...row, securitySchemes: [{ type: "oauth2", scopes: ["mcp"] }] })),
 ] as const;
 
 export type HostedToolName = typeof HOSTED_TOOL_TABLE[number]["name"];
@@ -146,7 +159,7 @@ function validRecipients(value: unknown): boolean {
     });
 }
 
-const KEYS: Record<HostedToolName, { allowed: readonly string[]; required: readonly string[] }> = {
+const KEYS: Partial<Record<HostedToolName, { allowed: readonly string[]; required: readonly string[] }>> = {
   claim_seat: { allowed: ["workspace_id", "name", "request_id"], required: ["name", "request_id"] },
   whoami: { allowed: ["seat"], required: ["seat"] },
   check: { allowed: ["seat", "ack"], required: ["seat"] },
@@ -183,9 +196,14 @@ export function validateHostedToolArguments(
   name: HostedToolName,
   value: unknown,
 ): HostedToolArguments {
+  if (!hostedToolName(name)) throw new HostedToolInputError("Unknown or unavailable tool.");
+  if (HOUSEHOLD_TOOL_REGISTRY.some(row => row.name === name)) {
+    try { return validateHouseholdToolArguments(name, value); }
+    catch (error) { if (error instanceof HouseholdToolInputError) throw new HostedToolInputError(error.code); throw error; }
+  }
   const args = record(value);
   if (args === null) throw new HostedToolInputError("Expected an object of tool arguments. Send arguments as a JSON object.");
-  const shape = KEYS[name];
+  const shape = KEYS[name]!;
   if (Object.keys(args).some((key) => !shape.allowed.includes(key))) {
     // Unknown keys and supplied values can contain secrets; list trusted keys.
     throw new HostedToolInputError(`Unknown tool argument. Use only: ${shape.allowed.join(", ")}.`);

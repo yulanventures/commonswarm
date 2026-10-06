@@ -1,0 +1,168 @@
+✔ lane record marks the retired parent rule and reconciles Fold 1 probe counts (0.763875ms)
+✔ Fold 16 evidence describes the edge release and file age actually exercised (1.016458ms)
+✖ every file:line this lane cites still points at what it claims (18.634417ms)
+✔ macOS stdout inspection timeout citation includes the bounded lsof exec option (1.2965ms)
+✔ live-session timeout row includes resume and every context-file watcher start (0.510875ms)
+✔ acceptable-use publishes the enforced file-create hourly cap (1.75825ms)
+✔ the acceptable-use comment points at the line the constant is really on (0.21075ms)
+✔ the edge enforcement reads the constant rather than a literal (0.491125ms)
+✔ the acceptable-use pointer comment carries the enforced number too (0.1645ms)
+✔ the file-artifacts design doc publishes the enforced hourly cap (0.6075ms)
+✔ the rate bucket is spent before the create runs, so refusals count (0.34325ms)
+✔ acceptable-use publishes the enforced file-create workspace hourly ceiling (0.202583ms)
+✔ the acceptable-use comment points at the line FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR is really on (0.194959ms)
+✔ the edge enforcement reads FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR rather than a literal (0.459708ms)
+✔ the acceptable-use pointer comment carries the enforced workspace number too (0.178958ms)
+✔ the file-artifacts design doc publishes the enforced workspace ceiling (0.238084ms)
+✔ the workspace rate bucket is spent before the create runs, so refusals count (0.254208ms)
+✔ storage bucket migration file_size_limit matches FILE_MAX_VERSION_BYTES (0.529541ms)
+✔ the edge enforcement lowercases UUIDs in rate bucket keys (0.306625ms)
+✔ file-create rate-limit refusals return machine-readable scope field (0.356084ms)
+✔ storage bucket migration fails loudly if not exactly one row updated (0.150334ms)
+✔ file create comments and design doc state correct free-tier aggregate arithmetic and no false fairness claim (10.248333ms)
+✔ FileCommandRefused carries machine-readable scope, limit and resets_at (0.475208ms)
+✔ SWARM-CLOUD.md §2.8 points at the active lines for fileContentAllowed and FILE_NAME_RE (1.183375ms)
+✔ src/cloud/files.ts points at active lines for FILE_MAX_VERSION_BYTES, FILE_CONTENT_WARNING, and ALLOWED_CONTENT_TYPE_RE (0.841084ms)
+✖ acceptable-use comment cites active lines for file caps and index.ts limits (2.563084ms)
+✔ the file-artifacts design doc cites objectSize symbol alone in file-artifacts.ts (0.139542ms)
+✔ every extension the refusal names is accepted, and named-absent ones are refused (15.067625ms)
+✔ the file_type_refused site passes the generated constant, not a literal (0.188208ms)
+✔ the pinned storage-js still documents a two-hour signed upload URL (1.110667ms)
+✔ acceptable-use publishes the enforced byte, name and version caps (0.581167ms)
+✔ acceptable-use describes the rows the byte quota actually sums (0.124208ms)
+✔ every content type the refusal names is accepted, and the set matches the regex (0.502041ms)
+✔ the extension allowlist matches the enumeration published in SWARM-CLOUD.md 2.8 (0.385584ms)
+✔ the file-artifacts design doc enumerates the same extension allowlist (0.335333ms)
+✔ the refusal's framing claims hold against fileContentAllowed (0.305583ms)
+✔ the refusal survives the CLI's own truncation with every group intact (0.986333ms)
+✔ the generated content-type regex accepts and refuses exactly what the literal did (0.187292ms)
+✔ the CLI sanitises the refusal's wire fields before they reach the terminal (0.916125ms)
+✔ the server, the CLI and the web app publish the same extension allowlist (1.319917ms)
+✔ every content type the clients send is one the server accepts (0.427583ms)
+✔ the CLI's printed allowlist names every extension it accepts (38.501583ms)
+✔ an upper-case extension is accepted on the path a user actually takes (0.146458ms)
+✔ the spec says the allowlist is a declaration check, not content inspection (0.108625ms)
+✔ the acceptable-use page's updated date is not older than this lane's change (0.105667ms)
+✔ a rate-limit refusal settles the ledger before it audits or refuses (2.733042ms)
+✖ the client build helper owns the source and every command envelope uses it (64.321333ms)
+✔ only the channel and listener claim callers set a presence route (22.83275ms)
+✔ touch presence follows the server's minimal success contract (7.405042ms)
+✔ checks touch presence concurrently and throttle attempts for 60 seconds (65.994333ms)
+✔ a slow or refused presence touch cannot delay or change check output (35.9235ms)
+✔ the pure presence classifier covers wake priority, ages, ACK, and client state (0.799667ms)
+ℹ tests 52
+ℹ suites 0
+ℹ pass 49
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1021.17925
+
+✖ failing tests:
+
+test at tests/p1-cli/citation-drift.test.ts:1:5473
+✖ every file:line this lane cites still points at what it claims (18.634417ms)
+  AssertionError [ERR_ASSERTION]: citations drifted:
+  
+  site/src/lib/agent-connect.ts (mintedHorizon)
+      cites supabase/functions/command/index.ts:12581 for "horizon_expires_at: prepared.command.renewal_horizon_ms === null"
+      but that text is at line 12602
+  
+  site/src/lib/agent-connect.ts (mintedHorizon, replay)
+      cites supabase/functions/command/index.ts:2939 for "horizon_expires_at: response.horizon_expires_at as string | null"
+      but that text is at line 2941
+  
+  site/src/lib/agent-connect.ts (the mint's device binding)
+      cites supabase/functions/command/index.ts:3509-3521 for "device.revoked_at !== null"
+      but that text is at line 3523
+  
+  site/src/lib/agent-connect.ts (the agent scope check)
+      cites supabase/functions/command/index.ts:10931 for "!auth.agent.scopes.includes(validation.command.kind)"
+      but that text is at line 10952
+  
+  site/src/lib/agent-connect.ts (the 400 message)
+      cites supabase/functions/command/index.ts:2635 for "const valid = exactKeys(cmd, ["
+      but that text is at line 1766
+  
+  agent-connect-mint.observer.test.ts (timeboxed fallback, validator)
+      cites supabase/functions/command/index.ts:2623 for "? \"timeboxed\""
+      but that text is at line 2625
+  
+  agent-connect-mint.observer.test.ts (timeboxed fallback, prepared)
+      cites supabase/functions/command/index.ts:3699 for "renewal_kind: wire.renewal_kind ?? \"timeboxed\""
+      but that text is at line 3701
+  
+  agent-connect-mint.observer.test.ts (standing needs an ABSENT horizon)
+      cites supabase/functions/command/index.ts:2629 for "renewalKind === \"standing\" && cmd.renewal_horizon_ms === undefined"
+      but that text is at line 2631
+  
+  agent-connect-mint.observer.test.ts (the 400)
+      cites supabase/functions/command/index.ts:2683 for "mint_agent_token fields are malformed or out of bounds"
+      but that text is at line 2685
+  
+  agent-connect-mint.observer.test.ts (standing binds to the request device)
+      cites supabase/functions/command/index.ts:4907 for "standing ? prepared.wire.device_id : null"
+      but that text is at line 4909
+  
+  command/index.ts (resume handler, the pattern it copies)
+      cites supabase/functions/command/index.ts:3955 for "grant_preflight_code: (preflight[0]?.code ?? null)"
+      but that text is at line 3957
+  
+  
+  11 !== 0
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-cli/citation-drift.test.ts:230:10)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:969:18)
+      at Test.postRun (node:internal/test_runner/test:1537:19)
+      at Test.run (node:internal/test_runner/test:1462:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 11,
+    expected: 0,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/p1-cli/file-create-rate-limit.test.ts:1:17259
+✖ acceptable-use comment cites active lines for file caps and index.ts limits (2.563084ms)
+  AssertionError [ERR_ASSERTION]: acceptable-use cites index.ts:831 for FREE_TIER_WORKSPACE_LIMIT, but found: " * remains archiving; this removes the ceiling until that exists."
+      at checkIndex (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-cli/file-create-rate-limit.test.ts:401:12)
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-cli/file-create-rate-limit.test.ts:407:3)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:969:18)
+      at Test.postRun (node:internal/test_runner/test:1537:19)
+      at Test.run (node:internal/test_runner/test:1462:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at tests/p1-cli/presence-client.test.ts:1:2730
+✖ the client build helper owns the source and every command envelope uses it (64.321333ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + [
+  +   'src/cloud/human-invitations.ts:17'
+  + ]
+  - []
+  
+      at TestContext.<anonymous> (/Users/yulanbot/work/cswarm-vision/lanes/hh-lane5/tests/p1-cli/presence-client.test.ts:95:10)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [ 'src/cloud/human-invitations.ts:17' ],
+    expected: [],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
