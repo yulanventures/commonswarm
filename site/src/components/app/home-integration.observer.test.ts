@@ -42,7 +42,7 @@ async function readFixture(server: unknown, postCommand?: (...args: unknown[]) =
     const homeServer = () => server;
     const paints = [], renderHomeRail = () => {}, renderHomeShell = () => {}, renderHomeSide = () => {}, renderHomeObjectPane = () => {}, renderFeed = () => {};
     const loadHouseholdConnections = async () => {}, householdCall = () => async () => ({status:'ok',objects:[],next_offset:null});
-    const applyHomePane = () => paints.push({available:workspaces[0].todosAvailable, state:homeTodosState, titles:homeTodoRows.map(row=>row.title)});
+    const applyRoute = () => paints.push({available:workspaces[0].todosAvailable, state:homeTodosState, titles:homeTodoRows.map(row=>row.title)});
   `, context);
   runInContext(await dashboardFunctions(['householdScope', 'householdCurrent', 'readHouseholdAccess', 'homeRefusalCopy', 'homeTodosAvailable', 'loadHomeWorkspace']), context);
   return { context, load: () => runInContext('loadHomeWorkspace()', context), state: () => JSON.parse(runInContext('JSON.stringify({state:homeTodosState,rows:homeTodoRows,paints})', context)) };
@@ -695,6 +695,8 @@ test('Add agent receives the viewer first name and Home and Done leave that scre
     const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
     const stopHostJoinWatch = () => { stopped.push('stop'); };
     const showChannelView = () => {};
+    const applyRoute = () => {};
+    let channelOverlay = null;
   `, context);
   runInContext(await dashboardFunctions(['openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
   runInContext('openAgentChoice()', context);

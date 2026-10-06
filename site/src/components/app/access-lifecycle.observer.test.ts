@@ -269,7 +269,7 @@ test("Done, Back, and first use converge on a channel return", () => {
   assert.match(dashboard, /connect\.finishPrompt\("back"\)/);
   assert.match(
     dashboard,
-    /explicit exit from an add-agent view[\s\S]*showChannelView\("feed"\);\s*renderFeed\(\)/,
+    /The address is already chat\. Show that feed before renderFeed fills it\.[\s\S]*showChannelView\("feed"\);\s*renderFeed\(\)/,
   );
   assert.match(
     dashboard,

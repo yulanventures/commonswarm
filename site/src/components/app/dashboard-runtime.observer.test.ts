@@ -157,8 +157,21 @@ test("workspace creation and active-feed expiry cannot outlive their session", (
   );
   assert.match(
     feed,
-    /window\.clearTimeout\(signalExpiryTimer\)[\s\S]*if \(addAgentViewOpen\(\)\) return/,
+    /window\.clearTimeout\(signalExpiryTimer\)[\s\S]*if \(addAgentViewOpen\(\)\) return;[\s\S]*if \(channelOverlay !== null\) return;/,
+    "a feed rebuild may repaint chat, and must not cover the pane the address opened",
   );
+  assert.doesNotMatch(feed, /showChannelView\(/);
+  assert.doesNotMatch(
+    between(dashboard, "const renderUnknownChannel = (): void => {", "const renderFeed ="),
+    /showChannelView\(/,
+  );
+  const channelPaint = between(dashboard, "const renderChannel = (workspace: Workspace", "const resetInviteSubmitControl");
+  assert.match(
+    channelPaint,
+    /if \(homeRoute\.view === "chat"\) \{\s*activeWorkspaceView = "signals";[\s\S]*if \(homeRoute\.view === "new"\) return;\s*showPanel\("channel"\);\s*applyRoute\(\);/,
+    "a roster read paints the address's pane, and New workspace stays on the creation form",
+  );
+  assert.doesNotMatch(channelPaint, /showChannelView\(/);
   assert.match(
     feed,
     /signals = signals\.filter\([\s\S]*signal\.until === null \|\| new Date\(signal\.until\)\.getTime\(\) > now/,
@@ -355,7 +368,7 @@ test("dashboard blocks an in-flight mint but Done and Back can finish a visible 
   );
   assert.match(
     openWorkspace,
-    /showChannelView\("connect"\);[\s\S]*return;[\s\S]*activeWorkspaceId = selected\.id/,
+    /channelOverlay = "connect";[\s\S]*applyRoute\(\);[\s\S]*return;[\s\S]*activeWorkspaceId = selected\.id/,
   );
   assert.match(
     openWorkspace,
@@ -363,15 +376,18 @@ test("dashboard blocks an in-flight mint but Done and Back can finish a visible 
   );
   assert.match(
     openWorkspace,
-    /channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`;[\s\S]*if \(addAgentViewOpen\(\)\) return;[\s\S]*renderChannel\(selected\);[\s\S]*showChannelView\("feed-error"\)/,
+    /channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`;[\s\S]*if \(addAgentViewOpen\(\)\) return;[\s\S]*renderChannel\(selected\);/,
+  );
+  assert.doesNotMatch(openWorkspace, /showChannelView\(/);
+  assert.match(
+    dashboard,
+    /const returnToChannel = \(\): void => \{[\s\S]*?if \(homeRoute\.view === "new"\) return;[\s\S]*?navigateHome\(\{ view: "chat"/,
+    "leaving Invite or Connect goes to the chat address, then the renderer shows chat",
   );
   assert.match(
     dashboard,
-    /const returnToChannel = \(\): void => \{[\s\S]*if \(channelLoadError\) showChannelView\("feed-error"\)/,
-  );
-  assert.match(
-    dashboard,
-    /loadSignals\(workspaceId, true, version\)\.catch\(\(error\) => \{[\s\S]*channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`;[\s\S]*if \(addAgentViewOpen\(\)\) return;[\s\S]*showChannelView\("feed-error"\)/,
+    /loadSignals\(workspaceId, true, version\)\.catch\(\(error\) => \{[\s\S]*?channelLoadError = `\$\{readableError\(error\)\} Nothing was changed\.`;[\s\S]*?if \(homeRoute\.view !== "chat" \|\| channelOverlay !== null\) return;[\s\S]*?applyRoute\(\)/,
+    "a chat read that fails after the reader opens another pane must not cover it",
   );
 });
 
@@ -415,7 +431,11 @@ test("workspace changes synchronously retarget AgentConnect before its panel ope
     openWorkspace,
     /activeWorkspaceId = selected\.id;[\s\S]*syncConnectWorkspace\(selected\);/,
   );
-  assert.match(openConnect, /syncConnectWorkspace\(selected\);[\s\S]*showChannelView\("connect"\)/);
+  assert.match(openConnect, /syncConnectWorkspace\(selected\);[\s\S]*channelOverlay = "connect";[\s\S]*applyRoute\(\)/);
+  assert.match(
+    dashboard,
+    /if \(channelOverlay === "invite" \|\| channelOverlay === "connect"\) \{\s*showChannelView\(channelOverlay\);/,
+  );
   assert.match(connect, /createAgentIdentity\([\s\S]*this\.#workspaceId/);
   assert.match(connect, /mintAgentCredential\([\s\S]*this\.#workspaceId/);
 });

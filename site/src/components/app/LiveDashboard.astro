@@ -989,6 +989,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
 <script>
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
+  import { chatSurface, paneForRoute } from "../../lib/home-pane";
   import { buildHomeRail } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     type WorkspaceShellVM, type ShellCallbacks } from "../../lib/home-shell";
@@ -1341,6 +1342,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     let workspaces: Workspace[] = [];
     let homeRoute: HomeRoute = { view: "catchup" };
     let homeNavigation = 0;
+    /** Invite and connect sit on top of the route. They are not addresses. */
+    let channelOverlay: "invite" | "connect" | null = null;
+    /** False until the chat list for this channel has finished loading. Sample mode sets it true. */
+    let feedReady = false;
+    /** True while a workspace open is still reading, before the agent list is known. */
+    let channelPending = false;
+    /** True while applyRoute is painting the feed, so that paint cannot ask for another pane. */
+    let paintingInsideRoute = false;
     let catchUpGeneration = 0;
     let catchUpData: CatchUpData[] = [];
     let catchUpExpanded = false;
@@ -1511,6 +1520,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       contentRole: "reader" | "editor" | null;
     } = { workspaceId: "", status: "unknown", contentRole: null };
     let householdAccessGeneration = 0;
+    /** Lists load started for this household generation. A clear bumps the generation and leaves this behind. */
+    let householdListsOpenedGeneration = -1;
     /** The workspace whose access the setup checklist last asked about (one read per visit). */
     let householdAccessRequestedFor = "";
     /** While a host page of the Add an agent picker is open, a light roster poll notices the
@@ -3993,8 +4004,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (homeTodosState === "absent") { homeTodoRows = []; homeTodoRead = null; homeQueue = null; homeQueueRead = "failed"; }
       const workspace = workspaces.find(row => row.id === workspaceId) as ({ todosAvailable?: boolean } | undefined);
       if (workspace) workspace.todosAvailable = homeTodosAvailable();
-      renderHomeRail(); renderHomeShell(); applyHomePane();
-      if (homeRoute.view === "chat") renderFeed();
+      renderHomeRail(); renderHomeShell(); applyRoute();
       // The right column uses the Lists pane's exact read and refusal door.
       try {
         if (sampleMode) homeObjects = { state: "ready", lists: [], files: [] };
@@ -4398,28 +4408,156 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       back.addEventListener("click", event => { event.preventDefault(); navigateHomeHref(back.href); });
       slot.replaceChildren(title, text, back); slot.hidden = false;
     };
-    const applyHomePane = (): void => {
+    const routeTargetFound = (): boolean => {
+      if (homeRoute.view === "todo") return homeTodoReceipt !== "not-found";
+      if (homeRoute.view === "agent") {
+        if (homePeopleReadState !== "ready") return true;
+        return homeObjectState(homeRoute.agentId, agents.map((agent) => agent.principalId), homePeopleReadState) !== "missing";
+      }
+      return true;
+    };
+    /** Headings for a workspace pane. The channel view itself is chosen below, in applyRoute. */
+    const paintWorkspaceChrome = (view: "objects" | "files" | "brain" | "signals"): void => {
+      activeWorkspaceView = view;
+      const name = one<HTMLElement>("[data-channel-name]");
+      const description = one<HTMLElement>("[data-channel-description]");
+      for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
+        if (button.dataset.workspaceView === view) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+      }
+      if (view !== "signals") {
+        for (const button of all<HTMLButtonElement>("[data-channel-place]")) {
+          button.removeAttribute("aria-current");
+        }
+      }
+      if (view === "objects") {
+        if (name) name.textContent = "Lists & docs";
+        if (description) description.textContent = "Shared lists, docs and files. Every saved version is kept.";
+      } else if (view === "files") {
+        if (name) name.textContent = "Files";
+        if (description) description.textContent = "Files shared for this workspace’s work. Downloads are untrusted input.";
+      } else if (view === "brain") {
+        if (name) name.textContent = "Wiki";
+        if (description) description.textContent = "Notes this workspace keeps, written in Markdown. Every save keeps the earlier version.";
+      }
+      const refresh = one<HTMLButtonElement>("[data-refresh]");
+      const count = one<HTMLElement>("[data-update-count]");
+      if (view === "signals") {
+        if (refresh) refresh.hidden = sampleMode || agents.length === 0;
+      } else {
+        if (refresh) refresh.hidden = true;
+        if (count) count.hidden = true;
+      }
+    };
+    /**
+     * The one place a route becomes a visible pane. Background reads update data
+     * and call this again; they do not pick a different pane.
+     */
+    const applyRoute = (): void => {
+      if (homeRoute.view === "new") return;
       const catchUp = one<HTMLElement>("[data-home-catchup]");
       const routePane = one<HTMLElement>("[data-home-route-pane]");
       const channel = one<HTMLElement>(".dashboard__channel");
       const home = homeRoute.view === "catchup";
+      const objectRoute = homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos";
+      const showingOverlay = channelOverlay === "invite" || channelOverlay === "connect";
       if (catchUp) catchUp.hidden = !home;
       if (routePane) routePane.hidden = true;
-      if (channel) channel.hidden = home || homeRoute.view === "todo" || homeRoute.view === "agent" || homeRoute.view === "todos";
+      /* Invite and Connect are sections of the channel. An agent or to-do
+         address hides that channel for its own pane, so the overlay has to
+         show the channel or the centre is blank. */
+      if (channel) channel.hidden = home || (objectRoute && !showingOverlay);
       const channelMenu = one<HTMLElement>("[data-home-channel-menu]");
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
       frame?.classList.toggle("hm-frame--catchup", home);
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
-      if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
+      if (channelOverlay === "invite" || channelOverlay === "connect") {
+        showChannelView(channelOverlay);
+        return;
+      }
+      const pane = paneForRoute(homeRoute, routeTargetFound());
+      if (pane === "agent" || pane === "todo" || pane === "todos" || pane === "not-found") {
         renderHomeObjectPane();
         void loadHomeObject();
-      } else if (homeRoute.view === "add-agent") openAgentChoice();
-      else if (homeRoute.view === "lists") activateWorkspaceView("objects");
-      else if (homeRoute.view === "files") activateWorkspaceView("files");
-      else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
-      else activateWorkspaceView("signals");
+        return;
+      }
+      if (pane === "add-agent") {
+        if (app.dataset.channelView !== "agent-choice") {
+          const picker = one<HTMLElement & {
+            reset?: () => void;
+            setContext?: (context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }) => void;
+          }>("agent-host-picker");
+          const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+          const rosterName = members.find((member) => member.userId === session?.user.id)?.name ?? "";
+          const account = session ? accountName(session) : "";
+          picker?.reset?.();
+          picker?.setContext?.({
+            workspaceName: selected?.name ?? "",
+            accountEmail: session?.user.email ?? account,
+            viewerFirstName: personFirstName(rosterName) || personFirstName(account),
+          });
+          stopHostJoinWatch();
+        }
+        showChannelView("agent-choice");
+        return;
+      }
+      if (pane === "lists" || pane === "files" || pane === "wiki") {
+        const channelView = pane === "lists" ? "objects" : pane === "files" ? "files" : "brain";
+        const entering = app.dataset.channelView !== channelView;
+        paintWorkspaceChrome(channelView);
+        if (pane === "lists") {
+          showChannelView("objects");
+          /* A clear leaves the view on objects and empties the content. Load again once the roster has settled. */
+          const listsCleared = householdListsOpenedGeneration !== householdAccessGeneration;
+          if (sampleMode) householdListsOpenedGeneration = householdAccessGeneration;
+          else if (homePeopleReadState !== "pending" && (entering || listsCleared)) void openHouseholdView();
+        } else if (pane === "files") {
+          if (entering) renderFiles();
+          showChannelView("files");
+        } else if (pane === "wiki") {
+          if (entering) renderBrain();
+          showChannelView("brain");
+        }
+        return;
+      }
+      paintWorkspaceChrome("signals");
+      renderChannelHead();
+      const now = Date.now();
+      const liveSignalCount = signals.filter((signal) => signal.until === null || new Date(signal.until).getTime() > now).length;
+      const workspaceName = workspaces.find((row) => row.id === activeWorkspaceId)?.name ?? "Workspace";
+      const fixCount = homeAgentFixCards(currentHomePeople(), {
+        id: activeWorkspaceId,
+        name: workspaceName,
+        href: routeHref({ view: "chat", workspaceId: activeWorkspaceId }),
+      }).length;
+      const surface = chatSurface({
+        loadError: channelLoadError !== "",
+        pending: channelPending || (!sampleMode && !feedReady && agents.length > 0),
+        sample: sampleMode,
+        agentCount: agents.length,
+        signalCount: liveSignalCount,
+        unknownChannel: unknownChannelId !== null,
+        fixCount,
+      });
+      if (surface === "feed-error") { showChannelView("feed-error"); return; }
+      if (surface === "feed-pending") { showChannelView("feed-pending"); return; }
+      if (surface === "no-agents") { showChannelView("no-agents"); renderSetupChecklist(); return; }
+      if (surface === "feed-empty") {
+        paintingInsideRoute = true;
+        try {
+          showChannelView("feed-empty");
+          renderFeed();
+        } finally { paintingInsideRoute = false; }
+        return;
+      }
+      paintingInsideRoute = true;
+      try {
+        // The address is already chat. Show that feed before renderFeed fills it.
+        showChannelView("feed");
+        renderFeed();
+      } finally { paintingInsideRoute = false; }
     };
     const focusHomeView = (): void => {
       const route = homeRoute;
@@ -4439,6 +4577,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
     const navigateHome = async (requested: HomeRoute, historyMode: "push" | "replace" | "pop"): Promise<void> => {
       if ((!session && !sampleMode) || keepConnectCredentialVisible()) return;
+      channelOverlay = null;
       const route = resolveHomeRoute(new URL(routeHref(requested), window.location.origin).search, workspaces);
       const previous = window.history.state?.home === true;
       const scroll = one<HTMLElement>(".dashboard__feed-view");
@@ -4460,7 +4599,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           target.textContent = session ? accountName(session) : "Sample account";
         }
         for (const [id, position] of positions) homeScroll.set(id, position);
-        showPanel("channel"); renderHomeShell(); applyHomePane(); focusHomeView();
+        showPanel("channel"); renderHomeShell(); applyRoute(); focusHomeView();
         void loadHomeCatchUp(); return;
       }
       if (!("workspaceId" in route) || !route.workspaceId) return;
@@ -4471,10 +4610,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } else if (route.view === "chat") {
         applyChannelFromUrl(route.workspaceId);
         syncChannelUrl();
-        if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
+        /* Paint chat before the read. A rejected read must still reach the renderer below. */
+        if (navigation !== homeNavigation) return;
+        renderHomeRail(); renderHomeShell(); applyRoute();
+        if (!sampleMode) {
+          try {
+            await loadSignals(route.workspaceId, true, requestVersion);
+          } catch (error) {
+            if (navigation !== homeNavigation) return;
+            channelLoadError = `${readableError(error)} Nothing was changed.`;
+            channelPending = false;
+            const target = one<HTMLElement>("[data-feed-error]");
+            if (target) target.textContent = channelLoadError;
+          }
+        }
       }
       if (navigation !== homeNavigation) return;
-      renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
+      renderHomeRail(); renderHomeShell(); applyRoute(); focusHomeView();
       renderChannelRail();
       if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
       if (route.view === "chat" && route.messageId) {
@@ -5427,14 +5579,20 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         row.append(" ", open);
         list.append(row);
       }
-      showChannelView("feed");
     };
 
     const renderFeed = (change: "history" | "latest" = "history"): void => {
       window.clearTimeout(signalExpiryTimer);
       signalExpiryTimer = undefined;
       if (addAgentViewOpen()) return;
+      /* Receipts, polls, and roster reads rebuild this list. They must not cover another pane. */
+      if (channelOverlay !== null) return;
+      const paintingChat = homeRoute.view === "chat" && channelOverlay === null;
       if (unknownChannelId !== null) {
+        if (paintingChat && !paintingInsideRoute && app.dataset.channelView !== "feed") {
+          applyRoute();
+          return;
+        }
         renderUnknownChannel();
         return;
       }
@@ -5448,7 +5606,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!Number.isFinite(expiresAt) || expiresAt <= now) return nearest;
         return nearest === null || expiresAt < nearest ? expiresAt : nearest;
       }, null);
-      if (nextExpiry !== null) {
+      if (nextExpiry !== null && paintingChat) {
         signalExpiryTimer = window.setTimeout(
           renderFeed,
           Math.min(Math.max(nextExpiry - now + 25, 25), 2_147_483_647),
@@ -5517,8 +5675,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         previousSignalIds.clear();
         feedWasEmpty = true;
         if (fixes.length) { const empty = document.createElement("li"); empty.textContent = "No messages yet."; list.append(empty); }
-        showChannelView(fixes.length ? "feed" : "feed-empty");
-        focusComposerOnEntry();
+        if (paintingChat && !paintingInsideRoute) {
+          const wanted = fixes.length ? "feed" : "feed-empty";
+          if (app.dataset.channelView !== wanted) { applyRoute(); return; }
+        }
+        if (paintingChat) focusComposerOnEntry();
         return;
       }
       const agentById = new Map(agents.map((agent) => [agent.principalId, agent]));
@@ -5887,7 +6048,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       previousSignalIds = new Set(signals.map((signal) => signal.id));
       feedWasEmpty = false;
-      showChannelView("feed");
+      if (paintingChat && !paintingInsideRoute && app.dataset.channelView !== "feed") {
+        applyRoute();
+        return;
+      }
       observeHumanSeenRows();
       /* Two cases, and the anchoring MUST live here rather than around the load-older click.
        * The click handler is `async` and returns at its first `await`, so measuring around
@@ -5899,7 +6063,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
        * position by the exact height that was prepended above them. Scrolling them down
        * unconditionally is the defect every chat client ships at least once.
        *
-       * showChannelView must run first: the view is `hidden` until then, and a hidden element
+       * The route renderer shows the feed first: the view is `hidden` until then, and a hidden element
        * has no scroll geometry to read or set. */
       if (wasAtBottom) {
         scrollToNewest();
@@ -5911,7 +6075,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           el.scrollTop = topBefore + (el.scrollHeight - heightBefore);
         }
       }
-      focusComposerOnEntry();
+      if (paintingChat) focusComposerOnEntry();
     };
 
     const syncConnectWorkspace = (workspace: Workspace): void => {
@@ -5982,7 +6146,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ) changed = true;
           deliveryReceiptCache.set(read.signalId, { result: read.result, checkedAt });
         }
-        if (changed && !addAgentViewOpen()) renderFeed();
+        if (changed && channelOverlay === null && !addAgentViewOpen()) {
+          if (homeRoute.view === "chat") renderFeed();
+          else applyRoute();
+        }
       } finally {
         if (deliveryReceiptRefreshOwner === owner) deliveryReceiptRefreshOwner = "";
       }
@@ -6055,7 +6222,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const last = page.rows.at(-1);
       signalCursor = last ? { createdAt: last.createdAt, id: last.id } : cursor;
       signalHasMore = page.hasMore;
-      renderFeed();
+      feedReady = true;
+      channelPending = false;
+      if (!reset && homeRoute.view === "chat" && channelOverlay === null) renderFeed();
+      else applyRoute();
       void refreshDeliveryReceipts(workspaceId, version);
     };
 
@@ -6106,7 +6276,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         signalHasMore = signalHasMore || page.hasMore;
         if (changed) {
           signals = next;
-          renderFeed("latest");
+          if (app.dataset.channelView === "feed-empty") applyRoute();
+          else renderFeed("latest");
         }
         void refreshDeliveryReceipts(workspaceId, version);
         /* The dedicated access cadence owns discovery; a healthy feed tick also
@@ -6720,9 +6891,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const renderChannel = (workspace: Workspace, pending = false): void => {
+      channelPending = pending;
+      if (pending) feedReady = false;
       const id = one<HTMLElement>("[data-channel-id]");
-      /* This IS the signals view: the loop below marks it current. */
-      activeWorkspaceView = "signals";
+      /* The signals mark belongs to chat. A roster read must not claim the chat
+         after Lists, Files, Wiki, To-dos, or an agent is open. */
       /* ORDER IS LOAD-BEARING. The all-signals button is both a view control and a place
          control, so the signals-view loop below marks it current; running it AFTER the rail
          means syncChannelCurrent has the last word, the way it already does in
@@ -6730,9 +6903,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          open, including opens that resolved to a channel and opens whose ?c= resolved to
          nothing — two current places, or one that says you are reading the whole feed while
          the feed is not being shown. Found by a review arm. */
-      for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
-        if (button.dataset.workspaceView === "signals") button.setAttribute("aria-current", "page");
-        else button.removeAttribute("aria-current");
+      if (homeRoute.view === "chat") {
+        activeWorkspaceView = "signals";
+        for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
+          if (button.dataset.workspaceView === "signals") button.setAttribute("aria-current", "page");
+          else button.removeAttribute("aria-current");
+        }
       }
       renderChannelRail();
       renderChannelHead();
@@ -6742,25 +6918,21 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (refresh) refresh.hidden = sampleMode || agents.length === 0;
       const count = one<HTMLElement>("[data-update-count]");
       if (count) count.hidden = pending || agents.length === 0 || signals.length === 0;
+      if (pending && count) count.textContent = "Loading updates…";
+      else if (!sampleMode && agents.length === 0 && count) count.textContent = "Empty channel";
       renderWorkspaceList(workspace);
       renderWorkspaceSettingsPanel(workspace);
       renderRoster();
       for (const target of all<HTMLElement>("[data-rail-account]")) {
         target.textContent = sampleMode || !session ? "Sample account" : accountName(session);
       }
+      /* The setup checklist is the markup default, so the address's pane is
+         painted once the channel panel is up. A read that finishes while New
+         workspace is open must return first: the creation form is the create
+         panel, and switching to the channel would hide it. */
+      if (homeRoute.view === "new") return;
       showPanel("channel");
-      if (pending) {
-        if (count) count.textContent = "Loading updates…";
-        showChannelView("feed-pending");
-      } else if (sampleMode) {
-        renderFeed();
-      } else if (agents.length === 0) {
-        if (count) count.textContent = "Empty channel";
-        showChannelView("no-agents");
-        renderSetupChecklist();
-      } else {
-        showChannelView("feed-pending");
-      }
+      applyRoute();
     };
 
     const resetInviteSubmitControl = (): void => {
@@ -6841,13 +7013,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const changesWorkspace =
           promptWorkspaceId.length > 0 && promptWorkspaceId !== workspaceId;
         pendingWorkspaceId = changesWorkspace ? workspaceId : "";
-        showChannelView("connect");
+        channelOverlay = "connect";
+        applyRoute();
         window.requestAnimationFrame(() => {
           one<HTMLElement>("[data-close-connect]")?.focus();
         });
         return;
       }
       pendingWorkspaceId = "";
+      channelOverlay = null;
       /* Every real workspace open advances requestVersion, so an invite submission
          from the prior generation no longer owns this shared form. Reset its busy
          affordance here; the stale async handler is forbidden from touching it. */
@@ -6896,6 +7070,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       syncPendingPoll();
       people = new Map();
       signals = [];
+      feedReady = false;
+      channelPending = false;
       deliveryReceiptCache.clear();
       deliveryReceiptRefreshOwner = "";
       files = [];
@@ -6998,7 +7174,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         homeWorkClaims = claims;
         renderHomeRail();
         renderHomeShell();
-        applyHomePane();
+        applyRoute();
       } catch (error) {
         if (version !== requestVersion) return;
         signalHasMore = false;
@@ -7008,7 +7184,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (target) target.textContent = channelLoadError;
         if (addAgentViewOpen()) return;
         renderChannel(selected);
-        showChannelView("feed-error");
       }
     };
 
@@ -7018,6 +7193,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         void navigateHome({ view: "add-agent", workspaceId: activeWorkspaceId }, "push");
         return;
       }
+      /* Invite sits on this same address. Back has to drop it or the
+         renderer paints Invite again. */
+      channelOverlay = null;
       const picker = one<HTMLElement & {
         reset?: () => void;
         setContext?: (context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }) => void;
@@ -7032,7 +7210,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         viewerFirstName: personFirstName(rosterName) || personFirstName(account),
       });
       stopHostJoinWatch();
-      showChannelView("agent-choice");
+      applyRoute();
       window.requestAnimationFrame(() => {
         one<HTMLElement>("[data-ahp-grid-title]")?.focus({ preventScroll: true });
       });
@@ -7116,7 +7294,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         inviteWorkspace.textContent =
           workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? "this workspace";
       }
-      showChannelView("invite");
+      channelOverlay = "invite";
+      applyRoute();
       window.requestAnimationFrame(() => {
         one<HTMLInputElement>("[data-invite-email]")?.focus({ preventScroll: true });
       });
@@ -7130,7 +7309,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       syncConnectWorkspace(selected);
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) exitStatus.hidden = true;
-      showChannelView("connect");
+      channelOverlay = "connect";
+      applyRoute();
       connectFocusObserver?.disconnect();
       const focusField = (): boolean => {
         if (connect.dataset.state !== "ready") return false;
@@ -7160,7 +7340,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const connectState = connect?.dataset.state ?? "";
       const mintBusy = connect?.hasAttribute("data-mint-busy") ?? false;
       if (!mintBusy && connectState !== "working") return false;
-      showChannelView("connect");
+      channelOverlay = "connect";
+      applyRoute();
       const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
       if (exitStatus) {
         exitStatus.textContent =
@@ -7174,38 +7355,37 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
 
     const returnToChannel = (): void => {
-      if (homeRoute.view === "add-agent" && activeWorkspaceId) {
+      channelOverlay = null;
+      pendingWorkspaceId = "";
+      const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
+      if (exitStatus) exitStatus.hidden = true;
+      /* Creating a workspace is its own panel. Back to the channel from anywhere
+         else first changes the address to chat, then the renderer paints it. */
+      if (homeRoute.view === "new") return;
+      if (!activeWorkspaceId) return;
+      const onChat = homeRoute.view === "chat" && homeRoute.workspaceId === activeWorkspaceId;
+      if (!onChat) {
         void navigateHome({ view: "chat", workspaceId: activeWorkspaceId,
           ...(activeChannelId ? { channelId: activeChannelId } : {}) }, "push");
         return;
       }
-      pendingWorkspaceId = "";
-      const exitStatus = one<HTMLElement>("[data-connect-exit-status]");
-      if (exitStatus) exitStatus.hidden = true;
-      if (channelLoadError) showChannelView("feed-error");
-      else if (agents.length === 0) {
-        showChannelView("no-agents");
-        renderSetupChecklist();
-      } else if (signals.length === 0) {
-        const workspaceId = activeWorkspaceId;
-        const version = requestVersion;
-        showChannelView("feed-pending");
-        void loadSignals(workspaceId, true, version).catch((error) => {
-          if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
-          channelLoadError = `${readableError(error)} Nothing was changed.`;
-          const target = one<HTMLElement>("[data-feed-error]");
-          if (target) target.textContent = channelLoadError;
-          if (addAgentViewOpen()) return;
-          showChannelView("feed-error");
-        });
+      if (channelLoadError || sampleMode || agents.length === 0 || feedReady) {
+        applyRoute();
+        return;
       }
-      else {
-        // This is an explicit exit from an add-agent view. Mark the feed active
-        // before rendering so renderFeed's background-refresh guard does not
-        // mistake the requested return for an unsolicited view change.
-        showChannelView("feed");
-        renderFeed();
-      }
+      channelPending = true;
+      applyRoute();
+      const workspaceId = activeWorkspaceId;
+      const version = requestVersion;
+      void loadSignals(workspaceId, true, version).catch((error) => {
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        channelLoadError = `${readableError(error)} Nothing was changed.`;
+        const target = one<HTMLElement>("[data-feed-error]");
+        if (target) target.textContent = channelLoadError;
+        if (homeRoute.view !== "chat" || channelOverlay !== null) return;
+        channelPending = false;
+        applyRoute();
+      });
     };
 
     /* ===== Household: Lists & docs access, agent approvals, setup checklist (redesign) =====
@@ -7594,6 +7774,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const activeSession = session;
       const selectedId = activeWorkspaceId;
       if (!selected || !activeSession || sampleMode) return;
+      householdListsOpenedGeneration = householdAccessGeneration;
       renderHouseholdAccess();
       await refreshHouseholdAccess();
       if (selectedId !== activeWorkspaceId || activeWorkspaceView !== "objects") return;
@@ -7720,62 +7901,17 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (keepConnectCredentialVisible()) return;
       const nextView = view === "signals" ? "chat" : view === "objects" ? "lists" : view === "brain" ? "wiki" : "files";
       if (homeRoute.view !== nextView && activeWorkspaceId) {
+        channelOverlay = null;
         void navigateHome({ view: nextView, workspaceId: activeWorkspaceId,
           ...(nextView === "chat" && activeChannelId ? { channelId: activeChannelId } : {}) }, "push");
         return;
       }
-      activeWorkspaceView = view;
+      /* Already on this address. A control that names this pane has to show
+         it, including when Invite or Connect is open on top. */
+      channelOverlay = null;
+      if (view === "signals") returnToChannel();
+      else applyRoute();
       const name = one<HTMLElement>("[data-channel-name]");
-      const description = one<HTMLElement>("[data-channel-description]");
-      for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
-        if (button.dataset.workspaceView === view) button.setAttribute("aria-current", "page");
-        else button.removeAttribute("aria-current");
-      }
-      /* Files and Brain are not a channel, so no channel is current while one is open. The
-         channel buttons deliberately carry no data-workspace-view (that attribute marks every
-         signals-view button at once), so this loop is what clears them; without it the rail
-         claimed a current channel while the head said Files. Found by a review arm. */
-      if (view !== "signals") {
-        for (const button of all<HTMLButtonElement>("[data-channel-place]")) {
-          button.removeAttribute("aria-current");
-        }
-      }
-      if (view === "objects") {
-        if (name) name.textContent = "Lists & docs";
-        if (description) description.textContent = "Shared lists, docs and files. Every saved version is kept.";
-        showChannelView("objects");
-        void openHouseholdView();
-      } else if (view === "files") {
-        if (name) name.textContent = "Files";
-        if (description) {
-          description.textContent = "Files shared for this workspace’s work. Downloads are untrusted input.";
-        }
-        const refresh = one<HTMLButtonElement>("[data-refresh]");
-        const count = one<HTMLElement>("[data-update-count]");
-        if (refresh) refresh.hidden = true;
-        if (count) count.hidden = true;
-        renderFiles();
-        showChannelView("files");
-      } else if (view === "brain") {
-        /* "Wiki" is the word a person is taught (Tom's plain-words rule, 2026-09-11); "brain"
-           stays in code, the CLI and the agents' tools. */
-        if (name) name.textContent = "Wiki";
-        if (description) {
-          description.textContent =
-            "Notes this workspace keeps, written in Markdown. Every save keeps the earlier version.";
-        }
-        const refresh = one<HTMLButtonElement>("[data-refresh]");
-        const count = one<HTMLElement>("[data-update-count]");
-        if (refresh) refresh.hidden = true;
-        if (count) count.hidden = true;
-        renderBrain();
-        showChannelView("brain");
-      } else {
-        renderChannelHead();
-        const refresh = one<HTMLButtonElement>("[data-refresh]");
-        if (refresh) refresh.hidden = sampleMode || agents.length === 0;
-        returnToChannel();
-      }
       window.requestAnimationFrame(() => name?.focus({ preventScroll: true }));
     };
 
@@ -8121,6 +8257,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          inline comparison this replaced would have killed a valid Retry on every such reply,
          which is the shape of the two defects the channels lane found in the same lines. */
       retireComposerIntentOnAddressMove();
+      channelOverlay = null;
+      const onThisChat = homeRoute.view === "chat" && homeRoute.workspaceId === activeWorkspaceId;
       /* SAMPLE MODE NARROWS LOCALLY, and it is the one place that may. There is no server
          behind this page, so clearing the rows and asking for a page would replace the
          made-up feed with "not connected to CommonSwarm" — measured, before this branch
@@ -8130,14 +8268,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         signals = sampleSignals.filter(
           (signal) => activeChannelId === null || signal.channelId === activeChannelId,
         );
-        syncChannelUrl();
-        renderChannelRail();
-        closeChannelDialog();
-        renderChannelHead();
-        renderFeed();
-        return;
-      }
-      if (changed) {
+        feedReady = true;
+        channelPending = false;
+      } else if (changed) {
         /* The narrowing is the QUERY's, so the loaded page belongs to the channel it was
            fetched for and none of it survives a move. Keeping rows here would show the
            previous channel's messages under this channel's name until the fetch landed. */
@@ -8150,13 +8283,31 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         feedWasEmpty = false;
         deliveryReceiptCache.clear();
         deliveryReceiptRefreshOwner = "";
+        feedReady = false;
+      }
+      closeChannelDialog();
+      renderChannelRail();
+      /* A channel picked from Lists, Files, or Wiki is a request to open chat.
+         The address changes first. Already being on chat only replaces `c`. */
+      if (!onThisChat && activeWorkspaceId) {
+        void navigateHome({
+          view: "chat",
+          workspaceId: activeWorkspaceId,
+          ...(activeChannelId ? { channelId: activeChannelId } : {}),
+        }, "push");
+        return;
+      }
+      if (homeRoute.view === "chat") {
+        const messageId = !changed ? homeRoute.messageId : undefined;
+        homeRoute = {
+          view: "chat",
+          workspaceId: homeRoute.workspaceId,
+          ...(activeChannelId ? { channelId: activeChannelId } : {}),
+          ...(messageId ? { messageId } : {}),
+        };
       }
       syncChannelUrl();
-      renderChannelRail();
-      closeChannelDialog();
-      /* returnToChannel, reached through here, is what loads the new page: it sees an
-         empty signal list and fetches one under the channel now in state. */
-      activateWorkspaceView("signals");
+      returnToChannel();
     };
 
     const setChannelDialogError = (message: string): void => {
@@ -8273,6 +8424,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (!current()) return;
       channels = next;
       channelListFailed = false;
+      /* Same-workspace navigation leaves this read valid. Selecting a channel
+         opens chat, so a pane the address already opened only corrects which
+         channel is current. The chat path below still moves the feed with it. */
+      if (homeRoute.view !== "chat") {
+        const found = unknownChannelId === null ? null : channelById(channels, unknownChannelId);
+        if (found !== null) {
+          activeChannelId = found.channelId;
+          unknownChannelId = null;
+        } else if (activeChannelId !== null && activeChannel()?.archivedAt !== null) {
+          activeChannelId = null;
+        }
+        renderChannelRail();
+        renderChannelHead();
+        renderChannelDialog();
+        applyRoute();
+        return;
+      }
       /* A `?c=` that could not be resolved earlier gets one more chance against this list.
          The workspace open resolves the URL against the list it read, and that read can be
          dropped in favour of a newer one that has not landed yet, leaving a real id resolved
@@ -8708,9 +8876,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const refresh = one<HTMLButtonElement>("[data-refresh]");
       if (refresh) refresh.hidden = true;
       for (const button of all<HTMLButtonElement>("[data-signout]")) button.hidden = true;
+      feedReady = true;
+      channelPending = false;
       homeRoute = { view: "chat", workspaceId: activeWorkspaceId };
       renderChannel(workspaces[0]!);
-      applyHomePane();
     };
 
     const boot = async (): Promise<void> => {
@@ -10184,17 +10353,18 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const workspaceId = activeWorkspaceId;
       const version = requestVersion;
+      const navigation = homeNavigation;
       const purpose = purposeInput === null ? null : purposeInput.value.trim() || null;
       if (submit) submit.disabled = true;
       setChannelDialogStatus(`Creating ${channelLabel(slug)}…`);
       try {
         const created = await createChannel(session, uuid(), workspaceId, slug, purpose);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || homeNavigation !== navigation) return;
         input.value = "";
         if (purposeInput) purposeInput.value = "";
         setChannelDialogStatus(`${channelLabel(created.slug)} is ready.`);
         await refreshChannels(workspaceId, version);
-        if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
+        if (version !== requestVersion || workspaceId !== activeWorkspaceId || homeNavigation !== navigation) return;
         selectChannel(created.channelId);
       } catch (error) {
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;

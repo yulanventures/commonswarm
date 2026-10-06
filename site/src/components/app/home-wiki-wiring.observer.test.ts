@@ -12,7 +12,7 @@ test("Wiki is reachable from the workspace menu and right column using the exist
   assert.match(sideCards, /link\(doc, "Wiki", vm\.hrefs\.wiki, "wiki", vm\.sample\)/);
   assert.equal([...dashboard.matchAll(/wiki: routeHref\(\{ view: "wiki", workspaceId: workspace\.id \}\)/g)].length, 2,
     "the workspace menu and right column both link to this workspace's Wiki");
-  assert.match(dashboard, /homeRoute\.view === "wiki"\) activateWorkspaceView\("brain"\)/);
+  assert.match(dashboard, /else if \(pane === "wiki"\) \{[\s\S]{0,240}showChannelView\("brain"\)/);
   assert.match(dashboard, /data-channel-view="brain"/);
   assert.match(dashboard, /brainTopics\(files, workspaceFileUploaderName\)/);
   assert.match(dashboard, /data-brain-raw-toggle/);

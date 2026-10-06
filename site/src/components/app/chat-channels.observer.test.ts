@@ -838,7 +838,7 @@ test("no view but the feed leaves a channel marked current in the rail", () => {
   /* Files and Brain are not a channel. The channel buttons carry no data-workspace-view on
      purpose, so activateWorkspaceView's own loop never reached them and the rail claimed a
      current channel while the head said Files. Found by a review arm. */
-  const activate = between(dashboard, "const activateWorkspaceView = (", "const closeConnect =");
+  const activate = between(dashboard, "const paintWorkspaceChrome =", "const applyRoute =");
   assert.match(
     activate,
     /if \(view !== "signals"\) \{\s*for \(const button of all<HTMLButtonElement>\("\[data-channel-place\]"\)\) \{\s*button\.removeAttribute\("aria-current"\);/,
