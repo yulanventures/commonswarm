@@ -18,7 +18,7 @@ export type AgentWork = 'working' | 'idle' | 'disconnected';
 export interface AgentWorkFacts {
     transport: 'local' | 'hosted_mcp';
     turn_only: boolean;
-    connection: 'live' | 'removed' | 'key_off' | 'key_ended' | 'paused';
+    connection: 'live' | 'removed' | 'key_off' | 'key_ended' | 'paused' | 'connection_off';
     last_activity_at: string | null;
     messages_waiting_since: string | null;
     doing: {

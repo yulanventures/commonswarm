@@ -135,7 +135,7 @@ function validGate(gate: TodoGate): boolean {
   if (!gate || typeof gate !== 'object') return false;
   switch (gate.kind) {
     case 'none': return true;
-    case 'hold': return gate.note === null || typeof gate.note === 'string' && textLength(gate.note) <= TODO_GATE_NOTE_LIMIT && !gate.note.includes('\0');
+    case 'hold': return gate.note === null || typeof gate.note === 'string' && textLength(gate.note) <= TODO_GATE_NOTE_LIMIT && !hasInvalidControls(gate.note);
     case 'after': return uuid(gate.todo_id);
     case 'at': return typeof gate.at === 'string'
       && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(gate.at)
@@ -309,7 +309,7 @@ export function decideTodo(state: HouseholdTodoState, command: TodoCommand, ctx:
     if (typeof command.body !== 'string' || !command.body.trim() || textLength(command.body) > TODO_COMMENT_LIMIT || hasInvalidControls(command.body)) return refuse('comment_invalid');
     const mentions = command.mentions ?? [];
     if (!Array.isArray(mentions) || mentions.length > TODO_MENTIONS_LIMIT || mentions.some(p => targetRefusal(p) !== null)
-      || new Set(mentions.map(p => JSON.stringify(p))).size !== mentions.length) return refuse('mentions_invalid');
+      || new Set(mentions.map(p => `${p.kind}:${p.id}`)).size !== mentions.length) return refuse('mentions_invalid');
     if (!uuid(ctx.comment_id) || own(state.comments, ctx.comment_id)) throw new RangeError('new server comment ID is required');
     const comment: TodoComment = { comment_id: ctx.comment_id, target, author: actor, body: command.body, mentions, created_at: timestamp };
     const todo = target.kind === 'todo' ? own(state.todos, target.id)! : null;
@@ -545,7 +545,7 @@ export function reduceTodoEvents(initial: HouseholdTodoState, events: readonly T
       case 'TodoCommented': {
         const comment = event.payload.comment;
         if (!comment || !uuid(comment.comment_id) || own(comments, comment.comment_id) || !comment.body?.trim()
-          || textLength(comment.body) > TODO_COMMENT_LIMIT || comment.body.includes('\0') || !Array.isArray(comment.mentions)
+          || textLength(comment.body) > TODO_COMMENT_LIMIT || hasInvalidControls(comment.body) || !Array.isArray(comment.mentions)
           || comment.mentions.length > TODO_MENTIONS_LIMIT || comment.author.user_id !== event.actor_user
           || comment.author.principal_id !== event.actor_agent_principal || comment.created_at !== new Date(event.occurred_at_server).toISOString()) fail('invalid comment');
         if (comment.target.kind === 'todo') {

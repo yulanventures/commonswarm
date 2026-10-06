@@ -478,6 +478,7 @@ test('comment target, text and mentions are validated; tagged comments emit one 
   refused(run(s, { ...command, target: { kind: 'todo', id: third } }), 'target_not_found');
   refused(run(s, { ...command, body: ' ' }), 'comment_invalid');
   refused(run(s, { ...command, mentions: Array(9).fill({ kind: 'user', id: bob }) }), 'mentions_invalid');
+  refused(run(s, { ...command, mentions: [{ kind: 'user', id: bob }, { id: bob, kind: 'user' }] }), 'mentions_invalid');
   refused(run(s, { ...command, mentions: [{ kind: 'agent', id: uid(999) }] }), 'mentions_invalid');
   const object = run(s, { ...command, target: { kind: 'doc', id: 'recipes' } });
   assert.equal(object.outcome.status, 'committed');
@@ -672,6 +673,39 @@ test('agent work status table uses credential facts and recent server activity, 
     [{ doing, last_activity_at: '2026-10-05T12:01:00Z' }, now, 'idle'],
     [{ transport: 'local', turn_only: false }, now, 'idle'], [{ doing }, NaN, 'idle'],
   ];
-  for (const connection of ['removed', 'key_off', 'key_ended', 'paused'] as const) rows.push([{ connection, doing, working_on: claim }, now, 'disconnected']);
+  for (const connection of ['removed', 'key_off', 'key_ended', 'paused', 'connection_off'] as const) rows.push([{ connection, doing, working_on: claim }, now, 'disconnected']);
   for (const [facts, time, expected] of rows) assert.equal(agentWorkState({ ...base, ...facts }, time), expected);
+});
+
+test('AM16 reducer rejects comment controls and hold notes consistently with the decider', () => {
+  const initial = state(todo());
+  const good = run(initial, { kind: 'todo_comment', target: { kind: 'todo', id: first }, body: 'Text\n\t' });
+  assert.equal(good.outcome.status, 'committed');
+  assert.equal(Object.values(reduceTodoEvents(initial, good.events).comments)[0]!.body, 'Text\n\t');
+  for (const code of [1, 8, 11, 13, 31, 127, 128, 159]) {
+    const events = structuredClone(good.events);
+    const event = events.find(e => e.type === 'TodoCommented')!;
+    assert.equal(event.type, 'TodoCommented');
+    if (event.type === 'TodoCommented') {
+      event.payload.comment.body = `Text${String.fromCodePoint(code)}`;
+      const receipt = event.payload.receipt;
+      if (receipt?.outcome.status === 'committed' && 'body' in receipt.outcome.value)
+        receipt.outcome.value.body = event.payload.comment.body;
+    }
+    assert.throws(() => reduceTodoEvents(initial, events), /invalid comment/);
+    refused(run(initial, { kind: 'todo_assign', todo_id: first, base_version: 1,
+      to: { kind: 'agent', id: agentA }, gate: { kind: 'hold', note: `Wait${String.fromCodePoint(code)}` } }), 'gate_invalid');
+  }
+  const held = run(initial, { kind: 'todo_assign', todo_id: first, base_version: 1,
+    to: { kind: 'agent', id: agentA }, gate: { kind: 'hold', note: 'Wait\n\t' } });
+  assert.deepEqual(value(held).gate, { kind: 'hold', note: 'Wait\n\t' });
+  assert.deepEqual(reduceTodoEvents(initial, held.events).todos[first]!.gate, { kind: 'hold', note: 'Wait\n\t' });
+  const invalid = structuredClone(held.events);
+  for (const event of invalid) {
+    if ('todo' in event.payload && event.payload.todo) event.payload.todo.gate = { kind: 'hold', note: 'Wait\u0001' };
+    const receipt = event.payload.receipt;
+    if (receipt?.outcome.status === 'committed' && 'todo_id' in receipt.outcome.value)
+      receipt.outcome.value.gate = { kind: 'hold', note: 'Wait\u0001' };
+  }
+  assert.throws(() => reduceTodoEvents(initial, invalid), /invalid/);
 });

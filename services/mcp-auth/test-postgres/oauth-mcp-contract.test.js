@@ -429,10 +429,14 @@ test('hosted OAuth contract: CIMD and DCR discovery through real consent, PKCE t
         response = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, tokens.access_token, initialized.result.protocolVersion);
         assert.equal(response.status, 200);
         const listed = await response.json();
-        const expectedTools = ['claim_seat', 'whoami', 'check', 'ask', 'note', 'reply', 'working_on', 'members',
-          'object_list', 'object_read', 'object_history', 'object_create', 'object_update'];
-        assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools.sort(),
-          'hosted discovery includes structured objects and excludes gated file transport');
+        // Must match supabase/functions/mcp/tools.ts; hosted-tool-pins.test.ts guards this plain-JS list.
+        const expectedTools = ['ask', 'check', 'claim_seat', 'comment_list', 'members', 'note',
+          'object_create', 'object_history', 'object_list', 'object_read', 'object_update', 'reply',
+          'todo_assign', 'todo_comment', 'todo_create', 'todo_list', 'todo_queue', 'todo_read',
+          'todo_set_state', 'todo_start', 'todo_update', 'whoami', 'working_on'];
+        assert.equal(listed.result.tools.length, 23);
+        assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), expectedTools,
+          'hosted discovery includes structured objects, to-dos and comments and excludes gated file transport');
         assert.ok(listed.result.tools.every(tool => tool.inputSchema?.type === 'object'));
         const grant = await pool.query('SELECT state FROM swarm.hosted_mcp_grants WHERE interaction_ref = $1', [uid]);
         assert.equal(grant.rows[0]?.state, 'active', 'token and MCP success follows actual authority activation');

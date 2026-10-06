@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import * as todos from '../src/protocol/household-todos.js';
 import * as policy from '../src/protocol/household-todo-policy.js';
 import * as accessPolicy from '../src/protocol/household-object-policy.js';
+import { readHouseholdActivity } from '../supabase/functions/command/household-activity.js';
 import { createHouseholdTodoStore } from '../supabase/functions/command/household-todos.js';
+import { executeHouseholdSurface } from '../supabase/functions/command/household-integration.js';
 const reserve = new URL('../supabase/household-todo-reserve/', import.meta.url);
 const release = new URL('../deploy/release-proofs/household-todo/', import.meta.url);
 test('to-do reserve and release contain all three exact SQL proofs', () => {
@@ -24,6 +26,11 @@ const measuredBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.
 function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, approval: Row = {}) {
   const tx = (async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const sql = parts.join('?');
+    if (sql.includes('SELECT archived_at FROM swarm.workspaces')) return [{ archived_at: null }];
+    if (sql.includes('SELECT purpose, owner_user_id')) return [{ purpose: 'shared', owner_user_id: user }];
+    if (sql.includes('SELECT revoked_at FROM swarm.memberships')) return [{ revoked_at: null }];
+    if (sql.includes('SELECT * FROM swarm.household_member_content_roles')) return [{ revoked_at: null, content_role: 'editor', content_consent_id: id(5) }];
+    if (sql.includes('SELECT clock_timestamp() AS now')) return [{ now: at }];
     if (sql.includes('SELECT stream_id,last_seq')) return [{ stream_id: id(4), last_seq: 0 }];
     if (sql.includes('SELECT * FROM swarm.household_todos')) return rows;
     if (sql.includes('SELECT principal_id,accepts_from')) return [];
@@ -42,9 +49,12 @@ function readFixture(rows: Row[], comments: Row[] = [], agent: Row = {}, approva
       actor: { user_id: user, principal_id: null, run_id: null }, credential: { kind: 'human' },
       member: { user_id: user, workspace_id: workspace, revoked_at: null, content_role: 'editor', content_consent_id: id(5) } } }),
     notice: async () => { throw new Error('A read must not post a notice'); } });
-  return async (query: Parameters<typeof store.read>[3]) => {
+  const read = async (query: Parameters<typeof store.read>[3]) => {
     return store.read(tx, workspace, { user_id: user, principal_id: null, run_id: null, connection: null }, query);
   };
+  return Object.assign(read, { surface: (tool: string, args: Row) => executeHouseholdSurface(tx, workspace,
+    { user_id: user, principal_id: null, run_id: null, connection: null }, 'read_request_001',
+    { kind: 'household_tool', tool, arguments: { seat: 'seat_0000000000000000000000', ...args } }, async () => true) });
 }
 function row(n: number, title: string): Row {
   return { workspace_id: workspace, todo_id: id(100 + n), version: 1, title, notes: 'Details stay out of summaries', state: n < 80 ? 'doing' : 'open',
@@ -55,6 +65,40 @@ function row(n: number, title: string): Row {
     gate_kind: n >= 160 && n < 190 ? 'hold' : 'none', gate_note: 'Gate notes stay out of summaries', gate_todo_id: null, gate_at: null, gate_set_by: user,
     queue_rank: n < 190 ? n + 1 : null, state_by_user: user, state_by_principal: null, state_at: at, comment_count: 0 };
 }
+
+test('command reads keep transport status separate from queue work status and preserve refusals', async (t) => {
+  // Synthetic runtime configuration only; no credentials or Storage requests.
+  const deno = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
+  Object.defineProperty(globalThis, 'Deno', { configurable: true, value: { env: { get: (name: string) =>
+    name === 'SUPABASE_URL' ? 'https://storage.invalid' : name === 'SUPABASE_SERVICE_ROLE_KEY' ? 'synthetic-test-only' : undefined } } });
+  t.after(() => { if (deno) Object.defineProperty(globalThis, 'Deno', deno); else Reflect.deleteProperty(globalThis, 'Deno'); });
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('Reads must not use Storage or HTTP'); });
+  const read = readFixture([row(0, 'Working item'), row(80, 'Next item')]);
+  const body = await read.surface('todo_queue', { principal_id: principal });
+  assert.equal(body.status, 'ok');
+  const queue = body.queue as Row & { status: { work: string; facts: Row } };
+  assert.equal(queue.workspace_id, workspace);
+  assert.equal(queue.principal_id, principal);
+  assert.equal(queue.owner_user_id, user);
+  assert.equal(queue.status.work, 'working');
+  assert.deepEqual(queue.status.facts.doing, { todo_id: id(100), title: 'Working item', since: at });
+  assert.deepEqual((queue.up_next as Row[]).map(todo => todo.todo_id), [id(180)]);
+  assert.deepEqual(queue.next_offset, { working: null, up_next: null, not_yet: null, requests: null });
+  assert.equal(body.up_next, undefined, 'the line is carried inside the queue envelope');
+  assert.deepEqual(await read.surface('todo_queue', {}), { status: 'refused', reason: 'principal_required' });
+  assert.equal((await read.surface('todo_list', { scope: 'all' })).status, 'ok');
+  assert.deepEqual(await read.surface('todo_read', { todo_id: id(999) }), { status: 'refused', reason: 'todo_not_found' });
+  for (const title of ['界'.repeat(200), '"'.repeat(200), '\\'.repeat(200)]) {
+    const page = await readFixture(Array.from({ length: 200 }, (_, n) => row(n, title)))
+      .surface('todo_queue', { principal_id: principal });
+    assert.equal(page.status, 'ok');
+    assert.ok(measuredBytes(page) <= 28 * 1024, 'budget includes transport status and nested queue');
+    const pagedQueue = page.queue as Row & { next_offset: { working: number | null } };
+    assert.ok(pagedQueue.next_offset.working !== null, 'worst-case records truncate the queue page');
+    assert.equal(pagedQueue.next_offset.working, (pagedQueue.working as Row[]).length);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
 
 test('a human queue needs an explicit principal; valid queue summaries omit notes and carry one clear flag', async () => {
   const read = readFixture([row(160, 'Held work'), row(190, 'Requested work')]);
@@ -201,4 +245,40 @@ test('AM16 retains the first unexpectedly oversized stored row rather than retur
     assert.equal(result.comments[0]!.comment_id, '00000000-0000-4000-8000-000000002000');
     assert.equal(result.next_offset, 1);
   }
+});
+
+test('catalog ACL proof ignores system and dropped columns while rejecting live column grants', () => {
+  // Independent least-privilege contract. The CI database proof also grants a
+  // live column, observes refusal, drops it, and observes acceptance again.
+  const catalog = readFileSync(new URL('20261006000001-catalog.sql', reserve), 'utf8');
+  assert.match(catalog, /FROM pg_attribute WHERE attrelid=c\.oid AND attnum > 0 AND NOT attisdropped AND attacl IS NOT NULL/);
+});
+
+test('activity reads check consent before querying and again before exposing titles', async () => {
+  const facts: accessPolicy.HouseholdAccessFacts = { workspace_id: workspace, archived_at: null, boundary: { kind: 'shared' },
+    actor: { user_id: user, principal_id: null, run_id: null }, credential: { kind: 'human' },
+    member: { user_id: user, workspace_id: workspace, revoked_at: null, content_role: 'editor', content_consent_id: id(5) } };
+  const identity = { user_id: user, principal_id: null, run_id: null, connection: null };
+  const item = { at: new Date(at), key: 'todo:event', actor: { user_id: user, principal_id: null },
+    event: 'created', title: '<img src=x>', object: { kind: 'todo', id: id(100) } };
+  let queries = 0, checks = 0;
+  const tx = (async () => { queries++; return [item]; }) as unknown as Parameters<typeof readHouseholdActivity>[0];
+  const access = async () => { checks++; return { facts: structuredClone(facts), now: Date.parse(at) }; };
+  const query = { since: '2026-10-01T00:00:00Z', limit: 100 };
+  assert.deepEqual(await readHouseholdActivity(tx, workspace, identity, query, access),
+    { status: 'ok', activity: [{ ...item, at }] });
+  assert.equal(queries, 1); assert.equal(checks, 2);
+  facts.member!.content_consent_id = null;
+  assert.deepEqual(await readHouseholdActivity(tx, workspace, identity, query, access),
+    { status: 'refused', reason: 'content_consent_required' });
+  assert.equal(queries, 1, 'refusal happens before the query');
+  facts.member!.content_consent_id = id(5);
+  let rechecks = 0;
+  const changed = async () => { const checked = await access(); if (++rechecks === 2) checked.facts.member!.content_consent_id = null; return checked; };
+  assert.deepEqual(await readHouseholdActivity(tx, workspace, identity, query, changed),
+    { status: 'refused', reason: 'content_consent_required' });
+  assert.equal(queries, 2, 'the recheck hides an otherwise readable result');
+  for (const invalid of [{ ...query, limit: 101 }, { ...query, since: 'bad-time' }, { ...query, limit: 0 }])
+    assert.deepEqual(await readHouseholdActivity(tx, workspace, identity, invalid, access), { status: 'refused', reason: 'invalid_arguments' });
+  assert.equal(queries, 2, 'invalid paging and dates do not reach SQL');
 });

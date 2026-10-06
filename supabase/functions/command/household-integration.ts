@@ -4,12 +4,14 @@ import type postgres from 'postgres';
 import * as core from '../_shared/protocol.js';
 import { createHouseholdObjectStore, type HouseholdIdentity, type HouseholdCredentialRecheck } from './household-objects.ts';
 import { approveHouseholdConnection, withdrawHouseholdConnection } from './household-permissions.ts';
+import { createHouseholdTodoStore, type HouseholdTodoNoticePort } from './household-todos.ts';
+import { readHouseholdActivity } from './household-activity.ts';
 import * as transfers from './household-transfers.ts';
 import { FILE_BUCKET, fileContentAllowed } from './file-artifacts.ts';
 import type { HouseholdContent, HouseholdRevision } from '../_shared/household-object-events.d.ts';
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection'] as const;
+export const HOUSEHOLD_SURFACE_KINDS = ['household_tool', 'household_draft', 'household_permissions', 'household_access', 'household_connections', 'household_approve_connection', 'household_withdraw_connection', 'household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'] as const;
 const localSeat = core.HOUSEHOLD_LOCAL_SEAT;
 const refused = (reason: string) => ({ status: 'refused', reason });
 export const householdRevisionMetadata = (revision: HouseholdRevision) => ({
@@ -32,10 +34,21 @@ export function householdStore(recheckCredential: HouseholdCredentialRecheck, ne
  * The workspace lock covers preparation, quota, decision and receipt together. */
 export async function executeHouseholdSurface(tx: Sql, workspaceId: string, identity: HouseholdIdentity,
   requestId: string, value: Record<string, unknown>, recheckCredential: HouseholdCredentialRecheck,
-  attachment?: Uint8Array): Promise<Record<string, unknown>> {
+  attachment?: Uint8Array, notice?: HouseholdTodoNoticePort): Promise<Record<string, unknown>> {
   if (value.kind === 'household_approve_connection') return approveHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
   if (value.kind === 'household_withdraw_connection') return withdrawHouseholdConnection(tx, workspaceId, identity, requestId, value, recheckCredential);
+  // Refuse agent credentials before touching any human-only content or input.
+  const humanOnly = ['household_todo_answer', 'household_todo_steer', 'household_agent_work_policy', 'household_activity'].includes(String(value.kind));
+  if (humanOnly && identity.principal_id !== null) return refused('human_confirmation_required');
   const store = householdStore(recheckCredential);
+  const todos = createHouseholdTodoStore({ core: core as unknown as Parameters<typeof createHouseholdTodoStore>[0]['core'], access: store.access,
+    notice: notice ?? (async () => { throw new Error('Household notice port is required for writes.'); }) });
+  if (humanOnly) {
+    const command = core.validateHouseholdHumanCommand(value);
+    if (command.kind === 'household_activity') return readHouseholdActivity(tx, workspaceId, identity, command, store.access);
+    const result = await todos.write(tx, workspaceId, identity, requestId, command);
+    return { ...result.outcome, notices: result.notices, request_id: requestId, replayed: result.replayed };
+  }
   if (value.kind === 'household_connections') {
     if (identity.principal_id !== null || !await recheckCredential(tx, identity)) return refused('human_confirmation_required');
     const access = await store.access(tx, workspaceId, identity);
@@ -95,13 +108,29 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
   if (!access) return refused('workspace_access_refused');
   const denied = core.householdAccessRefusal(access.facts, workspaceId, operation, access.now);
   if (denied) return refused(denied);
+  if (core.HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === value.tool)!.objectTypes.includes('todo')) {
+    const todoInvocation = core.householdToolInvocation(value.tool, args, { workspace_id: workspaceId });
+    if ('query' in todoInvocation) {
+      const query = todoInvocation.query;
+      if (query.kind !== 'todo_list' && query.kind !== 'todo_read' && query.kind !== 'todo_queue' && query.kind !== 'comment_list') return refused('invalid_request');
+      const read = await todos.read(tx, workspaceId, identity, query) as Record<string, unknown>;
+      if (read.status === 'refused') return read;
+      // Keep transport status distinct from the agent's measured work status.
+      return query.kind === 'todo_queue' ? { status: 'ok', queue: read } : { status: 'ok', ...read };
+    }
+    const command = todoInvocation.command;
+    if (command.kind !== 'todo_create' && command.kind !== 'todo_comment' && command.kind !== 'todo_update'
+      && command.kind !== 'todo_assign' && command.kind !== 'todo_start' && command.kind !== 'todo_set_state') return refused('invalid_request');
+    const result = await todos.write(tx, workspaceId, identity, requestId, command);
+    return { ...result.outcome, notices: result.notices, request_id: requestId, replayed: result.replayed };
+  }
   const reservationId = 'upload_' + await transfers.householdSha256(new TextEncoder().encode(JSON.stringify([workspaceId, identity.principal_id ?? identity.user_id, requestId])));
   const state = await store.state(tx, workspaceId, false);
   const previous = state.reservations[reservationId];
   const invocation = core.householdToolInvocation(value.tool, args, { workspace_id: workspaceId,
     upload: { reservation_id: reservationId, expires_at: previous?.expires_at ?? access.now + 15 * 60_000 } });
   if ('query' in invocation) {
-    if ('limit' in invocation.query && invocation.query.limit > 100) return refused('page_limit_exceeded');
+    if ('limit' in invocation.query && invocation.query.limit !== undefined && invocation.query.limit > 100) return refused('page_limit_exceeded');
     if (invocation.query.kind === 'object_read') {
       const result = await store.readBytes(tx, workspaceId, identity, invocation.query);
       if (!('bytes' in result) || result.metadata.kind !== 'object_read') return result;
@@ -110,12 +139,15 @@ export async function executeHouseholdSurface(tx: Sql, workspaceId: string, iden
       return { ...meta, revision: householdRevisionMetadata(meta.revision),
         ...(meta.revision.kind === 'file' ? {} : { content: transfers.decodeHouseholdContent(result.bytes, meta.revision.kind) }) };
     }
+    if (invocation.query.kind !== 'object_list' && invocation.query.kind !== 'object_history' && invocation.query.kind !== 'draft_read') return refused('invalid_request');
     const result = await store.read(tx, workspaceId, identity, invocation.query);
     if (result.status === 'ok' && result.kind === 'object_history') return { ...result,
       revisions: result.revisions.map((revision) => ({ ...householdRevisionMetadata(revision), live: revision.live })) };
     return result;
   }
   const command = invocation.command;
+  if (command.kind !== 'create_household_object' && command.kind !== 'update_household_object'
+    && command.kind !== 'reserve_household_upload' && command.kind !== 'commit_household_upload') return refused('invalid_request');
   let proposal = null;
   if (command.kind === 'create_household_object') proposal = { content: command.content };
   if (command.kind === 'update_household_object') {

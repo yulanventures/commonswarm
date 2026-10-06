@@ -8,6 +8,7 @@ import { MCP_ISSUER, MCP_RESOURCE, McpJwtVerifier } from "../supabase/functions/
 import { createMcpProtocolHandler, PROTECTED_RESOURCE_METADATA_PATH, RESOURCE_METADATA_URL, WWW_AUTHENTICATE } from "../supabase/functions/mcp/protocol.ts";
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { HOSTED_TOOL_TABLE, validateHostedToolArguments, type HostedToolExecutor } from "../supabase/functions/mcp/tools.ts";
+import { HOUSEHOLD_TOOL_REGISTRY } from "../src/protocol/household-tool-registry.js";
 
 // @ts-expect-error TS5097: this service-free test imports the Deno source directly.
 import { HostedToolFailure } from "../supabase/functions/mcp/tool-errors.ts";
@@ -141,7 +142,7 @@ test("Claude initialization negotiates versions before initialized and tools/lis
         const tools = await listed.json();
         ListToolsResultSchema.parse(tools.result);
         assert.equal(tools.id, `${id}-list`);
-        assert.equal(tools.result.tools.length, 13);
+        assert.equal(tools.result.tools.length, 23);
         assert.ok(tools.result.tools.every((tool: { name: unknown; inputSchema: unknown }) =>
           typeof tool.name === "string" && typeof tool.inputSchema === "object"));
         for (const tool of tools.result.tools) {
@@ -186,6 +187,9 @@ test("tools/list preserves coordination titles, safety annotations and OAuth sec
     ["members", "List workspace participants", true, false, true],
   ] as const;
   const tools = envelope.result.tools;
+  // Five existing hosted object tools plus ten to-do/comment tools (files remain gated).
+  assert.equal(tools.length, 23);
+  assert.deepEqual(tools.slice(8).map((tool: { name: string }) => tool.name), HOUSEHOLD_TOOL_REGISTRY.filter(tool => tool.objectTypes.some(kind => kind !== 'file')).map(tool => tool.name));
   assert.deepEqual(tools.slice(0, 8).map((tool: { name: string }) => tool.name), expected.map(([name]) => name));
   for (const [index, [name, title, readOnlyHint, destructiveHint, idempotentHint]] of expected.entries()) {
     await t.test(name, () => {
@@ -519,7 +523,7 @@ test("origin and schema denials include authenticated positive controls", async 
     origin: "https://claude.ai",
   }));
   assert.equal(list.status, 200);
-  assert.equal((await list.json()).result.tools.length, 13);
+  assert.equal((await list.json()).result.tools.length, 23);
 
   const originDenied = await serve(post({ jsonrpc: "2.0", id: 2, method: "tools/list" }, {
     origin: "https://attacker.invalid",
