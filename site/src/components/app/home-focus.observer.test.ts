@@ -10,14 +10,39 @@ import { focusFixture } from "./home-focus.fixture.js";
 
 type CdpSend = (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<Record<string, unknown>>;
 
+const DEVTOOLS_COMMAND_MS = 15_000;
+
 function connectDevtools(url: string): Promise<{ socket: WebSocket; send: CdpSend }> {
   const socket = new WebSocket(url);
   const pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
   let next = 0;
+  const failPending = (message: string) => {
+    const waiters = [...pending.values()];
+    pending.clear();
+    for (const waiter of waiters) waiter.reject(new Error(message));
+  };
   const send: CdpSend = (method, params = {}, sessionId) => new Promise((resolveSocket, rejectSocket) => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      rejectSocket(new Error(`DevTools ${method} was not sent: socket is not open`));
+      return;
+    }
     const id = ++next;
-    pending.set(id, { resolve: resolveSocket, reject: rejectSocket });
-    socket.send(JSON.stringify({ id, method, params, sessionId }));
+    const timer = setTimeout(() => {
+      if (!pending.has(id)) return;
+      pending.delete(id);
+      rejectSocket(new Error(`DevTools ${method} did not answer within 15 seconds`));
+    }, DEVTOOLS_COMMAND_MS);
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(timer); resolveSocket(value); },
+      reject: (error) => { clearTimeout(timer); rejectSocket(error); },
+    });
+    try {
+      socket.send(JSON.stringify({ id, method, params, sessionId }));
+    } catch (error) {
+      pending.delete(id);
+      clearTimeout(timer);
+      rejectSocket(error instanceof Error ? error : new Error(`DevTools ${method} was not sent`));
+    }
   });
   socket.addEventListener("message", (event: MessageEvent) => {
     const message = JSON.parse(String(event.data)) as { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
@@ -27,16 +52,31 @@ function connectDevtools(url: string): Promise<{ socket: WebSocket; send: CdpSen
     if (message.error) waiter.reject(new Error(message.error.message ?? "DevTools command failed"));
     else waiter.resolve(message.result ?? {});
   });
+  // A closed socket never delivers the answer. Rejecting here is what lets Browser.close finish:
+  // Chrome exits and takes the socket with it, so the command response does not arrive.
+  socket.addEventListener("close", () => failPending("DevTools socket closed"));
+  socket.addEventListener("error", () => failPending("DevTools socket failed"));
   return new Promise((resolveSocket, rejectSocket) => {
-    socket.addEventListener("open", () => resolveSocket({ socket, send }));
-    socket.addEventListener("error", () => rejectSocket(new Error("DevTools socket failed")));
+    const timer = setTimeout(() => {
+      rejectSocket(new Error("DevTools socket did not open within 10 seconds"));
+      socket.close();
+    }, 10_000);
+    const finish = (failed: Error | undefined, value?: { socket: WebSocket; send: CdpSend }) => {
+      clearTimeout(timer);
+      if (failed) rejectSocket(failed);
+      else resolveSocket(value!);
+    };
+    socket.addEventListener("open", () => finish(undefined, { socket, send }));
+    socket.addEventListener("error", () => finish(new Error("DevTools socket failed")));
+    socket.addEventListener("close", () => finish(new Error("DevTools socket closed before it opened")));
   });
 }
 
-async function readDevtoolsPort(profile: string): Promise<{ port: string; path: string }> {
+async function readDevtoolsPort(profile: string, stopped: () => boolean): Promise<{ port: string; path: string } | undefined> {
   const file = join(profile, "DevToolsActivePort");
   const started = Date.now();
-  while (Date.now() - started < 15_000) {
+  while (!stopped()) {
+    if (Date.now() - started >= 15_000) throw new Error("Chrome did not write DevToolsActivePort within 15 seconds");
     try {
       const [port, browserPath] = (await readFile(file, "utf8")).split("\n");
       if (port?.trim() && browserPath?.trim()) return { port: port.trim(), path: browserPath.trim() };
@@ -45,7 +85,14 @@ async function readDevtoolsPort(profile: string): Promise<{ port: string; path: 
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
-  throw new Error("Chrome did not write DevToolsActivePort");
+  return undefined;
+}
+
+async function waitForChromeExit(settled: Promise<void>): Promise<void> {
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const timer = setTimeout(() => rejectWait(new Error("Chrome did not exit within 15 seconds of Browser.close")), 15_000);
+    settled.then(() => { clearTimeout(timer); resolveWait(); }, () => { clearTimeout(timer); resolveWait(); });
+  });
 }
 
 async function evaluate(send: CdpSend, sessionId: string, expression: string): Promise<unknown> {
@@ -154,7 +201,8 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
   const profile = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
   let socket: WebSocket | undefined;
-  let closeBrowser: (() => Promise<void>) | undefined;
+  let stopPortRead = false;
+  let portWaitOver = false;
   const launched = launchChrome(await findChrome(), [
     `--user-data-dir=${profile}`,
     "--remote-debugging-port=0",
@@ -162,14 +210,20 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
     "--window-size=1440,900",
     pathToFileURL(fixturePath).href,
   ], { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
+  const chromeSettled = launched.then(() => undefined, () => undefined);
+  const chromeEndedFirst = chromeSettled.then(() => {
+    if (!portWaitOver) throw new Error("Chrome exited before DevToolsActivePort was written");
+  });
   try {
     const endpoint = await Promise.race([
-      readDevtoolsPort(profile),
-      launched.then(() => { throw new Error("Chrome exited before DevToolsActivePort was written"); }),
+      readDevtoolsPort(profile, () => stopPortRead).then((value) => { portWaitOver = true; return value; }),
+      chromeEndedFirst,
     ]);
+    portWaitOver = true;
+    stopPortRead = true;
+    if (!endpoint) throw new Error("Chrome exited before DevToolsActivePort was written");
     const connected = await connectDevtools(`ws://127.0.0.1:${endpoint.port}${endpoint.path.startsWith("/") ? endpoint.path : `/${endpoint.path}`}`);
     socket = connected.socket;
-    closeBrowser = async () => { await connected.send("Browser.close"); };
     const targets = await connected.send("Target.getTargets") as { targetInfos?: Array<{ targetId: string; type: string; url: string }> };
     const page = targets.targetInfos?.find((target) => target.type === "page" && target.url.startsWith("file:"));
     assert.ok(page, "the fixture page did not open");
@@ -207,12 +261,15 @@ test("home refreshes keep rail controls, view headings and workspace menu focus"
       if (check.different) assert.notDeepEqual(check.actual, check.expected, check.name);
       else assert.deepEqual(check.actual, check.expected, check.name);
     }
-    await closeBrowser();
-    await launched;
+    // Browser.close ends the browser before DevTools can answer, so waiting on that command
+    // never settles. The process exit is the completion signal, and it has its own deadline.
+    void connected.send("Browser.close").catch(() => undefined);
+    await waitForChromeExit(chromeSettled);
   } finally {
-    await closeBrowser?.().catch(() => undefined);
+    portWaitOver = true;
+    stopPortRead = true;
     socket?.close();
-    await launched.catch(() => undefined);
+    await chromeSettled;
     await removeOwnedProfile(profile);
   }
 });

@@ -119,15 +119,17 @@ export function peopleRoleSelfConfirmCopy(current: PeopleDialogRole, next: Peopl
 export function peopleRoleReceipt(name: string, role: PeopleDialogRole): string {
   return `${peopleFirstName(name)} is now ${role === "member" ? "a" : "an"} ${role}.`;
 }
-/** Reads the stable code a rejected change carries: the first of `code` and `reason` that names a known refusal, else `code`, else `reason`. Never the message. */
+/** Reads the stable code a rejected change carries: the first of `code` and `reason` that names a known refusal, else `code`, else `reason`. Never the message. A fresh sign-in refusal is named by its class, before any code. */
 export function peopleRoleErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null) return null;
+  if ((error as { name?: unknown }).name === "FreshLoginRequired") return "fresh_auth_required";
   const { code, reason } = error as { code?: unknown; reason?: unknown };
   const found = [code, reason].filter((value): value is string => typeof value === "string");
   return found.find((value) => (PEOPLE_ROLE_REFUSAL_CODES as readonly string[]).includes(value)) ?? found[0] ?? null;
 }
 export function peopleRoleRefusal(code: string | null, name: string, workspaceName?: string): string {
   const first = peopleFirstName(name);
+  if (code === "fresh_auth_required") return "Sign in again, then retry the role change. No membership change was recorded.";
   if (code === "last_owner") return `${workspaceName?.trim() || "This workspace"} needs at least one owner. Make someone else an owner first.`;
   if (code === "role_forbidden") return "Only an owner can change an owner’s role.";
   if (code === "member_not_found") return `${first} is no longer a member. Reload to check.`;
@@ -243,15 +245,23 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       state.roleDraft = { userId: person.id, role: next, confirming: draft?.confirming === true };
       callbacks.render();
       let refusal: string | null = null;
+      let freshSignIn = false;
       try { await callbacks.changeRole({ kind: "change-role", userId: person.id, role: next }); }
-      catch (error) { refusal = peopleRoleRefusal(peopleRoleErrorCode(error), person.name, model.workspaceName); }
+      catch (error) {
+        const code = peopleRoleErrorCode(error);
+        freshSignIn = code === "fresh_auth_required";
+        refusal = peopleRoleRefusal(code, person.name, model.workspaceName);
+      }
       if (!peopleRoleFinishSave(state, person.id, save)) return;
       if (refusal === null) { if (state.roleDraft?.userId === person.id) state.roleDraft = null; state.roleReceipt = { userId: person.id, text: peopleRoleReceipt(person.name, next) }; }
       else {
         state.roleRefusal = { userId: person.id, name: person.name, text: refusal };
         if (state.selected?.type === "person" && state.selected.id === person.id) state.roleDraft = { userId: person.id, role: next, confirming: false, error: refusal };
       }
-      callbacks.render(); refocusRole(person.id, `role-${person.id}`);
+      callbacks.render();
+      // The sign-in controls sit outside this pane. Moving focus back to the role select covers them.
+      if (freshSignIn) doc.querySelector<HTMLElement>("[data-member-reauth] button")?.focus({ preventScroll: true });
+      else refocusRole(person.id, `role-${person.id}`);
     };
     const facts = node(doc, "dl", "pd-fact-sheet"); const row = node(doc, "div", "pd-fact-row");
     const label = node(doc, "dt", "", "Role"); label.id = `pd-role-label-${person.id}`;

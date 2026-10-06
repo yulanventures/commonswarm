@@ -4640,6 +4640,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const detailCue = one<HTMLElement>("[data-people-detail-scroll-cue]"); if (detailCue) detailCue.hidden = !detailMore;
     };
     let peopleDialogFocus: PeopleDialogFocus | undefined;
+    // Remove and a role change share the sign-in block. This names the control the email tells them to press.
+    let memberReauthNext: "remove" | "role" = "remove";
     const renderDialogRoster = (): void => {
       const list = one<HTMLElement>("[data-dialog-agent-list]"); const detail = one<HTMLElement>("[data-people-detail]");
       if (!list || !detail) return;
@@ -4669,7 +4671,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!value || !workspaceId || sampleMode) {
             throw Object.assign(new Error("The role change was not confirmed. Reload to check."), { code: "role_unavailable" });
           }
-          await changeWorkspaceRole(value, uuid(), workspaceId, change.userId, change.role);
+          // A later save must not keep a sign-in prompt from the previous try.
+          memberReauthNext = "remove";
+          const reauthBlock = one<HTMLElement>("[data-member-reauth]"); if (reauthBlock) reauthBlock.hidden = true;
+          const priorError = one<HTMLElement>("[data-member-error]"); if (priorError) { priorError.hidden = true; priorError.textContent = ""; }
+          try {
+            await changeWorkspaceRole(value, uuid(), workspaceId, change.userId, change.role);
+          } catch (error) {
+            if (error instanceof FreshLoginRequired && activeWorkspaceId === workspaceId && session?.user.id === value.user.id) {
+              memberReauthNext = "role";
+              const reauth = one<HTMLElement>("[data-member-reauth]"); if (reauth) reauth.hidden = false;
+              const errorTarget = one<HTMLElement>("[data-member-error]"); if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
+              // Self-role confirmation is its own dialog. The remove confirmation is a different one.
+              one<HTMLDialogElement>("[data-role-confirm]")?.close();
+              one<HTMLElement>("[data-member-reauth] button")?.focus();
+            }
+            throw error;
+          }
           if (workspaceId !== activeWorkspaceId || value.user.id !== session?.user.id) { state.rolePending?.clear(); return; }
           // Refresh facts in place: opening the workspace would discard another person's role draft.
           members = members.map(member => member.userId === change.userId ? { ...member, role: change.role } : member);
@@ -4733,6 +4751,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const memberError = one<HTMLElement>("[data-member-error]"); if (memberError) { memberError.hidden = true; memberError.textContent = ""; }
         try { await removeWorkspaceMember(session, uuid(), workspaceId, id); receipt = `${members.find((member) => member.userId === id)?.name ?? "Person"} removed from this space. Their other spaces are unaffected.`; }
         catch (error) { if (error instanceof FreshLoginRequired && activeWorkspaceId === workspaceId && session?.user.id === userId) {
+          memberReauthNext = "remove";
           sessionStorage.setItem("commonswarm.pending-member-selection", JSON.stringify({ workspaceId, userId: id }));
           const reauth = one<HTMLElement>("[data-member-reauth]"); if (reauth) reauth.hidden = false;
           const errorTarget = one<HTMLElement>("[data-member-error]"); if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
@@ -8837,6 +8856,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         }
       });
     }
+    const memberReauthEmailCopy = (): string => memberReauthNext === "role"
+      ? "Check your email. After signing in, return here and press Save again."
+      : "Check your email. After signing in, return here and press Remove again.";
     one<HTMLButtonElement>("[data-member-reauth-email]")?.addEventListener(
       "click",
       async (event) => {
@@ -8851,8 +8873,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           );
           const target = one<HTMLElement>("[data-member-error]");
           if (target) {
-            target.textContent =
-              "Check your email. After signing in, return here and press Remove again.";
+            target.textContent = memberReauthEmailCopy();
             target.hidden = false;
           }
         } catch (error) {
