@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
@@ -27,6 +27,20 @@ after(() => {
   const cleanup = spawnSync('rm', ['-r', '--', scratch], { encoding: 'utf8' });
   assert.equal(cleanup.status, 0, `fixture cleanup refused ${scratch}: ${cleanup.stderr}`);
 });
+
+// Scrubbed production /etc/caddy/Caddyfile, copied from HezLead's reviewed staging input.
+const productionCaddyfile = `{
+	auto_https off
+	admin unix//run/caddy/admin.sock|0600
+	servers {
+		protocols h1 h2
+		# Cloudflare published ranges, fetched 2026-09-16 from cloudflare.com/ips-v4 and ips-v6 (HezLead owns this block)
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		trusted_proxies_strict
+	}
+}
+import sites/*.caddy
+`;
 
 const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64);
 // Test-data stand-in for the released producer bytes at RELEASE_SHA (never written under repo scripts/).
@@ -54,6 +68,7 @@ import hashlib,io,json,os,pathlib,shutil,socket,subprocess,sys,urllib.request
 root=pathlib.Path(os.environ['W45_ROOT']); cfg=json.loads((root/'fixture.json').read_text())
 name=pathlib.Path(sys.argv[0]).name; args=sys.argv[1:]
 with (root/'commands.jsonl').open('a') as log: log.write(json.dumps([name]+args)+'\n')
+if cfg.get('fail_call')==[name]+args: raise SystemExit(1)
 def refuse(*a,**kw): raise RuntimeError('UNMODELLED '+name+' '+repr(args))
 def owned(value):
     p=pathlib.Path(value)
@@ -144,6 +159,8 @@ elif name=='mkdir':
 elif name=='cp':
     if len(args)==3 and args[0]=='-a' and args[1].endswith('/.'):
         shutil.copytree(owned(args[1]),owned(args[2]),dirs_exist_ok=True)
+        if cfg.get('empty_live_sites'):
+            live=owned(args[1]); live.rename(root/'live-sites-aside'); live.mkdir()
     elif len(args)==2: shutil.copyfile(owned(args[0]),owned(args[1]))
     else: refuse()
 elif name=='chmod' and len(args)==2 and args[0] in ('0700','0644') and cfg.get('install_root'):
@@ -154,12 +171,21 @@ elif name=='chmod':
 elif name=='caddy':
     if args not in [['validate','--config',str(root/'stage/Caddyfile'),'--adapter','caddyfile'],['validate','--config',str(root/'etc/caddy/Caddyfile'),'--adapter','caddyfile']]: refuse()
     if not owned(args[2]).is_file(): refuse()
+    if cfg.get('real_caddy_binary'):
+        # Run the real dependency from the live config directory, not the candidate directory.
+        os.chdir(root/'etc/caddy')
+        os.environ['XDG_CONFIG_HOME']=str(root/'caddy-config')
+        os.environ['XDG_DATA_HOME']=str(root/'caddy-data')
+        os.execv(cfg['real_caddy_binary'],[cfg['real_caddy_binary']]+args)
     if cfg.get('caddy_status',0): print('synthetic validation rejected')
     raise SystemExit(cfg.get('caddy_status',0))
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_run':
-    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check']]: refuse()
+    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
+    if args==['ai-recycle-rollback']:
+        dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
+        if dropin.exists(): dropin.unlink()
     # The shared backup receipt validator's verdict; its content checks run from plan bytes in admin-release-plan.test.ts.
     if args==['ai-backup-gate-check'] and cfg.get('backup_gate_refused'): raise SystemExit(1)
 elif name=='ai_db':
@@ -174,9 +200,14 @@ elif name=='date':
     if args!=['-u','+%Y-%m-%dT%H:%M:%SZ']: refuse()
     print('2026-10-03T12:00:00Z')
 elif name=='systemctl' and args==['is-active','--quiet','fixture-recycle.timer']:
-    raise SystemExit(0 if cfg.get('timer_active') else 3)
+    active=(root/'timer-state').read_text()=='active' if (root/'timer-state').exists() else cfg.get('timer_active')
+    raise SystemExit(0 if active else 3)
 elif name=='systemctl':
-    if args==['stop','fixture-recycle.timer'] or args==['reload','caddy']: pass
+    if args==['stop','fixture-recycle.timer']:
+        (root/'timer-state').write_text('inactive')
+    elif args==['start','fixture-recycle.timer']:
+        (root/'timer-state').write_text('active')
+    elif args==['reload','caddy']: pass
     elif args==['show','-p','ActiveState','--value','fixture-recycle.service']: print('inactive')
     elif args==['daemon-reload'] and cfg.get('install_root'): pass
     elif args==['cat','fixture-recycle.service'] and cfg.get('install_root'):
@@ -187,20 +218,30 @@ elif name=='cmp':
     if len(args)!=3 or args[0]!='-s': refuse()
     raise SystemExit(0 if owned(args[1]).read_bytes()==owned(args[2]).read_bytes() else 1)
 elif name=='ln':
-    if len(args)!=3 or args[0]!='-s': refuse()
-    owned(args[2]).symlink_to(owned(args[1]),target_is_directory=True)
+    # The plan uses -sfT: an existing temporary link is replaced, never followed.
+    if len(args)!=3 or args[0]!='-sfT': refuse()
+    link=owned(args[2])
+    if link.is_symlink(): link.unlink()
+    elif link.exists(): raise SystemExit(1)
+    link.symlink_to(owned(args[1]),target_is_directory=True)
 elif name=='mv':
     if len(args)!=3 or args[0]!='-Tf': refuse()
     owned(args[1]).replace(owned(args[2]))
 elif name=='docker':
     edge=str(root/'edge/releases'/cfg['sha']); compose=edge+'/deploy/edge-runtime'
     if args==['inspect','--format','{{.State.Health.Status}}','commonswarm-edge-edge-runtime-1']: print('healthy')
+    elif args==['inspect','--format','{{.Image}}','commonswarm-edge-edge-runtime-1']: print(cfg.get('running_image',cfg['image']))
+    elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.working_dir"}}','commonswarm-edge-edge-runtime-1']:
+        print(cfg.get('working_dir',(root/'edge-working-dir').read_text()))
     elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.config_files"}}','commonswarm-edge-edge-runtime-1']:
         old=str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime'); print(old+'/compose.yaml,'+old+'/compose.override.yaml')
     elif args==['inspect','commonswarm-edge-edge-runtime-1']:
         print(json.dumps([{'Image':cfg['image'],'State':{'Health':{'Status':'healthy'}},'Config':{'Labels':{'com.docker.compose.project.working_dir':compose}},'HostConfig':{'NetworkMode':'commonswarm-net','Memory':2147483648},'Mounts':[{'Destination':dest,'Source':edge+'/'+rel,'RW':False} for dest,rel in [('/home/deno/main','deploy/edge-runtime/main'),('/home/deno/functions-source','supabase/functions'),('/var/src','src')]]}]))
     elif args==['compose','--project-name','commonswarm-edge','-f',compose+'/compose.yaml','-f',compose+'/compose.override.yaml','up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']:
         if os.environ.get('COMMONSWARM_EDGE_NETWORK_MODE')!='commonswarm-net': refuse()
+    elif args==['compose','--project-name','commonswarm-edge','-f',str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime/compose.yaml'),'-f',str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime/compose.override.yaml'),'up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']:
+        if os.environ.get('COMMONSWARM_EDGE_NETWORK_MODE')!='commonswarm-net': refuse()
+        (root/'edge-working-dir').write_text(str(root/'edge/releases'/cfg['baseline']/'deploy/edge-runtime'))
     else: refuse()
 elif name=='timeout':
     expected='until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done'
@@ -213,9 +254,20 @@ elif name=='awk':
     if args!=['{print $1}']: refuse()
     print(sys.stdin.read().split()[0])
 elif name=='install':
+    if args==['-d','-o','root','-g','root','-m','0700',str(root/'edge/failed-attempts')]:
+        owned(args[7]).mkdir(exist_ok=True); owned(args[7]).chmod(0o700); raise SystemExit(0)
     if len(args)!=8 or args[:6]!=['-o','root','-g','root','-m','0644']: refuse()
     if args[7] not in [str(root/'etc/caddy/sites/20-commonswarm-mcp.caddy'),str(root/'etc/caddy/sites/10-commonswarm-api.caddy')]: refuse()
     shutil.copyfile(owned(args[6]),owned(args[7])); owned(args[7]).chmod(0o644)
+elif name=='readlink':
+    if args!=['-f',str(root/'edge/current')]: refuse()
+    print(owned(args[1]).resolve())
+elif name=='cat':
+    if len(args)!=1 or not args[0].endswith('.sh'): refuse()
+    sys.stdout.write(owned(args[0]).read_text())
+elif name=='stat':
+    if args!=['-c','%a %u %g',str(root/'edge/failed-attempts')]: refuse()
+    p=owned(args[2]); print(str(oct(p.stat().st_mode & 0o777)[2:])+' '+cfg.get('aside_owner','0 0'))
 else: refuse()
 `;
 
@@ -251,7 +303,7 @@ function fixture(config: Record<string, unknown> = {}) {
   chmodSync(join(bin, '_dispatch'), 0o700);
   for (const name of ['python3', 'node', 'ssh', 'psql', 'docker', 'curl', 'caddy', 'systemctl', 'sudo', 'git',
     'npm', 'npx', 'open', 'osascript', 'wget', 'op', 'mkdir', 'cp', 'chmod', 'ai_deadline', 'ai_run', 'ai_db',
-    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install', 'dirname']) symlinkSync('_dispatch', join(bin, name));
+    'ai_ro', 'date', 'cmp', 'ln', 'mv', 'timeout', 'sha256sum', 'awk', 'install', 'dirname', 'readlink', 'stat', 'cat']) symlinkSync('_dispatch', join(bin, name));
   // Synthetic active box baseline, as in the original diagnostic fixtures.
   // Repository templates are historical OAuth-only files, not this block's box input.
   for (const [file, bytes] of [
@@ -261,7 +313,7 @@ function fixture(config: Record<string, unknown> = {}) {
     put('stage/' + file, bytes);
     put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
   }
-  const caddyfile = 'import /etc/caddy/sites/*.caddy\n';
+  const caddyfile = typeof config.caddyfile === 'string' ? config.caddyfile : productionCaddyfile;
   // The remapped root is also used in the fixture baseline config's import.
   const fixtureCaddyfile = caddyfile.replace('/etc/caddy', join(root, 'etc/caddy'));
   put('etc/caddy/Caddyfile', fixtureCaddyfile); data.baseline_caddyfile_sha256 = hash(fixtureCaddyfile);
@@ -282,14 +334,7 @@ function fixture(config: Record<string, unknown> = {}) {
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
     const opening = steps[0] === 'ai-w5-preflight';
-    let source = steps.map(block).join('\n');
-    for (const [from, to] of [
-      ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
-      ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
-      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
-      ['/etc/systemd/system', join(root, 'systemd')],
-      ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
-    ] as const) source = source.split(from).join(to);
+    const source = remap(steps.map(step => step.startsWith('#') ? step : block(step)).join('\n'));
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
       cwd: root, env: { ...process.env, PATH: bin, PYTHONDONTWRITEBYTECODE: '1', W45_ROOT: root,
@@ -303,12 +348,22 @@ function fixture(config: Record<string, unknown> = {}) {
     });
     assert.ifError(result.error); assert.equal(result.signal, null);
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
-    for (const file of ['caddy-validate.log', 'caddy-live-validate.log', 'edge-apply.log'])
+    for (const file of ['caddy-validate.log', 'caddy-live-validate.log', 'edge-apply.log', 'caddy-rollback.log', 'edge-rollback.log'])
       if (existsSync(join(stage, file))) assert.doesNotMatch(readFileSync(join(stage, file), 'utf8'), /UNMODELLED/);
     return { ...result, calls: lines('commands.jsonl'), requests: lines('http.jsonl') };
   }
+  function remap(source: string) {
+    for (const [from, to] of [
+      ['/Users/yulanbot/work/hm37-live-release', receipts], ['/etc/caddy', join(root, 'etc/caddy')],
+      ['/home/commonswarm/edge', join(root, 'edge')], ['/home/commonswarm/.env', join(root, 'box/.env')],
+      ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')], ['/proof/measure.sql', join(proof, 'measure.sql')],
+      ['/etc/systemd/system', join(root, 'systemd')],
+      ['/usr/local/libexec', join(root, 'libexec')], ['/etc/commonswarm-admin-release', join(root, 'admin-release')],
+    ] as const) source = source.split(from).join(to);
+    return source;
+  }
   function lines(path: string): any[] { return readFileSync(join(root, path), 'utf8').trim().split('\n').filter(Boolean).map(s => JSON.parse(s)); }
-  return { root, site, stage, proof, goodClose, later, put, run,
+  return { root, site, stage, proof, goodClose, later, put, run, remap,
     closedRoot: join(receipts, `${data.release_sha}-W5-${data.window_id}`) };
 }
 type Fixture = ReturnType<typeof fixture>;
@@ -322,15 +377,185 @@ function stopped(f: Fixture, r: Result, text: string) {
   assert.ok(!existsSync(f.later), 'no later shell side effect');
 }
 function requestPairs(r: Result) { return r.requests.map(q => [q.method, q.url]); }
+
+const rollbackShim = `# test shim: source the plan's timer guard, recovery and edge aside; stub the recycle removal boundary
+ai_run() {
+ case "$1" in
+  ai-timer-guard) command ai_run "$@" || return $?; eval "$(cat "$W45_ROOT/timer.sh")";;
+  ai-w4-timer-recovery) eval "$(cat "$W45_ROOT/recovery.sh")";;
+  ai-release-aside) eval "$(cat "$W45_ROOT/aside.sh")";;
+  *) command ai_run "$@";;
+ esac
+}`;
+function rollbackFixture(config: Record<string, unknown> = {}, ignored = false) {
+  const f = fixture({ timer_active: true, ...config });
+  const mode = (source: string) => ignored ? source.replace('set -euo pipefail', 'set +e') : source;
+  f.put('timer.sh', f.remap(mode(block('ai-timer-guard'))));
+  f.put('recovery.sh', f.remap(mode(block('ai-w4-timer-recovery'))));
+  f.put('aside.sh', f.remap(mode(block('ai-release-aside'))));
+  f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.yaml`, 'baseline compose\n');
+  f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'baseline override\n');
+  f.put(`edge/releases/${sha}/RELEASE_SHA`, sha+'\n');
+  symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current'));
+  symlinkSync(join(f.root,'edge/releases',sha),join(f.root,'edge/current.admin-issuance'));
+  f.put('edge-working-dir',join(f.root,'edge/releases',sha,'deploy/edge-runtime'));
+  f.put('timer-state','active');
+  f.put('etc/caddy/sites/20-commonswarm-mcp.caddy','failed candidate MCP\n');
+  f.put('etc/caddy/sites/10-commonswarm-api.caddy','failed candidate API\n');
+  f.put('systemd/fixture-recycle.service.d/50-admin-measurement.conf','failed attempt hook\n');
+  return f;
+}
+const ignoredRollback = '# modelled ignored errexit (left side of ||)\n( ' + block('ai-w4-rollback').replace('set -euo pipefail','set +e') + '\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+test('same-version retry / w4-rollback-moves-tree-aside: baseline compose and Caddy restored, timer re-armed, evidence kept, rerun idempotent', () => {
+  for(const ignored of [false,true]) {
+    const f=rollbackFixture({},ignored), steps=[rollbackShim,ignored ? ignoredRollback : 'ai-w4-rollback'];
+    const r=f.run(steps); pass(f,r);
+    const dest=join(f.root,'edge/failed-attempts',`${sha}-W4-Fix123`);
+    assert.ok(!existsSync(join(f.root,'edge/releases',sha)));
+    assert.equal(readFileSync(join(dest,'RELEASE_SHA'),'utf8'),sha+'\n');
+    assert.equal(statSync(join(f.root,'edge/failed-attempts')).mode & 0o777,0o700);
+    assert.equal(realpathSync(join(f.root,'edge/current')),join(f.root,'edge/releases',baseline));
+    assert.ok(!existsSync(join(f.root,'edge/current.admin-issuance')));
+    for(const [source,target] of [['mcp.caddy','20-commonswarm-mcp.caddy'],['api.caddy','10-commonswarm-api.caddy']])
+      assert.deepEqual(readFileSync(join(f.root,'etc/caddy/sites',target)),readFileSync(join(f.stage,source)));
+    assert.ok(!existsSync(join(f.root,'systemd/fixture-recycle.service.d/50-admin-measurement.conf')));
+    assert.equal(readFileSync(join(f.root,'timer-state'),'utf8'),'active');
+    const record=JSON.parse(readFileSync(join(f.proof,'edge-aside.json'),'utf8'));
+    assert.deepEqual({...record,at:'x'},{part:'edge',release_sha:sha,window:'W4',window_id:'Fix123',from:join(f.root,'edge/releases',sha),to:dest,moved:true,at:'x'});
+    const compose=r.calls.findIndex(c=>c[0]==='docker' && c[1]==='compose');
+    const aside=r.calls.findIndex(c=>c[0]==='install' && c[1]==='-d');
+    assert.ok(compose>=0 && aside>compose,'move only after the baseline compose is live');
+    const saved=readFileSync(join(f.proof,'edge-aside.json'));
+    const again=f.run(steps); pass(f,again); assert.match(again.stdout,/already done/);
+    assert.deepEqual(readFileSync(join(f.proof,'edge-aside.json')),saved);
+  }
+  const none=rollbackFixture();
+  const erase=spawnSync('rm',['-r','--',join(none.root,'edge/releases',sha)],{encoding:'utf8'}); assert.equal(erase.status,0,erase.stderr);
+  pass(none,none.run([rollbackShim,'ai-w4-rollback']));
+  assert.equal(JSON.parse(readFileSync(join(none.proof,'edge-aside.json'),'utf8')).moved,false);
+});
+test('same-version retry / w4-rollback-refusals: each failure stops before the aside and completion, also with ignored errexit', () => {
+  // Baseline regression control: ignored errexit used to hide a failed recycle rollback and move the tree anyway.
+  const retryBaseline = spawnSync('git', ['cat-file', '-e', '50759707^{commit}']);
+  assert.equal(retryBaseline.status, 0, 'baseline commit 50759707 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin 50759707)');
+  const before=spawnSync('git',['show','50759707:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'],{encoding:'utf8'});
+  assert.equal(before.status,0,before.stderr);
+  const old=[...before.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m=>m[1]!).find(b=>b.startsWith('# step: ai-w4-rollback\n'))!;
+  const control=rollbackFixture({fail_call:['ai_run','ai-recycle-rollback']},true);
+  const oldIgnored='# modelled ignored errexit (left side of ||)\n( '+old.replace('set -euo pipefail','set +e')+'\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+  const escaped=control.run([rollbackShim,oldIgnored]); pass(control,escaped);
+  assert.match(escaped.stdout,/Apply body completed/); assert.ok(existsSync(join(control.proof,'edge-aside.json')));
+  assert.ok(escaped.calls.some(c=>c[0]==='ai_run' && c[1]==='ai-recycle-rollback'),'the control reached the failed step');
+  type Fault = [string,(f: Fixture)=>Record<string,unknown>,string];
+  const call=(argv: string[])=>({fail_call:argv});
+  const failures: Fault[] = [
+    ['database close',()=>call(['ai_db','-q','--command','BEGIN; SET LOCAL ROLE commonswarm_admin_release; UPDATE commonswarm_oauth.admin_cutover_state SET admin_issuance_enabled=false,invalidated_at=statement_timestamp(),release_generation=release_generation+1 WHERE singleton; COMMIT;']),'issuance close and invalidation expected committed got failure'],
+    ['timer guard',()=>call(['ai_run','ai-timer-guard']),'timer guard expected installed got failure'],
+    ['timer stop',()=>call(['systemctl','stop','fixture-recycle.timer']),'recycle timer stop expected success got failure'],
+    ['recycle removal',()=>call(['ai_run','ai-recycle-rollback']),'recycle rollback expected success got failure'],
+    ...(['mcp','api'] as const).map((name): Fault=>[name+' restore',f=>call(['install','-o','root','-g','root','-m','0644',join(f.stage,name+'.caddy'),join(f.root,'etc/caddy/sites',name==='mcp'?'20-commonswarm-mcp.caddy':'10-commonswarm-api.caddy')]),`baseline ${name==='mcp'?'MCP':'API'} Caddy restore expected success got failure`]),
+    ['validation',()=>({caddy_status:1}),'baseline Caddy validation expected success got failure'],
+    ['reload',()=>call(['systemctl','reload','caddy']),'Caddy reload expected success got failure'],
+    ['env mismatch',f=>{f.put('box/.env','different\n'); return {};},'edge.env bytes expected identical got different-or-unreadable'],
+    ['temporary link',f=>call(['ln','-sfT',join(f.root,'edge/releases',baseline),join(f.root,'edge/current.admin-issuance')]),'baseline temporary link expected replaced got failure'],
+    ['current switch',f=>call(['mv','-Tf',join(f.root,'edge/current.admin-issuance'),join(f.root,'edge/current')]),'edge current switch expected success got failure'],
+    ['compose',f=>call(['docker','compose','--project-name','commonswarm-edge','-f',join(f.root,'edge/releases',baseline,'deploy/edge-runtime/compose.yaml'),'-f',join(f.root,'edge/releases',baseline,'deploy/edge-runtime/compose.override.yaml'),'up','-d','--no-build','--pull','never','--force-recreate','edge-runtime']),'baseline compose up expected success got failure'],
+    ['health',()=>call(['timeout','90','/bin/bash','-c','until test "$(docker inspect --format "{{.State.Health.Status}}" commonswarm-edge-edge-runtime-1)" = healthy; do sleep 2; done']),'baseline edge health expected healthy got timeout-or-failure'],
+    ['image query',()=>call(['docker','inspect','--format','{{.Image}}','commonswarm-edge-edge-runtime-1']),'running image expected readable got failure'],
+    ['image mismatch',()=>({running_image:'sha256:'+'d'.repeat(64)}),'running image expected baseline got other'],
+    ['baseline image missing',f=>{const d=JSON.parse(readFileSync(join(f.root,'inputs.json'),'utf8')); delete d.baseline_edge_image; f.put('inputs.json',d); return {};},'baseline_edge_image expected readable got failure'],
+    ['readlink',f=>call(['readlink','-f',join(f.root,'edge/current')]),'edge current expected baseline got other'],
+    ['aside install',f=>call(['install','-d','-o','root','-g','root','-m','0700',join(f.root,'edge/failed-attempts')]),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['aside owner',()=>({aside_owner:'501 20'}),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['live failed tree',f=>({working_dir:join(f.root,'edge/releases',sha,'deploy/edge-runtime')}),'failed-attempt tree expected moved-aside-or-absent got refused'],
+    ['aside collision',f=>{mkdirSync(join(f.root,'edge/failed-attempts',`${sha}-W4-Fix123`),{recursive:true}); return {};},'failed-attempt tree expected moved-aside-or-absent got refused'],
+  ];
+  for(const [name,fault,message] of failures) for(const ignored of [false,true]) {
+    const f=rollbackFixture({},ignored), cfg=JSON.parse(readFileSync(join(f.root,'fixture.json'),'utf8'));
+    f.put('fixture.json',{...cfg,...fault(f)});
+    const r=f.run([rollbackShim,ignored?ignoredRollback:'ai-w4-rollback']);
+    stopped(f,r,`FAIL ai-w4-rollback: ${message}; STOP`);
+    if(ignored) assert.match(r.stderr,/CALLER: rollback failure seen/,name);
+    assert.ok(existsSync(join(f.root,'edge/releases',sha)),name+' leaves the failed tree');
+    assert.ok(!existsSync(join(f.proof,'edge-aside.json')),name+' writes no aside receipt');
+    assert.doesNotMatch(r.stdout,/Apply body completed/);
+    assert.equal(readFileSync(join(f.root,'timer-state'),'utf8'),'active',name+' timer is re-armed or was never stopped');
+  }
+});
 const gate = 'https://mcp.commonswarm.com/admin/gate';
 const post = 'https://api.commonswarm.com/admin';
 const probes = ['ai-w4-probes'];
 const gateFailure = (method: string) => `FAIL ai-w4-probes: ${method} /admin/gate status/ACAO/cache/body-length expected 200/*/no-store/<=4096 got 200/non-wildcard-or-missing/no-store/${method === 'GET' ? 19 : 0}; Origin expected commonswarm-site got commonswarm-site; STOP`;
 
+test('C1-5 Caddy imports: production relative and absolute forms validate candidate routes with empty live sites', () => {
+  // Caddy is a test prerequisite, not a daemon: only validate/adapt are called.
+  const located = spawnSync('/bin/sh', ['-c', 'command -v caddy'], { encoding: 'utf8' });
+  const binary = realpathSync(process.env.C1_CADDY_BINARY || located.stdout.trim() || resolve('scratchpad/c1-5-tools/caddy'));
+  assert.equal(spawnSync(binary, ['version'], { encoding: 'utf8' }).status, 0, 'working Caddy binary required');
+  const log = '\n\tlog {\n\t\tformat filter {\n\t\t\twrap json\n\t\t\tfields {\n\t\t\t\trequest>Authorization delete\n\t\t\t\tresp_headers>Authorization delete\n\t\t\t}\n\t\t}\n\t}\n';
+  for (const [form, input] of [
+    ['relative', productionCaddyfile],
+    ['absolute', productionCaddyfile.replace('import sites/*.caddy', 'import /etc/caddy/sites/*.caddy')],
+  ] as const) {
+    const f = fixture({ caddyfile: input, real_caddy_binary: binary, empty_live_sites: true });
+    // Valid minimal site configs retain the real candidate generator's anchors.
+    for (const [file, bytes] of [
+      ['mcp.caddy', '(mcp_oauth_active) {\n respond /oauth-fixture "baseline"\n}\n(mcp_resource_active) {\n respond /mcp-fixture "baseline"\n}\nmcp.commonswarm.com {\n import mcp_oauth_active\n import mcp_resource_active\n' + log + '}\n'],
+      ['api.caddy', 'api.commonswarm.com {\n\t@edge_functions path /functions/v1 /functions/v1/*\n' + log + '}\n'],
+    ] as const) {
+      f.put('stage/' + file, bytes);
+      f.put('etc/caddy/sites/' + (file === 'mcp.caddy' ? '20-commonswarm-mcp.caddy' : '10-commonswarm-api.caddy'), bytes);
+    }
+    const liveConfig = readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8');
+    const r = f.run(['ai-w4-caddy-candidate']);
+    assert.equal(r.status, 0, r.stderr + readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'));
+    pass(f, r);
+    assert.deepEqual(readdirSync(join(f.root, 'etc/caddy/sites')), [], 'live sites are empty during real validation');
+    assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), liveConfig, 'live Caddyfile bytes preserved');
+    const target = form === 'relative' ? 'sites/*.caddy' : join(f.stage, 'sites/*.caddy');
+    assert.equal(readFileSync(join(f.stage, 'Caddyfile'), 'utf8'), productionCaddyfile.replace('import sites/*.caddy', 'import ' + target));
+    assert.match(readFileSync(join(f.stage, 'caddy-validate.log'), 'utf8'), /Valid configuration/);
+    const adapted = spawnSync(binary, ['adapt', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+    });
+    assert.equal(adapted.status, 0, adapted.stderr);
+    const config = JSON.parse(adapted.stdout);
+    assert.match(JSON.stringify(config), /\/functions\/v1\/admin/);
+    assert.match(JSON.stringify(config), /127\.0\.0\.1:3490/);
+    // Negative dependency control: invalid candidate site bytes must fail real validation,
+    // even while the live directory is empty (an empty glob alone would validate).
+    f.put('stage/sites/10-commonswarm-api.caddy', 'invalid_candidate_directive {\n');
+    const invalid = spawnSync(binary, ['validate', '--config', join(f.stage, 'Caddyfile'), '--adapter', 'caddyfile'], {
+      cwd: join(f.root, 'etc/caddy'), encoding: 'utf8', timeout: 15_000,
+    });
+    assert.notEqual(invalid.status, 0, 'validation reads candidate site files');
+  }
+});
+
+test('C1-5 Caddy imports: zero, duplicate, other-target and mixed imports refuse exactly before validation', () => {
+  const control = fixture(); pass(control, control.run(['ai-w4-caddy-candidate']));
+  const prefix = 'FAIL ai-w4-caddy-candidate: Caddy imports expected exactly one of ["import sites/*.caddy", "import /etc/caddy/sites/*.caddy"] got ';
+  for (const [input, found] of [
+    ['', '[]'],
+    ['import sites/*.caddy\nimport sites/*.caddy\n', '["import sites/*.caddy", "import sites/*.caddy"]'],
+    ['import other/*.caddy\n', '["import other/*.caddy"]'],
+    ['import sites/*.caddy\nimport /etc/caddy/sites/*.caddy\n', '["import sites/*.caddy", "import /etc/caddy/sites/*.caddy"]'],
+    ['import sites/*.caddy\nimport other/*.caddy\n', '["import sites/*.caddy", "import other/*.caddy"]'],
+  ] as const) {
+    const f = fixture({ caddyfile: input }); const r = f.run(['ai-w4-caddy-candidate']);
+    const expected = (prefix + found + '; STOP').replaceAll('/etc/caddy', join(f.root, 'etc/caddy'));
+    stopped(f, r, expected);
+    assert.equal(r.stderr, expected + '\n', 'one exact failure line, without traceback');
+    assert.ok(!r.calls.some(c => c[0] === 'caddy'), 'invalid import never reaches validation');
+    assert.ok(!existsSync(join(f.stage, 'Caddyfile')), 'no candidate config written on refusal');
+    assert.equal(readFileSync(join(f.root, 'etc/caddy/Caddyfile'), 'utf8'), input.replaceAll('/etc/caddy', join(f.root, 'etc/caddy')));
+  }
+});
+
 test('edge-caddy-route / canonical-api-admin-route: fails closed when canonical POST misses the verifier', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', ...probes]); pass(good, r);
-  // Caddy snippets are global: the MCP candidate defines the snippet imported by API.
-  assert.match(readFileSync(join(good.stage, 'mcp.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\n/);
+  // The lexical API candidate defines shared snippets before both sites use them.
+  assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /rewrite \* \/functions\/v1\/admin\n/);
   assert.match(readFileSync(join(good.stage, 'api.new.caddy'), 'utf8'), /import admin_resource_active/);
   assert.deepEqual(requestPairs(r), [['GET', gate], ['HEAD', gate], ['POST', post]]);
   const bad = fixture({ post_status: 200 }); const refused = bad.run(['ai-w4-caddy-candidate', ...probes]);
@@ -350,6 +575,14 @@ test('edge-caddy-route / mcp-get-head-gate-cors: fails closed on a non-wildcard 
   }
 });
 
+test('same-version retry / w4-temporary-link-replaced: a current.admin-issuance link left by an interrupted switch is replaced, never followed', () => {
+  const f = fixture(); mkdirSync(join(f.root, 'edge/releases', baseline), { recursive: true });
+  symlinkSync(join(f.root, 'edge/releases', baseline), join(f.root, 'edge/current.admin-issuance'));
+  const r = f.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(f, r);
+  assert.equal(realpathSync(join(f.root, 'edge/current')), join(f.root, 'edge/releases', sha));
+  assert.ok(!existsSync(join(f.root, 'edge/releases', baseline, sha)), 'no link created inside the baseline release');
+  assert.ok(r.calls.some(c => c[0] === 'ln' && c[1] === '-sfT'));
+});
 test('backup-restore-gate / w4-apply-mutation-boundary: ai-w4-apply validates the backup receipt right before its first database mutation', () => {
   const good = fixture(); const r = good.run(['ai-w4-caddy-candidate', 'ai-w4-apply']); pass(good, r);
   const gate = r.calls.findIndex(c => c[0] === 'ai_run' && c[1] === 'ai-backup-gate-check');
@@ -549,7 +782,7 @@ test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses
   symlinkSync(join(linked.root, 'real-override.yaml'), join(linked.root, `edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`));
   guardRefused(linked, linked.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: baseline compose.override.yaml expected not-symlink got symlink; STOP');
   const present = fixture(); ready(present); mkdirSync(join(present.root, 'edge/releases', sha));
-  guardRefused(present, present.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected absent got present; STOP');
+  guardRefused(present, present.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected absent got present; a W4 at this release left it without a completed rollback: run ai-w4-rollback in this window (it moves the tree to ' + join(present.root, 'edge') + '/failed-attempts/<release_sha>-W4-<this window_id>), close recovered, then open a new W4 window; STOP');
   const dangling = fixture(); ready(dangling); symlinkSync(join(dangling.root, 'absent-edge'), join(dangling.root, 'edge/releases', sha));
   guardRefused(dangling, dangling.run(['ai-w4-preflight']), 'FAIL ai-w4-preflight: new edge release directory expected not-symlink got symlink; STOP');
   assert.ok(!existsSync(join(dangling.root, 'absent-edge')));
