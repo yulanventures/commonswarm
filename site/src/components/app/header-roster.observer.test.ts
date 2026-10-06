@@ -63,7 +63,7 @@ test("pending access keeps the header management door reachable before the first
   // A real workspace always keeps the door, even with no agents or a failed pending read.
   assert.match(shell, /people: !vm.sample/);
   assert.match(shell, /if \(doors.people\)/);
-  assert.match(dashboard, /openPeople: openRosterDialog/);
+  assert.match(dashboard, /openPeople: \(\) => openRosterDialog\(\)/);
   assert.match(dashboard, /buildPhoneTopBar\(document, vm, callbacks\)/);
   const header = dashboard.slice(dashboard.indexOf("const renderHeaderRoster ="), dashboard.indexOf("const renderDialogRoster ="));
   assert.match(header, /pendingTotal[^\n]*pending access/);

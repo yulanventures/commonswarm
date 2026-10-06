@@ -139,14 +139,16 @@ test("a person and an agent have separate doors in the People & agents dialog", 
 });
 
 test("creation asks for purpose without a default and states the owner's Editor access", () => {
-  const create = section(markup, "data-create-form", "</form>");
-  assert.match(create, /<fieldset[^>]*data-create-purpose-set[\s\S]*<legend>\{PURPOSE_QUESTION\}<\/legend>/);
-  assert.match(create, /type="radio"[^>]*data-create-purpose required/);
-  assert.doesNotMatch(create, /\bchecked\b/);
-  assert.match(create, /PURPOSE_COPY\[purpose\]\.label/);
-  assert.match(create, /Your access: \{CONTENT_ROLE_COPY.editor.label\}\. You can/);
-  assert.match(create, /CREATE_PURPOSE_DETAILS\[purpose\]/);
-  assert.match(create, /data-create-personal-warning aria-live="polite"><\/p>/);
+  const create = readFileSync(new URL("../../lib/home-new-workspace.ts", import.meta.url), "utf8");
+  assert.match(create, /legend: "Who is it for\?"/);
+  assert.match(create, /input.type = "radio"/);
+  assert.match(create, /input.checked = purposeChoices.value === option.value/);
+  assert.match(create, /label: option.label/);
+  assert.match(create, /Your access: \$\{CONTENT_ROLE_COPY.editor.label\}\. You can/);
+  assert.match(script, /detail: CREATE_PURPOSE_DETAILS\[purpose as HouseholdPurpose\]/);
+  assert.match(create, /personalWarning.dataset.createPersonalWarning = ""/);
+  assert.match(create, /personalWarning.setAttribute\("aria-live", "polite"\)/);
+  assert.match(create, /personalWarning.textContent = newWorkspacePersonalWarning\(vm.purpose\)/);
   assert.match(script, /setCreateError\("Choose who can use Lists & docs here\."\)/);
   assert.match(script, /one<HTMLInputElement>\("\[data-create-purpose\]"\)\?\.focus\(\)/);
 });
@@ -207,7 +209,7 @@ function dialogConnectionsFixture() {
     accessStatuses: [], pendingAgentsLoadFailed: false, people: new Map([["person", "Tom"]]),
     householdConnections: [], householdConnectionsReadState: "pending", householdReceipts: new Map(),
     peopleDialogReceipts: new Map(), identityRoster: () => ({ agents: [] }), identityDisplayLabel: (agent: any) => agent.name,
-    agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY,
+    workspaces: [{id:"workspace",name:"Home"}], agentStatus, peopleAgentStatus, classifyAgentPresence, grantRiskBadge, STANDING_GRANT_COPY,
     agentPresenceLine: () => null, wakePathMark: () => null, currentPendingAccessRows: () => [],
     formatTime: () => ({ relative: "just now" }), createLatestRead, uuid: () => "command-id",
     householdScope: () => ({ workspaceId: ctx.activeWorkspaceId, session: ctx.session }),
@@ -279,8 +281,10 @@ function creationFixture(outcome: "committed" | "refused" | "unknown", existing 
   const warning = { textContent: "" }, receipt = { hidden: true, textContent: "", dataset: {} };
   const session = { user: { id: "person" } };
   const ctx: any = {
+    homeRoute: {view:"new"}, routeHref: () => "?w=workspace", focusHomeView: () => {},
+    inviteOpens: [], openInvite: (origin: string) => ctx.inviteOpens.push(origin),
     PERSONAL_PURPOSE_WARNING, householdSetupNeeded: new Set(),
-    window: { localStorage: {
+    window: { history: {pushState() {}}, localStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => { storage.set(key, value); },
       removeItem: (key: string) => { storage.delete(key); },
@@ -427,7 +431,7 @@ test("the real creation submit blocks a missing purpose, then reuses only matchi
     createFromIntent: async (_session: any, intent: any) => { creations.push(JSON.parse(JSON.stringify(intent))); },
     uuid: () => `id-${++id}`,
   };
-  execute(section(script, 'one<HTMLFormElement>("[data-create-form]")?.addEventListener("submit"', 'for (const button of all<HTMLButtonElement>("[data-signout]"))'), ctx);
+  handler = execute(section(script, 'const submitWorkspaceCreate =', 'for (const button of all<HTMLButtonElement>("[data-signout]"))') + '; submitWorkspaceCreate;', ctx);
   await handler({ preventDefault: () => {} });
   assert.equal(creations.length, 0);
   assert.equal(saved, null);
@@ -623,7 +627,7 @@ test("workspace change clears only the creation setup receipt and retires known 
   const receipt = { dataset: { setupWorkspaceId: "workspace" }, textContent: "Your workspace is ready.", hidden: false };
   const ctx = {
     one: (selector: string) => selector === "[data-channel-receipt]" ? receipt : null,
-    all: () => [], householdDashboard: null, householdConnections: [], householdReceipts: new Map(), removedAgents: new Map(),
+    all: () => [], householdDashboard: null, householdConnections: [], householdReceipts: new Map(), removedAgents: new Map(), removedAgentOwners: new Map([["old-agent", "person"]]),
     householdConnectionsReadState: "succeeded",
     householdAccessGeneration: 1, householdAccessRequestedFor: "workspace", householdAccess: null,
     accessReads: createLatestRead(), connectionReads: createLatestRead(), stopHostJoinWatch: () => {},
@@ -634,8 +638,23 @@ test("workspace change clears only the creation setup receipt and retires known 
   assert.equal(receipt.hidden, true);
   assert.equal(receipt.dataset.setupWorkspaceId, undefined);
   assert.equal(ctx.householdConnectionsReadState, "pending");
+  assert.equal(ctx.removedAgentOwners.size, 0, "past-agent ownership is workspace scoped");
   receipt.textContent = "Agent connected."; receipt.hidden = false;
   reset();
   assert.equal(receipt.textContent, "Agent connected.");
   assert.equal(receipt.hidden, false);
+});
+
+
+test("new shared workspaces open chat and the invite door once; personal and resumed creates do not", async () => {
+  const shared = creationFixture("committed");
+  await shared.create(shared.session, {...createIntent,purpose:"shared"});
+  assert.deepEqual(JSON.parse(JSON.stringify(shared.ctx.homeRoute)),{view:"chat",workspaceId:"workspace"});
+  assert.deepEqual(shared.ctx.inviteOpens,["channel"]);
+  await shared.create(shared.session, {...createIntent,purpose:"shared"});
+  assert.deepEqual(shared.ctx.inviteOpens,["channel"], "retrying the same workspace does not reopen the invite door");
+  for (const [purpose,resume] of [["personal",false],["shared",true]] as const) {
+    const f=creationFixture("committed"); await f.create(f.session,{...createIntent,purpose},resume);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.ctx.homeRoute)),{view:"chat",workspaceId:"workspace"});assert.deepEqual(f.ctx.inviteOpens,[]);
+  }
 });

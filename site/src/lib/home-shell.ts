@@ -168,7 +168,12 @@ export function buildWorkspaceMenu(doc: Document, vm: WorkspaceShellVM, callback
     button.setAttribute("role", "menuitem");
     button.tabIndex = -1;
     if (item === "wiki") button.dataset.workspaceView = "brain";
-    if (item === "settings") button.dataset.workspaceSettingsItem = "";
+    if (item === "settings") {
+      button.dataset.workspaceSettingsItem = "";
+      button.dataset.workspaceDetailsTrigger = "";
+      button.setAttribute("aria-expanded", "false");
+      button.setAttribute("aria-controls", "dashboard-workspace-details");
+    }
     if (item === "admin-access") { button.dataset.adminAccessOpen = ""; button.dataset.adminAccessScope = "workspace"; }
     button.addEventListener("click", () => { close(false); callbacks.menu(item); });
     entry.append(button);

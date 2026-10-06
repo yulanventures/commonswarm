@@ -75,9 +75,13 @@ test("a member with zero agents has no empty nested list", async () => {
 });
 
 test("LiveDashboard uses the observed roster normalizer and renderer", () => {
-  assert.match(dashboard, /result\.push\(\.\.\.rosterAgentsFromRows\(page\)\)/);
   assert.match(
     dashboard,
-    /buildHomeRail\(document, mapHomeRail\(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts\)/,
+    /result\.push\(\.\.\.rosterAgentsFromRows\(page\)\.map\(agent => \(\{ \.\.\.agent, joinedAt:/,
   );
+  assert.match(
+    dashboard,
+    /const vm = mapHomeRail\(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts\)/,
+  );
+  assert.match(dashboard, /buildHomeRail\(document, vm,/);
 });

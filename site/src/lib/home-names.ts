@@ -47,6 +47,27 @@ export function agentLabel(agent: AgentLabelInput, opts: { nested?: boolean; peo
   return agent.yours || agent.own ? `Your ${name}` : owner ? `${owner}’s ${name}` : name;
 }
 
+/** Sentence fragments retain an agent's name, lowering only the possessive word. */
+export function agentLabelInSentence(label: string): string {
+  return label.replace(/^Your\s/u, "your ");
+}
+
+/** The first word of a display name. An email address is not a name, and neither is the account fallback. */
+export function personFirstName(displayName: string): string {
+  const trimmed = displayName.trim();
+  if (!trimmed || trimmed.includes("@") || trimmed.toLocaleLowerCase() === "your account") return "";
+  return trimmed.split(/\s+/)[0] ?? "";
+}
+
+/** UI-SPEC 3.7: the line under “Add one of your agents to Home”. */
+export function addAgentOwnershipLine(workspace: string, viewerFirstName: string, agentName: string): string {
+  const place = workspace.trim() || "this workspace";
+  const agent = agentName.trim() || "agent";
+  const first = personFirstName(viewerFirstName);
+  const seen = first ? agentLabel({ name: agent, ownerName: first }) : `your ${agent}`;
+  return `It joins as yours. People in ${place} see it as ${seen}.`;
+}
+
 export function initials(name: string): string {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2)
     .map(part => Array.from(part)[0] ?? "").join("").toLocaleUpperCase();

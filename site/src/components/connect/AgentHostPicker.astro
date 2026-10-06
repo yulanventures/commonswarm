@@ -89,7 +89,8 @@ const notesOf = (host: AgentHost): string[] => [
                   ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
                   : <span>{orbLetters(host)}</span>}
               </span>
-              <span>{host.name}</span>
+              <span data-ahp-host-name>{host.name}</span>
+              <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
             </button>
           </li>
         ))}
@@ -112,7 +113,8 @@ const notesOf = (host: AgentHost): string[] => [
                       ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
                       : <span>{orbLetters(host)}</span>}
                   </span>
-                  <span>{host.name}</span>
+                  <span data-ahp-host-name>{host.name}</span>
+                  <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
                 </button>
               </li>
             ))}
@@ -234,6 +236,7 @@ const notesOf = (host: AgentHost): string[] => [
     <p class="hm-ahp__lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
     <div class="hm-ahp__actions">
       <button class="hm-ahp__button" type="button" data-ahp-approve>Let it use Lists &amp; docs</button>
+      <button class="hm-ahp__button" type="button" data-ahp-done hidden={audience === "joiner"}>Done</button>
       <button class="hm-ahp__button hm-ahp__button--quiet" type="button" data-ahp-another>Add another agent</button>
     </div>
   </section>
@@ -242,6 +245,7 @@ const notesOf = (host: AgentHost): string[] => [
 </agent-host-picker>
 
 <script>
+  import { addAgentOwnershipLine } from "../../lib/home-names";
   import { agentJoinedSentence } from "../../lib/agent-hosts";
   const WAITING_HINT_MS = 120_000;
   const JOIN_POLL_MS = 5_000;
@@ -272,6 +276,12 @@ const notesOf = (host: AgentHost): string[] => [
       }
       this.querySelector<HTMLButtonElement>("[data-ahp-home-back]")?.addEventListener("click", () => {
         this.dispatchEvent(new CustomEvent("agent-host-home", { bubbles: true }));
+      });
+      this.querySelector<HTMLButtonElement>("[data-ahp-done]")?.addEventListener("click", () => {
+        this.dispatchEvent(new CustomEvent("agent-host-done", {
+          bubbles: true,
+          detail: { principalId: this.#joinedPrincipalId },
+        }));
       });
       for (const button of this.querySelectorAll<HTMLButtonElement>("[data-ahp-copy]")) {
         button.addEventListener("click", () => void this.#copy(button));
@@ -401,7 +411,7 @@ const notesOf = (host: AgentHost): string[] => [
 
     #hostName(id: string): string {
       const chip = this.querySelector<HTMLButtonElement>(`[data-ahp-host="${CSS.escape(id)}"]`);
-      const label = chip?.querySelector("span:last-child")?.textContent?.trim();
+      const label = chip?.querySelector("[data-ahp-host-name]")?.textContent?.trim();
       return label && label.length > 0 ? label : "your agent";
     }
 
@@ -441,9 +451,7 @@ const notesOf = (host: AgentHost): string[] => [
       const ownership = this.querySelector<HTMLElement>("[data-ahp-ownership-line]");
       if (ownership) {
         const agentName = this.#hostId ? this.#hostName(this.#hostId) : "agent";
-        ownership.textContent = first.length > 0
-          ? `It joins as yours. People in Home see it as ${first}'s ${agentName}.`
-          : `It joins as yours. People in Home see it as your ${agentName}.`;
+        ownership.textContent = addAgentOwnershipLine(workspace, first, agentName);
       }
     }
 

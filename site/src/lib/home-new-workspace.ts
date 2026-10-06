@@ -1,4 +1,4 @@
-import type { HouseholdPurpose } from "./household-access";
+import { CONTENT_ROLE_COPY, PERSONAL_PURPOSE_WARNING, type HouseholdPurpose } from "./household-access";
 import type { ChoiceVM } from "./home-types";
 
 /** One purpose card in the create form; supplied by the integration layer from PURPOSE_COPY. */
@@ -50,6 +50,11 @@ export function newWorkspaceShowsInviteSlot(purpose: HouseholdPurpose | null): b
   return purpose !== "personal";
 }
 
+/** The server refuses a later purpose change; keep that warning on the live form. */
+export function newWorkspacePersonalWarning(purpose: HouseholdPurpose | null): string {
+  return purpose === "personal" ? PERSONAL_PURPOSE_WARNING : "";
+}
+
 /** "Who's in it?" note depends on the chosen purpose (personal workspaces refuse invitations). */
 export function newWorkspacePeopleHint(purpose: HouseholdPurpose | null): string {
   if (purpose === "personal") {
@@ -78,12 +83,17 @@ export function buildNewWorkspaceForm(
   const layout = doc.createElement("div");
   layout.className = "hm-new-workspace__layout";
 
-  const formCard = doc.createElement("section");
+  const formCard = doc.createElement("form");
+  formCard.dataset.createForm = "";
+  formCard.noValidate = true;
+  formCard.addEventListener("submit", event => { event.preventDefault(); callbacks.onCreate(); });
   formCard.className = "hm-new-workspace__card";
   formCard.setAttribute("aria-labelledby", "hm-new-workspace-title");
 
   const title = doc.createElement("h1");
   title.id = "hm-new-workspace-title";
+  title.tabIndex = -1;
+  title.dataset.createTitle = "";
   title.className = "hm-new-workspace__title";
   title.textContent = "New workspace";
   formCard.append(title);
@@ -95,6 +105,7 @@ export function buildNewWorkspaceForm(
   nameLegend.textContent = "Name";
   const nameInput = doc.createElement("input");
   nameInput.type = "text";
+  nameInput.id = "dashboard-workspace-name";
   nameInput.name = "workspace-name";
   nameInput.maxLength = 80;
   nameInput.autocomplete = "off";
@@ -121,6 +132,7 @@ export function buildNewWorkspaceForm(
     card.className = "hm-new-workspace__purpose-card";
     const input = doc.createElement("input");
     input.type = "radio";
+    input.dataset.createPurpose = "";
     input.name = purposeChoices.name;
     input.value = option.value;
     input.checked = purposeChoices.value === option.value;
@@ -134,11 +146,21 @@ export function buildNewWorkspaceForm(
     const small = doc.createElement("small");
     small.textContent = option.hint ?? "";
     copy.append(strong, small);
-    card.append(input, copy);
+    const check = doc.createElement("span");
+    check.className = "hm-new-workspace__purpose-check";
+    check.setAttribute("aria-hidden", "true"); check.textContent = "✓";
+    card.append(input, copy, check);
     purposeList.append(card);
   }
   purposeField.append(purposeList);
   formCard.append(purposeField);
+
+  const personalWarning = doc.createElement("p");
+  personalWarning.className = "hm-new-workspace__note-hint";
+  personalWarning.dataset.createPersonalWarning = "";
+  personalWarning.setAttribute("aria-live", "polite");
+  personalWarning.textContent = newWorkspacePersonalWarning(vm.purpose);
+  formCard.append(personalWarning);
 
   const peopleNote = doc.createElement("div");
   peopleNote.className = "hm-new-workspace__note-block";
@@ -166,18 +188,24 @@ export function buildNewWorkspaceForm(
   formCard.append(agentsNote);
 
   const create = doc.createElement("button");
-  create.type = "button";
+  create.type = "submit";
+  create.dataset.createButton = "";
   create.className = "hm-new-workspace__create";
   create.textContent = "Create workspace";
   create.disabled = Boolean(vm.busy) || !newWorkspaceCanCreate(vm.name, vm.purpose);
-  create.addEventListener("click", () => callbacks.onCreate());
+
   formCard.append(create);
 
-  if (vm.error) {
+  const access = doc.createElement("p"); access.dataset.createAccess = "";
+  access.textContent = `Your access: ${CONTENT_ROLE_COPY.editor.label}. You can ${CONTENT_ROLE_COPY.editor.detail.charAt(0).toLowerCase() + CONTENT_ROLE_COPY.editor.detail.slice(1)}`;
+  formCard.append(access);
+  {
     const error = doc.createElement("p");
     error.className = "hm-new-workspace__error";
     error.setAttribute("role", "alert");
-    error.textContent = vm.error;
+    error.dataset.createError = "";
+    error.textContent = vm.error ?? "";
+    error.hidden = !vm.error;
     formCard.append(error);
   }
 

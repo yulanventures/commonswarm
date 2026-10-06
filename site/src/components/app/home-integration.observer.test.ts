@@ -4,12 +4,15 @@ import { readFile } from 'node:fs/promises';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
 import { HomeToolsUnavailable, HomeCommandRefused } from '../../lib/home/client';
-import { CommandOutcomeUnknown } from '../../lib/commonswarm';
+import { CommandOutcomeUnknown, WorkspaceRoleRefused, BROWSER_SIGNAL_COLUMNS, browserSignalFromRow } from '../../lib/commonswarm';
 import { createLatestRead } from '../../lib/latest-read';
 import { buildAuthorLine, buildStreamExtras, deriveStreamExtras } from '../../lib/home-stream';
-import { homeParty, mapHomePeople } from '../../lib/home-map';
+import { homeParty, mapHomePeople, homeAskAnswered } from '../../lib/home-map';
+import { peopleRoleErrorCode, peopleRoleRefusal } from '../../lib/people-dialog-view';
+import { addAgentOwnershipLine, agentLabelInSentence, personFirstName } from '../../lib/home-names';
 import { canStartThread, THREAD_REPLY_CONTROL_LABEL, threadReplyPlace, threadReplyTargetText } from '../../lib/thread-reply';
 import { channelLabel } from '../../lib/channels';
+import { parentRoute } from '../../lib/home-route';
 
 /** Execute the dashboard's read/write lifecycle, replacing only the DOM paint boundaries.
  * No browser, model, network or customer data. Expected surface states come from UI-SPEC 3.3. */
@@ -200,7 +203,7 @@ test('replying from a stream row preserves the agent ownership label and the roo
   const target = { textContent: '' };
   const context = createContext({ document, HTMLElement: RowNode, input, target, mapHomePeople, homeParty,
     buildAuthorLine, buildStreamExtras, deriveStreamExtras, canStartThread, THREAD_REPLY_CONTROL_LABEL,
-    threadReplyPlace, threadReplyTargetText, channelLabel, window: { requestAnimationFrame() {} },
+    threadReplyPlace, threadReplyTargetText, agentLabelInSentence, homeAskAnswered, channelLabel, window: { requestAnimationFrame() {} },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body; }, linkifyBrainTopics() {},
   });
   runInContext(`
@@ -212,7 +215,8 @@ test('replying from a stream row preserves the agent ownership label and the roo
     const homePeople=mapHomePeople({viewerId,members,agents:roster,access:[],signals:[],now,sample:false});
     const people=new Map(members.map(member=>[member.userId,member.name])), agentById=new Map(roster.map(agent=>[agent.principalId,agent]));
     const feedWasEmpty=false, previousSignalIds=new Set(), visualMentions=new Map();
-    const channels=[{channelId:'mobile',slug:'mobile'}], signals=[], expandedSignalIds=new Set(), expandedThreadIds=new Set();
+    const removedAgentOwners=new Map();
+    const agents=roster, channels=[{channelId:'mobile',slug:'mobile'}], signals=[], expandedSignalIds=new Set(), expandedThreadIds=new Set();
     const MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map(), streamWorkspace={id:'W',name:'Home',href:'?w=W'};
     const channelById=(rows,id)=>rows.find(row=>row.channelId===id)??null, activeChannel=()=>null;
     const signalIsDirectToViewer=()=>false, initials=()=>'', kindLabel=kind=>kind, markAgentAvatar=()=>{};
@@ -225,8 +229,8 @@ test('replying from a stream row preserves the agent ownership label and the roo
   `, context);
   runInContext(await dashboardFunctions(['threadReplyPlaceOf', 'syncComposerPlacement', 'setThreadReplyRoot', 'buildMessageRow']), context);
   for (const [id, channelId, expected] of [
-    ['orbit', null, 'Replying to Your Orbit in All messages.'],
-    ['river', 'mobile', 'Replying to Your River in #mobile.'],
+    ['orbit', null, 'Replying to your Orbit in All messages.'],
+    ['river', 'mobile', 'Replying to your River in #mobile.'],
     ['muse', null, 'Replying to Nikki’s Muse in All messages.'],
   ] as const) {
     const row = runInContext(`buildMessageRow({id:'S-${id}',from:'${id}',fromKind:'agent',kind:'note',body:'Hello',
@@ -244,7 +248,9 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   const document = { createElement: (tag: string) => new RowNode(tag) };
   const frames: (() => void)[] = [];
   const question = 'Which option should we take? '.repeat(24) + '[Read the options](https://example.test/options) Budget';
-  const context = createContext({ document, HTMLElement: RowNode, buildAuthorLine, buildStreamExtras, deriveStreamExtras, question,
+  let withoutTitle = false;
+  const context = createContext({ document, HTMLElement: RowNode, buildAuthorLine,
+    buildStreamExtras: (...args: Parameters<typeof buildStreamExtras>) => { const result = buildStreamExtras(...args); if (withoutTitle) (result as unknown as RowNode)?.querySelector('.hm-needs-title')?.remove(); return result; }, deriveStreamExtras, question, homeAskAnswered,
     window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
     setSanitizedMessageMarkdown: (node: RowNode, body: string) => { node.textContent = body;
       const link = document.createElement('a'); link.setAttribute('href', 'https://example.test/options'); node.append(link); },
@@ -253,7 +259,8 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
   runInContext(`
     const sampleMode=false, session=null, activeWorkspaceId='W', activeChannelId=null, viewerId='tom', now=0;
     const feedWasEmpty=false, previousSignalIds=new Set(), agentById=new Map(), people=new Map(), visualMentions=new Map();
-    const channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map();
+    const removedAgentOwners=new Map([['removed-own','tom'],['removed-other','nikki']]);
+    const agents=[], channels=[], signals=[], expandedSignalIds=new Set(), MESSAGE_COLLAPSE_LINES=6, streamTodos=new Map();
     const streamWorkspace={id:'W',name:'Home',href:'?w=W'}, homePeople={};
     const homeParty=()=>({id:'claude',name:'Claude',label:'Your Claude',nestedLabel:'Claude',ownerId:'tom',
       ownerFirstName:'Tom',ownerInitial:'T',yours:true,tint:0,hosted:true,state:{kind:'idle',word:'Idle'}});
@@ -262,17 +269,22 @@ test('an ask card keeps the full sanitized question, links, topic controls and S
     const appendDeliveryReceipt=()=>{}, canStartThread=()=>false;
   `, context);
   runInContext(await dashboardFunctions(['buildMessageRow']), context);
-  for (const kind of ['ask', 'note']) {
+  for (const [kind, from, reply, missingTitle] of [['ask','claude',null,false],['note','claude',null,false],['ask','claude','removed-own',false],['ask','claude','removed-other',false],['ask','claude',null,true]] as const) {
+    withoutTitle = missingTitle;
+    runInContext(`expandedSignalIds.clear(); signals.splice(0, signals.length, ...${reply ? JSON.stringify([{id:'reply',from:reply,fromKind:'agent',kind:'note',inReplyTo:`S-${kind}`}]) : '[]'});`, context);
     const row = runInContext(`buildMessageRow({id:'S-${kind}',from:'claude',fromKind:'agent',kind:'${kind}',body:question,
       to:'tom',toAgent:null,about:null,attachments:[],channelId:null,createdAt:'2026-10-05T12:00:00Z'},false)`, context) as RowNode;
     row.connected = true;
     for (const frame of frames.splice(0)) frame();
     const markdown = row.querySelector('.dashboard__message-markdown');
     assert.ok(markdown, `${kind}: the sanitizer's complete tree stays in the row`);
+    assert.equal(row.querySelectorAll('.dashboard__message-markdown').length, 1, 'the question appears once');
     assert.equal(markdown.textContent, question, `${kind}: text beyond the card excerpt remains readable`);
     assert.equal(markdown.querySelector('a')?.getAttribute('href'), 'https://example.test/options');
     assert.equal(markdown.querySelector('button')?.textContent, 'Budget');
-    assert.equal(row.querySelector('.hm-needs-you') !== null, kind === 'ask');
+    const needsYou = kind === 'ask' && reply !== 'removed-own';
+    assert.equal(row.querySelector('.hm-needs-you') !== null, needsYou);
+    if (needsYou && !missingTitle) assert.equal(row.querySelector('.hm-needs-title')?.textContent, 'Your Claude asked you:', 'the question appears once, in the sanitized body');
     const toggle = row.querySelector('.dashboard__message-toggle');
     assert.equal(toggle?.textContent, 'Show more'); toggle?.handlers.get('click')?.();
     assert.equal(toggle?.getAttribute('aria-expanded'), 'true');
@@ -320,4 +332,225 @@ test('an unknown write outcome is shown plainly; a late result never writes to t
   assert.equal(runInContext('homeTodoReceipt', context), 'New workspace');
   await runInContext("homeWrite(async () => { throw new HomeToolsUnavailable(); })", context);
   assert.equal(runInContext('homeTodosState', context), 'absent');
+});
+
+
+test('the role client posts the change_role envelope, and each reducer refusal is the spec sentence', async () => {
+  const protocol = await readFile(new URL('../../../../src/protocol/workspace-commands.ts', import.meta.url), 'utf8');
+  const start = protocol.indexOf("case 'change_role': {");
+  const body = protocol.slice(start, protocol.indexOf("case 'create_agent_principal'", start));
+  const codes = [...new Set([...body.matchAll(/domain\(\s*ctx,\s*cmd\.kind,\s*'([a-z_]+)'/g)].map(match => match[1]))].sort();
+  const spec = await readFile(new URL('../../../../docs/design/2026-10-05-consumer-home-ui/UI-SPEC.md', import.meta.url), 'utf8');
+  const section = spec.slice(spec.indexOf('### 3.6 '), spec.indexOf('### 3.7 ', spec.indexOf('### 3.6 ')));
+  const specCopy = new Map([...section.matchAll(/^\| `([a-z_]+)` \| "([^"]+)" \|$/gm)].map(match => [match[1], match[2]]));
+  assert.deepEqual([...specCopy.keys()].sort(), codes);
+  assert.equal(codes.length, 5);
+  const raw = await readFile(new URL('../../lib/commonswarm.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('client.ts', raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'changeWorkspaceRole');
+  assert.ok(fn);
+  const code = ts.transpileModule(fn.getText(ast).replace(/^export /, ''), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+  const commands: unknown[][] = [];
+  let result: { status: number; body: Record<string, unknown> } = { status: 200, body: { status: 'rejected', ok: false, reason: codes[0] } };
+  const context = createContext({ WorkspaceRoleRefused, postCommand: async (...args: unknown[]) => { commands.push(args); return result; } });
+  runInContext(code, context);
+  const envelope = { kind: 'change_role', user_id: 'nikki', role: 'admin' };
+  for (const reason of codes) {
+    const before = commands.length;
+    result = { status: 200, body: { status: 'rejected', ok: false, reason } };
+    await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+      assert.ok(error instanceof WorkspaceRoleRefused);
+      assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get(reason));
+      return true;
+    });
+    assert.deepEqual(JSON.parse(JSON.stringify(commands[before])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
+  }
+  assert.ok(codes.includes('role_forbidden'));
+  const forbidden = { status: 403, body: { error: 'role_forbidden' } };
+  assert.equal('reason' in forbidden.body, false);
+  const beforeForbidden = commands.length;
+  result = forbidden;
+  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+    assert.ok(error instanceof WorkspaceRoleRefused);
+    assert.equal((error as { code: string }).code, forbidden.body.error);
+    assert.equal(peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home'), specCopy.get('role_forbidden'));
+    return true;
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeForbidden])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
+  const processing = { status: 200, body: { status: 'processing' } };
+  assert.equal(codes.includes('unknown'), false);
+  assert.equal(specCopy.has('unknown'), false);
+  const beforeProcessing = commands.length;
+  result = processing;
+  await assert.rejects(runInContext("changeWorkspaceRole({user:{id:'tom'}}, 'command', 'Home-id', 'nikki', 'admin')", context), (error: unknown) => {
+    assert.ok(error instanceof WorkspaceRoleRefused);
+    assert.equal((error as { code: string }).code, 'unknown');
+    const shown = peopleRoleRefusal(peopleRoleErrorCode(error), 'Nikki', 'Home');
+    assert.equal(shown, 'The role change was not confirmed. Reload to check.');
+    for (const sentence of specCopy.values()) assert.notEqual(shown, sentence);
+    return true;
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(commands[beforeProcessing])), [{ user: { id: 'tom' } }, 'command', envelope, { workspace_id: 'Home-id', stream: { kind: 'workspace' } }]);
+});
+
+test('browser reads retain a top-level directed reply reference', () => {
+  assert.ok(BROWSER_SIGNAL_COLUMNS.split(',').includes('in_reply_to'));
+  const signal = browserSignalFromRow({id:'reply',from:'tom',from_kind:'user',kind:'note',body:'Done',created_at:'2026-10-05T12:00:00Z',in_reply_to:'ask'});
+  assert.equal(signal.inReplyTo, 'ask');
+});
+
+
+test('each navigation focuses the visible H1 for that view', async () => {
+  const frames: (()=>void)[] = [], selectors: string[] = [], focused: string[] = [];
+  const context = createContext({homeViewTitle:()=> 'View · CommonSwarm', window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
+    document:{title:''}, all:(selector:string)=>{selectors.push(selector);return [{getClientRects:()=>[],focus:()=>focused.push('hidden')},{getClientRects:()=>[{}],focus:()=>focused.push(selector)}];}});
+  runInContext("let homeRoute, workspaces=[{id:'W',name:'Home'}];",context);
+  runInContext(await dashboardFunctions(['focusHomeView']),context);
+  const scopes = {catchup:'[data-home-catchup]',chat:'[data-home-workspace-shell]',todos:'[data-home-route-pane]',todo:'[data-home-route-pane]',agent:'[data-home-route-pane]',new:'[data-panel=create]', 'add-agent':'[data-channel-view=agent-choice]',lists:'[data-channel-view=objects]',files:'[data-channel-view=files]',wiki:'[data-channel-view=brain]'};
+  for (const [view,scope] of Object.entries(scopes)) {
+    runInContext(`homeRoute={view:${JSON.stringify(view)},workspaceId:'W'};focusHomeView();`,context);
+    assert.equal(frames.length,1); frames.shift()!();
+    assert.equal(selectors.at(-1), `${scope} h1`); assert.equal(focused.at(-1),`${scope} h1`);
+  }
+});
+
+
+test('the Add agent poll passes the measured joined time and ignores another owner', async () => {
+  const joined: unknown[] = [], intervals: number[] = [];
+  let tick: ()=>void = ()=>{};
+  const context = createContext({document:{visibilityState:'visible'}, window:{setInterval:(fn:()=>void,ms:number)=>{tick=fn;intervals.push(ms);return 1;},clearInterval(){}},
+    one:()=>({showJoined:(value:unknown)=>joined.push(JSON.parse(JSON.stringify(value)))}), renderRoster:()=>{},
+    roster:async()=>[{principalId:'foreign',name:'Muse',ownerUserId:'nikki',joinedAt:'2026-10-05T11:31:00Z'},
+      {principalId:'own',name:'Claude',ownerUserId:'tom',joinedAt:'2026-10-05T11:32:00Z'}] });
+  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',requestVersion=1,sampleMode=false,agents=[],hostJoinGeneration=0,hostJoinTimer,hostJoinKnown=new Set(),hostJoinStartedAt=0;const app={dataset:{channelView:'agent-choice'}},householdAccess={status:'ok',workspaceId:'W'};",context);
+  runInContext(await dashboardFunctions(['stopHostJoinWatch','startHostJoinWatch']),context);
+  runInContext('startHostJoinWatch()',context); tick(); await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(intervals,[5000]);
+  assert.deepEqual(joined,[{name:'Claude',principalId:'own',canApprove:true,joinedAt:'2026-10-05T11:32:00Z'}]);
+});
+
+
+test('an accepted role save stays successful when the roster refresh fails', async () => {
+  const raw = await readFile(new URL('./LiveDashboard.astro', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('dashboard.ts', raw.match(/<script>([\s\S]*?)<\/script>/)![1], ts.ScriptTarget.Latest, true);
+  let changeRole: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(ast) === 'changeRole') changeRole = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(ast); assert.ok(changeRole);
+  const code = ts.transpileModule(`const changeRole = ${changeRole.getText(ast)};`, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+  const context = createContext({ changeWorkspaceRole: async () => {}, memberRoster: async () => { throw new Error('read failed'); } });
+  runInContext("let session={user:{id:'tom'}},activeWorkspaceId='W',sampleMode=false,members=[{userId:'nikki',role:'member'}]; const peopleDialogState={rolePending:new Map()}, uuid=()=> 'R'; let paints=0; const renderRoster=()=>{paints++;};",context);
+  runInContext(code,context);
+  await runInContext("changeRole({kind:'change-role',userId:'nikki',role:'admin'})",context);
+  assert.equal(runInContext('members[0].role',context),'admin');
+  assert.equal(runInContext('paints',context),1,'the accepted command updates facts even if the follow-up read fails');
+  runInContext("members[0].role='member';",context);
+  for (const blocked of [
+    "session=null; activeWorkspaceId='W'; sampleMode=false",
+    "session={user:{id:'tom'}}; activeWorkspaceId=''; sampleMode=false",
+    "session={user:{id:'tom'}}; activeWorkspaceId='W'; sampleMode=true",
+  ]) {
+    await assert.rejects(
+      () => runInContext(`${blocked}; changeRole({kind:'change-role',userId:'nikki',role:'admin'})`, context),
+      (error: unknown) => {
+        assert.equal((error as { code?: unknown }).code, 'role_unavailable');
+        return true;
+      },
+    );
+    assert.equal(runInContext('members[0].role', context), 'member', blocked);
+  }
+});
+
+test('an absent People & agents target falls back to the roster heading', async () => {
+  const frames: (()=>void)[] = [], focused: string[] = [];
+  const context = createContext({window:{requestAnimationFrame:(fn:()=>void)=>frames.push(fn)},
+    one:(selector:string)=>selector==='[data-roster-dialog]'?{open:false,showModal(){}}:selector==='#dashboard-roster-title'?{focus:()=>focused.push('roster')}:null,
+    all:()=>[], renderDialogRoster:()=>{}, syncPeopleDialogLayout:()=>{}, loadHouseholdConnections:()=>{},
+    peopleDialogState:{query:'',selected:null,focusApplied:null},sampleMode:true});
+  runInContext("let peopleDialogFocus,rosterFilter='';",context);
+  runInContext(await dashboardFunctions(['openRosterDialog']),context);
+  runInContext("openRosterDialog({kind:'person',id:'gone'})",context);
+  for (const frame of frames) frame();
+  assert.deepEqual(focused,['roster']);
+});
+
+
+test('past agents owned by the viewer remain answerers beyond the 200-name history window', async () => {
+  const ranges: number[][] = [], filters: unknown[][] = [];
+  const query = {schema:()=>query,from:()=>query,select:()=>query,order:()=>query,
+    eq:(...args:unknown[])=>{filters.push(args);return query;},not:(...args:unknown[])=>{filters.push(args);return query;},
+    range:async(start:number,end:number)=>{ranges.push([start,end]);return {data:Array.from({length:start===200?1:100},(_,i)=>({principal_id:`old-${start+i}`}))};}};
+  const context = createContext({client:()=>query,sampleMode:false});
+  runInContext(await dashboardFunctions(['readRemovedAgentOwners']),context);
+  const result = await runInContext("readRemovedAgentOwners('W','tom')",context) as Map<string,string>;
+  assert.equal(result.size,201); assert.equal(result.get('old-200'),'tom');
+  assert.deepEqual(ranges,[[0,99],[100,199],[200,299]]);
+  assert.ok(filters.some(values=>values[0]==='workspace_id'&&values[1]==='W'));
+  assert.ok(filters.some(values=>values[0]==='owner_user_id'&&values[1]==='tom'));
+  assert.ok(filters.some(values=>values[0]==='revoked_at'&&values[1]==='is'&&values[2]===null));
+  for (const statement of ["sampleMode=true; readRemovedAgentOwners('W','tom')", "sampleMode=false; readRemovedAgentOwners('W','')"]) {
+    assert.equal((await runInContext(statement,context)).size,0);
+    assert.equal(ranges.length,3,'unknown viewers and samples make no read');
+  }
+});
+
+test('Add agent receives the viewer first name and Home and Done leave that screen', async () => {
+  const seen: Array<{ workspaceName?: string; accountEmail?: string; viewerFirstName?: string }> = [];
+  const backs: boolean[] = [];
+  const context = createContext({
+    personFirstName,
+    parentRoute,
+    seen,
+    window: {
+      requestAnimationFrame() {},
+      history: { state: { home: true, homePrevious: true }, back() { backs.push(true); } },
+    },
+  });
+  runInContext(`
+    let sampleMode = false, activeWorkspaceId = 'W', accountLabel = 'tom@example.test';
+    let homeRoute = { view: 'add-agent', workspaceId: 'W' };
+    const workspaces = [{ id: 'W', name: 'Home' }];
+    const members = [{ userId: 'tom', name: 'Tom Langridge', role: 'owner' }];
+    const session = { user: { id: 'tom', email: 'tom@example.test', user_metadata: { user_name: 'Tom Langridge' } } };
+    const accountName = () => accountLabel;
+    const picker = { reset() {}, setContext(value) { seen.push(value); } };
+    const one = selector => selector === 'agent-host-picker' ? picker : null;
+    const navigated = [], stopped = [];
+    const navigateHome = (route, mode) => { navigated.push({ route, mode }); };
+    const stopHostJoinWatch = () => { stopped.push('stop'); };
+    const showChannelView = () => {};
+  `, context);
+  runInContext(await dashboardFunctions(['openAgentChoice', 'homeBack', 'leaveAddAgentForHome', 'finishJoinedAgent']), context);
+  runInContext('openAgentChoice()', context);
+  assert.equal(seen[0]?.viewerFirstName, 'Tom');
+  assert.equal(seen[0]?.workspaceName, 'Home');
+  assert.equal(seen[0]?.accountEmail, 'tom@example.test');
+  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as Tom’s agent.');
+  assert.equal(addAgentOwnershipLine('Home', seen[0]?.viewerFirstName ?? '', 'Claude'),
+    'It joins as yours. People in Home see it as Tom’s Claude.');
+  runInContext("members.length = 0; accountLabel = 'Tom Langridge'; openAgentChoice();", context);
+  assert.equal(seen[1]?.viewerFirstName, 'Tom', 'an account name supplies the first name when the roster has not arrived');
+  runInContext("accountLabel = 'tom@example.test'; openAgentChoice();", context);
+  assert.equal(seen[2]?.viewerFirstName, '');
+  assert.equal(addAgentOwnershipLine('Home', seen[2]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as your agent.');
+  runInContext("accountLabel = 'your account'; openAgentChoice();", context);
+  assert.equal(seen[3]?.viewerFirstName, '');
+  assert.equal(addAgentOwnershipLine('Home', seen[3]?.viewerFirstName ?? '', 'agent'),
+    'It joins as yours. People in Home see it as your agent.');
+  const stopsAfterOpen = runInContext('stopped.length', context) as number;
+  const navigated = () => JSON.parse(runInContext('JSON.stringify(navigated)', context) as string) as Array<{ route: { view: string; workspaceId?: string; agentId?: string }; mode: string }>;
+  runInContext('leaveAddAgentForHome()', context);
+  assert.deepEqual(backs, [true], 'Home uses history.back when the previous entry is ours');
+  assert.deepEqual(navigated(), []);
+  runInContext('window.history.state = {}; leaveAddAgentForHome();', context);
+  assert.deepEqual(navigated()[0], { route: { view: 'catchup' }, mode: 'push' });
+  runInContext("finishJoinedAgent('orbit')", context);
+  assert.deepEqual(navigated()[1], { route: { view: 'agent', workspaceId: 'W', agentId: 'orbit' }, mode: 'push' });
+  runInContext("const before = navigated.length; finishJoinedAgent(''); globalThis.stayed = navigated.length === before;", context);
+  assert.equal(runInContext('stayed', context), true);
+  assert.equal(runInContext('stopped.length', context), stopsAfterOpen + 4, 'Home, the fallback Home, Done and an empty Done each stop the join watch');
 });

@@ -64,7 +64,7 @@ const contentTypes: Record<string, string> = {
 };
 
 const revertedStyles = `<style>
-  .hm-frame .hm-frame__main .hm-frame__channel > header { min-block-size: 140px; }
+  .hm-frame.hm-frame .hm-frame__main .hm-frame__channel > header { min-block-size: 140px; }
   .hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-toolbar { min-block-size: 96px; margin-block-end: 0; }
   .dashboard__channel-head {
     min-block-size: 6.25rem;
@@ -680,14 +680,9 @@ test("an empty feed keeps the app shell at the dynamic viewport height", async (
   }
 });
 
-/* The floating band costs the reading area nothing only if its clearance is paid ONCE. Two
-   pairs have to agree, and they are not the same number. The filter row's own 2.5rem height and
-   the negative margin that takes it back out of the flow must match EACH OTHER. The clearance
-   is a different quantity: the height of the whole band, which is the taller of its two floating
-   parts — the roster cluster at var(--feed-band-height), 3.25rem. "Load older updates" sits
-   BETWEEN the band and the list, so when it is showing it is the element that clears the band,
-   and the list's own clearance becomes dead screen between the button and the first message.
-   Found by measuring at 390x844 while that clearance was still 2.5rem: a 40px gap. */
+/* The channel menu is in flow. Showing Load older must not change the list's own padding
+   or create a second header-sized gap before the first message. Both cases measure the same
+   production shell and keep a visible button as the positive control. */
 test("the channel menu stays above older updates without a second clearance gap", async () => {
   const chrome = await findChrome();
   const server = await startDistServer();

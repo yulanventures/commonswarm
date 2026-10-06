@@ -545,6 +545,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 accepts, and operations from the policy constant. Nothing here grants access by
                 itself; the command decides. */}
             <section class="dashboard__objects-view" data-channel-view="objects" hidden>
+              <h1 class="hm-pane-title" tabindex="-1">Lists</h1>
               <form class="dashboard__access-card" data-household-consent hidden>
                 <h2 class="dashboard__access-title">Turn on Lists &amp; docs</h2>
                 <p class="dashboard__access-lead">
@@ -598,6 +599,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <HouseholdObjects state={emptyHousehold} />
             </section>
             <section class="dashboard__files-view" data-channel-view="files" hidden>
+              <h1 class="hm-pane-title" tabindex="-1">Files</h1>
               <p class="dashboard__file-warning" data-file-warning hidden></p>
               <p class="dashboard__file-empty" data-file-empty hidden>No files shared yet.</p>
               <p class="dashboard__form-error dashboard__file-error" data-file-error role="alert" hidden></p>
@@ -605,6 +607,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             </section>
 
             <section class="dashboard__brain-view" data-channel-view="brain" hidden>
+              <h1 class="hm-pane-title" tabindex="-1">Wiki</h1>
               <aside class="dashboard__brain-index" aria-label="Wiki pages">
                 <p class="dashboard__brain-notice" role="status" data-brain-notice hidden></p>
                 <p class="dashboard__brain-empty" data-brain-empty></p>
@@ -698,14 +701,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 </button>
               </div>
               <div class="dashboard__composer-box">
+                <div class="dashboard__mention-picker" data-mention-picker-shell hidden>
                 <div
-                  class="dashboard__mention-picker"
                   id="dashboard-composer-mention-picker"
                   data-mention-picker
                   role="listbox"
                   aria-label="Mention a person or agent"
                   hidden
                 ></div>
+                <p class="hm-pick-footer" data-mention-footer hidden>A tag here highlights the name. To ask them directly, write in chat.</p>
+                </div>
                 <div class="dashboard__composer-input">
                   <div class="dashboard__composer-attachments" data-composer-attachments hidden></div>
                   <div class="dashboard__composer-drop-target" data-composer-drop-target hidden>
@@ -726,7 +731,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   <textarea
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
-                    placeholder="Message everyone"
+                    placeholder="Write to everyone, or type @ to tag a person or an agent"
                     aria-label="Message"
                     role="combobox"
                     aria-autocomplete="list"
@@ -1009,6 +1014,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { buildAuthorLine, groupByDay, buildDayDivider, deriveStreamExtras, buildStreamExtras, type StreamSignalVM } from "../../lib/home-stream";
   import { HOUSEHOLD_LOCAL_SEAT } from "../../../../src/protocol/household-tool-registry";
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
+  import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
+  import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
+  import { agentLabelInSentence, agentTint, personFirstName } from "../../lib/home-names";
+  import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import {
     CONTENT_OPERATION_LABELS,
@@ -1024,7 +1033,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { createLatestRead } from "../../lib/latest-read";
   import { agentStatus, peopleAgentStatus, peopleAgentActivityTime, agentResumeReceipt } from "../../lib/agent-status";
   import { renderPeopleDialog, peopleDialogCounts, peopleDialogCanAct, showPeopleConfirmation,
-    type PeopleDialogModel, type PeopleDialogState, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
+    type PeopleDialogModel, type PeopleDialogState, type PeopleDialogFocus, type PeopleDialogAction, type PeopleConfirmAction } from "../../lib/people-dialog-view";
   import { classifyAgentPresence } from "../../../../src/cloud/agent-presence";
   import type { Session } from "@supabase/supabase-js";
   import {
@@ -1047,6 +1056,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     archiveWorkspace,
     client,
     createWorkspace,
+    changeWorkspaceRole,
     currentSession,
     deployment,
     fileDownloadUrl,
@@ -1253,6 +1263,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     ownerUserId: string;
     oldestUnobservedAt?: string | null;
     presence?: AgentPresenceRow | null;
+    joinedAt?: string | null;
   }
 
   interface Member {
@@ -1492,6 +1503,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       } catch { /* The current page still retains the reminder when storage is unavailable. */ }
     };
     let removedAgents = new Map<string, string>();
+    let removedAgentOwners = new Map<string, string>();
     /**
      * The viewer's own Lists & docs access in the open workspace, as household_access last
      * answered it. Unknown reads keep a failed creation's setup step available.
@@ -1943,38 +1955,29 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         target.textContent = who;
       }
       const hasWorkspace = workspaces.length > 0;
-      const title = one<HTMLElement>("[data-create-title]");
-      const description = one<HTMLElement>("[data-create-description]");
-      const cancel = one<HTMLButtonElement>("[data-create-cancel]");
-      const button = one<HTMLButtonElement>("[data-create-button]");
-      if (title) title.textContent = hasWorkspace ? "Name another workspace." : "Create your first workspace.";
-      if (description) {
-        description.textContent = hasWorkspace
-          ? "Start a separate feed for a different group of people and AI agents."
-          : "It's where your agents and the people you invite share lists, docs and messages.";
-      }
-      if (cancel) cancel.hidden = !hasWorkspace;
-      const input = one<HTMLInputElement>("#dashboard-workspace-name");
-      if (input) {
-        input.disabled = false;
-        if (hasWorkspace && message === null) input.value = "";
-        else if (!input.value) input.value = defaultWorkspaceName(value);
-      }
-      if (button) {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-        button.textContent = "Create workspace";
-      }
-      if (message === null) {
-        for (const radio of all<HTMLInputElement>("[data-create-purpose]")) { radio.checked = false; radio.disabled = false; }
-        syncCreatePurposeWarning();
-      }
-      setCreateError(message);
-      showPanel("create");
-      window.requestAnimationFrame(() => {
-        input?.focus({ preventScroll: true });
-        input?.select();
-      });
+      const previousName = one<HTMLInputElement>("#dashboard-workspace-name")?.value ?? "";
+      const previousPurpose = one<HTMLInputElement>("[data-create-purpose]:checked")?.value;
+      const panel = one<HTMLElement>("[data-panel=create]"); if (!panel) return;
+      const vm = { viewerName: who, viewerInitials: initials(who),
+        name: message ? previousName : hasWorkspace ? "" : defaultWorkspaceName(value),
+        purpose: (message && (previousPurpose === "shared" || previousPurpose === "personal") ? previousPurpose : null) as HouseholdPurpose | null,
+        purposes: Object.entries(PURPOSE_COPY).map(([purpose, copy]) => ({ value: purpose as HouseholdPurpose, label: copy.label, detail: CREATE_PURPOSE_DETAILS[purpose as HouseholdPurpose] })), error: message };
+      const footer = Array.from(panel.querySelectorAll<HTMLElement>("[data-admin-access-open], [data-signout], .dashboard__gateway-mark, .dashboard__account-line"));
+      panel.setAttribute("aria-labelledby", "hm-new-workspace-title");
+      const mount = () => {
+        const replacement = buildNewWorkspaceForm(document, vm, {
+          onNameInput: name => { vm.name = name; const preview = panel.querySelector<HTMLElement>(".hm-new-workspace__preview-title"); if (preview) preview.textContent = newWorkspacePreviewTitle(name);
+            const button = panel.querySelector<HTMLButtonElement>("[data-create-button]"); if (button) button.disabled = !newWorkspaceCanCreate(name, vm.purpose); },
+          onPurposeSelect: purpose => { vm.purpose = purpose; mount(); panel.querySelector<HTMLInputElement>(`[data-create-purpose][value="${purpose}"]`)?.focus({ preventScroll: true }); },
+          onCreate: () => { void submitWorkspaceCreate(); },
+        });
+        if (!hasWorkspace) replacement.querySelector<HTMLElement>("h1")!.textContent = "Create your first workspace.";
+        panel.replaceChildren(replacement, ...footer);
+        if (hasWorkspace) { const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "hm-ahp__back";
+          cancel.textContent = "← Workspaces"; cancel.dataset.createCancel = ""; cancel.addEventListener("click", homeBack); panel.append(cancel); }
+      };
+      mount(); showPanel("create");
+      window.requestAnimationFrame(() => panel.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }));
     };
 
     const renderWorkspaceError = (value: Session, error: unknown): void => {
@@ -1990,6 +1993,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     const workspaceMemberships = async (): Promise<Workspace[]> => {
       return (await myWorkspaces()).map(workspace => ({ ...workspace, archived: false }));
+    };
+
+    const readRemovedAgentOwners = async (workspaceId: string, viewerId: string): Promise<Map<string, string>> => {
+      const owners = new Map<string, string>();
+      const api = client(); if (!api || sampleMode || !viewerId) return owners;
+      try {
+        const pageSize = 100;
+        for (let offset = 0; ; offset += pageSize) {
+          const { data, error } = await api.schema("swarm_read").from("agent_principals")
+            .select("principal_id").eq("workspace_id", workspaceId).eq("owner_user_id", viewerId)
+            .not("revoked_at", "is", null).order("principal_id", { ascending: true }).range(offset, offset + pageSize - 1);
+          if (error) return new Map();
+          const page = data ?? [];
+          for (const row of page) if (typeof row.principal_id === "string") owners.set(row.principal_id, viewerId);
+          if (page.length < pageSize) return owners;
+        }
+      } catch { return new Map(); }
     };
 
     const removedAgentNames = async (workspaceId: string): Promise<Map<string, string>> => {
@@ -2025,7 +2045,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const { data, error } = await api
           .schema("swarm_read")
           .from("agent_principals")
-          .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id")
+          .select("principal_id,name,model,transport,turn_only,owner_user_id,revoked_at,workspace_id,created_at")
           .eq("workspace_id", workspaceId)
           .is("revoked_at", null)
           .order("name", { ascending: true })
@@ -2033,7 +2053,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           .range(offset, offset + pageSize - 1);
         if (error) throw new Error(error.message);
         const page = data ?? [];
-        result.push(...rosterAgentsFromRows(page));
+        const joinedTimes = new Map(page.map(row => [String(row.principal_id), typeof row.created_at === "string" ? row.created_at : null]));
+        result.push(...rosterAgentsFromRows(page).map(agent => ({ ...agent, joinedAt: joinedTimes.get(agent.principalId) ?? null })));
         if (page.length < pageSize) {
           const readPresence = async (): Promise<{
             available: boolean;
@@ -3209,16 +3230,25 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
             composerRecipientKnown,
           );
         if (body === "" && !hadAttachments && !addressChosen) {
+          /* The box can be empty because the pass has not committed, not because the reader
+             cleared it. Deleting then throws away an address-only draft the next paint reads. */
+          if (!composerToLive && readComposerDraft(key)?.to !== undefined) return;
           window.localStorage.removeItem(key);
           return;
         }
+        /* A flush before the pass commits must not replace the stored address with the empty
+           pair left in memory. The body can already be the restored draft while the roster is
+           still unknown; writing `to: []` there makes the next pass treat every tag as new. */
+        const storedPair = composerToLive ? null : readComposerDraft(key);
+        const draftTo = composerToLive ? composerTo : storedPair?.to;
+        const draftApplied = composerToLive ? composerToApplied : storedPair?.applied ?? [];
         window.localStorage.setItem(
           key,
           JSON.stringify({
             body,
             ...(hadAttachments ? { hadAttachments: true } : {}),
-            to: composerTo,
-            ...(composerToApplied.length === 0 ? {} : { applied: composerToApplied }),
+            ...(draftTo === undefined ? {} : { to: draftTo }),
+            ...(draftApplied.length === 0 ? {} : { applied: draftApplied }),
           }),
         );
       } catch {
@@ -3240,7 +3270,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       composerResizeFrame = 0;
       composerResizeTimer = 0;
       input.style.blockSize = "auto";
-      input.style.blockSize = `${input.scrollHeight}px`;
+      /* An empty box's scrollHeight counts a wrapped placeholder as a second line. Leave the
+         resting box on one line; typed text still grows from scrollHeight. */
+      if (input.value.length > 0) input.style.blockSize = `${input.scrollHeight}px`;
     };
     /* localStorage is synchronous, and on iOS Safari it is synchronous ACROSS PROCESSES. One
      * write per keystroke put that cost inside the keystroke. The draft only has to survive a
@@ -3587,6 +3619,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       cancelMentionPickerRender();
       const picker = one<HTMLElement>("[data-mention-picker]");
       if (picker) picker.hidden = true;
+      const shell = one<HTMLElement>("[data-mention-picker-shell]");
+      if (shell) shell.hidden = true;
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       input?.setAttribute("aria-expanded", "false");
       input?.removeAttribute("aria-activedescendant");
@@ -3688,6 +3722,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         button.addEventListener("click", () => selectMention(candidate));
         picker.append(button);
       });
+      const footer = one<HTMLElement>("[data-mention-footer]");
+      if (footer) footer.hidden = !threadReplyRoot;
+      const shell = one<HTMLElement>("[data-mention-picker-shell]");
+      if (shell) shell.hidden = false;
       picker.hidden = false;
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       input?.setAttribute("aria-expanded", "true");
@@ -3754,13 +3792,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         input.value = "";
         input.style.blockSize = "auto";
       }
-      /* THIS IS NOT THE SEND PATH. The only callers are the workspace change and session
-         teardown; a send empties the box in its own handler and clears the draft on success,
-         and it deliberately keeps the caret because a FAILED send puts the body back and the
-         reader's place in it with it. What has to go here is state that belongs to the
-         workspace being left.
-         The caret, because the text it indexes is about to be replaced by another
-         workspace's draft. */
+      /* Not the send path. Callers leave the workspace or end the session: a real switch,
+         a sample switch, Catch up, and session teardown. A send empties the box itself and
+         keeps the caret, because a failed send puts that body back.
+         The caret indexes text the next workspace is about to replace. */
       composerCaretKnown = false;
       /* And the address, because it belongs to the workspace being left.
 
@@ -3882,7 +3917,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     };
     const homeTodosAvailable = (): boolean => homeTodosState !== "pending" && homeTodosState !== "absent";
     const homeTodoContext = (): HomeTodoContext => ({ workspaceId: activeWorkspaceId, people: currentHomePeople(), viewerId: homeViewerId(),
-      editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails });
+      editor: sampleMode || householdAccess.workspaceId === activeWorkspaceId && householdAccess.contentRole === "editor", sample: sampleMode, now: Date.now(), details: homeTodoDetails, tagDelivers: true });
     const homeTodoModels = (): TodoVM[] => homeTodoRows.map(row => mapHomeTodo(row, homeTodoContext(), homeTodoRows));
     const homeServer = (): HomeServer | null => {
       if (!sampleMode) return session ? createHomeServer(session) : null;
@@ -4146,7 +4181,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         vm.lineNotice = homeQueueRead !== "ready" ? homeQueueRead === "pending" ? "Checking the line…" : homeTodosState === "absent" ? "The line is not available here yet." : "Could not load the line. Reload to try again." : null;
         if (homePolicies.has(id)) vm.workPolicy = homePolicies.get(id);
         vm.receipt = homeTodoReceipt === "not-found" ? "" : homeTodoReceipt;
-        const manage = () => { openRosterDialog(); peopleDialogState.selected = { type: "agent", id }; renderDialogRoster(); };
+        const manage = () => openRosterDialog({ kind: "agent", id });
         replaceHomeRegion(slot, "agent", [agentPage(document, vm, { onManage: manage,
           onFix: action => {
             if (action === "new-key") void navigateHome({ view: "chat", workspaceId: workspace.id }, "push").then(() => {
@@ -4223,9 +4258,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!entry) return;
         await navigateHome({ view: "chat", workspaceId: entry.workspace.id }, "push");
       }
-      openRosterDialog();
-      peopleDialogState.selected = { type: "person", id };
-      renderDialogRoster();
+      openRosterDialog({ kind: "person", id });
     };
     const renderHomeRail = (): void => {
       const slot = one<HTMLElement>("[data-home-rail-slot]");
@@ -4274,7 +4307,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         menu: { settings: true, adminAccess: true } };
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) return;
-      const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: openRosterDialog,
+      const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
           else if (item === "settings") openWorkspaceDetailsDialog();
@@ -4354,10 +4387,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const latest = await feed(workspace.id, 50).catch(() => [] as Signal[]);
           return { ...catchUpDetailFromOverview(row, overview.viewer_user_id, Date.parse(overview.generated_at), sampleMode, asks), signals: latest };
         }
+        const signalPage = 50;
         const [nextMembers, nextAgents, nextAccess, nextSignals, claims, nextFiles] = await Promise.all([
-          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, 50),
+          memberRoster(workspace.id), roster(workspace.id), agentAccessStatuses(workspace.id), feed(workspace.id, signalPage),
           homeWorkingOn(workspace.id), workspaceFiles(workspace.id).then(value => homeFileCount(value), () => null),
         ]);
+        // Page length is not an answer check: the read hides the viewer's own directed replies.
         return { people: mapHomePeople({ viewerId: viewer, members: nextMembers.members, agents: nextAgents,
           access: nextAccess, signals: claims, now: Date.now(), sample: false }), signals: nextSignals,
           openTodos: null, lists: null, files: nextFiles, newMessages: null };
@@ -4408,6 +4443,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const scope = homeRoute.view === "catchup" ? "[data-home-catchup]"
           : homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos" ? "[data-home-route-pane]"
           : homeRoute.view === "new" ? "[data-panel=create]"
+          : homeRoute.view === "add-agent" ? "[data-channel-view=agent-choice]"
+          : homeRoute.view === "lists" ? "[data-channel-view=objects]"
+          : homeRoute.view === "files" ? "[data-channel-view=files]"
+          : homeRoute.view === "wiki" ? "[data-channel-view=brain]"
           : "[data-home-workspace-shell]";
         all<HTMLElement>(`${scope} h1`).find(heading => heading.getClientRects().length > 0)?.focus({ preventScroll: true });
       });
@@ -4533,6 +4572,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const rosterNames = identityRoster().agents;
       return {
         sample: sampleMode, pendingFailed: pendingAgentsLoadFailed,
+        workspaceName: workspaces.find(workspace => workspace.id === activeWorkspaceId)?.name,
         people: members.map((member) => ({ id: member.userId, name: member.name, role: member.role,
           own: member.userId === session?.user.id,
           mayRemove: !sampleMode && member.userId !== session?.user.id &&
@@ -4599,6 +4639,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const detailMore = !!detail && !detail.hidden && detail.scrollHeight - detail.clientHeight - detail.scrollTop > 8;
       const detailCue = one<HTMLElement>("[data-people-detail-scroll-cue]"); if (detailCue) detailCue.hidden = !detailMore;
     };
+    let peopleDialogFocus: PeopleDialogFocus | undefined;
     const renderDialogRoster = (): void => {
       const list = one<HTMLElement>("[data-dialog-agent-list]"); const detail = one<HTMLElement>("[data-people-detail]");
       if (!list || !detail) return;
@@ -4623,13 +4664,31 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (errorTarget) { errorTarget.textContent = readableError(error); errorTarget.hidden = false; }
         } finally { button.disabled = false; }
       },
+        changeRole: async change => {
+          const value = session, workspaceId = activeWorkspaceId, state = peopleDialogState;
+          if (!value || !workspaceId || sampleMode) {
+            throw Object.assign(new Error("The role change was not confirmed. Reload to check."), { code: "role_unavailable" });
+          }
+          await changeWorkspaceRole(value, uuid(), workspaceId, change.userId, change.role);
+          if (workspaceId !== activeWorkspaceId || value.user.id !== session?.user.id) { state.rolePending?.clear(); return; }
+          // Refresh facts in place: opening the workspace would discard another person's role draft.
+          members = members.map(member => member.userId === change.userId ? { ...member, role: change.role } : member);
+          renderRoster();
+          try {
+            const next = await memberRoster(workspaceId);
+            if (workspaceId !== activeWorkspaceId || value.user.id !== session?.user.id) { state.rolePending?.clear(); return; }
+            members = next.members; renderRoster();
+          } catch {
+            // The accepted command is the receipt; a failed follow-up read cannot undo it.
+          }
+        },
         confirm: confirmPeopleDialogAction, saveModel: async (principalId, modelValue) => {
           if (!session || !activeWorkspaceId || !peopleDialogModel().agents.some((agent) => agent.id === principalId && agent.mayManage)) return;
           const scope = { workspaceId: activeWorkspaceId, userId: session.user.id };
           await setAgentModel(session, uuid(), scope.workspaceId, principalId, modelValue);
           if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
           await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
-        } });
+        } }, { focus: peopleDialogFocus, tintFor: agentTint });
       syncPeopleDialogLayout(); window.requestAnimationFrame(syncPeopleDialogLayout);
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {
@@ -4707,9 +4766,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * restore on close are the native <dialog>'s; the close event re-syncs the stack
      * button's aria-expanded no matter which path closed it.
      */
-    const openRosterDialog = (): void => {
+    const openRosterDialog = (focus?: PeopleDialogFocus): void => {
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
-      if (!dialog || dialog.open) return;
+      if (!dialog) return;
+      peopleDialogFocus = focus; peopleDialogState.focusApplied = null;
+      if (dialog.open) { renderDialogRoster(); one<HTMLElement>("#pd-detail-title")?.focus({ preventScroll: true }); return; }
       rosterFilter = "";
       peopleDialogState.selected = null; peopleDialogState.showAllAttention = false;
       const search = one<HTMLInputElement>("[data-roster-search]");
@@ -4717,7 +4778,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       renderDialogRoster();
       dialog.showModal();
       if (!sampleMode) void loadHouseholdConnections();
-      const firstStop = one<HTMLElement>("#dashboard-roster-title");
+      const firstStop = (focus ? one<HTMLElement>("#pd-detail-title") : null) ?? one<HTMLElement>("#dashboard-roster-title");
       window.requestAnimationFrame(() => firstStop?.focus({ preventScroll: true }));
       for (const button of all<HTMLButtonElement>("[data-roster-open]")) button.setAttribute("aria-expanded", "true");
     };
@@ -4726,14 +4787,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const dialog = one<HTMLDialogElement>("[data-roster-dialog]");
       const confirm = one<HTMLDialogElement>("[data-people-confirm]"); if (confirm?.open) confirm.close();
       if (dialog?.open) dialog.close();
+      peopleDialogFocus = undefined; peopleDialogState.rolePending?.clear(); peopleDialogState.roleDraft = null; peopleDialogState.roleReceipt = null; peopleDialogState.roleRefusal = null;
     };
 
     const openWorkspaceDetailsDialog = (): void => {
       const dialog = one<HTMLDialogElement>("[data-workspace-details-popover]");
       if (!dialog || dialog.open) return;
       dialog.showModal();
-      one<HTMLButtonElement>("[data-workspace-details-trigger]")
-        ?.setAttribute("aria-expanded", "true");
+      for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
+        trigger.setAttribute("aria-expanded", "true");
+      }
     };
 
     const closeWorkspaceDetailsDialog = (): void => {
@@ -5610,7 +5673,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           meta.append(author, identityBadge, target, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
-          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: signals.some(reply => reply.threadRootId === signal.id && reply.from === viewerId),
+          author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal.id, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {
@@ -5661,7 +5724,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!expandedSignalIds.has(signal.id)) {
           markdown.classList.add("dashboard__message-markdown--collapsed");
         }
-        if (!extras?.ask) body.append(markdown);
+        body.append(markdown);
         if (extras) {
           const decoration = buildStreamExtras(document, extras, () => {
             if (composerSending || sampleMode) return;
@@ -5679,11 +5742,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               link.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); if (sampleMode) return;
                 void freshAttachmentDownload(attachment.file_id, attachment.version_n).then(url => window.location.assign(url), error => setComposerStatus(readableError(error), "error")); });
             }
+            if (extras?.ask) {
+              const title = decoration.querySelector<HTMLElement>(".hm-needs-title");
+              if (title) { title.textContent = `${authorName} asked you:`; title.after(markdown); }
+            }
             body.append(decoration);
           }
         } else renderMessageAttachments(body, signal);
-        // The card is a preview; keep the complete sanitized question beneath it.
-        if (extras?.ask) body.append(markdown);
+
         if (signal.about && !extras?.todo) {
           const about = document.createElement("code");
           about.className = "dashboard__message-about";
@@ -6721,6 +6787,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         delete receipt.dataset.setupWorkspaceId;
       }
       removedAgents = new Map();
+      removedAgentOwners = new Map();
       householdAccessGeneration += 1;
       householdAccess = { workspaceId: "", status: "unknown", contentRole: null };
       householdAccessRequestedFor = "";
@@ -6855,6 +6922,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const channelGeneration = ++channelReadGeneration;
       try {
         const removedAgentsRead = removedAgentNames(selected.id);
+        const removedOwnersRead = readRemovedAgentOwners(selected.id, session?.user.id ?? "");
         const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
@@ -6877,10 +6945,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ),
         ]);
         const nextRemovedAgents = await removedAgentsRead;
+        const nextRemovedOwners = await removedOwnersRead;
         if (version !== requestVersion) return;
         agents = nextAgents;
         homePeopleReadState = "ready";
         removedAgents = nextRemovedAgents;
+        removedAgentOwners = nextRemovedOwners;
         people = nextRoster.names;
         members = nextRoster.members;
         pendingInvites = nextInvites;
@@ -6945,13 +7015,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       const picker = one<HTMLElement & {
         reset?: () => void;
-        setContext?: (context: { workspaceName?: string; accountEmail?: string }) => void;
+        setContext?: (context: { workspaceName?: string; accountEmail?: string; viewerFirstName?: string }) => void;
       }>("agent-host-picker");
       const selected = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+      const rosterName = members.find((member) => member.userId === session?.user.id)?.name ?? "";
+      const account = session ? accountName(session) : "";
       picker?.reset?.();
       picker?.setContext?.({
         workspaceName: selected?.name ?? "",
-        accountEmail: session?.user.email ?? (session ? accountName(session) : ""),
+        accountEmail: session?.user.email ?? account,
+        viewerFirstName: personFirstName(rosterName) || personFirstName(account),
       });
       stopHostJoinWatch();
       showChannelView("agent-choice");
@@ -7626,10 +7699,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (!joined) return;
           stopHostJoinWatch();
           const picker = one<HTMLElement & {
-            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean }) => void;
+            showJoined?: (agent: { name: string; principalId: string; canApprove: boolean; joinedAt?: string }) => void;
           }>("agent-host-picker");
           picker?.showJoined?.({
             name: joined.name,
+            joinedAt: joined.joinedAt ?? undefined,
             principalId: joined.principalId,
             canApprove: householdAccess.status === "ok" && householdAccess.workspaceId === workspaceId,
           });
@@ -7807,7 +7881,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const place = threadReplyPlaceOf(threadReplyRoot);
         const block = threadReplyBlock(threadReplyRoot);
         if (targetText) {
-          targetText.textContent = threadReplyTargetText(threadReplyRoot.author, place);
+          targetText.textContent = threadReplyTargetText(agentLabelInSentence(threadReplyRoot.author), place);
         }
         if (windowText) {
           /* THE CEILING, when there is one, and the BLOCK when the thread has stopped taking
@@ -8255,6 +8329,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
     };
 
+    const shownWorkspaceCreateInvites = new Set<string>();
+
     const createFromIntent = async (value: Session, intent: CreateIntent, resumeOnBoot = false): Promise<void> => {
       const version = requestVersion;
       const userId = value.user.id;
@@ -8307,10 +8383,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           ...workspaces.filter((workspace) => workspace.id !== madeWorkspace.id),
         ];
         if (input) input.disabled = false;
+        homeRoute = { view: "chat", workspaceId: madeWorkspace.id };
+        window.history.pushState({ home: true, homePrevious: true }, "", routeHref(homeRoute));
         const opening = openWorkspace(madeWorkspace.id);
         const openedVersion = requestVersion;
         const openedGeneration = householdAccessGeneration;
         await opening;
+        if (requestVersion === openedVersion && session?.user.id === userId && activeWorkspaceId === madeWorkspace.id) {
+          focusHomeView();
+          const inviteKey = `${userId}:${madeWorkspace.id}`;
+          if (!resumeOnBoot && intent.purpose === "shared" && !shownWorkspaceCreateInvites.has(inviteKey)) {
+            shownWorkspaceCreateInvites.add(inviteKey); openInvite("channel");
+          }
+        }
         if (requestVersion === openedVersion && householdAccessGeneration === openedGeneration && session?.user.id === userId && activeWorkspaceId === madeWorkspace.id && permissions !== "committed" && needsHouseholdSetup(userId, madeWorkspace.id)) {
           const receipt = one<HTMLElement>("[data-channel-receipt]");
           if (receipt) {
@@ -8816,8 +8901,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       radio.addEventListener("change", syncCreatePurposeWarning);
     }
 
-    one<HTMLFormElement>("[data-create-form]")?.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    const submitWorkspaceCreate = async (): Promise<void> => {
       if (!session) return;
       if (
         activeCreate?.version === requestVersion &&
@@ -8848,7 +8932,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           };
       writeCreateIntent(session.user.id, intent);
       await createFromIntent(session, intent);
-    });
+    };
 
     for (const button of all<HTMLButtonElement>("[data-signout]")) {
       button.addEventListener("click", async () => {
@@ -9071,7 +9155,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     }
 
     one<HTMLButtonElement>("[data-create-cancel]")?.addEventListener("click", homeBack);
-    one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", openRosterDialog);
+    one<HTMLButtonElement>("[data-roster-open]")?.addEventListener("click", () => openRosterDialog());
     one<HTMLButtonElement>("[data-roster-close]")?.addEventListener("click", closeRosterDialog);
     one<HTMLButtonElement>("[data-workspace-details-trigger]")?.addEventListener(
       "click",
@@ -10035,10 +10119,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       closeRosterDialog();
       openInvite("channel");
     });
+    const leaveAddAgentForHome = (): void => {
+      stopHostJoinWatch();
+      homeBack();
+    };
+    const finishJoinedAgent = (agentId: string): void => {
+      stopHostJoinWatch();
+      if (!agentId || !activeWorkspaceId) return;
+      void navigateHome({ view: "agent", workspaceId: activeWorkspaceId, agentId }, "push");
+    };
     const hostPicker = one<HTMLElement>("agent-host-picker");
     hostPicker?.addEventListener("agent-host-selected", () => startHostJoinWatch());
     hostPicker?.addEventListener("agent-host-back", () => stopHostJoinWatch());
+    hostPicker?.addEventListener("agent-host-home", () => {
+      leaveAddAgentForHome();
+    });
     hostPicker?.addEventListener("agent-host-approve", () => activateWorkspaceView("objects"));
+    hostPicker?.addEventListener("agent-host-done", (event: Event) => {
+      const principalId = (event as CustomEvent<{ principalId?: unknown }>).detail?.principalId;
+      finishJoinedAgent(typeof principalId === "string" ? principalId : "");
+    });
     for (const button of all<HTMLButtonElement>("[data-workspace-view]")) {
       button.addEventListener("click", () => {
         const view = button.dataset.workspaceView;
@@ -10232,8 +10332,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (event.target === dialog) dialog.close();
       });
       dialog?.addEventListener("close", () => {
-        one<HTMLButtonElement>("[data-workspace-details-trigger]")
-          ?.setAttribute("aria-expanded", "false");
+        for (const trigger of all<HTMLButtonElement>("[data-workspace-details-trigger]")) {
+          trigger.setAttribute("aria-expanded", "false");
+        }
       });
     }
     {
@@ -13705,6 +13806,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__composer textarea::placeholder {
     color: var(--text-faint);
+    /* The resting box stays one line, so a long hint is cut off with an ellipsis. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .dashboard__composer-send {
@@ -14891,38 +14996,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       max-inline-size: 100%;
     }
 
-    /* The channel head STOPS BEING A ROW here. It is positioned over the top of the
-       transcript, so it costs the reading area no height at all, and it carries only the two
-       things a phone still needs from it: the live dot and the roster pill that opens agent
-       management. The channel name is redundant with the view switcher in the bar above —
-       "Signals" is already marked aria-current — so the titleblock is hidden from sight and
-       kept for the accessible name of this section. */
+    /* The channel menu is a row under the phone bar. It stays in the grid so the transcript
+       starts below it. The titleblock stays clipped; the menu and actions stay in this row. */
     .dashboard__channel {
       position: relative;
-      grid-template-rows: minmax(0, 1fr);
-      /* ONE height for the floating band, read by every clearance that keeps the transcript
-         out from under it. The two floating parts are not the same height: the filter row is
-         2.5rem, and the roster cluster is a 2.75rem tap target inside var(--s-1) of padding,
-         which is 3.25rem. The clearance was the filter row's 2.5rem, so at rest 12px of the
-         first message sat under the roster pill — measured at 390x844: the first row began
-         113px below the top of the app bar and the pill ended at 125px. The band is as tall
-         as its tallest part, and the clearance is the band. */
-      --feed-band-height: 3.25rem;
+      grid-template-rows: auto minmax(0, 1fr);
+      --feed-band-height: 0px;
     }
 
     .dashboard__channel-head {
-      position: absolute;
-      z-index: 4;
-      inset-block-start: 0;
-      inset-inline-end: 0;
+      position: relative;
+      z-index: 1;
+      inset: auto;
       min-block-size: 0;
-      justify-content: flex-end;
+      justify-content: flex-start;
       flex-wrap: nowrap;
       gap: var(--s-2);
-      padding: var(--s-1) var(--s-4);
-      background: none;
+      padding-block: 0;
+      padding-inline: var(--s-3);
+      background: var(--surface);
       border-block-end: 0;
-      pointer-events: none;
+      pointer-events: auto;
     }
 
     /* These two float over live text, so each one carries the same translucent backdrop the
@@ -14960,15 +15054,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       margin-inline-start: 0;
     }
 
-    /* The filter row floats too. Sticky keeps it at the top of the scroller; the negative
-       margin takes ITS OWN height back out of the flow, so the transcript passes UNDER it
-       instead of starting below it. That pair is 2.5rem and must match each other. The list's
-       top padding is NOT the same amount: it clears the whole band, whose height is the taller
-       of the two floating parts, so it is var(--feed-band-height). It is clearance at rest and
-       scrolls away with the content. */
+    /* The filter row is the next in-flow row. A negative margin would let the first message
+       start underneath it. */
     .dashboard__feed-toolbar {
+      position: relative;
       min-block-size: 2.5rem;
-      margin-block-end: -2.5rem;
+      margin-block-end: 0;
       padding-inline: var(--s-4);
       /* Room for the floating roster cluster on the opposite side of the same band. */
       padding-inline-end: 8rem;
@@ -15000,19 +15091,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       white-space: nowrap;
     }
 
-    .dashboard__feed {
-      padding-block-start: var(--feed-band-height);
-    }
-
-    .dashboard__feed-more {
-      padding-block-start: var(--feed-band-height);
-    }
-
-    /* The clearance belongs to whatever is FIRST under the floating band, and only to that.
-       "Load older updates" sits between the band and the list, so when it is showing it has
-       already cleared the band and the list's own clearance becomes a band's height of dead
-       screen between the button and the first message. Measured at 390x844 when that clearance
-       was still the filter row's 2.5rem: a 40px gap. It is --feed-band-height now. */
+    .dashboard__feed,
+    .dashboard__feed-more,
     .dashboard__feed-more:not([hidden]) + .dashboard__feed {
       padding-block-start: 0;
     }
@@ -15034,11 +15114,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       padding-inline: var(--s-2);
     }
 
-    /* The channel control appears exactly where the rail's channel list disappears. It
-       rides in the toolbar band, which floats over the transcript on a negative margin
-       equal to its own height, so it adds NO height to the header: the 73px app bar
-       remains the only standing header (2026-09-04 ruling). Its own height is the band's
-       2.5rem, so it cannot make the band taller either. */
+    /* The channel control sits in the in-flow filter row under the channel menu. */
     .dashboard__channel-switch {
       display: inline-flex;
       align-items: center;
@@ -16023,10 +16099,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
   @media (max-width: 52rem) {
-    /* On a phone the channel head floats over the top of the body (--feed-band-height), and the
-       fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits about
-       10rem above the bottom edge. These views start below the band and leave room to scroll
-       every control clear of that box (after-screenshot defects 1 and 2). */
+    /* The channel head is an in-flow row, so these views do not reserve a floating band.
+       The fixed "Admin clients and history" box from AdminDelegations.astro (C1-owned) sits
+       about 10rem above the bottom edge; the end padding keeps every control clear of it. */
     .dashboard__setup,
     .dashboard__objects-view,
     .dashboard__host-view {

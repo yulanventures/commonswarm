@@ -69,7 +69,7 @@ test("built dashboard carries to_agent from the read query into Signal.toAgent",
      installed browser. So the assertion moved from the call site to the constant. */
   assert.match(
     clientSource,
-    /export const BROWSER_SIGNAL_COLUMNS =\n\s*"id,from,from_kind,to,to_agent,kind,body,about,until,created_at,attachments," \+\n\s*"channel_id,thread_root_id,broadcast_to_channel";/,
+    /export const BROWSER_SIGNAL_COLUMNS =\n\s*"id,from,from_kind,to,to_agent,kind,body,about,until,created_at,attachments," \+\n\s*"channel_id,thread_root_id,broadcast_to_channel,in_reply_to";/,
   );
   assert.match(clientSource, /\.select\(BROWSER_SIGNAL_COLUMNS\)/);
   assert.doesNotMatch(clientSource, /\.select\("\*"\)/);

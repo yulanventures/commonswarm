@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { HOSTED_MCP_RESOURCE } from "../../../src/protocol/hosted-authority.ts";
 import {
+  TURN_ONLY_NOTE,
   AGENT_CONNECTOR_ADDRESS,
   AGENT_HOSTS,
   AGENT_HOST_STATUS_LABELS,
@@ -48,7 +49,8 @@ test("the waiting label names OpenAI, so only OpenAI hosts may use it", () => {
 });
 
 test("people-facing step text has no protocol words or endorsement claims", () => {
-  const banned = /\b(seat|grant|claim_seat|claim|ACK|listener|signal|principal|OAuth|partner|certified|endorsed|one-click|wakes up)\b/iu;
+  const banned = /\b(seat|grant|claim_seat|claim|ACK|listener|signal|principal|OAuth|partner|certified|endorsed|one-click|wakes up|wake up)\b/iu;
+  assert.doesNotMatch(TURN_ONLY_NOTE, banned);
   for (const host of AGENT_HOSTS) {
     const steps = [...host.steps, ...(host.testing?.steps ?? [])];
     /* Everything a person reads or copies, including the sentences they say to the agent
@@ -69,6 +71,7 @@ test("people-facing step text has no protocol words or endorsement claims", () =
   }
   // Controls: the instrument does fire on a protocol word and on the retired Muse draft.
   assert.match("claim a seat", banned);
+  assert.match("It does not wake up", banned);
   assert.match("Create a CommonSwarm custom connector over MCP with OAuth", banned);
 });
 
@@ -130,13 +133,29 @@ test("the invite connect footnote does not claim directed messages are public", 
   assert.doesNotMatch(INVITE_CONNECT_FOOTNOTE, /Everyone in Home sees what it posts here/u);
 });
 
+test("Home leaves Add agent, and Done opens the agent that just joined", () => {
+  const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(picker, /data-ahp-home-back[\s\S]*?Home/);
+  assert.match(picker, /new CustomEvent\("agent-host-home", \{ bubbles: true \}\)/);
+  assert.match(picker, /data-ahp-done hidden=\{audience === "joiner"\}>Done</);
+  assert.match(
+    picker,
+    /new CustomEvent\("agent-host-done", \{\s*bubbles: true,\s*detail: \{ principalId: this\.#joinedPrincipalId \},\s*\}\)/,
+  );
+  assert.match(picker, /ownership\.textContent = addAgentOwnershipLine\(workspace, first, agentName\)/);
+  assert.match(dashboard, /addEventListener\("agent-host-home", \(\) => \{\s*leaveAddAgentForHome\(\);\s*\}\)/);
+  assert.match(dashboard, /addEventListener\("agent-host-done", \(event: Event\) => \{[\s\S]*?finishJoinedAgent\(/);
+  assert.match(dashboard, /viewerFirstName: personFirstName\(rosterName\) \|\| personFirstName\(account\)/);
+});
+
 test("showJoined does not invent a join time when joinedAt is missing", () => {
   assert.equal(agentJoinedSentence("Claude", "Home"), "Claude joined Home.");
   assert.equal(agentJoinedSentence("Claude", "Home", ""), "Claude joined Home.");
   assert.equal(agentJoinedSentence("Claude", "Home", "unknown"), "Claude joined Home.");
   // A local wall-clock timestamp is deterministic across the test machine's time zones.
   const measured = agentJoinedSentence("Claude", "Home", "2026-10-05T11:32:00");
-  assert.equal(measured.toLowerCase().replace(/[\u00a0\u202f]/gu, " "), "claude joined home at 11:32 am.");
+  assert.equal(measured.replace(/[\u00a0\u202f]/gu, " "), "Claude joined Home at 11:32 am.");
   const picker = readFileSync(new URL("../components/connect/AgentHostPicker.astro", import.meta.url), "utf8");
   assert.match(picker, /agentJoinedSentence\(agent\.name, workspace, agent\.joinedAt\)/u);
   assert.doesNotMatch(picker, /: new Date\(\)/u);

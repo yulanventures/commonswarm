@@ -43,6 +43,15 @@ export function railWorkspaceRows(workspaces: readonly RailWorkspace[], expanded
   return { rows: rows.map((row) => ({ ...row, hidden: row.overflow && !expanded })), overflowCount };
 }
 
+/** Duplicate names carry enough of the UUID to distinguish every matching membership. */
+export function railWorkspaceIdentifier(workspace: RailWorkspace, workspaces: readonly RailWorkspace[]): string | null {
+  const matches = workspaces.filter(row => row.name.trim().toLocaleLowerCase() === workspace.name.trim().toLocaleLowerCase());
+  if (matches.length < 2) return null;
+  let length = 8;
+  while (length < workspace.id.length && matches.some(row => row.id !== workspace.id && row.id.slice(0, length) === workspace.id.slice(0, length))) ++length;
+  return workspace.id.slice(0, length);
+}
+
 export function railMoreLabel(overflowCount: number, expanded: boolean): string | null {
   if (overflowCount <= 0) return null;
   return expanded ? "Show fewer" : `Show ${overflowCount} more`;
@@ -208,7 +217,10 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
     if (workspace.current) row.setAttribute("aria-current", "page");
     const name = node(doc, "span", "hm-rail__name", workspace.name);
     name.title = workspace.name;
-    row.append(name, ...badge(doc, workspace.needsYou));
+    row.append(name);
+    const shortId = railWorkspaceIdentifier(workspace, vm.workspaces);
+    if (shortId) { const identifier = node(doc, "span", "hm-rail__identifier", shortId); identifier.title = workspace.id; row.append(identifier); }
+    row.append(...badge(doc, workspace.needsYou));
     item.append(row);
     list.append(item);
   }

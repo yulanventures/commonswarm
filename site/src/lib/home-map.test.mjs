@@ -260,3 +260,146 @@ test("to-do feature detection distinguishes missing tools from a content refusal
     await assert.rejects(server.overview(), HomeToolsUnavailable);
   }
 });
+
+import { homeAskAnswered } from "./home-map.ts";
+test("asks accept thread and directed answers from the viewer or their agents only", () => {
+  const ask = "ask";
+  for (const link of [{threadRootId:ask}, {inReplyTo:ask}]) {
+    assert.equal(homeAskAnswered(ask, [{...link, from:"tom", fromKind:"user"}], "tom", ["orbit"]), true);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"orbit", fromKind:"agent"}], "tom", ["orbit"]), true);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"nikki", fromKind:"user"}], "tom", ["orbit"]), false);
+    assert.equal(homeAskAnswered(ask, [{...link, from:"muse", fromKind:"agent"}], "tom", ["orbit"]), false);
+  }
+  assert.equal(homeAskAnswered(ask, [{inReplyTo:"other",from:"tom",fromKind:"user"}], "tom", []), false);
+});
+const directedAsk = { id: "ask", kind: "ask", from: "amy", fromKind: "user", to: "zoe", body: "Call the plumber?", until: "2026-10-06T12:00:00Z", createdAt: "2026-10-05T11:00:00Z" };
+const viewerReply = { id: "reply", kind: "note", from: "zoe", fromKind: "user", to: "amy", body: "On it.", inReplyTo: directedAsk.id, until: null, createdAt: "2026-10-05T11:30:00Z" };
+const ownedAgents = ["A"];
+/** Recipient filter of swarm_read.signals. Independent of the client. */
+function visibleInRead(row, viewerId, ownedAgentIds) {
+  const toUser = row.to ?? null;
+  const toAgent = row.toAgent ?? null;
+  if (toUser === null && toAgent === null) return true;
+  if (toUser === viewerId) return true;
+  if (toAgent !== null && ownedAgentIds.includes(toAgent)) return true;
+  return (row.recipients ?? []).some(recipient => recipient.kind === "user"
+    ? recipient.id === viewerId : ownedAgentIds.includes(recipient.id));
+}
+/** Answer rule of home_overview: a swarm.signals reply by the viewer or an agent they own. */
+function overviewAnswered(askId, table, viewerId, ownedAgentIds) {
+  return table.some(row => row.inReplyTo === askId && (row.fromKind === "user"
+    ? row.from === viewerId : row.fromKind === "agent" && ownedAgentIds.includes(row.from)));
+}
+const askIds = vm => vm.needsYou.filter(item => item.kind === "ask").map(item => item.id);
+test("an overview's needs-you list stays the list when a feed page still holds the ask", () => {
+  const people = mapHomePeople(input);
+  const excluded = { ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] } };
+  const feed = [directedAsk];
+  const hidden = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: {
+    ...catchUpDetailFromOverview(excluded, "zoe", now, false, []), signals: feed } }], "zoe", "Zoe", now, false);
+  assert.equal(feed.some(signal => signal.id === directedAsk.id), true);
+  assert.deepEqual(askIds(hidden), excluded.needs_you.asks.map(ask => ask.signal_id));
+  const other = { ...directedAsk, id: "other", body: "Bring the ladder?" };
+  const kept = mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: {
+    ...catchUpDetailFromOverview(overviewRow, "zoe", now, false, [directedAsk]), signals: [directedAsk, other, viewerReply] } }], "zoe", "Zoe", now, false);
+  assert.deepEqual(askIds(kept), overviewRow.needs_you.asks.map(ask => ask.signal_id));
+  assert.equal(kept.needsYou.find(item => item.id === directedAsk.id).what, `Amy asked you: ‘${directedAsk.body}’`);
+  const fanOut = detail => mapCatchUp([{ workspace: workspaces[0], state: "ready", detail: { people, signals: [], openTodos: null, lists: null, files: null, newMessages: null, ...detail } }], "zoe", "Zoe", now, false);
+  const answeredTable = [directedAsk, viewerReply];
+  const visible = answeredTable.filter(row => visibleInRead(row, "zoe", ownedAgents));
+  assert.equal(overviewAnswered(directedAsk.id, answeredTable, "zoe", ownedAgents), true);
+  assert.deepEqual(visible.map(row => row.id), [directedAsk.id]);
+  const hiddenReply = fanOut({ signals: visible, signalsComplete: true });
+  assert.equal(hiddenReply.latest.some(item => item.id === directedAsk.id), true);
+  assert.deepEqual(askIds(hiddenReply), []);
+  assert.equal(hiddenReply.emptySummary, "Checked 1 of 1 workspace.");
+  const agentReply = { ...viewerReply, id: "agent-reply", from: "A", fromKind: "agent" };
+  const agentTable = [directedAsk, agentReply];
+  assert.equal(visibleInRead(agentReply, "zoe", ownedAgents), false);
+  assert.equal(overviewAnswered(directedAsk.id, agentTable, "zoe", ownedAgents), true);
+  assert.deepEqual(askIds(fanOut({ signals: agentTable.filter(row => visibleInRead(row, "zoe", ownedAgents)), signalsComplete: true })), []);
+  assert.equal(overviewAnswered(directedAsk.id, [directedAsk], "zoe", ownedAgents), false);
+  assert.deepEqual(askIds(fanOut({ signals: [directedAsk], signalsComplete: true })), []);
+  assert.deepEqual(askIds(fanOut({ signals: [directedAsk, viewerReply] })), []);
+});
+test("the live loader keeps the overview list and does not treat a short feed as an open ask", async () => {
+  const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
+  const file = ts.createSourceFile("dashboard.ts", dashboard.match(/<script>([\s\S]*?)<\/script>/u)[1], ts.ScriptTarget.Latest, true);
+  let loader;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(file) === "loadHomeCatchUp") loader = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(loader);
+  const script = ts.transpile(`const ${loader.getText(file)}; loadHomeCatchUp();`, { target: ts.ScriptTarget.ES2022 });
+  const load = async (overview, pageFor) => {
+    const paints = []; const pages = [];
+    const context = { catchUpGeneration: 0, homeRoute: { view: "catchup" }, homeViewerId: () => "zoe",
+      sampleMode: false, catchUpExpanded: false, catchUpData: [], workspaces: workspaces.slice(0, 1),
+      homeOverviewCounts: new Map(), Date: { now: () => now, parse: Date.parse },
+      initialCatchUpData, overviewCatchUpData, mapCatchUp, fillCatchUpDetails, catchUpDetailFromOverview, mapHomePeople, homeFileCount,
+      homeOverview: async () => overview,
+      homeOverviewAsks: async (_workspaceId, ids) => ids.length ? [directedAsk] : [],
+      feed: async (_workspaceId, limit) => { const rows = pageFor(limit); pages.push({ limit, rows: rows.length }); return rows; },
+      memberRoster: async () => ({ members: input.members }), roster: async () => input.agents,
+      agentAccessStatuses: async () => [], homeWorkingOn: async () => [], workspaceFiles: async () => [],
+      renderHomeCatchUp: () => paints.push(mapCatchUp(context.catchUpData, "zoe", "Zoe", now, false)) };
+    await runInNewContext(script, context);
+    return { vm: paints.at(-1), pages };
+  };
+  const serverList = row => row.needs_you.asks.map(ask => ask.signal_id);
+  const excluded = { ...overviewRow, needs_you: { asks: [], assigned: [], waiting: [] } };
+  const hidden = await load({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [excluded] },
+    () => [directedAsk, { ...directedAsk, id: "other", body: "Bring the ladder?" }]);
+  assert.equal(hidden.pages[0].rows >= 1, true);
+  assert.deepEqual(askIds(hidden.vm), serverList(excluded));
+  const kept = await load({ viewer_user_id: "zoe", generated_at: new Date(now).toISOString(), workspaces: [overviewRow] },
+    () => [directedAsk, { ...directedAsk, id: "other", body: "Bring the ladder?" }, viewerReply]);
+  assert.deepEqual(askIds(kept.vm), serverList(overviewRow));
+  assert.equal(kept.vm.needsYou.find(item => item.id === directedAsk.id).what, `Amy asked you: ‘${directedAsk.body}’`);
+  const full = await load(null, limit => [directedAsk, ...Array.from({ length: limit - 1 }, (_, index) => ({ id: `n${index}`, kind: "note", from: "amy", fromKind: "user", body: "note", until: null, createdAt: "2026-10-05T10:00:00Z" }))]);
+  assert.equal(full.pages[0].rows, full.pages[0].limit);
+  assert.deepEqual(askIds(full.vm), []);
+  const answeredTable = [directedAsk, viewerReply];
+  const visible = answeredTable.filter(row => visibleInRead(row, "zoe", ownedAgents));
+  assert.equal(overviewAnswered(directedAsk.id, answeredTable, "zoe", ownedAgents), true);
+  assert.deepEqual(visible.map(row => row.id), [directedAsk.id]);
+  const fallen = await load(null, limit => visible.slice(0, limit));
+  assert.equal(fallen.pages[0].limit, 50);
+  assert.ok(fallen.pages[0].rows < fallen.pages[0].limit);
+  assert.equal(fallen.vm.latest.some(item => item.id === directedAsk.id), true);
+  assert.deepEqual(askIds(fallen.vm), []);
+  assert.equal(fallen.vm.emptySummary, "Checked 1 of 1 workspace.");
+  const agentReply = { ...viewerReply, id: "agent-reply", from: "A", fromKind: "agent" };
+  const agentTable = [directedAsk, agentReply];
+  assert.equal(visibleInRead(agentReply, "zoe", ownedAgents), false);
+  assert.equal(overviewAnswered(directedAsk.id, agentTable, "zoe", ownedAgents), true);
+  const agentFallen = await load(null, limit => agentTable.filter(row => visibleInRead(row, "zoe", ownedAgents)).slice(0, limit));
+  assert.ok(agentFallen.pages[0].rows < agentFallen.pages[0].limit);
+  assert.deepEqual(askIds(agentFallen.vm), []);
+  assert.equal(overviewAnswered(directedAsk.id, [directedAsk], "zoe", ownedAgents), false);
+  const unknown = await load(null, limit => [directedAsk].slice(0, limit));
+  assert.ok(unknown.pages[0].rows < unknown.pages[0].limit);
+  assert.deepEqual(askIds(unknown.vm), []);
+  assert.equal(unknown.vm.emptySummary, "Checked 1 of 1 workspace.");
+});
+test("the fix card names the measured fault in the spec's sentence", () => {
+  const agent = {id:"dot",label:"Your dot",yours:true,state:{attention:true,word:"Disconnected",detail:"Key turned off"}};
+  assert.equal(homeAgentFixCards({groups:[{agents:[agent]}],other:[]},{id:"W",name:"Home",href:"?w=W"})[0].what,
+    "Your dot is disconnected: key turned off.");
+});
+
+test("tags highlight by default; only delivered to-do comments notify", () => {
+  assert.equal(mapHomeTodo(todoRow(), todoCtx()).tagDelivers, false);
+  assert.equal(mapHomeTodo(todoRow(), todoCtx({tagDelivers: false})).tagDelivers, false);
+  assert.equal(mapHomeTodo(todoRow(), todoCtx({tagDelivers: true})).tagDelivers, true);
+});
+
+
+test("workspace identifiers extend past a shared UUID prefix", async () => {
+  const { railWorkspaceIdentifier } = await import('./home-rail.ts');
+  const memberships = [{id:'12345678-1111-4000-8000-000000000001',name:'Home'},{id:'12345678-2111-4000-8000-000000000002',name:'home'}];
+  assert.equal(railWorkspaceIdentifier(memberships[0],memberships),'12345678-1');
+  assert.equal(railWorkspaceIdentifier(memberships[1],memberships),'12345678-2');
+});

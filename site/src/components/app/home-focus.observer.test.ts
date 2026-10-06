@@ -1,88 +1,70 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { test } from "node:test";
+import { join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createContext, runInContext } from "node:vm";
 import { build } from "esbuild";
-import ts from "typescript";
-import { browserTest, findChrome, buildChromeArgs, resolveChromePath } from "../../../tests/chrome.js";
-import { PendingRefreshGate } from "../../lib/pending-refresh";
-import { mapHomePeople } from "../../lib/home-map";
+import { browserTest as test } from "../../../tests/chrome.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
+import { focusFixture } from "./home-focus.fixture.js";
 
-async function focusFixture() {
-  const source = await readFile(new URL("LiveDashboard.astro", import.meta.url), "utf8");
-  const file = ts.createSourceFile("dashboard.ts", source.match(/<script>([\s\S]*?)<\/script>/u)![1], ts.ScriptTarget.Latest, true);
-  const names = ["homeViewerId", "currentHomePeople", "renderHomeRail", "renderHomeShell", "renderHomeCatchUp",
-    "wakeMarkKey", "renderRoster", "hasPendingAccess", "refreshPendingAccess"];
-  const declarations = new Map<string, string>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && names.includes(node.name.getText(file))) declarations.set(node.name.getText(file), node.getText(file));
-    ts.forEachChild(node, visit);
-  };
-  visit(file);
-  for (const name of names) assert.ok(declarations.has(name), `production ${name} is available`);
-  const setup = `
-    const one = (selector) => document.querySelector(selector);
-    let now = Date.parse('2026-10-05T12:00:00Z'); Date.now = () => now;
-    const session = {user:{id:'tom'}}, sampleMode = false, accountName = () => 'Tom';
-    let workspaces = [{id:'W',name:'Home'},{id:'X',name:'Trip'}];
-    let homeRoute = {view:'chat',workspaceId:'W'}, activeWorkspaceId = 'W', requestVersion = 1;
-    let members = [{userId:'tom',name:'Tom',role:'owner'}];
-    let agents = [{principalId:'A',name:'Claude',ownerUserId:'tom',transport:'hosted_mcp',
-      work:{work:'idle',facts:{transport:'hosted_mcp',turn_only:true,connection:'live',last_activity_at:'2026-10-05T11:47:00Z'}}}];
-    let people = new Map(), accessStatuses = [], homeWorkClaims = [], pendingInvites = [], pendingAgents = [];
-    let pendingAgentsLoadFailed = false, freshInviteWorkspaceId = '', freshInviteId = '';
-    let railExpanded = false, catchUpExpanded = false, homeShellKey = '', homeRailKey = '', homeCatchUpKey = '', renderedWakeMarkKey = '';
-    let catchUpData = [], rosterReads = 0, rosterRenders = 0;
-    const homeOverviewCounts = new Map(), pendingRefreshGate = new PendingRefreshGate(12000,30000);
-    const pendingMemberInvites = async () => [], agentAccessStatuses = async () => [];
-    const pendingAgentAccess = async () => [], loadPendingAccess = async read => ({rows:await read(),failed:false});
-    const memberRoster = async () => { rosterReads++; return {members:[...members],names:new Map()}; };
-    const renderMembers = () => {}, renderPendingAccess = () => {}, renderHeaderRoster = () => {}, renderDialogRoster = () => {}, restoreComposerOnEntry = () => {};
-    let syncComposerAddress = () => {};
-    const renderSetupChecklist = () => { rosterRenders++; };
-    const wakePathMark = () => null, shouldRetireFreshInvite = () => false, retireFreshInviteResult = () => {};
-    const navigateHomeHref = () => {}, selectHomePerson = () => {}, navigateHome = () => {}, homeBack = () => {}, openRosterDialog = () => {}, openWorkspaceDetailsDialog = () => {};
-    const poll = async (elapsed = 30001) => { now += elapsed; await refreshPendingAccess('W',1); return {reads:rosterReads,rendered:rosterRenders}; };
-  `;
-  const production = (selected = names) => selected.map(name => `const ${declarations.get(name)};`).join("\n");
-  return { setup, production };
+type CdpSend = (method: string, params?: Record<string, unknown>, sessionId?: string) => Promise<Record<string, unknown>>;
+
+function connectDevtools(url: string): Promise<{ socket: WebSocket; send: CdpSend }> {
+  const socket = new WebSocket(url);
+  const pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }>();
+  let next = 0;
+  const send: CdpSend = (method, params = {}, sessionId) => new Promise((resolveSocket, rejectSocket) => {
+    const id = ++next;
+    pending.set(id, { resolve: resolveSocket, reject: rejectSocket });
+    socket.send(JSON.stringify({ id, method, params, sessionId }));
+  });
+  socket.addEventListener("message", (event: MessageEvent) => {
+    const message = JSON.parse(String(event.data)) as { id?: number; result?: Record<string, unknown>; error?: { message?: string } };
+    if (!message.id || !pending.has(message.id)) return;
+    const waiter = pending.get(message.id)!;
+    pending.delete(message.id);
+    if (message.error) waiter.reject(new Error(message.error.message ?? "DevTools command failed"));
+    else waiter.resolve(message.result ?? {});
+  });
+  return new Promise((resolveSocket, rejectSocket) => {
+    socket.addEventListener("open", () => resolveSocket({ socket, send }));
+    socket.addEventListener("error", () => rejectSocket(new Error("DevTools socket failed")));
+  });
 }
 
-function assertPollCompleted(progress: { reads: number; rendered: number }, expectedReads: number): void {
-  assert.equal(progress.reads, expectedReads, "each poll actually completed a roster read");
-  assert.equal(progress.rendered, expectedReads + 1, "initial paint and each poll reached the end of renderRoster");
-}
-
-test("focus observer fixture ages production status detail and completes both poll renders", async () => {
-  const { setup, production } = await focusFixture();
-  // Only the DOM paint boundaries are replaced here; the browser uses the real builders.
-  const context = createContext({ PendingRefreshGate, mapHomePeople });
-  const script = `${setup}
-    const renderHomeRail = () => {}, renderHomeShell = () => {};
-    ${production(["homeViewerId", "currentHomePeople", "wakeMarkKey", "renderRoster", "hasPendingAccess", "refreshPendingAccess"])}
-    renderRoster(); poll;
-  `;
-  const poll = runInContext(ts.transpileModule(script, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
-  assert.equal(runInContext("rosterRenders", context), 1, "fixture boot reached the end of renderRoster");
-  const detail = () => runInContext("currentHomePeople().groups[0].agents[0].state.detail", context);
-  assert.equal(detail(), "Active 13 minutes ago", "fixture starts outside the Active now window");
-  for (const [expectedReads, expectedDetail] of [[1, "Active 13 minutes ago"], [2, "Active 14 minutes ago"]] as const) {
-    assertPollCompleted(await poll(), expectedReads);
-    assert.equal(detail(), expectedDetail, "production mapping crosses a minute boundary during the poll sequence");
+async function readDevtoolsPort(profile: string): Promise<{ port: string; path: string }> {
+  const file = join(profile, "DevToolsActivePort");
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    try {
+      const [port, browserPath] = (await readFile(file, "utf8")).split("\n");
+      if (port?.trim() && browserPath?.trim()) return { port: port.trim(), path: browserPath.trim() };
+    } catch {
+      // Chrome writes this file once the debugging port is listening.
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
   }
-  runInContext("syncComposerAddress = () => { throw new Error('fixture render failed'); }", context);
-  const interrupted = await poll();
-  assert.equal(interrupted.reads, 3, "a failed render still reached the read");
-  assert.equal(interrupted.rendered, 3, "a swallowed render failure did not complete another paint");
-  assert.throws(() => assertPollCompleted(interrupted, 3), assert.AssertionError, "read success cannot conceal an incomplete render");
-});
+  throw new Error("Chrome did not write DevToolsActivePort");
+}
 
-// Use Chrome's debugging pipe: real Tab events, file fixtures and no HTTP/server/network calls.
-browserTest("home refreshes keep rail controls, view headings and workspace menu focus", { timeout: 60_000 }, async () => {
+async function evaluate(send: CdpSend, sessionId: string, expression: string): Promise<unknown> {
+  const result = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+  const details = result.exceptionDetails as { text?: string; exception?: { description?: string } } | undefined;
+  if (details) throw new Error(details.exception?.description || details.text || "page evaluation failed");
+  return (result.result as { value?: unknown } | undefined)?.value;
+}
+
+async function removeOwnedProfile(profile: string): Promise<void> {
+  const root = resolve(tmpdir());
+  const target = resolve(profile);
+  if (target.startsWith(`${root}${sep}`) && target.includes(`${sep}commonswarm-home-focus-profile-`)) {
+    await rm(target, { recursive: true, force: true });
+  }
+}
+
+// File fixtures use the shared CI launcher; all expectations stay in the host test.
+test("home refreshes keep rail controls, view headings and workspace menu focus", { timeout: 60_000 }, async () => {
   const { setup, production } = await focusFixture();
   const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
   const fixtureScript = `
@@ -97,6 +79,7 @@ browserTest("home refreshes keep rail controls, view headings and workspace menu
     ${setup}
     ${production()}
     renderRoster();
+    window.runFocusChecks = async () => {
     window.fixture = {
       poll,
       rename: () => { workspaces = workspaces.map(w => w.id === 'X' ? {...w,name:'Summer trip'} : w); renderRoster(); },
@@ -106,69 +89,22 @@ browserTest("home refreshes keep rail controls, view headings and workspace menu
       fillCard: () => { catchUpData[0] = {...catchUpData[0],state:'open'}; renderHomeCatchUp(); },
       repaint: () => { now += 60000; renderHomeCatchUp(); }
     };
-  `;
-  const bundle = await build({ absWorkingDir: siteRoot, bundle: true, write: false, format: "iife", platform: "browser",
-    outfile: "focus.js", stdin: { contents: fixtureScript, resolveDir: siteRoot, loader: "ts" } });
-  const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
-  const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))!.text;
-  const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-"));
-  const fixturePath = join(directory, "index.html");
-  await writeFile(fixturePath, `<!doctype html><html><head><style>${css}
-    [hidden] {display:none!important} .hm-phone-bar,.hm-ws-nav {display:none}
-    </style></head><body><div data-home-rail-slot></div><div data-home-workspace-shell></div>
-    <div data-home-phone-nav></div><section data-home-catchup></section>
-    <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
-  const chrome = await resolveChromePath(await findChrome());
-  const profile = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
-  const child = spawn(chrome, buildChromeArgs(["--remote-debugging-pipe", "--window-size=1440,900", "about:blank"], profile, process.env.GITHUB_ACTIONS === "true"),
-    { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
-  const input = child.stdio[3] as import("node:stream").Writable;
-  const output = child.stdio[4] as import("node:stream").Readable;
-  let sequence = 0, buffered = "";
-  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
-  let pageLoad: { resolve: () => void; reject: (error: Error) => void } | undefined;
-  const rejectPending = (error: Error) => { for (const call of pending.values()) call.reject(error); pending.clear(); pageLoad?.reject(error); };
-  child.on("error", rejectPending);
-  child.on("exit", () => rejectPending(new Error("fixture browser exited")));
-  child.stderr?.resume();
-  output.setEncoding("utf8");
-  output.on("data", chunk => {
-    buffered += chunk;
-    let end: number;
-    while ((end = buffered.indexOf("\0")) >= 0) {
-      const message = JSON.parse(buffered.slice(0, end)); buffered = buffered.slice(end + 1);
-      if (message.method === "Page.loadEventFired") pageLoad?.resolve();
-      const call = pending.get(message.id);
-      if (!call) continue;
-      pending.delete(message.id);
-      if (message.error) call.reject(new Error(JSON.stringify(message.error))); else call.resolve(message.result);
-    }
-  });
-  const send = (method: string, params: object = {}, sessionId?: string): Promise<any> => new Promise((resolve, reject) => {
-    const id = ++sequence; pending.set(id, { resolve, reject });
-    input.write(`${JSON.stringify({ id, method, params, sessionId })}\0`);
-  });
-  // Own a hard deadline even if a browser exits before the first protocol reply.
-  const deadline = setTimeout(() => { rejectPending(new Error("focus fixture deadline")); child.kill("SIGKILL"); }, 45_000);
-  try {
-    const { targetId } = await send("Target.createTarget", { url: "about:blank" });
-    const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
-    const evaluate = async (expression: string) => {
-      const result = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
-      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
-      return result.result.value;
-    };
-    await send("Page.enable", {}, sessionId);
-    const loaded = new Promise<void>((resolve, reject) => { pageLoad = { resolve, reject }; });
-    await send("Page.navigate", { url: pathToFileURL(fixturePath).href }, sessionId);
-    await loaded; pageLoad = undefined;
+      const checks = [];
+      const assert = {
+        equal: (actual, expected, name) => checks.push({ actual, expected, name }),
+        deepEqual: (actual, expected, name) => checks.push({ actual, expected, name }),
+        notEqual: (actual, expected, name) => checks.push({ actual, expected, name, different: true })
+      };
+      const assertPollCompleted = (progress, reads) => {
+        assert.equal(progress.reads, reads, 'each poll completed a roster read');
+        assert.equal(progress.rendered, reads + 1, 'each poll reached the end of renderRoster');
+      };
+      const evaluate = async expression => (0, eval)(expression);
     assert.equal(await evaluate("!!window.fixture"), true, "production refresh functions initialized");
-    const tab = async () => {
-      await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 }, sessionId);
-      await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 }, sessionId);
-    };
-    await tab(); await tab(); await tab();
-    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "native Tab enters the Trip control");
+    const sequential = [...document.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')]
+      .filter(node => node.tabIndex >= 0 && !node.disabled && node.getClientRects().length > 0);
+    assert.equal(sequential[2]?.dataset.railWorkspace, "X", "the third native keyboard target is the Trip link");
+    assert.equal(await evaluate("document.activeElement.dataset.railWorkspace"), "X", "three Tab keys landed on the Trip link");
     await evaluate("window.original = document.activeElement");
     const statusTitle = () => evaluate("document.querySelector('[data-rail-agent] .hm-status').title");
     assert.equal(await statusTitle(), "Active 13 minutes ago", "initial paint exposes an aging status detail");
@@ -200,9 +136,83 @@ browserTest("home refreshes keep rail controls, view headings and workspace menu
     assert.equal(await evaluate("document.activeElement.id"), "hm-catchup-title", "a returned detail read preserves H1 focus");
     await evaluate("document.querySelector('.hm-catchup-card').focus(); fixture.catchup()");
     assert.equal(await evaluate("document.activeElement.dataset.workspaceId"), "W", "Catch up card identity survives a data rebuild");
-    await send("Browser.close");
+
+      return checks;
+    };
+    document.documentElement.dataset.focusReady = "1";
+  `;
+  const bundle = await build({ absWorkingDir: siteRoot, bundle: true, write: false, format: "iife", platform: "browser",
+    outfile: "focus.js", stdin: { contents: fixtureScript, resolveDir: siteRoot, loader: "ts" } });
+  const js = bundle.outputFiles.find(file => file.path.endsWith(".js"))!.text;
+  const css = bundle.outputFiles.find(file => file.path.endsWith(".css"))!.text;
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-"));
+  const fixturePath = join(directory, "index.html");
+  await writeFile(fixturePath, `<!doctype html><html><head><style>${css}
+    [hidden] {display:none!important} .hm-phone-bar,.hm-ws-nav {display:none}
+    </style></head><body><div data-home-rail-slot></div><div data-home-workspace-shell></div>
+    <div data-home-phone-nav></div><section data-home-catchup></section>
+    <script>${js.replace(/<\/script/giu, "<\\/script")}</script></body></html>`);
+  const profile = await mkdtemp(join(tmpdir(), "commonswarm-home-focus-profile-"));
+  let socket: WebSocket | undefined;
+  let closeBrowser: (() => Promise<void>) | undefined;
+  const launched = launchChrome(await findChrome(), [
+    `--user-data-dir=${profile}`,
+    "--remote-debugging-port=0",
+    "--remote-allow-origins=*",
+    "--window-size=1440,900",
+    pathToFileURL(fixturePath).href,
+  ], { maxBuffer: 10 * 1024 * 1024, timeout: 45_000, killSignal: "SIGKILL" });
+  try {
+    const endpoint = await Promise.race([
+      readDevtoolsPort(profile),
+      launched.then(() => { throw new Error("Chrome exited before DevToolsActivePort was written"); }),
+    ]);
+    const connected = await connectDevtools(`ws://127.0.0.1:${endpoint.port}${endpoint.path.startsWith("/") ? endpoint.path : `/${endpoint.path}`}`);
+    socket = connected.socket;
+    closeBrowser = async () => { await connected.send("Browser.close"); };
+    const targets = await connected.send("Target.getTargets") as { targetInfos?: Array<{ targetId: string; type: string; url: string }> };
+    const page = targets.targetInfos?.find((target) => target.type === "page" && target.url.startsWith("file:"));
+    assert.ok(page, "the fixture page did not open");
+    const attached = await connected.send("Target.attachToTarget", { targetId: page.targetId, flatten: true }) as { sessionId?: string };
+    const sessionId = attached.sessionId;
+    assert.ok(sessionId, "the fixture page did not attach");
+    await connected.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId);
+    await connected.send("Page.bringToFront", {}, sessionId);
+    const readyDeadline = Date.now() + 10_000;
+    let ready = false;
+    while (Date.now() < readyDeadline) {
+      ready = await evaluate(connected.send, sessionId, "document.documentElement.dataset.focusReady === '1'") === true;
+      if (ready) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+    assert.equal(ready, true, "the fixture did not finish painting");
+    for (let step = 0; step < 3; step += 1) {
+      await connected.send("Input.dispatchKeyEvent", {
+        type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+      }, sessionId);
+      await connected.send("Input.dispatchKeyEvent", {
+        type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9,
+      }, sessionId);
+    }
+    assert.equal(
+      await evaluate(connected.send, sessionId, "document.activeElement?.dataset?.railWorkspace ?? ''"),
+      "X",
+      "three Tab keys land on the Trip workspace",
+    );
+    const checks = await evaluate(connected.send, sessionId, "window.runFocusChecks()") as
+      { actual: unknown; expected: unknown; name: string; different?: boolean }[];
+    assert.ok(Array.isArray(checks), "focus checks did not return");
+    assert.equal(checks.length, 23, "every focus and poll expectation must run");
+    for (const check of checks) {
+      if (check.different) assert.notDeepEqual(check.actual, check.expected, check.name);
+      else assert.deepEqual(check.actual, check.expected, check.name);
+    }
+    await closeBrowser();
+    await launched;
   } finally {
-    clearTimeout(deadline); child.kill("SIGKILL");
-    // Keep only task-created CI fixture/profile directories for failure inspection.
+    await closeBrowser?.().catch(() => undefined);
+    socket?.close();
+    await launched.catch(() => undefined);
+    await removeOwnedProfile(profile);
   }
 });

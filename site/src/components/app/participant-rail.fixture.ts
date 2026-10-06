@@ -63,7 +63,7 @@ export const renderParticipantRailFixture = async (
         })),
         innerHtml: list.innerHTML,
       };
-      document.documentElement.dataset.fixture = btoa(JSON.stringify(snapshot));
+      document.documentElement.dataset.fixture = btoa(unescape(encodeURIComponent(JSON.stringify(snapshot))));
     </script>
   </body>
 </html>`;

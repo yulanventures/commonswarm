@@ -797,7 +797,7 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     assert.deepEqual(measured.replyBar, {
       hidden: false,
       broadcastChip: THREAD_REPLY_CHIP_LABEL,
-      target: "Replying to Your Orbit in All messages.",
+      target: "Replying to your Orbit in All messages.",
       /* The sample rows do not expire, so there is no ceiling to state and the line collapses
          rather than saying "never". */
       windowLine: "",
@@ -848,12 +848,12 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
     /* BROADCAST IS OFFERED ONLY WHERE THERE IS A CHANNEL TO BROADCAST TO. */
     assert.deepEqual(measured.replyUnfiled, {
       broadcastHidden: true,
-      target: "Replying to Your Orbit in All messages.",
+      target: "Replying to your Orbit in All messages.",
     }, "replyUnfiled: an unfiled thread has nowhere to broadcast, so there is no control");
     assert.deepEqual(measured.replyInChannel, {
       broadcastHidden: false,
       broadcastLabel: threadReplyBroadcastLabel("mobile"),
-      target: "Replying to Your River in #mobile.",
+      target: "Replying to your River in #mobile.",
     }, "replyInChannel: the control names the channel it would send to");
 
     /* THE SEND. One reply under its root, no new top-level row, and the composer goes back to

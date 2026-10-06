@@ -1330,6 +1330,18 @@ export interface CreatedWorkspace {
   name: string;
 }
 
+/** Role refusals retain the command's stable reason for the People & agents dialog. */
+export class WorkspaceRoleRefused extends Error {
+  constructor(readonly code: string) { super("The role change was not confirmed. Reload to check."); this.name = "WorkspaceRoleRefused"; }
+}
+export async function changeWorkspaceRole(session: Session, commandId: string, workspaceId: string,
+  userId: string, role: "owner" | "admin" | "member"): Promise<void> {
+  const { status, body } = await postCommand(session, commandId, { kind: "change_role", user_id: userId, role },
+    { workspace_id: workspaceId, stream: { kind: "workspace" } });
+  if (status === 200 && body.status === "accepted") return;
+  throw new WorkspaceRoleRefused(typeof body.reason === "string" ? body.reason : typeof body.error === "string" ? body.error : "unknown");
+}
+
 /**
  * Creates the caller's own workspace — the one command in the product that a caller with no
  * membership may issue, dispatched ahead of route resolution for exactly that reason.
@@ -1428,6 +1440,8 @@ export interface Signal {
   channelId: string | null;
   /** The message this reply's thread starts from, or `null` for a message of its own. */
   threadRootId: string | null;
+  /** A top-level directed answer to an ask; separate from thread identity. */
+  inReplyTo?: string | null;
   /** A thread reply the author also sent to the channel. Always false on a root. */
   broadcastToChannel: boolean;
 }
@@ -2317,7 +2331,7 @@ export async function reportBrowserSignalsSeen(
  */
 export const BROWSER_SIGNAL_COLUMNS =
   "id,from,from_kind,to,to_agent,kind,body,about,until,created_at,attachments," +
-  "channel_id,thread_root_id,broadcast_to_channel";
+  "channel_id,thread_root_id,broadcast_to_channel,in_reply_to";
 
 /**
  * One row of `swarm_read.signals` as the browser holds it. Both readers call
@@ -2344,6 +2358,7 @@ export function browserSignalFromRow(row: Record<string, unknown>): Signal {
     createdAt: String(row.created_at ?? ""),
     channelId: text(row.channel_id),
     threadRootId: text(row.thread_root_id),
+    inReplyTo: text(row.in_reply_to),
     broadcastToChannel: row.broadcast_to_channel === true,
   };
 }

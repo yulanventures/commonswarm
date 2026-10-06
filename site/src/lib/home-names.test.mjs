@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentLabel, firstNames, initials, agentTint, ordinal, formatWhen, greeting } from "./home-names.ts";
+import { addAgentOwnershipLine, agentLabel, firstNames, initials, agentTint, ordinal, formatWhen, greeting, personFirstName } from "./home-names.ts";
 
 test("the naming table preserves ownership, historical identity and duplicate suffixes", () => {
   const people = [{ id: "t", name: "Tom Langridge" }, { id: "n", name: "Nikki Cooper" }, { id: "n2", name: "Nikki Singh" }];
@@ -50,4 +50,45 @@ test("timestamps use the viewer's local day and locale; bad timestamps stay unkn
   assert.equal(formatWhen(new Date(2026, 9, 5, 9, 5).toISOString(), now, "en-GB"), "9:05");
   assert.equal(formatWhen("invalid", now), "Time unavailable");
   for (const [hour, expected] of [[0,"Good morning"],[11,"Good morning"],[12,"Good afternoon"],[17,"Good afternoon"],[18,"Good evening"],[23,"Good evening"]]) assert.equal(greeting(new Date(2026, 9, 5, hour)), expected);
+});
+
+import { agentLabelInSentence } from "./home-names.ts";
+test("mid-sentence possessives lower your without changing an agent name", () => {
+  assert.equal(agentLabelInSentence("Your Orbit"), "your Orbit");
+  assert.equal(agentLabelInSentence("Nikki’s Muse"), "Nikki’s Muse");
+  assert.equal(agentLabelInSentence("Yourself"), "Yourself");
+  assert.equal(agentLabel({name:"Orbit", yours:true}), "Your Orbit");
+});
+
+test("Add agent names the viewer’s agent with their first name", () => {
+  assert.equal(personFirstName("Tom Langridge"), "Tom");
+  assert.equal(personFirstName("  Tom  "), "Tom");
+  assert.equal(personFirstName("tom@example.test"), "");
+  assert.equal(personFirstName(""), "");
+  assert.equal(personFirstName("your account"), "");
+  assert.equal(personFirstName("Your Account"), "");
+  assert.equal(
+    addAgentOwnershipLine("Home", "your account", "agent"),
+    "It joins as yours. People in Home see it as your agent.",
+  );
+  assert.equal(
+    addAgentOwnershipLine("Home", "Tom", "agent"),
+    "It joins as yours. People in Home see it as Tom’s agent.",
+  );
+  assert.equal(
+    addAgentOwnershipLine("Home", "Tom Langridge", "Claude"),
+    "It joins as yours. People in Home see it as Tom’s Claude.",
+  );
+  assert.equal(
+    addAgentOwnershipLine("Home", "", "agent"),
+    "It joins as yours. People in Home see it as your agent.",
+  );
+  assert.equal(
+    addAgentOwnershipLine("Home", "tom@example.test", "Claude"),
+    "It joins as yours. People in Home see it as your Claude.",
+  );
+  assert.equal(
+    addAgentOwnershipLine("", "Tom", "Claude"),
+    "It joins as yours. People in this workspace see it as Tom’s Claude.",
+  );
 });

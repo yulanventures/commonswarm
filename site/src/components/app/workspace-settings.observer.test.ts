@@ -132,13 +132,17 @@ test("the dashboard closes through the human command and leaves the dead route",
 });
 
 test("workspace settings is a modal dialog outside the scrolling rail", async () => {
-  const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+  const [dashboard, shell] = await Promise.all([
+    readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8"),
+    readFile(new URL("../../lib/home-shell.ts", import.meta.url), "utf8"),
+  ]);
   const settingsTag = dashboard.match(
     /<([a-z][\w-]*)\b[^>]*\bdata-workspace-details-popover\b[^>]*>/,
   );
   assert.equal(settingsTag?.[1], "dialog", "the settings surface must use native dialog");
 
-  const railStart = dashboard.indexOf('<aside class="dashboard__rail"');
+  const railTag = dashboard.match(/<aside\b[^>]*\bclass="[^"\n]*\bdashboard__rail\b[^"\n]*"[^>]*>/);
+  const railStart = railTag?.index ?? -1;
   const railEnd = dashboard.indexOf("</aside>", railStart);
   assert.ok(railStart >= 0 && railEnd > railStart, "the dashboard rail must be enumerable");
   assert.doesNotMatch(
@@ -147,10 +151,15 @@ test("workspace settings is a modal dialog outside the scrolling rail", async ()
     "the rail scroll container must not own the settings dialog",
   );
   assert.match(dashboard, /openWorkspaceDetailsDialog[\s\S]*dialog\.showModal\(\)/);
-  assert.match(
-    dashboard,
-    /data-workspace-details-trigger[\s\S]*aria-expanded="false"[\s\S]*aria-controls="dashboard-workspace-details"/,
+  /* The control that opens the dialog is the Workspace settings menuitem. It starts
+     collapsed and names the dialog, and closing the dialog clears that expanded state. */
+  const settingsItem = shell.slice(
+    shell.indexOf('if (item === "settings")'),
+    shell.indexOf('if (item === "admin-access")'),
   );
+  assert.match(settingsItem, /dataset\.workspaceDetailsTrigger = ""/);
+  assert.match(settingsItem, /setAttribute\("aria-expanded", "false"\)/);
+  assert.match(settingsItem, /setAttribute\("aria-controls", "dashboard-workspace-details"\)/);
   assert.match(
     dashboard,
     /data-workspace-details-popover[\s\S]*addEventListener\("close"[\s\S]*aria-expanded", "false"/,

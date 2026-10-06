@@ -82,7 +82,8 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
   const prompt = read("src/components/connect/agent-prompt.ts");
 
   assert.match(dashboard, /Create your first workspace\./);
-  assert.match(dashboard, /Name another workspace\./);
+  assert.match(dashboard, /buildNewWorkspaceForm\(document, vm/);
+  assert.match(read("src/lib/home-new-workspace.ts"), /title\.textContent = "New workspace"/);
   assert.doesNotMatch(dashboard, /data-create-eyebrow/);
   assert.doesNotMatch(dashboard, /<label for="dashboard-workspace-name">/);
   assert.match(dashboard, /id="dashboard-workspace-name"[\s\S]*?aria-label="Workspace name"/);

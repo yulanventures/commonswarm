@@ -146,32 +146,28 @@ export function overviewCatchUpData(data: CatchUpData[], overview: HomeOverview,
 }
 export function homeAgentFixCards(people: HomePeople, workspace: NeedsYouVM['workspace']): NeedsYouVM[] {
   return [...people.groups.flatMap(group => group.agents), ...people.other].filter(agent => agent.yours && agent.state.attention).map(agent => ({
-    id: `${workspace.id}:${agent.id}`, kind: 'agent-fix', workspace, from: agent, what: `${agent.label}: ${agent.state.detail}.`, when: '',
+    id: `${workspace.id}:${agent.id}`, kind: 'agent-fix', workspace, from: agent, what: `${agent.label} is ${agent.state.word.toLocaleLowerCase()}: ${agent.state.detail.replace(/^./u, char => char.toLocaleLowerCase())}.`, when: '',
     primary: { label: 'What to do', href: routeHref({ view: 'agent', workspaceId: workspace.id, agentId: agent.id }) },
   }));
 }
-function detailNeeds(entry: CatchUpData, viewerId: string | null, now: number): NeedsYouVM[] {
+/** Mirrors overview SQL: answers from the viewer or their agents, in threads or directed replies. */
+export function homeAskAnswered(askId: string, signals: readonly Signal[], viewerId: string | null, ownAgentIds: readonly string[]): boolean {
+  return signals.some(reply => (reply.threadRootId === askId || reply.inReplyTo === askId)
+    && (reply.fromKind === "user" ? reply.from === viewerId : reply.fromKind === "agent" && ownAgentIds.includes(reply.from)));
+}
+function detailNeeds(entry: CatchUpData): NeedsYouVM[] {
   const detail = entry.detail;
   if (!detail) return [];
   const workspace = { ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }) };
-  const agents = [...detail.people.groups.flatMap(group => group.agents), ...detail.people.other];
   const items = [...(detail.needsYou ?? [])];
   items.push(...homeAgentFixCards(detail.people, workspace));
-  for (const signal of detail.signals) {
-    if (signal.kind !== "ask" || signal.to !== viewerId || !Number.isFinite(Date.parse(signal.until ?? "")) || Date.parse(signal.until ?? "") <= now || detail.signals.some(reply => reply.threadRootId === signal.id && reply.from === viewerId)) continue;
-    const from = signal.fromKind === "agent" ? agents.find(agent => agent.id === signal.from)
-      : detail.people.groups.find(group => group.person.id === signal.from)?.person;
-    if (!from) continue;
-    if (items.some(item => item.id === signal.id)) continue;
-    items.push({ id: signal.id, kind: "ask", workspace, from,
-      what: `${"label" in from ? from.label : from.name} asked you: ‘${signal.body}’`, when: formatWhen(signal.createdAt, now),
-      primary: { label: "Reply", href: routeHref({ view: "chat", workspaceId: entry.workspace.id, ...(signal.channelId ? { channelId: signal.channelId } : {}), messageId: signal.id }) } });
-  }
+  // Overview needs_you is the only answer check. swarm_read.signals hides the viewer's own
+  // directed replies, so a short feed cannot prove an ask is still open.
   return items;
 }
 /** The frozen builder cannot express an incomplete needs-you read independently of card detail. */
 export interface HomeCatchUpVM extends CatchUpVM { emptySummary: string | null }
-export function mapCatchUp(data: readonly CatchUpData[], viewerId: string | null, viewerName: string, now: number, sample: boolean, expanded = false): HomeCatchUpVM {
+export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | null, viewerName: string, now: number, sample: boolean, expanded = false): HomeCatchUpVM {
   const latest = data.flatMap(entry => (entry.detail?.signals ?? []).filter(signal => signal.until === null || Date.parse(signal.until ?? "") > now).map(signal => {
     const people = entry.detail!.people;
     const author = signal.fromKind === "agent" ? [...people.groups.flatMap(group => group.agents), ...people.other].find(agent => agent.id === signal.from)
@@ -187,7 +183,7 @@ export function mapCatchUp(data: readonly CatchUpData[], viewerId: string | null
       ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.`
       : complete ? null : checks.length ? `Checked ${checked} of ${checks.length} ${checks.length === 1 ? "workspace" : "workspaces"}.` : "Latest",
     sample, viewerFirstName: viewerName.trim().split(/\s+/)[0] || "there", now: new Date(now).toISOString(), needsYouExpanded: expanded,
-    needsYou: data.flatMap(entry => detailNeeds(entry, viewerId, now)), latest,
+    needsYou: data.flatMap(entry => detailNeeds(entry)), latest,
     workspaces: data.map(entry => ({ ...entry.workspace, href: routeHref({ view: "chat", workspaceId: entry.workspace.id }), state: entry.state,
       capsules: entry.detail?.people.groups ?? [], peopleSummary: entry.detail ? catchUpPeopleSummary(entry.detail.people.groups.map(group => group.person)) : "",
       openTodos: entry.detail?.openTodos ?? null, lists: entry.detail?.lists ?? null, files: entry.detail?.files ?? null,
@@ -228,7 +224,7 @@ import type { TodoVM, ObjectCardVM, QueueRowVM } from './home-types';
 import type { AgentFoundVM } from './home-agent';
 import { ownershipLine, notYetTodoGate, notYetNoteGate, setTimeCopy } from './home-agent-copy';
 import { todoSubline } from './home-todo-copy';
-export interface HomeTodoContext { workspaceId: string; people: HomePeople; viewerId: string | null; editor: boolean; sample: boolean; now: number; details?: ReadonlyMap<string, Todo> }
+export interface HomeTodoContext { workspaceId: string; people: HomePeople; viewerId: string | null; editor: boolean; sample: boolean; now: number; details?: ReadonlyMap<string, Todo>; tagDelivers?: boolean }
 export function homeParty(party: Party | null, people: HomePeople): PersonVM | AgentVM | null {
   if (!party) return null;
   return party.kind === 'agent' ? [...people.groups.flatMap(group => group.agents), ...people.other].find(agent => agent.id === party.id) ?? null
@@ -270,7 +266,7 @@ export function mapHomeTodo(row: Todo | TodoSummary, ctx: HomeTodoContext, known
     doneBy: full && row.state === 'done' ? homeActor(full.state_by, ctx.people) : null, doneAt: row.state === 'done' ? row.state_at : null,
     receipt: null, sample: ctx.sample, may: { edit, assign: edit && open, start: steer, reorder: steer, complete: !!canComplete, comment: edit },
     comments: comments.map(comment => ({ id: comment.comment_id, author: homeActor(comment.author, ctx.people), at: comment.created_at, body: comment.body,
-      tags: comment.mentions.flatMap(party => { const who = homeParty(party, ctx.people); return who ? [{ id: party.id, label: 'label' in who ? who.label : who.name }] : []; }) })), tagDelivers: true };
+      tags: comment.mentions.flatMap(party => { const who = homeParty(party, ctx.people); return who ? [{ id: party.id, label: 'label' in who ? who.label : who.name }] : []; }) })), tagDelivers: ctx.tagDelivers === true };
 }
 export function homeTodoCard(todo: TodoVM, now: number): ObjectCardVM {
   return { kind: 'todo', id: todo.id, title: todo.title, href: routeHref({ view: 'todo', workspaceId: todo.workspaceId, todoId: todo.id }),
