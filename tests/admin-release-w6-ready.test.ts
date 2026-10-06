@@ -323,7 +323,8 @@ test('W7 preflight binds the closed-success W6 of this release by w6_window_id a
   assert.notEqual(mismatch.r.status, 0);
   assert.match(mismatch.r.stderr, /W6 C1.json digest vs admin-c1-smoke gate expected identical got mismatch/);
   assert.match(block('ai-w7-proof'), /W7_C1_BINDING=\$\(ai_run ai-w7-preflight\) \|\|/);
-  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates/);
+  assert.match(block('ai-w7-proof'), /ai_run ai-gates-bind/);
+  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates(?:\s|$)/);
 });
 
 // ---------------- explicit audit dispatch and fence driver (R7 timing) ----------------

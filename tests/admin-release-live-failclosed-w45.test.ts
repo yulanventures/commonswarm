@@ -192,7 +192,7 @@ elif name=='caddy':
 elif name=='ai_deadline':
     if args: refuse()
 elif name=='ai_run':
-    if args not in [['ai-inputs'],['ai-gates'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
+    if args not in [['ai-inputs'],['ai-gates'],['ai-gates-bind'],['ai-timer-guard'],['ai-recycle-install'],['ai-backup-gate-check'],['ai-recycle-rollback']]: refuse()
     if args==['ai-recycle-rollback']:
         dropin=root/'systemd/fixture-recycle.service.d/50-admin-measurement.conf'
         if dropin.exists(): dropin.unlink()

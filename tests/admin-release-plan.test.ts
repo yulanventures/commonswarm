@@ -252,7 +252,8 @@ test('admin release plan: W6 and W7 approval is action/release/window/plan bound
   }
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-approval/);
   assert.match(block('ai-w7-proof'), /ai_run ai-w7-preflight/);
-  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates/);
+  assert.match(block('ai-w7-proof'), /ai_run ai-gates-bind/);
+  assert.doesNotMatch(block('ai-w7-proof'), /ai_run ai-gates(?:\s|$)/);
 });
 
 test('admin release plan: W4 requires separate terminal fence approval and W6 refuses absent approval inputs', () => {
@@ -4536,4 +4537,82 @@ test('C1-24: re-entry refuses a short, reordered or foreign manifest before the 
   assert.notEqual(expectedShort.result.status, 0);
   assert.match(expectedShort.result.stderr, /FAIL ai-db-session: expected-migration-manifest expected the release 20261003 sequence got other; STOP/);
   assert.doesNotMatch(expectedShort.result.stderr, /ledger-before-plus-ordered-prefix-of-new-migrations/);
+});
+
+const frozenC125Present = spawnSync('git', ['cat-file', '-e', 'b3181b79^{commit}']);
+assert.equal(frozenC125Present.status, 0, 'baseline commit b3181b79 is absent from this clone: fetch it (fetch-depth: 0 or git fetch origin b3181b79)');
+const frozenC125Plan = spawnSync('git', ['show', 'b3181b79:docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'], { encoding: 'utf8' });
+assert.equal(frozenC125Plan.status, 0, frozenC125Plan.stderr);
+const frozenC125Blocks = [...frozenC125Plan.stdout.matchAll(/^```sh\n([\s\S]*?)^```[ \t]*$/gm)].map(m => m[1]!);
+const frozenC125Block = (id: string) => frozenC125Blocks.find(s => s.startsWith(`# step: ${id}\n`)) ?? '';
+const boxAiGatesCall = /ai_run ai-gates(?:\s|$)/;
+const boxEvidenceOpen = /pathlib\.Path\(r\['evidence_root'\]\)/;
+const boxAiGatesCallers = (sources: string[]) => sources.filter(s => hostRoleOf(s) === 'box' && boxAiGatesCall.test(s)).map(s => /^# step: (\S+)/.exec(s)![1]!).sort();
+const boxEvidenceOpens = (sources: string[]) => sources.filter(s => hostRoleOf(s) === 'box' && boxEvidenceOpen.test(s)).map(s => /^# step: (\S+)/.exec(s)![1]!).sort();
+
+test('C1-25: box-hosted blocks never call ai_run ai-gates or open evidence_root; frozen b3181b79 does', () => {
+  assert.deepEqual(boxAiGatesCallers(blocks), []);
+  assert.deepEqual(boxEvidenceOpens(blocks), []);
+  assert.deepEqual(boxAiGatesCallers(frozenC125Blocks), ['ai-w4-apply', 'ai-w6-activation-apply', 'ai-w6-activation-checks']);
+  for (const id of ['ai-w4-apply', 'ai-w6-activation-checks', 'ai-w6-activation-apply', 'ai-w7-proof']) {
+    assert.match(block(id), /ai_run ai-gates-bind/, id);
+    assert.doesNotMatch(block(id), boxAiGatesCall, id);
+    assert.match(frozenC125Block(id), id === 'ai-w7-proof' ? /Mac already ran ai-gates/ : boxAiGatesCall, id);
+  }
+  assert.equal(block('ai-gates'), frozenC125Block('ai-gates'));
+  assert.match(block('ai-gates'), boxEvidenceOpen);
+  assert.doesNotMatch(block('ai-gates-bind'), boxEvidenceOpen);
+  assert.doesNotMatch(block('ai-gates-bind'), /\.is_dir\(|\.is_file\(|\.read_bytes\(/);
+  assert.match(block('ai-db-session'), /ai-gates\|ai-gates-bind\|ai-w6-activation-approval/);
+});
+
+test('C1-25: box bind passes with no evidence tree; one-byte and other-release receipts refuse; ai-gates still needs the tree', () => {
+  const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as {
+    gates: Record<string, string[]>; windows: Record<string, string[]>;
+  };
+  const absentRoot = '/Users/checker/absent-evidence';
+  assert.ok(!existsSync(absentRoot));
+  const receiptFor = (releaseSha: string) => {
+    const gates: Record<string, unknown> = {};
+    for (const name of contract.windows.W1) {
+      gates[name] = { status: 'PASS', controls: contract.gates[name], file: 'control.txt', sha256: 'c'.repeat(64) };
+    }
+    return JSON.stringify({ release_sha: releaseSha, evidence_root: absentRoot, gates }) + '\n';
+  };
+  const runBind = (receipt: string, extra: { gatesCopy?: string; digestReceipt?: string } = {}) => {
+    const dir = realpathSync(mkdtempSync(join(scratch, 'c125-bind-')));
+    const proof = realpathSync(mkdtempSync(join(dir, 'proof-')));
+    const receiptPath = join(dir, 'receipt.json');
+    writeFileSync(receiptPath, receipt);
+    writeFileSync(join(proof, 'gates.json'), extra.gatesCopy ?? receipt);
+    const inputs = { ...base(), window: 'W1', gate_receipt_sha256: digest(extra.digestReceipt ?? receipt) };
+    return run(block('ai-gates-bind'), {
+      INPUTS_FILE: inputFile(inputs), GATE_RECEIPT_FILE: receiptPath, PLAN_FILE: planPath, PROOF_DIR: proof,
+    });
+  };
+  const matching = receiptFor(sha);
+  const ok = runBind(matching);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /PASS ai-gates-bind: receipt digest, same-build release_sha and required gate list; evidence files not opened/);
+  const stillAbsent = run(block('ai-gates'), {
+    INPUTS_FILE: inputFile({ ...base(), window: 'W1', gate_receipt_sha256: digest(matching) }),
+    GATE_RECEIPT_FILE: (() => { const p = join(scratch, 'c125-gates-receipt.json'); writeFileSync(p, matching); return p; })(),
+    PLAN_FILE: planPath,
+  });
+  assert.notEqual(stillAbsent.status, 0);
+  assert.match(stillAbsent.stderr, /FAIL ai-gates: evidence root; STOP/);
+  const flipped = Buffer.from(matching);
+  flipped[10] ^= 1;
+  const oneByte = runBind(flipped.toString('latin1'), { digestReceipt: matching, gatesCopy: matching });
+  assert.notEqual(oneByte.status, 0);
+  assert.match(oneByte.stderr, /FAIL ai-gates-bind: GATE_RECEIPT_FILE digest expected input-gate_receipt_sha256 got mismatch; STOP/);
+  const copyFlipped = Buffer.from(matching);
+  copyFlipped[12] ^= 1;
+  const copyByte = runBind(matching, { gatesCopy: copyFlipped.toString('utf8') });
+  assert.notEqual(copyByte.status, 0);
+  assert.match(copyByte.stderr, /FAIL ai-gates-bind: PROOF_DIR\/gates.json digest expected input-gate_receipt_sha256 got mismatch; STOP/);
+  const other = receiptFor('b'.repeat(40));
+  const otherRelease = runBind(other);
+  assert.notEqual(otherRelease.status, 0);
+  assert.match(otherRelease.stderr, /FAIL ai-gates-bind: receipt release_sha expected input-release-sha got mismatch; STOP/);
 });

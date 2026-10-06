@@ -1327,3 +1327,64 @@ INNER_RC=0
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (issuer DO $issuer$ parity and duplicate/creator refusals; short/reordered/foreign manifest before prefix). D-030 still reaches every test file. No commit or push. HEAD remains `2f3b7133`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
 
+## C1-25: box-side ai-gates cannot open Mac gate evidence (uncommitted)
+
+Prepared against frozen `b3181b79`. No commit, push, production operation,
+full suite, build, Docker or browser. HezLead owns independent review.
+
+Staging W4 (`ai-w4-apply`) reran `ai_run ai-gates` on the box after both Caddy
+candidates validated. `ai-gates` requires `evidence_root` to be an absolute
+directory on the host that runs it. The checker's tree lives on the Mac; the
+plan never copies it. Production W4 and W6 would stop the same way. C1-12
+already bound W7 by digest; this patch applies that pattern to every remaining
+box-hosted `ai_run ai-gates` call.
+
+`ai-gates` is unchanged (byte-identical to `b3181b79`) and still runs on the
+Mac. New helper `ai-gates-bind` (not-run; allowlisted in `ai_run`) checks
+`GATE_RECEIPT_FILE` and `$PROOF_DIR/gates.json` sha256 against INPUTS
+`gate_receipt_sha256`, then the receipt `release_sha` and required gate list
+against INPUTS and `GATES.json`. It does not open `evidence_root`.
+
+| Call site | Before (`b3181b79`) | After |
+| --- | --- | --- |
+| `ai-w4-apply` | `ai_run ai-gates` L3814 | `ai_run ai-gates-bind` L3857 |
+| `ai-w6-activation-checks` | `ai_run ai-gates` L4931 | `ai_run ai-gates-bind` L4974 |
+| `ai-w6-activation-apply` | `ai_run ai-gates` L5200 | `ai_run ai-gates-bind` L5243 |
+| `ai-w7-proof` | no `ai_run ai-gates` (C1-12); C1.json vs `admin-c1-smoke` only | `ai_run ai-gates-bind` L6545 plus existing C1.json bind |
+
+W7 C1-12 consistency: C1-12 removed the box `ai_run ai-gates` from `ai-w7-proof`
+and added a W7-only C1.json digest check in `ai-w7-preflight`. That did not bind
+the receipt bytes or the full `GATES.json` window list. W7-proof now calls the
+same helper as W4/W6; the C1.json smoke bind stays.
+
+Inserting the helper shifted later `when`/`manual` quote line pins (not-run +1;
+helper +42; W7 extra `ai_run` +1). Pins were retargeted to the same quotes in
+preamble/body, never to the run-order JSON.
+
+| Test | file:line | Pre-change at `b3181b79` |
+| --- | --- | --- |
+| box-hosted blocks never call `ai_run ai-gates` or open `evidence_root` | `tests/admin-release-plan.test.ts:4553` | FAIL: `ai-w4-apply`, `ai-w6-activation-checks`, `ai-w6-activation-apply` call `ai_run ai-gates` |
+| bind passes with no evidence tree; one-byte and other-release refuse; `ai-gates` still needs the tree | `tests/admin-release-plan.test.ts:4569` | helper absent; `ai-gates` on the same receipt prints `FAIL ai-gates: evidence root; STOP` |
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.iGcQ24: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.XXXXXX`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 198
+ℹ suites 0
+ℹ pass 197
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 198776.115792
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (box call-site pin vs `b3181b79`; extracted bind pass/one-byte/other-release plus unchanged `ai-gates` evidence-root refusal). D-030 still reaches every test file. No commit or push. HEAD remains `b3181b79`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
