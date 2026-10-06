@@ -819,7 +819,27 @@ function decideWorkspace(state, cmd, ctx) {
           "landing authority must be transferred to a live successor first"
         );
       }
+      const seen = /* @__PURE__ */ new Set();
+      const revocations = [];
+      for (const invitation_id of [...ctx.pendingInvitationIds?.(cmd.user_id) ?? []].sort()) {
+        if (seen.has(invitation_id)) continue;
+        seen.add(invitation_id);
+        const invitation = state.invitations[invitation_id];
+        if (!invitation || invitation.consumed_at !== null || invitation.revoked_at !== null) {
+          return domain2(
+            ctx,
+            cmd.kind,
+            "invitation_not_live",
+            "a pending invitation for this member is not live"
+          );
+        }
+        revocations.push(env2(ctx, "InvitationRevoked", {
+          invitation_id,
+          revoked_at: ctx.now
+        }));
+      }
       return accept2([
+        ...revocations,
         env2(ctx, "MemberRemoved", { user_id: cmd.user_id, revoked_at: ctx.now })
       ]);
     }
@@ -4704,11 +4724,24 @@ function parseHumanInviteCommand(value) {
   if (c.action !== "preview" && !(c.action === "accept" && c.consent_version === HOUSEHOLD_JOIN_CONSENT_VERSION && typeof c.preview_digest === "string" && /^[0-9a-f]{64}$/.test(c.preview_digest) && HOUSEHOLD_CONTENT_ROLES.includes(c.content_role))) return null;
   return c;
 }
+function legacyHouseholdAcceptRefusal(boundaryPresent, verifiedEmail, invitedEmail) {
+  if (!boundaryPresent) return null;
+  if (verifiedEmail === null || invitedEmail === null || verifiedEmail !== invitedEmail) {
+    return "invitation_recipient_mismatch";
+  }
+  return "recipient_consent_required";
+}
+function legacyRemovalRejoinRefusal(membershipRevokedAt, invitationCreatedAt) {
+  if (membershipRevokedAt === null) return null;
+  if (Number.isFinite(invitationCreatedAt) && invitationCreatedAt > membershipRevokedAt) return null;
+  return "invitation_predates_removal";
+}
 function decideHumanInvite(command, facts) {
   const refuse2 = (reason) => ({ status: "refused", reason });
   if (!facts.human || !facts.identity_verified) return refuse2("human_sign_in_required");
   if (!facts.recipient_matches || facts.invitation_kind !== "member" || facts.role !== "member") return refuse2("invitation_unavailable");
   if (facts.accepted_at !== null) return facts.accepted_by === facts.user_id && facts.member_live ? { status: "already_joined" } : refuse2("invitation_unavailable");
+  if (facts.membership_revoked_at !== null && (!Number.isFinite(facts.invitation_created_at) || facts.invitation_created_at <= facts.membership_revoked_at)) return refuse2("invitation_predates_removal");
   if (facts.revoked_at !== null || facts.expires_at <= facts.now || !facts.parent_live || !facts.inviter_can_invite || facts.personal_boundary)
     return refuse2("invitation_unavailable");
   if (facts.member_live) return refuse2("member_exists");
@@ -5370,6 +5403,8 @@ export {
   isBrainFileArtifactName,
   isFileVersionPrecondition,
   leaseLive,
+  legacyHouseholdAcceptRefusal,
+  legacyRemovalRejoinRefusal,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   parseAdminClientApprovalCommand,

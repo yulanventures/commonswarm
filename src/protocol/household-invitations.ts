@@ -28,6 +28,33 @@ export interface HumanInviteFacts {
   inviter_can_invite: boolean; parent_live: boolean; now: number; expires_at: number;
   revoked_at: number | null; accepted_at: number | null; accepted_by: string | null;
   user_id: string; member_live: boolean; preview_digest: string;
+  /** Null when this person has no membership row, or that row is still live. */
+  membership_revoked_at: number | null;
+  invitation_created_at: number;
+}
+export type LegacyHouseholdAcceptRefusal = 'invitation_recipient_mismatch' | 'recipient_consent_required';
+/** When a household boundary exists, legacy acceptance requires the verified email to equal the invited email. */
+export function legacyHouseholdAcceptRefusal(
+  boundaryPresent: boolean,
+  verifiedEmail: string | null,
+  invitedEmail: string | null,
+): LegacyHouseholdAcceptRefusal | null {
+  if (!boundaryPresent) return null;
+  if (verifiedEmail === null || invitedEmail === null || verifiedEmail !== invitedEmail) {
+    return 'invitation_recipient_mismatch';
+  }
+  return 'recipient_consent_required';
+}
+export type LegacyRemovalRejoinRefusal = 'invitation_predates_removal';
+/** A legacy invitation issued after the latest removal may rejoin. One issued at
+ * or before that removal, or with no usable time, may not. */
+export function legacyRemovalRejoinRefusal(
+  membershipRevokedAt: number | null,
+  invitationCreatedAt: number,
+): LegacyRemovalRejoinRefusal | null {
+  if (membershipRevokedAt === null) return null;
+  if (Number.isFinite(invitationCreatedAt) && invitationCreatedAt > membershipRevokedAt) return null;
+  return 'invitation_predates_removal';
 }
 export type HumanInviteDecision = { status: 'preview' | 'join' | 'already_joined' } | { status: 'refused'; reason: string };
 export function decideHumanInvite(command: HumanInviteCommand, facts: HumanInviteFacts): HumanInviteDecision {
@@ -38,6 +65,9 @@ export function decideHumanInvite(command: HumanInviteCommand, facts: HumanInvit
   // It must never revive a removed member, even on an exact retry.
   if (facts.accepted_at !== null) return facts.accepted_by === facts.user_id && facts.member_live
     ? { status: 'already_joined' } : refuse('invitation_unavailable');
+  if (facts.membership_revoked_at !== null && (
+    !Number.isFinite(facts.invitation_created_at) || facts.invitation_created_at <= facts.membership_revoked_at
+  )) return refuse('invitation_predates_removal');
   if (facts.revoked_at !== null || facts.expires_at <= facts.now || !facts.parent_live || !facts.inviter_can_invite || facts.personal_boundary)
     return refuse('invitation_unavailable');
   if (facts.member_live) return refuse('member_exists');

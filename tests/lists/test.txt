@@ -117,3 +117,6 @@ tests/household-todos.test.ts
 tests/household-todo-proofs.test.ts
 tests/home-overview-proofs.test.ts
 tests/hosted-tool-pins.test.ts
+tests/household-member-removal.test.ts
+tests/household-managed-file-fence.test.ts
+tests/household-member-removal-backfill.test.ts

@@ -335,6 +335,11 @@ export interface DecideWorkspaceCtx {
    * instead of renewing against permissive defaults.
    */
   renewalFacts?(predecessor_token_id: string): RenewalFacts;
+  /**
+   * Unconsumed link invitations addressed to this member. Omitted by adapters
+   * that have not loaded them; removal then emits no invitation events.
+   */
+  pendingInvitationIds?(user_id: string): readonly string[];
 
   nextSeq(): number;
   nextEventId(): string;
@@ -929,7 +934,31 @@ export function decideWorkspace(
           'landing authority must be transferred to a live successor first',
         );
       }
+      const seen = new Set<string>();
+      const revocations = [];
+      for (const invitation_id of [...(ctx.pendingInvitationIds?.(cmd.user_id) ?? [])].sort()) {
+        if (seen.has(invitation_id)) continue;
+        seen.add(invitation_id);
+        const invitation = state.invitations[invitation_id];
+        if (
+          !invitation
+          || invitation.consumed_at !== null
+          || invitation.revoked_at !== null
+        ) {
+          return domain(
+            ctx,
+            cmd.kind,
+            'invitation_not_live',
+            'a pending invitation for this member is not live',
+          );
+        }
+        revocations.push(env(ctx, 'InvitationRevoked', {
+          invitation_id,
+          revoked_at: ctx.now,
+        }));
+      }
       return accept([
+        ...revocations,
         env(ctx, 'MemberRemoved', { user_id: cmd.user_id, revoked_at: ctx.now }),
       ]);
     }

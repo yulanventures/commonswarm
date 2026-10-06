@@ -123,7 +123,7 @@ import {
   fileRestore,
   fileTombstone,
   fileVersionCommit,
-  fileVersionCreate,
+  fileVersionCreate, householdManagedFileRefusal,
   validateFileCommand,
   type FileCommand,
   type FileStorage,
@@ -132,7 +132,7 @@ import { executeHouseholdLegacy } from "./household-legacy-integration.ts";
 import { HOUSEHOLD_FEATURE_GATES } from "../_shared/household-feature-gates.ts";
 import { HOUSEHOLD_SURFACE_KINDS, executeHouseholdSurface } from "./household-integration.ts";
 import type { HouseholdTodoNoticePort } from './household-todos.ts';
-import { provisionHouseholdPermissions } from "./household-permissions.ts";
+import { provisionHouseholdPermissions, pendingLinkInvitationIds, revokeRemovedMemberHousehold } from "./household-permissions.ts";
 import { drainFilePurgeQueue } from "./file-artifacts.ts";
 import {
   parseSignalAttachmentRefs,
@@ -173,7 +173,7 @@ import {
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
   PRINCIPAL_NAME_TAKEN,
-  publicHostedCommandForbidden,
+  publicHostedCommandForbidden, legacyHouseholdAcceptRefusal, legacyRemovalRejoinRefusal,
   reduceHostedAuthority,
 } from "../_shared/protocol.js";
 import {
@@ -3758,7 +3758,7 @@ async function prepareWorkspaceCommand(
     `;
     inviteeAlreadyMember = rows[0]?.present ?? false;
   }
-  let landingAuthorityChangeResolved = true;
+  let landingAuthorityChangeResolved = true, pendingForRemoval: readonly string[] = [];
   if (wire.kind === "remove_member" || wire.kind === "change_role") {
     const mappings = await tx<{ blocked: boolean }[]>`
       SELECT EXISTS (
@@ -3769,7 +3769,7 @@ async function prepareWorkspaceCommand(
           AND archived_at IS NULL
       ) AS blocked
     `;
-    landingAuthorityChangeResolved = !(mappings[0]?.blocked ?? true);
+    landingAuthorityChangeResolved = !(mappings[0]?.blocked ?? true); if (wire.kind === "remove_member") pendingForRemoval = await pendingLinkInvitationIds(tx, route.workspaceId, wire.user_id);
   }
 
   let nextSeq = headSeq;
@@ -3800,7 +3800,7 @@ async function prepareWorkspaceCommand(
         targetUserId === wire.user_id &&
         successorUserId === null
         ? landingAuthorityChangeResolved
-        : true,
+        : true, pendingInvitationIds: (userId) => wire.kind === "remove_member" && userId === wire.user_id ? pendingForRemoval : [],
     // Present only for a renewal that resolved a predecessor. Left undefined
     // otherwise so the reducer refuses `renewal_unsupported` instead of
     // deciding against a fabricated fact.
@@ -4481,7 +4481,7 @@ async function updateWorkspaceProjection(
   tx: Sql,
   route: Route,
   prepared: PreparedWorkspace,
-  events: readonly EventEnvelope[],
+  events: readonly EventEnvelope[], requestDigest: string,
 ): Promise<WorkspaceState> {
   let projection = prepared.state;
   for (const event of events) {
@@ -4574,7 +4574,7 @@ async function updateWorkspaceProjection(
       ) {
         throw new Error("MemberRemoved payload is malformed");
       }
-      const updated = await tx<{ user_id: string }[]>`
+      await revokeRemovedMemberHousehold(tx, route.workspaceId, payload.user_id, new Date(payload.revoked_at), event.actor_user, event.command_id, requestDigest); const updated = await tx<{ user_id: string }[]>`
         UPDATE swarm.memberships
         SET revoked_at = ${new Date(payload.revoked_at)}
         WHERE workspace_id = ${route.workspaceId}::uuid
@@ -9035,7 +9035,7 @@ type SignalAttachmentResolution =
  * Pins only readable, committed versions from the routed workspace. The file
  * and version locks keep tombstone/purge from crossing the signal insert.
  */
-async function resolveSignalAttachments(
+export async function resolveSignalAttachments(
   tx: Sql,
   route: Route,
   refs: readonly SignalAttachmentRef[],
@@ -9067,15 +9067,15 @@ async function resolveSignalAttachments(
       file_id: string;
       name: string;
       tombstoned_at: Date | null;
-      purged_at: Date | null;
+      purged_at: Date | null; household_managed: boolean;
     }[]>`
-      SELECT file_id, name, tombstoned_at, purged_at
+      SELECT file_id, name, tombstoned_at, purged_at, household_managed
       FROM swarm.files
       WHERE file_id = ${ref.file_id}::uuid
         AND workspace_id = ${route.workspaceId}::uuid
       FOR SHARE
     `;
-    const file = files[0];
+    const file = files[0]; if (file?.household_managed === true) { const managed = householdManagedFileRefusal("signal"); return { ok: false, status: managed.status, error: managed.error, reason: managed.reason, message: managed.message }; }
     if (
       file === undefined || file.tombstoned_at !== null ||
       file.purged_at !== null
@@ -10764,12 +10764,12 @@ async function handleTransaction(
       return { status: 403, body: { error: isDeliveryCommand ? "delivery_unavailable" : "forbidden" } };
     }
     if (kind === "accept_invitation") {
-      // Resolve a live workspace and reject revoked access before consent guidance.
-      // Only household member links require this review; legacy connect flows keep their acceptance path.
-      const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
-      if (boundary) {
-        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: 'authz', reason: 'recipient_consent_required' });
-        return { status: 403, body: { error: 'recipient_consent_required', message: 'Open the invitation in /invite and review it as yourself.' } };
+      // Fast path only. The same boundary and email comparison runs again under the locks.
+      // A workspace with a household boundary must match the verified email; others do not.
+      const early = await legacyAcceptEarlyRefusal(tx, route, auth, invitationRouteHash);
+      if (early !== null) {
+        await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: 'authz', reason: early.error });
+        return { status: 403, body: { error: early.error, message: early.message } };
       }
     }
     /* Dispatched HERE — after the route and the revocation sweep, before
@@ -12347,7 +12347,7 @@ async function handleTransaction(
       };
     }
 
-    await beforeStep(8);
+    await beforeStep(8); if (kind === "accept_invitation" || kind === "remove_member") { const lockedWorkspace = await tx<{ workspace_id: string }[]>`SELECT workspace_id FROM swarm.workspaces WHERE workspace_id = ${route.workspaceId}::uuid FOR UPDATE`; if (!lockedWorkspace[0]) throw new Error("validated workspace disappeared"); }
     const streamRows = await tx<{ head_seq: string | number }[]>`
       SELECT head_seq
       FROM swarm.streams
@@ -12630,7 +12630,7 @@ async function handleTransaction(
         prepared.state,
         prepared.command,
         prepared.ctx,
-      ) as Decision;
+      ) as Decision; const lockedRefusal = decision.ok && prepared.command.kind === "accept_invitation" ? await legacyAcceptLockedFence(tx, route, auth, prepared.invitationHash) : null; if (lockedRefusal !== null) { await insertAudit(tx, { auth, commandKind: kind, workspaceId: route.workspaceId, streamId: route.streamId, outcome: "authz", reason: lockedRefusal.error, hash }); return { status: 403, body: { error: lockedRefusal.error, message: lockedRefusal.message } }; }
       if (
         decision.ok &&
         prepared.command.kind === "accept_invitation" &&
@@ -12810,7 +12810,7 @@ async function handleTransaction(
 
     await beforeStep(12);
     if (prepared !== null) {
-      await updateWorkspaceProjection(tx, route, prepared, outcome.events);
+      await updateWorkspaceProjection(tx, route, prepared, outcome.events, hash);
     } else {
       await updateProjection(
         tx,
@@ -14524,4 +14524,97 @@ export async function handleAdminWorkerCommand(
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort);
   }
+}
+
+function legacyAcceptRefusalMessage(reason: string): string {
+  if (reason === "invitation_recipient_mismatch") {
+    return "This invitation is for a different verified email. Nothing was changed.";
+  }
+  if (reason === "invitation_predates_removal") {
+    return "This invitation was issued before the member was removed. Nothing was changed.";
+  }
+  return "Open the invitation in /invite and review it as yourself.";
+}
+
+function stampMillis(value: Date | string | null | undefined): number {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") return new Date(value).getTime();
+  return Number.NaN;
+}
+
+/** Repeats the household boundary check after both rows are locked. */
+export async function legacyAcceptLockedFence(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  invitationHash: Uint8Array | null,
+): Promise<{ error: string; message: string } | null> {
+  const [boundary] = await tx<{ purpose: string }[]>`
+    SELECT purpose FROM swarm.household_workspace_boundaries
+    WHERE workspace_id = ${route.workspaceId}::uuid
+    FOR SHARE
+  `;
+  const invited = invitationHash === null ? [] : await tx<{
+    email: string | null;
+    created_at: Date | string | null;
+  }[]>`
+    SELECT i.email, i.created_at
+    FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash}
+      AND i.workspace_id = ${route.workspaceId}::uuid
+    FOR SHARE
+  `;
+  const members = auth.actor.user === null ? [] : await tx<{ revoked_at: Date | string | null }[]>`
+    SELECT m.revoked_at
+    FROM swarm.memberships AS m
+    WHERE m.workspace_id = ${route.workspaceId}::uuid
+      AND m.user_id = ${auth.actor.user}::uuid
+    FOR SHARE
+  `;
+  const boundaryRefusal = legacyHouseholdAcceptRefusal(
+    boundary !== undefined,
+    normalizedEmail(auth.email),
+    normalizedEmail(invited[0]?.email ?? null),
+  );
+  if (boundaryRefusal !== null) {
+    return { error: boundaryRefusal, message: legacyAcceptRefusalMessage(boundaryRefusal) };
+  }
+  const member = members[0];
+  const revokedAt = member === undefined || member.revoked_at === null
+    ? null
+    : stampMillis(member.revoked_at);
+  const removalRefusal = legacyRemovalRejoinRefusal(
+    revokedAt,
+    stampMillis(invited[0]?.created_at),
+  );
+  if (removalRefusal !== null) {
+    return { error: removalRefusal, message: legacyAcceptRefusalMessage(removalRefusal) };
+  }
+  return null;
+}
+
+export async function legacyAcceptEarlyRefusal(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  invitationHash: Uint8Array | null,
+): Promise<{ error: string; message: string } | null> {
+  const [boundary] = await tx`SELECT purpose FROM swarm.household_workspace_boundaries WHERE workspace_id=${route.workspaceId}::uuid`;
+  if (!boundary) return null;
+  const invited = invitationHash === null ? [] : await tx<{ email: string | null }[]>`
+    SELECT i.email, i.created_at
+    FROM swarm.invitations AS i
+    WHERE i.token_hash = ${invitationHash}
+      AND i.workspace_id = ${route.workspaceId}::uuid
+  `;
+  const refusal = legacyHouseholdAcceptRefusal(
+    true,
+    normalizedEmail(auth.email),
+    normalizedEmail(invited[0]?.email ?? null),
+  );
+  return refusal === null ? null : { error: refusal, message: legacyAcceptRefusalMessage(refusal) };
+}
+
+interface WorkspaceDecideCtx {
+  pendingInvitationIds?(user_id: string): readonly string[];
 }

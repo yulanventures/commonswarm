@@ -66,17 +66,19 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
     personal_boundary: boundary?.purpose !== 'shared', inviter_can_invite: !!sender && sender.revoked_at === null && ['owner','admin'].includes(String(sender.role)),
     parent_live: parentLive, now, expires_at: expiresAt, revoked_at: invite.revoked_at === null ? null : new Date(invite.revoked_at as string).getTime(),
     accepted_at: invite.accepted_at === null ? null : new Date(invite.accepted_at as string).getTime(), accepted_by: invite.accepted_by as string | null,
-    user_id: human.user_id, member_live: !!member && member.revoked_at === null, preview_digest: previewDigest };
+    user_id: human.user_id, member_live: !!member && member.revoked_at === null, preview_digest: previewDigest,
+    membership_revoked_at: !member || member.revoked_at === null ? null : new Date(member.revoked_at as string).getTime(),
+    invitation_created_at: new Date(invite.created_at as string).getTime() };
   const requestDigest = await digest(command.invitation.source === 'link' ? { ...command, invitation: { source: 'link', invitation_id: invitationId } } : command);
   const [prior] = await tx`SELECT request_hash,response FROM swarm.idempotency_keys WHERE principal_kind='user' AND principal_id=${human.user_id} AND command_id=${commandId}`;
   if (command.action === 'accept' && prior && prior.request_hash !== requestDigest) return { status: 409, body: { error: 'command_id_conflict' } };
   const decision = decideHumanInvite(command, facts) as HumanInviteDecision;
   if (decision.status === 'refused') return { status: decision.reason === 'review_changed' ? 409 : 403, body: decision };
   const [currentContent] = await tx`SELECT content_role FROM swarm.household_member_content_roles WHERE workspace_id=${workspaceId}::uuid AND user_id=${human.user_id}::uuid AND revoked_at IS NULL`;
-  const receipt = { status: 'joined', workspace_id: workspaceId, workspace_name: String(workspace.name), invitation_id: invitationId,
-    content_role: decision.status === 'join' && command.action === 'accept' ? command.content_role : currentContent?.content_role ?? null,
+  const joined = { status: 'joined', workspace_id: workspaceId, workspace_name: String(workspace.name), invitation_id: invitationId,
+    content_role: currentContent?.content_role ?? null,
     agents_provisioned_by_join: false, next_action: 'Open the workspace. Create your own personal space if you want one. Authorize your own agents separately.' };
-  if (decision.status === 'already_joined') return { status: 200, body: prior ? prior.response as Record<string, unknown> : receipt };
+  if (decision.status === 'already_joined') return { status: 200, body: prior ? prior.response as Record<string, unknown> : joined };
   if (decision.status === 'preview') return { status: 200, body: { status: 'preview', workspace_id: workspaceId, workspace_name: String(workspace.name),
     invitation_id: invitationId, audience, expires_at: expiresAt, disclosure: HOUSEHOLD_JOIN_DISCLOSURE, consent_version: HOUSEHOLD_JOIN_CONSENT_VERSION, preview_digest: previewDigest } };
   if (command.action !== 'accept') throw new Error('join without consent');
@@ -102,9 +104,34 @@ export async function humanInvitationTransaction(tx: Sql, commandId: string, val
     await tx`UPDATE swarm.admin_accounts SET seq=${event.seq},projection=${tx.json(next as unknown as postgres.JSONValue)} WHERE owner_user_id=${inviter}::uuid`;
   }
   await tx`SELECT set_config('cswarm.household_actor',${human.user_id},true),set_config('cswarm.household_request',${commandId},true),set_config('cswarm.household_digest',${requestDigest},true)`;
-  await tx`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
-    VALUES(${workspaceId}::uuid,${human.user_id}::uuid,${command.content_role},${crypto.randomUUID()}::uuid,${date(now)})
-    ON CONFLICT(workspace_id,user_id) DO UPDATE SET content_role=excluded.content_role,content_consent_id=excluded.content_consent_id,confirmed_at=excluded.confirmed_at,revoked_at=NULL`;
+  // Read the row before writing. An insert trigger records a confirmation for
+  // every proposed row, including one ON CONFLICT later skips.
+  const [existingRole] = await tx<{ content_role: string; revoked_at: Date | null }[]>`SELECT content_role, revoked_at
+    FROM swarm.household_member_content_roles WHERE workspace_id=${workspaceId}::uuid AND user_id=${human.user_id}::uuid FOR UPDATE`;
+  let writtenRole: string | null = null;
+  if (existingRole === undefined) {
+    const inserted = await tx<{ content_role: string }[]>`INSERT INTO swarm.household_member_content_roles(workspace_id,user_id,content_role,content_consent_id,confirmed_at)
+      VALUES(${workspaceId}::uuid,${human.user_id}::uuid,${command.content_role},${crypto.randomUUID()}::uuid,${date(now)})
+      RETURNING content_role`;
+    writtenRole = inserted[0]?.content_role ?? null;
+  } else if (existingRole.revoked_at === null) {
+    const updated = await tx<{ content_role: string }[]>`UPDATE swarm.household_member_content_roles
+      SET content_role=${command.content_role},content_consent_id=${crypto.randomUUID()}::uuid,confirmed_at=${date(now)},revoked_at=NULL
+      WHERE workspace_id=${workspaceId}::uuid AND user_id=${human.user_id}::uuid AND revoked_at IS NULL
+      RETURNING content_role`;
+    writtenRole = updated[0]?.content_role ?? null;
+  }
+  await tx`SELECT set_config('cswarm.household_command','household_withdraw_connection',true)`;
+  await tx`UPDATE swarm.household_content_connections SET revoked_at=${date(now)}
+    WHERE workspace_id=${workspaceId}::uuid AND owner_user_id=${human.user_id}::uuid
+      AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp())`;
+  const receipt = {
+    ...joined,
+    content_role: writtenRole,
+    next_action: existingRole !== undefined && existingRole.revoked_at !== null && writtenRole === null
+      ? 'Open the workspace. Your Lists & docs role stays revoked until you give fresh consent. Authorize your own agents separately.'
+      : joined.next_action,
+  };
   await tx`INSERT INTO swarm.idempotency_keys(principal_kind,principal_id,command_id,workspace_id,stream_id,request_hash,response)
     VALUES('user',${human.user_id},${commandId},${workspaceId}::uuid,${String(stream.stream_id)}::uuid,${requestDigest},${tx.json(receipt)})`;
   return { status: 200, body: receipt };
