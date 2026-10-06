@@ -1036,3 +1036,57 @@ INNER_RC=0
 ```
 
 Skipped: C1-5 Caddy imports (no `caddy` binary). Two new tests (extracted recovery-env; generator order). D-030 still reaches every test file. No commit or push. HEAD remains `cd46463c`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
+
+## C1-21: checker round 10 (Codex FAIL) on the recovery env (uncommitted)
+
+Prepared against committed HEAD `4f5ecf0e` (worktree `lane/c1-frozen-work`). No commit,
+push, production operation, full suite, build, Docker or browser. HezLead owns
+independent review. PG rehearsal, Caddy, and the Mac sandbox TAP are left for
+the Lead.
+
+ai-db-session reads WINDOW, PROOF_DIR, RELEASE_ROOT, SECRET_STAGE, INPUTS_FILE
+(and writes EDGE_RECYCLE_TIMER / EDGE_RECYCLE_SERVICE / PSQL_IMAGE from
+INPUTS_FILE). ai-close (non-W5 recovered) reads WINDOW, CLOSE_RESULT, PROOF_DIR,
+PLAN_FILE, INPUTS_FILE, BOX_ARCHIVE_PATH, SECRET_STAGE, EDGE_RECYCLE_TIMER
+(session-set). Recovery now sets every one of those except CLOSE_RESULT (the
+close outcome input) and the session-derived timer/service/image.
+
+| Item | Status | Plan/harness locus |
+| --- | --- | --- |
+| 1 PLAN_FILE recovered | done | `ai-recovery-env` L7006–7009, L7024, L7029: retained `RELEASE_ROOT/docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md` whose sha256 equals inputs `plan_sha256`; refuse digest-mismatch |
+| 2 ancestor symlink | done | L6967–6978 `resolved()`: `os.path.realpath(p)==p` and each path component checked for PROOF_DIR and RELEASE_ROOT |
+| 3 early unset | done | L6960 box outputs first, before any `:?`; L7037 Mac `unset PREP_DIR` before INPUTS_FILE check. Operator inputs WINDOW/WINDOW_ID/INPUTS_FILE kept |
+| 4 absent pointer refuses | done | L7012 exact `FAIL ai-recovery-env: secret-stage.path expected recorded-stage got absent; use ai-open-abort; STOP` |
+| 5 real session+close | done | `tests/admin-release-plan.test.ts:3873` extracted `ai-db-session` then `ai-close`; stub only docker/systemctl; operator inputs only through `PASS window closed recovered` |
+| 6 FAIL text | done | L6995 `0700 owner-matched` matches uid `0` or `geteuid()`; tests stay non-root without remapping |
+| 7 LOG quote pin | done | run-order manuals `"line":7079` → `7090` (recovery block grew by 11 lines) |
+
+Tests (pre-change at `4f5ecf0e`, Codex CHECK-C1-10 probes):
+
+| Item | Test | Pre-change |
+| --- | --- | --- |
+| 1 PLAN_FILE | `tests/admin-release-plan.test.ts:3873` full chain | FAIL `PLAN_FILE: unbound variable` after `PASS ai-db-session`; close succeeded only when PLAN_FILE was supplied |
+| 2 ancestor | `tests/admin-release-plan.test.ts:3921` | PASS; `PROOF_DIR.resolve()!=PROOF_DIR` still accepted |
+| 3 early unset | `tests/admin-release-plan.test.ts:3942` box; `:3995` Mac | box empty INPUTS_FILE kept RELEASE_SHA/PROOF_DIR/RELEASE_ROOT/BOX_ARCHIVE_PATH/SECRET_STAGE; Mac kept PREP_DIR=/old |
+| 4 absent pointer | `tests/admin-release-plan.test.ts:3889` | recovery PASS without SECRET_STAGE; actual session then `SECRET_STAGE: unbound variable` |
+| 5 real blocks | `tests/admin-release-plan.test.ts:3753` | C1-20 stubs `reached_ai_db_session` / `reached_ai_close`; missed finding 1 |
+| 6 root-owned | `tests/admin-release-plan.test.ts:3768` | FAIL text `0700-root-owned` while uid check allowed `geteuid()` |
+
+Official gate `C1_GATE_EXTRA="tests/c1-task-from-plan.test.ts tests/p1-cli/test-gate-coverage.test.ts" bash /Users/yulanbot/work/c1-verify/build/gate-c1.sh` in this sandbox:
+
+```
+mktemp: mkdtemp failed on /tmp/lane-home.a40xax: Operation not permitted
+```
+
+Equivalent inner run (same files except `tests/c1-w2-rehearsal.test.ts`, which also mktemps `/tmp/c1w2.*`) under `HOME=/private/tmp/cs-c1-frozen/scratchpad/lane-home.rSbkaH`, `env -u NODE_OPTIONS`, `node --import tsx --test` of plan, w123, w45, w6-ready, `c1-task-from-plan`, and `p1-cli/test-gate-coverage`:
+
+```
+ℹ tests 189
+ℹ pass 188
+ℹ fail 0
+ℹ skipped 1
+ℹ duration_ms 196361.388041
+INNER_RC=0
+```
+
+Skipped: C1-5 Caddy imports (no `caddy` binary). C1-20 drive-through now runs extracted `ai-db-session` and `ai-close`. D-030 still reaches every test file. No commit or push. HEAD remains `4f5ecf0e`. PG rehearsal, Caddy and the Mac sandbox TAP are left for the Lead.
