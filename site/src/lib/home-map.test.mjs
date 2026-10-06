@@ -190,7 +190,7 @@ test("optional working-on reads keep loaded chat usable on returned errors, time
   const script = ts.transpile(declaration.getText(file).replace(/^export /u, ""), { target: ts.ScriptTarget.ES2022 });
   let calls = 0;
   for (const outcome of [{ data: [{ id: "claim" }], error: null }, { data: null, error: { code: "42501" } }, new DOMException("Deadline", "TimeoutError"), new TypeError("Failed to fetch")]) {
-    const read = runInNewContext(script + ";homeWorkingOn", { client: () => ({}), Date, BROWSER_SIGNAL_COLUMNS: "signal_id", browserSignalFromRow: row => row,
+    const read = runInNewContext(script + ";homeWorkingOn", { client: () => ({}), Date, BROWSER_SIGNAL_COLUMNS: "id", browserSignalFromRow: row => row,
       readWithDeadline: async () => { ++calls; if (outcome instanceof Error) throw outcome; return outcome; } });
     const result = await read("W");
     assert.deepEqual(JSON.parse(JSON.stringify(result)), outcome.data?.length ? [{ id: "claim" }] : []);
