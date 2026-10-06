@@ -207,3 +207,23 @@ export async function revalidateHostedSeatContent(tx: Sql, capability: HostedSea
   const tool = HOUSEHOLD_TOOL_REGISTRY.find(row => row.name === binding.tool);
   return tool ? await resolveSeat(tx, binding, tool.effect === "read" ? "read" : "command") : null;
 }
+
+/** Household content tables are granted to swarm_command, so a read stays in
+ * that transaction. The read resolver is executable by swarm_read only: take
+ * that role for this call, then restore the command role before any store
+ * statement. Writes keep the command resolver. */
+export async function revalidateHouseholdSeat(
+  tx: Sql,
+  capability: HostedSeatCapability,
+  restoreCommandRole: (tx: Sql) => Promise<void>,
+): Promise<ResolvedHostedSeat | null> {
+  const name = hostedCapabilityTool(capability);
+  const reading = HOUSEHOLD_TOOL_REGISTRY.some((row) => row.name === name && row.effect === "read");
+  if (!reading) return await revalidateHostedSeatContent(tx, capability);
+  await tx`SELECT set_config('role', 'swarm_read', true)`;
+  try {
+    return await revalidateHostedSeatContent(tx, capability);
+  } finally {
+    await restoreCommandRole(tx);
+  }
+}

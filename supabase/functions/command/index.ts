@@ -177,7 +177,7 @@ import {
   reduceHostedAuthority,
 } from "../_shared/protocol.js";
 import {
-  revalidateHostedSeatContent,
+  revalidateHouseholdSeat,
   hostedCapabilityTool,
   revalidateHostedGrantCommand,
   revalidateHostedSeatCommand,
@@ -10511,7 +10511,7 @@ async function handleTransaction(
 
     const hostedSeat = hostedSeatCapability === null
       ? null
-      : kind === "household_tool" ? await revalidateHostedSeatContent(tx, hostedSeatCapability)
+      : kind === "household_tool" ? await revalidateHouseholdSeat(tx, hostedSeatCapability, setTransaction)
       : await revalidateHostedSeatCommand(tx, hostedSeatCapability);
     if (hostedSeatCapability !== null && hostedSeat === null) {
       return { status: 403, body: { error: "forbidden" } };
@@ -10810,7 +10810,7 @@ async function handleTransaction(
           : auth.agent ? { connection_id: auth.agent.token_id, grant_id: auth.agent.run_id } : null };
       const recheck = async (checkTx: Sql) => {
         if (hostedSeatCapability) {
-          const seat = await revalidateHostedSeatContent(checkTx, hostedSeatCapability);
+          const seat = await revalidateHouseholdSeat(checkTx, hostedSeatCapability, setTransaction);
           return seat !== null && seat.workspace_id === route.workspaceId && seat.principal_id === identity.principal_id;
         }
         return !await revoked(checkTx, auth, route);
