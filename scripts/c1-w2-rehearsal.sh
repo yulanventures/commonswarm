@@ -95,7 +95,10 @@ fi
 T=
 
 say() { printf '%s\n' "$*"; }
-die() { say "FAIL $1: $2"; exit 1; }
+# fd 3 is the harness stdout. extract() is often redirected into a block file; FAIL
+# from die must not land in that file (C1-14: two ai-close timer lines hid extract's FAIL).
+exec 3>&1
+die() { printf '%s\n' "FAIL $1: $2" >&3; exit 1; }
 
 own_dir_ok() {
   [[ "$1" =~ ^(/private)?/tmp/c1w2\.[A-Za-z0-9]{6}$ ]] || return 1

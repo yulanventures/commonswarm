@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -16,7 +16,7 @@ function block(step: string) {
 }
 const python = spawnSync('which', ['python3'], { encoding: 'utf8' }).stdout.trim();
 assert.ok(python.startsWith('/'), 'absolute Python runtime');
-const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64);
+const sha = 'a'.repeat(40), baseline = 'b'.repeat(40), image = 'sha256:' + 'c'.repeat(64), baselineImage = 'sha256:' + 'e'.repeat(64);
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'admin-live-w123-')));
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 // Test-data stand-in for the released producer; it is never written under repo scripts/.
@@ -51,6 +51,8 @@ elif name=='python3':
     import socket
     def no_network(*a,**kw): raise RuntimeError('UNMODELLED network')
     socket.socket.connect=no_network; socket.create_connection=no_network
+    if 'W2 ledger expected no complete 20261003 set before open' in source:
+        source=source.replace("n=subprocess.check_output(['/bin/bash','-s','--',sha,image],input=query,text=True,stderr=subprocess.DEVNULL).strip()","n='0'")
     exec(compile(source,'<complete-plan-block>','exec'))
 elif name=='ai_deadline':
     if args: refuse()
@@ -61,6 +63,8 @@ elif name=='ai_ro':
         output(cfg['w2b_checksums']); raise SystemExit(0)
     if args==['-Atq','--file','/proof/catalog.sql']:
         text=(root/'proof/catalog.sql').read_text()
+        ok=re.fullmatch(re.escape(chr(92))+r"i /release/deploy/release-proofs/item-ai/(2026100300000[1-5])-catalog\.sql\nSELECT :'catalog_ok'::boolean;\n",text)
+        if ok: output(cfg.get('catalog_ok',{}).get(ok.group(1),'t')); raise SystemExit(0)
         m=re.fullmatch(re.escape(chr(92))+r"i /release/deploy/release-proofs/item-ai/(2026100300000[1-5])-catalog\.sql\nSELECT :'catalog_ok_failed_checks';\n",text)
         if not m: refuse()
         output(cfg.get('catalog_failed',{}).get(m.group(1),'')); raise SystemExit(0)
@@ -68,6 +72,8 @@ elif name=='ai_ro':
         if not (root/'proof/w2b-preconditions.sql').read_text().startswith(chr(92)+'i /release/deploy/release-proofs/item-ai/w2b-preconditions.sql'): refuse()
         output(cfg.get('w2b','t')); raise SystemExit(0)
     if len(args)!=3 or args[:2]!=['-Atq','--command']: refuse()
+    if args[2]=="SELECT rolcanlogin AND rolpassword IS NOT NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';":
+        output(cfg.get('issuer_login','t')); raise SystemExit(0)
     if args[2] not in ['SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;',"SELECT NOT rolcanlogin AND rolpassword IS NULL FROM pg_catalog.pg_authid WHERE rolname='commonswarm_admin_issuer';"]: refuse()
     if 'pg_authid' in args[2]:
         if cfg.get('readback_failed'): raise SystemExit(1)
@@ -99,6 +105,10 @@ elif name=='openssl':
 elif name=='chmod':
     if len(args)<2 or args[0] not in ('0600','0700'): refuse()
     for value in args[1:]: owned(value).chmod(int(args[0],8))
+elif name=='install' and args[:1]==['-d']:
+    if args!=['-d','-o','root','-g','root','-m','0700',str(root/'oauth/failed-attempts')]: refuse()
+    if cfg.get('aside_install_failed'): raise SystemExit(1)
+    owned(args[7]).mkdir(exist_ok=True); owned(args[7]).chmod(0o700)
 elif name=='install' and len(args)==4 and args[:2]==['-m','0600']:
     target=owned(args[3]); shutil.copyfile(owned(args[2]),target); target.chmod(0o600)
 elif name=='install':
@@ -118,10 +128,13 @@ elif name=='mktemp':
     if len(args)!=2 or args[0]!='-d' or not args[1].endswith('.XXXXXX'): refuse()
     created=owned(args[1][:-6]+''.join(random.choice(string.ascii_letters+string.digits) for _ in range(6)))
     created.mkdir(mode=0o700); output(created)
+elif name=='stat' and args==['-c','%a %u %g',str(root/'oauth/failed-attempts')]:
+    # Ownership boundary: a non-root test cannot chown to 0:0; the mode is measured, the owner is the fixture's word.
+    output(format(owned(args[2]).stat().st_mode & 0o777,'o')+' '+cfg.get('aside_owner','0 0'))
 elif name=='stat':
     if args!=['-c','%a %u %g',str(root/'etc/commonswarm-oauth/admin-issuer-database-credentials')]: refuse()
     if not owned(args[2]).is_file(): refuse()
-    output('440 0 986')
+    output(cfg.get('credential_mode','440 0 986'))
 elif name=='cat':
     if len(args)!=1: refuse()
     sys.stdout.write(owned(args[0]).read_text())
@@ -151,8 +164,15 @@ elif name=='timeout':
     if 'docker inspect' not in args[3] or 'healthy' not in args[3]: refuse()
     raise SystemExit(subprocess.run(args[1:]).returncode)
 elif name=='ln':
-    if len(args)!=3 or args[0]!='-s': refuse()
-    owned(args[2]).symlink_to(owned(args[1]),target_is_directory=True)
+    # The plan uses -sfT: an existing temporary link is replaced, never followed.
+    if len(args)!=3 or args[0]!='-sfT': refuse()
+    link=owned(args[2])
+    if link.is_symlink(): link.unlink()
+    elif link.exists(): raise SystemExit(1)
+    link.symlink_to(owned(args[1]),target_is_directory=True)
+elif name=='readlink':
+    if len(args)!=2 or args[0]!='-f': refuse()
+    output(os.path.realpath(owned(args[1])))
 elif name=='mv':
     if len(args)!=3 or args[0]!='-Tf': refuse()
     owned(args[1]).replace(owned(args[2]))
@@ -170,10 +190,18 @@ elif name=='docker':
     elif args[:4]==['run','--rm','--network','none']:
         if args[4:9]!=['--entrypoint','node',cfg['image'],'--input-type=module','-e'] or len(args)!=10: refuse()
     elif args[:4]==['run','--rm','--network','commonswarm-net']:
-        expected=['run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(root/'stage/issuer-service.conf')+':/run/service.conf:ro','--volume',str(root/'stage/issuer-pass')+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--entrypoint','psql','fixture-postgres','-X','--set=ON_ERROR_STOP=1','-Atq','--command',"SELECT current_user='commonswarm_admin_issuer' AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user;"]
+        prefix='issuer-live-' if str(root/'stage/issuer-live-service.conf') in ' '.join(args) else 'issuer-'
+        expected=['run','--rm','--network','commonswarm-net','--add-host','db.commonswarm.internal:172.31.0.10','--env','PGSERVICE=target','--env','PGSERVICEFILE=/run/service.conf','--env','PGPASSFILE=/run/pass','--volume',str(root/('stage/'+prefix+'service.conf'))+':/run/service.conf:ro','--volume',str(root/('stage/'+prefix+'pass'))+':/run/pass:ro','--volume','/etc/ssl/yulan-internal-ca.pem:/etc/ssl/yulan-internal-ca.pem:ro','--entrypoint','psql','fixture-postgres','-X','--set=ON_ERROR_STOP=1','-Atq','--command',"SELECT current_user='commonswarm_admin_issuer' AND NOT rolinherit AND NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user;"]
         if args!=expected: refuse()
         if cfg.get('tls_failed'): raise SystemExit(1)
         output(cfg.get('login','t'))
+    elif args==['inspect','--format','{{index .Config.Labels "com.docker.compose.project.working_dir"}}','commonswarm-oauth-oauth-1']:
+        output(cfg.get('working_dir',str(os.path.realpath(root/'oauth/current'))+'/deploy/mcp-auth'))
+    elif args and args[0]=='compose' and str(root/'oauth/releases'/cfg['baseline']) in ' '.join(args):
+        base=str(root/'oauth/releases'/cfg['baseline']/'deploy/mcp-auth')
+        expected=['compose','--project-name','commonswarm-oauth','--env-file',str(root/'etc/commonswarm-oauth/compose.env'),'-f',base+'/compose.yaml','-f',base+'/compose.management.yaml','up','-d','--no-build','--pull','never','--force-recreate','oauth']
+        if args!=expected: refuse()
+        if cfg.get('rollback_compose_failed'): raise SystemExit(1)
     elif args and args[0]=='compose':
         base=str(root/'oauth/releases'/cfg['sha']/'deploy/mcp-auth')
         expected=['compose','--project-name','commonswarm-oauth','--env-file',str(root/'etc/commonswarm-oauth/compose.env'),'-f',base+'/compose.yaml','-f',base+'/compose.management.yaml','up','-d','--no-build','--pull','never','--force-recreate','oauth']
@@ -187,7 +215,7 @@ else: refuse()
 function fixture(config: Record<string, unknown> = {}) {
   const root = mkdtempSync(join(scratch, 'case-'));
   const bin = join(root, 'bin'), proof = join(root, 'proof'), stage = join(root, 'stage');
-  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'release/scripts'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth'), join(root, 'archive'), join(root, 'tmp'), join(root, 'caddy')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [bin, proof, stage, join(root, 'etc/commonswarm-oauth'), join(root, 'backup'), join(root, 'release/deploy/mcp-auth'), join(root, 'release/scripts'), join(root, 'oauth/releases', baseline, 'deploy/mcp-auth'), join(root, 'archive'), join(root, 'tmp'), join(root, 'mac-anvil-secret'), join(root, 'caddy')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const put = (path: string, value: unknown) => writeFileSync(join(root, path), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
   put('commands.json', { sha, baseline, image, ...config }); put('argv.jsonl', '');
   put('proof/schema-committed.txt', 'PASS');
@@ -201,6 +229,8 @@ function fixture(config: Record<string, unknown> = {}) {
     put('oauth/releases/'+baseline+'/deploy/mcp-auth/'+file, 'reviewed '+file);
   }
   put('release/scripts/live-ordinary-controls.mjs', producerSource);
+  // The live OAuth current points at the baseline release (ai-box-preflight measures this before open).
+  symlinkSync(join(root, 'oauth/releases', baseline), join(root, 'oauth/current'));
   // The verified release archive is the only producer source; inputs carry its digest.
   const archive = join(root, 'archive/release.tar');
   function buildArchive(producer: string | null, bindInputs = true) {
@@ -208,33 +238,38 @@ function fixture(config: Record<string, unknown> = {}) {
     if (producer !== null) put('release/scripts/live-ordinary-controls.mjs', producer);
     const made = spawnSync(python, ['-c', 'import sys,tarfile\nwith tarfile.open(sys.argv[1],"w") as t:\n    [t.add(sys.argv[2]+"/"+m,arcname=m) for m in sys.argv[3:]]', archive, join(root, 'release'), ...members], { encoding: 'utf8' });
     assert.equal(made.status, 0, made.stderr); chmodSync(archive, 0o600);
-    if (bindInputs) put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(plan) });
+    if (bindInputs) put('inputs.json', { release_sha: sha, window_id: 'fixture', window: 'W3', baseline_oauth_sha: baseline, baseline_oauth_image: baselineImage, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(plan) });
   }
   buildArchive(producerSource);
   // A valid opening pair, as ai-open retains it.
   const preText = JSON.stringify(consentReceipt('pre-W1'));
   put('proof/consent-pre-W1.json', preText); put('proof/ordinary-before.json', liveReceipt('W3', 'fixture', 'before', preText));
-  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'ai_db_secret_file', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node']) {
+  for (const name of ['python3', 'ai_deadline', 'ai_ro', 'ai_db', 'ai_db_secret_file', 'openssl', 'chmod', 'install', 'stat', 'cat', 'cmp', 'mkdir', 'cp', 'rm', 'date', 'nice', 'timeout', 'ln', 'mv', 'docker', 'sha256sum', 'awk', 'mktemp', 'node', 'readlink']) {
     writeFileSync(join(bin, name), '#!'+python+'\n'+dispatcher, { mode: 0o700 });
   }
   const env = { ...process.env, PATH: bin, FIXTURE_ROOT: root, WINDOW: 'W3', PROOF_DIR: proof, SECRET_STAGE: stage,
     INPUTS_FILE: join(root, 'inputs.json'), LIVE_CONTROLS_FILE: join(root, 'controls.json'), CONSENT_RECEIPT_FILE: join(root, 'consent.json'), RELEASE_SHA: sha,
     BOX_ARCHIVE_PATH: archive, PLAN_FILE: resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md'),
     RELEASE_ROOT: join(root, 'release'), NEW_OAUTH: join(root, 'oauth/releases', sha), PSQL_IMAGE: 'fixture-postgres' };
-  function run(steps: string[], window = 'W3', extra: Record<string, string | undefined> = {}) {
-    // A step beginning with '#' is raw test source (a modelled shell function), not a plan block.
-    let source = steps.map(step => step.startsWith('#') ? step : block(step)).join('\n');
+  function remap(text: string) {
+    let source = text;
     // Remap filesystem boundaries only. SQL, shell guards and Python assertions stay verbatim.
     for (const [from, to] of [
       ['/tmp/admin-issuance-', join(root, 'archive/admin-issuance-')],
       ['/home/commonswarm/admin-issuance', join(root, 'admin-issuance')],
       ['/home/commonswarm/.env', join(root, 'home.env')],
       ['/etc/caddy/sites', join(root, 'caddy')],
-      ['/private/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
+      ['/private/tmp/anvil-secret', join(root, 'mac-anvil-secret')],
+      ['/tmp/anvil-secret', join(root, 'tmp/anvil-secret')],
       ['/var/backups/commonswarm-postgres', join(root, 'backup')],
       ['/etc/commonswarm-oauth', join(root, 'etc/commonswarm-oauth')],
       ['/home/commonswarm/oauth', join(root, 'oauth')],
     ]) source = source.split(from!).join(to!);
+    return source;
+  }
+  function run(steps: string[], window = 'W3', extra: Record<string, string | undefined> = {}) {
+    // A step beginning with '#' is raw test source (a modelled shell function), not a plan block.
+    const source = remap(steps.map(step => step.startsWith('#') ? step : block(step)).join('\n'));
     const runEnv: Record<string, string | undefined> = { ...env, WINDOW: window, ...extra };
     for (const key of Object.keys(runEnv)) if (runEnv[key] === undefined) delete runEnv[key];
     const result = spawnSync('/bin/bash', [], { input: source, env: runEnv as NodeJS.ProcessEnv, encoding: 'utf8', timeout: 10_000 });
@@ -247,7 +282,7 @@ function fixture(config: Record<string, unknown> = {}) {
     assert.doesNotMatch(result.stdout + result.stderr, /UNMODELLED/);
     return { ...result, calls };
   }
-  return { root, proof, put, run, buildArchive, archive, preText };
+  return { root, proof, put, run, remap, buildArchive, archive, preText };
 }
 function pass(result: ReturnType<ReturnType<typeof fixture>['run']>) {
   assert.equal(result.status, 0, result.stderr);
@@ -370,7 +405,7 @@ function openFixture(window: string, producer = producerSource, includeProducer 
     archive, ...files.flatMap(([name]) => [name, join(releaseRoot, name)])], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   chmodSync(archive, 0o600);
-  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText) });
+  f.put('open-inputs.json', { release_sha: sha, window_id: openId, window, archive_sha256: digest(readFileSync(archive)), plan_sha256: digest(planText), baseline_postgres_image: image });
   f.put('gates.json', '{}'); f.put('home.env', 'EDGE=fixture\n');
   for (const name of ['20-commonswarm-mcp.caddy', '10-commonswarm-api.caddy']) f.put('caddy/'+name, 'fixture '+name);
   const proof = join(f.root, 'admin-issuance/release-proofs', `${sha}-${window}-${openId}`);
@@ -603,18 +638,116 @@ test('release-plan-contract / ai-db-session-open-close-guards: refuses without o
   const r2 = closed.run(['ai-db-session'], 'W2');
   stopped(r2, 'FAIL ai-db-session: closed.txt expected absent got present; STOP'); assert.ok(!r2.calls.some(c => c[0] === 'node'));
 });
-test('release-plan-contract / w3-new-oauth-release-guards: refuses an existing or symlinked new OAuth release directory before copying', () => {
+test('release-plan-contract / w3-new-oauth-release-guards: refuses an existing or symlinked new OAuth release directory before copying, with the exact recovery', () => {
   const good = fixture(); pass(good.run(['ai-w3-preflight'])); assert.ok(existsSync(join(good.root, 'oauth/releases', sha)));
   const present = fixture(); mkdirSync(join(present.root, 'oauth/releases', sha));
-  let r = present.run(['ai-w3-preflight']); stopped(r, 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; STOP');
+  let r = present.run(['ai-w3-preflight']);
+  stopped(r, 'FAIL ai-w3-preflight: new OAuth release directory expected absent got present; a W3 at this release left it without a completed rollback: run ai-w3-rollback in this window (it moves the tree to /home/commonswarm/oauth/failed-attempts/<release_sha>-W3-<this window_id>), close recovered, then open a new W3 window; STOP'.split('/home/commonswarm/oauth').join(join(present.root, 'oauth')));
   assert.ok(!r.calls.some(c => c[0] === 'cp')); assert.deepEqual(readdirSync(join(present.root, 'oauth/releases', sha)), []);
   const linked = fixture(); symlinkSync(join(linked.root, 'absent-release'), join(linked.root, 'oauth/releases', sha));
   r = linked.run(['ai-w3-preflight']); stopped(r, 'FAIL ai-w3-preflight: new OAuth release directory expected not-symlink got symlink; STOP');
   assert.ok(!r.calls.some(c => c[0] === 'cp')); assert.ok(!existsSync(join(linked.root, 'absent-release')));
 });
+test('same-version retry / w3-stale-other-release-tree-ignored-with-evidence: a tree of an earlier release is recorded, never moved', () => {
+  const f = fixture(); const stale = 'a5cb82518488afcf4d5cb35de8272e08c6172dfb'; mkdirSync(join(f.root, 'oauth/releases', stale));
+  pass(f.run(['ai-w3-preflight']));
+  assert.ok(existsSync(join(f.root, 'oauth/releases', stale)), 'the earlier release tree stays');
+  const inventory = JSON.parse(readFileSync(join(f.proof, 'oauth-releases-inventory.json'), 'utf8'));
+  assert.deepEqual(inventory, { baseline, release: sha, current: baseline, other_releases_ignored: [stale] });
+  // A current that is not the baseline STOPs before any copy.
+  const moved = fixture(); unlinkSync(join(moved.root, 'oauth/current')); mkdirSync(join(moved.root, 'oauth/releases', stale));
+  symlinkSync(join(moved.root, 'oauth/releases', stale), join(moved.root, 'oauth/current'));
+  const r = moved.run(['ai-w3-preflight']); stopped(r, 'FAIL ai-w3-preflight: OAuth release inventory expected current-on-baseline got other; STOP');
+  assert.ok(!r.calls.some(c => c[0] === 'cp')); assert.ok(!existsSync(join(moved.root, 'oauth/releases', sha)));
+});
+// ai_run evals the plan's own ai-release-aside block, remapped like every other block.
+const asideShim = `# test shim: ai_run runs the plan's own ai-release-aside block (the box's ai_run evals it the same way)
+ai_run() { test "$1" = ai-release-aside || return 1; eval "$(cat "$FIXTURE_ROOT/aside.sh")"; }`;
+function rollbackFixture(config: Record<string, unknown> = {}) {
+  const f = fixture({ running_image: baselineImage, ...config }); f.put('aside.sh', f.remap(block('ai-release-aside')));
+  // The failed attempt: preflight copied the tree, apply switched current to it.
+  mkdirSync(join(f.root, 'oauth/releases', sha, 'deploy/mcp-auth'), { recursive: true }); f.put(`oauth/releases/${sha}/RELEASE_SHA`, sha + '\n');
+  unlinkSync(join(f.root, 'oauth/current')); symlinkSync(join(f.root, 'oauth/releases', sha), join(f.root, 'oauth/current'));
+  f.put('etc/commonswarm-oauth/compose.env', 'MCP_OAUTH_IMAGE=' + image + '\n');
+  return f;
+}
+const W3_ENV = { WINDOW_ID: 'Fix123' };
+test('same-version retry / w3-rollback-moves-tree-aside: rollback restores the baseline, then moves the failed tree to failed-attempts with evidence', () => {
+  const f = rollbackFixture(); const r = f.run([asideShim, 'ai-w3-rollback'], 'W3', W3_ENV); pass(r);
+  const dest = join(f.root, 'oauth/failed-attempts', `${sha}-W3-Fix123`);
+  assert.ok(!existsSync(join(f.root, 'oauth/releases', sha)), 'no tree at this release');
+  assert.equal(readFileSync(join(dest, 'RELEASE_SHA'), 'utf8'), sha + '\n', 'evidence kept');
+  assert.equal(statSync(join(f.root, 'oauth/failed-attempts')).mode & 0o777, 0o700);
+  assert.equal(realpathSync(join(f.root, 'oauth/current')), join(f.root, 'oauth/releases', baseline));
+  assert.equal(readFileSync(join(f.root, 'etc/commonswarm-oauth/compose.env'), 'utf8'), 'MCP_OAUTH_IMAGE=baseline\n');
+  const record = JSON.parse(readFileSync(join(f.proof, 'oauth-aside.json'), 'utf8'));
+  assert.deepEqual({ ...record, at: 'x' }, { part: 'oauth', release_sha: sha, window: 'W3', window_id: 'Fix123', from: join(f.root, 'oauth/releases', sha), to: dest, moved: true, at: 'x' });
+  assert.equal(readFileSync(join(f.proof, 'W3-rollback.txt'), 'utf8'), 'PASS W3 rollback: baseline image and current restored; release tree aside or absent\n');
+  // Then the same-version retry preflight finds its one admissible state.
+  pass(f.run(['ai-w3-preflight'])); assert.ok(existsSync(join(f.root, 'oauth/releases', sha, 'deploy/mcp-auth/compose.yaml')));
+  // A rerun of the rollback is idempotent: the record and the moved tree are consistent.
+  const again = rollbackFixture(); pass(again.run([asideShim, 'ai-w3-rollback'], 'W3', W3_ENV));
+  const second = again.run([asideShim, 'ai-w3-rollback'], 'W3', W3_ENV); pass(second); assert.match(second.stdout, /already done/);
+  // Nothing at this release (failure before the preflight copy): no move, a moved:false record.
+  const none = rollbackFixture(); rmSync(join(none.root, 'oauth/releases', sha), { recursive: true });
+  pass(none.run([asideShim, 'ai-w3-rollback'], 'W3', W3_ENV));
+  assert.equal(JSON.parse(readFileSync(join(none.proof, 'oauth-aside.json'), 'utf8')).moved, false);
+});
+test('same-version retry / w3-rollback-aside-refusals: a live, symlinked or colliding tree is never moved; every step fails explicitly', () => {
+  const modelled = (step: string) => '# modelled ignored errexit (left side of ||)\n( ' + block(step).replace('set -euo pipefail', 'set +e') + '\n) || { printf "CALLER: rollback failure seen\\n" >&2; exit 1; }';
+  const cases: Array<[string, Record<string, unknown>, (f: ReturnType<typeof fixture>) => void, string]> = [
+    ['container still on the failed tree', { working_dir: 'TREE' }, () => undefined, 'FAIL ai-release-aside: live container working directory expected baseline-not-the-failed-tree got failed-tree; STOP'],
+    ['tree is a symlink', {}, f => { rmSync(join(f.root, 'oauth/releases', sha), { recursive: true }); mkdirSync(join(f.root, 'elsewhere')); symlinkSync(join(f.root, 'elsewhere'), join(f.root, 'oauth/releases', sha)); }, 'FAIL ai-release-aside: failed-attempt tree expected directory got symlink; STOP'],
+    ['destination exists', {}, f => mkdirSync(join(f.root, 'oauth/failed-attempts', `${sha}-W3-Fix123`), { recursive: true }), 'FAIL ai-release-aside: aside destination expected absent got present; STOP'],
+    ['parent not root-owned', { aside_owner: '501 20' }, () => undefined, 'FAIL ai-release-aside: failed-attempts mode expected 700-0-0 got other; STOP'],
+    ['parent is a symlink', {}, f => { mkdirSync(join(f.root, 'elsewhere')); symlinkSync(join(f.root, 'elsewhere'), join(f.root, 'oauth/failed-attempts')); }, 'FAIL ai-release-aside: failed-attempts expected not-symlink got symlink; STOP'],
+    ['baseline compose up fails', { rollback_compose_failed: true }, () => undefined, 'FAIL ai-w3-rollback: baseline compose up expected success got failure; STOP'],
+    ['running image is not the baseline', { running_image: image }, () => undefined, 'FAIL ai-w3-rollback: running image expected baseline got other; STOP'],
+  ];
+  for (const [name, config, setup, message] of cases) for (const mode of ['as written', 'modelled ignored errexit']) {
+    const f = rollbackFixture(config.working_dir === 'TREE' ? { ...config, working_dir: '' } : config);
+    if (config.working_dir === 'TREE') { const c = JSON.parse(readFileSync(join(f.root, 'commands.json'), 'utf8')); f.put('commands.json', { ...c, working_dir: join(f.root, 'oauth/releases', sha, 'deploy/mcp-auth') }); }
+    setup(f);
+    const r = f.run([asideShim, mode === 'as written' ? 'ai-w3-rollback' : modelled('ai-w3-rollback')], 'W3', W3_ENV);
+    stopped(r, message); if (mode !== 'as written') assert.match(r.stderr, /CALLER: rollback failure seen/, name);
+    assert.ok(!existsSync(join(f.proof, 'W3-rollback.txt')), `${name} ${mode}: no PASS receipt`);
+    if (name !== 'tree is a symlink') assert.ok(existsSync(join(f.root, 'oauth/releases', sha)), `${name} ${mode}: tree not moved`);
+    if (name === 'baseline compose up fails') assert.ok(!r.calls.some(c => c[0] === 'ln'), `${name}: nothing after the failed compose`);
+  }
+});
+test('same-version retry / w6-issuer-live: W6 re-verifies the installed issuer credential live, whichever release its W2b ran at', () => {
+  const live = (config: Record<string, unknown> = {}, setup: (f: ReturnType<typeof fixture>) => void = () => undefined) => {
+    const f = fixture(config); f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', JSON.stringify({ user: 'commonswarm_admin_issuer', password: 'd'.repeat(64) }));
+    setup(f); return { f, r: f.run(['ai-w6-issuer-live'], 'W6') };
+  };
+  const good = live(); pass(good.r);
+  assert.equal(readFileSync(join(good.f.proof, 'issuer-live.txt'), 'utf8'), 'PASS W6 issuer live: LOGIN with password, credential 0440 root:986, TLS login as the issuer, five forward catalogs true\n');
+  assert.match(readFileSync(join(good.f.root, 'stage/issuer-live-service.conf'), 'utf8'), /^user=commonswarm_admin_issuer$/m);
+  assert.equal(statSync(join(good.f.root, 'stage/issuer-live-pass')).mode & 0o777, 0o600);
+  assert.equal(good.r.calls.filter(c => c[0] === 'ai_ro' && c.includes('/proof/catalog.sql')).length, 5);
+  assert.doesNotMatch(good.r.stdout + good.r.stderr, /d{64}/, 'the password is never printed');
+  const C = 'etc/commonswarm-oauth/admin-issuer-database-credentials';
+  const bad: Array<[string, Record<string, unknown>, (f: ReturnType<typeof fixture>) => void, string]> = [
+    ['credential missing', {}, f => rmSync(join(f.root, C)), 'FAIL ai-w6-issuer-live: issuer credential file expected regular-file got missing; STOP'],
+    ['credential symlink', {}, f => { rmSync(join(f.root, C)); symlinkSync(join(f.root, 'etc/commonswarm-oauth/protected-sibling'), join(f.root, C)); }, 'FAIL ai-w6-issuer-live: issuer credential file expected not-symlink got symlink; STOP'],
+    ['credential mode', { credential_mode: '644 0 0' }, () => undefined, 'FAIL ai-w6-issuer-live: issuer credential mode expected 440-0-986 got other; STOP'],
+    ['role NOLOGIN', { issuer_login: 'f' }, () => undefined, 'FAIL ai-w6-issuer-live: issuer role expected LOGIN-with-password got other; STOP'],
+    ['credential for another user', {}, f => f.put(C, JSON.stringify({ user: 'postgres', password: 'd'.repeat(64) })), 'FAIL ai-w6-issuer-live: login files from the installed credential expected prepared got refused; STOP'],
+    ['TLS login fails', { tls_failed: true }, () => undefined, 'FAIL ai-w6-issuer-live: TLS psql login with the installed credential expected exit 0 got failure; STOP'],
+    ['login measures another role', { login: 'f' }, () => undefined, 'FAIL ai-w6-issuer-live: dedicated-role measurement expected t got non-t; STOP'],
+    ['forward catalog false', { catalog_ok: { '20261003000004': 'f' } }, () => undefined, 'FAIL ai-w6-issuer-live: forward catalog 20261003000004 expected t got other; STOP'],
+  ];
+  for (const [name, config, setup, message] of bad) {
+    const { f, r } = live(config, setup); stopped(r, message); assert.ok(!existsSync(join(f.proof, 'issuer-live.txt')), name);
+    assert.doesNotMatch(r.stdout + r.stderr, /d{64}/, name);
+  }
+  // The activation checks call it right after the W2b provenance, before any release identity check.
+  assert.match(block('ai-w6-activation-checks'), /printf '%s\\n' "\$W2B_BINDING" >"\$PROOF_DIR\/issuer-provenance.json"\n# The provenance is a record; the credential itself is re-verified live, now.\n\( ai_run ai-w6-issuer-live \) \|\| \{ printf 'FAIL ai-w6-activation-checks: issuer credential expected live LOGIN/);
+});
 test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-password-guarded-file-removal: fails closed when guarded cleanup refuses', () => {
   for (const refused of [false, true]) {
     const f = fixture({ cleanup_refused: refused }); f.put('etc/commonswarm-oauth/admin-issuer-database-credentials', 'synthetic fixture');
+    f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
     const result = f.run(['ai-w2-issuer-rollback'], 'W2');
     assert.equal(readFileSync(join(f.root, 'applied.sql'), 'utf8'), 'ALTER ROLE commonswarm_admin_issuer NOLOGIN PASSWORD NULL;');
     assert.deepEqual(result.calls.filter(c => c[0] === 'rm'), [['rm', '--', join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')]]);
@@ -629,6 +762,7 @@ test('admin-issuer-credential-provisioning / failed-provisioning-nologin-clear-p
   const f = fixture();
   const target = join(f.root, 'etc/commonswarm-oauth/protected-sibling');
   symlinkSync(target, join(f.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials'));
+  f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
   const result = f.run(['ai-w2-issuer-rollback'], 'W2'); assert.notEqual(result.status, 0);
   assert.ok(!result.calls.some(c => c[0] === 'rm')); assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')));
   assert.equal(readFileSync(target, 'utf8'), 'must survive');
@@ -648,6 +782,7 @@ test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every ro
   ];
   for (const [name, config, setup, message] of cases) for (const [mode, steps] of [['as written', ['ai-w2-issuer-rollback']], ['modelled ignored errexit', [modelled]]] as const) {
     const f = fixture(config); setup(f);
+    f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
     const result = f.run([...steps], 'W2b');
     assert.notEqual(result.status, 0, `${name} ${mode}`); stopped(result, message);
     if (mode !== 'as written') assert.match(result.stderr, /CALLER: rollback failure seen/, name);
@@ -657,8 +792,18 @@ test('admin-issuer-credential-provisioning / rollback-fails-explicitly: every ro
   }
   // Positive control in both modes.
   for (const steps of [['ai-w2-issuer-rollback'], [modelled]]) {
-    const f = fixture(); f.put(C, 'synthetic fixture'); pass(f.run(steps, 'W2b'));
+    const f = fixture(); f.put(C, 'synthetic fixture'); f.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n'); pass(f.run(steps, 'W2b'));
     assert.equal(readFileSync(join(f.proof, 'issuer-rollback.txt'), 'utf8'), 'PASS issuer login disabled; additive roles/grants retained\n');
+  }
+  // Without this window's marker the live issuer is left untouched.
+  {
+    const f = fixture(); f.put(C, 'synthetic fixture');
+    const result = f.run(['ai-w2-issuer-rollback'], 'W2b');
+    assert.notEqual(result.status, 0);
+    stopped(result, 'FAIL ai-w2-issuer-rollback: this window did not own issuer provisioning; live issuer left untouched; STOP');
+    assert.ok(existsSync(join(f.root, C)));
+    assert.ok(!existsSync(join(f.proof, 'issuer-rollback.txt')));
+    assert.ok(!result.calls.some(c => c[0] === 'ai_db' || c[0] === 'rm'));
   }
 });
 
@@ -681,6 +826,7 @@ test('release-plan-contract / w3-unset-env-overlay-absent: fails closed on set a
 test('admin-issuer-credential-provisioning / dedicated-role-tls-login-positive: fails closed on bad issuer role or TLS login', () => {
   const good = fixture(); const positive = good.run(['ai-w2-issuer-credential'], 'W2'); pass(positive);
   assert.ok(existsSync(join(good.proof, 'issuer-credential.txt')));
+  assert.ok(existsSync(join(good.proof, 'issuer-provisioning-attempted.txt')));
   // libpq's service-file parser takes key=value only (5f64fab4 W2 RGLqZX failed on configparser's "key = value").
   const service = readFileSync(join(good.root, 'stage/issuer-service.conf'), 'utf8');
   assert.match(service, /^sslmode=verify-full$/m);
@@ -756,6 +902,7 @@ test('admin-issuer-credential-provisioning / w2b-shared-issuer-block: W2b runs t
     stopped(f.run(['ai-w2-issuer-rollback'], window), 'FAIL ai-w2-issuer-rollback: window expected W2-or-W2b got other; STOP');
   }
   const rollback = fixture(); rollback.put('etc/commonswarm-oauth/admin-issuer-database-credentials', '{}');
+  rollback.put('proof/issuer-provisioning-attempted.txt', '2026-10-05T00:00:00Z\n');
   pass(rollback.run(['ai-w2-issuer-rollback'], 'W2b'));
   assert.ok(!existsSync(join(rollback.root, 'etc/commonswarm-oauth/admin-issuer-database-credentials')));
   assert.ok(existsSync(join(rollback.proof, 'issuer-rollback.txt')));
