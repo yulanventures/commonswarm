@@ -57,6 +57,45 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-f
 @media (width > 52rem) {
   .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
 }
+/* New workspace (New-Space.dc.html): with a workspace to go back to, the create panel borrows the frame's rail
+   (LiveDashboard showPanel) and the form takes the main column, 32px clamp(16px, 3vw, 40px) 56px, gap 24px, on the
+   canvas. The rail column is the frame's own, so the rail does not move between routes. The first-run gateway
+   (no workspace yet, no data-create-rail) keeps onboarding.css's centred column. */
+.dashboard__gateway--create[data-create-rail] {
+  position: relative;
+  display: grid;
+  grid-template-columns: 15.5rem minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  inline-size: 100%;
+  /* block-size: LiveDashboard.astro sets the viewport height (its --dashboard-viewport-height). */
+  min-block-size: 0;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+  background: var(--home-canvas);
+}
+.hm-create-main {
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 32px clamp(16px, 3vw, 40px) 56px;
+}
+/* The rail is the way back on a wide screen; a phone has no rail column, so it keeps "← Workspaces". */
+@media (width > 52rem) {
+  .hm-create-main > [data-create-cancel] { display: none; }
+}
+@media (width <= 52rem) {
+  .dashboard__gateway--create[data-create-rail] { grid-template-columns: minmax(0, 1fr); }
+  .hm-create-main { grid-column: 1; grid-row: 1; }
+  /* The back link shares the top row with the account door (absolute, top right). */
+  .hm-create-main { padding-block-start: var(--s-1); }
+  .hm-create-main > [data-create-cancel] { margin-inline-end: calc(44px + var(--s-3)); }
+}
 /* Navigation moves focus to the view heading. That heading is not a tab stop, so it draws no ring. */
 h1[tabindex="-1"]:focus,
 h1[tabindex="-1"]:focus-visible,

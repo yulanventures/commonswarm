@@ -1721,6 +1721,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
+         create panel borrows the frame's rail while it shows with `data-create-rail`; every other panel
+         gives it back, first in the frame. It moves, so renderHomeRail keeps its one slot. */
+      const rail = one<HTMLElement>(".hm-frame__rail");
+      const frame = one<HTMLElement>(".hm-frame");
+      const createPanel = panel("create");
+      if (rail && frame && createPanel) {
+        const home = name === "create" && createPanel.hasAttribute("data-create-rail") ? createPanel : frame;
+        if (rail.parentElement !== home) home.prepend(rail);
+      }
       for (const section of all<HTMLElement>(".dashboard__root > [data-panel]")) {
         section.hidden = section.dataset.panel !== name;
       }
@@ -2003,11 +2013,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           onCreate: () => { void submitWorkspaceCreate(); },
         });
         if (!hasWorkspace) replacement.querySelector<HTMLElement>("h1")!.textContent = "Create your first workspace.";
-        panel.replaceChildren(replacement, ...footer);
-        if (hasWorkspace) { const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "hm-ahp__back";
-          cancel.textContent = "← Workspaces"; cancel.dataset.createCancel = ""; cancel.addEventListener("click", homeBack); panel.append(cancel); }
+        /* With a workspace, the form sits in the main column beside the rail (New-Space.dc.html), and the rail
+           carries the brand, the account menu (Sign out) and the way back. The first-run gateway has no rail,
+           so it keeps its own wordmark, account line and Sign out. Those stay in the DOM, hidden, for it. */
+        panel.toggleAttribute("data-create-rail", hasWorkspace);
+        for (const node of footer) node.hidden = hasWorkspace;
+        const rail = panel.querySelector<HTMLElement>(":scope > .hm-frame__rail");
+        if (hasWorkspace) {
+          const main = document.createElement("div"); main.className = "hm-create-main";
+          main.append(replacement, ...footer);
+          /* A phone has no rail column, so this is its way back; on a wider screen the rail is. */
+          const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "hm-ahp__back";
+          cancel.textContent = "← Workspaces"; cancel.dataset.createCancel = ""; cancel.addEventListener("click", homeBack); main.prepend(cancel);
+          panel.replaceChildren(...(rail ? [rail] : []), main);
+        } else panel.replaceChildren(...(rail ? [rail] : []), replacement, ...footer);
       };
       mount(); showPanel("create");
+      if (hasWorkspace) { renderHomeRail(); void loadRailOverview(); }
       window.requestAnimationFrame(() => panel.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }));
     };
 
@@ -4576,6 +4598,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
       }
       if (navigation !== homeNavigation) return;
+      /* Back from New workspace to the workspace still open behind it reopens nothing, so the panel turns here. */
+      if (app.dataset.state === "create") showPanel("channel");
       renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
       void loadRailOverview();
       renderChannelRail();
@@ -11272,6 +11296,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__gateway--create h1 {
     max-inline-size: 22ch;
+  }
+
+  /* New workspace beside the rail (home/integration.css): one viewport tall, so the form column scrolls and the
+     rail stays, as in the frame. */
+  .dashboard[data-state="create"]:has(> .dashboard__root > .dashboard__gateway--create[data-create-rail]),
+  .dashboard__gateway--create[data-create-rail] {
+    block-size: var(--dashboard-viewport-height, 100dvh);
+    overflow: hidden;
   }
 
   .dashboard__gateway--create .dashboard__gateway-copy > p:last-child {

@@ -18,6 +18,7 @@
 
 /* Base type for the whole app frame. Surfaces set their own sizes on top of this. */
 .hm-frame,
+.dashboard__gateway--create[data-create-rail],
 .hm-shell { font-family: var(--home-font-body); font-size: 16px; line-height: 1.45; color: var(--home-ink); }
 /* Zero specificity, so every surface's own heading rule wins whatever the import order. */
 :where(.hm-frame, .hm-shell) :where(h1, h2, h3) { font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.01em; }
