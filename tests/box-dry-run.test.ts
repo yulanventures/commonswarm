@@ -1101,8 +1101,8 @@ interface UnproducedRead {
 }
 
 // Defaulted expansions (${NAME-default} or ${NAME:-default}) are optional inputs,
-// unlike mandatory ${NAME:?reason} reads. No name-specific exemption is needed.
-const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):\?[^}]*\}/g;
+// unlike mandatory ${NAME:?reason} or ${NAME?reason} reads. No name-specific exemption is needed.
+const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):?\?[^}]*\}/g;
 const UNRESOLVED_INPUT = /<(?:(?:approved|agreed|next-approved|sha256-from|space-separated|newline-separated|edge\|stack|yes-or-no)[^>]*|sha)>/g;
 const PLAN_FILE_INPUT = /(?:\/home\/commonswarm\/migration-direct\.env|(?:\$[A-Z_]+\/)?GO\.txt|(?:\$[A-Z_]+\/)?(?:human-session\.json|hm37-open-ack-control\.ts|hm37-open-ack-deno\.json|oauth-image\.id)|(?:\$[A-Z_]+\/)?gate-evidence\.txt|(?:\$[A-Z_]+\/)?site\/\.env|(?:\$[A-Z_]+\/)?compose\.override\.yaml)/g;
 const PLAN_ENV_ALLOWLIST = new Set(["HOME", "PATH", "LANG", "TZ"]);
@@ -2837,18 +2837,8 @@ function uploadWindowContent(fixture: ProductContext, archive: Buffer): string {
   })));
 }
 
-// Historical migration plans predate the explicit mode input. Supply it in their
-// durable writer, never in the consumer's environment. All original writer checks run.
-function historicalMigrationInputSource(block: Block, source: string): string {
-  if (block.file !== HM37 || shortStep(block) !== "hm37a-resolved-inputs") return source;
-  const end = '  } >"$EVIDENCE_DIR/item-resolved-inputs.env"';
-  assert.equal(source.split(end).length, 2, "historical resolved-input writer must have one durable destination");
-  return source.replace(end, `    printf 'NO_MIGRATIONS=%q\\n' no\n${end}`);
-}
-
 function resolvedTransferNames(): string[] {
-  const original = planBlock(HM37, "hm37a-resolved-inputs");
-  const producer = { ...original, source: historicalMigrationInputSource(original, original.source) };
+  const producer = planBlock(HM37, "hm37a-resolved-inputs");
   const writer = producer.source.slice(producer.source.indexOf("  {"), producer.source.indexOf('>"$EVIDENCE_DIR/item-resolved-inputs.env"'));
   return [...writer.matchAll(/printf '([A-Z][A-Z0-9_]*)=%q/g)].map((match) => match[1]!);
 }
@@ -2987,8 +2977,7 @@ function macProductModel(product: TransferProduct, block: Block, fixture: Produc
   if (name === "hm37a-prep-seat-inventory.json") return prepSeatInventory(fixture);
   if (name === "item-resolved-inputs.env") {
     const values = Object.fromEntries(resolvedTransferNames().map((name) => {
-      const value = name === "NO_MIGRATIONS" ? "no"
-        : name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
+      const value = name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
       assert.notEqual(value, undefined, `unresolved prompt input: ${name}`);
       return [name, value!];
     }));
@@ -3115,7 +3104,7 @@ function modelMacWindowWriter(block: Block, fixture: Fixture): Execution | undef
 function modelMacWindowAppend(block: Block, fixture: Fixture): Execution | undefined {
   if (!/printf '[^'\n]*EXPECTED_ARCHIVE_SHA256=%q/.test(block.source) ||
       !block.source.includes('>>"$BOX_WINDOW_INPUT"')) return undefined;
-  return macLocalExecution(block, fixture, historicalMigrationInputSource(block, block.source));
+  return macLocalExecution(block, fixture, block.source);
 }
 
 function macNoWindowGuard(block: Block, fixture: Fixture): Execution | undefined {
@@ -3671,7 +3660,7 @@ function executeWholeBlock(
       stderr: seed.refused.join("\n"), stdout: "", seeded: seed.seeded, refused: seed.refused, declared,
     };
   }
-  let body = materialize({ ...block, source: historicalMigrationInputSource(block, block.source) });
+  let body = materialize(block);
   if (fixture.temporary) body = body.replaceAll(PLANNED_PREP_ROOT, join(fixture.temporary, "hm37-prep"));
   if (fixture.macTmp) body = mapMacTmp(body, fixture.macTmp);
   const script = [
@@ -5081,9 +5070,20 @@ test("controls: producer analysis accepts defaulted inputs and still reports man
   for (const expansion of ["${UNDECLARED_RELEASE_MODE-no}", "${UNDECLARED_RELEASE_MODE:-no}"]) {
     assert.deepEqual(discoverUnproducedReads([{ ...block, source: `: "${expansion}"\n` }]), []);
   }
-  const mandatory = discoverUnproducedReads([{ ...block,
-    source: ': "${UNDECLARED_RELEASE_MODE:?named release mode required}"\n' }]);
-  assert.deepEqual(mandatory.map((read) => read.what), ["UNDECLARED_RELEASE_MODE"]);
+  for (const name of ["UNDECLARED_RELEASE_MODE", "MIGRATION_VERSIONS", "FUNCTIONAL_VERSIONS"]) {
+    for (const operator of [":?", "?"]) {
+      const consumer = { ...block, source: `: "\${${name}${operator}named input required}"\n` };
+      const writer = { ...block, step: "required-input-writer", source: `printf '${name}=%s\\n' value >inputs.env\n` };
+      assert.deepEqual(discoverUnproducedReads([consumer]).map((read) => read.what), [name],
+        `${name}${operator}: a missing producer was accepted`);
+      assert.deepEqual(discoverUnproducedReads([writer, consumer]), [],
+        `${name}${operator}: an earlier writer was ignored`);
+      assert.deepEqual(discoverUnproducedReads([{ ...consumer, source: writer.source + consumer.source }]), [],
+        `${name}${operator}: a same-block earlier writer was ignored`);
+      assert.deepEqual(discoverUnproducedReads([consumer, writer]).map((read) => read.what), [name],
+        `${name}${operator}: a later writer hid an unproduced read`);
+    }
+  }
 });
 
 test("controls: pre-revision plans still report their audited UNPRODUCED items", () => {
@@ -7742,16 +7742,18 @@ test("controls: the box lane writes resolved prompt inputs by name", {
     assert.match(notExecutedLine(block, records[0]!.execution), /Seeded from committed evidence: nothing\. Plan-documented output: item-resolved-inputs\.env/);
     const bytes = readFileSync(target, "utf8");
     assert.doesNotMatch(bytes, /\[object Object\]|=undefined/);
-    assert.match(bytes, /^NO_MIGRATIONS='no'$/m, "historical migration mode must be a durable item input");
+    assert.doesNotMatch(bytes, /^NO_MIGRATIONS=/m, "the historical writer does not supply a migration mode");
     const names = resolvedTransferNames();
-    const expectedValues = names.map((name) => name === "NO_MIGRATIONS" ? "no" : name === "ARCHIVE_SHA256"
+    const expectedValues = names.map((name) => name === "ARCHIVE_SHA256"
       ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name]);
     assert.equal([...bytes.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].length, names.length);
+    const migrationModeDefault = /^\s*NO_MIGRATIONS=.*$/m.exec(planBlock(RUNBOOK, "runbook-03").source)?.[0];
+    assert.ok(migrationModeDefault, "runbook-03 has no migration mode default");
     const restored = containedCommand(fixture, "/bin/bash", ["-c",
-      `set -euo pipefail; . "$1"; printf '%s\\0' ${names.map((name) => `"$${name}"`).join(" ")}`,
+      `set -euo pipefail; unset NO_MIGRATIONS; . "$1"; ${migrationModeDefault}; printf '%s\\0' ${names.map((name) => `"$${name}"`).join(" ")} "$NO_MIGRATIONS"`,
       "prompt-readback", target], { env: fixture.env });
     assert.equal(restored.status, 0, restored.stderr);
-    assert.equal(restored.stdout, expectedValues.join("\0") + "\0");
+    assert.equal(restored.stdout, expectedValues.join("\0") + "\0no\0", "the real plan must default the absent mode to no");
     const stat = lstatSync(target);
     assert.equal(stat.mode & 0o777, 0o600);
     assert.equal(stat.uid, 0);
