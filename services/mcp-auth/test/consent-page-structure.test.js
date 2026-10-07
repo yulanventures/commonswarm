@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
-import { PROVIDER_LABELS, renderConsentPage } from "../src/interaction-page.js";
+import { PROVIDER_LABELS, renderConsentDestination, renderConsentPage } from "../src/interaction-page.js";
 import { createInteractionHandler } from "../src/interactions.js";
 
 const USER = "10000000-0000-4000-8000-000000000001";
@@ -193,13 +193,46 @@ test("client identity strings pinned by the authorize-state suite stay in the pa
   }
 });
 
+test("an HTTPS metadata client ID gets a neutral label, never a verified, trusted or safe claim", () => {
+  const body = (html) => html.replace(/<style>[\s\S]*?<\/style>/u, "");
+  const metadataClient = page();
+  assert.match(metadataClient, /<span class="badge badge-neutral">HTTPS client ID<\/span>/u);
+  assert.doesNotMatch(body(metadataClient), /verified|trusted|\btrust\b|\bsafe\b|<svg[^>]*>[^]*?<\/svg><\/span>HTTPS/iu);
+  // Positive control: the same body filter still sees the unverified warning path.
+  const unverified = page({ clientDisplay: { verified: false, primary: "agent.example", declaredName: null } });
+  assert.match(body(unverified), /Unverified app/u);
+  assert.match(body(unverified), /<p class="warning unverified-warning">/u);
+  assert.doesNotMatch(unverified, /HTTPS client ID/u);
+});
+
+test("picker help states the server's home-workspace rule and the progress error keeps the danger colour", () => {
+  assert.match(page(), /If you select more than one workspace, choose one of them as Home workspace\./u);
+  const style = /<style>([\s\S]*?)<\/style>/u.exec(page())[1];
+  assert.match(style, /\.progress \.error\{[^}]*color:var\(--danger\)/u);
+});
+
+test("the shared destination helper keeps one fact per line without this page's stylesheet", () => {
+  // admin-interaction-page.js renders this helper with its own minimal stylesheet.
+  const html = renderConsentDestination({ clientName: "Client <x>", redirectUri: "https://claude.ai/cb", metadataHost: "claude.ai" });
+  const lines = html.replace(/<p[^>]*>|<\/p>/gu, "").split("<br>").map((line) => line.replace(/<[^>]+>/gu, "").replace(/\s+/gu, " ").trim());
+  assert.deepEqual(lines, [
+    "Client name (supplied by the client): Client &lt;x&gt;",
+    "After you approve, you return to claude.ai.",
+    "Client ID URL host: claude.ai.",
+  ]);
+  assert.doesNotMatch(html, /<svg|style=/u);
+  const noHost = renderConsentDestination({ clientName: null, redirectUri: "http://127.0.0.1:9/cb" });
+  assert.equal(noHost.split("<br>").length, 2);
+  assert.match(noHost, /After you approve, you return to <strong>a program on this computer \(localhost\)<\/strong>\./u);
+});
+
 test("the page makes no external requests and carries no script", () => {
   const html = page({ switchAccount: SWITCH, identity: { ...identity, provider: "google" } });
   assert.doesNotMatch(html, /<script|<link|<img|<iframe|\bsrc=|url\(|@import|@font-face|javascript:/iu);
   assert.deepEqual(html.match(/https?:\/\/[^\s"'<)]+/giu), ["https://commonswarm.com/app"]);
 });
 
-test("workspace picker bounds long lists and reports the count; locked rows keep hidden copies", () => {
+test("workspace picker marks long lists with the is-long class, reports the count, and locked rows keep hidden copies", () => {
   const many = Array.from({ length: 40 }, (_, index) => ({
     id: `20000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`, name: `Workspace ${index + 1}` }));
   const long = page({ workspaces: many });
