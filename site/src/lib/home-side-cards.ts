@@ -90,9 +90,15 @@ function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, clas
   if (text !== undefined) element.textContent = text;
   return element;
 }
-function section(doc: Document, key: string, title: string): { root: HTMLElement; body: HTMLElement } {
+/**
+ * One side card. Tom's ruling 4 ("Quiet forms"): a card's "All …" destination is its title, so with `href`
+ * (and outside sample mode) the title text is that link and the card has no foot row.
+ */
+function section(doc: Document, key: string, title: string, href?: string): { root: HTMLElement; body: HTMLElement } {
   const root = node(doc, "section", "hm-side-card"); root.dataset.sideCard = key;
-  const heading = node(doc, "h2", "hm-side-card__title", title); heading.id = `hm-side-${key}-title`;
+  const heading = node(doc, "h2", "hm-side-card__title"); heading.id = `hm-side-${key}-title`;
+  if (href === undefined) heading.textContent = title;
+  else { const anchor = node(doc, "a", "hm-side-card__title-link", title); anchor.href = href; anchor.dataset.sideLink = key; heading.append(anchor); }
   root.setAttribute("aria-labelledby", heading.id);
   const body = node(doc, "div", "hm-side-card__body");
   root.append(heading, body); return { root, body };
@@ -150,15 +156,22 @@ function todoRow(doc: Document, item: SideTodoVM, sample: boolean, callbacks: Si
   return row;
 }
 
-/** To-dos: up to 6 open rows, "+ Add a to-do" and "All to-dos". Returns null when the read is absent. */
+/** The title row: the title (a link to the whole collection), how many rows are not shown, then any door. */
+function headRow(doc: Document, root: HTMLElement, more: number): HTMLElement | null {
+  const heading = root.querySelector("h2"); if (!heading) return null;
+  const head = node(doc, "div", "hm-side-card__head"); heading.replaceWith(head); head.append(heading);
+  if (more) head.append(node(doc, "span", "hm-side-card__more", `${more} more`));
+  return head;
+}
+
+/** To-dos: up to 6 open rows and "+ Add a to-do"; the title opens all to-dos. Returns null when the read is absent. */
 export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement | null {
   if (!vm.todos) return null;
-  const { root, body } = section(doc, "todos", "To-dos");
+  const { root, body } = section(doc, "todos", "To-dos", vm.sample ? undefined : vm.todos.allHref);
   const { shown, more } = sideOpenTodos(vm.todos.items);
+  const head = headRow(doc, root, more);
   // The add door sits beside the title as a 44 px "+" (Space.dc.html); its name stays "Add a to-do".
-  const heading = root.querySelector("h2");
-  if (heading && vm.todos.canAdd && !vm.sample) {
-    const head = node(doc, "div", "hm-side-card__head"); heading.replaceWith(head); head.append(heading);
+  if (head && vm.todos.canAdd && !vm.sample) {
     const add = node(doc, "button", "hm-side-add"); add.type = "button"; add.dataset.sideAddTodo = "";
     add.setAttribute("aria-label", "Add a to-do"); add.title = "Add a to-do"; add.append(plus(doc));
     add.addEventListener("click", () => callbacks.onAddTodo()); head.append(add);
@@ -167,9 +180,6 @@ export function buildTodosCard(doc: Document, vm: SideCardsVM, callbacks: SideCa
   else if (shown.length === 0) body.append(node(doc, "p", "hm-side-card__empty", "No open to-dos."));
   else { const list = node(doc, "ul", "hm-side-list hm-side-list--todos"); list.setAttribute("aria-label", "Open to-dos");
     for (const item of shown) list.append(todoRow(doc, item, vm.sample, callbacks)); body.append(list); }
-  const foot = node(doc, "div", "hm-side-card__foot");
-  if (more) foot.append(node(doc, "span", "hm-side-card__empty", `${more} more`));
-  foot.append(link(doc, "All to-dos", vm.todos.allHref, "todos", vm.sample)); body.append(foot);
   return root;
 }
 
@@ -189,18 +199,18 @@ function objectsDoor(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbac
   return root;
 }
 
-/** Lists and Files (up to 5 each plus "All"), or the single door when the read is refused. */
+/** Lists and Files (up to 5 each; the title opens all of them), or the single door when the read is refused. */
 export function buildObjectsCards(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement[] {
   const objects = vm.objects;
   if (objects.state !== "ready") return [objectsDoor(doc, vm, callbacks)];
-  const make = (key: "lists" | "files", title: string, items: ObjectCardVM[], allText: string): HTMLElement => {
-    const { root, body } = section(doc, key, title);
+  const make = (key: "lists" | "files", title: string, items: ObjectCardVM[]): HTMLElement => {
+    const { root, body } = section(doc, key, title, vm.sample ? undefined : vm.hrefs[key]);
     const { shown, more } = sideCapObjects(items);
+    headRow(doc, root, more);
     body.append(shown.length ? cardList(doc, vm.sample ? shown.map(item => Object.assign({ ...item }, { sample: true })) : shown, title) : node(doc, "p", "hm-side-card__empty", key === "lists" ? "No lists or docs yet." : "No files yet."));
-    const foot = node(doc, "div", "hm-side-card__foot"); if (more) foot.append(node(doc, "span", "hm-side-card__empty", `${more} more`)); foot.append(link(doc, allText, vm.hrefs[key], key, vm.sample)); body.append(foot);
     return root;
   };
-  return [make("lists", "Lists", objects.lists, "All lists"), make("files", "Files", objects.files, "All files")];
+  return [make("lists", "Lists", objects.lists), make("files", "Files", objects.files)];
 }
 
 /** "What’s shared here": the broad line for everyone, then one line per agent of the viewer's own. */
@@ -211,11 +221,11 @@ export function buildSharedCard(doc: Document, vm: SideCardsVM): HTMLElement {
   return root;
 }
 
-/** The right column in the order of UI-SPEC 3.3: To-dos, Lists, Files, What’s shared here, Wiki. */
+/** The right column in the order of UI-SPEC 3.3: To-dos, Lists, Files, What’s shared here, Wiki (ruling 4: one entry row, not a card). */
 export function buildSideCards(doc: Document, vm: SideCardsVM, callbacks: SideCardsCallbacks): HTMLElement {
   const column = node(doc, "div", "hm-side"); column.dataset.homeSide = ""; if (vm.sample) column.dataset.sample = "true";
   const todos = buildTodosCard(doc, vm, callbacks); if (todos) column.append(todos);
   column.append(...buildObjectsCards(doc, vm, callbacks), buildSharedCard(doc, vm));
-  const wiki = node(doc, "div", "hm-side-card hm-side-card--link"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); column.append(wiki);
+  const wiki = node(doc, "div", "hm-side-entry"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); column.append(wiki);
   return column;
 }
