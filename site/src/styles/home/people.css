@@ -158,9 +158,11 @@ dialog.dashboard__roster-dialog .pd-orb {
   background: var(--home-soft);
   color: var(--home-ink-muted);
   font-family: var(--home-font-body);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
 }
+/* No data-tint: the owner left. A neutral square, no person colour. */
+dialog.dashboard__roster-dialog .pd-orb:not([data-tint]) { border-color: var(--home-ink-faint); background: transparent; color: var(--home-ink-muted); }
 /* dialog.… plus the attribute outranks LiveDashboard's dark-mode `:root[data-theme="dark"] .pd-orb` letter colour. */
 dialog.dashboard__roster-dialog .pd-orb[data-tint="0"] { border-color: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
 dialog.dashboard__roster-dialog .pd-orb[data-tint="1"] { border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
@@ -196,7 +198,7 @@ dialog.dashboard__roster-dialog .pd-agent[data-attention="true"] .pd-orb { borde
 .dashboard__roster-dialog .pd-agent + .pd-agent,
 .dashboard__roster-dialog .pd-agent[data-attention="true"] {
   margin: 0;
-  padding: 10px 0 10px 28px;
+  padding: 12px 0 12px 28px;
   border-block-start: 1px solid var(--home-hairline);
   border-radius: 0;
   background: transparent;
@@ -396,12 +398,271 @@ dialog.dashboard__roster-dialog .pd-detail-identity .pd-orb { inline-size: 52px;
 }
 .dashboard__roster-dialog .pd-confirm-actions .dashboard__button--primary { background: var(--home-ink); color: var(--home-card); }
 .dashboard__roster-dialog .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-card); }
+/* Confirmations outside the roster dialog (the page's role question, and [data-people-confirm] once it sits outside the
+   roster dialog): the same canvas look as the dialog's confirmations above. */
+dialog.pd-confirm:not(.dashboard__roster-dialog *) {
+  border: 1px solid var(--home-card-border); border-radius: 18px; background: var(--home-card); color: var(--home-ink); font-family: var(--home-font-body);
+}
+dialog.pd-confirm:not(.dashboard__roster-dialog *) h2 { font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.02em; }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-icon { background: var(--home-offline-tint); color: var(--home-danger); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-facts li::before { background: var(--home-danger); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-facts li.keep::before { background: var(--home-ink-muted); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-alternative { border: 1px solid var(--home-card-border); border-radius: 14px; background: var(--home-soft); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-alternative p { color: var(--home-ink-muted); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-error { color: var(--home-danger); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .dashboard__button {
+  min-block-size: 44px; padding: 0 20px;
+  border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill);
+  background: transparent; color: var(--home-ink);
+  font-family: var(--home-font-body); font-size: var(--t-sm); font-weight: 700; box-shadow: none;
+}
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .dashboard__button--primary { background: var(--home-ink); color: var(--home-card); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) .pd-confirm-actions .pd-danger-fill { border-color: var(--home-danger); background: var(--home-danger); color: var(--home-card); }
+dialog.pd-confirm:not(.dashboard__roster-dialog *) :is(button, a):focus-visible { outline: none; box-shadow: var(--focus-ring); }
 /* The self-change question is a nested alertdialog; the dialog's own .pd-confirm rules size and place it. */
 .hm-role-question { margin: 0; font-size: var(--t-lg); line-height: 1.4; overflow-wrap: anywhere; }
 .hm-role-actions { flex-wrap: wrap; }
 .hm-role-actions .dashboard__button { min-block-size: 44px; white-space: normal; }
 .hm-role-actions .dashboard__button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .hm-role-actions .dashboard__button:disabled { cursor: default; }
+
+/* ── Page layout (renderPeopleDialog layout "page"): the canvas Members artboard as a page in the home frame ───────
+   Every rule starts with section.pd-page[data-people-page] (0,2,1): it outranks LiveDashboard's unscoped .pd-* base
+   rules, the dark-mode `:root[data-theme] .pd-orb` letter, and integration.css's route-pane button rule (0,2,1, which
+   loads later). Sizes are the Members.dc.html inline styles. The route pane supplies the page padding. */
+section.pd-page[data-people-page] {
+  display: flex; flex-direction: column; gap: 22px; min-inline-size: 0;
+  color: var(--home-ink); font-family: var(--home-font-body); font-size: 16px; line-height: 1.45;
+}
+section.pd-page[data-people-page] :is(button, a, select, input):focus-visible { outline: none; box-shadow: var(--focus-ring); }
+section.pd-page[data-people-page] .pd-muted { color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-page-back {
+  display: inline-flex; align-items: center; gap: 6px; min-block-size: 44px; padding: 0; border-radius: 8px;
+  color: var(--home-ink-muted); font-size: 15px; font-weight: 600; text-decoration: none;
+}
+section.pd-page[data-people-page] .pd-page-back:hover { color: var(--home-ink); }
+section.pd-page[data-people-page] .pd-page-back-icon { flex: none; }
+section.pd-page[data-people-page] .pd-page-title-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; }
+section.pd-page[data-people-page] .pd-page-title-row h1 {
+  margin: 0; min-inline-size: 0; overflow-wrap: anywhere;
+  font-family: var(--home-font-display); font-size: clamp(30px, 3vw, 40px); font-weight: 700; line-height: 1.05; letter-spacing: -0.025em;
+  color: var(--home-ink);
+}
+section.pd-page[data-people-page] .pd-page-title-row h1:focus { outline: none; }
+section.pd-page[data-people-page] .pd-page-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+section.pd-page[data-people-page] :is(.pd-page-primary, .pd-page-secondary) {
+  display: inline-flex; align-items: center; box-sizing: border-box; min-block-size: 46px; padding: 0 20px;
+  border-radius: var(--radius-pill); font-family: var(--home-font-body); font-size: 15px; font-weight: 700; text-decoration: none; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-page-primary { border: 0; background: var(--home-ink); color: var(--home-canvas); }
+section.pd-page[data-people-page] .pd-page-primary:hover { background: var(--home-link-hover); }
+section.pd-page[data-people-page] .pd-page-secondary { border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-ink); }
+section.pd-page[data-people-page] .pd-page-secondary:hover { background: var(--home-soft); }
+section.pd-page[data-people-page] .pd-page-search {
+  box-sizing: border-box; inline-size: 100%; max-inline-size: 420px; min-block-size: 44px; margin-block-start: 14px; padding: 0 16px;
+  border: 1px solid var(--home-field-border); border-radius: var(--radius-pill); background: var(--home-field); color: var(--home-ink); font: inherit; font-size: 15px;
+}
+
+/* Columns: the roster (flex 999 1 520px) and the side column (1 1 320px), 28px apart; they stack when narrow. */
+section.pd-page[data-people-page] .pd-page-columns { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px 28px; }
+section.pd-page[data-people-page] .pd-page-main { display: flex; flex: 999 1 520px; flex-direction: column; gap: 16px; min-inline-size: 0; }
+section.pd-page[data-people-page] .pd-page-side { display: flex; flex: 1 1 320px; flex-direction: column; gap: 16px; min-inline-size: 0; }
+section.pd-page[data-people-page] .pd-member-grid { display: flex; flex-direction: column; gap: 16px; }
+
+/* Person card: 4px 20px 6px, head row min 72px: avatar 42, name 21px display, sub line 13px, role at the right. */
+section.pd-page[data-people-page] .pd-member-card {
+  min-inline-size: 0; padding: 4px 20px 6px;
+  border: 1px solid var(--home-card-border); border-radius: 18px; background: var(--home-card); box-shadow: var(--home-card-shadow);
+}
+section.pd-page[data-people-page] .pd-person-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-block-size: 72px; padding: 0; }
+section.pd-page[data-people-page] .pd-person-disclosure {
+  display: flex; flex: 1 1 200px; align-items: center; gap: 14px; min-inline-size: 0; min-block-size: 44px; padding: 0;
+  border: 0; border-radius: 12px; background: transparent; color: var(--home-ink); font-family: var(--home-font-body); text-align: start; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-initials {
+  position: relative; display: grid; place-items: center; box-sizing: border-box; flex: 0 0 42px; inline-size: 42px; block-size: 42px;
+  border-radius: 50%; background: var(--home-ink-muted); color: var(--home-on-person); font-family: var(--home-font-body); font-size: 17px; font-weight: 700;
+}
+section.pd-page[data-people-page] .pd-initials[data-hue="0"] { background: var(--home-blue); }
+section.pd-page[data-people-page] .pd-initials[data-hue="1"] { background: var(--home-orange); }
+section.pd-page[data-people-page] .pd-initials[data-hue="2"] { background: var(--home-purple); }
+section.pd-page[data-people-page] .pd-initials[data-hue="3"] { background: var(--home-teal); }
+section.pd-page[data-people-page] .pd-neutral-avatar { border: 1.5px dashed var(--home-line-dashed); background: transparent; }
+section.pd-page[data-people-page] .pd-person-copy { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: 0 6px; min-inline-size: 0; }
+section.pd-page[data-people-page] .pd-person-name {
+  min-inline-size: 0; overflow-wrap: anywhere;
+  font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em;
+}
+section.pd-page[data-people-page] .pd-you { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+section.pd-page[data-people-page] .pd-person-sub { flex: 1 0 100%; color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; }
+section.pd-page[data-people-page] .pd-role-pill {
+  padding: 5px 12px; border-radius: var(--radius-pill); background: var(--home-ink); color: var(--home-canvas); font-size: 13px; font-weight: 700; line-height: 1.45;
+}
+/* Role control on the card: the same select, Save and question. Save shows once the choice differs (or while saving). */
+section.pd-page[data-people-page] .pd-person-head .hm-role,
+section.pd-page[data-people-page] .pd-person-head .pd-fact-sheet { display: contents; }
+section.pd-page[data-people-page] .pd-person-head .pd-fact-row { display: flex; align-items: center; gap: 8px; min-block-size: 0; padding: 0; border: 0; }
+section.pd-page[data-people-page] .pd-person-head .pd-fact-row dd { margin: 0; }
+section.pd-page[data-people-page] .pd-person-head .hm-role-select {
+  inline-size: auto; min-block-size: 44px; padding: 0 34px 0 14px; appearance: none;
+  border: 1.5px solid var(--home-line-dashed); border-radius: var(--radius-pill); color: var(--home-ink);
+  /* A 2px chevron drawn from two gradient strokes (no icon file, no raw colour). */
+  background: linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 20px) 55% / 6px 6px no-repeat,
+    linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 14px) 55% / 6px 6px no-repeat, transparent;
+  font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
+}
+section.pd-page[data-people-page] .pd-person-head .hm-role[data-own="true"] .hm-role-select { border-color: var(--home-ink); background-color: var(--home-ink); color: var(--home-canvas); }
+section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button {
+  min-block-size: 44px; padding: 0 16px; border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill);
+  background: transparent; color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button:disabled:not([aria-busy="true"]) { display: none; }
+section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button[aria-busy="true"] { border-color: var(--home-card-border); color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-person-head .pd-error { flex: 1 0 100%; order: 9; margin: 0 0 10px; color: var(--home-danger); font-size: 14px; }
+section.pd-page[data-people-page] .pd-person-head > .pd-danger-button,
+section.pd-page[data-people-page] :is(.pd-agent-actions, .pd-invite) .pd-text-button {
+  min-block-size: 44px; padding: 0 6px; border: 0; background: transparent; color: var(--home-ink);
+  font-family: var(--home-font-body); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-person-head > .pd-danger-button { color: var(--home-danger); }
+section.pd-page[data-people-page] :is(.pd-agent-actions, .pd-invite) .pd-text-button:hover { color: var(--home-link-hover); }
+section.pd-page[data-people-page] .pd-member-card > .pd-receipt { margin: 0 0 10px; padding: 8px 12px; border-radius: 12px; background: var(--home-lime-soft); color: var(--home-ink); font-size: 14px; }
+
+/* Agent rows: 12px 0 12px 28px, hairline above, gap 8px 14px; the actions sit on the row. */
+section.pd-page[data-people-page] .pd-agents-list { margin: 0; padding: 0; border: 0; list-style: none; }
+section.pd-page[data-people-page] .pd-agent,
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0; padding: 12px 0 12px 28px;
+  border: 0; border-block-start: 1px solid var(--home-hairline); border-radius: 0; background: transparent;
+}
+/* The agent whose details show in the side column. */
+section.pd-page[data-people-page] .pd-agent:has(> .pd-agent-disclosure[aria-expanded="true"]) { margin-inline: -20px; padding-inline-end: 20px; padding-inline-start: 48px; background: var(--home-soft); }
+section.pd-page[data-people-page] .pd-agent-disclosure {
+  display: flex; flex: 1 1 240px; align-items: center; gap: 14px; inline-size: auto; min-inline-size: 0; min-block-size: 44px; padding: 0;
+  border: 0; border-radius: 12px; background: transparent; color: var(--home-ink); font-family: var(--home-font-body); text-align: start; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-agent-copy { display: flex; flex: 1; flex-direction: column; gap: 0; min-inline-size: 0; font-size: 16px; }
+section.pd-page[data-people-page] .pd-agent-name-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-inline-size: 0; font-weight: 700; }
+section.pd-page[data-people-page] .pd-agent-name-line strong { font-weight: 700; }
+section.pd-page[data-people-page] .pd-agent-app { color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; text-wrap: pretty; overflow-wrap: anywhere; }
+section.pd-page[data-people-page] .pd-access-mark { color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+section.pd-page[data-people-page] .pd-pill-link {
+  display: inline-flex; align-items: center; box-sizing: border-box; min-block-size: 44px; padding: 0 16px;
+  border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill); color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none;
+}
+section.pd-page[data-people-page] .pd-pill-link:hover { background: var(--home-soft); }
+section.pd-page[data-people-page] .pd-agent-actions .pd-reconnect {
+  padding: 0 16px; border-radius: var(--radius-pill); background: var(--home-offline-deep); color: var(--home-offline-tint);
+  font-weight: 700; text-decoration: none; white-space: nowrap;
+}
+section.pd-page[data-people-page] .pd-agent-actions .pd-reconnect:hover { color: var(--home-offline-tint); text-decoration: underline; }
+section.pd-page[data-people-page] .pd-agent > :is(.pd-receipt, .pd-error) { flex: 1 0 100%; margin: 0; padding-inline-start: 48px; font-size: 13px; }
+section.pd-page[data-people-page] .pd-agent > .pd-receipt { color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-error { color: var(--home-danger); }
+
+/* Agent avatar: 34px square, radius 10, 1.5px owner colour, 14px deep letter; dashed when it needs attention. */
+section.pd-page[data-people-page] .pd-orb {
+  display: grid; place-items: center; box-sizing: border-box; flex: 0 0 34px; inline-size: 34px; block-size: 34px; margin: 0;
+  border: 1.5px solid var(--home-ink-faint); border-radius: 10px; background: transparent; color: var(--home-ink-muted);
+  font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
+}
+section.pd-page[data-people-page] .pd-orb[data-tint="0"] { border-color: var(--home-blue); background: var(--home-blue-tint); color: var(--home-blue-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="1"] { border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="2"] { border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep); }
+section.pd-page[data-people-page] .pd-orb[data-tint="3"] { border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep); }
+section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { border-style: dashed; }
+
+/* Measured status pill: active lime, needs attention amber, the rest quiet. */
+section.pd-page[data-people-page] .pd-status {
+  display: inline-flex; align-items: center; gap: 6px; inline-size: fit-content; max-inline-size: 100%; padding: 2px 10px;
+  border-radius: var(--radius-pill); background: var(--home-soft); color: var(--home-ink);
+  font-family: var(--home-font-body); font-size: 12px; font-weight: 700; line-height: 1.4;
+}
+section.pd-page[data-people-page] .pd-status[data-agent-status="active"] { background: var(--home-lime); color: var(--home-lime-ink); }
+section.pd-page[data-people-page] .pd-status[data-attention="true"] { background: var(--home-offline-tint); color: var(--home-offline-deep); }
+section.pd-page[data-people-page] .pd-status-shape {
+  display: inline-block; box-sizing: border-box; flex: none; inline-size: 8px; block-size: 8px; border: 1.5px solid currentColor; border-radius: 50%;
+}
+section.pd-page[data-people-page] .pd-status-shape[data-shape="dot"] { border: 0; background: var(--home-lime-ink); }
+section.pd-page[data-people-page] .pd-status-shape[data-shape="diamond"] { inline-size: 7px; block-size: 7px; border: 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
+
+/* Invitations: one dashed card each (4px 20px, min 76px). The heading is for screen readers and shows when focused. */
+section.pd-page[data-people-page] .pd-invited { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+section.pd-page[data-people-page] .pd-invited h3 { margin: 0; color: var(--home-ink-muted); font-size: 13px; font-weight: 700; }
+section.pd-page[data-people-page] .pd-invited h3:not(:focus) { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+section.pd-page[data-people-page] .pd-invite-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+section.pd-page[data-people-page] .pd-invite {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; box-sizing: border-box; min-block-size: 76px; padding: 4px 20px;
+  border: 1.5px dashed var(--home-line-dashed); border-radius: 18px;
+}
+section.pd-page[data-people-page] .pd-invite-symbol {
+  display: grid; place-items: center; box-sizing: border-box; flex: none; inline-size: 42px; block-size: 42px;
+  border: 1.5px dashed var(--home-line-dashed); border-radius: 50%; color: var(--home-ink-muted);
+}
+section.pd-page[data-people-page] .pd-invite .pd-agent-copy { display: grid; flex: 1 1 220px; gap: 0; min-inline-size: 0; }
+section.pd-page[data-people-page] .pd-invite strong { font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; }
+section.pd-page[data-people-page] .pd-invite .pd-muted { font-size: 13px; text-wrap: pretty; }
+section.pd-page[data-people-page] .pd-page-note { margin: 0; color: var(--home-ink-muted); font-size: 14px; text-wrap: pretty; }
+
+/* Side column: the selected person's or agent's details (the dialog's detail pane, as a card), then Roles. */
+section.pd-page[data-people-page] .pd-side-card,
+section.pd-page[data-people-page] .pd-detail {
+  box-sizing: border-box; min-inline-size: 0; padding: 16px 20px 18px; overflow: visible;
+  border: 1px solid var(--home-card-border); border-radius: 18px; background: var(--home-card); box-shadow: var(--home-card-shadow);
+}
+section.pd-page[data-people-page] .pd-side-card h2 { margin: 0; font-family: var(--home-font-display); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+section.pd-page[data-people-page] .pd-roles-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 0; font-size: 15px; }
+section.pd-page[data-people-page] .pd-roles-list dt { display: inline; margin-inline-end: 0.3em; font-weight: 700; }
+section.pd-page[data-people-page] .pd-roles-list dd { display: inline; margin: 0; color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-detail { flex: none; padding-block-start: 6px; }
+section.pd-page[data-people-page] .pd-detail-top { display: flex; justify-content: flex-end; margin: 0 -10px -6px 0; }
+section.pd-page[data-people-page] .pd-close-detail { display: grid; place-items: center; inline-size: 44px; min-block-size: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--home-ink); cursor: pointer; }
+section.pd-page[data-people-page] .pd-close-detail:hover { background: var(--home-soft); }
+section.pd-page[data-people-page] .pd-detail-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-block-end: 16px; }
+section.pd-page[data-people-page] .pd-detail-identity > div { flex: 1; min-inline-size: 0; }
+section.pd-page[data-people-page] .pd-detail-identity h2 { margin: 0; overflow-wrap: anywhere; font-family: var(--home-font-display); font-size: 23px; font-weight: 700; line-height: 1.15; letter-spacing: -0.02em; }
+section.pd-page[data-people-page] .pd-detail-identity p { margin: 2px 0 4px; color: var(--home-ink-muted); font-size: 14px; }
+section.pd-page[data-people-page] .pd-detail-identity .pd-orb { flex-basis: 48px; inline-size: 48px; block-size: 48px; border-radius: 13px; font-size: 19px; }
+section.pd-page[data-people-page] .pd-detail-identity .pd-initials { flex-basis: 48px; inline-size: 48px; block-size: 48px; font-size: 19px; }
+section.pd-page[data-people-page] .pd-fact-sheet { margin: 0 0 14px; overflow: hidden; border: 1px solid var(--home-card-border); border-radius: 14px; }
+section.pd-page[data-people-page] .pd-fact-row { display: grid; grid-template-columns: 88px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-block-size: 48px; padding: 6px 12px; }
+section.pd-page[data-people-page] .pd-fact-row + .pd-fact-row { border-block-start: 1px solid var(--home-hairline); }
+section.pd-page[data-people-page] .pd-fact-row dt { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+section.pd-page[data-people-page] .pd-fact-row dd { margin: 0; overflow-wrap: anywhere; font-size: 14px; }
+section.pd-page[data-people-page] :is(.pd-detail, .pd-danger-zone) .pd-text-button,
+section.pd-page[data-people-page] :is(.pd-detail, .pd-danger-zone) .pd-danger-button {
+  min-block-size: 44px; padding: 0 2px; border: 0; background: transparent; color: var(--home-ink);
+  font-family: var(--home-font-body); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-detail .pd-danger-button { color: var(--home-danger); }
+section.pd-page[data-people-page] .pd-detail .pd-quiet-link { color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-guidance { display: grid; justify-items: start; gap: 6px; margin-block-end: 14px; padding: 14px 16px; border-radius: 14px; background: var(--home-offline-tint); color: var(--home-offline-deep); font-size: 14px; }
+section.pd-page[data-people-page] .pd-guidance h3 { margin: 0; font-size: 14px; font-weight: 700; }
+section.pd-page[data-people-page] .pd-guidance .pd-text-button { padding: 0 16px; border-radius: var(--radius-pill); background: var(--home-offline-deep); color: var(--home-offline-tint); font-weight: 700; text-decoration: none; }
+section.pd-page[data-people-page] :is(.pd-permission-note, .pd-model-form, .pd-technical) { margin-block-end: 12px; padding: 10px 14px; border-radius: 14px; background: var(--home-soft); color: var(--home-ink-muted); font-size: 14px; }
+section.pd-page[data-people-page] .pd-technical summary { min-block-size: 32px; cursor: pointer; }
+section.pd-page[data-people-page] .pd-model-form input { border: 1px solid var(--home-field-border); border-radius: 12px; background: var(--home-field); color: var(--home-ink); }
+section.pd-page[data-people-page] .pd-detail > .pd-receipt { margin: 0 0 12px; padding: 8px 12px; border-radius: 12px; background: var(--home-lime-soft); color: var(--home-ink); font-size: 14px; }
+section.pd-page[data-people-page] .pd-danger-zone { margin-block-start: 8px; padding-block-start: 10px; border-block-start: 1px solid var(--home-hairline); }
+section.pd-page[data-people-page] :is(.pd-danger-zone h3, .pd-section-title) {
+  margin: 8px 0 4px; color: var(--home-ink-muted); font-family: var(--home-font-body); font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+}
+section.pd-page[data-people-page] .pd-danger-actions { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+section.pd-page[data-people-page] .pd-person-agents { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+section.pd-page[data-people-page] .pd-person-agents button {
+  min-block-size: 44px; padding: 0 16px; border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill);
+  background: transparent; color: var(--home-ink); font-family: var(--home-font-body); font-size: 14px; font-weight: 700; cursor: pointer;
+}
+section.pd-page[data-people-page] .pd-person-agents button:hover { background: var(--home-soft); }
+@media (max-width: 52rem) {
+  section.pd-page[data-people-page] .pd-member-card { padding: 4px 14px 6px; }
+  section.pd-page[data-people-page] .pd-agent,
+  section.pd-page[data-people-page] .pd-agent[data-attention="true"] { padding-inline-start: 0; }
+  section.pd-page[data-people-page] .pd-agent > :is(.pd-receipt, .pd-error) { padding-inline-start: 0; }
+  section.pd-page[data-people-page] .pd-agent:has(> .pd-agent-disclosure[aria-expanded="true"]) { margin-inline: -14px; padding-inline: 14px; }
+  section.pd-page[data-people-page] .pd-invite { padding-inline: 14px; }
+}
 
 /* ── Narrow (bottom sheet) ────────────────────────────────────────────────────────────────────────── */
 @media (max-width: 52rem) {
