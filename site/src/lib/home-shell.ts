@@ -129,12 +129,12 @@ function link(doc: Document, href: string, className: string, callbacks: Pick<Sh
 function chevron(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "hm-icon");
-  svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
-  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.75");
+  svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.8");
   svg.setAttribute("stroke-linecap", "round"); svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
   const path = doc.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M14 6l-6 6 6 6");
+  path.setAttribute("d", "M10 3L5 8l5 5");
   svg.append(path);
   return svg;
 }

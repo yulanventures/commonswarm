@@ -52,11 +52,12 @@
 .hm-phone-bar,
 .hm-ws-nav { display: none; }
 
-/* Workspace header: the H1 wraps and is never cut short. */
+/* Workspace header: the H1 wraps and is never cut short. Title block and actions are centred on one line
+   (Space.dc.html `align-items: center`). */
 .hm-ws-header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px 20px;
   padding: 16px 24px;
@@ -209,7 +210,9 @@
   grid-template-columns: 44px minmax(0, 1fr) auto 44px;
   align-items: start;
   gap: 2px;
-  padding: 8px 12px 12px 4px;
+  /* Phone-Space.dc.html draws 50 px above the control row: the status bar. A real phone reports that as the
+     safe-area inset (whole pixels); with none the bar keeps 8 px. */
+  padding: max(8px, env(safe-area-inset-top, 0px)) 12px 12px 4px;
   border-block-end: 0;
   background: var(--home-rail-bg);
   color: var(--home-rail-strong);
@@ -231,18 +234,10 @@
 
 .hm-phone-bar__people { max-inline-size: 40vw; padding: 0; overflow: hidden; }
 /* Capsules on the ink bar: a raised ink fill, no edge, 28 / 24 px faces (Phone-Space.dc.html). */
-.hm-phone-bar .hm-capsule-stack { gap: 6px; }
+.hm-phone-bar .hm-capsule-stack { gap: 8px; }
 .hm-phone-bar .hm-capsule { gap: 3px; padding: 3px 6px 3px 3px; border-color: var(--home-rail-raised); background: var(--home-rail-raised); }
 .hm-phone-bar .hm-person-avatar[data-size="30"] { inline-size: 28px; block-size: 28px; font-size: 12px; }
 .hm-phone-bar .hm-agent-orb[data-size="26"] { inline-size: 24px; block-size: 24px; border-radius: 7px; font-size: 11px; }
-/* Narrow phones also carry the ⋯ menu and the account door, which the design does not have; the faces
-   step down 2px so a short workspace name keeps its line. */
-@media (width <= 26rem) {
-  .hm-phone-bar .hm-capsule-stack { gap: 4px; }
-  .hm-phone-bar .hm-capsule { gap: 2px; padding-inline-end: 4px; }
-  .hm-phone-bar .hm-person-avatar[data-size="30"] { inline-size: 26px; block-size: 26px; }
-  .hm-phone-bar .hm-agent-orb[data-size="26"] { inline-size: 22px; block-size: 22px; font-size: 10px; }
-}
 .hm-phone-bar__people--static { cursor: default; }
 
 /* Phone-Space.dc.html: the H1 sits in the 44 px control row with no padding of its own. Its line box is a whole
@@ -295,7 +290,8 @@
   position: sticky;
   inset-block-end: 0;
   z-index: 10;
-  padding: 8px 12px max(12px, env(safe-area-inset-bottom, 0px));
+  /* Phone-Space.dc.html: 8px 12px 22px; a larger home-indicator inset wins. */
+  padding: 8px 12px max(22px, env(safe-area-inset-bottom, 0px));
   border-block-start: 1px solid var(--home-card-border);
   background: var(--home-canvas);
 }
