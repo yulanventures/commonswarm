@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { canonicalAdminJson } from '../src/protocol/admin-policy.js';
+import { FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS } from '../supabase/functions/command/fresh-auth.ts';
 
 const planPath = resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEASE.md');
 const plan = readFileSync(planPath, 'utf8');
@@ -498,8 +499,12 @@ test('ai-w6-human-revoke refuses an approval withdrawal made before it (withdraw
   const ownerClient = block('ai-w6-owner-client-command');
   assert.match(ownerClient, /origin:'https:\/\/commonswarm\.com'/);
   assert.match(ownerClient, /newestInteractiveAmrSeconds\(claims\)/);
-  assert.match(ownerClient, /from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
-  assert.match(ownerClient, /Date\.now\(\)\/1000-interactive>240/);
+  assert.match(ownerClient, /import \{ FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS, newestInteractiveAmrSeconds \} from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
+  assert.match(ownerClient, /age===null\|\|age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS\|\|age>240/);
+  assert.match(ownerClient, /got \$\{age===null\?'missing':age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS\?'future':'stale'\}/);
+  assert.match(ownerClient, /before any request id or command request/);
+  assert.doesNotMatch(ownerClient, /<-\s*\d+/);
+  assert.equal(typeof FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS, 'number');
   assert.match(ownerClient, /FAIL owner client command; interactive owner sign-in expected under 240 s got /);
   assert.match(ownerClient, /FAIL owner client command; refused human_confirmation_required \(stored under this request id\)/);
   const freshAuth = readFileSync(resolve('supabase/functions/command/fresh-auth.ts'), 'utf8');

@@ -5733,7 +5733,7 @@ case "$C1_CLIENT_ACTION" in approve|withdraw) ;; *) exit 1;; esac
 # Execute ai-w6-preflight and retain box C1-client-check.txt first.
 # approve: only after ai-w6-start/ai-w6-pointer, immediately before consent; owner interactive sign-in in the owner file-store CLI session immediately before this approve.
 # withdraw: AFTER ai-w6-fence-driver (human revoke + refused follow-up) and the runner's exit, in this same W6; owner interactive sign-in in the owner file-store CLI session immediately before this withdraw;
-# withdrawal itself fences every family of this owner/client/version, so it never precedes the human revoke.
+# withdrawal itself fences every family of this owner/client/version, so it never precedes the human revoke. Freshness precheck of the newest interactive AMR is before any request id or command request; refreshedCredential is required to read claims and sends no command.
 if test "$C1_CLIENT_ACTION" = approve; then test -f /Users/yulanbot/work/dcr-rt/c1-smoke.pointer; fi
 test -f "$C1_PROOF_DIR/C1-client-check.txt"
 node --import tsx --input-type=module - "$C1_INPUTS_FILE" "$C1_PROOF_DIR" "$C1_CLIENT_ACTION" <<'JS'
@@ -5745,7 +5745,7 @@ import { cloudTarget, commandEndpoint, CLIENT_PROTOCOL_VERSION } from './src/clo
 import { withClientBuild } from './src/cloud/client-build.ts';
 import { canonicalAdminJson } from './src/protocol/admin-policy.ts';
 import { createHash } from 'node:crypto';
-import { newestInteractiveAmrSeconds } from './supabase/functions/command/fresh-auth.ts';
+import { FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS, newestInteractiveAmrSeconds } from './supabase/functions/command/fresh-auth.ts';
 const [file,proof,action]=process.argv.slice(2);
 try {
  const c=JSON.parse(await readFile(file,'utf8'));
@@ -5756,7 +5756,7 @@ try {
  const parts=String(human.accessToken).split('.'); let claims=null;
  try { if(parts.length===3) claims=JSON.parse(Buffer.from(parts[1],'base64url').toString('utf8')); } catch { claims=null; }
  const interactive=newestInteractiveAmrSeconds(claims);
- if(interactive===null || Date.now()/1000-interactive>240){ console.error(`FAIL owner client command; interactive owner sign-in expected under 240 s got ${interactive===null?'missing':'stale'}; sign in again with the owner file-store CLI session and rerun this block; STOP`); process.exit(1); }
+ const age=interactive===null?null:Date.now()/1000-interactive; if(age===null||age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS||age>240){ console.error(`FAIL owner client command; interactive owner sign-in expected under 240 s got ${age===null?'missing':age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS?'future':'stale'}; sign in again with the owner file-store CLI session and rerun this block; STOP`); process.exit(1); }
  const response=await fetch('https://commonswarm.com/oauth/c1-smoke/client.json',{redirect:'error',signal:AbortSignal.timeout(10000)});
  if(!response.ok || response.headers.get('content-type')?.split(';')[0]!=='application/json') throw Error();
  const bytes=await response.text(); if(Buffer.byteLength(bytes)>4096) throw Error();

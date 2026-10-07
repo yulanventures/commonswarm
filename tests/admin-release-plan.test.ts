@@ -6,6 +6,7 @@ import { chmodSync, existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, 
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
+import { FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS } from '../supabase/functions/command/fresh-auth.ts';
 
 const directory = resolve('docs/evidence/2026-10-03-admin-issuance-release');
 const planPath = join(directory, 'RELEASE.md');
@@ -3437,13 +3438,19 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   const freshAuth = readFileSync(resolve('supabase/functions/command/fresh-auth.ts'), 'utf8');
   const interactiveMethods = [...(/const INTERACTIVE_METHODS = new Set\(\[([\s\S]*?)\]\)/.exec(freshAuth)?.[1] ?? '').matchAll(/"([^"]+)"/g)].map(m => m[1]!);
   assert.ok(interactiveMethods.length > 0, 'INTERACTIVE_METHODS must be read from fresh-auth.ts');
-  assert.match(current, /from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
+  assert.match(current, /import \{ FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS, newestInteractiveAmrSeconds \} from '\.\/supabase\/functions\/command\/fresh-auth\.ts'/);
   assert.match(js, /newestInteractiveAmrSeconds\(claims\)/);
   assert.match(current, /origin:'https:\/\/commonswarm\.com'/);
   assert.match(js, /fetch\(commandEndpoint\(target\),\{method:'POST',headers:\{authorization:`Bearer \$\{human\.accessToken\}`,apikey:target\.anonKey,'content-type':'application\/json',origin:'https:\/\/commonswarm\.com'\}/);
   const failFresh = 'FAIL owner client command; interactive owner sign-in expected under 240 s got ';
-  assert.match(js, /interactive owner sign-in expected under 240 s got \$\{interactive===null\?'missing':'stale'\}/);
-  assert.match(js, /Date\.now\(\)\/1000-interactive>240/);
+  assert.match(current, /before any request id or command request/);
+  assert.doesNotMatch(current, /before any request(?! id or command request)/);
+  assert.match(js, /interactive owner sign-in expected under 240 s got \$\{age===null\?'missing':age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS\?'future':'stale'\}/);
+  assert.match(js, /age===null\|\|age<-FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS\|\|age>240/);
+  assert.doesNotMatch(js, /<-\s*\d+/);
+  assert.equal(typeof FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS, 'number');
+  assert.ok(10 > FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS);
+  assert.ok(3 < FRESH_INTERACTIVE_AUTH_CLOCK_SKEW_SECONDS);
   const precheck = js.indexOf(failFresh);
   const idRead = js.indexOf('lstat(idPath)');
   const idWrite = js.indexOf("writeFile(idPath");
@@ -3498,6 +3505,28 @@ test('C1-31: owner-client-command sends Origin, prechecks AMR freshness at 240 s
   const rerun = runOwnerClient(current, stale, 'withdraw');
   assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout);
   assert.ok(existsSync(join(stale, 'withdraw-request-id')));
+
+  const boundNow = Math.floor(Date.now() / 1000);
+  for (const [label, offset] of [['near-stale', -239], ['skew-ok', 3]] as const) {
+    const d = mkdtempSync(join(scratch, `occ-c131-${label}-`));
+    const r = runOwnerClient(current, d, 'approve', {
+      accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + offset }]),
+    });
+    assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+    assert.ok(ownerFetchLog(d).some(c => c.command), label);
+  }
+  const future = mkdtempSync(join(scratch, 'occ-c131-future-'));
+  writeFileSync(join(future, 'unrelated.txt'), 'keep\n');
+  const futureRun = runOwnerClient(current, future, 'withdraw', {
+    accessToken: ownerJwt([{ method: interactiveMethods[0], timestamp: boundNow + 10 }]),
+  });
+  assert.notEqual(futureRun.status, 0);
+  assert.match(futureRun.stderr, /FAIL owner client command; interactive owner sign-in expected under 240 s got future; sign in again with the owner file-store CLI session and rerun this block; STOP/);
+  assert.equal(ownerFetchLog(future).length, 0);
+  assert.ok(!existsSync(join(future, 'withdraw-request-id')));
+  const futureRerun = runOwnerClient(current, future, 'withdraw');
+  assert.equal(futureRerun.status, 0, futureRerun.stderr + futureRerun.stdout);
+  assert.ok(existsSync(join(future, 'withdraw-request-id')));
 
   const saved = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
   const refused = mkdtempSync(join(scratch, 'occ-c131-403-'));
