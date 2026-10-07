@@ -136,7 +136,10 @@ test("consent destination is prominent beside approval and describes loopback pr
       clientDisplay: { verified: false, primary: "metadata.example", declaredName: "Registered app" },
       identity, workspaces: [], selectionVersion: 0, csrfToken: "csrf" });
     assert.ok(html.includes(`After you approve, you return to <strong>${destination}</strong>`));
-    const nearApproval = html.slice(html.lastIndexOf('<p class="notice">'), html.indexOf('<button type="submit">'));
+    const destinationStart = html.lastIndexOf('<p class="notice destination">');
+    const approval = html.indexOf('<button type="submit">Allow connection</button>');
+    assert.ok(destinationStart > 0 && approval > destinationStart, "destination block sits before Allow connection");
+    const nearApproval = html.slice(destinationStart, approval);
     assert.ok(nearApproval.includes("Registered app"));
     assert.ok(nearApproval.includes(destination));
     assert.doesNotMatch(nearApproval, /Client ID URL host:|code=hidden/u);
