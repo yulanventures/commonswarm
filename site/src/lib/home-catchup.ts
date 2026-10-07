@@ -1,6 +1,6 @@
 // Catch up view (UI-SPEC.md section 3.2). Lane C owns this file.
-import { capsule, needsYouCard } from "./home-primitives";
-import type { CapsuleVM, NeedsYouVM, PersonVM } from "./home-types";
+import { agentOrb, capsule, needsYouCard, personAvatar } from "./home-primitives";
+import type { AgentVM, CapsuleVM, NeedsYouVM, PersonVM } from "./home-types";
 
 /** Local view model for Catch up; integration maps server rows into this shape. */
 export interface CatchUpWorkspaceCardVM {
@@ -26,6 +26,8 @@ export interface CatchUpLatestRowVM {
   };
   excerpt: string;
   when: string;
+  /** Optional: when integration knows who posted, the row shows their avatar. */
+  author?: PersonVM | AgentVM | null;
 }
 
 export interface CatchUpVM {
@@ -45,6 +47,26 @@ export interface CatchUpCallbacks {
 
 const NEEDS_YOU_PREVIEW = 3;
 const LATEST_MAX = 8;
+/** One row of person+agents capsules on a workspace card; the rest are a "+N" count. */
+const CARD_CAPSULES_MAX = 3;
+
+/** Date eyebrow above the greeting ("Monday, October 5"), from the same clock as the greeting. */
+export function catchUpDateLine(now: string): string {
+  return new Date(now).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+}
+
+/**
+ * The card footer is one line, as in the canvas design. The other measured lines stay in the card's
+ * accessible name. New messages win: agent attention also surfaces as a Needs you item at the top.
+ */
+export function catchUpCardFooter(card: CatchUpWorkspaceCardVM): { kind: "since" | "attention" | "counts"; text: string } | null {
+  const since = catchUpNewMessagesSinceLastLookedLine(card.newMessagesSinceLastLooked);
+  if (since) return { kind: "since", text: since };
+  const attention = catchUpAgentAttentionLine(card.agentsNeedingAttention);
+  if (attention) return { kind: "attention", text: attention };
+  const counts = catchUpWorkspaceCountsLine(card);
+  return counts ? { kind: "counts", text: counts } : null;
+}
 
 /** Local greeting until home-names.ts ships in lane P. */
 export function catchUpGreeting(now: string, firstName: string): string {
@@ -190,15 +212,26 @@ function workspaceCard(doc: Document, card: CatchUpWorkspaceCardVM, sample: bool
   const summary = node(doc, "div", "hm-catchup-card-summary", card.peopleSummary);
   head.append(title, summary);
   const capsules = node(doc, "div", "hm-catchup-card-capsules");
-  for (const group of card.capsules) capsules.append(capsule(doc, group, { compact: true }));
+  const shown = card.capsules.slice(0, CARD_CAPSULES_MAX);
+  capsules.dataset.count = String(shown.length);
+  for (const group of shown) capsules.append(capsule(doc, group, { compact: true }));
+  const hidden = card.capsules.length - shown.length;
+  if (hidden > 0) {
+    const more = node(doc, "span", "hm-catchup-card-more", `+${hidden}`);
+    more.setAttribute("role", "img");
+    more.setAttribute("aria-label", `${hidden} more ${plural(hidden, "person", "people")}`);
+    capsules.append(more);
+  }
   const sinceLastLooked = catchUpNewMessagesSinceLastLookedLine(card.newMessagesSinceLastLooked);
-  if (sinceLastLooked) head.append(node(doc, "p", "hm-catchup-card-since", sinceLastLooked));
-  const foot = node(doc, "div", "hm-catchup-card-foot");
   const counts = catchUpWorkspaceCountsLine(card);
-  if (counts) foot.append(node(doc, "p", "hm-catchup-card-counts", counts));
   const attention = catchUpAgentAttentionLine(card.agentsNeedingAttention);
-  if (attention) foot.append(node(doc, "p", "hm-catchup-card-attention", attention));
-  element.append(head, capsules, foot);
+  element.append(head, capsules);
+  const footer = catchUpCardFooter(card);
+  if (footer) {
+    const foot = node(doc, "div", "hm-catchup-card-foot");
+    foot.append(node(doc, "p", `hm-catchup-card-${footer.kind}`, footer.text));
+    element.append(foot);
+  }
   element.title = card.name;
   element.setAttribute("aria-label", [card.name, card.peopleSummary, sinceLastLooked, counts, attention].filter(Boolean).join(". "));
   return element;
@@ -216,17 +249,42 @@ function needsYouPreview(doc: Document, item: NeedsYouVM): HTMLElement {
   return article;
 }
 
+/** Author avatar when integration supplies the author record. A guessed initial could mislead ("Y" for "Your Claude"), so none is drawn without one. */
+function latestAvatar(doc: Document, row: CatchUpLatestRowVM): HTMLElement | null {
+  const author = row.author;
+  if (!author) return null;
+  const chain = node(doc, "div", "hm-catchup-latest-who");
+  chain.append("label" in author ? agentOrb(doc, author, { size: 28, badge: true }) : personAvatar(doc, author, 28));
+  return chain;
+}
+
 function latestRow(doc: Document, row: CatchUpLatestRowVM, sample: boolean): HTMLElement {
   const element = node(doc, "article", "hm-catchup-latest-row");
   element.dataset.latestId = row.id;
-  const author = node(doc, "div", "hm-catchup-latest-author", row.authorLabel);
   const body = node(doc, "div", "hm-catchup-latest-body");
-  body.append(node(doc, "p", "hm-catchup-latest-excerpt", row.excerpt), node(doc, "time", "hm-catchup-latest-when", row.when));
+  const sentence = node(doc, "p", "hm-catchup-latest-excerpt");
+  sentence.append(node(doc, "strong", "hm-catchup-latest-author", row.authorLabel), " ", node(doc, "span", "hm-catchup-latest-text", row.excerpt));
+  body.append(sentence, node(doc, "time", "hm-catchup-latest-when", row.when));
   const pill = sample
     ? node(doc, "span", "hm-catchup-latest-workspace hm-catchup-latest-workspace--sample", row.workspace.name)
     : link(doc, row.workspace.href, "hm-catchup-latest-workspace", row.workspace.name);
-  element.append(author, body, pill);
+  const avatar = latestAvatar(doc, row);
+  if (avatar) element.append(avatar);
+  element.append(body, pill);
   return element;
+}
+
+function legend(doc: Document): HTMLElement {
+  const root = node(doc, "div", "hm-catchup-legend");
+  for (const [shape, text] of [["person", "A person"], ["agent", "An agent, grouped with its owner"]] as const) {
+    const item = node(doc, "span", "hm-catchup-legend-item");
+    const mark = node(doc, "span", "hm-catchup-legend-mark");
+    mark.dataset.shape = shape;
+    mark.setAttribute("aria-hidden", "true");
+    item.append(mark, node(doc, "span", "", text));
+    root.append(item);
+  }
+  return root;
 }
 
 /** Pure DOM builder for Catch up. User text always goes through textContent. */
@@ -238,22 +296,25 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
   const title = node(doc, "h1", "hm-catchup-title", catchUpGreeting(vm.now, vm.viewerFirstName));
   title.id = "hm-catchup-title";
   title.tabIndex = -1;
-  header.append(title, node(doc, "p", "hm-catchup-subline", catchUpSubline(vm)));
+  header.append(node(doc, "p", "hm-catchup-date", catchUpDateLine(vm.now)), title, node(doc, "p", "hm-catchup-subline", catchUpSubline(vm)));
   root.append(header);
 
   const visibleNeedsYou = catchUpNeedsYouVisible(vm.needsYou, expanded);
   if (visibleNeedsYou.length) {
     const section = node(doc, "section", "hm-catchup-needs");
     section.setAttribute("aria-labelledby", "hm-catchup-needs-title");
-    const needsTitle = node(doc, "h2", "hm-catchup-section-title", "Needs you");
+    const needsTitle = node(doc, "h2", "hm-catchup-section-title hm-catchup-needs-title", "Needs you");
     needsTitle.id = "hm-catchup-needs-title";
     section.append(needsTitle);
     const list = node(doc, "div", "hm-catchup-needs-list");
     list.id = "hm-catchup-needs-list";
-    for (const item of visibleNeedsYou) {
-      list.append(vm.sample
+    // The first item is the lime band; the rest are quieter rows under it (catchup.css).
+    for (const [index, item] of visibleNeedsYou.entries()) {
+      const entry = vm.sample
         ? needsYouPreview(doc, item)
-        : needsYouCard(doc, item, (action, entry) => callbacks.onNeedsYouAction(action, entry)));
+        : needsYouCard(doc, item, (action, need) => callbacks.onNeedsYouAction(action, need));
+      entry.dataset.needsRank = index === 0 ? "first" : "more";
+      list.append(entry);
     }
     section.append(list);
     const more = catchUpNeedsYouMoreCount(vm.needsYou, expanded);
@@ -272,7 +333,9 @@ export function renderCatchUp(doc: Document, vm: CatchUpVM, callbacks: CatchUpCa
   workspaces.setAttribute("aria-labelledby", "hm-catchup-workspaces-title");
   const workspacesTitle = node(doc, "h2", "hm-catchup-section-title", "Your workspaces");
   workspacesTitle.id = "hm-catchup-workspaces-title";
-  workspaces.append(workspacesTitle);
+  const workspacesHead = node(doc, "div", "hm-catchup-workspaces-head");
+  workspacesHead.append(workspacesTitle, legend(doc));
+  workspaces.append(workspacesHead);
   const grid = node(doc, "div", "hm-catchup-grid");
   for (const card of vm.workspaces) grid.append(workspaceCard(doc, card, vm.sample));
   workspaces.append(grid);

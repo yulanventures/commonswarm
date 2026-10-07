@@ -1,4 +1,4 @@
-import { catchUpGreeting, type CatchUpVM } from "./home-catchup";
+import { catchUpDateLine, catchUpGreeting, type CatchUpVM } from "./home-catchup";
 import { railAgentName } from "./home-rail";
 import type { RailVM } from "./home-types";
 import type { WorkspaceShellVM } from "./home-shell";
@@ -98,10 +98,12 @@ export function refreshHomeRailTimes(slot: HTMLElement, vm: RailVM): void {
   }
 }
 
-/** The greeting and timestamps are text nodes, so a clock tick cannot detach the focused H1. */
+/** The date, greeting and timestamps are text nodes, so a clock tick cannot detach the focused H1. */
 export function refreshHomeCatchUpTimes(slot: HTMLElement, vm: CatchUpVM): void {
   const heading = slot.querySelector<HTMLElement>(".hm-catchup-title");
   if (heading) heading.textContent = catchUpGreeting(vm.now, vm.viewerFirstName);
+  const date = slot.querySelector<HTMLElement>(".hm-catchup-date");
+  if (date) date.textContent = catchUpDateLine(vm.now);
   for (const row of slot.querySelectorAll<HTMLElement>("[data-latest-id]")) {
     const item = vm.latest.find(item => item.id === row.dataset.latestId);
     const time = row.querySelector<HTMLElement>("time");
