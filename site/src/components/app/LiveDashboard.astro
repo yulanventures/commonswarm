@@ -5236,6 +5236,15 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       details.className = "dashboard__message-receipt";
       details.dataset.receiptState = indicator.state;
       if (indicator.outcome !== null) details.dataset.receiptOutcome = indicator.outcome;
+      /* TOM'S RULING 1 (2026-10-07, "Quiet forms"): a receipt shows on the row only while it is a
+         problem or still moving: pending, stuck, failed, expired, or a mix that may hide a failure.
+         A settled receipt is quiet: it moves into the row's tools and shows on hover or focus, and
+         a keyboard reaches it by Tab. A problem state is never quiet. */
+      // Tom's ruling 1: settled receipts go quiet; a problem never hides. "Unavailable" is an unknown delivery state, so
+      // it stays visible like pending/stuck/failed (Lead decision).
+      const receiptProblem = indicator.state === "pending" || indicator.state === "stuck" || indicator.state === "unavailable" ||
+        indicator.outcome === "failed_terminal" || indicator.outcome === "expired" || indicator.outcome === "mixed";
+      if (!receiptProblem) details.dataset.receiptQuiet = "";
       const summary = document.createElement("summary");
       summary.title = indicator.detail;
       summary.setAttribute(
@@ -5928,6 +5937,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           });
           actions.append(reply);
           body.append(actions);
+        }
+        /* THE ROW'S TOOLS (ruling 1): a quiet receipt and "Reply in thread" share one control strip
+           that shows on hover or keyboard focus. A tap on a touch screen focuses the row (it is
+           focusable but not a tab stop), which shows the strip the same way. */
+        const quietTools = Array.from(body.children as ArrayLike<HTMLElement>).filter((child) =>
+          (child.className === "dashboard__message-receipt" && child.dataset.receiptQuiet !== undefined) ||
+          child.className === "dashboard__message-actions");
+        if (quietTools.length) {
+          const tools = document.createElement("div");
+          tools.className = "dashboard__message-tools";
+          tools.append(...quietTools);
+          body.append(tools);
+          row.tabIndex = -1;
         }
         row.append(avatar, body);
         window.requestAnimationFrame(() => {
