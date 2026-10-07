@@ -23,7 +23,9 @@ import {
   fixActionLabel,
   fixControlAllowed,
   footerNote,
+  lineTitle,
   steeringMay,
+  waitingLine,
 } from "./home-agent-copy";
 
 export interface AgentDoingNowVM {
@@ -192,39 +194,58 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   page.dataset.hmAgent = agent.id;
   page.dataset.hmYours = String(agent.yours);
   page.dataset.hmReadonly = String(!canSteer);
+  page.dataset.hmState = agent.state.kind;
   page.setAttribute("aria-labelledby", "hm-agent-title");
 
+  // Header: the agent avatar and who owns it on the left, the measured status on the right.
   const header = el(doc, "header", "hm-agent__header");
-  header.append(agentOrb(doc, agent, { size: 60, badge: true }));
+  const who = el(doc, "div", "hm-agent__who");
+  who.append(agentOrb(doc, agent, { size: 60, badge: true }));
   const intro = el(doc, "div", "hm-agent__intro");
   const title = heading(doc, "h1", "hm-agent__title", agent.label, "hm-agent-title");
   title.tabIndex = -1;
+  const byline = el(doc, "div", "hm-agent__byline");
   const ownership = el(doc, "p", "hm-agent__ownership", vm.ownership);
   ownership.dataset.hmOwnership = "";
-  intro.append(title, ownership);
+  const receive = el(doc, "p", "hm-agent__receive", vm.receive);
+  receive.dataset.hmReceive = "";
+  byline.append(ownership, receive);
+  intro.append(title, byline);
+  who.append(intro);
   const statusWrap = el(doc, "div", "hm-agent__status");
   // The fix is rendered once in What to do, alongside its available action.
   statusWrap.append(statusLine(doc, { ...agent.state, attention: false }, { form: "pill" }));
-
-  const receive = el(doc, "p", "hm-agent__receive", vm.receive);
-  receive.dataset.hmReceive = "";
-  intro.append(statusWrap, receive);
-  header.append(intro);
+  header.append(who, statusWrap);
   page.append(header);
 
-  if (agent.state.kind === "disconnected" && agent.state.word === "Disconnected") {
-    const banner = notice(doc, disconnectedBanner(agent.state.detail), "warning");
+  const disconnected = agent.state.kind === "disconnected" && agent.state.word === "Disconnected";
+  const banner = disconnected ? notice(doc, disconnectedBanner(agent.state.detail), "warning") : null;
+  if (banner) {
     banner.classList.add("hm-agent__banner");
     banner.dataset.hmBanner = "";
-    page.append(banner);
   }
 
   if (agent.state.attention) {
+    // One amber notice: what happened, what is waiting, and the one action that fixes it.
     const box = el(doc, "section", "hm-agent__fix");
     box.dataset.hmFix = "";
     box.setAttribute("aria-labelledby", "hm-agent-fix");
-    box.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.whatToDo, "hm-agent-fix"));
-    box.append(notice(doc, agent.state.fix.sentence, "warning"));
+    const copy = el(doc, "div", "hm-agent__fix-copy");
+    copy.append(heading(doc, "h2", "hm-agent__fix-title", AGENT_COPY.whatToDo, "hm-agent-fix"));
+    if (banner) {
+      copy.append(banner);
+      // Only Up next is in the line; Not yet and At a set time stay out of it until they join.
+      const waiting = vm.lineNotice ? null : waitingLine(vm.upNext.length);
+      if (waiting) {
+        const line = el(doc, "p", "hm-agent__fix-sentence", waiting);
+        line.dataset.hmWaiting = "";
+        copy.append(line);
+      }
+      if (agent.state.fix.sentence) copy.append(el(doc, "p", "hm-agent__fix-sentence", agent.state.fix.sentence));
+    } else {
+      copy.append(notice(doc, agent.state.fix.sentence, "warning"));
+    }
+    box.append(copy);
     const fixAction = agent.state.fix.action;
     const label = fixActionLabel(fixAction);
     if (fixControlAllowed(agent.yours, vm.sample, agent.state.fix.allowed) && fixAction && label) {
@@ -235,10 +256,22 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
       box.append(button);
     }
     page.append(box);
+  } else if (banner) {
+    const box = el(doc, "div", "hm-agent__fix");
+    box.append(banner);
+    page.append(box);
   }
 
   const body = el(doc, "div", "hm-agent__body");
-  const line = el(doc, "div", "hm-agent__line");
+  // The line: one card with Doing now, Up next, Not yet, At a set time and Done recently.
+  const line = el(doc, "section", "hm-agent__line");
+  line.setAttribute("aria-labelledby", "hm-agent-line");
+  const lineHead = el(doc, "div", "hm-agent__line-head");
+  lineHead.append(heading(doc, "h2", "hm-agent__h2", lineTitle(agent.nestedLabel), "hm-agent-line"));
+  const footer = el(doc, "p", "hm-agent__footer", footerNote(agent.nestedLabel, vm.workspaceName));
+  footer.dataset.hmFooter = "";
+  lineHead.append(footer);
+  line.append(lineHead);
   const empty = agentLineEmpty(vm);
 
   if (vm.lineNotice) line.append(el(doc, "p", "hm-agent__meta", vm.lineNotice));
@@ -248,24 +281,28 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     line.append(vacant);
   }
 
-  if (vm.doingNow) {
+  const part = (hook: string, id: string, text: string) => {
     const section = el(doc, "section", "hm-agent__section");
-    section.dataset.hmDoing = "";
-    section.setAttribute("aria-labelledby", "hm-agent-doing");
-    section.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.doingNow, "hm-agent-doing"));
+    section.dataset[hook] = "";
+    section.setAttribute("aria-labelledby", id);
+    const label = el(doc, "h3", "hm-agent__eyebrow", text);
+    label.id = id;
+    section.append(label);
+    return section;
+  };
+
+  if (vm.doingNow) {
+    const section = part("hmDoing", "hm-agent-doing", AGENT_COPY.doingNow);
     const card = el(doc, "div", "hm-agent__doing");
     card.append(textLink(doc, vm.doingNow.href, vm.doingNow.title, "hm-agent__todo-link"));
     card.append(el(doc, "p", "hm-agent__meta", vm.doingNow.meta));
-    card.append(el(doc, "p", "hm-agent__detail", vm.doingNow.detail));
+    if (vm.doingNow.detail) card.append(el(doc, "p", "hm-agent__detail", vm.doingNow.detail));
     section.append(card);
     line.append(section);
   }
 
   if (vm.upNext.length) {
-    const section = el(doc, "section", "hm-agent__section");
-    section.dataset.hmUpNext = "";
-    section.setAttribute("aria-labelledby", "hm-agent-up-next");
-    section.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.upNext, "hm-agent-up-next"));
+    const section = part("hmUpNext", "hm-agent-up-next", AGENT_COPY.upNext);
     const list = el(doc, "ul", "hm-agent__queue");
     for (const row of vm.upNext) {
       const gated: QueueRowVM = { ...row, may: steeringMay(agent.yours, vm.sample, vm.may.steer, row.may) };
@@ -279,10 +316,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   }
 
   if (vm.notYet.length) {
-    const section = el(doc, "section", "hm-agent__section");
-    section.dataset.hmNotYet = "";
-    section.setAttribute("aria-labelledby", "hm-agent-not-yet");
-    section.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.notYet, "hm-agent-not-yet"));
+    const section = part("hmNotYet", "hm-agent-not-yet", AGENT_COPY.notYet);
     const list = el(doc, "div", "hm-agent__gated-list");
     for (const row of vm.notYet) {
       const item = el(doc, "div", "hm-agent__gated");
@@ -295,7 +329,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
         if (!canSteer) return;
         callbacks.onQueueAction?.(action, q);
       }));
-      item.append(gate, nested);
+      item.append(nested, gate);
       list.append(item);
     }
     section.append(list);
@@ -303,10 +337,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   }
 
   if (vm.atSetTime.length) {
-    const section = el(doc, "section", "hm-agent__section");
-    section.dataset.hmAtTime = "";
-    section.setAttribute("aria-labelledby", "hm-agent-at-time");
-    section.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.atSetTime, "hm-agent-at-time"));
+    const section = part("hmAtTime", "hm-agent-at-time", AGENT_COPY.atSetTime);
     const list = el(doc, "ul", "hm-agent__scheduled");
     for (const row of vm.atSetTime) {
       list.append(todoLinkRow(doc, row.href, row.title, row.whenLine));
@@ -317,10 +348,7 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
 
   const done = doneRecentlyLimit(vm.doneRecently);
   if (done.length) {
-    const section = el(doc, "section", "hm-agent__section");
-    section.dataset.hmDone = "";
-    section.setAttribute("aria-labelledby", "hm-agent-done");
-    section.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.doneRecently, "hm-agent-done"));
+    const section = part("hmDone", "hm-agent-done", AGENT_COPY.doneRecently);
     const list = el(doc, "ul", "hm-agent__done");
     for (const row of done) list.append(todoLinkRow(doc, row.href, row.title, row.meta));
     section.append(list);
@@ -347,27 +375,33 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     facts.append(lists);
   }
   if (agent.yours && vm.facts.postsHere) facts.append(switchRow(doc, vm.facts.postsHere, () => {}));
-  if (agent.yours && vm.workPolicy) { const policy = { name: `hm-work-policy-${agent.id}`, legend: "Who can give it work",
-    value: vm.workPolicy, options: [{ value: "owner" as const, label: "Only you" }, { value: "anyone" as const, label: `Anyone in ${vm.workspaceName}` }], sample: vm.sample }; facts.append(choiceChips(doc, policy,
-    value => { if (value === "owner" || value === "anyone") callbacks.onWorkPolicy?.(value); })); }
-  if (vm.receipt) { const receipt = el(doc, "p", "hm-agent__meta", vm.receipt); receipt.setAttribute("role", "status"); facts.append(receipt); }
   aside.append(facts);
 
+  let receiptHome: HTMLElement = facts;
+  if (agent.yours && vm.workPolicy) {
+    const policyCard = el(doc, "section", "hm-agent__policy");
+    policyCard.dataset.hmPolicy = "";
+    const policy = { name: `hm-work-policy-${agent.id}`, legend: "Who can give it work",
+      value: vm.workPolicy, options: [{ value: "owner" as const, label: "Only you" }, { value: "anyone" as const, label: `Anyone in ${vm.workspaceName}` }], sample: vm.sample };
+    policyCard.append(choiceChips(doc, policy, value => { if (value === "owner" || value === "anyone") callbacks.onWorkPolicy?.(value); }));
+    aside.append(policyCard);
+    receiptHome = policyCard;
+  }
+  if (vm.receipt) { const receipt = el(doc, "p", "hm-agent__meta", vm.receipt); receipt.setAttribute("role", "status"); receiptHome.append(receipt); }
+
   if (vm.activity) {
-  const activity = el(doc, "section", "hm-agent__activity");
-  activity.dataset.hmActivity = "";
-  activity.setAttribute("aria-labelledby", "hm-agent-activity");
-  activity.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.recentActivity, "hm-agent-activity"));
-  const slot = el(doc, "div", "hm-agent__activity-slot");
-  slot.dataset.agentActivity = "";
-  if (vm.activity) {
+    const activity = el(doc, "section", "hm-agent__activity");
+    activity.dataset.hmActivity = "";
+    activity.setAttribute("aria-labelledby", "hm-agent-activity");
+    activity.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.recentActivity, "hm-agent-activity"));
+    const slot = el(doc, "div", "hm-agent__activity-slot");
+    slot.dataset.agentActivity = "";
     slot.append(el(doc, "p", "hm-agent__meta", vm.activity.ageLabel));
     if (vm.activity.phaseLabel) slot.append(el(doc, "p", "hm-agent__detail", vm.activity.phaseLabel));
     if (vm.activity.toolTitle) slot.append(el(doc, "p", "hm-agent__detail", vm.activity.toolTitle));
     if (vm.activity.emptyMessage) slot.append(el(doc, "p", "hm-agent__meta", vm.activity.emptyMessage));
-  }
-  activity.append(slot);
-  aside.append(activity);
+    activity.append(slot);
+    aside.append(activity);
   }
 
   if (canAct) {
@@ -380,8 +414,5 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
 
   body.append(line, aside);
   page.append(body);
-  const footer = el(doc, "p", "hm-agent__footer", footerNote(agent.nestedLabel, vm.workspaceName));
-  footer.dataset.hmFooter = "";
-  page.append(footer);
   return page;
 }

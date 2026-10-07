@@ -55,6 +55,17 @@ export function emptyLine(agentName: string): string {
   return `Nothing in ${possessive(agentName)} line. ${AGENT_COPY.emptyAssign}`;
 }
 
+/** Title of the card that holds the agent's line (vocabulary: "line", never "queue"). */
+export function lineTitle(agentName: string): string {
+  return `${possessive(agentName)} line`;
+}
+
+/** What a disconnected agent has waiting, from the measured line only. Null when nothing is measured as waiting. */
+export function waitingLine(count: number): string | null {
+  if (!Number.isInteger(count) || count < 1) return null;
+  return count === 1 ? "1 to-do is waiting in its line." : `${count} to-dos are waiting in its line.`;
+}
+
 export function footerNote(agentName: string, workspaceName: string): string {
   return `This page shows ${agentName} in ${workspaceName}.`;
 }

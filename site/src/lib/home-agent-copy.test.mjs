@@ -9,12 +9,14 @@ import {
   fixActionLabel,
   fixControlAllowed,
   footerNote,
+  lineTitle,
   notYetNoteGate,
   notYetTimeGate,
   notYetTodoGate,
   ownershipLine,
   setTimeCopy,
   steeringMay,
+  waitingLine,
 } from "./home-agent-copy.ts";
 
 const steer = { up: true, down: true, startNow: true, notYet: true, release: true };
@@ -40,6 +42,16 @@ test("empty line and footer name the agent and the workspace", () => {
   assert.equal(emptyLine("Claude"), "Nothing in Claude’s line. Assign it a to-do from any to-do page.");
   assert.equal(footerNote("Claude", "Home"), "This page shows Claude in Home.");
   assert.equal(AGENT_COPY.notFound, "Nothing with this link in Home.");
+});
+
+test("line title and the waiting count use the line vocabulary", () => {
+  assert.equal(lineTitle("Claude"), "Claude’s line");
+  assert.equal(waitingLine(1), "1 to-do is waiting in its line.");
+  assert.equal(waitingLine(6), "6 to-dos are waiting in its line.");
+  assert.equal(waitingLine(0), null);
+  assert.equal(waitingLine(-1), null);
+  assert.equal(waitingLine(1.5), null);
+  assert.doesNotMatch(lineTitle("Claude"), /queue/i);
 });
 
 test("R4 set-time copy joins the line and never starts a model", () => {
@@ -111,6 +123,9 @@ test("agent view copy stays in plain words", () => {
     disconnectedBanner("Key turned off"),
     emptyLine("Claude"),
     footerNote("Claude", "Home"),
+    lineTitle("Claude"),
+    waitingLine(1),
+    waitingLine(3),
     setTimeCopy("Claude", "9:00 pm"),
     notYetTodoGate("Get quotes", "Claude"),
     ...Object.values(AGENT_COPY),

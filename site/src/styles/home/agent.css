@@ -1,210 +1,594 @@
-/* Contrast measured from tokens.css with WCAG sRGB relative luminance.
-   Light / dark: text on bg 13.59 / 15.43; on surface 14.42 / 13.24.
-   Muted on bg 5.34 / 9.41; on surface 5.66 / 8.08.
-   Accent-bright on surface 7.44 / 9.64; accent-ink on accent 5.12 / 8.25.
-   Warning on warning-dim composited over bg 4.93 / 7.86, over surface 5.22 / 6.66.
-   Controls in the same invocation: black/white 21.00, mid-grey/white 4.48,
-   blue/white 8.59. Both dark selectors resolve to the same measured token pairs. */
-/* Home UI: agent view (UI-SPEC.md 3.5). Site tokens only. Class prefix hm-. */
+/* Home UI: agent view (UI-SPEC.md 3.5), the canvas "Agent" artboard (home-visual DESIGN-MAP).
+   --home-* tokens only; they switch in dark mode on their own. Class prefix hm-agent.
+   Measured WCAG sRGB contrast (tokens.css header method), light / dark:
+     ink on card 15.90 / 14.21; ink on canvas 14.32 / 15.27; muted on card 6.72 / 8.43;
+     muted on canvas 6.05 / 9.05; muted on soft 6.21 / 7.58; ink on lime-soft 15.08 / 11.43;
+     offline-deep on offline-tint 9.17 / 9.62, and the reverse pair on the fix button the same.
+   Calculator controls on the same run: black/white 21.00; #777/white 4.48; #00f/white 8.59. */
 .hm-agent {
   min-inline-size: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--stack-lg);
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: var(--t-base);
-  line-height: var(--lh-base);
+  gap: 24px;
+  color: var(--home-ink);
+  font-family: var(--home-font-body);
+  font-size: 16px;
+  line-height: 1.45;
 }
 
+/* Header: avatar, name, possessive owner line and the receive sentence; status pill on the right. */
 .hm-agent__header {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--s-4);
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px 24px;
   min-inline-size: 0;
+}
+
+.hm-agent__who {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-inline-size: 0;
+  /* Wide enough that a long status pill wraps under the name instead of squeezing it. */
+  flex: 1 1 24rem;
 }
 
 .hm-agent__intro {
   min-inline-size: 0;
-  flex: 1 1 16rem;
+  flex: 1 1 auto;
+}
+
+/* The page avatar sits on the canvas: a softer corner and a wider badge ring than the shared 60px orb. */
+.hm-agent__header .hm-agent-orb[data-size="60"] {
+  border-radius: 18px;
+}
+
+.hm-agent__header .hm-agent-orb[data-size="60"] .hm-owner-badge {
+  inset-inline-end: -8px;
+  inset-block-end: -6px;
+  box-shadow: 0 0 0 3px var(--home-canvas);
 }
 
 .hm-agent__title {
   margin: 0;
-  font-family: var(--font-display);
-  font-weight: var(--weight-display);
-  font-size: var(--t-2xl);
-  line-height: var(--lh-2xl);
-  letter-spacing: var(--track-head);
+  font-family: var(--home-font-display);
+  font-weight: 700;
+  font-size: clamp(30px, 3vw, 40px);
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__byline {
+  margin-top: 4px;
+  color: var(--home-ink-muted);
+  font-size: 15px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .hm-agent__ownership,
-.hm-agent__receive,
-.hm-agent__status-detail,
-.hm-agent__meta,
-.hm-agent__footer {
-  margin: var(--stack-xs) 0 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-  line-height: var(--lh-sm);
-  overflow-wrap: anywhere;
+.hm-agent__receive {
+  display: inline;
+  margin: 0;
+}
+
+.hm-agent__ownership + .hm-agent__receive::before {
+  content: " \00B7  " / "";
 }
 
 .hm-agent__status {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--gap-inline);
-  margin-top: var(--stack-sm);
+  gap: 10px;
+  min-inline-size: 0;
 }
 
-.hm-agent__banner,
+.hm-agent__status .hm-status[data-form="pill"] {
+  font-size: 14px;
+}
+
+/* On the lime pill the working dot is filled ink, so it reads as a dot and not a ring. */
+.hm-agent__status .hm-status[data-form="pill"][data-state="working"] .hm-status-shape {
+  border-color: currentColor;
+  background: currentColor;
+}
+
+/* One amber notice for an agent that needs a fix: what happened, what waits, one action. */
 .hm-agent__fix {
-  padding: var(--pad-card);
-  background: var(--warning-dim);
-  color: var(--warning);
-  border-radius: var(--radius-lg);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 18px;
+  padding: 18px 20px;
+  background: var(--home-offline-tint);
+  color: var(--home-offline-deep);
+  border-radius: 18px;
   overflow-wrap: anywhere;
+}
+
+.hm-agent__fix-copy {
+  flex: 1 1 360px;
+  min-inline-size: 0;
+}
+
+.hm-agent__fix-title {
+  margin: 0;
+  font-family: var(--home-font-display);
+  font-weight: 700;
+  font-size: 20px;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.hm-agent__fix .hm-notice {
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  text-wrap: pretty;
+}
+
+.hm-agent__fix > .hm-notice:first-child {
+  margin-top: 0;
+}
+
+.hm-agent__fix-sentence {
+  margin: 4px 0 0;
+  text-wrap: pretty;
+}
+
+.hm-agent__banner .hm-notice-tone {
+  font-weight: 700;
+}
+
+/* Scoped under .hm-agent so the route pane's generic control padding (integration.css) does not win. */
+.hm-agent .hm-agent__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 46px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--home-offline-deep);
+  color: var(--home-offline-tint);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+/* Body: the line card, then a column of fact cards. Wraps to one column when narrow. */
+.hm-agent__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 24px 28px;
+  min-inline-size: 0;
+}
+
+.hm-agent__line {
+  flex: 999 1 480px;
+  min-inline-size: 0;
+}
+
+.hm-agent__aside {
+  flex: 1 1 340px;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.hm-agent__line,
+.hm-agent__facts,
+.hm-agent__policy,
+.hm-agent__activity {
+  box-sizing: border-box;
+  padding: 18px 20px;
+  background: var(--home-card);
+  border: 1px solid var(--home-card-border);
+  border-radius: 18px;
+  box-shadow: var(--home-card-shadow);
+}
+
+.hm-agent__line {
+  padding-block-end: 14px;
+}
+
+.hm-agent__line-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
 }
 
 .hm-agent__h2 {
-  margin: 0 0 var(--stack-sm);
-  font-family: var(--font-display);
-  font-weight: var(--weight-head);
-  font-size: var(--t-lg);
-  line-height: var(--lh-lg);
-  letter-spacing: var(--track-head);
-}
-
-.hm-agent__body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--gap-grid);
-  align-items: start;
-}
-
-@media (min-width: 52.01rem) {
-  .hm-agent__body {
-    grid-template-columns: minmax(0, 1fr) 20rem;
-  }
-}
-
-.hm-agent__line,
-.hm-agent__aside,
-.hm-agent__section,
-.hm-agent__facts,
-.hm-agent__activity,
-.hm-agent__doing {
-  min-inline-size: 0;
-}
-
-.hm-agent__section,
-.hm-agent__facts,
-.hm-agent__activity,
-.hm-agent__doing {
-  padding: var(--pad-card);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-}
-
-.hm-agent__line,
-.hm-agent__aside {
-  display: flex;
-  flex-direction: column;
-  gap: var(--stack-lg);
-}
-
-.hm-agent__empty {
   margin: 0;
-  padding: var(--pad-card);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  font-family: var(--home-font-display);
+  font-weight: 700;
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
+.hm-agent__footer {
+  margin: 0;
+  color: var(--home-ink-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__section {
+  min-inline-size: 0;
+  margin-top: 20px;
+}
+
+.hm-agent__line-head + .hm-agent__section {
+  margin-top: 16px;
+}
+
+.hm-agent__eyebrow {
+  margin: 0;
+  color: var(--home-ink-muted);
+  font-family: var(--home-font-body);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hm-agent__meta {
+  margin: 0;
+  color: var(--home-ink-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__line > .hm-agent__meta {
+  margin-top: 16px;
+  font-size: 15px;
+}
+
+.hm-agent__detail,
+.hm-agent__gate {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__empty {
+  margin: 16px 0 4px;
+  padding: 14px 16px;
+  background: var(--home-soft);
+  border-radius: 14px;
+  color: var(--home-ink);
+  font-size: 15px;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+/* Doing now: a pale panel, lime while the agent is measured working. */
+.hm-agent__doing {
+  min-inline-size: 0;
+  margin-top: 8px;
+  padding: 14px 16px;
+  background: var(--home-soft);
+  border-radius: 14px;
+}
+
+.hm-agent[data-hm-state="working"] .hm-agent__doing {
+  background: var(--home-lime-soft);
+}
+
+.hm-agent__doing .hm-agent__todo-link {
+  font-weight: 700;
+}
+
+.hm-agent__doing .hm-agent__meta {
+  color: var(--home-ink);
+}
+
+.hm-agent__doing .hm-agent__detail {
+  margin-top: 6px;
+  font-size: 15px;
+  text-wrap: pretty;
+}
+
+/* Links keep a 44px target; negative block margins keep the row as dense as the canvas. */
+.hm-agent .hm-agent__todo-link,
+.hm-agent .hm-agent__home {
+  display: inline-flex;
+  align-items: center;
+  max-inline-size: 100%;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  margin-block: -10px;
+  padding: 0;
+  border-radius: 8px;
+  color: var(--home-ink);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent .hm-agent__home {
+  margin-block: 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* The line: numbered rows, a hairline between them, owner controls as small outline pills. */
 .hm-agent__queue,
 .hm-agent__scheduled,
-.hm-agent__done,
-.hm-agent__gated-list {
+.hm-agent__done {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--stack-sm);
   min-inline-size: 0;
 }
 
-.hm-agent__gated {
+.hm-agent .hm-queue-row {
   display: flex;
-  flex-direction: column;
-  gap: var(--stack-xs);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 12px 0;
+  border-block-end: 0;
+  border-block-start: 1px solid var(--home-hairline);
+}
+
+.hm-agent .hm-queue-row:first-child {
+  border-block-start: 0;
+}
+
+.hm-agent .hm-queue-position {
+  flex: none;
+  align-self: center;
+  inline-size: 22px;
+  padding: 0;
+  color: var(--home-ink-muted);
+  font-family: var(--home-font-display);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.hm-agent .hm-queue-copy {
+  flex: 1 1 240px;
   min-inline-size: 0;
-  padding-block: var(--s-2);
-  border-block-start: 1px solid var(--border);
+}
+
+.hm-agent .hm-queue-title {
+  display: inline-flex;
+  padding: 0;
+  margin-block: -10px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.hm-agent .hm-queue-title:hover {
+  color: var(--home-link-hover);
+}
+
+.hm-agent .hm-queue-meta {
+  display: block;
+  font-size: 13px;
+}
+
+.hm-agent .hm-queue-row > .hm-actions {
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px 8px;
+  margin-inline-start: auto;
+}
+
+.hm-agent .hm-queue-row .hm-button {
+  padding: 0 14px;
+  font-size: 14px;
+}
+
+/* Move up, Move down and Not yet read as the canvas's underlined text controls. */
+.hm-agent .hm-queue-row .hm-button[data-queue-action="up"],
+.hm-agent .hm-queue-row .hm-button[data-queue-action="down"],
+.hm-agent .hm-queue-row .hm-button[data-queue-action="not-yet"] {
+  padding: 0 10px;
+  border-color: transparent;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Not yet: held rows carry no line number; the hold reason reads as the row's second line. */
+.hm-agent__gated {
+  min-inline-size: 0;
+  padding-block-end: 12px;
+  border-block-start: 1px solid var(--home-hairline);
 }
 
 .hm-agent__gated:first-child {
   border-block-start: 0;
-  padding-block-start: 0;
 }
 
-.hm-agent__gate,
-.hm-agent__detail {
+.hm-agent__gated .hm-queue-row {
+  padding-block-end: 4px;
+}
+
+.hm-agent__gated .hm-queue-position {
+  display: none;
+}
+
+.hm-agent__gate {
+  color: var(--home-ink-muted);
+  font-size: 13px;
+}
+
+.hm-agent__done-item {
+  min-inline-size: 0;
+  padding: 12px 0;
+  border-block-start: 1px solid var(--home-hairline);
+}
+
+.hm-agent__done-item:first-child {
+  border-block-start: 0;
+}
+
+.hm-agent__done-item .hm-agent__meta {
+  margin-top: 2px;
+}
+
+/* Facts: where it is connected, as ruled rows. */
+.hm-agent__fact-list {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  margin: 10px 0 0;
+}
+
+.hm-agent__fact-label,
+.hm-agent__fact-value {
   margin: 0;
+  padding: 13px 0;
+  border-block-start: 1px solid var(--home-hairline);
+  font-size: 14px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-.hm-agent__meta + .hm-agent__detail {
-  margin-top: var(--stack-xs);
+.hm-agent__fact-label {
+  padding-inline-end: 12px;
+  color: var(--home-ink-muted);
 }
 
-.hm-agent__todo-link,
-.hm-agent__home,
-.hm-agent__action,
-.hm-agent__manage {
+.hm-agent__fact-value {
+  color: var(--home-ink);
+  font-weight: 700;
+  text-align: end;
+}
+
+.hm-agent__facts .hm-switch-row {
+  padding: 12px 0;
+  border-radius: 0;
+  border-block-end: 0;
+  border-block-start: 1px solid var(--home-hairline);
+  background: transparent;
+}
+
+.hm-agent__facts button.hm-switch-row:hover {
+  background: transparent;
+}
+
+.hm-agent__facts .hm-switch-label {
+  font-weight: 600;
+}
+
+.hm-agent__facts .hm-switch-detail {
+  font-size: 13px;
+}
+
+.hm-agent__facts .hm-switch-word {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* Who can give it work: its own card; the legend is the card title. */
+.hm-agent__policy .hm-choices {
+  min-inline-size: 0;
+}
+
+.hm-agent__policy .hm-legend {
+  float: left;
+  inline-size: 100%;
+  margin: 0 0 10px;
+  padding: 0;
+  font-family: var(--home-font-display);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.hm-agent__policy .hm-choice-options {
+  clear: both;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hm-agent__policy .hm-choice {
+  inline-size: 100%;
+  padding: 8px 14px;
+  border-width: 1px;
+  border-color: var(--home-card-border);
+  border-radius: 14px;
+  font-size: 15px;
+}
+
+.hm-agent__policy .hm-choice:has(input:checked),
+.hm-agent__policy .hm-choice[data-selected="true"] {
+  border-color: var(--home-ink);
+  font-weight: 700;
+}
+
+.hm-agent__policy > .hm-agent__meta,
+.hm-agent__facts > .hm-agent__meta {
+  margin-top: 10px;
+}
+
+.hm-agent__activity-slot {
+  min-inline-size: 0;
+  margin-top: 10px;
+}
+
+.hm-agent__activity-slot .hm-agent__detail {
+  margin-top: 4px;
+  font-size: 15px;
+}
+
+/* Manage: an underlined text control, as the canvas's last aside line. */
+.hm-agent .hm-agent__manage {
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
   min-inline-size: 44px;
   min-block-size: 44px;
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--radius-pill);
-  font: inherit;
-  font-weight: var(--weight-semibold);
-  overflow-wrap: anywhere;
-}
-
-.hm-agent__todo-link,
-.hm-agent__home,
-.hm-agent__manage {
-  color: var(--accent-bright);
-  text-decoration: none;
+  padding: 0;
+  border: 0;
   background: transparent;
-  border: 0;
-}
-
-.hm-agent__action {
+  color: var(--home-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
   cursor: pointer;
-  color: var(--accent-ink);
-  background: var(--accent);
-  border: 0;
-}
-
-.hm-agent__manage {
-  cursor: pointer;
-  align-self: flex-start;
+  overflow-wrap: anywhere;
 }
 
 .hm-agent__todo-link:hover,
 .hm-agent__home:hover,
 .hm-agent__manage:hover {
+  color: var(--home-link-hover);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.hm-agent__action:hover {
+  background: var(--home-ink);
+  color: var(--home-card);
 }
 
 .hm-agent__todo-link:focus-visible,
@@ -213,54 +597,6 @@
 .hm-agent__manage:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-}
-
-.hm-agent__done-item {
-  min-inline-size: 0;
-  padding-block: var(--s-2);
-  border-block-start: 1px solid var(--border);
-}
-
-.hm-agent__done-item:first-child {
-  border-block-start: 0;
-  padding-block-start: 0;
-}
-
-.hm-agent__fact-list {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--stack-xs);
-  margin: 0;
-}
-
-@media (min-width: 52.01rem) {
-  .hm-agent__fact-list {
-    grid-template-columns: max-content minmax(0, 1fr);
-    gap: var(--stack-xs) var(--gap-inline);
-  }
-}
-
-.hm-agent__fact-label {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-sm);
-}
-
-.hm-agent__fact-value {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.hm-agent__lists {
-  margin-top: var(--stack-md);
-}
-
-.hm-agent__activity-slot {
-  min-inline-size: 0;
-}
-
-.hm-agent__footer {
-  margin: 0;
 }
 
 .hm-agent__action,
@@ -277,16 +613,4 @@
   .hm-agent__home {
     transition: none;
   }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .hm-agent__action {
-    color: var(--accent-ink);
-    background: var(--accent);
-  }
-}
-
-[data-theme="dark"] .hm-agent__action {
-  color: var(--accent-ink);
-  background: var(--accent);
 }
