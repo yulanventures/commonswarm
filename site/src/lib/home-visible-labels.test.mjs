@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { foldIdentityName } from "./identity-label.ts";
 import { disambiguateVisibleLabels } from "./home-visible-labels.ts";
 import { catchUpSubline } from "./home-catchup.ts";
-import { mapHomePeople, homeNeedsYouCount, catchUpRailPeople, catchUpDetailFromOverview, mapHomeRail, mapCatchUp } from "./home-map.ts";
+import { mapHomePeople, homeNeedsYouCount, catchUpRailPeople, homeRailPeople, catchUpDetailFromOverview, mapHomeRail, mapCatchUp } from "./home-map.ts";
 import { agentAccessibleName } from "./home-primitives.ts";
 import { buildHomeRail, railAgentName } from "./home-rail.ts";
 
@@ -364,7 +364,11 @@ test("Catch up suffixes two own agents that were unique inside different workspa
   const museHome = mapHomePeople({ ...base, agents: [{ principalId: muse, name: "Muse", ownerUserId: "zoe" }] });
   const distinct = catchUpRailPeople([{ detail: { people: home } }, { detail: { people: museHome } }]);
   assert.deepEqual(distinct.groups[0].agents.map(agent => agent.nestedLabel), ["Claude", "Muse"]);
+  // Since be00f9b8 every route's rail is homeRailPeople(catchUpData, current) (catchUpRailPeople is its Catch-up form); the same
+  // suffix rule must hold when a workspace view's own people are read first.
+  const joined = homeRailPeople([{ detail: { people: home } }, { detail: { people: trip } }], home);
+  assert.deepEqual(joined.groups[0].agents.map(agent => agent.nestedLabel), ["Claude · 3dab8f40", "Claude · 9c0e1a22"]);
   const dashboard = readFileSync(new URL("../components/app/LiveDashboard.astro", import.meta.url), "utf8");
   const body = dashboard.slice(dashboard.indexOf("const renderHomeRail"), dashboard.indexOf("const renderHomeShell"));
-  assert.match(body, /catchUpRailPeople\(catchUpData\)/);
+  assert.match(body, /homeRailPeople\(catchUpData,/);
 });

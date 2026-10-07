@@ -2,8 +2,8 @@
    "Todo" (ref/Todo.dc.html). --home-* tokens only; they switch in dark mode.
    The assign picker is the canvas's row of chips, grouped in card-coloured capsules. The tag picker
    is the canvas's floating card: a soft heading band, 50 px rows with a hairline between
-   them, the active row in lime with a 3 px ink bar (shape, not colour alone; aria-selected for
-   assistive tech). Contrast, from the audited token notes in tokens.css: --home-lime-ink on
+   them, the active row in lime, as on the canvas (aria-selected for assistive tech; the lime fill
+   against card rows is the visible cue). Contrast, from the audited token notes in tokens.css: --home-lime-ink on
    --home-lime 12.65; --home-ink-muted on --home-soft 6.21; --home-offline-text on --home-card 6.66. */
 
 .hm-picker { position: relative; display: grid; justify-items: start; min-inline-size: 0; }
@@ -66,7 +66,7 @@
 .hm-tag-picker .hm-pick-option + .hm-pick-option,
 .hm-tag-picker .hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--home-hairline); }
 .hm-pick-option:hover { background: var(--home-soft); }
-.hm-pick-option[aria-selected="true"] { background: var(--home-lime); color: var(--home-lime-ink); box-shadow: inset 3px 0 0 var(--home-lime-ink); }
+.hm-pick-option[aria-selected="true"] { background: var(--home-lime); color: var(--home-lime-ink); }
 .hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 .hm-pick-option[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
 .hm-pick-copy { display: grid; gap: 0; min-inline-size: 0; }

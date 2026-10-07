@@ -491,7 +491,7 @@ section.pd-page[data-people-page] .pd-neutral-avatar { border: 1.5px dashed var(
 section.pd-page[data-people-page] .pd-person-copy { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: 0 6px; min-inline-size: 0; }
 section.pd-page[data-people-page] .pd-person-name {
   min-inline-size: 0; overflow-wrap: anywhere;
-  font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em;
+  color: var(--home-ink); font-family: var(--home-font-display); font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em;
 }
 section.pd-page[data-people-page] .pd-you { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
 section.pd-page[data-people-page] .pd-person-sub { flex: 1 0 100%; color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; }
@@ -511,7 +511,13 @@ section.pd-page[data-people-page] .pd-person-head .hm-role-select {
     linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 14px) 55% / 6px 6px no-repeat, transparent;
   font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
 }
-section.pd-page[data-people-page] .pd-person-head .hm-role[data-own="true"] .hm-role-select { border-color: var(--home-ink); background-color: var(--home-ink); color: var(--home-canvas); }
+/* Your own role is the canvas "Owner" badge (5px 12px, 13px, no chevron); it stays the same native select. The 7px
+   transparent top and bottom borders keep a 44px target around the 30px pill (the background stops at the padding box). */
+section.pd-page[data-people-page] .pd-person-head .hm-role[data-own="true"] .hm-role-select {
+  box-sizing: border-box; min-block-size: 44px; padding: 5px 12px; border: 0; border-block: 7px solid transparent;
+  background: var(--home-ink); background-clip: padding-box; color: var(--home-canvas); font-size: 13px; line-height: 1.45;
+  field-sizing: content; /* as wide as the chosen role, not the widest option */
+}
 section.pd-page[data-people-page] .pd-person-head .hm-role .pd-text-button {
   min-block-size: 44px; padding: 0 16px; border: 1.5px solid var(--home-ink); border-radius: var(--radius-pill);
   background: transparent; color: var(--home-ink); font-size: 14px; font-weight: 700; text-decoration: none; cursor: pointer;
@@ -543,9 +549,9 @@ section.pd-page[data-people-page] .pd-agent-disclosure {
 }
 section.pd-page[data-people-page] .pd-agent-copy { display: flex; flex: 1; flex-direction: column; gap: 0; min-inline-size: 0; font-size: 16px; }
 section.pd-page[data-people-page] .pd-agent-name-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-inline-size: 0; font-weight: 700; }
-section.pd-page[data-people-page] .pd-agent-name-line strong { font-weight: 700; }
+section.pd-page[data-people-page] .pd-agent-name-line strong { color: var(--home-ink); font-weight: 700; }
 section.pd-page[data-people-page] .pd-agent-app { color: var(--home-ink-muted); font-size: 13px; line-height: 1.45; text-wrap: pretty; overflow-wrap: anywhere; }
-section.pd-page[data-people-page] .pd-access-mark { color: var(--home-ink-muted); }
+section.pd-page[data-people-page] .pd-access-mark { margin-inline-start: 6px; color: var(--home-ink-muted); }
 section.pd-page[data-people-page] .pd-agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 section.pd-page[data-people-page] .pd-pill-link {
   display: inline-flex; align-items: center; box-sizing: border-box; min-block-size: 44px; padding: 0 16px;
@@ -577,12 +583,13 @@ section.pd-page[data-people-page] .pd-agent[data-attention="true"] .pd-orb { bor
 section.pd-page[data-people-page] .pd-status {
   display: inline-flex; align-items: center; gap: 6px; inline-size: fit-content; max-inline-size: 100%; padding: 2px 10px;
   border-radius: var(--radius-pill); background: var(--home-soft); color: var(--home-ink);
-  font-family: var(--home-font-body); font-size: 12px; font-weight: 700; line-height: 1.4;
+  font-family: var(--home-font-body); font-size: 12px; font-weight: 700; line-height: 1.45;
 }
 section.pd-page[data-people-page] .pd-status[data-agent-status="active"] { background: var(--home-lime); color: var(--home-lime-ink); }
 section.pd-page[data-people-page] .pd-status[data-attention="true"] { background: var(--home-offline-tint); color: var(--home-offline-deep); }
+/* The canvas pill is words only; the dialog layout keeps its shapes. */
 section.pd-page[data-people-page] .pd-status-shape {
-  display: inline-block; box-sizing: border-box; flex: none; inline-size: 8px; block-size: 8px; border: 1.5px solid currentColor; border-radius: 50%;
+  display: none; box-sizing: border-box; flex: none; inline-size: 8px; block-size: 8px; border: 1.5px solid currentColor; border-radius: 50%;
 }
 section.pd-page[data-people-page] .pd-status-shape[data-shape="dot"] { border: 0; background: var(--home-lime-ink); }
 section.pd-page[data-people-page] .pd-status-shape[data-shape="diamond"] { inline-size: 7px; block-size: 7px; border: 0; border-radius: 2px; transform: rotate(45deg); background: currentColor; }
@@ -611,7 +618,7 @@ section.pd-page[data-people-page] .pd-detail {
   box-sizing: border-box; min-inline-size: 0; padding: 16px 20px 18px; overflow: visible;
   border: 1px solid var(--home-card-border); border-radius: 18px; background: var(--home-card); box-shadow: var(--home-card-shadow);
 }
-section.pd-page[data-people-page] .pd-side-card h2 { margin: 0; font-family: var(--home-font-display); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25; }
+section.pd-page[data-people-page] .pd-side-card h2 { margin: 0; font-family: var(--home-font-display); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.45; }
 section.pd-page[data-people-page] .pd-roles-list { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 0; font-size: 15px; }
 section.pd-page[data-people-page] .pd-roles-list dt { display: inline; margin-inline-end: 0.3em; font-weight: 700; }
 section.pd-page[data-people-page] .pd-roles-list dd { display: inline; margin: 0; color: var(--home-ink-muted); }

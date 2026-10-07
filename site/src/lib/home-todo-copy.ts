@@ -239,6 +239,13 @@ export function todoSubline(todo: TodoVM, ctx: TodoCopyContext): string {
   return [name, where, word].filter(Boolean).join(" · ");
 }
 
+/** The padlock line under the start chips. Moving a to-do in an agent's line, moving it to the front
+ * and holding it are the agent owner's alone (household_todo_steer refuses everyone else with
+ * owner_only, admins included), and the chips render only for that owner, so "Only you" is true. */
+export function todoSteerLine(agent: AgentVM, names?: ReadonlyMap<Id, string>): string {
+  return `Only you can change when ${sentenceName(agent, names)} picks this up.`;
+}
+
 /** Start chips for an agent assignee. Null hides them: a person, a pending or declined request,
  * a finished to-do, sample mode, or no `may.start`. Null value = nothing preselected. */
 export function todoStartChoice(todo: TodoVM): ChoiceVM<TodoStartMode> | null {
