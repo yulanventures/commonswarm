@@ -6,7 +6,7 @@ import { disambiguateVisibleLabels } from "./home-visible-labels";
 import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./participant-rail";
 import { parseRoute, routeHref, type HomeRoute } from "./home-route";
 import { catchUpPeopleSummary, type CatchUpVM, type CatchUpWorkspaceCardVM } from "./home-catchup";
-import { RAIL_CATCH_UP_PEOPLE_TITLE, railAgentOwnerPhrase } from "./home-rail";
+import { railAgentOwnerPhrase, type HomeRailVM } from "./home-rail";
 import type { AgentVM, PersonVM, RailVM, NeedsYouVM } from "./home-types";
 import type { AgentWorkStatus, HomeOverview, WorkspaceCatchUp } from "./home/contract";
 import type { AgentAccessStatus, Signal } from "./commonswarm";
@@ -93,16 +93,52 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
   return result;
 }
 
-/** Catch up shows the viewer's own agents from every workspace in one group.
- *  Labels were already settled inside each workspace, so they are settled again
- *  on the combined list. Copies keep a workspace's own labels unchanged. */
+/** Which reading of one agent the rail shows when workspaces measured it differently: a state that
+ *  needs attention first (a problem is never hidden), then working, then the first one read. */
+function railStateRank(agent: AgentVM): number {
+  return agent.state.attention ? 0 : agent.state.kind === "working" ? 1 : 2;
+}
+
+/** The rail's "People & agents": everyone the viewer shares any loaded workspace with, each person once
+ *  with all of their agents, the viewer first (orderRailPeople sorts). Only rosters already read are
+ *  used; nobody is invented. `current` is the workspace in view: its reading of a person or agent wins.
+ *  Labels were settled inside each workspace, so they are settled again on the combined list.
+ *  Copies keep each workspace's own labels unchanged. */
+export function homeRailPeople(entries: readonly { detail?: { people?: HomePeople } }[], current: HomePeople | null = null): HomePeople {
+  const sources = [...(current ? [current] : []), ...entries.flatMap(entry => entry.detail?.people ? [entry.detail.people] : [])];
+  const people = new Map<string, PersonVM>();
+  const owned = new Map<string, Map<string, AgentVM>>();
+  const other = new Map<string, AgentVM>();
+  const fixed = new Set<string>(); // agents the workspace in view has read: that reading stays
+  const keep = (into: Map<string, AgentVM>, agent: AgentVM, fromCurrent: boolean): void => {
+    const seen = into.get(agent.id);
+    if (seen && (fixed.has(agent.id) || railStateRank(agent) >= railStateRank(seen))) return;
+    into.set(agent.id, { ...agent });
+    if (fromCurrent) fixed.add(agent.id);
+  };
+  for (const [index, source] of sources.entries()) {
+    const fromCurrent = !!current && index === 0;
+    for (const group of source.groups) {
+      const known = people.get(group.person.id);
+      if (!known || (known.dashed && !group.person.dashed)) people.set(group.person.id, { ...group.person });
+      const agents = owned.get(group.person.id) ?? new Map<string, AgentVM>();
+      owned.set(group.person.id, agents);
+      for (const agent of group.agents) keep(agents, agent, fromCurrent);
+    }
+    for (const agent of source.other) keep(other, agent, fromCurrent);
+  }
+  const groups = [...people.values()].map(person => ({ person, agents: [...(owned.get(person.id)?.values() ?? [])] }));
+  const grouped = new Set(groups.flatMap(group => group.agents.map(agent => agent.id)));
+  const result: HomePeople = { title: "People & agents", groups, other: [...other.values()].filter(agent => !grouped.has(agent.id)) };
+  const all = [...result.groups.flatMap(group => group.agents), ...result.other];
+  applyVisibleLabel(all, "label");
+  applyNestedLabels(all);
+  return result;
+}
+
+/** Catch up's rail: every person and agent from the workspaces Catch up has read. */
 export function catchUpRailPeople(entries: readonly { detail?: { people?: HomePeople } }[]): HomePeople {
-  const own = entries.flatMap(entry => entry.detail?.people?.groups.filter(group => group.person.you) ?? []);
-  const first = own[0];
-  const agents = [...new Map(own.flatMap(group => group.agents).map(agent => [agent.id, agent])).values()]
-    .map(agent => ({ ...agent }));
-  applyVisibleLabel(agents, "nestedLabel");
-  return { title: RAIL_CATCH_UP_PEOPLE_TITLE, other: [], groups: first ? [{ person: first.person, agents }] : [] };
+  return homeRailPeople(entries);
 }
 
 /** Membership is checked before a workspace is opened. A foreign address falls back to boot. */
@@ -126,13 +162,16 @@ export function homeViewTitle(route: HomeRoute, workspaceName?: string): string 
   const labels: Record<HomeRoute["view"], string> = { catchup: "Catch up", new: "New workspace", chat: "Chat", todos: "To-dos", lists: "Lists", files: "Files", wiki: "Wiki", "add-agent": "Add agent", todo: "To-do", agent: "Agent" };
   return [labels[route.view], workspaceName, "CommonSwarm"].filter(Boolean).join(" · ");
 }
+/** On an agent's page the agent's rail row is the current row, not its workspace. */
 export function mapHomeRail(workspaces: readonly HomeWorkspace[], route: HomeRoute, people: HomePeople | null, sample: boolean,
-  counts: ReadonlyMap<string, number | null> = new Map()): RailVM {
+  counts: ReadonlyMap<string, number | null> = new Map()): HomeRailVM {
   const allMeasured = workspaces.every(workspace => counts.get(workspace.id) != null);
+  const agentId = route.view === "agent" ? route.agentId : null;
   return { sample, catchUp: { href: routeHref({ view: "catchup" }), current: route.view === "catchup",
     needsYou: allMeasured ? workspaces.reduce((sum, workspace) => sum + (counts.get(workspace.id) ?? 0), 0) : null },
     workspaces: workspaces.map(workspace => ({ ...workspace, href: routeHref({ view: "chat", workspaceId: workspace.id }),
-      current: "workspaceId" in route && route.workspaceId === workspace.id, needsYou: counts.get(workspace.id) ?? null })), people };
+      current: !agentId && "workspaceId" in route && route.workspaceId === workspace.id, needsYou: counts.get(workspace.id) ?? null })), people,
+    ...(agentId ? { currentAgentId: agentId } : {}) };
 }
 
 export interface CatchUpDetail {

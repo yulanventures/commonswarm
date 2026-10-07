@@ -22,6 +22,9 @@ export interface RailCallbacks {
   toggleWorkspaces?: (expanded: boolean) => void;
 }
 
+/** The rail model plus the agent whose page is open (home-types.ts RailVM is frozen). */
+export type HomeRailVM = RailVM & { currentAgentId?: Id };
+
 /** Local to this lane; home-types.ts has no rail options. */
 export interface RailOptions {
   newWorkspaceHref?: string;
@@ -81,7 +84,8 @@ export function orderRailPeople(people: RailPeople): RailPeople {
   return { title: people.title, groups: orderCapsules(people.groups), other: [...people.other].sort(compareAgents) };
 }
 
-/** On Catch up the section narrows to the viewer and the viewer's own agents. */
+/** The viewer and the viewer's own agents only. The rail no longer narrows (it lists everyone the viewer
+ *  shares a workspace with, home-map homeRailPeople); kept for callers that want the viewer's own group. */
 export function narrowRailPeopleToViewer(people: RailPeople): RailPeople {
   return {
     title: RAIL_CATCH_UP_PEOPLE_TITLE,
@@ -170,10 +174,11 @@ function personRow(doc: Document, person: PersonVM, sample: boolean, callbacks: 
   return row;
 }
 
-function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__agent-item");
   const row = interactiveRow(doc, "hm-rail__agent", sample, () => callbacks.openAgent(agent.id));
   row.dataset.railAgent = agent.id;
+  if (currentAgentId === agent.id) row.setAttribute("aria-current", "page");
   row.dataset.agentState = agent.state.kind;
   row.setAttribute("aria-label", railAgentName(agent));
   const orb = node(doc, "span", "hm-rail__orb");
@@ -188,21 +193,23 @@ function agentRow(doc: Document, agent: AgentVM, sample: boolean, callbacks: Rai
   return item;
 }
 
-function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks): HTMLLIElement {
+function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: RailCallbacks, currentAgentId?: Id): HTMLLIElement {
   const item = node(doc, "li", "hm-rail__group");
   if (capsule.person.you) item.dataset.railViewer = "";
   item.append(personRow(doc, capsule.person, sample, callbacks));
   if (capsule.agents.length) {
     const agents = node(doc, "ul", "hm-rail__agents");
     agents.setAttribute("aria-label", `${capsule.person.you ? "Your" : `${capsule.person.firstName}’s`} agents`);
-    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks));
+    for (const agent of capsule.agents) agents.append(agentRow(doc, agent, sample, callbacks, currentAgentId));
     item.append(agents);
   }
   return item;
 }
 
-/** The left rail: brand row, Catch up, Workspaces, People & agents, the ownership line and New workspace. */
-export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
+/** The left rail: brand row, Catch up, Workspaces, People & agents and New workspace. The ownership line is
+ *  read to screen readers only (the canvas design draws none), and is left out on an agent's page. */
+export function buildHomeRail(doc: Document, vm: HomeRailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
+  const currentAgentId = vm.currentAgentId;
   const root = node(doc, "div", "hm-rail");
   root.dataset.homeRail = "";
 
@@ -265,25 +272,26 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
   root.append(nav);
 
   if (vm.people) {
-    const people = orderRailPeople(vm.catchUp.current ? narrowRailPeopleToViewer(vm.people) : vm.people);
+    const people = orderRailPeople(vm.people);
     const section = node(doc, "section", "hm-rail__people");
     section.setAttribute("aria-labelledby", "hm-rail-people-title");
     const title = node(doc, "h2", "hm-rail__heading", people.title);
     title.id = "hm-rail-people-title";
     const peopleList = node(doc, "ul", "hm-rail__people-list");
     peopleList.dataset.sidebarParticipantList = "";
-    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks));
+    for (const capsule of people.groups) peopleList.append(group(doc, capsule, vm.sample, callbacks, currentAgentId));
     if (people.other.length) {
       const item = node(doc, "li", "hm-rail__group hm-rail__group--other");
       const head = node(doc, "p", "hm-rail__other-head", "Other agents");
       head.id = "hm-rail-other-title";
       const agents = node(doc, "ul", "hm-rail__agents");
       agents.setAttribute("aria-labelledby", head.id);
-      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks));
+      for (const agent of people.other) agents.append(agentRow(doc, agent, vm.sample, callbacks, currentAgentId));
       item.append(head, agents);
       peopleList.append(item);
     }
-    section.append(title, peopleList, node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
+    section.append(title, peopleList);
+    if (!currentAgentId) section.append(node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
     root.append(section);
   }
   /* New workspace is the outline button pinned to the foot of the rail. A sample has no doors. */

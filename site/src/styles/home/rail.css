@@ -97,7 +97,9 @@
   text-align: start;
   text-decoration: none;
 }
-.hm-rail__agent { padding-inline-start: 34px; }
+/* Agent rows sit on the canvas design's 40px pitch (person and workspace rows 44px) while the button
+   keeps the 44px target: 2px of it reaches into the gap above and below. */
+.hm-rail__agent { margin-block: -2px; padding-inline-start: 34px; }
 
 .hm-rail a,
 .hm-rail button { cursor: pointer; }
@@ -111,7 +113,9 @@
 .hm-rail__group[data-rail-viewer] > .hm-rail__person { color: var(--home-rail-strong); font-weight: 700; }
 
 .hm-rail__link[aria-current="page"],
-.hm-rail__link[aria-current="page"]:hover {
+.hm-rail__link[aria-current="page"]:hover,
+.hm-rail__agent[aria-current="page"],
+.hm-rail__agent[aria-current="page"]:hover {
   background: var(--home-lime);
   color: var(--home-lime-ink);
   font-weight: 700;
@@ -189,8 +193,9 @@
   scrollbar-color: var(--home-rail-raised) transparent;
 }
 
-.hm-rail__agents { display: flex; flex-direction: column; gap: 2px; margin-block-start: 2px; }
-.hm-rail__group--other .hm-rail__agents { margin-block-start: 0; }
+/* 2px between a person and their first agent, as between every row (scoped above `.hm-rail ul { margin: 0 }`). */
+.hm-rail .hm-rail__agents { display: flex; flex-direction: column; gap: 2px; margin-block-start: 2px; }
+.hm-rail .hm-rail__group--other .hm-rail__agents { margin-block-start: 0; }
 .hm-rail__face,
 .hm-rail__orb { display: inline-grid; place-items: center; flex: none; }
 
@@ -211,14 +216,21 @@
 .hm-rail .hm-status-shape[data-shape="diamond"] { background: var(--home-offline); }
 .hm-rail .hm-status[data-state="disconnected"],
 .hm-rail .hm-status[data-state="disconnected"] .hm-status-word { color: var(--home-offline); }
+/* On the current (lime) agent row the word reads in lime ink, 600, with no shape (Agent.dc.html): 12.65 / 12.65. */
+.hm-rail__agent[aria-current="page"] .hm-status,
+.hm-rail__agent[aria-current="page"] .hm-status-word { color: var(--home-lime-ink); font-weight: 600; }
+.hm-rail__agent[aria-current="page"] .hm-status-shape { display: none; }
 
+/* The ownership line is read, not drawn: the canvas design has no note under the list. */
 .hm-rail__note {
-  flex: none;
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
   margin: 0;
-  padding: 6px 12px 0;
-  color: var(--home-rail-muted);
-  font-size: 12px;
-  line-height: 1.45;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* New workspace: the outline button pinned to the foot of the rail. */

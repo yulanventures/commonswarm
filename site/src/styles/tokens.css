@@ -571,9 +571,11 @@
   --home-card-border: #d3dbcc; /* 1px card and capsule edge. Decorative; the lip and fill carry the plane. */
   --home-card-lip: #c9d2c1; /* the 0 2px 0 shadow under a card */
   --home-card-shadow: 0 2px 0 var(--home-card-lip);
+  --home-pill-border: #aeb9a8; /* 1px edge of an outline pill (mockup `1px solid #AEB9A8`). Decorative: 2.00 on card, 1.80 on canvas; the pill's text and fill carry it */
 
   /* Ink. Body text needs 4.5:1; every value below clears it on all three surfaces. */
   --home-ink: #17231c; /* text, primary pill fill. min 14.32 (on canvas); --home-card on it 15.90 */
+  --home-on-ink: #eef2ea; /* text on a primary (ink-filled) pill. 14.32 on --home-ink */
   --home-ink-muted: #4f5e54; /* secondary text. min 6.05 (on canvas) */
   --home-ink-faint: #5c6f63; /* tertiary text, min 4.74 (on canvas). ALSO the outline-button edge on the rail: 3.02 on --home-rail-bg (non-text, needs 3:1) */
   --home-line-dashed: #7b897f; /* dashed placeholder outlines. Non-text, 3.59 on card */
@@ -588,10 +590,16 @@
   --home-rail-soft: #b4c2b8; /* secondary text on ink screens. 8.77 */
   --home-rail-raised: #2a3d32; /* hover row, capsule on the ink phone bar. --home-rail-text on it 7.60 */
   --home-rail-divider: #34483c; /* 1px rule on ink. Decorative. */
+  --home-rail-panel: #22332a; /* panel on an ink screen (invite connect steps). rail-text 8.74, rail-strong 11.76, rail-soft 7.21 */
+  --home-rail-choice: #1e2d25; /* unselected choice card on an ink screen. rail-text 9.45, rail-strong 12.71 */
+  --home-rail-choice-edge: #3a4e42; /* its 1.5px edge. Decorative (1.61 on the choice); the selected state adds a lime edge (9.03 on --home-rail-raised) */
+  --home-rail-orange-line: #e58a55; /* dashed outline of a not-yet-joined orange person on ink. 6.26 on --home-rail-bg */
+  --home-rail-orange-soft: #f3b48e; /* that person's initial on ink. 9.07 on --home-rail-bg */
 
   /* Lime: the one accent. Never text on light (it is a fill). */
   --home-lime: #d4f04a; /* current rail row, Needs-you band, rail badges, working dot */
   --home-lime-ink: #17231c; /* text on lime. 12.65. Lime as text on --home-rail-bg (badge on the current row): 12.65 */
+  --home-on-lime-ink: #eef2ea; /* text on an ink pill inside the lime band; the pill is --home-lime-ink in BOTH modes, so this is too. 14.32 */
   --home-lime-soft: #f4fad8; /* pale lime row fill. --home-ink on it 15.08 */
   --home-lime-hover: #e4f78a;
 
@@ -643,7 +651,10 @@
        deep on tint         blue 9.83  orange 9.80  purple 10.04 teal 9.76
        fill on card         blue 3.08  orange 3.25  purple 3.20  teal 3.02 (non-text)
        --d-home-offline-deep on its tint 9.62; --d-home-offline-text on card 8.82
-       --d-home-danger on card 8.24; --d-home-ink on --d-home-lime-soft 11.43 */
+       --d-home-danger on card 8.24; --d-home-ink on --d-home-lime-soft 11.43
+       --d-home-on-ink on --d-home-ink 14.21; --d-home-pill-border on card 2.91, on canvas 3.13
+       ink screens on --d-home-rail-bg: --d-home-rail-panel rail-text 10.52 strong 14.15;
+       --d-home-rail-choice rail-text 11.11 strong 14.94; orange line 7.36, orange soft 10.66 */
   --d-home-canvas: #121a15;
   --d-home-card: #18211b;
   --d-home-soft: #1f2a23;
@@ -651,7 +662,9 @@
   --d-home-hairline: #253129;
   --d-home-card-border: #33433a;
   --d-home-card-lip: #070b09;
+  --d-home-pill-border: #5a6b5f;
   --d-home-ink: #e9f0e7;
+  --d-home-on-ink: #18211b;
   --d-home-ink-muted: #aebdb2;
   --d-home-ink-faint: #93a398;
   --d-home-line-dashed: #6e7f74;
@@ -664,8 +677,14 @@
   --d-home-rail-soft: #b4c2b8;
   --d-home-rail-raised: #1f2c24;
   --d-home-rail-divider: #26352c;
+  --d-home-rail-panel: #18241d;
+  --d-home-rail-choice: #141f19;
+  --d-home-rail-choice-edge: #2c3d33;
+  --d-home-rail-orange-line: #e58a55;
+  --d-home-rail-orange-soft: #f3b48e;
   --d-home-lime: #d4f04a;
   --d-home-lime-ink: #17231c;
+  --d-home-on-lime-ink: #eef2ea;
   --d-home-lime-soft: #2a3313;
   --d-home-lime-hover: #e4f78a;
   --d-home-on-person: #ffffff;
@@ -759,7 +778,9 @@
     --home-hairline: var(--d-home-hairline);
     --home-card-border: var(--d-home-card-border);
     --home-card-lip: var(--d-home-card-lip);
+    --home-pill-border: var(--d-home-pill-border);
     --home-ink: var(--d-home-ink);
+    --home-on-ink: var(--d-home-on-ink);
     --home-ink-muted: var(--d-home-ink-muted);
     --home-ink-faint: var(--d-home-ink-faint);
     --home-line-dashed: var(--d-home-line-dashed);
@@ -772,8 +793,14 @@
     --home-rail-soft: var(--d-home-rail-soft);
     --home-rail-raised: var(--d-home-rail-raised);
     --home-rail-divider: var(--d-home-rail-divider);
+    --home-rail-panel: var(--d-home-rail-panel);
+    --home-rail-choice: var(--d-home-rail-choice);
+    --home-rail-choice-edge: var(--d-home-rail-choice-edge);
+    --home-rail-orange-line: var(--d-home-rail-orange-line);
+    --home-rail-orange-soft: var(--d-home-rail-orange-soft);
     --home-lime: var(--d-home-lime);
     --home-lime-ink: var(--d-home-lime-ink);
+    --home-on-lime-ink: var(--d-home-on-lime-ink);
     --home-lime-soft: var(--d-home-lime-soft);
     --home-lime-hover: var(--d-home-lime-hover);
     --home-on-person: var(--d-home-on-person);
@@ -864,7 +891,9 @@
   --home-hairline: var(--d-home-hairline);
   --home-card-border: var(--d-home-card-border);
   --home-card-lip: var(--d-home-card-lip);
+  --home-pill-border: var(--d-home-pill-border);
   --home-ink: var(--d-home-ink);
+  --home-on-ink: var(--d-home-on-ink);
   --home-ink-muted: var(--d-home-ink-muted);
   --home-ink-faint: var(--d-home-ink-faint);
   --home-line-dashed: var(--d-home-line-dashed);
@@ -877,8 +906,14 @@
   --home-rail-soft: var(--d-home-rail-soft);
   --home-rail-raised: var(--d-home-rail-raised);
   --home-rail-divider: var(--d-home-rail-divider);
+  --home-rail-panel: var(--d-home-rail-panel);
+  --home-rail-choice: var(--d-home-rail-choice);
+  --home-rail-choice-edge: var(--d-home-rail-choice-edge);
+  --home-rail-orange-line: var(--d-home-rail-orange-line);
+  --home-rail-orange-soft: var(--d-home-rail-orange-soft);
   --home-lime: var(--d-home-lime);
   --home-lime-ink: var(--d-home-lime-ink);
+  --home-on-lime-ink: var(--d-home-on-lime-ink);
   --home-lime-soft: var(--d-home-lime-soft);
   --home-lime-hover: var(--d-home-lime-hover);
   --home-on-person: var(--d-home-on-person);

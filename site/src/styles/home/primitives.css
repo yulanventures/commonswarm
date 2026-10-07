@@ -1,7 +1,7 @@
 /* Home primitives: the canvas design (home-visual DESIGN-MAP), --home-* tokens only.
    Measured WCAG sRGB contrast (tokens.css header method), light / dark:
      ink on card 15.90 / 14.21; ink on canvas 14.32 / 15.27; muted on card 6.72 / 8.43;
-     primary pill (card text on ink) 15.90 / 15.27; lime-ink on lime 12.65 / 12.65;
+     primary pill (--home-on-ink on ink) 14.32 / 14.21; band pill (--home-on-lime-ink on lime-ink) 14.32 / 14.32; lime-ink on lime 12.65 / 12.65;
      white initial on person fill: blue 6.15 / 5.36, orange 5.09 / 5.09, purple 6.63 / 5.16, teal 5.47 / 5.47;
      agent letter (deep on tint): blue 8.01 / 9.83, orange 7.19 / 9.80, purple 8.86 / 10.04, teal 7.79 / 9.76;
      offline-deep on offline-tint 9.17 / 9.62; offline-text on card 6.66 / 8.82; danger on card 8.37 / 8.24.
@@ -24,7 +24,7 @@
   min-inline-size: 44px;
 }
 
-/* Pill buttons. Secondary: 1.5px ink outline. Primary: ink fill, card text. */
+/* Pill buttons. Secondary: 1.5px ink outline. Primary: ink fill, no edge, --home-on-ink text (the canvas design's #EEF2EA). */
 .hm-button {
   display: inline-flex;
   align-items: center;
@@ -44,9 +44,9 @@
   overflow-wrap: anywhere;
   cursor: pointer;
 }
-.hm-button[data-primary="true"] { padding-inline: 24px; border-color: var(--home-ink); background: var(--home-ink); color: var(--home-card); }
+.hm-button[data-primary="true"] { padding-inline: 24px; border: 0; background: var(--home-ink); color: var(--home-on-ink); }
 .hm-button:hover, button.hm-capsule:hover, button.hm-switch-row:hover { background: var(--home-soft); color: var(--home-ink); }
-.hm-button[data-primary="true"]:hover { background: var(--home-link-hover); border-color: var(--home-link-hover); color: var(--home-card); }
+.hm-button[data-primary="true"]:hover { background: var(--home-link-hover); color: var(--home-on-ink); }
 .hm-button:focus-visible, .hm-capsule:focus-visible, .hm-object-card:focus-visible,
 .hm-switch-row:focus-visible, .hm-queue-title:focus-visible, .hm-choice:has(input:focus-visible) {
   outline: none;
@@ -94,7 +94,7 @@
 .hm-agent-orb[data-size="36"] { border-radius: 10px; }
 .hm-person-avatar[data-size="44"] { inline-size: 44px; block-size: 44px; font-size: 18px; }
 .hm-person-avatar[data-size="48"] { inline-size: 48px; block-size: 48px; font-size: 20px; }
-.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; border-width: 2px; border-radius: 16px; font-size: 26px; }
+.hm-agent-orb[data-size="60"] { inline-size: 60px; block-size: 60px; border-width: 2px; border-radius: 18px; font-size: 26px; }
 .hm-person-avatar[data-dashed="true"] { border: 1.5px dashed var(--home-line-dashed); background: transparent; color: var(--home-ink-muted); }
 .hm-agent-orb[data-dashed="true"] { border-style: dashed; }
 
@@ -120,7 +120,7 @@
 .hm-agent-orb[data-hue="1"] .hm-owner-badge { background: var(--home-orange); }
 .hm-agent-orb[data-hue="2"] .hm-owner-badge { background: var(--home-purple); }
 .hm-agent-orb[data-hue="3"] .hm-owner-badge { background: var(--home-teal); }
-.hm-agent-orb[data-size="60"] .hm-owner-badge { inline-size: 24px; block-size: 24px; font-size: 12px; }
+.hm-agent-orb[data-size="60"] .hm-owner-badge { inset-inline-end: -8px; inset-block-end: -6px; inline-size: 24px; block-size: 24px; box-shadow: 0 0 0 3px var(--home-canvas); font-size: 12px; }
 .hm-needs-you .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }
 
 /* Person + agents capsule. */
@@ -161,7 +161,17 @@ button.hm-capsule { font: inherit; cursor: pointer; }
 /* Cards: 18px radius, 1px border, 0 2px 0 lip. */
 .hm-object-card { display: flex; align-items: center; gap: 12px; min-block-size: 56px; padding: 12px 14px; border: 1px solid var(--home-card-border); border-radius: 14px; color: var(--home-ink); background: var(--home-soft); text-decoration: none; }
 a.hm-object-card:hover { border-color: var(--home-field-border); color: var(--home-ink); }
-.hm-object-icon { flex: none; font-size: var(--t-lg); color: var(--home-ink); }
+/* Object icons: the canvas design's 1.6-stroke line icons (Space.dc.html) as masks in currentColor.
+   File 22-unit grid (22px in side cards, 20px in stream attachments); to-do and list 20-unit grid. A surface
+   sizes the icon with inline-size alone; the square follows. */
+.hm-object-icon { display: inline-block; flex: none; box-sizing: border-box; inline-size: 22px; aspect-ratio: 1; background: currentColor; color: var(--home-ink);
+  mask-position: center; mask-repeat: no-repeat; mask-size: 100% 100%; }
+.hm-object-icon[data-icon="file"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 22' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5h7l4 4V19a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 6 19V2.5z'/%3E%3Cpath d='M13 2.5v4h4'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="doc"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 22' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 2.5h7l4 4V19a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 6 19V2.5z'/%3E%3Cpath d='M13 2.5v4h4'/%3E%3Cpath d='M8.8 11.5h5.4M8.8 15h5.4'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="todo"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='14' height='14' rx='4'/%3E%3C/svg%3E"); }
+.hm-object-card[data-done="true"] .hm-object-icon[data-icon="todo"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='14' height='14' rx='4'/%3E%3Cpath d='M6.6 10.2l2.3 2.3 4.6-4.9'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="list"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7.5 5.5h9M7.5 10h9M7.5 14.5h9M3.6 5.5h.1M3.6 10h.1M3.6 14.5h.1'/%3E%3C/svg%3E"); }
+.hm-object-icon[data-icon="ask"] { mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 4h12a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H9l-3.5 3v-3H4a1.5 1.5 0 0 1-1.5-1.5V5.5A1.5 1.5 0 0 1 4 4z'/%3E%3C/svg%3E"); }
 .hm-object-copy { flex: 1; min-inline-size: 0; }
 .hm-object-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 16px; font-weight: 700; line-height: 1.3; }
 .hm-object-card[data-done="true"] .hm-object-title { text-decoration: line-through; }
@@ -170,14 +180,19 @@ a.hm-object-card:hover { border-color: var(--home-field-border); color: var(--ho
 /* Needs you: the lime band. */
 .hm-needs-you { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 18px 20px; border: 0; border-radius: 18px; background: var(--home-lime); color: var(--home-lime-ink); }
 .hm-needs-copy { flex: 1 1 320px; min-inline-size: 0; }
+/* An unknown sender (no name, no initials): a neutral glyph in the card's own text colour, the size of the avatar it replaces. */
+.hm-needs-glyph { display: inline-grid; place-items: center; flex: none; inline-size: 36px; block-size: 36px; grid-column: 1; grid-row: 1 / span 2; color: inherit; }
+.hm-needs-glyph .hm-object-icon { inline-size: 24px; color: inherit; }
 .hm-eyebrow { margin: 0; font-size: 13px; font-weight: 700; color: var(--home-lime-ink); }
 .hm-needs-title { margin: 2px 0 0; font-family: var(--home-font-body); font-size: 17px; font-weight: 600; line-height: 1.35; letter-spacing: 0; text-wrap: pretty; }
 .hm-needs-copy > .hm-actions { margin-block-start: 12px; }
 .hm-needs-you .hm-button { border-color: var(--home-lime-ink); color: var(--home-lime-ink); }
 .hm-needs-you .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
-.hm-needs-you .hm-button[data-primary="true"] { min-block-size: 46px; background: var(--home-lime-ink); color: var(--home-lime); font-size: 15px; }
-/* Hover stays dark in both modes: lime on --home-rail-raised 9.03 light, 11.33 dark. */
-.hm-needs-you .hm-button[data-primary="true"]:hover { background: var(--home-rail-raised); color: var(--home-lime); }
+.hm-needs-you .hm-button[data-primary="true"] { min-block-size: 46px; border: 0; background: var(--home-lime-ink); color: var(--home-on-lime-ink); font-size: 15px; }
+/* A quieter needs-you row (catchup.css data-needs-rank="more") draws its action as an outline pill: keep the edge it colours. */
+.hm-needs-you[data-needs-rank="more"] .hm-button[data-primary="true"] { border-width: 1.5px; border-style: solid; }
+/* Hover stays dark in both modes: --home-on-lime-ink on --home-rail-raised 10.22 light, 12.83 dark. */
+.hm-needs-you .hm-button[data-primary="true"]:hover { background: var(--home-rail-raised); color: var(--home-on-lime-ink); }
 .hm-actions { display: flex; flex-wrap: wrap; gap: 8px; min-inline-size: 0; }
 
 .hm-choices { margin: 0; padding: 0; border: 0; color: var(--home-ink); }

@@ -102,6 +102,16 @@ export function statusLine(doc: Document, s: AgentStateVM, opts: { form: "word" 
   if (s.attention && s.fix.sentence && opts.form !== "word") root.append(notice(doc, s.fix.sentence, "warning"));
   return root;
 }
+/** The canvas design's line icon for an object kind (or an ask). The shape is a CSS mask in primitives.css,
+ *  painted in currentColor; this element carries no text. 22 px by default, sized by the surface. */
+export function objectIcon(doc: Document, kind: ObjectCardVM["kind"] | "ask"): HTMLElement {
+  const icon = node(doc, "span", "hm-object-icon"); icon.dataset.icon = kind;
+  return icon;
+}
+/** A needs-you card whose sender is unknown (no name, no initials) shows a neutral glyph, never a blank colour. */
+export function needsYouUnknownSender(n: NeedsYouVM): boolean {
+  return !("label" in n.from) && !Array.from(n.from.initials.trim()).length;
+}
 /** To-do, list, doc or file card: one link, 56 px minimum. */
 export function objectCard(doc: Document, o: ObjectCardVM): HTMLElement {
   const href = !isSample(o) ? safeHomeHref(o.href) : null;
@@ -109,8 +119,7 @@ export function objectCard(doc: Document, o: ObjectCardVM): HTMLElement {
   if (href) (root as HTMLAnchorElement).href = href;
   root.dataset.objectId = o.id; root.dataset.kind = o.kind; root.dataset.done = String(!!o.done);
   const kinds = { todo: "To-do", list: "List", doc: "Doc", file: "File" };
-  const symbols = { todo: "☑", list: "≡", doc: "▤", file: "▧" };
-  const icon = node(doc, "span", "hm-object-icon", symbols[o.kind]); icon.setAttribute("role", "img"); icon.setAttribute("aria-label", kinds[o.kind]);
+  const icon = objectIcon(doc, o.kind); icon.setAttribute("role", "img"); icon.setAttribute("aria-label", kinds[o.kind]);
   const text = node(doc, "span", "hm-object-copy"); const title = node(doc, "strong", "hm-object-title", o.title); title.title = o.title;
   text.append(title, node(doc, "span", "hm-object-meta", `${o.done ? "Done · " : ""}${o.meta}`)); root.append(icon, text);
   if (o.who) root.append("label" in o.who ? agentOrb(doc, o.who, { size: 28, badge: true }) : personAvatar(doc, o.who, 28));
@@ -121,7 +130,10 @@ export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: st
   const root = node(doc, "article", "hm-needs-you"); root.dataset.needsYou = n.id;
   const heading = node(doc, "h3", "hm-needs-title", n.what); heading.id = `hm-needs-${encodeURIComponent(n.id)}`;
   root.setAttribute("aria-labelledby", heading.id);
-  root.append("label" in n.from ? agentOrb(doc, n.from, { size: 36, badge: true }) : personAvatar(doc, n.from, 36));
+  if (needsYouUnknownSender(n)) {
+    const glyph = node(doc, "span", "hm-needs-glyph"); glyph.setAttribute("role", "img"); glyph.setAttribute("aria-label", n.from.name);
+    glyph.append(decorative(objectIcon(doc, n.kind === "ask" ? "ask" : "todo"))); root.append(glyph);
+  } else root.append("label" in n.from ? agentOrb(doc, n.from, { size: 36, badge: true }) : personAvatar(doc, n.from, 36));
   const copy = node(doc, "div", "hm-needs-copy"); copy.append(node(doc, "p", "hm-eyebrow", ["Needs you", n.workspace.name, n.when].filter(Boolean).join(" · ")), heading);
   const actions = node(doc, "div", "hm-actions");
   if (!isSample(n)) for (const [index, action] of [n.primary, n.secondary].entries()) {
