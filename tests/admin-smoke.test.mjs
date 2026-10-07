@@ -17,6 +17,20 @@ const CLIENT = 'https://commonswarm.com/oauth/c1-smoke/client.json';
 const REDIRECT = 'https://commonswarm.com/oauth/c1-smoke/callback';
 const SCOPE = 'admin:read workspaces:create seats:create seats:revoke';
 const SCOPES = SCOPE.split(' ');
+const AUTHORIZE_SCOPE = `openid offline_access ${SCOPE}`;
+// oidc-provider lib/actions/authorization/scopes.js:33-39 drops offline_access
+// unless prompt includes consent; issueRefreshToken needs the surviving scope.
+function oidcGrantedScopes(requestedScope, prompt) {
+  const requested = String(requestedScope ?? '').split(' ').filter(Boolean);
+  const prompts = String(prompt ?? '').split(' ').filter(Boolean);
+  if (!prompts.includes('consent')) return requested.filter(s => s !== 'offline_access');
+  return requested;
+}
+function authorizeQueryContract(params) {
+  return params.get('client_id') === CLIENT && params.get('redirect_uri') === REDIRECT &&
+    params.get('resource') === RESOURCE && params.get('code_challenge_method') === 'S256' &&
+    params.get('scope') === AUTHORIZE_SCOPE && params.get('prompt') === 'consent';
+}
 const resourceUrl = new URL(RESOURCE);
 const resourceMetadataInsertionPath = `/.well-known/oauth-protected-resource${resourceUrl.pathname}`;
 const resourceMetadataSuffixPath = `${resourceUrl.pathname}/.well-known/oauth-protected-resource`;
@@ -70,7 +84,7 @@ async function exercise(config = {}) {
   const grant = { grant_id: grantId, state: 'active', expires_at: Date.now() + 86_400_000, refresh_deadline: Date.now() + 86_400_000 };
   const secrets = [randomBytes(24).toString('base64url'), 'fixture-owner@private.example'];
   const code = secrets[0], attempts = [], seenProofs = new Set(), failures = [], commandRetries = new Map();
-  let authorize, initialKey, currentToken, refreshToken, generation = 0, workspaceId, fenced = false, callbackMode, actionChallenged = false;
+  let authorize, grantedOidc = [], initialKey, currentToken, refreshToken, generation = 0, workspaceId, fenced = false, callbackMode, actionChallenged = false;
   let wireRunId = null, fencedRunId = null;
   let out = '', err = '', child, readyAt = 0;
   const check = (value, reason) => { if (!value) throw new Error(reason); };
@@ -134,8 +148,9 @@ async function exercise(config = {}) {
         const h = Buffer.from(JSON.stringify({ typ: 'at+jwt', alg: 'ES256', kid: 'fixture-key' })).toString('base64url');
         const c = Buffer.from(JSON.stringify(accessClaims)).toString('base64url');
         currentToken = `${h}.${c}.${sign('sha256', Buffer.from(`${h}.${c}`), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
-        refreshToken = randomBytes(32).toString('base64url'); secrets.push(currentToken, refreshToken);
-        return emit(res, 200, { access_token: currentToken, refresh_token: refreshToken, token_type: 'DPoP', expires_in: config.shortToken ? 1 : 300,
+        refreshToken = grantedOidc.includes('offline_access') ? randomBytes(32).toString('base64url') : null;
+        secrets.push(currentToken, ...(refreshToken ? [refreshToken] : []));
+        return emit(res, 200, { access_token: currentToken, ...(refreshToken ? { refresh_token: refreshToken } : {}), token_type: 'DPoP', expires_in: config.shortToken ? 1 : 300,
           scope: SCOPE, ignored_cookie: secrets[1] });
       }
       const rpc = row.rpc;
@@ -189,9 +204,8 @@ async function exercise(config = {}) {
         handledConsent = true;
         handoff = handoff.then(async () => {
           authorize = new URL((await readFile(paths.authorize, 'utf8')).trim());
-          check(authorize.origin === ISSUER && authorize.pathname === '/authorize' && authorize.searchParams.get('client_id') === CLIENT &&
-            authorize.searchParams.get('redirect_uri') === REDIRECT && authorize.searchParams.get('resource') === RESOURCE &&
-            authorize.searchParams.get('code_challenge_method') === 'S256' && authorize.searchParams.get('scope') === `openid offline_access ${SCOPE}`, 'authorize_contract');
+          check(authorize.origin === ISSUER && authorize.pathname === '/authorize' && authorizeQueryContract(authorize.searchParams), 'authorize_contract');
+          grantedOidc = oidcGrantedScopes(authorize.searchParams.get('scope'), authorize.searchParams.get('prompt'));
           secrets.push(authorize.href, authorize.searchParams.get('state'));
           const url = new URL(REDIRECT); url.search = new URLSearchParams({ state: config.badState ? 'wrong-state' : authorize.searchParams.get('state'),
             iss: config.wrongIssuer ? 'https://other.invalid' : ISSUER, code }).toString();
@@ -241,6 +255,22 @@ async function exercise(config = {}) {
     removeStage(dir);
   }
 }
+
+test('authorize prompt=consent keeps offline_access; a request without it fails and yields no refresh_token', () => {
+  const requested = AUTHORIZE_SCOPE;
+  const withConsent = new URLSearchParams({ client_id: CLIENT, redirect_uri: REDIRECT, response_type: 'code', scope: requested,
+    resource: RESOURCE, prompt: 'consent', code_challenge_method: 'S256' });
+  assert.equal(authorizeQueryContract(withConsent), true);
+  const kept = oidcGrantedScopes(requested, withConsent.get('prompt'));
+  assert.ok(kept.includes('offline_access'));
+  const without = new URLSearchParams({ client_id: CLIENT, redirect_uri: REDIRECT, response_type: 'code', scope: requested,
+    resource: RESOURCE, code_challenge_method: 'S256' });
+  assert.equal(authorizeQueryContract(without), false);
+  const dropped = oidcGrantedScopes(requested, without.get('prompt'));
+  assert.equal(dropped.includes('offline_access'), false);
+  assert.ok(dropped.includes('openid'));
+  assert.deepEqual(dropped, requested.split(' ').filter(s => s !== 'offline_access'));
+});
 
 test('C1 happy path executes real PKCE/DPoP wire flow, one workspace/seat/revoke/refresh and redacts its receipt', async () => {
   const r = await exercise(); assert.equal(r.exitCode, 0); assert.equal(r.receipt.ok, true);

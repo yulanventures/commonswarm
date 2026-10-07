@@ -274,6 +274,8 @@ test('W6 client verification: canonical digest equals canonicalAdminJson; the re
   }
   // Order: the row exists before activation and before the client check.
   assert.match(block('ai-w6-activation-apply'), /test -f "\$PROOF_DIR\/C1-client-verification.txt"/);
+  const apply = block('ai-w6-activation-apply');
+  assert.ok(apply.indexOf('edge-oauth-runtime-catalog.sql') < apply.indexOf('ai_db -q --file /proof/activate.sql'));
   assert.match(block('ai-w6-client-check'), /test -f "\$PROOF_DIR\/C1-client-verification.txt"/);
 });
 

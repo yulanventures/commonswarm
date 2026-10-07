@@ -126,7 +126,7 @@ test('admin release plan: every complete marked block parses in Bash 3.2 and emb
     assert.ok(!seen.has(lines[0]!), 'duplicate step marker'); seen.add(lines[0]!);
     const shell = spawnSync('/bin/bash', ['-n'], { input: source, encoding: 'utf8' });
     assert.equal(shell.status, 0, `${lines[0]}: ${shell.stderr}`);
-    for (const match of source.matchAll(/^python3[^\n]*<<'PY'\n([\s\S]*?)^PY$/gm)) {
+    for (const match of source.matchAll(/^python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/gm)) {
       const python = spawnSync('python3', ['-c', 'import sys; compile(sys.stdin.read(), "<plan-python>", "exec")'], {
         input: match[1], encoding: 'utf8',
       });
@@ -900,6 +900,8 @@ test('admin release plan: W6 close requires cleanup only after Mac start, reject
   writeFileSync(join(proof,'consent-post-W5.json'),post);
   writeFileSync(join(proof,'ordinary-after.json'),liveFor('W6','after',post)); writeFileSync(join(proof,'ordinary-recovery.json'),liveFor('W6','recovery',post));
   for(const file of ['C1.json','C1-cleanup.txt','C1-finish.json']) writeFileSync(join(proof,file),'{}');
+  writeFileSync(join(proof,'edge-oauth-runtime-grant.txt'),'PASS W6 edge oauth-runtime SET grant: one f/f/t membership, edge others unchanged, issuer unchanged, live SET LOCAL ROLE\n');
+  writeFileSync(join(proof,'edge-oauth-runtime-grant-pre-activation.txt'),'PASS W6 edge oauth-runtime membership still exact SET grant immediately before activation\n');
   const w6Inputs=join(scratch,'close-inputs-W6.json'); writeFileSync(w6Inputs,JSON.stringify({...base(),window:'W6',archive_sha256:archiveSha}));
   writeFileSync(join(proof,'secret-stage.path'),stage+'\n');
   const closeState=(started:boolean)=>JSON.stringify({release_sha:sha,window_id:'Abc123',plan_sha256:digest(plan),started});
@@ -908,7 +910,7 @@ test('admin release plan: W6 close requires cleanup only after Mac start, reject
   writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 0\n',{mode:0o700});
   try {
     // Read-only database boundary starts CLOSED: opening-state checks must fail.
-    const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *) printf 'f\\n';; esac; }\n`;
+    const harness=`ai_ro() { case "$*" in *'SELECT NOT admin_issuance_enabled'*) printf 't\\n';; *commonswarm_oauth_runtime*commonswarm_edge*) printf \"\${MEMBERSHIP_LEFT:-0}\\n\";; *) printf 'f\\n';; esac; }\n`;
     const env={WINDOW:'W6',SECRET_STAGE:stage,PROOF_DIR:proof,EDGE_RECYCLE_TIMER:'fixture.timer',INPUTS_FILE:w6Inputs,PLAN_FILE:planPath,BOX_ARCHIVE_PATH:archive,PATH:shim+':/Users/yulanbot/.local/bin:'+process.env.PATH};
     writeFileSync(join(shim,'systemctl'),'#!/bin/sh\nexit 1\n',{mode:0o700});
     for(const outcome of ['success','recovered']) {
@@ -963,6 +965,16 @@ test('admin release plan: W6 close requires cleanup only after Mac start, reject
       assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
       rmSync(join(proof,file)); writeFileSync(join(proof,file),saved);
     }
+    for(const file of ['edge-oauth-runtime-grant.txt','edge-oauth-runtime-grant-pre-activation.txt']) for(const dangling of [false,true]) {
+      const saved=readFileSync(join(proof,file)); rmSync(join(proof,file));
+      const target=join(scratch,`close-link-${file}`); if(!dangling) writeFileSync(target,saved);
+      else if(existsSync(target)) rmSync(target);
+      symlinkSync(target,join(proof,file));
+      const linked=run(harness+close,{...env,CLOSE_RESULT:'success'});
+      assert.notEqual(linked.status,0); assert.ok(linked.stderr.includes(`FAIL ai-close: W6 ${file} expected regular-non-symlink got other; STOP`),linked.stderr);
+      assert.ok(existsSync(stage)); assert.ok(!existsSync(join(proof,'closed.txt')));
+      rmSync(join(proof,file)); writeFileSync(join(proof,file),saved);
+    }
     // W2 arm: its own valid W2 after pair (pre-W1 consent) in a separate proof directory.
     const proof2=join(scratch,'close-w2'); mkdirSync(proof2); const pre=consentFor('pre-W1');
     writeFileSync(join(proof2,'consent-pre-W1.json'),pre); writeFileSync(join(proof2,'ordinary-after.json'),liveFor('W2','after',pre));
@@ -989,11 +1001,42 @@ test('admin release plan: W6 close requires cleanup only after Mac start, reject
         writeFileSync(join(recoveryProof,'C1-close-state.json'),closeState(started));
         writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS');
         if(started) writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS');
+        writeFileSync(join(recoveryProof,'edge-oauth-runtime-revoke.txt'),'PASS W6 edge oauth-runtime SET grant revoked: no membership row\n');
         const recovered=run(harness+close,{...env,SECRET_STAGE:recoveryStage,PROOF_DIR:recoveryProof,CLOSE_RESULT:'recovered'});
         assert.equal(recovered.status,0,recovered.stderr); assert.ok(existsSync(join(recoveryProof,'closed.txt'))); assert.ok(!existsSync(recoveryStage));
         assert.equal(existsSync(join(recoveryProof,'C1-no-start.txt')),!started);
       } finally { if(existsSync(recoveryStage)) removeStage(recoveryStage); }
     }
+    const recoveredGrant=(files: Record<string,string>, extra: Record<string,string> = {}) => {
+      const recoveryStage=makeStage(), recoveryProof=mkdtempSync(join(scratch,'close-recovered-w6-grant-'));
+      try {
+        for(const file of readdirSync(proof)) {
+          if(['closed.txt','close-result.json','secret-stage.path','C1-client-check.txt','C1-cleanup.txt','C1-close-state.json','C1-no-start.txt','edge-oauth-runtime-grant.txt','edge-oauth-runtime-revoke.txt','edge-oauth-runtime-absent.txt','edge-oauth-runtime-grant-attempted.txt'].includes(file)) continue;
+          writeFileSync(join(recoveryProof,file),readFileSync(join(proof,file)));
+        }
+        writeFileSync(join(recoveryProof,'secret-stage.path'),recoveryStage+'\n');
+        writeFileSync(join(recoveryProof,'C1-close-state.json'),closeState(true));
+        writeFileSync(join(recoveryProof,'C1-client-check.txt'),'PASS');
+        writeFileSync(join(recoveryProof,'C1-cleanup.txt'),'PASS');
+        for(const [name,value] of Object.entries(files)) writeFileSync(join(recoveryProof,name),value);
+        return {out:run(harness+close,{...env,SECRET_STAGE:recoveryStage,PROOF_DIR:recoveryProof,CLOSE_RESULT:'recovered',...extra}), recoveryProof, recoveryStage};
+      } finally { if(existsSync(recoveryStage)) removeStage(recoveryStage); }
+    };
+    const absentLine='PASS W6 edge oauth-runtime SET grant absent at recovery: no membership row\n';
+    const missingEvidence=recoveredGrant({'edge-oauth-runtime-grant-attempted.txt':'2026-10-07T00:00:00Z\n'});
+    assert.notEqual(missingEvidence.out.status,0);
+    assert.match(missingEvidence.out.stderr,/FAIL ai-close: recovered W6 edge oauth-runtime revoke-or-absent evidence expected present after this-window grant attempt got missing-or-other; STOP/);
+    assert.ok(!existsSync(join(missingEvidence.recoveryProof,'closed.txt')));
+    const absentClose=recoveredGrant({'edge-oauth-runtime-grant-attempted.txt':'2026-10-07T00:00:00Z\n','edge-oauth-runtime-absent.txt':absentLine});
+    assert.equal(absentClose.out.status,0,absentClose.out.stderr);
+    assert.ok(existsSync(join(absentClose.recoveryProof,'closed.txt')));
+    const noMarkers=recoveredGrant({});
+    assert.equal(noMarkers.out.status,0,noMarkers.out.stderr);
+    assert.ok(existsSync(join(noMarkers.recoveryProof,'closed.txt')));
+    const stillPresent=recoveredGrant({'edge-oauth-runtime-grant-attempted.txt':'2026-10-07T00:00:00Z\n','edge-oauth-runtime-revoke.txt':'PASS W6 edge oauth-runtime SET grant revoked: no membership row\n'},{MEMBERSHIP_LEFT:'1'});
+    assert.notEqual(stillPresent.out.status,0);
+    assert.match(stillPresent.out.stderr,/FAIL ai-close: recovered W6 edge oauth-runtime membership expected absent at close got other; STOP/);
+    assert.ok(!existsSync(join(stillPresent.recoveryProof,'closed.txt')));
   } finally {
     if(existsSync(stage)) removeStage(stage);
   }
@@ -1714,7 +1757,8 @@ test('edge-release-measurement-paths: W4 records generation and W6 binds the fre
   const supplied = join(root, 'supplied.json'); writeFileSync(supplied, readFileSync(receipt));
   rmSync(receipt);
   const remeasure = `ai_run() { test "$1" = ai-edge-remeasure || return 1; python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); m.update(generation=int(sys.argv[3]),invalidated_at=None); open(sys.argv[2],"x").write(json.dumps(m,sort_keys=True)+"\\n")' "$EDGE_MEASUREMENT_FILE" "$EDGE_MEASUREMENT_OUT" "$OBSERVED_GENERATION"; }\n`;
-  const result = run('set -euo pipefail\n'+read+remeasure+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
+  const applyRo = `ai_ro() { case "$*" in *edge-oauth-runtime*) printf 't\\n';; *) printf '%s\\n' "$OBSERVED_GENERATION";; esac; }\n`;
+  const result = run('set -euo pipefail\n'+applyRo+remeasure+apply.slice(refreshStart, refreshEnd)+apply.slice(sqlStart, sqlEnd), {
     ...env, OBSERVED_GENERATION: '15', EDGE_MEASUREMENT_FILE: supplied, INPUTS_FILE: inputFile(base()),
   });
   assert.equal(result.status, 0, result.stderr);
@@ -4741,4 +4785,162 @@ test('C1-25: box bind passes with no evidence tree; one-byte and other-release r
   const otherRelease = runBind(other);
   assert.notEqual(otherRelease.status, 0);
   assert.match(otherRelease.stderr, /FAIL ai-gates-bind: receipt release_sha expected input-release-sha got mismatch; STOP/);
+});
+
+const GRANT_PASS = 'PASS W6 edge oauth-runtime SET grant: one f/f/t membership, edge others unchanged, issuer unchanged, live SET LOCAL ROLE';
+const REVOKE_PASS = 'PASS W6 edge oauth-runtime SET grant revoked: no membership row';
+const ABSENT_PASS = 'PASS W6 edge oauth-runtime SET grant absent at recovery: no membership row';
+const PRE_ACT_PASS = 'PASS W6 edge oauth-runtime membership still exact SET grant immediately before activation';
+
+test('admin release plan: W6 edge oauth-runtime grant is after ai-db-session, before activation; revoke is recovery-only', () => {
+  const grant = block('ai-w6-edge-oauth-runtime-grant');
+  const revoke = block('ai-w6-edge-oauth-runtime-revoke');
+  const apply = block('ai-w6-activation-apply');
+  const close = block('ai-close');
+  assert.match(grant, /GRANT commonswarm_oauth_runtime TO commonswarm_edge WITH ADMIN FALSE, INHERIT FALSE, SET TRUE/);
+  assert.match(grant, /a started grant is never re-run/);
+  assert.match(grant, /edge-oauth-runtime-catalog\.sql/);
+  assert.match(grant, /SWARM_DATABASE_URL/);
+  assert.match(grant, /SET LOCAL ROLE commonswarm_oauth_runtime/);
+  assert.match(grant, /\/home\/commonswarm\/\.env/);
+  assert.match(revoke, /REVOKE commonswarm_oauth_runtime FROM commonswarm_edge GRANTED BY %I/);
+  assert.doesNotMatch(revoke, /REVOKE[^\n]*commonswarm_admin_issuer/);
+  assert.match(revoke, /edge-oauth-runtime-revoke-grantors\.txt\.tmp/);
+  assert.match(revoke, /mv -f "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt\.tmp" "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt"/);
+  assert.match(revoke, /rm -f "\$PROOF_DIR\/edge-oauth-runtime-revoke-grantors\.txt\.tmp"/);
+  assert.match(revoke, /a started revoke is never re-run/);
+  assert.match(revoke, /no this-window grant evidence; revoke skipped/);
+  assert.match(revoke, /Pre-existing exact SET grant/);
+  assert.match(revoke, /membership absent at recovery/);
+  assert.match(plan, /"id":"ai-db-session","host":"box"}\n{"id":"ai-w6-edge-oauth-runtime-grant","host":"box"}\n{"id":"ai-w6-prepare"/);
+  assert.match(plan, /```c1-order W6 rollback[\s\S]*ai-w6-edge-oauth-runtime-revoke[\s\S]*```c1-order W6 recovered-close/);
+  assert.match(plan, /```c1-order W6 recovered-close[\s\S]*ai-w6-edge-oauth-runtime-revoke[\s\S]*"id":"ai-close"/);
+  const w6Forward = /```c1-order W6 forward[\s\S]*?```c1-order W6 rollback/.exec(plan)![0]!;
+  assert.doesNotMatch(w6Forward, /ai-w6-edge-oauth-runtime-revoke/);
+  const catalogBefore = apply.indexOf('edge-oauth-runtime-catalog.sql');
+  const activate = apply.indexOf('ai_db -q --file /proof/activate.sql');
+  assert.ok(catalogBefore > 0 && catalogBefore < activate, 'readback immediately before activation transaction');
+  assert.match(close, /W6 edge-oauth-runtime-grant\.txt expected regular-non-symlink/);
+  assert.match(close, /W6 edge-oauth-runtime-grant\.txt expected exact-PASS-line/);
+  assert.match(close, /W6 edge-oauth-runtime-grant-pre-activation\.txt expected regular-non-symlink/);
+  assert.match(close, /W6 edge-oauth-runtime-grant-pre-activation\.txt expected exact-PASS-line/);
+  assert.match(close, /revoke-or-absent evidence expected present after this-window grant attempt/);
+  assert.match(close, /membership expected absent at close/);
+  const contract = JSON.parse(readFileSync(join(directory, 'GATES.json'), 'utf8')) as {
+    gates: Record<string, string[]>; windows: Record<string, string[]>;
+  };
+  assert.deepEqual(contract.gates['edge-oauth-runtime-set-grant'], [
+    'edge-membership', 'idempotency', 'drift-refusal', 'edge-login-switching', 'commit-rollback-reset',
+  ]);
+  assert.ok(contract.windows.W6.includes('edge-oauth-runtime-set-grant'));
+  assert.match(readFileSync(join('deploy/release-proofs/item-ai/edge-oauth-runtime-catalog.sql'), 'utf8'),
+    /edge-oauth-runtime-membership-one-fft/);
+});
+
+test('admin release plan: edge oauth-runtime grant refuses closed-issuance, missing roles, drift and a started retry', () => {
+  const grant = block('ai-w6-edge-oauth-runtime-grant');
+  const proof = mkdtempSync(join(scratch, 'edge-grant-'));
+  const env = { WINDOW: 'W6', PROOF_DIR: proof, SECRET_STAGE: makeStage(), PSQL_IMAGE: 'fixture-postgres' };
+  const wrongWindow = run(grant, { ...env, WINDOW: 'W5' });
+  assert.notEqual(wrongWindow.status, 0);
+  assert.match(wrongWindow.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: window expected W6 got other; STOP/);
+  const harness = (ro: string) => `ai_ro() { ${ro}; }\nai_db() { printf 'unexpected-ai_db\\n' >&2; return 9; }\n`;
+  const openIssuance = run(harness('printf f') + grant, env);
+  assert.notEqual(openIssuance.status, 0);
+  assert.match(openIssuance.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: issuance expected CLOSED got other; STOP/);
+  const missingRoles = run(harness('case "$*" in *admin_issuance_enabled*) printf t;; *) printf f;; esac') + grant, env);
+  assert.notEqual(missingRoles.status, 0);
+  assert.match(missingRoles.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: roles commonswarm_edge and commonswarm_oauth_runtime expected present got absent; STOP/);
+  writeFileSync(join(proof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const started = run(harness('case "$*" in *admin_issuance_enabled*) printf t;; *pg_roles*) printf t;; *) printf issuer-row;; esac') + grant, env);
+  assert.notEqual(started.status, 0);
+  assert.match(started.stderr, /FAIL ai-w6-edge-oauth-runtime-grant: a started grant is never re-run; STOP/);
+  assert.ok(!existsSync(join(proof, 'edge-oauth-runtime-grant.txt')));
+});
+
+test('admin release plan: edge oauth-runtime revoke follows the attempted marker and live catalog, not the PASS receipt', () => {
+  const revoke = block('ai-w6-edge-oauth-runtime-revoke');
+  const close = block('ai-close');
+  const sqlHasPerGrantorRevoke = 'grep -q "REVOKE commonswarm_oauth_runtime FROM commonswarm_edge GRANTED BY %I" "$PROOF_DIR/edge-oauth-runtime-revoke.sql" 2>/dev/null && ! grep -q commonswarm_admin_issuer "$PROOF_DIR/edge-oauth-runtime-revoke.sql" 2>/dev/null';
+  const membership = (count: string, afterSql = '0') =>
+    `ai_ro() { case "$*" in *pg_auth_members*) if ${sqlHasPerGrantorRevoke}; then printf '${afterSql}\\n'; else printf '${count}\\n'; fi;; *) printf 'UNEXPECTED\\n'; return 9;; esac; }\n`;
+  const dbOk = `ai_db() { ${sqlHasPerGrantorRevoke} || return 9; printf '%s\\n' "$*" >>"$PROOF_DIR/ai_db.log"; printf 'postgres\\n'; return 0; }\n`;
+  const dbFail = `ai_db() { printf 'unexpected-ai_db\\n' >&2; return 9; }\n`;
+  const skipProof = mkdtempSync(join(scratch, 'edge-revoke-skip-'));
+  const skip = run(revoke, { WINDOW: 'W6', PROOF_DIR: skipProof });
+  assert.equal(skip.status, 0, skip.stderr);
+  assert.match(skip.stdout, /no this-window grant evidence; revoke skipped/);
+  assert.ok(!existsSync(join(skipProof, 'edge-oauth-runtime-revoke.txt')));
+  assert.ok(!existsSync(join(skipProof, 'edge-oauth-runtime-absent.txt')));
+  const startedProof = mkdtempSync(join(scratch, 'edge-revoke-started-'));
+  writeFileSync(join(startedProof, 'edge-oauth-runtime-grant.txt'), GRANT_PASS + '\n');
+  writeFileSync(join(startedProof, 'edge-oauth-runtime-revoke-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const started = run(revoke, { WINDOW: 'W6', PROOF_DIR: startedProof });
+  assert.notEqual(started.status, 0);
+  assert.match(started.stderr, /FAIL ai-w6-edge-oauth-runtime-revoke: a started revoke is never re-run; STOP/);
+  const committedProof = mkdtempSync(join(scratch, 'edge-revoke-committed-'));
+  writeFileSync(join(committedProof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const committed = run(membership('1') + dbOk + revoke, { WINDOW: 'W6', PROOF_DIR: committedProof });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(readFileSync(join(committedProof, 'edge-oauth-runtime-revoke.txt'), 'utf8'), REVOKE_PASS + '\n');
+  assert.equal(readFileSync(join(committedProof, 'edge-oauth-runtime-revoke-grantors.txt'), 'utf8'), 'postgres\n');
+  assert.equal(statSync(join(committedProof, 'edge-oauth-runtime-revoke-grantors.txt')).mode & 0o777, 0o600);
+  assert.ok(!existsSync(join(committedProof, 'edge-oauth-runtime-revoke-grantors.txt.tmp')));
+  assert.ok(existsSync(join(committedProof, 'ai_db.log')));
+  assert.ok(!existsSync(join(committedProof, 'edge-oauth-runtime-absent.txt')));
+  const dbWriteThenFail = `ai_db() { ${sqlHasPerGrantorRevoke} || return 9; printf 'postgres\\n'; return 9; }\n`;
+  const failProof = mkdtempSync(join(scratch, 'edge-revoke-grantors-fail-'));
+  writeFileSync(join(failProof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const failed = run(membership('1') + dbWriteThenFail + revoke, { WINDOW: 'W6', PROOF_DIR: failProof });
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stderr, /FAIL ai-w6-edge-oauth-runtime-revoke: REVOKE expected committed got refused; STOP/);
+  assert.ok(!existsSync(join(failProof, 'edge-oauth-runtime-revoke-grantors.txt')));
+  assert.ok(!existsSync(join(failProof, 'edge-oauth-runtime-revoke-grantors.txt.tmp')));
+  assert.ok(!existsSync(join(failProof, 'edge-oauth-runtime-revoke.txt')));
+  const bareSql = "BEGIN;\nREVOKE commonswarm_oauth_runtime FROM commonswarm_edge;\nCOMMIT;";
+  const bareRevoke = revoke.replace(/cat >"\$PROOF_DIR\/edge-oauth-runtime-revoke\.sql" <<'SQL'\n[\s\S]*?\nSQL\n/, `cat >"$PROOF_DIR/edge-oauth-runtime-revoke.sql" <<'SQL'\n${bareSql}\nSQL\n`);
+  const bareProof = mkdtempSync(join(scratch, 'edge-revoke-bare-'));
+  writeFileSync(join(bareProof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const bare = run(membership('1') + dbOk + bareRevoke, { WINDOW: 'W6', PROOF_DIR: bareProof });
+  assert.notEqual(bare.status, 0, 'a file-exists no-op REVOKE must not pass as a per-grantor revoke');
+  assert.ok(!existsSync(join(bareProof, 'edge-oauth-runtime-revoke.txt')));
+  assert.match(readFileSync(join(bareProof, 'edge-oauth-runtime-revoke.sql'), 'utf8'), /^BEGIN;\nREVOKE commonswarm_oauth_runtime FROM commonswarm_edge;\nCOMMIT;\n$/);
+  const absentProof = mkdtempSync(join(scratch, 'edge-revoke-absent-'));
+  writeFileSync(join(absentProof, 'edge-oauth-runtime-grant-attempted.txt'), '2026-10-07T00:00:00Z\n');
+  const absent = run(membership('0') + dbFail + revoke, { WINDOW: 'W6', PROOF_DIR: absentProof });
+  assert.equal(absent.status, 0, absent.stderr);
+  assert.match(absent.stdout, /membership absent at recovery/);
+  assert.equal(readFileSync(join(absentProof, 'edge-oauth-runtime-absent.txt'), 'utf8'), ABSENT_PASS + '\n');
+  assert.ok(!existsSync(join(absentProof, 'edge-oauth-runtime-revoke.txt')));
+  assert.ok(!existsSync(join(absentProof, 'ai_db.log')));
+  const successClose = close.indexOf('test -f "$PROOF_DIR/edge-oauth-runtime-grant.txt" && test ! -L "$PROOF_DIR/edge-oauth-runtime-grant.txt"');
+  const preActClose = close.indexOf('W6 edge-oauth-runtime-grant-pre-activation.txt expected exact-PASS-line');
+  const recoveredClose = close.indexOf('revoke-or-absent evidence expected present after this-window grant attempt');
+  const liveClose = close.indexOf('membership expected absent at close');
+  assert.ok(successClose > 0 && preActClose > successClose && recoveredClose > preActClose && liveClose > recoveredClose);
+  assert.match(close, new RegExp(REVOKE_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(close, new RegExp(ABSENT_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(close, new RegExp(PRE_ACT_PASS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('admin release plan: edge-login producer writes 0600 service files from SWARM_DATABASE_URL and never prints', () => {
+  const stage = makeStage();
+  try {
+    writeFileSync(join(stage, 'service.conf'), '[target]\nhost=db.commonswarm.internal\nport=5432\ndbname=postgres\nuser=supabase_admin\nsslmode=verify-full\n', { mode: 0o600 });
+    const envFile = join(stage, 'box.env');
+    writeFileSync(envFile, 'SWARM_DATABASE_URL=postgres://commonswarm_edge:fixture-edge-secret@db.commonswarm.internal:5432/postgres\n', { mode: 0o600 });
+    const python = block('ai-w6-edge-oauth-runtime-grant').match(/^python3[^\n]*<<'PY'[^\n]*\n([\s\S]*?)^PY$/m)![1]!;
+    const result = spawnSync('python3', ['-', envFile, stage], { input: python, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+    assert.match(readFileSync(join(stage, 'edge-login-service.conf'), 'utf8'), /^user=commonswarm_edge$/m);
+    assert.equal(statSync(join(stage, 'edge-login-service.conf')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(stage, 'edge-login-pass')).mode & 0o777, 0o600);
+    assert.ok(!result.stdout.includes('fixture-edge-secret') && !result.stderr.includes('fixture-edge-secret'));
+    writeFileSync(join(stage, 'bad.env'), 'SWARM_DATABASE_URL=postgres://postgres:other@db.commonswarm.internal:5432/postgres\n', { mode: 0o600 });
+    const wrongUser = spawnSync('python3', ['-', join(stage, 'bad.env'), stage], { input: python, encoding: 'utf8' });
+    assert.notEqual(wrongUser.status, 0);
+    assert.doesNotMatch(wrongUser.stdout + wrongUser.stderr, /other|postgres:\/\//);
+  } finally { removeStage(stage); }
 });

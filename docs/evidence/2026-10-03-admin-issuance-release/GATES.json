@@ -261,6 +261,13 @@
       "accepted-workspace-residue-next-site-client-removal",
       "secret-handoffs-guarded-cleanup-redacted-report"
     ],
+    "edge-oauth-runtime-set-grant": [
+      "edge-membership",
+      "idempotency",
+      "drift-refusal",
+      "edge-login-switching",
+      "commit-rollback-reset"
+    ],
     "backup-restore-gate": [
       "fresh-verified-database-and-object-backup",
       "complete-isolated-restore-receipt",
@@ -340,7 +347,8 @@
       "edge-caddy-route",
       "site-build-qa",
       "admin-issuer-credential-provisioning",
-      "admin-c1-smoke"
+      "admin-c1-smoke",
+      "edge-oauth-runtime-set-grant"
     ],
     "W7": [
       "legacy-admin-unreachable",

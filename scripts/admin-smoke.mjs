@@ -219,7 +219,7 @@ async function run(o) {
     const state = randomBytes(32).toString('base64url'), verifier = randomBytes(32).toString('base64url');
     const auth = new URL(authorizeEndpoint);
     auth.search = new URLSearchParams({ client_id: CLIENT, redirect_uri: REDIRECT, response_type: 'code', scope: SCOPE,
-      resource: RESOURCE, state, code_challenge: hash(verifier), code_challenge_method: 'S256', dpop_jkt: jkt }).toString();
+      resource: RESOURCE, prompt: 'consent', state, code_challenge: hash(verifier), code_challenge_method: 'S256', dpop_jkt: jkt }).toString();
     const code = await step('consent', async () => {
       const fd = await newFile(o.authorize); try { await fd.writeFile(auth.href + '\n'); } finally { await fd.close(); }
       process.stdout.write('consent_handoff_ready\n');
