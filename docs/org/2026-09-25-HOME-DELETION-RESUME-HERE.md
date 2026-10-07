@@ -1,8 +1,24 @@
-# Resume here: the home directory deletion on the Mac mini (2026-09-25)
+# HOLD LIFTED (2026-10-07): the home directory deletion on the Mac mini (2026-09-25)
+
+## Status at 2026-10-07
+
+- Recovery from the home directory deletion is complete. This file is no longer a resume point. It is kept as
+  the incident record, and nothing in the incident record below is an open action.
+- `main` is well past `d437c291`, the SHA that survived the deletion.
+- CI runs on GitHub-hosted runners.
+- The host controls stay in place: the `rm` guard at `~/.local/bin/rm`, the hourly APFS local snapshots
+  (`com.yulanbot.apfs-snapshot`), and the Claude `PreToolUse` hook that blocks the deletion pattern.
+- Tom's priority for 2026-10-07 (the redesign, the home UI, and the household stack) ships in C1 F17d window W5.
+  Admin issuance (W6 and W7) follows and does not gate W5.
+- New work goes through HezLead.
+
+## Incident record (2026-09-25 to 2026-09-26)
+
+Original title: "Resume here: the home directory deletion on the Mac mini (2026-09-25)".
 
 Written by CSwarmDevLead for a cold successor. Read this before any lane work on the mini.
 
-## What happened
+### What happened
 
 - 10:57:58Z: the lead's Grok review arm for item M round 7 (grok 1.0.41, worktree `scratchpad/arms-m`, no
   permission mode, no sandbox) started a background shell task with, verbatim from `~/.grok/…/updates.jsonl`:
@@ -24,7 +40,7 @@ HezLead's incident report is outside this repository, at `Ridge.io/ops/incidents
 on the Mac mini. It names the lead as the launcher and the Grok arm as the actor, with the TCC line, and lists this
 lane as a control.
 
-## What was lost
+### What was lost
 
 `~/.config` (every cswarm seat credential, the anon key file, the `gh` login, alloy), `~/.cswarm` (every
 profile), almost all of `~/Developer` (the main checkout and its `.git`, the prompteden checkout),
@@ -32,7 +48,7 @@ profile), almost all of `~/Developer` (the main checkout and its `.git`, the pro
 `agy` CLIs. There was no Time Machine destination and no APFS snapshot. `~/.ssh`, `~/Library`, `~/.claude`,
 `~/projects`, and `~/Documents` survived.
 
-## What was saved
+### What was saved
 
 - `main` on GitHub was untouched (d437c291). HezLead re-cloned it to the old checkout path.
 - The lanes whose commits were lost were rebuilt as single commits from their surviving worktree files:
@@ -42,22 +58,22 @@ profile), almost all of `~/Developer` (the main checkout and its `.git`, the pro
 - The K Maker and the 2b fold 9 Maker were paused mid-work by HezLead (SIGSTOP). Their edits are in
   `scratchpad/wt-k` and `scratchpad/wt-g2b` and are snapshotted into the same bundle, uncommitted-state only.
 
-## Standing orders (HezLead, until the operator approves the prevention plan)
+### Standing orders (HezLead, until the operator approves the prevention plan)
 
 No Grok CLI arm runs shell on the mini. No arm or Maker runs a test suite on the mini. No script contains
 `rm -rf "$VAR"` where VAR can be HOME or empty. Reading, writing docs, and pushing are allowed.
 
-## Prevention (this lane)
+### Prevention (this lane)
 
 AGENTS.md "Sandbox and deletion rules" and `docs/design/LANE-BRIEF-TEMPLATE.md`. The lead's arm prompt
 template line "pure tests with a temporary HOME" is retired: it is what produced the command.
 
-## What is not established
+### What is not established
 
 Why the arm also ran background shell tasks with no permission mode; whether any earlier Grok arm's
 temporary-HOME run wrote into the real `~/.cswarm` (HezLead is checking each session's `updates.jsonl`).
 
-## Box windows moved (HezLead, 2026-09-25)
+### Box windows moved (HezLead, 2026-09-25)
 
 The item G lane 1 window (SHA 9627cb37) and the renewal-fix window (a54afaf6, its migration follows G's) move
 from 2026-09-25 to **2026-09-26 21:45Z**, G first. Reasons: the G seed seats need `cswarm login` on the mini,
@@ -67,7 +83,7 @@ which was deleted, and the gate-evidence files were in the deleted checkout. Con
 the operator mints the seed seats 20:00-21:30Z into `$HOME/.config/cswarm/g-seed-20260926` with the same
 block as before. HezLead's Anvil prompts are ready and unchanged.
 
-## Next
+### Next
 
 1. Operator: `gh auth login`; mint seat files for CSwarmDevLead (4989ea3b) and CSwarmStrategist (f5b46ef8)
    and the anon key file; reinstall `claude`, `alloy`, `agy`; approve the prevention plan.
@@ -77,7 +93,7 @@ block as before. HezLead's Anvil prompts are ready and unchanged.
    that do not run). Neither is ready to land. The next folds are written in
    `scratchpad/itemM/fold7-*` and `scratchpad/itemG2b/fold9.md` and wait for clearance.
 
-## State at 2026-09-26 04:30Z (lead; replaces the "Next" list above)
+### State at 2026-09-26 04:30Z (lead; replaces the "Next" list above)
 
 **Rules in force.**
 - Every local gate runs through `scripts/run-gates.sh` (main `d77d1020`). The wrapper gives each gate a temporary HOME.
