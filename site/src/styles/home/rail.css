@@ -298,8 +298,10 @@
 .hm-frame__rail .dashboard__user-trigger :is(.dashboard__user-trigger-mark, .dashboard__user-trigger-brand) { display: none; }
 /* Wide screens: the brand row IS the account control (the canvas rail has no account foot, so New workspace is its
    last element). The button draws the brand row exactly (mark, then the 20px display word in --home-rail-strong,
-   rail padding 14px 12px, 44px tall, full width) with one quiet cue, a 12px chevron in --home-rail-muted (5.96 light / 7.00 dark
-   on the rail). The rail's own brand link stands down here; the menu's "CommonSwarm home" is the site home link. */
+   rail padding 14px 12px, 44px tall, full width). The 12px chevron in --home-rail-muted (5.96 light / 7.00 dark on the rail)
+   is hidden at rest, as the canvas draws no trailing icon, and shows on hover, keyboard focus and while the menu is open
+   (opacity, so the row never reflows). The rail's own brand link stands down here; the menu's "CommonSwarm home" is the
+   site home link. */
 @media (width > 52rem) {
   .hm-frame__rail > .dashboard__rail-foot { flex: none; display: block; padding: 14px 12px 0; background: var(--home-rail-bg); }
   .hm-frame__rail .hm-rail__brand { display: none; }
@@ -328,7 +330,8 @@
     white-space: nowrap;
   }
   .hm-frame__rail .dashboard__user-trigger-name { display: none; }
-  .hm-frame__rail .dashboard__user-trigger > svg { inline-size: 12px; block-size: 12px; margin-inline-start: -4px; color: var(--home-rail-muted); }
+  .hm-frame__rail .dashboard__user-trigger > svg { inline-size: 12px; block-size: 12px; margin-inline-start: -4px; color: var(--home-rail-muted); opacity: 0; }
+  .hm-frame__rail .dashboard__user-trigger:is(:hover, :focus-visible, [aria-expanded="true"]) > svg { opacity: 1; }
   .hm-frame__rail .dashboard__user-trigger:is(:hover, [aria-expanded="true"]) > svg { color: var(--home-rail-strong); }
   /* The menu opens below the row, the rail's inner width, the signed-in line first (the button no longer shows it). */
   .hm-frame__rail .dashboard__user-menu {

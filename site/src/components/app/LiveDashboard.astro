@@ -245,8 +245,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
           {/* On a wide screen the rail's BRAND ROW is the account control: the mark and "CommonSwarm", as the canvas
-              rail draws them, plus a quiet chevron (so New workspace is the rail's last element, 16px above the
-              bottom). It comes before the rail in the DOM, so focus meets it at the top, where it is drawn; the
+              rail draws them, plus a chevron that shows only on hover, keyboard focus or while the menu is open (so New
+              workspace is the rail's last element, 16px above the bottom). It comes before the rail in the DOM, so focus meets it at the top, where it is drawn; the
               rail's own brand link stands down there (rail.css), and the menu's "CommonSwarm home" is the way to
               the site home. On a phone it is the chevron disc at the top right. The menu keeps the theme switch,
               Connected apps and Sign out. */}
@@ -987,7 +987,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction } from "../../lib/home-shell";
+    type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
@@ -1851,6 +1851,27 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       else if (action.kind === "new-channel") openChannelDialog();
       else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
       else one<HTMLButtonElement>("[data-refresh]")?.click();
+    };
+
+    /** The account entries the phone bar's ⋯ offers (round 7: on a phone it is the one account door). Read from the
+        account menu's own controls each time ⋯ opens, so the two never disagree; the actions click those controls. */
+    const accountMenuState = (): AccountMenuState | null => {
+      if (sampleMode) return null;
+      const theme = one<HTMLButtonElement>("[data-theme-toggle]");
+      const themeLabel = (one<HTMLElement>("[data-theme-toggle-label]")?.textContent ?? "").trim();
+      const signOut = one<HTMLButtonElement>("[data-user-menu] [data-signout]");
+      const apps = one<HTMLButtonElement>("[data-connected-apps-open]");
+      return {
+        signedInAs: (one<HTMLElement>(".dashboard__user-menu-account")?.textContent ?? "").trim() || "Your account",
+        theme: theme && !theme.hidden ? `Theme: ${themeLabel || "System"}` : null,
+        connectedApps: !!apps && !apps.hidden,
+        signOut: !!signOut && !signOut.hidden,
+      };
+    };
+    const accountMenuAction = (action: AccountMenuAction): void => {
+      if (action === "theme") one<HTMLButtonElement>("[data-theme-toggle]")?.click();
+      else if (action === "connected-apps") one<HTMLButtonElement>("[data-connected-apps-open]")?.click();
+      else one<HTMLButtonElement>("[data-user-menu] [data-signout]")?.click();
     };
 
     const addAgentViewOpen = (): boolean =>
@@ -4400,7 +4421,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) return;
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
-        feedMenu: feedMenuState, feed: feedMenuAction,
+        feedMenu: feedMenuState, feed: feedMenuAction, account: accountMenuState, accountAction: accountMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
           else if (item === "settings") openWorkspaceDetailsDialog();

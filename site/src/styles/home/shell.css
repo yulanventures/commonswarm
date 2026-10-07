@@ -165,6 +165,8 @@
 .hm-menu__group-label { padding: 8px 12px 2px; color: var(--home-ink-muted); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .hm-menu__radio[aria-checked="true"] { background: var(--home-lime); color: var(--home-lime-ink); font-weight: 700; }
 .hm-menu__separator { block-size: 1px; margin: 6px 4px; background: var(--home-hairline); }
+/* Phone ⋯ only: who is signed in, above the account entries (the account menu's own first line). */
+.hm-menu__account { overflow: hidden; padding: 8px 12px 2px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 /* The live state's one small dot, on ⋯. */
 .hm-live-dot { position: absolute; inset-block-start: 5px; inset-inline-end: 5px; inline-size: 9px; block-size: 9px; border-radius: 50%;
   background: var(--home-lime); box-shadow: 0 0 0 1.5px var(--home-ink); pointer-events: none; }
@@ -203,17 +205,20 @@
 .hm-channel-menu__new { color: var(--home-ink); }
 
 /* Phone top bar: 44 px back chevron, H1 (wraps onto as many lines as it needs, never cut short),
-   capsules, ⋯. The controls stay at the top when a long name wraps. */
+   capsules, ⋯. The controls stay at the top when a long name wraps.
+   Phone-Space.dc.html: padding 50px 16px 12px around one 44 px control row. Its 50 px top is the device status bar
+   (RULINGS 11): a real phone reports that as the safe-area inset (whole pixels); with none the bar keeps 8 px, so a
+   phone browser does not lose 42 px of reading height under its own chrome. The back button bleeds 12 px into the
+   left padding (margin-left: -12px), so the bar starts it 4 px in; ⋯ mirrors that on the right. The title starts
+   4 px after the back button (the source's gap). */
 .hm-phone-bar {
   position: sticky;
   inset-block-start: 0;
   z-index: 10;
   grid-template-columns: 44px minmax(0, 1fr) auto 44px;
   align-items: start;
-  gap: 2px;
-  /* Phone-Space.dc.html draws 50 px above the control row: the status bar. A real phone reports that as the
-     safe-area inset (whole pixels); with none the bar keeps 8 px. */
-  padding: max(8px, env(safe-area-inset-top, 0px)) 12px 12px 4px;
+  gap: 4px;
+  padding: max(8px, env(safe-area-inset-top, 0px)) 4px 12px 4px;
   border-block-end: 0;
   background: var(--home-rail-bg);
   color: var(--home-rail-strong);
@@ -260,6 +265,8 @@
 }
 
 .hm-phone-bar .hm-menu__trigger { border: 0; background: transparent; color: var(--home-rail-strong); }
+/* With the account entries the phone menu can be taller than a small screen: it scrolls inside the space under the bar. */
+.hm-phone-bar .hm-menu__list { max-block-size: calc(100dvh - 120px); overflow-y: auto; }
 .hm-phone-bar :is(.hm-phone-bar__back, .hm-phone-bar__people, .hm-menu__trigger):hover { background: var(--home-rail-raised); }
 
 @media (width <= 24rem) {

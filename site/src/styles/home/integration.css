@@ -123,7 +123,8 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame__rail.hm-frame__rail { display: contents; }
   .hm-frame__rail-content, .hm-frame__side { display: none; }
   /* The account door shares the phone bar's 44 px control row (same top as the back chevron and ⋯) and sits 4 px from
-     the edge, so the bar keeps room for two whole capsules and a one-word title at 390 px (Phone-Space.dc.html). */
+     the edge. It shows where there is no workspace ⋯ to carry the account entries (Catch up, a sample); on a
+     workspace the ⋯ menu carries them and the door stands down (below). */
   .hm-frame__rail > [data-user-menu-root] { position: absolute; inset-inline-end: 4px; inset-block-start: max(8px, env(safe-area-inset-top, 0px)); z-index: 21; }
   .hm-frame__main { grid-column: 1; grid-row: 1; }
   /* The channel menu is an in-flow row under the phone bar. One grid row collapses that
@@ -155,6 +156,10 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {
-  .hm-frame__main .hm-phone-bar { padding-inline-end: calc(44px + 4px); }
+  /* A phone bar whose ⋯ carries the account entries (theme, Connected apps, Sign out: home-shell.ts) is the one
+     account door on that screen (Phone-Space.dc.html draws no second control), so the floating door leaves and the
+     bar keeps its own 4 px edge. A bar without them (a sample) keeps the door and the room for it. */
+  .hm-frame:has(.hm-phone-bar[data-home-account-menu]) > .hm-frame__rail > [data-user-menu-root] { display: none; }
+  .hm-frame__main .hm-phone-bar:not([data-home-account-menu]) { padding-inline-end: calc(44px + 4px); }
   .hm-frame__main .hm-catchup-header { padding-inline-end: calc(44px + var(--s-3)); }
 }
