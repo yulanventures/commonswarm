@@ -76,7 +76,8 @@
 .hm-side-list a.hm-object-card:hover .hm-object-title { text-decoration: underline; }
 .hm-side-list .hm-object-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
 .hm-side-list .hm-object-meta { font-size: 13px; line-height: 1.4; }
-.hm-side-list .hm-object-icon { inline-size: 20px; font-size: 18px; line-height: 1; text-align: center; color: var(--home-ink); }
+/* The icon is a masked 1:1 box (primitives.css), so its width alone sizes it: 22 px as the Files rows in the source. */
+.hm-side-list .hm-object-icon { inline-size: 22px; color: var(--home-ink); }
 /* Lists show no icon in the source, a chevron instead. The icon's name ("List") stays for a screen reader. */
 .hm-side-card[data-side-card="lists"] .hm-object-icon { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .hm-side-card[data-side-card="lists"] .hm-object-card::after { content: ""; flex: none; inline-size: 7px; block-size: 7px; margin-inline: 4px 6px;
@@ -116,12 +117,18 @@
 .hm-extras .hm-object-card { box-sizing: border-box; max-inline-size: 440px; min-block-size: 56px; padding: 6px 14px; gap: 12px; border-radius: 14px; background: var(--home-soft); }
 .hm-extras .hm-object-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
 .hm-extras .hm-object-meta { font-size: 13px; line-height: 1.4; }
-.hm-extras .hm-object-icon { inline-size: 20px; font-size: 18px; line-height: 1; text-align: center; }
+.hm-extras .hm-object-icon { inline-size: 20px; }
 /* An ask for the viewer is the lime card itself; the row already shows who asked, so the card drops its picture. */
 .hm-extras__ask .hm-needs-you { box-sizing: border-box; max-inline-size: 520px; padding: 16px; border-radius: 16px; }
-.hm-extras__ask .hm-needs-you > :is(.hm-agent-orb, .hm-person-avatar) { display: none; }
+.hm-extras__ask .hm-needs-you > :is(.hm-agent-orb, .hm-person-avatar, .hm-needs-glyph) { display: none; }
 .hm-extras__ask .hm-eyebrow { font-size: 13px; font-weight: 700; }
 .hm-extras__ask .hm-needs-copy { flex-basis: 100%; }
+/* A fix card at the head of the stream (an agent of yours that needs you) takes the same compact form as the
+   ask card in the source: at most 520 px, 16 px padding, 16 px radius, 44 px actions. It has no author row, so
+   it keeps the agent's picture, beside the words with the stream's 12 px gap. */
+.hm-frame .dashboard__feed-fix .hm-needs-you { box-sizing: border-box; max-inline-size: 520px; align-items: flex-start; gap: 12px; padding: 16px; border-radius: 16px; }
+.hm-frame .dashboard__feed-fix .hm-needs-copy { flex: 1 1 0; }
+.hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you .hm-button { min-block-size: 44px; padding-inline: 20px; font-size: 15px; }
 
 /* The stream column is the card surface in both themes (the dashboard's own --surface is the old palette). */
 .hm-frame .dashboard__channel { background: var(--home-card); color: var(--home-ink); }
@@ -271,8 +278,11 @@
 .hm-frame .dashboard__composer-attach { inset-inline-end: calc(5.5rem + 14px); inset-block-end: 3px; color: var(--home-ink-muted); border-radius: 10px; }
 .hm-frame .dashboard__composer-attach:hover:not(:disabled) { color: var(--home-ink); background: var(--home-soft); }
 .hm-frame .dashboard__composer-drop-target { inset: 4px calc(5.5rem + 14px) 4px 4px; color: var(--home-ink); background: var(--home-lime-soft); border-color: var(--home-ink-faint); border-radius: 10px; }
-.hm-frame .dashboard__composer-send { inline-size: 5.5rem; block-size: 50px; color: var(--home-card); background: var(--home-ink); border-radius: 14px; font: inherit; font-size: 15px; font-weight: 700; }
+.hm-frame .dashboard__composer-send { inline-size: 5.5rem; block-size: 50px; color: var(--home-on-ink); background: var(--home-ink); border-radius: 14px; font: inherit; font-size: 15px; font-weight: 700; }
 .hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--home-link-hover); }
+/* Nothing to send yet: the button keeps its full ink fill (Space.dc.html, Phone-Space.dc.html); the cue is its
+   word or arrow going dim, not a faded control. */
+.hm-frame .dashboard__composer-send:disabled { opacity: 1; color: color-mix(in oklab, var(--home-on-ink) 55%, var(--home-ink)); }
 .hm-frame .dashboard__composer-send-word { grid-area: 1 / 1; }
 .hm-frame .dashboard__composer-send-icon { display: none; }
 .hm-frame .dashboard__composer-send[data-state="posting"] .dashboard__composer-send-word { visibility: hidden; }
@@ -310,8 +320,10 @@
   .hm-frame .hm-author__when, .hm-frame .dashboard__message-meta time { font-size: 12px; }
   .hm-frame .dashboard__message-markdown { font-size: 15px; }
   .hm-frame .hm-needs-you .dashboard__message-markdown { font-size: 16px; }
-  .hm-frame .hm-extras__ask .hm-needs-you { padding: 14px; }
-  .hm-frame .hm-extras__ask .hm-eyebrow { font-size: 12px; }
+  .hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you { padding: 14px; }
+  .hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-needs-you .hm-button { font-size: 14px; }
+  .hm-frame :is(.dashboard__feed-fix, .hm-extras__ask) .hm-eyebrow { font-size: 12px; }
+  .hm-frame .dashboard__feed-fix .hm-needs-title { font-size: 16px; line-height: 1.3; }
   .hm-frame .dashboard__thread { padding: 0 16px 8px calc(16px + 32px + 10px); }
   .hm-frame .dashboard__thread-replies { gap: 10px; padding: 12px; border-radius: 14px; }
   .hm-frame .dashboard__feed-toolbar { padding-inline-start: 10px; }

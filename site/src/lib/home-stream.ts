@@ -106,10 +106,14 @@ export function streamAskCard(signal: StreamSignalVM, workspace: StreamContext["
     primary: { label: "Reply", action: "reply" } };
 }
 
-/** Everything extra one message gets beside its text. */
+/**
+ * Everything extra one message gets beside its text. The cards under a message carry no picture (Space.dc.html):
+ * the author line above names who sent the file, and the to-do's own line names who has it.
+ */
 export function deriveStreamExtras(signal: StreamSignalVM, context: StreamContext): StreamExtrasVM {
-  return { ask: streamAskCard(signal, context.workspace), attachments: signal.attachments.map((file) => streamFileCard(file, signal.author)),
-    todo: streamTodoCard(signal.about, context.todos) };
+  const todo = streamTodoCard(signal.about, context.todos);
+  return { ask: streamAskCard(signal, context.workspace), attachments: signal.attachments.map((file) => streamFileCard(file)),
+    todo: todo && { ...todo, who: null } };
 }
 
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
