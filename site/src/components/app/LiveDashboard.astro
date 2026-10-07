@@ -401,11 +401,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 Other; it carries data-agent-owner-self, so it opens AgentConnect exactly as the
                 "I do" choice did. Inviting a person is the picker's footer link, which carries
                 data-agent-owner-teammate and opens the person invite as before. */}
+            {/* Add-Agent.dc.html has one way back: the picker's own breadcrumb, which sends agent-host-home. */}
             <section class="dashboard__connect-view dashboard__choice-view dashboard__host-view" data-channel-view="agent-choice" hidden>
-              <button class="dashboard__back-button" type="button" data-close-agent-choice>
-                <span aria-hidden="true">←</span>
-                Back to the channel
-              </button>
               <AgentHostPicker audience="setter" class="dashboard__host-picker" />
             </section>
 
@@ -4485,6 +4482,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--agent", homeRoute.view === "agent");
       frame?.classList.toggle("hm-frame--people", homeRoute.view === "people");
       frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
+      frame?.classList.toggle("hm-frame--add-agent", homeRoute.view === "add-agent");
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
@@ -10477,7 +10475,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       event.preventDefault(); const selection = peopleDialogState.selected; peopleDialogState.selected = null;
       renderDialogRoster(); (document.getElementById(`pd-${selection.type}-${selection.id}`) ?? one<HTMLElement>("#pd-page-title"))?.focus({ preventScroll: true });
     });
-    one<HTMLButtonElement>("[data-close-agent-choice]")?.addEventListener("click", returnToChannel);
     one<HTMLButtonElement>("[data-agent-owner-self]")?.addEventListener("click", openConnect);
     one<HTMLButtonElement>("[data-agent-owner-teammate]")?.addEventListener(
       "click",
@@ -16229,8 +16226,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   @media (max-width: 52rem) {
     .dashboard__setup,
-    .dashboard__objects-view,
-    .dashboard__host-view {
+    .dashboard__objects-view {
       padding-block-start: calc(var(--feed-band-height, 3.25rem) + var(--s-2));
     }
   }

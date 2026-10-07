@@ -43,6 +43,17 @@
 @media (width <= 52rem) {
   .hm-frame.hm-frame--todo :is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
 }
+/* Add an agent (Add-Agent.dc.html) is a page of its own inside the channel: no stream head or filter row at any width,
+   no side column on desktop, and on a phone no top bar, section nav or account door. The picker's breadcrumb is the
+   way back. Scoped to the route AND the view, so a later route never inherits a stale channel view. */
+live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent :is(.hm-frame__channel > header, .dashboard__feed-toolbar) { display: none; }
+@media (width > 52rem) {
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent { grid-template-columns: 15.5rem minmax(0, 1fr); }
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame.hm-frame.hm-frame.hm-frame--add-agent > .hm-frame__side { display: none; }
+}
+@media (width <= 52rem) {
+  live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent :is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
+}
 @media (width > 52rem) {
   .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
 }
