@@ -1100,6 +1100,8 @@ interface UnproducedRead {
   offset: number;
 }
 
+// Defaulted expansions (${NAME-default} or ${NAME:-default}) are optional inputs,
+// unlike mandatory ${NAME:?reason} reads. No name-specific exemption is needed.
 const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):\?[^}]*\}/g;
 const UNRESOLVED_INPUT = /<(?:(?:approved|agreed|next-approved|sha256-from|space-separated|newline-separated|edge\|stack|yes-or-no)[^>]*|sha)>/g;
 const PLAN_FILE_INPUT = /(?:\/home\/commonswarm\/migration-direct\.env|(?:\$[A-Z_]+\/)?GO\.txt|(?:\$[A-Z_]+\/)?(?:human-session\.json|hm37-open-ack-control\.ts|hm37-open-ack-deno\.json|oauth-image\.id)|(?:\$[A-Z_]+\/)?gate-evidence\.txt|(?:\$[A-Z_]+\/)?site\/\.env|(?:\$[A-Z_]+\/)?compose\.override\.yaml)/g;
@@ -5062,6 +5064,8 @@ test("stubs do not return synthetic whole-step success", () => {
 test("current plans report only undeclared operator inputs as UNPRODUCED", (t) => {
   const report = unproducedReport();
   assert.equal(new Set(report).size, report.length);
+  assert.ok(!report.some((line) => line.includes("UNPRODUCED NO_MIGRATIONS read by ")),
+    "historical plans may omit the optional migration mode");
   for (const item of [PREP, HM37, HM37B, RUNBOOK, SITE].flatMap(promptInputs)) {
     assert.ok(!report.some((line) => line.includes(`UNPRODUCED ${item.name} read by `)),
       `declared prompt input was reported as unproduced: ${item.plan}:${item.name}`);
@@ -5070,6 +5074,16 @@ test("current plans report only undeclared operator inputs as UNPRODUCED", (t) =
     assert.match(line, /^UNPRODUCED .+ read by .+ at .+:\d+ \[run=.+ plan=(?:prep|hm37|hm37b|runbook|site)\]$/);
     t.diagnostic(line);
   }
+});
+
+test("controls: producer analysis accepts defaulted inputs and still reports mandatory reads", () => {
+  const block = planBlock(RUNBOOK, "runbook-03");
+  for (const expansion of ["${UNDECLARED_RELEASE_MODE-no}", "${UNDECLARED_RELEASE_MODE:-no}"]) {
+    assert.deepEqual(discoverUnproducedReads([{ ...block, source: `: "${expansion}"\n` }]), []);
+  }
+  const mandatory = discoverUnproducedReads([{ ...block,
+    source: ': "${UNDECLARED_RELEASE_MODE:?named release mode required}"\n' }]);
+  assert.deepEqual(mandatory.map((read) => read.what), ["UNDECLARED_RELEASE_MODE"]);
 });
 
 test("controls: pre-revision plans still report their audited UNPRODUCED items", () => {
@@ -5525,7 +5539,7 @@ test("section 1: stack-only window reaches runbook-05 without migration or edge 
   });
 });
 
-test("controls: section 1 rejects missing or contradictory no-migrations inputs", { skip: SECTION1_BOX_ONLY }, () => {
+test("controls: section 1 defaults absent migration mode to no and rejects contradictory inputs", { skip: SECTION1_BOX_ONLY }, () => {
   section1Window("stack", (fixture, _evidence, inputs, writeInputs) => {
     const block = planBlock(RUNBOOK, "runbook-03");
     const execute = () => executeWholeBlock(block, fixture, {
@@ -5534,8 +5548,8 @@ test("controls: section 1 rejects missing or contradictory no-migrations inputs"
     assert.equal(execute().result, "passed"); // Same boundary as every negative control below.
     const manifestBefore = readFileSync(join(PROOF_DIR, "copy-back.list"));
     const variants: Array<[string, Record<string, string>, RegExp]> = [
-      ["missing explicit input", {}, /NO_MIGRATIONS: resolved item input missing/],
-      ["empty explicit input", { NO_MIGRATIONS: "" }, /NO_MIGRATIONS: resolved item input missing/],
+      ["absent mode with empty lists", {}, /test -n "\$MIGRATION_VERSIONS"/],
+      ["empty explicit input", { NO_MIGRATIONS: "" }, /: false$/m],
       ["invalid explicit input", { NO_MIGRATIONS: "maybe" }, /: false$/m],
       ["empty lists with no", { NO_MIGRATIONS: "no" }, /test -n "\$MIGRATION_VERSIONS"/],
       ["empty functional list with no", { NO_MIGRATIONS: "no", MIGRATION_VERSIONS: "20260928000004" }, /test -n "\$FUNCTIONAL_VERSIONS"/],
@@ -5550,7 +5564,7 @@ test("controls: section 1 rejects missing or contradictory no-migrations inputs"
     ];
     for (const [name, overrides, failure] of variants) {
       const values = { ...inputs, ...overrides };
-      if (name === "missing explicit input") delete values.NO_MIGRATIONS;
+      if (name === "absent mode with empty lists") delete values.NO_MIGRATIONS;
       if (name === "missing migration list with yes") delete values.MIGRATION_VERSIONS;
       if (name === "missing functional list with yes") delete values.FUNCTIONAL_VERSIONS;
       writeInputs(values);
@@ -5567,9 +5581,25 @@ test("controls: section 1 rejects missing or contradictory no-migrations inputs"
       env: { NO_MIGRATIONS: "yes" }, unsetEnv: ["MIGRATION_VERSIONS", "FUNCTIONAL_VERSIONS"],
     });
     assert.equal(inherited.result, "failed", `inherited yes with missing durable input: ${inherited.stderr}`);
-    assert.match(inherited.stderr, /NO_MIGRATIONS: resolved item input missing/);
+    assert.match(inherited.stderr, /test -n "\$MIGRATION_VERSIONS"/);
     assert.doesNotMatch(inherited.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub|unbound variable/);
     assert.deepEqual(readFileSync(join(PROOF_DIR, "copy-back.list")), manifestBefore, "inherited yes overwrote the manifest");
+    const legacyMigrationInputs = { ...missingMode,
+      MIGRATION_VERSIONS: "20260928000004", FUNCTIONAL_VERSIONS: "20260928000004" };
+    writeInputs(legacyMigrationInputs);
+    const legacy = execute();
+    assert.equal(legacy.result, "passed", `absent mode with non-empty lists: ${legacy.stderr}`);
+    const legacyManifest = readFileSync(join(PROOF_DIR, "copy-back.list"));
+    const legacyNames = legacyManifest.toString().trim().split("\n");
+    for (const name of ["migration-files.txt", "migration-files.sha256", "verification-sql.sha256",
+      "20260928000004-catalog.sql", "20260928000004-functional.sql", "20260928000004-functional.txt"]) {
+      assert.ok(legacyNames.includes(name), `absent mode omitted ${name}`);
+    }
+    writeInputs({ ...legacyMigrationInputs, NO_MIGRATIONS: "no" });
+    const explicitNo = execute();
+    assert.equal(explicitNo.result, "passed", explicitNo.stderr);
+    assert.deepEqual(readFileSync(join(PROOF_DIR, "copy-back.list")), legacyManifest,
+      "absent mode and explicit no must produce the same migration manifest");
     writeInputs(inputs);
     assert.equal(execute().result, "passed");
   });
@@ -9451,13 +9481,13 @@ test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missi
     assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
     const positive = executeWholeBlock(consumer, fixture);
     // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
-    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:470). A nounset failure there
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:471). A nounset failure there
     // is a separate plan defect, after the input file and required values were read.
     // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
     if (positive.result === "failed") {
       assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
       assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
-      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:470; transfer succeeded, consumer still fails.");
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:471; transfer succeeded, consumer still fails.");
     } else {
       assert.equal(positive.result, "passed", positive.stderr);
     }

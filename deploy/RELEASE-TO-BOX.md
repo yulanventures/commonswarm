@@ -312,12 +312,13 @@ window identity, and before any database, service, timer, symlink, or Caddy
 mutation, Anvil runs `runbook-03` on the box to create the copy-back manifest.
 Set `KIND_LIST` to the same approved surfaces used by the apply block,
 list every pending migration version, and list the subset whose functional
-proof produces a `.txt` file during this window. Set `NO_MIGRATIONS=no` for a
-migration release; both version lists must be non-empty. For a stack-only image
+proof produces a `.txt` file during this window. An absent `NO_MIGRATIONS` in
+the durable inputs means `no`; both version lists must be non-empty. For a stack-only image
 release, use `KIND_LIST='stack'`, `NO_MIGRATIONS=yes`, `MIGRATION_VERSIONS=''`,
 and `FUNCTIONAL_VERSIONS=''` in the durable `item-resolved-inputs.env` on both
-hosts. Both lists must be present and empty with `yes`; a missing input, an
-invalid switch value, or a non-empty list stops the block. Its copy-back manifest
+hosts. Both lists must be present and empty with `yes`; a missing version list,
+any present switch value other than `yes` or `no`, or a non-empty list with `yes`
+stops the block. An inherited shell switch is ignored. Its copy-back manifest
 then contains no migration entries. Set the five named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
 switch, the section 8 backup-status proof, the section 9 API Caddy pair, or the
@@ -362,7 +363,7 @@ initial manifest is built only from the explicit arrays below, never from
   : "${BACKUP_STATUS_PROOF:?resolved item input missing}"
   : "${API_CADDY_PAIR:?resolved item input missing}"
   : "${MCP_CADDY_RELEASE:?resolved item input missing}"
-  : "${NO_MIGRATIONS:?resolved item input missing}"
+  NO_MIGRATIONS="${NO_MIGRATIONS-no}"
   : "${MIGRATION_VERSIONS?resolved item input missing}"
   : "${FUNCTIONAL_VERSIONS?resolved item input missing}"
   case "$NO_MIGRATIONS" in
