@@ -219,6 +219,19 @@ expect_fail() { # label script pattern
 q1() { pgx -Atq -v ON_ERROR_STOP=1 -c "$1" 2>"$PSQL_LOG"; }
 state() { q1 "SELECT admin_issuance_enabled::text||' gen='||release_generation||' measured='||coalesce(measured_generation::text,'null')||' invalidated='||(invalidated_at IS NOT NULL)::text FROM commonswarm_oauth.admin_cutover_state WHERE singleton;"; }
 timer_active() { test "$(cat "$W6R/timer")" = active; }
+edge_oauth_membership() {
+  q1 "SELECT count(*) FROM pg_auth_members WHERE roleid='commonswarm_oauth_runtime'::regrole AND member='commonswarm_edge'::regrole;"
+}
+w6_edge_grant() { # proof_dir
+  test -f "$T/blocks/w6-edge-grant.sh" || return 0
+  say "EMUL ai-w6-edge-oauth-runtime-grant: live edge-login proof not run (docker SET LOCAL ROLE as commonswarm_edge is not modelled); catalog GRANT, refusals and readback ran"
+  PROOF_DIR=$1 WINDOW=W6 step ai-w6-edge-oauth-runtime-grant "$T/blocks/w6-edge-grant.sh"
+}
+w6_edge_revoke() { # proof_dir
+  test -f "$T/blocks/w6-edge-revoke.sh" || return 0
+  PROOF_DIR=$1 WINDOW=W6 step ai-w6-edge-oauth-runtime-revoke "$T/blocks/w6-edge-revoke.sh"
+  test "$(edge_oauth_membership)" = 0 || die ai-w6-edge-oauth-runtime-revoke 'zero membership rows expected after revoke got other'
+}
 
 # W6 ai_run: the plan's ai_run evaluates the verified block; the rehearsal evaluates the same block bytes from the
 # copy. Blocks that need ingress, compose or gates the rehearsal does not have are EMULATED and say so.
@@ -247,6 +260,15 @@ ai_run() {
     *) printf 'FAIL rehearsal ai_run: %s is not dispatched\n' "$1" >&2; return 1 ;;
   esac
 }
+# C1-37: SET grant after ai-db-session and before prepare/activation. Catalog GRANT/readback/refusals
+# run; the docker live edge-login SET LOCAL ROLE proof is not modelled (EMUL at the call site).
+if grep -q '^# step: ai-w6-edge-oauth-runtime-grant$' "$PLANC"; then
+  { x ai-w6-edge-oauth-runtime-grant lines 'test "$WINDOW" = W6' 'cat >"$PROOF_DIR/edge-oauth-runtime-live.sql"'
+    x ai-w6-edge-oauth-runtime-grant from 'printf '\''%s\n'\'' "$GRANT_PASS" >"$PROOF_DIR/edge-oauth-runtime-grant.txt"'; } >"$T/blocks/w6-edge-grant.sh"
+fi
+if grep -q '^# step: ai-w6-edge-oauth-runtime-revoke$' "$PLANC"; then
+  x ai-w6-edge-oauth-runtime-revoke block >"$T/blocks/w6-edge-revoke.sh"
+fi
 for f in "$T"/blocks/w6-*.sh; do /bin/bash -n "$f" || die w6-extract "$(basename "$f") is not valid bash"; done
 
 # ---------------- W4: issuance close, legacy fence, measurement ----------------
@@ -324,6 +346,9 @@ timer_active || die ai-edge-refresh 'recycle timer expected re-armed got inactiv
 grep -q '^systemctl stop rehearsal-edge-recycle.timer$' "$W6R/calls" || die ai-edge-refresh 'timer stop expected got none'
 say "PASS recycle-hook: hook before/after on the real row (generation $GEN_BEFORE -> $(q1 "SELECT release_generation FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")); remeasure wrote a fresh receipt; timer re-armed; state $(state)"
 INPUTS_FILE=$W6_INPUTS expect_fail ai-edge-receipt:stale-generation "$T/blocks/w6-receipt-w4.sh" 'generation/release_generation/measured_generation'
+
+# Plan order: after ai-db-session, before ai-w6-prepare / activation. Issuance is CLOSED after W4.
+w6_edge_grant "$W6_PROOF"
 
 # ---------------- W6 activation checks (DB part) and G4 ----------------
 x ai-w6-activation-checks from "test \"\$(ai_ro -Atq --command 'SELECT count(*) FROM commonswarm_ops.migration_checksum_failures();')\" = 0" >"$T/blocks/w6-activation-checks.sh"
@@ -684,10 +709,16 @@ say "PASS w6-finish-unknown-propagates: reopen committed, both closes refused; i
 printf '%s\n' 'set -euo pipefail' 'ai_run ai-w6-activation-rollback' >"$T/blocks/recover-unknown.sh"
 PROOF_DIR=$W6U_PROOF step ai-emergency-close:recover-unknown "$T/blocks/recover-unknown.sh"
 test "$(q1 "SELECT NOT admin_issuance_enabled FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-emergency-close:recover-unknown 'closed expected got other'
+# Recovered-close / rollback order: emergency-close then ai-w6-edge-oauth-runtime-revoke.
+if test -f "$W6_PROOF/edge-oauth-runtime-grant.txt"; then
+  cp "$W6_PROOF/edge-oauth-runtime-grant-attempted.txt" "$W6_PROOF/edge-oauth-runtime-grant.txt" "$W6U_PROOF/" || die ai-w6-edge-oauth-runtime-revoke 'this-window grant evidence expected copyable got missing'
+fi
+w6_edge_revoke "$W6U_PROOF"
 
 # ---------------- ruling 3: emergency close of an OPEN W6 re-arms the held timer ----------------
 # Issuance returns only through a W6 activation (new proof directory), which holds the timer; then the emergency path.
 W6E_PROOF=$T/proof-W6-emergency; mkdir -p "$W6E_PROOF" || exit 1
+w6_edge_grant "$W6E_PROOF"
 PROOF_DIR=$W6E_PROOF INPUTS_FILE=$W6K_INPUTS WINDOW=W6 step ai-w6-activation-apply:reopen-before-emergency "$T/blocks/w6-apply-head.sh"
 timer_active && die ai-w6-activation-apply 'recycle timer expected HELD stopped got active'
 test "$(q1 "$OPEN_MEASURED")" = t || die ai-w6-activation-apply 'open and measured expected got other'
@@ -695,5 +726,6 @@ printf '%s\n' 'set -euo pipefail' 'ai_run ai-w6-activation-rollback' >"$T/blocks
 PROOF_DIR=$W6E_PROOF step ai-emergency-close:activation-rollback "$T/blocks/emergency.sh"
 timer_active || die ai-emergency-close 'recycle timer expected re-armed got inactive'
 test "$(q1 "SELECT NOT admin_issuance_enabled AND invalidated_at IS NOT NULL FROM commonswarm_oauth.admin_cutover_state WHERE singleton;")" = t || die ai-emergency-close 'closed and invalidated expected got other'
+w6_edge_revoke "$W6E_PROOF"
 say "PASS emergency-close-rearms: open issuance with the timer held; the emergency path's activation rollback closed and invalidated it in one transaction and re-armed the timer; state $(state)"
 say "PASS rehearsal: W4, recycle hook, W6 activation/C1/G3/finish (both keep_open paths), W7, recycles and emergency close on the post-W2 database"

@@ -755,7 +755,8 @@ test('c1 W6 rehearsal: the sourced steps are Bash 3.2 syntax, run plan slices fr
   assert.match(source, /\. "\$REPO\/scripts\/c1-w6-rehearsal-steps\.sh"/);
   // The copy differs from the plan only by the listed prefixes, and the reverse map must restore it byte for byte.
   assert.match(w6Steps, /assert back==raw/);
-  for (const step of ['ai-w4-apply', 'ai-w4-readback', 'ai-recycle-hook', 'ai-edge-receipt', 'ai-edge-refresh', 'ai-edge-remeasure', 'ai-w6-activation-checks',
+  for (const step of ['ai-w4-apply', 'ai-w4-readback', 'ai-recycle-hook', 'ai-edge-receipt', 'ai-edge-refresh', 'ai-edge-remeasure', 'ai-w6-edge-oauth-runtime-grant',
+    'ai-w6-edge-oauth-runtime-revoke', 'ai-w6-activation-checks',
     'ai-w6-client-verification', 'ai-w6-activation-apply', 'ai-w6-activation-readback', 'ai-w6-activation-rollback', 'ai-w6-client-check', 'ai-w6-audit',
     'ai-w6-fence-readback', 'ai-w6-finish', 'ai-w7-preflight', 'ai-w7-proof', 'ai-w4-timer-recovery']) {
     assert.match(w6Steps, new RegExp(`(?:\\bx|extract "\\$PLANC") ${step} (?:block|line|lines|from)\\b`), `${step} comes from the plan copy`);
@@ -821,6 +822,8 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS psql-time-render: no plan parser reads a psql-rendered time; /m, /^PASS marker-times: every closed-issuance marker 'at' written by the hook parses with box_utc/m,
     /^PASS ai-edge-receipt:W4-measurement$/m, /^PASS ai-edge-refresh:before-W6-open$/m,
     /^PASS ai-edge-receipt:stale-generation: refused \(generation\/release_generation\/measured_generation\)$/m,
+    /^PASS ai-w6-edge-oauth-runtime-grant$/m,
+    /^EMUL ai-w6-edge-oauth-runtime-grant: live edge-login proof not run /m,
     /^PASS ai-w6-activation-checks:db-measurement-g4$/m, /^PASS ai-w6-activation-checks:g4-archive-missing: refused /m,
     /^PASS ai-w6-client-verification:digest-not-the-document: refused /m, /^PASS ai-w6-client-verification$/m, /^PASS c1-verification:idempotent: /m,
     /^PASS ai-w6-client-verification:second-active-version: refused \(another active C1 verification version\)$/m,
@@ -845,6 +848,7 @@ test('c1 W6 rehearsal: --w6 PASSES on the post-W2 database: W4 fence, recycle ho
     /^PASS recycle-lost-reopen-response: the reopen committed, its response was lost; the hook closed again and confirmed CLOSED by readback before one CLOSED marker; /m,
     /^PASS ai-w6-finish:keep-open-close-refused: refused \(FAIL ai-w6-finish: issuance state UNKNOWN after the remeasure failure \(may be OPEN\)\)$/m,
     /^PASS w6-finish-unknown-propagates: /m, /^PASS ai-emergency-close:recover-unknown$/m,
+    /^PASS ai-w6-edge-oauth-runtime-revoke$/m,
     /^PASS emergency-close-rearms: /m, /^PASS rehearsal: W4, recycle hook, W6 activation/m, /^PASS cleanup: /m]) assert.match(r.stdout, line);
   // ai-close's timer line runs after ai-w6-finish in the same shell, for both finish paths.
   assert.equal(r.stdout.match(/^PASS ai-close:timer-line after ai-w6-finish in the same shell$/gm)?.length, 2);
@@ -861,11 +865,13 @@ test('c1 W6 rehearsal: negative controls: the release-role checksum gate (plan a
   assert.match(old.stdout, /^CONTROL w6-plan-from: W4\/W6\/W7 blocks from the plan at 13512a34$/m);
   assert.match(old.stdout, /^PASS ai-edge-receipt:W4-measurement$/m);
   assert.match(old.stdout, /^FAIL ai-edge-refresh:before-W6-open: FAIL ai-edge-refresh: edge remeasure expected PASS got failure; STOP$/m);
+  assert.doesNotMatch(old.stdout, /^PASS ai-w6-edge-oauth-runtime-grant$/m);
   assert.match(old.stdout, /^PASS cleanup: /m);
   // guard_cutover_state refuses a generation bump in the same update that closes OPEN issuance.
   const fault = run(args, { PG_BIN: PG(), C1_W2_REHEARSAL_FAULT: 'one-statement-close' });
   assert.notEqual(fault.status, 0);
   assert.match(fault.stdout, /^FAULT injected: ai-recycle-hook before\/close and ai-w6-activation-rollback close and bump the generation in one update/m);
+  assert.match(fault.stdout, /^PASS ai-w6-edge-oauth-runtime-grant$/m);
   assert.match(fault.stdout, /^PASS ai-w6-activation-readback$/m);
   assert.match(fault.stdout, /^FAIL ai-w6-finish:default-closed: .*ERROR: {2}close issuance before release measurement changes/m);
   assert.match(fault.stdout, /^PASS cleanup: /m);

@@ -308,6 +308,35 @@ run_sql_file() { # label file
   say "FAIL $1: $(first_error "$PSQL_LOG")"; exit 1
 }
 
+# Production edge login (deploy/supabase-stack/migrate/prepare-target.sh:40-42,51): LOGIN INHERIT,
+# member of swarm_command/swarm_read/swarm_capability, not commonswarm_oauth_runtime until W6.
+cat >"$T/restore-edge-role.sql" <<'SQL'
+DO $edge$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'commonswarm_edge') THEN
+    CREATE ROLE commonswarm_edge LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+      INHERIT NOREPLICATION NOBYPASSRLS;
+  END IF;
+END
+$edge$;
+GRANT swarm_command, swarm_read, swarm_capability TO commonswarm_edge;
+DO $check$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_roles WHERE rolname='commonswarm_edge' AND rolcanlogin AND rolinherit
+      AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_edge attributes expected LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS';
+  END IF;
+  IF (SELECT array_agg(p.rolname::text ORDER BY p.rolname) FROM pg_auth_members m
+        JOIN pg_roles p ON p.oid=m.roleid WHERE m.member='commonswarm_edge'::regrole)
+     IS DISTINCT FROM ARRAY['swarm_capability','swarm_command','swarm_read']::text[] THEN
+    RAISE EXCEPTION 'commonswarm_edge baseline memberships expected swarm_capability,swarm_command,swarm_read and no oauth-runtime row';
+  END IF;
+END
+$check$;
+SQL
+
 if test "$MODE" = build; then
   test ! -e "$TARGET" || die build-fixture "$TARGET expected absent got present"
   mkdir -p "$TARGET" || die build-fixture 'cannot create the output directory'
@@ -324,6 +353,7 @@ if test "$MODE" = build; then
     COUNT=$((COUNT+1))
   done
   say "PASS fixture:migrations: $COUNT pre-W2 migrations applied with their ledger rows"
+  run_sql_file fixture:edge-role "$T/restore-edge-role.sql"
   "$PG_BIN/pg_dumpall" -h "$T" -p "$PORT" -U supabase_admin -r --no-role-passwords >"$TARGET/roles.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
   "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -s >"$TARGET/schema.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
   "$PG_BIN/pg_dump" -h "$T" -p "$PORT" -U supabase_admin -d postgres -a -t supabase_migrations.schema_migrations >"$TARGET/ledger.sql" 2>"$PSQL_LOG" || die fixture:dump "$(first_error "$PSQL_LOG")"
@@ -369,6 +399,7 @@ restore_stream() { # label kind file
   say "FAIL $1: $(first_error "$PSQL_LOG")"; exit 1
 }
 restore_stream restore-roles roles "$TARGET/roles.sql"
+run_sql_file restore-edge-role "$T/restore-edge-role.sql"
 if test "$LIVE_DUMP" = 1; then
   python3 "$T/dumpfilter.py" models "$TARGET/schema.sql" "$MODELS" 2>"$T/filter.err" || { say "$(head -1 "$T/filter.err" | cut -c1-300)"; exit 1; }
   restore_stream restore-schema schema "$TARGET/schema.sql"
