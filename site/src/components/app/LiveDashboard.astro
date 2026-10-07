@@ -739,6 +739,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     aria-autocomplete="list"
                     aria-haspopup="listbox"
                     aria-controls="dashboard-composer-mention-picker"
+                    aria-describedby="dashboard-composer-to-note"
                     aria-expanded="false"
                     data-composer-input
                     required
@@ -760,9 +761,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                   </button>
                 </div>
               </div>
-              {/* THE ADDRESS, always visible. The label, the chips and the delivery note sit
-                  on one row; the note is what says who is woken and who only reads. */}
-              <div class="dashboard__composer-to" data-composer-to>
+              {/* THE ADDRESS. The label, the chips and the delivery note sit on one row; the note
+                  is what says who is woken and who only reads.
+
+                  ~~"THE ADDRESS, always visible."~~ Retired 2026-10-07 by Tom's ruling 3 ("Quiet
+                  forms", home-visual RULINGS.md): the row shows only when the address is not
+                  "Everyone here" (a tag, a reply, a notice about names that could not be kept) or
+                  while a name is being chosen. At rest it is hidden, the placeholder says "Write to
+                  everyone", and the note stays the textarea's description so the delivery truth is
+                  still read out. `syncComposerToVisibility` is the one rule. */}
+              <div class="dashboard__composer-to" data-composer-to hidden>
                 <span class="dashboard__composer-to-label" id="dashboard-composer-to-label" data-composer-to-label>To:</span>
                 <div
                   class="dashboard__composer-to-chips"
@@ -772,6 +780,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 ></div>
                 <p
                   class="dashboard__composer-to-note"
+                  id="dashboard-composer-to-note"
                   data-composer-to-note
                   role="status"
                   aria-live="polite"
@@ -2885,7 +2894,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
      * workspace switch where the roster was not known yet. That work is now the pass below,
      * so what a reader sees on the row is always what the last commit decided.
      */
+    /* WHEN THE ADDRESS ROW SHOWS (Tom's ruling 3, 2026-10-07: "Quiet forms"). Only when the
+     * address is not "Everyone here" or while a name is being chosen. A reply's address is the
+     * thread, not everyone, so a reply always shows it; so does a notice about names the pass
+     * could not keep, because that is news about this message. The row is hidden, never
+     * emptied: what it says is still written by renderComposerTo and still describes the box. */
+    const syncComposerToVisibility = (): void => {
+      const row = one<HTMLElement>("[data-composer-to]");
+      if (!row) return;
+      const picker = one<HTMLElement>("[data-mention-picker]");
+      const choosing = picker !== null && !picker.hidden;
+      row.hidden = !(
+        composerIsReplying() ||
+        composerRecipients().length > 0 ||
+        composerToNotice !== "" ||
+        choosing
+      );
+    };
+
     const renderComposerTo = (): void => {
+      syncComposerToVisibility();
       const chips = one<HTMLElement>("[data-composer-to-chips]");
       const note = one<HTMLElement>("[data-composer-to-note]");
       const row = one<HTMLElement>("[data-composer-to]");
@@ -3631,6 +3659,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       input?.setAttribute("aria-expanded", "false");
       input?.removeAttribute("aria-activedescendant");
       mentionPickerIndex = 0;
+      syncComposerToVisibility();
     };
 
     const mentionSearch = (): { query: string; start: number } | null => {
@@ -3733,6 +3762,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const shell = one<HTMLElement>("[data-mention-picker-shell]");
       if (shell) shell.hidden = false;
       picker.hidden = false;
+      syncComposerToVisibility();
       const input = one<HTMLTextAreaElement>("[data-composer-input]");
       input?.setAttribute("aria-expanded", "true");
       const active = candidates[mentionPickerIndex];
@@ -13976,6 +14006,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     min-inline-size: 0;
     padding-inline: calc(var(--composer-border-width) + var(--composer-inset));
     font-size: var(--t-xs);
+  }
+
+  /* Ruling 3 (2026-10-07): hidden while the address is "Everyone here". The flex display above
+   * would otherwise beat the hidden attribute. */
+  .dashboard__composer-to[hidden] {
+    display: none;
   }
 
   .dashboard__composer-to-label {

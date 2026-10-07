@@ -19,7 +19,9 @@ type RestGeometry = {
   lineBottom: number;
   lineHeight: number;
   lineTop: number;
+  field: { bottom: number; left: number; right: number; top: number };
   send: Rect;
+  sendFieldEdgeDelta: number;
   sendInsetDelta: number;
   sendRightInset: number;
   shell: Rect;
@@ -197,13 +199,31 @@ const measurementPage = (url: URL): string | null => {
       const textLeft = inputBox.left + inputBorderLeft + inputPaddingLeft;
       const textLeftInset = textLeft - shellInnerLeft;
       const sendRightInset = shellInnerRight - sendBox.right;
+      /* THE FIELD IS WHAT THE READER SEES AS THE BOX. In the canvas form (Space.dc.html,
+         Phone-Space.dc.html) Send sits BESIDE the field, and the field is drawn by the shell's
+         ::before so both stay in one grid cell. Without that pseudo-element the field is the
+         shell itself, which is the Slack form this test was first written for. */
+      const fieldStyle = view.getComputedStyle(shell, "::before");
+      const field = fieldStyle.content !== "none" && fieldStyle.position === "absolute"
+        ? {
+          top: shellInnerTop + Number.parseFloat(fieldStyle.top),
+          right: shellInnerRight - Number.parseFloat(fieldStyle.right),
+          bottom: shellInnerBottom - Number.parseFloat(fieldStyle.bottom),
+          left: shellInnerLeft + Number.parseFloat(fieldStyle.left),
+        }
+        : { top: shellInnerTop, right: shellInnerRight, bottom: shellInnerBottom, left: shellInnerLeft };
       const rest = {
         composer: readRect(form),
         bottomTextInset,
         lineBottom,
         lineHeight,
         lineTop,
+        field,
         send: readRect(send),
+        sendFieldEdgeDelta: Math.max(
+          Math.abs(field.top - sendBox.top),
+          Math.abs(field.bottom - sendBox.bottom),
+        ),
         sendInsetDelta: Math.abs(textLeftInset - sendRightInset),
         sendRightInset,
         shell: readRect(shell),
@@ -335,6 +355,23 @@ const measure = async (
 };
 
 /**
+ * THE CEILINGS COME FROM THE SOURCE NOW (2026-10-07, home visual lane, Tom's ruling 3 "Quiet
+ * forms": the To: line shows only when the address is not "Everyone here").
+ *
+ * Rest, Space.dc.html composer: border-top 1 + padding-top 14 + the 13px label at the body's
+ * 1.45 line-height (18.85) + 6 + the 50px field + padding-bottom 22 = 111.85px, so 112. The phone
+ * (Phone-Space.dc.html: 1 + 10 + 46 + 10) is 67px, under it. Measured on this build in the lane
+ * harness: 111.85px desktop, 67px mobile. The reverted control rests at about 123.85px desktop.
+ *
+ * Two lines with a tag: the same 111.85 + 20px (the 50px field holds one 23px line; a second
+ * grows it to 70) + the To: row ruling 3 now shows for a tag (6px gap + a 23.59px chip line) =
+ * 161.44px, so 162. Measured 161.44px desktop, 113.39px mobile; the reverted control is about
+ * 166.44px desktop and 138.39px mobile, so the ceiling still separates them.
+ *
+ * ~~108 / 130~~, retired the same day: they were the 2026-09-05 build's measurements with the
+ * To: row always shown and the label absent, not anything the canvas implies.
+ *
+ * The older record, kept for its bound:
  * The composer's height ceilings, measured on this build rather than chosen. Both are just
  * above what the current bar actually is and well below the reverted control, so the pair
  * still discriminates: see the comments at each use.
@@ -345,8 +382,8 @@ const measure = async (
  * below, which is recorded with its screenshot in
  * docs/evidence/2026-09-05-composer-to/mobile-measurements.json rather than gated here.
  */
-const COMPOSER_REST_BUDGET_PX = 108;
-const COMPOSER_TWO_LINE_BUDGET_PX = 130;
+const COMPOSER_REST_BUDGET_PX = 112;
+const COMPOSER_TWO_LINE_BUDGET_PX = 162;
 
 const geometryFailures = (measurement: PolishMeasurement): string[] => {
   const failures: string[] = [];
@@ -389,8 +426,18 @@ const geometryFailures = (measurement: PolishMeasurement): string[] => {
         `${COMPOSER_REST_BUDGET_PX}px budget`,
     );
   }
-  if (measurement.rest.sendInsetDelta > 1) {
-    failures.push(`send/text inset delta ${measurement.rest.sendInsetDelta.toFixed(2)}px > 1px`);
+  /* SEND AND THE FIELD SHARE THEIR TOP AND BOTTOM EDGES (Space.dc.html: a 50px field and a 50px
+   * Send on one flex-end row; Phone-Space.dc.html: 46px and 46px). This is the alignment the
+   * canvas has, and the reverted control (a padded shell around a shorter Send) breaks it by 8px.
+   *
+   * ~~`send/text inset delta`: the text's left inset inside the shell equals Send's right inset~~,
+   * retired 2026-10-07. It described the Slack form, where Send sat INSIDE the bordered shell.
+   * In the canvas form Send sits beside the field, flush with the row's edge, so its right inset
+   * is 0 by construction while the text keeps the source's 16px padding; the only geometry that
+   * passed it was a fake 16px margin the mockup does not have. The value is still measured and
+   * logged as `sendInsetDelta`. */
+  if (measurement.rest.sendFieldEdgeDelta > 1) {
+    failures.push(`send/field edge delta ${measurement.rest.sendFieldEdgeDelta.toFixed(2)}px > 1px`);
   }
   /* Two lines of text may grow the box, but not past a third of a phone screen. Measured
    * 2026-09-05 with the To: row: 124.44px desktop, 119.38px mobile; the reverted control is
@@ -444,7 +491,7 @@ test("Slack-shaped composer geometry stays aligned in real Chrome", async () => 
         revertedFailures.some((failure) =>
           failure.includes(`over ${COMPOSER_TWO_LINE_BUDGET_PX}px`)
         ) &&
-        revertedFailures.some((failure) => failure.includes("send/text inset")) &&
+        revertedFailures.some((failure) => failure.includes("send/field edge")) &&
         revertedFailures.some((failure) => failure.includes("visible status text")),
       `geometry reversion control did not exercise every defect:\n${revertedFailures.join("\n")}`,
     );

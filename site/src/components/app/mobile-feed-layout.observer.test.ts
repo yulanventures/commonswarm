@@ -460,7 +460,20 @@ const assertDensity = (measurement: LayoutMeasurement, width: number): void => {
   }
   /* The workspace header and channel menu share this compactness budget. The mutation
    * adds height to the actual elements and must still fail the density checks. */
-  const limits = { headerMax: 125, headerMin: 110, ratioMin: 5, transcriptMin: 600 };
+  /* ~~headerMin: 110~~, retired 2026-10-07 (home visual lane). It was the 2026-09 build's own
+   * measurement, not a requirement: the floor only exists so an unrendered header cannot pass.
+   * The canvas (Space.dc.html) draws no channel head and no filter row at all; its only header is
+   * the workspace header above them, which this band does not count. A floor of 110 therefore
+   * failed the lane for moving TOWARD the mockup (CI 37680538386: 48px head + 41px filter row =
+   * 89px). The floor is now one 44px tap row, and the channel head must be present, which is the
+   * same positive control the phone rule uses. headerMax and every reading-space check stand, and
+   * the reverted fixture (a 140px head and a 96px filter row) still fails the band. */
+  const limits = { headerMax: 125, headerMin: 44, ratioMin: 5, transcriptMin: 600 };
+  assert.ok(
+    measurement.header.height > 0,
+    `${width}px density: the channel head is missing from the transcript header: ` +
+      JSON.stringify(measurement.header),
+  );
   // UI-SPEC adds a workspace header before the old stream. Debit its measured height only.
   const referenceTranscript = measurement.transcriptVisibleHeight + measurement.workspaceHeader.height;
   assert.ok(

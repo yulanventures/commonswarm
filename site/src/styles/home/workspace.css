@@ -224,8 +224,12 @@
 .hm-frame .dashboard__filter-empty { color: var(--home-ink-muted); }
 
 /* ---- Composer: "Message <workspace>" label, a 50 px field with 14 px corners, an ink Send ---- */
-.hm-frame .dashboard__composer { gap: 6px; padding: 14px 24px calc(18px + env(safe-area-inset-bottom)); background: var(--home-card); border-block-start: 1px solid var(--home-card-border); }
-.hm-frame .dashboard__composer-label { display: block; margin: 0 0 6px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; line-height: 1.4; }
+/* Space.dc.html: padding 14px 24px 22px, the 13 px label (body line-height 1.45), 6 px, the 50 px field: 112 px at rest.
+   The rows stack in source order: the base grid's numbered rows left an empty first track whose gap the source
+   does not have once the To: row is hidden (ruling 3). */
+.hm-frame .dashboard__composer { gap: 6px; padding: 14px 24px calc(22px + env(safe-area-inset-bottom)); background: var(--home-card); border-block-start: 1px solid var(--home-card-border); }
+.hm-frame .dashboard__composer > * { grid-row: auto; }
+.hm-frame .dashboard__composer-label { display: block; margin: 0 0 6px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; line-height: 1.45; }
 /* The field is drawn by ::before so Send can sit outside it while staying in the same grid cell. Send is
    5.5rem wide here and 46 px on a phone; the field's right edge, the attach button and the drop target follow it. */
 .hm-frame .dashboard__composer-input { isolation: isolate; align-items: end; gap: 10px; min-block-size: 50px; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
@@ -245,7 +249,9 @@
 .hm-frame .dashboard__composer-send-word { grid-area: 1 / 1; }
 .hm-frame .dashboard__composer-send-icon { display: none; }
 .hm-frame .dashboard__composer-send[data-state="posting"] .dashboard__composer-send-word { visibility: hidden; }
-/* The address stays visible: "To:", the chips and the delivery note, as one 13 px line under the field. */
+/* The address: "To:", the chips and the delivery note, as one 13 px line under the field. Ruling 3 (Quiet forms):
+   it shows only when the address is not "Everyone here" or while a name is being chosen. */
+.hm-frame .dashboard__composer-to[hidden] { display: none; }
 .hm-frame .dashboard__composer-to { gap: 2px 8px; padding-inline: 2px; color: var(--home-ink-muted); font-size: 13px; }
 .hm-frame .dashboard__composer-to-label { color: var(--home-ink-muted); font-weight: 700; letter-spacing: 0; }
 .hm-frame .dashboard__composer-to-note { color: var(--home-ink-muted); }
@@ -283,7 +289,7 @@
   .hm-frame .dashboard__thread-replies { gap: 10px; padding: 12px; border-radius: 14px; }
   .hm-frame .dashboard__feed-toolbar { padding-inline-start: 10px; }
 
-  .hm-frame .dashboard__composer { gap: 4px; padding: 10px 16px calc(6px + env(safe-area-inset-bottom)); }
+  .hm-frame .dashboard__composer { gap: 4px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
   .hm-frame .dashboard__composer-label { position: absolute; inline-size: 1px; block-size: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .hm-frame .dashboard__composer-input { gap: 8px; min-block-size: 46px; }
   .hm-frame .dashboard__composer-input::before { inset-inline-end: calc(46px + 8px); border-radius: 23px; }
