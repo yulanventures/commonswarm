@@ -91,6 +91,12 @@
   font-size: 14px;
 }
 
+/* Idle is measured but not drawn on the canvas: keep the pill form on the canvas with a card fill and border. */
+.hm-agent__status .hm-status[data-form="pill"][data-state="idle"] {
+  background: var(--home-card);
+  box-shadow: inset 0 0 0 1px var(--home-card-border);
+}
+
 /* On the lime pill the working dot is filled ink, so it reads as a dot and not a ring. */
 .hm-agent__status .hm-status[data-form="pill"][data-state="working"] .hm-status-shape {
   border-color: currentColor;
@@ -115,13 +121,13 @@
   min-inline-size: 0;
 }
 
+/* Canvas: 20px Bricolage 700 with the body's inherited 1.45 line-height and normal tracking. */
 .hm-agent__fix-title {
   margin: 0;
   font-family: var(--home-font-display);
   font-weight: 700;
   font-size: 20px;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
+  line-height: 1.45;
 }
 
 .hm-agent__fix .hm-notice {
@@ -219,7 +225,7 @@
   font-family: var(--home-font-display);
   font-weight: 700;
   font-size: 22px;
-  line-height: 1.25;
+  line-height: 1.45;
   letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
@@ -246,7 +252,7 @@
   font-family: var(--home-font-body);
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.45;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -308,16 +314,18 @@
   text-wrap: pretty;
 }
 
-/* Links keep a 44px target; negative block margins keep the row as dense as the canvas. */
+/* Links keep a 44px target; negative block margins keep the row as dense as the canvas. The matching
+   10px block padding keeps a wrapped (two-line) title from sliding over the meta line under it. */
 .hm-agent .hm-agent__todo-link,
 .hm-agent .hm-agent__home {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   max-inline-size: 100%;
   min-inline-size: 44px;
   min-block-size: 44px;
   margin-block: -10px;
-  padding: 0;
+  padding: 10px 0;
   border-radius: 8px;
   color: var(--home-ink);
   font: inherit;
@@ -373,8 +381,9 @@
 }
 
 .hm-agent .hm-queue-title {
+  box-sizing: border-box;
   display: inline-flex;
-  padding: 0;
+  padding: 10px 0;
   margin-block: -10px;
   font-weight: 600;
   text-decoration: underline;
@@ -394,7 +403,7 @@
 .hm-agent .hm-queue-row > .hm-actions {
   flex: 0 1 auto;
   align-items: center;
-  gap: 4px 8px;
+  gap: 6px 12px;
   margin-inline-start: auto;
 }
 
@@ -452,36 +461,66 @@
   margin-top: 2px;
 }
 
-/* Facts: where it is connected, as ruled rows. */
+/* Facts: the canvas's first aside card. A 14px introduction, a 14px/600 summary line, then 48px ruled rows
+   (16px/600 label left, 13px/700 value right). */
+.hm-agent__facts {
+  padding-block-end: 12px;
+}
+
+.hm-agent__facts-intro {
+  margin: 6px 0 0;
+  color: var(--home-ink-muted);
+  font-size: 14px;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__facts-summary {
+  margin: 10px 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
 .hm-agent__fact-list {
-  display: grid;
-  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
-  margin: 10px 0 0;
+  margin: 0;
+}
+
+.hm-agent__fact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-block-size: 48px;
+  border-block-start: 1px solid var(--home-hairline);
 }
 
 .hm-agent__fact-label,
 .hm-agent__fact-value {
   margin: 0;
-  padding: 13px 0;
-  border-block-start: 1px solid var(--home-hairline);
-  font-size: 14px;
-  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .hm-agent__fact-label {
-  padding-inline-end: 12px;
-  color: var(--home-ink-muted);
+  flex: none;
+  max-inline-size: 60%;
+  color: var(--home-ink);
+  font-weight: 600;
 }
 
 .hm-agent__fact-value {
+  min-inline-size: 0;
+  padding-block: 6px;
   color: var(--home-ink);
+  font-size: 13px;
   font-weight: 700;
   text-align: end;
 }
 
 .hm-agent__facts .hm-switch-row {
-  padding: 12px 0;
+  min-block-size: 48px;
+  padding: 6px 0;
   border-radius: 0;
   border-block-end: 0;
   border-block-start: 1px solid var(--home-hairline);
@@ -493,11 +532,17 @@
 }
 
 .hm-agent__facts .hm-switch-label {
+  font-size: 16px;
   font-weight: 600;
 }
 
 .hm-agent__facts .hm-switch-detail {
+  color: var(--home-ink-muted);
   font-size: 13px;
+}
+
+.hm-agent__facts .hm-switch-detail:empty {
+  display: none;
 }
 
 .hm-agent__facts .hm-switch-word {
@@ -505,42 +550,66 @@
   font-weight: 700;
 }
 
-/* Who can give it work: its own card; the legend is the card title. */
-.hm-agent__policy .hm-choices {
-  min-inline-size: 0;
-}
-
-.hm-agent__policy .hm-legend {
-  float: left;
-  inline-size: 100%;
-  margin: 0 0 10px;
-  padding: 0;
-  font-family: var(--home-font-display);
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-}
-
-.hm-agent__policy .hm-choice-options {
-  clear: both;
+/* Who can give it work: the current policy as 15px summary text, one underlined control to change it,
+   and a ruled callout with the 16px padlock. */
+.hm-agent__policy-summary {
+  display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.hm-agent__policy .hm-choice {
-  inline-size: 100%;
-  padding: 8px 14px;
-  border-width: 1px;
-  border-color: var(--home-card-border);
-  border-radius: 14px;
+  margin-top: 10px;
   font-size: 15px;
 }
 
-.hm-agent__policy .hm-choice:has(input:checked),
-.hm-agent__policy .hm-choice[data-selected="true"] {
-  border-color: var(--home-ink);
+.hm-agent__policy-now,
+.hm-agent__policy-offer {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__policy-now strong {
   font-weight: 700;
+}
+
+.hm-agent__policy-offer {
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
+}
+
+.hm-agent .hm-agent__policy-change {
+  display: inline-flex;
+  align-items: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  margin-block: 2px -6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--home-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: start;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__policy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--home-hairline);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent__lock {
+  flex: none;
+  margin-top: 3px;
+  color: var(--home-ink);
 }
 
 .hm-agent__policy > .hm-agent__meta,
@@ -558,8 +627,34 @@
   font-size: 15px;
 }
 
-/* Manage: an underlined text control, as the canvas's last aside line. */
+/* Manage: the canvas header's outline pill beside the status (People & agents holds keys, resume and removal). */
 .hm-agent .hm-agent__manage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  padding: 0 18px;
+  border: 1.5px solid var(--home-ink);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--home-ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.hm-agent .hm-agent__manage:hover {
+  background: var(--home-ink);
+  color: var(--home-card);
+  text-decoration: none;
+}
+
+/* Remove: the canvas's separate danger line under the aside cards. */
+.hm-agent .hm-agent__remove {
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
@@ -568,10 +663,11 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--home-ink);
+  color: var(--home-danger);
   font: inherit;
   font-size: 14px;
   font-weight: 700;
+  text-align: start;
   text-decoration: underline;
   text-underline-offset: 3px;
   cursor: pointer;
@@ -580,7 +676,7 @@
 
 .hm-agent__todo-link:hover,
 .hm-agent__home:hover,
-.hm-agent__manage:hover {
+.hm-agent__policy-change:hover {
   color: var(--home-link-hover);
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -594,13 +690,17 @@
 .hm-agent__todo-link:focus-visible,
 .hm-agent__home:focus-visible,
 .hm-agent__action:focus-visible,
-.hm-agent__manage:focus-visible {
+.hm-agent__manage:focus-visible,
+.hm-agent__policy-change:focus-visible,
+.hm-agent__remove:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
 .hm-agent__action,
 .hm-agent__manage,
+.hm-agent__policy-change,
+.hm-agent__remove,
 .hm-agent__todo-link,
 .hm-agent__home {
   transition: color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard);
@@ -609,6 +709,8 @@
 @media (prefers-reduced-motion: reduce) {
   .hm-agent__action,
   .hm-agent__manage,
+  .hm-agent__policy-change,
+  .hm-agent__remove,
   .hm-agent__todo-link,
   .hm-agent__home {
     transition: none;

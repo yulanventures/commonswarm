@@ -1,6 +1,5 @@
 import {
   agentOrb,
-  choiceChips,
   notice,
   queueRow,
   statusLine,
@@ -20,10 +19,14 @@ import {
   disconnectedBanner,
   doneRecentlyLimit,
   emptyLine,
+  factsIntro,
   fixActionLabel,
   fixControlAllowed,
   footerNote,
+  lastActiveLine,
   lineTitle,
+  policyChangeLabel,
+  removeLabel,
   steeringMay,
   waitingLine,
 } from "./home-agent-copy";
@@ -77,6 +80,8 @@ export interface AgentActivityVM {
 
 export interface AgentPageMay {
   steer: boolean;
+  /** The viewer may remove this agent from the workspace (people dialog mayManage). */
+  remove?: boolean;
 }
 
 export interface AgentNotFoundVM {
@@ -115,6 +120,24 @@ export interface AgentPageCallbacks {
   onQueueAction?: (action: QueueAction, row: QueueRowVM) => void;
   onFix?: (action: NonNullable<AgentStateVM["fix"]["action"]>, agent: AgentVM) => void;
   onListsToggle?: (row: SwitchRowVM) => void;
+  /** Opens the existing removal confirmation; the danger line shows only when this is wired and may.remove is true. */
+  onRemove?: (agent: AgentVM) => void;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** The canvas's 16px padlock, drawn in currentColor; decorative. */
+function lockIcon(doc: Document): SVGSVGElement {
+  const svg = doc.createElementNS(SVG_NS, "svg");
+  for (const [name, value] of [["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"], ["stroke", "currentColor"],
+    ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
+  svg.setAttribute("class", "hm-agent__lock");
+  const body = doc.createElementNS(SVG_NS, "rect");
+  for (const [name, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) body.setAttribute(name, value);
+  const shackle = doc.createElementNS(SVG_NS, "path");
+  shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
+  svg.append(body, shackle);
+  return svg;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -171,9 +194,11 @@ function notFoundPage(doc: Document, vm: AgentNotFoundVM): HTMLElement {
 }
 
 function appendFact(doc: Document, list: HTMLDListElement, label: string, value: string, hook: string) {
+  const row = el(doc, "div", "hm-agent__fact");
   const term = el(doc, "dt", "hm-agent__fact-label", label);
   term.dataset.hmFact = hook;
-  list.append(term, el(doc, "dd", "hm-agent__fact-value", value));
+  row.append(term, el(doc, "dd", "hm-agent__fact-value", value));
+  list.append(row);
 }
 
 function todoLinkRow(doc: Document, href: string, title: string, meta: string, extra?: string) {
@@ -215,6 +240,14 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   const statusWrap = el(doc, "div", "hm-agent__status");
   // The fix is rendered once in What to do, alongside its available action.
   statusWrap.append(statusLine(doc, { ...agent.state, attention: false }, { form: "pill" }));
+  // Keys, resume and removal live in People & agents: the header's outline action opens it.
+  if (canAct) {
+    const manage = actionButton(doc, AGENT_COPY.manage, "hm-agent__manage", () => {
+      callbacks.onManage?.(agent);
+    });
+    manage.dataset.hmManage = "";
+    statusWrap.append(manage);
+  }
   header.append(who, statusWrap);
   page.append(header);
 
@@ -360,11 +393,21 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   facts.dataset.hmFacts = "";
   facts.setAttribute("aria-labelledby", "hm-agent-facts");
   facts.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.facts, "hm-agent-facts"));
-  const list = el(doc, "dl", "hm-agent__fact-list");
-  if (vm.facts.model) appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
-  appendFact(doc, list, AGENT_COPY.receiveFact, vm.facts.receive, "receive");
-  appendFact(doc, list, AGENT_COPY.lastActive, vm.facts.lastActive, "last-active");
-  facts.append(list);
+  facts.append(el(doc, "p", "hm-agent__facts-intro", factsIntro(agent.nestedLabel, vm.workspaceName)));
+  // The connection summary (the canvas's 14px/600 line): how it gets messages, then when it was last active.
+  const summary = el(doc, "p", "hm-agent__facts-summary");
+  // vm.receive is the full sentence (facts.receive shortens an unknown to "Not reported").
+  const received = el(doc, "span", "", vm.receive);
+  received.dataset.hmFact = "receive";
+  const last = el(doc, "span", "", lastActiveLine(vm.facts.lastActive));
+  last.dataset.hmFact = "last-active";
+  summary.append(received, " ", last);
+  facts.append(summary);
+  if (vm.facts.model) {
+    const list = el(doc, "dl", "hm-agent__fact-list");
+    appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
+    facts.append(list);
+  }
   if (canAct && agent.yours && vm.facts.listsAndDocs) {
     const lists = el(doc, "div", "hm-agent__lists");
     lists.dataset.hmLists = "";
@@ -379,11 +422,30 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
 
   let receiptHome: HTMLElement = facts;
   if (agent.yours && vm.workPolicy) {
+    // The current policy as plain summary text; one secondary control switches it.
+    const current = vm.workPolicy;
     const policyCard = el(doc, "section", "hm-agent__policy");
-    policyCard.dataset.hmPolicy = "";
-    const policy = { name: `hm-work-policy-${agent.id}`, legend: "Who can give it work",
-      value: vm.workPolicy, options: [{ value: "owner" as const, label: "Only you" }, { value: "anyone" as const, label: `Anyone in ${vm.workspaceName}` }], sample: vm.sample };
-    policyCard.append(choiceChips(doc, policy, value => { if (value === "owner" || value === "anyone") callbacks.onWorkPolicy?.(value); }));
+    policyCard.dataset.hmPolicy = current;
+    policyCard.setAttribute("aria-labelledby", "hm-agent-policy");
+    policyCard.append(heading(doc, "h2", "hm-agent__h2", AGENT_COPY.policyTitle, "hm-agent-policy"));
+    const summary = el(doc, "div", "hm-agent__policy-summary");
+    const now = el(doc, "p", "hm-agent__policy-now");
+    now.dataset.hmPolicyNow = "";
+    now.append(el(doc, "strong", "", current === "owner" ? AGENT_COPY.policyOwner : AGENT_COPY.policyAnyone), ` in ${vm.workspaceName}`);
+    summary.append(now);
+    if (current === "owner") summary.append(el(doc, "p", "hm-agent__policy-offer", AGENT_COPY.policyOffer));
+    policyCard.append(summary);
+    if (canAct && callbacks.onWorkPolicy) {
+      const next = current === "owner" ? "anyone" : "owner";
+      const change = actionButton(doc, policyChangeLabel(next), "hm-agent__policy-change", () => {
+        callbacks.onWorkPolicy?.(next);
+      });
+      change.dataset.hmPolicyChange = next;
+      policyCard.append(change);
+    }
+    const lock = el(doc, "p", "hm-agent__policy-note");
+    lock.append(lockIcon(doc), el(doc, "span", "", AGENT_COPY.policyLock));
+    policyCard.append(lock);
     aside.append(policyCard);
     receiptHome = policyCard;
   }
@@ -404,12 +466,12 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     aside.append(activity);
   }
 
-  if (canAct) {
-    const manage = actionButton(doc, AGENT_COPY.manage, "hm-agent__manage", () => {
-      callbacks.onManage?.(agent);
+  if (canAct && vm.may.remove && callbacks.onRemove) {
+    const remove = actionButton(doc, removeLabel(agent.nestedLabel, vm.workspaceName), "hm-agent__remove", () => {
+      callbacks.onRemove?.(agent);
     });
-    manage.dataset.hmManage = "";
-    aside.append(manage);
+    remove.dataset.hmRemove = "";
+    aside.append(remove);
   }
 
   body.append(line, aside);

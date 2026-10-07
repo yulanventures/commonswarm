@@ -6,14 +6,18 @@ import {
   disconnectedBanner,
   doneRecentlyLimit,
   emptyLine,
+  factsIntro,
   fixActionLabel,
   fixControlAllowed,
   footerNote,
+  lastActiveLine,
   lineTitle,
   notYetNoteGate,
   notYetTimeGate,
   notYetTodoGate,
   ownershipLine,
+  policyChangeLabel,
+  removeLabel,
   setTimeCopy,
   steeringMay,
   waitingLine,
@@ -128,7 +132,24 @@ test("agent view copy stays in plain words", () => {
     waitingLine(3),
     setTimeCopy("Claude", "9:00 pm"),
     notYetTodoGate("Get quotes", "Claude"),
+    factsIntro("Claude", "Home"),
+    lastActiveLine("3 hours ago"),
+    policyChangeLabel("owner"),
+    policyChangeLabel("anyone"),
+    removeLabel("Claude", "Home"),
     ...Object.values(AGENT_COPY),
   ];
   for (const sample of samples) assert.doesNotMatch(sample, BANNED);
+});
+
+test("Facts, work policy and removal copy name the workspace and the measured values only", () => {
+  assert.equal(factsIntro("Claude", "Home"), "How Claude connects to Home and what it may use here.");
+  assert.equal(lastActiveLine("3 hours ago"), "Last active: 3 hours ago.");
+  assert.equal(lastActiveLine("Not reported"), "Last active: Not reported.");
+  assert.equal(policyChangeLabel("owner"), "Change to only you");
+  assert.equal(policyChangeLabel("anyone"), "Change to anyone in the workspace");
+  assert.equal(removeLabel("Claude", "Home"), "Remove Claude from Home");
+  // Removal ends access to one workspace (the people dialog confirmation), never the whole product.
+  assert.doesNotMatch(removeLabel("Claude", "Home"), /CommonSwarm/u);
+  assert.doesNotMatch(AGENT_COPY.policyLock, /\b(?:see|sees|visible)\b/iu);
 });
