@@ -699,6 +699,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 </button>
               </div>
               <div class="dashboard__composer-box">
+                {/* The visible name of the box (Space.dc.html "Message Home"). renderHomeShell writes
+                    the workspace name into it and into the textarea's accessible name together. */}
+                <label class="dashboard__composer-label" for="dashboard-composer-input" data-composer-label>Message</label>
                 <div class="dashboard__mention-picker" data-mention-picker-shell hidden>
                 <div
                   id="dashboard-composer-mention-picker"
@@ -727,6 +730,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     </svg>
                   </button>
                   <textarea
+                    id="dashboard-composer-input"
                     rows="1"
                     maxlength={SIGNAL_BODY_MAX}
                     placeholder="Write to everyone, or type @ to tag a person or an agent"
@@ -751,6 +755,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                         <path d="m5 12 7-7 7 7M12 5v14"></path>
                       </svg>
                     </span>
+                    <span class="dashboard__composer-send-word" aria-hidden="true">Send</span>
                     <span class="dashboard__composer-send-progress" aria-hidden="true"></span>
                   </button>
                 </div>
@@ -4035,8 +4040,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         ...files.filter(file => !file.tombstonedAt && !objectsRead.files.some(object => object.id === file.fileId)).map(file => ({ kind: "file" as const, id: file.fileId, title: file.name,
           href: routeHref({ view: "files", workspaceId: workspace.id }), meta: formatAttachmentSize(file.sizeBytes), who: homeParty({ kind: file.uploadedByKind === "agent" ? "agent" : "user", id: file.uploadedBy }, ctx.people) }))] } : objectsRead;
       const vm = { sample: sampleMode, workspaceName: workspace.name,
-        todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => ({ id: todo.id, title: todo.title, href: homeTodoCard(todo, ctx.now).href,
-          state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }) })) : [],
+        todos: homeTodosAvailable() ? { items: homeTodosState === "ready" ? models.map(todo => { const card = homeTodoCard(todo, ctx.now); return { id: todo.id, title: todo.title, href: card.href,
+          state: todo.state, mayComplete: todo.may.complete, subline: todoSubline(todo, { now: ctx.now }), who: card.who }; }) : [],
           allHref: routeHref({ view: "todos", workspaceId: workspace.id }), canAdd: homeTodosState === "ready" && ctx.editor,
           notice: homeTodosState === "ready" ? undefined : homeTodoReceipt } : null,
         objects, sharedAgents: householdConnectionsReadState !== "succeeded" ? [] : ctx.people.groups.flatMap(group => group.agents).filter(agent => agent.yours).flatMap(agent => {
@@ -4299,6 +4304,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           lists: routeHref({ view: "lists", workspaceId: workspace.id }), files: routeHref({ view: "files", workspaceId: workspace.id }),
           wiki: routeHref({ view: "wiki", workspaceId: workspace.id }), workspaces: routeHref({ view: "catchup" }) },
         menu: { settings: true, adminAccess: true } };
+      const composerName = `Message ${workspace.name}`;
+      const composerLabel = one<HTMLElement>("[data-composer-label]");
+      if (composerLabel) composerLabel.textContent = composerName;
+      one<HTMLTextAreaElement>("[data-composer-input]")?.setAttribute("aria-label", composerName);
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) return;
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
@@ -4412,6 +4421,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (channelMenu) channelMenu.hidden = homeRoute.view !== "chat";
       const frame = one<HTMLElement>(".hm-frame");
       frame?.classList.toggle("hm-frame--catchup", home);
+      frame?.classList.toggle("hm-frame--agent", homeRoute.view === "agent");
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {
@@ -5513,6 +5523,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const fixes = homeAgentFixCards(homePeople, streamWorkspace);
       for (const fix of fixes) {
         const row = document.createElement("li");
+        row.className = "dashboard__feed-fix";
         const card = { ...fix, sample: sampleMode };
         row.append(needsYouCard(document, card, () => {})); list.append(row);
       }
@@ -5634,6 +5645,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         identityBadge.textContent = signal.fromKind === "user" ? "PERSON" : "AGENT";
         const target = document.createElement("span");
         target.className = "dashboard__message-target";
+        /* The address decides how loud the row's target is (Space.dc.html): a message for an
+           agent is a handoff and wears the lime pill, a message for one person is a quiet name,
+           and a message to everyone says so to a screen reader only. The words are unchanged. */
+        target.dataset.targetKind = signal.toAgent !== null ? "agent" : signal.to !== null ? "person" : "everyone";
         target.append("→ ");
         if (signal.toAgent !== null && targetAgent) {
           target.append(entityControl(
@@ -5673,6 +5688,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         } else {
           operator.textContent = signal.fromKind === "user" ? "Workspace member" : "AI agent";
         }
+        /* A handoff names itself beside its target; the target keeps its own text. */
+        let addressed: HTMLElement = target;
+        if (signal.toAgent !== null) {
+          addressed = document.createElement("span");
+          addressed.className = "dashboard__message-handoff";
+          const word = document.createElement("span");
+          word.className = "dashboard__message-handoff-word";
+          word.textContent = "Handoff";
+          addressed.append(word, " ", target);
+        }
         const badge = document.createElement("span");
         badge.className = `dashboard__message-kind dashboard__message-kind--${signal.kind}`;
         badge.textContent = kindLabel(signal.kind);
@@ -5696,16 +5721,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           place.textContent = channelLabel(rowChannel.slug);
           place.title = `Open ${channelLabel(rowChannel.slug)}`;
           place.addEventListener("click", () => selectChannel(rowChannel.channelId));
-          meta.append(author, identityBadge, target, operator, badge, place, time);
+          meta.append(author, identityBadge, addressed, operator, badge, place, time);
         } else {
-          meta.append(author, identityBadge, target, operator, badge, time);
+          meta.append(author, identityBadge, addressed, operator, badge, time);
         }
         const streamSignal: StreamSignalVM | null = homeAuthor ? { id: signal.id, kind: signal.kind, body: signal.body, about: signal.about, createdAt: signal.createdAt, when: formatted.relative,
           author: homeAuthor, addressedToViewer: signalIsDirectToViewer(signal, viewerId), answered: homeAskAnswered(signal.id, signals, viewerId, [...agents.filter(agent => agent.ownerUserId === viewerId).map(agent => agent.principalId), ...Array.from(removedAgentOwners).filter(([, ownerId]) => ownerId === viewerId).map(([id]) => id)]),
           attachments: (signal.attachments ?? []).map(file => ({ fileId: file.file_id, versionN: file.version_n, name: file.name, contentType: file.content_type, sizeBytes: file.size_bytes,
             href: routeHref({ view: "files", workspaceId: activeWorkspaceId }) })) } : null;
         if (streamSignal) {
-          const authorLine = buildAuthorLine(document, streamSignal);
+          const authorLine = buildAuthorLine(document, streamSignal, isReply ? 28 : 36);
           const mark = authorLine.firstElementChild; if (mark instanceof HTMLElement) { avatar = mark; avatar.classList.add("dashboard__message-avatar"); }
           author.remove(); time.remove();
           const authorLabel = authorLine.querySelector<HTMLElement>(".hm-author__name");
@@ -16167,6 +16192,37 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
     .dashboard__approval > .dashboard__button {
       justify-self: start;
+    }
+  }
+
+  /* HOME CANVAS, the custom properties the home stylesheets may not set (home-tokens.observer.test.ts
+     bans local properties there; styles/home/workspace.css draws everything else). The direct-to-you row
+     ends its arrival animation on --message-row-background, so the tint lives in the property, not only in
+     `background`. The stream reads at 1.45 (Space.dc.html) and the collapse height follows --lh-base, so
+     the fold still cuts on a line boundary. */
+  .hm-frame .dashboard__message--direct-to-viewer {
+    --message-row-background: var(--home-lime-soft);
+  }
+
+  .hm-frame .dashboard__message--reply {
+    --message-row-background: transparent;
+  }
+
+  .hm-frame .dashboard__message-markdown {
+    --lh-base: 1.45;
+  }
+
+  .hm-frame .hm-needs-you .dashboard__message-markdown {
+    --lh-base: 1.35;
+  }
+
+  @media (width <= 52rem) {
+    .hm-frame .dashboard__message-markdown {
+      --lh-base: 1.4;
+    }
+
+    .hm-frame .hm-needs-you .dashboard__message-markdown {
+      --lh-base: 1.3;
     }
   }
 </style>

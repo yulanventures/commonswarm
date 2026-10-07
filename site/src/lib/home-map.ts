@@ -272,7 +272,7 @@ export function mapCatchUp(data: readonly CatchUpData[], _viewerId: string | nul
       : people.groups.find(group => group.person.id === signal.from)?.person;
     return { id: signal.id, authorLabel: author ? "label" in author ? author.label : author.name : "Workspace member",
       workspace: { name: entry.workspace.name, href: routeHref({ view: "chat", workspaceId: entry.workspace.id, ...(signal.channelId ? { channelId: signal.channelId } : {}), messageId: signal.id }) },
-      excerpt: signal.body.slice(0, 240), when: formatWhen(signal.createdAt, now), at: Date.parse(signal.createdAt) };
+      excerpt: signal.body.slice(0, 240), when: formatWhen(signal.createdAt, now), at: Date.parse(signal.createdAt), author: author ?? null };
   })).sort((left, right) => right.at - left.at).slice(0, 8);
   const checks = data.filter(entry => entry.state !== "open");
   const checked = checks.filter(entry => entry.state === "ready").length;

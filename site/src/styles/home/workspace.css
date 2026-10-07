@@ -1,66 +1,301 @@
-/* Home UI: workspace styles (UI-SPEC.md 3.3, lane W): the right column cards and the stream decorations.
-   Site tokens only: no raw hex, no local colour variables. Every colour pair below is a token pair that
-   tokens.css already measures on --surface (cards) and --elev-0 (page), in both themes, so dark mode needs no
-   override here. Targets are 44 px or more; motion is colour only and is off under reduced motion. */
+/* Home UI: workspace styles (UI-SPEC.md 3.3, lane W), drawn to the canvas design: Space.dc.html (desktop,
+   1360) and Phone-Space.dc.html (390). --home-* tokens only, so dark mode follows tokens.css with no
+   override here. Every interactive target keeps 44 px or more unless a comment says why; motion is colour
+   only and is off under reduced motion.
 
-/* ---- Right column ---- */
-.hm-side { display: flex; flex-direction: column; gap: var(--gap-grid); min-width: 0; font-family: var(--font-sans); color: var(--text); }
-.hm-side-card { box-sizing: border-box; min-width: 0; padding: var(--pad-card-sm); background: var(--surface); color: var(--text);
-  border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
-.hm-side-card__title { margin: 0 0 var(--s-2); font-family: var(--font-display); font-size: var(--t-lg); line-height: var(--lh-lg);
-  font-weight: var(--weight-display); letter-spacing: var(--track-head); color: var(--text); overflow-wrap: anywhere; }
-.hm-side-card__body { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
-.hm-side-card__empty, .hm-side-card__line { margin: 0; font-size: var(--t-sm); line-height: var(--lh-sm); color: var(--text-muted); overflow-wrap: anywhere; }
-.hm-side-card__line { color: var(--text); }
-.hm-side-card__foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--gap-inline); }
-.hm-side-card--link { padding: var(--s-1) var(--pad-card-sm); }
+   The stream rules sit under `.hm-frame` on purpose: LiveDashboard's own sheet styles the same classes at
+   (0,1,0) and (0,2,0), and this file must win without !important and whatever the import order. */
+
+/* =============================================================================================
+   Right column (Space.dc.html <aside>): canvas behind, 20 px padding, 16 px between cards.
+   ============================================================================================= */
+.hm-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding: 20px; font-family: var(--home-font-body); font-size: 16px; line-height: 1.45; color: var(--home-ink); }
+.hm-side-card { box-sizing: border-box; min-width: 0; padding: 16px 16px 6px; background: var(--home-card); color: var(--home-ink);
+  border: 1px solid var(--home-card-border); border-radius: 18px; box-shadow: var(--home-card-shadow); }
+.hm-side-card[data-side-card="todos"] { padding: 14px 16px 8px; }
+.hm-side-card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.hm-side-card__title { margin: 0 0 6px; font-family: var(--home-font-display); font-size: 20px; line-height: 1.2;
+  font-weight: 700; letter-spacing: -0.01em; color: var(--home-ink); overflow-wrap: anywhere; }
+.hm-side-card__head > .hm-side-card__title { margin: 0; }
+.hm-side-card__body { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+.hm-side-card__empty, .hm-side-card__line { margin: 0; padding-block: 6px 10px; font-size: 14px; line-height: 1.45; color: var(--home-ink-muted); overflow-wrap: anywhere; }
+.hm-side-card__line { color: var(--home-ink); }
+.hm-side-card__line + .hm-side-card__line { padding-block-start: 0; }
+.hm-side-card__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; border-block-start: 1px solid var(--home-hairline); }
+.hm-side-card__foot > .hm-side-card__empty { padding: 0; font-size: 13px; }
+.hm-side-card[data-side-card="shared"] { padding-block-end: 8px; }
+.hm-side-card--link { padding: 0 16px; }
+.hm-side-card--link .hm-side-link { color: var(--home-ink); font-size: 15px; font-weight: 700; }
+
+/* The "+" beside "To-dos": a 44 px round door, pulled 8 px into the card edge as in the source. */
+.hm-side-add { display: inline-grid; place-items: center; flex: none; inline-size: 44px; block-size: 44px; margin-inline-end: -8px; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: var(--home-ink); cursor: pointer; }
+.hm-side-add:hover { background: var(--home-soft); }
+.hm-side-add:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 .hm-side-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; min-width: 0; }
-.hm-side-list__item { min-width: 0; padding: var(--s-1) 0; }
-.hm-side-list__item + .hm-side-list__item, .hm-todo-row + .hm-todo-row { border-top: 1px solid var(--border); }
+.hm-side-list__item { min-width: 0; padding: 0; border-block-start: 1px solid var(--home-hairline); }
 
-/* ---- To-do rows: a 44 px checkbox, then the title and its status line ---- */
-.hm-todo-row { display: flex; align-items: flex-start; gap: var(--s-1); min-width: 0; }
-.hm-todo-row__check { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 2.75rem; min-height: 2.75rem; cursor: pointer; }
+/* ---- To-do rows: 22 px box (44 px label around it), title and status line, the assignee at the end ---- */
+.hm-todo-row { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 58px; border-block-start: 1px solid var(--home-hairline); }
+.hm-todo-row__check { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 2.75rem; min-height: 2.75rem;
+  margin-inline: -11px -9px; cursor: pointer; }
 .hm-todo-row__box { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.hm-todo-row__mark { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: 1.25rem; height: 1.25rem; border-radius: var(--radius-sm);
-  border: 1.5px solid var(--border-interactive); background: var(--surface); color: var(--accent-ink); pointer-events: none; }
+.hm-todo-row__mark { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: 22px; height: 22px; border-radius: 7px;
+  border: 1.5px solid var(--home-ink); background: transparent; color: var(--home-lime); pointer-events: none; }
 .hm-todo-row__tick { opacity: 0; }
-.hm-todo-row__box:checked + .hm-todo-row__mark { background: var(--accent); border-color: var(--accent); }
+.hm-todo-row__box:checked + .hm-todo-row__mark { background: var(--home-ink); border-color: var(--home-ink); }
 .hm-todo-row__box:checked + .hm-todo-row__mark .hm-todo-row__tick { opacity: 1; }
 .hm-todo-row__box:focus-visible + .hm-todo-row__mark { box-shadow: var(--focus-ring); }
-.hm-todo-row__text { display: flex; flex: 1 1 auto; flex-direction: column; justify-content: center; gap: 0; min-width: 0; min-height: 2.75rem; padding: var(--s-1) 0; color: var(--text); text-decoration: none; border-radius: var(--radius); }
+.hm-todo-row__text { display: flex; flex: 1 1 auto; flex-direction: column; justify-content: center; gap: 0; min-width: 0; min-height: 2.75rem; padding: 6px 0;
+  color: var(--home-ink); text-decoration: none; border-radius: 10px; }
+.hm-todo-row__text:hover { color: var(--home-ink); }
 .hm-todo-row__text:hover .hm-todo-row__title { text-decoration: underline; }
 .hm-todo-row__text:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.hm-todo-row__title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: var(--t-sm); line-height: var(--lh-sm); font-weight: var(--weight-medium); }
-.hm-todo-row__sub { overflow-wrap: anywhere; font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
+.hm-todo-row__title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; font-size: 16px; line-height: 1.3; font-weight: 600; }
+.hm-todo-row__sub { overflow-wrap: anywhere; font-size: 13px; line-height: 1.4; color: var(--home-ink-muted); }
+/* The owner badge hangs 6 px past the picture (Space.dc.html margin-right: 6px). */
+.hm-todo-row__who { display: inline-flex; flex: none; margin-inline-end: 6px; }
+.hm-todo-row__who .hm-person-avatar { inline-size: 26px; block-size: 26px; font-size: 12px; }
+
+/* ---- Lists and Files rows: the frozen object card, flattened into a hairline row ---- */
+.hm-side-list .hm-object-card { min-block-size: 56px; padding: 6px 0; gap: 12px; border: 0; border-radius: 10px; background: transparent; color: var(--home-ink); }
+.hm-side-list a.hm-object-card:hover { color: var(--home-ink); }
+.hm-side-list a.hm-object-card:hover .hm-object-title { text-decoration: underline; }
+.hm-side-list .hm-object-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
+.hm-side-list .hm-object-meta { font-size: 13px; line-height: 1.4; }
+.hm-side-list .hm-object-icon { inline-size: 20px; font-size: 18px; line-height: 1; text-align: center; color: var(--home-ink); }
+/* Lists show no icon in the source, a chevron instead. The icon's name ("List") stays for a screen reader. */
+.hm-side-card[data-side-card="lists"] .hm-object-icon { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.hm-side-card[data-side-card="lists"] .hm-object-card::after { content: ""; flex: none; inline-size: 7px; block-size: 7px; margin-inline: 4px 6px;
+  border-block-start: 2px solid var(--home-ink-muted); border-inline-end: 2px solid var(--home-ink-muted); transform: rotate(45deg); }
 
 /* ---- Links and buttons in the cards ---- */
-.hm-side-link, .hm-side-button { display: inline-flex; align-items: center; box-sizing: border-box; min-width: 2.75rem; min-height: 2.75rem; padding: 0 var(--s-2); border-radius: var(--radius);
-  font: inherit; font-size: var(--t-sm); font-weight: var(--weight-medium); line-height: var(--lh-sm); text-decoration: none; cursor: pointer; }
-.hm-side-link { color: var(--accent-bright); }
-.hm-side-link:hover { text-decoration: underline; }
-.hm-side-button { border: 1px solid var(--border-interactive); background: var(--surface); color: var(--text); }
-.hm-side-button--primary { align-self: flex-start; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.hm-side-link, .hm-side-button { display: inline-flex; align-items: center; box-sizing: border-box; min-width: 2.75rem; min-height: 2.75rem; padding: 0; border-radius: 10px;
+  font: inherit; font-size: 14px; font-weight: 600; line-height: 1.3; text-decoration: none; cursor: pointer; }
+.hm-side-link { color: var(--home-ink-muted); }
+.hm-side-link:hover { color: var(--home-ink); text-decoration: underline; }
+.hm-side-button { align-self: flex-start; margin-block: 4px 10px; padding: 0 18px; border: 1.5px solid var(--home-ink); border-radius: 999px; background: transparent; color: var(--home-ink); font-weight: 700; }
+.hm-side-button:hover { background: var(--home-soft); }
+.hm-side-button--primary { border-color: var(--home-ink); background: var(--home-ink); color: var(--home-card); }
+:is(.hm-side-button--primary):hover { background: var(--home-link-hover); }
 .hm-side-link:focus-visible, .hm-side-button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
-/* ---- Stream: day dividers ---- */
-.hm-day { display: flex; align-items: center; gap: var(--s-3); margin: var(--s-4) 0 var(--s-2); padding: 0; list-style: none; color: var(--text-muted); font-size: var(--t-xs); line-height: var(--lh-xs);
-  font-weight: var(--weight-semibold); letter-spacing: var(--track-xs); }
-.hm-day::before, .hm-day::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--border); }
-.hm-day__label { flex: none; padding: var(--s-1) var(--s-3); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface); }
+/* =============================================================================================
+   Stream (Space.dc.html <main id="stream">)
+   ============================================================================================= */
 
-/* ---- Stream: author line ---- */
-.hm-author { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-width: 0; font-size: var(--t-sm); line-height: var(--lh-sm); }
-.hm-author__name { min-width: 0; overflow-wrap: anywhere; font-weight: var(--weight-semibold); color: var(--text); }
-.hm-author__you { padding: 0 var(--s-2); border: 1px solid var(--border-interactive); border-radius: var(--radius-pill); font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
-.hm-author__when { font-size: var(--t-xs); line-height: var(--lh-xs); color: var(--text-muted); }
+/* ---- Day dividers: a centred 13 px label on a hairline ---- */
+.hm-day { display: flex; align-items: center; gap: 12px; margin: 10px 24px; padding: 0; list-style: none; color: var(--home-ink-muted); font-size: 13px; line-height: 1.4;
+  font-weight: 700; letter-spacing: 0; }
+.hm-day::before, .hm-day::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--home-card-border); }
+.hm-day__label { flex: none; padding: 0; border: 0; background: transparent; }
 
-/* ---- Stream: cards under a message ---- */
-.hm-extras { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; margin-top: var(--s-2); }
-.hm-extras__files { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+/* ---- Author line: name 700 and time 13 px on one baseline ---- */
+.hm-author { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: 16px; line-height: 1.45; }
+.hm-author__name { min-width: 0; overflow-wrap: anywhere; font-weight: 700; color: var(--home-ink); }
+.hm-author__you { padding: 0 8px; border: 1px solid var(--home-card-border); border-radius: 999px; font-size: 12px; line-height: 1.5; color: var(--home-ink-muted); }
+.hm-author__when { font-size: 13px; line-height: 1.4; color: var(--home-ink-muted); }
+
+/* ---- Cards under a message: soft surface, 14 px radius, at most 440 px ---- */
+.hm-extras { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin-top: 8px; }
+.hm-extras__files { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .hm-extras__ask, .hm-extras__object { min-width: 0; }
+.hm-extras .hm-object-card { box-sizing: border-box; max-inline-size: 440px; min-block-size: 56px; padding: 6px 14px; gap: 12px; border-radius: 14px; background: var(--home-soft); }
+.hm-extras .hm-object-title { font-size: 16px; font-weight: 600; line-height: 1.3; }
+.hm-extras .hm-object-meta { font-size: 13px; line-height: 1.4; }
+.hm-extras .hm-object-icon { inline-size: 20px; font-size: 18px; line-height: 1; text-align: center; }
+/* An ask for the viewer is the lime card itself; the row already shows who asked, so the card drops its picture. */
+.hm-extras__ask .hm-needs-you { box-sizing: border-box; max-inline-size: 520px; padding: 16px; border-radius: 16px; }
+.hm-extras__ask .hm-needs-you > :is(.hm-agent-orb, .hm-person-avatar) { display: none; }
+.hm-extras__ask .hm-eyebrow { font-size: 13px; font-weight: 700; }
+.hm-extras__ask .hm-needs-copy { flex-basis: 100%; }
+
+/* The stream column is the card surface in both themes (the dashboard's own --surface is the old palette). */
+.hm-frame .dashboard__channel { background: var(--home-card); color: var(--home-ink); }
+
+/* ---- Rows: 36 px picture, 12 px gap, 20 px between rows, no rules between them ---- */
+.hm-frame .dashboard__feed { padding-block: 6px 12px; }
+.hm-frame .dashboard__feed-fix { padding: 12px 24px 6px; list-style: none; }
+.hm-frame .dashboard__message { grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 10px 24px; color: var(--home-ink); }
+.hm-frame .dashboard__message:hover { background: var(--home-soft); }
+.hm-frame .dashboard__message + .dashboard__message { border-block-start: 0; }
+/* A message addressed to the viewer keeps its measured tint, now the pale lime of the canvas. The row's
+   --message-row-background (which the arrival animation ends on) is set to match in LiveDashboard's sheet,
+   because a home stylesheet may not set custom properties. */
+.hm-frame .dashboard__message--direct-to-viewer, .hm-frame :is(.dashboard__message--direct-to-viewer):hover { background: var(--home-lime-soft); }
+
+.hm-frame .dashboard__message-avatar { inline-size: 36px; block-size: 36px; font-family: var(--home-font-body); font-size: 15px; font-weight: 700; }
+/* The plain-initials fallback (an author the people read does not know). The primitives keep their own colours. */
+.hm-frame .dashboard__message-avatar:not(.hm-person-avatar, .hm-agent-orb) { color: var(--home-ink); background: var(--home-soft); border: 1.5px solid var(--home-card-border); border-radius: 50%; }
+.hm-frame .dashboard__message-avatar.hm-person-avatar { border: 0; border-radius: 50%; color: var(--home-on-person); }
+.hm-frame .dashboard__message-avatar.hm-agent-orb { border-width: 1.5px; border-style: solid; border-radius: 11px; }
+.hm-frame .dashboard__message-avatar.hm-agent-orb .hm-owner-badge { inline-size: 17px; block-size: 17px; font-size: 10px; }
+.hm-frame .dashboard__message-avatar[data-size="28"] { inline-size: 28px; block-size: 28px; font-size: 12px; }
+.hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="28"] { margin-inline-end: 4px; border-radius: 9px; }
+.hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="28"] .hm-owner-badge { inline-size: 16px; block-size: 16px; font-size: 9px; }
+.hm-frame .dashboard__message--direct-to-viewer .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime-soft); }
+
+/* Line 1: the author line and whatever of the meta still shows; then the text, the cards, and one quiet
+   line of receipt and reply. Everything but those four takes a whole line. */
+.hm-frame .dashboard__message-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-inline-size: 0; }
+.hm-frame .dashboard__message-body > :not(.hm-author, .dashboard__message-meta, .dashboard__message-about, .dashboard__message-receipt, .dashboard__message-actions) { flex: 1 0 100%; min-inline-size: 0; }
+/* "Show more" starts its own line but stays a short text control, not a full-width button. */
+.hm-frame .dashboard__message-body > .dashboard__message-toggle { flex: 1 0 100%; max-inline-size: max-content; text-align: start; }
+.hm-frame .dashboard__message-meta { flex: 0 1 auto; align-items: center; gap: 2px 8px; color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__message-meta strong { color: var(--home-ink); font-size: 16px; font-weight: 700; }
+.hm-frame .dashboard__message-meta time { margin-inline-start: 0; color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__message-entity { color: inherit; text-decoration: none; }
+.hm-frame .dashboard__message-entity:hover { color: inherit; text-decoration: underline; }
+.hm-frame .dashboard__message-entity:focus-visible { outline: none; border-radius: 4px; box-shadow: var(--focus-ring); }
+
+/* Ownership shows in the picture's owner badge and the possessive name, so the kind word, the model and
+   "operated by" line, a plain note's kind and "→ everyone" leave the screen. A screen reader still reads them. */
+.hm-frame :is(.dashboard__message-identity-badge, .dashboard__message-operator, .dashboard__message-kind--note, .dashboard__message-target[data-target-kind="everyone"]) {
+  position: absolute; inline-size: 1px; block-size: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.hm-frame .dashboard__message-kind { padding: 0; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+.hm-frame .dashboard__message-target { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+.hm-frame .dashboard__message-channel { color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__message-channel:hover { color: var(--home-ink); text-decoration: underline; }
+/* A message for an agent is a handoff: the lime pill of the source, "Handoff → <agent>". */
+.hm-frame .dashboard__message-handoff { display: inline-flex; align-items: center; gap: 0 5px; padding: 1px 9px; border-radius: 999px; background: var(--home-lime);
+  color: var(--home-lime-ink); font-size: 12px; font-weight: 700; line-height: 1.5; }
+.hm-frame .dashboard__message-handoff .dashboard__message-target { color: inherit; font-size: inherit; font-weight: inherit; }
+
+.hm-frame .dashboard__message-markdown { margin-block-start: 2px; color: var(--home-ink); font-size: 16px; line-height: var(--lh-base); text-wrap: pretty; }
+.hm-frame .dashboard__message-markdown a { color: var(--home-ink); }
+.hm-frame .dashboard__message-markdown a:hover { color: var(--home-link-hover); }
+.hm-frame .dashboard__message-markdown :not(pre) > code, .hm-frame .dashboard__message-markdown pre { color: var(--home-ink); background: var(--home-soft); border-color: var(--home-card-border); }
+/* What the message is about: a small soft tag (the receipt line may share its line), not a full-width code bar. */
+.hm-frame .dashboard__message-body > .dashboard__message-about { flex: 0 1 auto; max-inline-size: 100%; margin-block-start: 6px; padding: 1px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--home-ink-muted); background: var(--home-soft); border: 1px solid var(--home-card-border); border-radius: 999px; font-size: 12px; }
+.hm-frame .dashboard__message-markdown blockquote { color: var(--home-ink-muted); border-color: var(--home-card-border); }
+.hm-frame .dashboard__message-mentions { color: var(--home-ink); }
+.hm-frame .dashboard__mention-chip { color: var(--home-ink); background: var(--home-lime-soft); border-color: var(--home-card-border); }
+.hm-frame .dashboard__message-toggle { color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__message-toggle:hover { color: var(--home-ink); text-decoration: underline; }
+/* Inside the lime ask card the question is the card's own sentence (17 px 600 in the source). */
+.hm-frame .hm-needs-you .dashboard__message-markdown { margin-block-start: 4px; color: var(--home-lime-ink); font-size: 17px; font-weight: 600; }
+
+/* ---- The quiet line: delivery receipt and "Reply in thread", 13 px muted text, always shown ---- */
+.hm-frame .dashboard__message-receipt { flex: 0 1 auto; justify-self: start; min-inline-size: 0; margin-block-start: 4px; color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__message-receipt summary { min-block-size: 28px; gap: 4px; padding: 0 4px; margin-inline-start: -4px; background: transparent; border: 0; border-radius: 8px; font-weight: 500; }
+.hm-frame .dashboard__message-receipt summary:hover { color: var(--home-ink); background: var(--home-soft); }
+.hm-frame .dashboard__message-receipt :is(p, .dashboard__message-receipt-section) { color: var(--home-ink-muted); background: var(--home-soft); border-radius: 12px; }
+.hm-frame .dashboard__message-receipt-section h4 { color: var(--home-ink); }
+.hm-frame .dashboard__message-receipt:is([data-receipt-state="seen"], [data-receipt-state="delivered"], [data-receipt-state="working"], [data-receipt-state="done"]) { color: var(--home-ink-muted); }
+.hm-frame .dashboard__message-receipt:is([data-receipt-state="stuck"], [data-receipt-outcome="expired"]) { color: var(--home-offline-text); }
+.hm-frame .dashboard__message-receipt[data-receipt-outcome="failed_terminal"] { color: var(--home-danger); }
+.hm-frame .dashboard__message-actions { flex: 0 0 auto; gap: 8px; margin-block-start: 4px; }
+.hm-frame .dashboard__message-reply { min-block-size: 28px; padding: 0 6px; border-radius: 8px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; text-decoration: none; }
+.hm-frame .dashboard__message-reply:hover { color: var(--home-ink); background: var(--home-soft); }
+.hm-frame .dashboard__message-reply:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ---- Threads: the count is a quiet control; the replies sit in a soft panel under the message ---- */
+.hm-frame .dashboard__thread { gap: 8px; padding: 0 24px 10px calc(24px + 36px + 12px); list-style: none; }
+.hm-frame .dashboard__thread-toggle { min-block-size: 28px; padding: 0 6px; margin-inline-start: -6px; border-radius: 8px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+.hm-frame .dashboard__thread-toggle:hover, .hm-frame .dashboard__thread-toggle:focus-visible { color: var(--home-ink); background: var(--home-soft); }
+.hm-frame .dashboard__thread-replies { gap: 14px; padding: 14px 16px; border: 0; border-radius: 16px; background: var(--home-soft); }
+.hm-frame .dashboard__message--reply { grid-template-columns: 28px minmax(0, 1fr); gap: 10px; padding: 0; }
+.hm-frame :is(.dashboard__message--reply):hover { background: transparent; }
+.hm-frame .dashboard__thread-replies .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-soft); }
+.hm-frame .dashboard__thread-replies .hm-object-card { max-inline-size: 420px; background: var(--home-card); }
+
+/* ---- The channel line above the stream: one slim toolbar, quiet type ---- */
+.hm-frame .dashboard__channel-head { background: var(--home-card); border-block-end: 0; }
+.hm-frame .dashboard__channel-actions { gap: 8px; color: var(--home-ink-muted); background: transparent; backdrop-filter: none; font-size: 13px; }
+.hm-frame .dashboard__live { gap: 6px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.hm-frame .dashboard__live-dot { background: var(--home-teal); }
+.hm-frame .dashboard__update-count { color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__channel-actions .dashboard__icon-button { color: var(--home-ink-muted); background: transparent; border-color: transparent; border-radius: 50%; }
+.hm-frame .dashboard__channel-actions .dashboard__icon-button:hover { color: var(--home-ink); background: var(--home-soft); }
+.hm-frame .dashboard__feed-toolbar { min-block-size: 40px; padding-inline: 18px; background: var(--home-card); border-block-end: 1px solid var(--home-hairline); backdrop-filter: none; }
+.hm-frame .dashboard__feed-filters { gap: 2px; }
+/* 44 px tall hit areas; the visible pill is the ::after, 30 px, behind the word. */
+.hm-frame .dashboard__feed-filters button { isolation: isolate; min-block-size: 40px; padding: 0 12px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
+.hm-frame .dashboard__feed-filters button::after { inset: 5px 0; z-index: -1; block-size: auto; border-radius: 999px; background: transparent; }
+.hm-frame .dashboard__feed-filters button:hover { color: var(--home-ink); }
+.hm-frame .dashboard__feed-filters button:hover::after { background: var(--home-soft); }
+.hm-frame .dashboard__feed-filters button[aria-pressed="true"] { color: var(--home-ink); font-weight: 700; }
+.hm-frame .dashboard__feed-filters button[aria-pressed="true"]::after { background: var(--home-canvas); box-shadow: inset 0 0 0 1px var(--home-card-border); }
+.hm-frame .dashboard__feed-filters button:focus-visible { border-radius: 999px; }
+.hm-frame .dashboard__feed-more .dashboard__button { border: 1.5px solid var(--home-ink); border-radius: 999px; background: transparent; color: var(--home-ink); font-weight: 700; }
+.hm-frame .dashboard__feed-more .dashboard__button:hover { background: var(--home-soft); }
+.hm-frame .dashboard__filter-empty { color: var(--home-ink-muted); }
+
+/* ---- Composer: "Message <workspace>" label, a 50 px field with 14 px corners, an ink Send ---- */
+.hm-frame .dashboard__composer { gap: 6px; padding: 14px 24px calc(18px + env(safe-area-inset-bottom)); background: var(--home-card); border-block-start: 1px solid var(--home-card-border); }
+.hm-frame .dashboard__composer-label { display: block; margin: 0 0 6px; color: var(--home-ink-muted); font-size: 13px; font-weight: 600; line-height: 1.4; }
+/* The field is drawn by ::before so Send can sit outside it while staying in the same grid cell. Send is
+   5.5rem wide here and 46 px on a phone; the field's right edge, the attach button and the drop target follow it. */
+.hm-frame .dashboard__composer-input { isolation: isolate; align-items: end; gap: 10px; min-block-size: 50px; padding: 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.hm-frame .dashboard__composer-input::before { content: ""; position: absolute; inset: 0 calc(5.5rem + 10px) 0 0; z-index: -1; box-sizing: border-box;
+  border: 1.5px solid var(--home-field-border); border-radius: 14px; background: var(--home-field); pointer-events: none; }
+.hm-frame .dashboard__composer-input:focus-within { border-color: transparent; }
+.hm-frame .dashboard__composer-input:focus-within::before { border-color: var(--home-ink); }
+.hm-frame :is(.dashboard__composer-input--drop)::before { border-color: var(--home-ink); box-shadow: 0 0 0 3px var(--home-lime); }
+.hm-frame .dashboard__composer-attachments { margin-inline-end: calc(5.5rem + 10px); padding: 6px 6px 0; }
+.hm-frame .dashboard__composer textarea { min-block-size: 47px; padding: 12px calc(44px + 8px) 12px 16px; color: var(--home-ink); font-size: 16px; line-height: 23px; }
+.hm-frame .dashboard__composer textarea::placeholder { color: var(--home-ink-faint); }
+.hm-frame .dashboard__composer-attach { inset-inline-end: calc(5.5rem + 14px); inset-block-end: 3px; color: var(--home-ink-muted); border-radius: 10px; }
+.hm-frame .dashboard__composer-attach:hover:not(:disabled) { color: var(--home-ink); background: var(--home-soft); }
+.hm-frame .dashboard__composer-drop-target { inset: 4px calc(5.5rem + 14px) 4px 4px; color: var(--home-ink); background: var(--home-lime-soft); border-color: var(--home-ink-faint); border-radius: 10px; }
+.hm-frame .dashboard__composer-send { inline-size: 5.5rem; block-size: 50px; color: var(--home-card); background: var(--home-ink); border-radius: 14px; font: inherit; font-size: 15px; font-weight: 700; }
+.hm-frame .dashboard__composer-send:hover:not(:disabled) { background: var(--home-link-hover); }
+.hm-frame .dashboard__composer-send-word { grid-area: 1 / 1; }
+.hm-frame .dashboard__composer-send-icon { display: none; }
+.hm-frame .dashboard__composer-send[data-state="posting"] .dashboard__composer-send-word { visibility: hidden; }
+/* The address stays visible: "To:", the chips and the delivery note, as one 13 px line under the field. */
+.hm-frame .dashboard__composer-to { gap: 2px 8px; padding-inline: 2px; color: var(--home-ink-muted); font-size: 13px; }
+.hm-frame .dashboard__composer-to-label { color: var(--home-ink-muted); font-weight: 700; letter-spacing: 0; }
+.hm-frame .dashboard__composer-to-note { color: var(--home-ink-muted); }
+.hm-frame .dashboard__composer-chip { padding: 1px 4px 1px 9px; color: var(--home-ink); background: var(--home-soft); border: 1px solid var(--home-card-border); border-radius: 999px; }
+.hm-frame .dashboard__composer-chip--everyone { padding-inline-end: 9px; }
+.hm-frame .dashboard__composer-chip-remove { color: var(--home-ink-muted); border-radius: 50%; }
+.hm-frame .dashboard__composer-chip-remove:hover { color: var(--home-ink); background: var(--home-canvas); }
+.hm-frame .dashboard__composer-reply { color: var(--home-ink-muted); background: var(--home-soft); border-color: var(--home-card-border); border-radius: 12px; }
+.hm-frame .dashboard__composer-reply-target, .hm-frame .dashboard__composer-reply-window { color: var(--home-ink-muted); }
+.hm-frame .dashboard__composer-count, .hm-frame .dashboard__composer-status { color: var(--home-ink-muted); }
+.hm-frame .dashboard__composer-status[data-state="error"] { color: var(--home-danger); }
+.hm-frame .dashboard__composer-reload-warning { color: var(--home-offline-text); }
+
+/* ---- Phone (Phone-Space.dc.html): 32 px pictures, 15 px type, a pill field and a round Send ---- */
+@media (width <= 52rem) {
+  .hm-side { padding: 16px; }
+  .hm-day { margin: 7px 16px; gap: 10px; font-size: 12px; }
+  .hm-frame .dashboard__feed-fix { padding: 10px 16px 4px; }
+  .hm-frame .dashboard__message { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 7px 16px; }
+  .hm-frame .dashboard__message-avatar[data-size="36"] { inline-size: 32px; block-size: 32px; font-size: 13px; }
+  .hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="36"] { border-radius: 10px; }
+  .hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="36"] .hm-owner-badge { inline-size: 16px; block-size: 16px; font-size: 9px; }
+  .hm-frame .dashboard__message-avatar[data-size="28"] { inline-size: 24px; block-size: 24px; font-size: 11px; }
+  .hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="28"] { border-radius: 7px; }
+  .hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="28"] .hm-owner-badge { inline-size: 15px; block-size: 15px; }
+  .hm-frame .dashboard__message--reply { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
+  .hm-frame .dashboard__message-body { gap: 2px 6px; }
+  .hm-frame .hm-author { font-size: 15px; gap: 2px 6px; }
+  .hm-frame .hm-author__when, .hm-frame .dashboard__message-meta time { font-size: 12px; }
+  .hm-frame .dashboard__message-markdown { font-size: 15px; }
+  .hm-frame .hm-needs-you .dashboard__message-markdown { font-size: 16px; }
+  .hm-frame .hm-extras__ask .hm-needs-you { padding: 14px; }
+  .hm-frame .hm-extras__ask .hm-eyebrow { font-size: 12px; }
+  .hm-frame .dashboard__thread { padding: 0 16px 8px calc(16px + 32px + 10px); }
+  .hm-frame .dashboard__thread-replies { gap: 10px; padding: 12px; border-radius: 14px; }
+  .hm-frame .dashboard__feed-toolbar { padding-inline-start: 10px; }
+
+  .hm-frame .dashboard__composer { gap: 4px; padding: 10px 16px calc(6px + env(safe-area-inset-bottom)); }
+  .hm-frame .dashboard__composer-label { position: absolute; inline-size: 1px; block-size: 1px; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .hm-frame .dashboard__composer-input { gap: 8px; min-block-size: 46px; }
+  .hm-frame .dashboard__composer-input::before { inset-inline-end: calc(46px + 8px); border-radius: 23px; }
+  .hm-frame .dashboard__composer-attachments { margin-inline-end: calc(46px + 8px); }
+  .hm-frame .dashboard__composer textarea { min-block-size: 43px; padding: 10px calc(44px + 4px) 10px 16px; font-size: 16px; line-height: 23px; }
+  .hm-frame .dashboard__composer-attach { inset-inline-end: calc(46px + 9px); inset-block-end: 1px; }
+  .hm-frame .dashboard__composer-send { inline-size: 46px; block-size: 46px; border-radius: 50%; }
+  .hm-frame .dashboard__composer-send-icon { display: grid; place-items: center; }
+  .hm-frame .dashboard__composer-send-word { display: none; }
+  .hm-frame .dashboard__composer-to { font-size: 12px; }
+}
 
 @media (prefers-reduced-motion: no-preference) {
-  .hm-side-link, .hm-side-button, .hm-todo-row__mark { transition: color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard); }
+  .hm-side-link, .hm-side-button, .hm-side-add, .hm-todo-row__mark { transition: color var(--dur-2) var(--ease-standard), background-color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard); }
 }

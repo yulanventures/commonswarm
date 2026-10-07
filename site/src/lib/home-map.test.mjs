@@ -284,6 +284,8 @@ test("live Catch up keeps a successful overview when ask previews fail, without 
     assert.deepEqual([vm.workspaces[0].openTodos, vm.workspaces[0].lists, vm.workspaces[0].files], [4, 3, 2]);
     assert.deepEqual(reads, ["asks", "latest"], "both positive and failed previews reach the real loading path");
     assert.equal(vm.latest[0].excerpt, "Quotes arrived.");
+    assert.equal(vm.latest[0].author?.id, "amy", "a Latest row carries the member who posted it, for its picture");
+    assert.equal(vm.latest[0].author?.name, "Amy");
     assert.equal(context.homeOverviewCounts.get("W"), 1, "a failed ask preview keeps the overview's measured count");
     assert.equal(context.catchUpData[0].detail.needsYouComplete, true);
     assert.equal(vm.needsYou.length, 1);

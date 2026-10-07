@@ -176,12 +176,15 @@
   border-radius: 12px;
   background: transparent;
   color: var(--home-ink);
-  font-family: var(--home-font-display);
-  font-size: 20px;
+  /* A quiet view switch on the channel line, not a second page title (the source has none). */
+  font-family: var(--home-font-body);
+  font-size: 15px;
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   cursor: pointer;
 }
+
+.hm-channel-menu__trigger:hover { background: var(--home-soft); }
 
 .hm-channel-menu__label { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hm-channel-menu__caret { flex: none; color: var(--home-ink-muted); font-size: var(--t-sm); }
@@ -216,7 +219,7 @@
   cursor: pointer;
 }
 
-.hm-phone-bar__people { max-inline-size: 42vw; padding: 0; overflow: hidden; }
+.hm-phone-bar__people { max-inline-size: 40vw; padding: 0; overflow: hidden; }
 /* Capsules on the ink bar: a raised ink fill, no edge, 28 / 24 px faces (Phone-Space.dc.html). */
 .hm-phone-bar .hm-capsule-stack { gap: 6px; }
 .hm-phone-bar .hm-capsule { gap: 3px; padding: 3px 6px 3px 3px; border-color: var(--home-rail-raised); background: var(--home-rail-raised); }
