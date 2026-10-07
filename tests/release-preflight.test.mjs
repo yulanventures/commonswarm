@@ -61,6 +61,7 @@ function fixture(file, atHead = false) {
     let value;
     if (fmt === 'sha40') value = key === c.release_input ? sha : 'e'.repeat(40);
     else if (fmt === 'digest') value = 'sha256:' + 'd'.repeat(64);
+    else if (fmt === 'uuid') value = key === 'control_user_id' ? '11111111-1111-4111-8111-111111111111' : '22222222-2222-8222-a222-222222222222';
     else if (fmt === 'decimal-positive') value = '120';
     else if (fmt === 'schema-set') value = '20261002000001,20260916000001';
     else if (fmt === 'utc-window') value = new Date(Date.now() + 1200000).toISOString().slice(0, 19) + 'Z';
@@ -118,7 +119,11 @@ for (const file of plans) {
     try {
       const positive = f.check(); assert.equal(positive.status, 0, positive.stdout + positive.stderr); assert.equal(positive.stdout.trim(), 'PASS');
       for (const key of Object.keys(f.c.inputs)) {
-        for (const value of [undefined, 'invalid']) {
+        const invalid = [undefined, 'invalid'];
+        if (f.c.inputs[key].format === 'uuid') invalid.push('', '00000000-0000-0000-0000-000000000000',
+          'ABCDEFAB-CDEF-4ABC-8ABC-ABCDEFABCDEF', '11111111-1111-9111-8111-111111111111',
+          '11111111-1111-4111-7111-111111111111');
+        for (const value of invalid) {
           const result = f.check({ ...f.inputs, [key]: value });
           assert.notEqual(result.status, 0, `${key} ${value}`);
           assert.ok(result.stdout.includes('field ' + key + ':'), result.stdout);

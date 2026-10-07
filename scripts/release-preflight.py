@@ -114,6 +114,7 @@ def valid_input(value, rule):
         return False
     fmt = rule['format']
     patterns = {'sha40': r'[0-9a-f]{40}', 'digest': r'sha256:[0-9a-f]{64}',
+                'uuid': r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
                 'decimal-positive': r'[1-9][0-9]*', 'schema-set': r'[0-9]{14}(,[0-9]{14})*',
                 'op-reference': r'op://Yulan Ventures Infra/[^/\n]+/[^/\n]+'}
     if fmt in patterns:
