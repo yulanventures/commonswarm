@@ -36,6 +36,8 @@ export async function focusFixture() {
     const renderSetupChecklist = () => { rosterRenders++; };
     const wakePathMark = () => null, shouldRetireFreshInvite = () => false, retireFreshInviteResult = () => {};
     const navigateHomeHref = () => {}, selectHomePerson = () => {}, navigateHome = () => {}, homeBack = () => {}, openRosterDialog = () => {}, openWorkspaceDetailsDialog = () => {};
+    // renderHomeShell's feed-menu dependencies (ruling 2). This fixture has no feed, so the menu offers no feed entries.
+    const feedMenuState = () => null, feedMenuAction = () => {}, syncFeedChrome = () => {};
     const poll = async (elapsed = 30001) => { now += elapsed; await refreshPendingAccess('W',1); return {reads:rosterReads,rendered:rosterRenders}; };
   `;
   const production = (selected = names) => selected.map(name => `const ${declarations.get(name)};`).join("\n");
