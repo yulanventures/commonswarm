@@ -1114,6 +1114,23 @@
   font-weight: 700;
 }
 
+/* The capsule is bound to its owner's colour family (data-hue from personTint, as every person
+   dot): 0 blue (the viewer, the default above), 1 orange, 2 purple, 3 teal. */
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__person { background: var(--home-orange); }
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__agent {
+  border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep);
+}
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__person { background: var(--home-purple); }
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__agent {
+  border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep);
+}
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__person { background: var(--home-teal); }
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__agent {
+  border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep);
+}
+
+.hm-invite-connect__caption strong { font-weight: 700; color: var(--home-rail-strong); }
+
 .hm-invite-connect__status {
   display: inline-block;
   margin: 0;
@@ -1149,12 +1166,21 @@
   text-wrap: pretty;
 }
 
-/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it). */
-.hm-invite-connect .hm-ahp__steps {
+/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
+   "Good to know" is the panel's last row, not a block of its own. */
+.hm-invite-connect__panel {
   margin-block-start: 20px;
   padding: 4px 16px;
   background: var(--home-rail-panel);
   border-radius: 18px;
+}
+
+.hm-invite-connect__panel:has(> [data-connect-steps][hidden]) { display: none; }
+
+.hm-invite-connect .hm-ahp__steps {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
 }
 
 /* A row wraps: heading, then a "Show" toggle beside it when it fits; the line and an open value
@@ -1250,7 +1276,13 @@
 
 .hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
 
-.hm-invite-connect__more { margin-block-start: 10px; }
+.hm-invite-connect__more {
+  padding-block: 6px;
+  border-block-start: 1px solid var(--home-rail-divider);
+}
+
+.hm-invite-connect__more > summary { min-block-size: 32px; }
+.hm-invite-connect__more[open] { padding-block-end: 12px; }
 .hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
 
 .hm-invite-connect .hm-ahp__notes {
@@ -1277,7 +1309,7 @@
 .hm-invite-connect__footnote {
   margin: 6px 0 0;
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.4;
   text-align: center;
   color: var(--home-rail-soft);
   text-wrap: pretty;

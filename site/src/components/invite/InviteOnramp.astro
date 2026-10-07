@@ -84,6 +84,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   </section>
 
   <section class="invite-onramp__panel invite-onramp__card" data-view="review" hidden aria-labelledby="invite-review-title">
+    <a class="invite-onramp__button invite-onramp__button--quiet invite-onramp__exit" href="/app">Not now</a>
     <div class="invite-onramp__pair" aria-hidden="true">
       <span class="invite-onramp__face" data-inviter-initial></span>
       <svg class="invite-onramp__pair-arrow" width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h11M9 4l4 4-4 4"></path></svg>
@@ -161,7 +162,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     <div class="invite-onramp__actions">
       <p class="invite-onramp__hint" data-review-hint role="alert" hidden></p>
       <button class="invite-onramp__button" type="button" data-confirm-join><span class="invite-onramp__label">Join <span data-join-workspace-name>Home</span></span></button>
-      <a class="invite-onramp__button invite-onramp__button--quiet" href="/app">Not now</a>
     </div>
     <p class="invite-onramp__fineprint" data-review-expiry></p>
   </section>
@@ -192,11 +192,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     </div>
     <h1 class="hm-invite-connect__title invite-onramp__title" data-connect-title tabindex="-1">Connect your assistant.</h1>
     <p class="hm-invite-connect__lead" data-connect-lead hidden>{INVITE_CONNECT_LEAD}</p>
-    <ol class="hm-ahp__steps" data-connect-steps hidden></ol>
-    <details class="hm-invite-connect__more">
-      <summary>Good to know</summary>
-      <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
-    </details>
+    <div class="hm-invite-connect__panel">
+      <ol class="hm-ahp__steps" data-connect-steps hidden></ol>
+      <details class="hm-invite-connect__more">
+        <summary>Good to know</summary>
+        <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
+      </details>
+    </div>
     <div class="invite-onramp__receipt" data-connect-receipt>
       <span class="invite-onramp__receipt-mark" aria-hidden="true">✓</span>
       <h2 class="invite-onramp__receipt-title">You're in <span data-workspace>a workspace</span>.</h2>
@@ -404,7 +406,21 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       }
       const first = authEmail?.split("@")[0] ?? "You";
       if (title) title.textContent = `Connect ${connectHost.name}.`;
-      if (caption) caption.textContent = addAgentOwnershipLine(workspaceName, "", connectHost.name);
+      if (caption) {
+        /* The canvas caption: muted sentence, the agent's identity in strong text. */
+        const line = addAgentOwnershipLine(workspaceName, "", connectHost.name);
+        const marker = " see it as ";
+        const at = line.lastIndexOf(marker);
+        if (at < 0) {
+          caption.textContent = line;
+        } else {
+          const identity = document.createElement("strong");
+          identity.textContent = line.slice(at + marker.length).replace(/\.$/u, "");
+          caption.replaceChildren(line.slice(0, at + marker.length), identity, line.endsWith(".") ? "." : "");
+        }
+      }
+      /* The capsule takes its owner's colour family the way every person dot does (personTint). */
+      if (capsule) capsule.dataset.hue = String(personTint(null, true) ?? 0);
       if (agentInitial) agentInitial.textContent = Array.from(connectHost.name)[0] ?? "";
       const initialsNode = one<HTMLElement>("[data-connect-initials]");
       if (initialsNode) initialsNode.textContent = viewerInitials(first);
@@ -890,6 +906,11 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     box-shadow: var(--focus-ring);
   }
 
+  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. */
+  .invite-onramp:has(> [data-view="connect"]:not([hidden])) {
+    padding-block-end: 24px;
+  }
+
   .invite-onramp__mark { flex: none; }
   .invite-onramp__mark circle { fill: var(--home-lime); }
   .invite-onramp__mark rect { stroke: var(--home-rail-strong); }
@@ -952,7 +973,8 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     overflow-wrap: anywhere;
   }
 
-  .invite-onramp__title {
+  /* The connect title's own type lives in onboarding.css (.hm-invite-connect__title, 38px). */
+  .invite-onramp__title:not(.hm-invite-connect__title) {
     text-wrap: wrap;
     font-size: 40px;
     line-height: 1.05;
@@ -978,7 +1000,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-block-end: -2px;
     color: var(--home-rail-soft);
   }
 
@@ -1001,10 +1022,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   .invite-onramp__face[data-hue="3"] { background: var(--home-teal); }
   .invite-onramp__face:empty { visibility: hidden; }
 
+  /* The joiner's dashed circle, in her (the viewer's) blue, lifted for the ink screen with the
+     canvas emphasis: a mid outline (5.68 / 7.16 on --home-rail-bg, light / dark) and a lighter
+     initial (9.30 / 11.28). Both are mixed with rail-strong, so they stay light in dark mode. */
   .invite-onramp__face--you {
     background: transparent;
-    border: 1.5px dashed var(--home-blue-tint);
-    color: var(--home-blue-tint);
+    border: 1.5px dashed color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
+    color: color-mix(in oklab, var(--home-blue) 30%, var(--home-rail-strong));
   }
 
   .invite-onramp__pair-arrow { flex: none; }
@@ -1063,7 +1087,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     padding: 12px 24px;
     color: var(--home-lime-ink);
     background: var(--home-lime);
-    border: 1.5px solid var(--home-lime);
+    border: 0;
     border-radius: var(--radius-pill);
     font: inherit;
     font-size: 16px;
@@ -1087,28 +1111,30 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     min-inline-size: 0;
   }
 
-  .invite-onramp :global(.invite-onramp__button):hover {
-    color: var(--home-lime-ink);
-    background: var(--home-lime-hover);
-    border-color: var(--home-lime-hover);
+  /* Hover only where there is a pointer that hovers: a tap on a phone leaves no lighter lime. */
+  @media (hover: hover) {
+    .invite-onramp :global(.invite-onramp__button):hover {
+      color: var(--home-lime-ink);
+      background: var(--home-lime-hover);
+    }
+
+    .invite-onramp :global(.invite-onramp__button--quiet):hover {
+      color: var(--home-rail-strong);
+      background: var(--home-rail-raised);
+    }
   }
 
+  /* The quiet outline is an inset 1.5px ring: a 1.5px border renders 1px in Chromium. */
   .invite-onramp :global(.invite-onramp__button--quiet) {
     color: var(--home-rail-strong);
     background: transparent;
-    border-color: var(--home-ink-faint);
-  }
-
-  .invite-onramp :global(.invite-onramp__button--quiet):hover {
-    color: var(--home-rail-strong);
-    background: var(--home-rail-raised);
-    border-color: var(--home-ink-faint);
+    box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   }
 
   .invite-onramp :global(.invite-onramp__button):disabled {
     color: var(--home-rail-muted);
     background: var(--home-rail-raised);
-    border-color: var(--home-rail-raised);
+    box-shadow: none;
     cursor: not-allowed;
   }
 
@@ -1117,6 +1143,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   .invite-onramp__consent input:focus-visible {
     outline: 2px solid transparent;
     box-shadow: var(--focus-ring);
+  }
+
+  .invite-onramp :global(.invite-onramp__button--quiet):focus-visible {
+    box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--focus-ring);
   }
 
   .invite-onramp__divider {
@@ -1211,8 +1241,6 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   [data-view="review"] > .invite-onramp__facts { margin-block-start: 22px; }
   [data-view="review"] > .invite-onramp__consent { margin-block-start: 14px; }
 
-  /* Controls the bottom bar could cover scroll clear of it when the Join hint focuses them. */
-  [data-view="review"] input { scroll-margin-block-end: 180px; }
 
   .invite-onramp__facts {
     display: flex;
@@ -1283,18 +1311,23 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     padding: 10px 14px;
     color: var(--home-rail-strong);
     background: var(--home-rail-choice);
-    border: 1.5px solid var(--home-rail-choice-edge);
+    border: 0;
     border-radius: 14px;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-choice-edge);
     cursor: pointer;
   }
 
   .invite-onramp__choice:has(input:checked) {
     background: var(--home-rail-raised);
-    border-color: var(--home-lime);
+    box-shadow: inset 0 0 0 1.5px var(--home-lime);
   }
 
   .invite-onramp__choice:has(input:focus-visible) {
-    box-shadow: var(--focus-ring);
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-choice-edge), var(--focus-ring);
+  }
+
+  .invite-onramp__choice:has(input:checked:focus-visible) {
+    box-shadow: inset 0 0 0 1.5px var(--home-lime), var(--focus-ring);
   }
 
   .invite-onramp__choice input,
@@ -1310,14 +1343,16 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     order: 3;
     appearance: none;
     box-sizing: border-box;
-    border: 1.5px solid var(--home-rail-soft);
+    border: 0;
     border-radius: 50%;
     background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--home-rail-soft);
     cursor: pointer;
   }
 
   .invite-onramp__choice input:checked {
     background: var(--home-lime);
+    box-shadow: none;
   }
 
   .invite-onramp__consent input {
@@ -1393,7 +1428,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     flex: none;
     border-radius: 9px;
     background: var(--home-blue-tint);
-    border: 1.5px solid var(--home-blue);
+    box-shadow: inset 0 0 0 1.5px var(--home-blue);
     color: var(--home-blue-deep);
     font-size: 13px;
     font-weight: 700;
@@ -1401,6 +1436,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
   .invite-onramp__tile-orb--empty {
     background: transparent;
+    box-shadow: none;
     border: 1.5px dashed var(--home-line-dashed);
   }
 
@@ -1414,18 +1450,14 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     cursor: pointer;
   }
 
-  /* The Join pill stays at the bottom of the screen, 28px up, as on the canvas, over a short fade;
-     the page under it still scrolls to every choice above. */
+  /* The Join pill ends the column, pushed to the bottom of the screen when the page is short
+     (canvas margin-top: auto); no overlay over the choices. */
   .invite-onramp__actions {
-    position: sticky;
-    inset-block-end: 0;
-    z-index: 1;
     display: flex;
     flex-direction: column;
     gap: 6px;
     margin-block-start: auto;
-    padding-block: 28px;
-    background: linear-gradient(to bottom, transparent, var(--home-rail-bg) 28px);
+    padding-block-start: 28px;
   }
 
   .invite-onramp__actions .invite-onramp__hint { margin-block-end: 4px; }
@@ -1442,23 +1474,32 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     font-size: 18px;
   }
 
-  /* The way out under it reads as a link, not a second button. */
-  .invite-onramp__actions .invite-onramp__button--quiet {
-    min-block-size: 46px;
-    padding-block: 0;
-    border-color: transparent;
+  /* The way out sits on the brand row, right, as a quiet link (where Phone-Connect puts its step
+     label): 44px tall, centred on the 24px row. */
+  .invite-onramp .invite-onramp__exit {
+    position: absolute;
+    inset-block-start: 46px;
+    inset-inline-end: 0;
+    inline-size: auto;
+    min-block-size: 44px;
+    padding: 0 4px;
+    color: var(--home-rail-soft);
     background: transparent;
-    font-size: 15px;
+    box-shadow: none;
+    font-size: 14px;
     font-weight: 600;
     text-decoration: underline;
     text-underline-offset: 2px;
   }
 
-  .invite-onramp__actions .invite-onramp__button--quiet:hover {
-    background: transparent;
-    border-color: transparent;
-    color: var(--home-lime);
+  @media (hover: hover) {
+    .invite-onramp .invite-onramp__exit:hover {
+      color: var(--home-rail-strong);
+      background: transparent;
+    }
   }
+
+  .invite-onramp .invite-onramp__exit:focus-visible { box-shadow: var(--focus-ring); }
 
   .invite-onramp .invite-onramp__fineprint {
     margin: 0;
@@ -1486,7 +1527,7 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     margin-block-start: 10px;
     color: var(--home-rail-strong);
     background: transparent;
-    border-color: var(--home-ink-faint);
+    box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
     font-size: 16px;
   }
 
@@ -1539,6 +1580,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
 
     .invite-onramp .hm-invite-connect__step {
       inset-block-start: 64px;
+    }
+
+    .invite-onramp .invite-onramp__exit {
+      inset-block-start: 54px;
     }
   }
 
