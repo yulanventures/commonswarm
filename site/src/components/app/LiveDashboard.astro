@@ -4484,6 +4484,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       frame?.classList.toggle("hm-frame--catchup", home);
       frame?.classList.toggle("hm-frame--agent", homeRoute.view === "agent");
       frame?.classList.toggle("hm-frame--people", homeRoute.view === "people");
+      frame?.classList.toggle("hm-frame--todo", homeRoute.view === "todo");
       if (home) { one<HTMLElement>("[data-home-side-slot]")?.replaceChildren(); renderHomeCatchUp(); return; }
       renderHomeSide();
       if (homeRoute.view === "agent" || homeRoute.view === "todo" || homeRoute.view === "todos") {

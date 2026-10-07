@@ -18,8 +18,9 @@
 }
 
 /* Back link left, "Added by … · Due …" right, on one line when it fits. */
-/* Inside the app's route pane, which already pads 24 px (integration.css), the view adds no padding of its own. */
-.hm-route-pane .hm-todo, .hm-route-pane .hm-todos { max-inline-size: 720px; padding: 0 0 8px; }
+/* Inside the app's route pane, which already pads 24 px (integration.css), the list adds no padding of its own.
+   A single to-do keeps its own padding: integration.css takes the pane's away for it (Todo.dc.html). */
+.hm-route-pane .hm-todos { max-inline-size: 720px; padding: 0 0 8px; }
 
 /* The pane's generic ".hm-route-pane :is(button, a):not(.hm-agent *)" rule (0,2,1, integration.css) would set
    every button and link here to inline-flex with 8 px padding. The button and link selectors below repeat their

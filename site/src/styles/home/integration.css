@@ -35,6 +35,14 @@
 /* People & agents is a page (Members.dc.html): its own back link and title, the main column's padding, no side
    column. Agent.dc.html and Members.dc.html draw no workspace header above the page; the phone keeps its top bar. */
 .hm-frame--people .hm-route-pane { padding: 20px clamp(16px, 3vw, 40px) 56px; }
+/* A to-do (Todo.dc.html) is one card-surface page with its own 20 px / clamp(16px, 4vw, 32px) padding, so the pane
+   adds none (todo.css no longer zeroes .hm-todo's padding: the two land together, or it would double). On a phone
+   the page has no top bar, no section nav and no account door; its back link is the way out. */
+.hm-route-pane:has(> .hm-todo) { padding: 0; }
+.hm-frame__main:has(> [data-home-route-pane]:not([hidden]) > .hm-todo) { background: var(--home-card); }
+@media (width <= 52rem) {
+  .hm-frame.hm-frame--todo :is(.hm-phone-bar, .hm-ws-nav--phone, [data-user-menu-root]) { display: none; }
+}
 @media (width > 52rem) {
   .hm-frame:is(.hm-frame--agent, .hm-frame--people) .hm-ws-header { display: none; }
 }
