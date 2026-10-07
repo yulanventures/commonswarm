@@ -226,6 +226,19 @@ test("the shared destination helper keeps one fact per line without this page's 
   assert.match(noHost, /After you approve, you return to <strong>a program on this computer \(localhost\)<\/strong>\./u);
 });
 
+test("the tab title is first-party text and never carries a client-supplied name", () => {
+  // A client can name itself anything (even "CommonSwarm"); unlabelled in the tab and history it would read as a
+  // first-party prompt. The body labels the client name as supplied by the client; the title stays neutral.
+  for (const declaredName of ["Claude", "CommonSwarm", "Evil <b>App</b>"]) {
+    const html = page({ clientDisplay: { verified: false, primary: "evil.example", declaredName } });
+    const titles = [...html.matchAll(/<title>([^<]*)<\/title>/gu)].map((match) => match[1]);
+    assert.deepEqual(titles, ["Connect an app to CommonSwarm"]);
+  }
+  // Positive control: the same scan sees a client name if one were put in the title.
+  assert.deepEqual([..."<title>Connect Claude to CommonSwarm</title>".matchAll(/<title>([^<]*)<\/title>/gu)].map((m) => m[1]),
+    ["Connect Claude to CommonSwarm"]);
+});
+
 test("the page makes no external requests and carries no script", () => {
   const html = page({ switchAccount: SWITCH, identity: { ...identity, provider: "google" } });
   assert.doesNotMatch(html, /<script|<link|<img|<iframe|\bsrc=|url\(|@import|@font-face|javascript:/iu);
