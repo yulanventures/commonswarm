@@ -46,6 +46,10 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 .hm-frame__main [data-home-channel-menu] { min-inline-size: 0; }
 /* The channel line is a slim toolbar (Space.dc.html has none): view switch, Live, updates, refresh. */
 .hm-frame__main .hm-frame__channel > header { min-block-size: 48px; padding: 2px 16px 0; }
+/* Ruling 2 (Quiet forms): the view switch, filters and refresh live in the ⋯ menu; these rows return only
+   while they say something (a channel, a filter, an unresolved address). LiveDashboard sets the attribute. */
+.hm-frame[data-feed-quiet] .hm-frame__channel > header,
+.hm-frame[data-feed-quiet] .dashboard__feed-toolbar { display: none; }
 .hm-frame__channel > header > [data-home-channel-menu]:not([hidden]) + div { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (width > 52rem) and (width < 64rem) {
   .hm-frame.hm-frame.hm-frame { grid-template-columns: 15.5rem minmax(0, 1fr); }

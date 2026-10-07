@@ -981,7 +981,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
   import { buildHomeRail } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
-    type WorkspaceShellVM, type ShellCallbacks } from "../../lib/home-shell";
+    type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
   import { homeStructureKey, replaceHomeRegion, refreshHomeRailTimes, refreshHomeCatchUpTimes } from "../../lib/home-focus";
   import { mapHomePeople, mapHomeRail, mapCatchUp, initialCatchUpData, fillCatchUpDetails,
@@ -1790,9 +1790,50 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (liveChip) {
         liveChip.hidden = sampleMode || !(name === "feed" || name === "feed-empty");
       }
+      syncFeedChrome();
       if (name === "feed" || name === "feed-empty") {
         queueMicrotask(() => armLiveFeed());
       }
+    };
+
+    /* TOM'S RULING 2 (2026-10-07, "Quiet forms"): the view switch, the feed filters and refresh live in
+       the workspace header's ⋯ menu, and the live state keeps one small dot there. The stream head and
+       the filter row come back only when they say something the reader must see: a channel other than
+       All messages, a filter other than All, or an address that did not resolve. A sample has no ⋯ (it
+       renders no doors), so it keeps both rows. */
+    const syncFeedChrome = (): void => {
+      const frame = one<HTMLElement>(".hm-frame");
+      const quiet = !sampleMode && homeRoute.view === "chat" && activeWorkspaceView === "signals" &&
+        activeChannelId === null && unknownChannelId === null && signalFilter === "all";
+      frame?.toggleAttribute("data-feed-quiet", quiet);
+      const liveChip = one<HTMLElement>("[data-live-chip]");
+      for (const dot of all<HTMLElement>("[data-home-live-dot]")) dot.hidden = sampleMode || !liveChip || liveChip.hidden;
+    };
+    /** What the ⋯ menu offers for the feed, read from the controls that own it, so the two never disagree. */
+    const feedMenuState = (): FeedMenuState | null => {
+      if (sampleMode || homeRoute.view !== "chat" || activeWorkspaceView !== "signals") return null;
+      const refresh = one<HTMLButtonElement>("[data-refresh]");
+      const count = one<HTMLElement>("[data-update-count]");
+      const refreshLabel = refresh?.getAttribute("aria-label") ?? "Refresh";
+      return {
+        channels: [{ id: "", label: channelLabel(ALL_SIGNALS_SLUG), current: activeChannelId === null && unknownChannelId === null },
+          ...liveChannels(channels).map((channel) => ({ id: channel.channelId, label: channel.slug,
+            current: channel.channelId === activeChannelId && unknownChannelId === null }))],
+        mayCreateChannel: !sampleMode,
+        filters: all<HTMLButtonElement>("[data-feed-filter]").flatMap((button) => {
+          const value = button.dataset.feedFilter;
+          return value === "all" || value === "broadcast" || value === "direct-to-you"
+            ? [{ value, label: (button.textContent ?? "").trim(), current: button.getAttribute("aria-pressed") === "true" }] : [];
+        }),
+        refresh: refresh && !refresh.hidden
+          ? { label: count && !count.hidden && count.textContent ? `${refreshLabel} · ${count.textContent}` : refreshLabel } : null,
+      };
+    };
+    const feedMenuAction = (action: FeedMenuAction): void => {
+      if (action.kind === "channel") selectChannel(action.id === "" ? null : action.id);
+      else if (action.kind === "new-channel") openChannelDialog();
+      else if (action.kind === "filter") one<HTMLButtonElement>(`[data-feed-filter="${action.value}"]`)?.click();
+      else one<HTMLButtonElement>("[data-refresh]")?.click();
     };
 
     const addAgentViewOpen = (): boolean =>
@@ -4326,6 +4367,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       const key = homeStructureKey(vm);
       if (key === homeShellKey && slot.childElementCount) return;
       const callbacks: ShellCallbacks = { navigate: href => navigateHomeHref(href), back: homeBack, openPeople: () => openRosterDialog(),
+        feedMenu: feedMenuState, feed: feedMenuAction,
         menu: item => {
           if (item === "wiki") navigateHomeHref(vm.hrefs.wiki);
           else if (item === "settings") openWorkspaceDetailsDialog();
@@ -4344,6 +4386,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (bottom) replaceHomeRegion(bottom, "phone-nav", [buildWorkspaceNav(document, vm, callbacks, "phone")],
         Array.from(slot.querySelectorAll<HTMLElement>("h1")).find(heading => heading.getClientRects().length > 0));
       homeShellKey = key;
+      syncFeedChrome();
     };
     const renderHomeCatchUp = (): void => {
       if (homeRoute.view !== "catchup") return;
@@ -4454,6 +4497,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       else if (homeRoute.view === "files") activateWorkspaceView("files");
       else if (homeRoute.view === "wiki") activateWorkspaceView("brain");
       else activateWorkspaceView("signals");
+      syncFeedChrome();
     };
     const focusHomeView = (): void => {
       const route = homeRoute;
@@ -5588,6 +5632,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         const active = button.dataset.feedFilter === signalFilter;
         button.setAttribute("aria-pressed", String(active));
       }
+      syncFeedChrome();
       if (visibleSignals.length === 0) {
         const empty = document.createElement("li");
         empty.className = "dashboard__filter-empty";
@@ -8091,6 +8136,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       }
       syncChannelCurrent();
       syncComposerPlacement();
+      syncFeedChrome();
     };
 
     const renderChannelRail = (): void => {

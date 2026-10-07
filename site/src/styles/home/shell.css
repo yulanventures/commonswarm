@@ -158,6 +158,16 @@
   overflow-wrap: anywhere;
 }
 
+/* The feed's entries in ⋯ (ruling 2): two labelled radio groups and Refresh, then a rule before the workspace doors. */
+.hm-menu__group { display: grid; margin: 0; padding: 0; list-style: none; }
+.hm-menu__group-label { padding: 8px 12px 2px; color: var(--home-ink-muted); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.hm-menu__radio[aria-checked="true"] { background: var(--home-lime); color: var(--home-lime-ink); font-weight: 700; }
+.hm-menu__separator { block-size: 1px; margin: 6px 4px; background: var(--home-hairline); }
+/* The live state's one small dot, on ⋯. */
+.hm-live-dot { position: absolute; inset-block-start: 5px; inset-inline-end: 5px; inline-size: 9px; block-size: 9px; border-radius: 50%;
+  background: var(--home-lime); box-shadow: 0 0 0 1.5px var(--home-ink); pointer-events: none; }
+.hm-live-dot[hidden] { display: none; }
+.hm-phone-bar .hm-live-dot { box-shadow: 0 0 0 1.5px var(--home-rail-bg); }
 .hm-menu__item:hover,
 .hm-channel-menu__item:hover,
 .hm-channel-menu__list > button:hover { background: var(--home-soft); }
