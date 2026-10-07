@@ -20,7 +20,7 @@ type Geometry = {
   adminPosition: string;
   adminRects: number;
   rows: { height: number; oneLine: boolean; nameTruncated: boolean; statusWhole: boolean; title: string; accessible: string }[];
-  themes: { theme: string; disconnectedBg: string; disconnectedInk: string; idleBg: string }[];
+  themes: { theme: string; disconnectedBg: string; disconnectedInk: string; idleBg: string; idleInk: string }[];
 };
 
 const siteRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -117,7 +117,7 @@ test("home polish keeps the header above the view, one rail line, and no heading
             const status = document.querySelector('[data-agent-state="disconnected"] .hm-status');
             const idle = document.querySelector('[data-agent-state="idle"] .hm-status');
             const style = getComputedStyle(status);
-            return { disconnectedBg: style.backgroundColor, disconnectedInk: style.color, idleBg: getComputedStyle(idle).backgroundColor };
+            return { disconnectedBg: style.backgroundColor, disconnectedInk: style.color, idleBg: getComputedStyle(idle).backgroundColor, idleInk: getComputedStyle(idle).color };
           };
           metrics.themes = [{ theme: document.documentElement.dataset.theme || "light", ...chip() }];
           document.documentElement.dataset.theme = "dark";
@@ -154,10 +154,15 @@ test("home polish keeps the header above the view, one rail line, and no heading
       assert.equal(geometry.rows[0]?.nameTruncated, true);
       assert.equal(geometry.rows[1]?.nameTruncated, false);
       const [light, dark] = geometry.themes;
-      assert.equal(light?.disconnectedBg === "rgba(0, 0, 0, 0)", false);
-      assert.equal(dark?.disconnectedBg === "rgba(0, 0, 0, 0)", false);
-      assert.notEqual(light?.disconnectedBg, dark?.disconnectedBg);
-      assert.notEqual(light?.disconnectedInk, light?.disconnectedBg);
+      /* Canvas design (home-visual 2026-10-07): the rail is ink in both modes and its status words carry
+         no chip. Disconnected is the amber word and diamond (--home-offline, #f0b25a in both modes,
+         8.67:1 / 10.20:1 on the rail), so it never reads as idle. */
+      assert.equal(light?.disconnectedBg, "rgba(0, 0, 0, 0)");
+      assert.equal(dark?.disconnectedBg, "rgba(0, 0, 0, 0)");
+      assert.equal(light?.disconnectedInk, "rgb(240, 178, 90)");
+      assert.equal(dark?.disconnectedInk, "rgb(240, 178, 90)");
+      assert.notEqual(light?.disconnectedInk, light?.idleInk);
+      assert.notEqual(dark?.disconnectedInk, dark?.idleInk);
       assert.equal(light?.idleBg, "rgba(0, 0, 0, 0)");
     }
   } finally {

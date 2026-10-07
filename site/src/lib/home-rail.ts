@@ -25,8 +25,8 @@ export interface RailCallbacks {
 /** Local to this lane; home-types.ts has no rail options. */
 export interface RailOptions {
   newWorkspaceHref?: string;
-  /** The page's existing wordmark element, moved into the slot at the top. */
-  wordmark?: HTMLElement | null;
+  /** Where the brand row links. Default: the site home. */
+  brandHref?: string;
   workspacesExpanded?: boolean;
 }
 
@@ -123,6 +123,22 @@ function link(doc: Document, href: string, className: string, callbacks: RailCal
   return element;
 }
 
+/** A decorative 18px line icon. Its shape is a CSS mask in rail.css and its colour is currentColor. */
+function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement {
+  const mark = node(doc, "span", "hm-rail__icon");
+  mark.dataset.icon = name;
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
+/** The two-shape mark: a lime circle and an outlined rounded square, drawn by rail.css. */
+function brandMark(doc: Document): HTMLElement {
+  const mark = node(doc, "span", "hm-rail__mark");
+  mark.setAttribute("aria-hidden", "true");
+  mark.append(node(doc, "span", "hm-rail__mark-dot"), node(doc, "span", "hm-rail__mark-square"));
+  return mark;
+}
+
 function badge(doc: Document, count: number | null): HTMLElement[] {
   const value = needsYouBadge(count);
   if (!value) return [];
@@ -185,22 +201,22 @@ function group(doc: Document, capsule: CapsuleVM, sample: boolean, callbacks: Ra
   return item;
 }
 
-/** The left rail: wordmark slot, Catch up, Workspaces, People & agents and the ownership line. */
+/** The left rail: brand row, Catch up, Workspaces, People & agents, the ownership line and New workspace. */
 export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallbacks, options: RailOptions = {}): HTMLElement {
   const root = node(doc, "div", "hm-rail");
   root.dataset.homeRail = "";
 
-  const wordmark = node(doc, "div", "hm-rail__wordmark");
-  wordmark.dataset.homeRailWordmark = "";
-  if (options.wordmark) wordmark.append(options.wordmark);
-  root.append(wordmark);
+  const brand = node(doc, "a", "hm-rail__brand");
+  brand.href = options.brandHref ?? "/";
+  brand.append(brandMark(doc), node(doc, "span", "hm-rail__brand-word", "CommonSwarm"));
+  root.append(brand);
 
   const nav = node(doc, "nav", "hm-rail__nav");
   nav.setAttribute("aria-label", "Home");
   const catchUp = link(doc, vm.catchUp.href, "hm-rail__link hm-rail__catch-up", callbacks);
   catchUp.dataset.homeCatchUp = "";
   if (vm.catchUp.current) catchUp.setAttribute("aria-current", "page");
-  catchUp.append(node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
+  catchUp.append(icon(doc, "inbox"), node(doc, "span", "hm-rail__name", "Catch up"), ...badge(doc, vm.catchUp.needsYou));
   nav.append(catchUp);
 
   const workspaces = node(doc, "section", "hm-rail__workspaces");
@@ -219,9 +235,10 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
     const row = link(doc, workspace.href, "hm-rail__link hm-rail__workspace", callbacks);
     row.dataset.railWorkspace = workspace.id;
     if (workspace.current) row.setAttribute("aria-current", "page");
+    if (needsYouBadge(workspace.needsYou)) row.dataset.railAttention = "";
     const name = node(doc, "span", "hm-rail__name", workspace.name);
     name.title = workspace.name;
-    row.append(name);
+    row.append(icon(doc, "workspace"), name);
     const shortId = railWorkspaceIdentifier(workspace, vm.workspaces);
     if (shortId) { const identifier = node(doc, "span", "hm-rail__identifier", shortId); identifier.title = workspace.id; row.append(identifier); }
     row.append(...badge(doc, workspace.needsYou));
@@ -243,14 +260,6 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
       callbacks.toggleWorkspaces?.(expanded);
     });
     workspaces.append(more);
-  }
-  if (!vm.sample) {
-    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__link hm-rail__new", callbacks);
-    create.dataset.homeNewWorkspace = "";
-    const plus = node(doc, "span", "hm-rail__plus", "+");
-    plus.setAttribute("aria-hidden", "true");
-    create.append(plus, node(doc, "span", "hm-rail__name", "New workspace"));
-    workspaces.append(create);
   }
   nav.append(workspaces);
   root.append(nav);
@@ -276,6 +285,15 @@ export function buildHomeRail(doc: Document, vm: RailVM, callbacks: RailCallback
     }
     section.append(title, peopleList, node(doc, "p", "hm-rail__note", RAIL_OWNERSHIP_NOTE));
     root.append(section);
+  }
+  /* New workspace is the outline button pinned to the foot of the rail. A sample has no doors. */
+  if (!vm.sample) {
+    const foot = node(doc, "div", "hm-rail__foot");
+    const create = link(doc, options.newWorkspaceHref ?? "?v=new", "hm-rail__new", callbacks);
+    create.dataset.homeNewWorkspace = "";
+    create.append(icon(doc, "plus"), node(doc, "span", "hm-rail__new-label", "New workspace"));
+    foot.append(create);
+    root.append(foot);
   }
   return root;
 }

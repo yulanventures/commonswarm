@@ -551,6 +551,141 @@
   --d-shadow-orb: 0 18px 24px -14px rgba(0, 0, 0, 0.45);
   --d-mark-center: #f4f2ed;
   --d-mark-west: #a8bbff;
+
+  /* ======================================================================
+     HOME CANVAS — the signed-in app (/app) palette (2026-10-07)
+     From the canvas mockups (home-visual DESIGN-MAP, *.dc.html sources). New names
+     only: nothing above changes value, so the marketing site is untouched. Home
+     stylesheets read these; dark values live as --d-home-* just below and are
+     mapped by both dark branches. Measured with the instrument in the file header
+     (controls on the same run: #000/#fff 21.00, #777/#fff 4.48, #767676/#fff 4.54,
+     #00f/#fff 8.59; discrimination arm #eee/#fff 1.16).
+
+     Surfaces. Ink ratios are quoted on every surface it sits on; the worst is the
+     one that binds. */
+  --home-canvas: #eef2ea; /* page canvas, capsule fill.  --home-ink 14.32  --home-ink-muted 6.05  --home-ink-faint 4.74 */
+  --home-card: #fcfdfa; /* cards, stream, panels.      --home-ink 15.90  --home-ink-muted 6.72  --home-ink-faint 5.26 */
+  --home-soft: #f1f5ec; /* nested panel inside a card. --home-ink 14.70  --home-ink-muted 6.21  --home-ink-faint 4.86 */
+  --home-field: #ffffff; /* text input fill.           --home-ink 16.6 */
+  --home-hairline: #e3e9dd; /* 1px divider inside a card. Decorative. */
+  --home-card-border: #d3dbcc; /* 1px card and capsule edge. Decorative; the lip and fill carry the plane. */
+  --home-card-lip: #c9d2c1; /* the 0 2px 0 shadow under a card */
+  --home-card-shadow: 0 2px 0 var(--home-card-lip);
+
+  /* Ink. Body text needs 4.5:1; every value below clears it on all three surfaces. */
+  --home-ink: #17231c; /* text, primary pill fill. min 14.32 (on canvas); --home-card on it 15.90 */
+  --home-ink-muted: #4f5e54; /* secondary text. min 6.05 (on canvas) */
+  --home-ink-faint: #5c6f63; /* tertiary text, min 4.74 (on canvas). ALSO the outline-button edge on the rail: 3.02 on --home-rail-bg (non-text, needs 3:1) */
+  --home-line-dashed: #7b897f; /* dashed placeholder outlines. Non-text, 3.59 on card */
+  --home-field-border: #8a978c; /* input / composer edge. Control edge: 3.05 on --home-field, 2.99 on card — it only just meets 1.4.11 on white, so never put it on a darker fill */
+  --home-link-hover: #2f4438; /* link hover ink, 10.26 on card */
+
+  /* The rail: an ink column in BOTH modes; it is the identity. Text on --home-rail-bg: */
+  --home-rail-bg: #17231c;
+  --home-rail-text: #c9d4cc; /* rows. 10.65 */
+  --home-rail-strong: #eef2ea; /* brand, unread rows. 14.32 */
+  --home-rail-muted: #8fa196; /* section heads, status words, "you" at 12px. 5.96 */
+  --home-rail-soft: #b4c2b8; /* secondary text on ink screens. 8.77 */
+  --home-rail-raised: #2a3d32; /* hover row, capsule on the ink phone bar. --home-rail-text on it 7.60 */
+  --home-rail-divider: #34483c; /* 1px rule on ink. Decorative. */
+
+  /* Lime: the one accent. Never text on light (it is a fill). */
+  --home-lime: #d4f04a; /* current rail row, Needs-you band, rail badges, working dot */
+  --home-lime-ink: #17231c; /* text on lime. 12.65. Lime as text on --home-rail-bg (badge on the current row): 12.65 */
+  --home-lime-soft: #f4fad8; /* pale lime row fill. --home-ink on it 15.08 */
+  --home-lime-hover: #e4f78a;
+
+  /* People. Each person takes one set; their agents always use the owner's set.
+     fill = person avatar and owner badge, white initial on it (--home-on-person);
+     tint/deep = agent avatar fill and letter, with a 1.5px fill-coloured border.
+       white on fill     blue 6.15  orange 5.09  purple 6.63  teal 5.47
+       deep on tint      blue 8.01  orange 7.19  purple 8.86  teal 7.79
+       fill on card      blue 6.02  orange 4.98  purple 6.49  teal 5.36 (non-text, 3:1) */
+  --home-on-person: #ffffff;
+  --home-blue: #2a5dbf;
+  --home-blue-tint: #dde7fa;
+  --home-blue-deep: #1b3f87;
+  --home-orange: #b5501c;
+  --home-orange-tint: #fbe4d5;
+  --home-orange-deep: #7e3410;
+  --home-purple: #6b45b8;
+  --home-purple-tint: #e8e0f8;
+  --home-purple-deep: #44287f;
+  --home-teal: #0f766e;
+  --home-teal-tint: #d5efea;
+  --home-teal-deep: #0b4f49;
+
+  /* Disconnected / offline, and danger. */
+  --home-offline: #f0b25a; /* diamond and word on the ink rail: 8.67 on --home-rail-bg */
+  --home-offline-tint: #fcebcb; /* notice fill */
+  --home-offline-deep: #5e3300; /* text on the tint 9.17; on card 10.55 */
+  --home-offline-text: #8a4b00; /* offline text on light surfaces: 6.66 on card, 6.00 on canvas */
+  --home-danger: #8c2a14; /* remove. 8.37 on card, 7.54 on canvas */
+
+  /* Type. The families are self-hosted (global.css @font-face); the existing site
+     fonts follow as fallback. Bricolage uses its optical-size axis (auto). */
+  --home-font-display: "Bricolage Grotesque", "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --home-font-body: "Instrument Sans", "DM Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+
+  /* HOME CANVAS — dark values. A deep green-black family: the same hue as the light
+     canvas, the rail sinks below the page, lime stays the one accent, and person
+     fills are lifted just enough to separate from the dark card while keeping the
+     white initial at AA. Measured:
+       --d-home-ink         on canvas 15.27  card 14.21  soft 12.79
+       --d-home-ink-muted   on canvas  9.05  card  8.43  soft  7.58
+       --d-home-ink-faint   on canvas  6.70  card  6.24  soft  5.61   (rail outline 3.25 on rail-bg)
+       --d-home-field-border on card 4.77, on field 5.30
+       rail on --d-home-rail-bg: text 12.52  strong 16.84  muted 7.00  soft 10.32  offline 10.20  lime 14.87
+       --d-home-rail-text on --d-home-rail-raised 9.54
+       primary pill (card text on ink fill) 15.27
+       white on fill        blue 5.36  orange 5.09  purple 5.16  teal 5.47
+       deep on tint         blue 9.83  orange 9.80  purple 10.04 teal 9.76
+       fill on card         blue 3.08  orange 3.25  purple 3.20  teal 3.02 (non-text)
+       --d-home-offline-deep on its tint 9.62; --d-home-offline-text on card 8.82
+       --d-home-danger on card 8.24; --d-home-ink on --d-home-lime-soft 11.43 */
+  --d-home-canvas: #121a15;
+  --d-home-card: #18211b;
+  --d-home-soft: #1f2a23;
+  --d-home-field: #0f1612;
+  --d-home-hairline: #253129;
+  --d-home-card-border: #33433a;
+  --d-home-card-lip: #070b09;
+  --d-home-ink: #e9f0e7;
+  --d-home-ink-muted: #aebdb2;
+  --d-home-ink-faint: #93a398;
+  --d-home-line-dashed: #6e7f74;
+  --d-home-field-border: #7d8e82;
+  --d-home-link-hover: #ffffff;
+  --d-home-rail-bg: #0b110d;
+  --d-home-rail-text: #c9d4cc;
+  --d-home-rail-strong: #eef2ea;
+  --d-home-rail-muted: #8fa196;
+  --d-home-rail-soft: #b4c2b8;
+  --d-home-rail-raised: #1f2c24;
+  --d-home-rail-divider: #26352c;
+  --d-home-lime: #d4f04a;
+  --d-home-lime-ink: #17231c;
+  --d-home-lime-soft: #2a3313;
+  --d-home-lime-hover: #e4f78a;
+  --d-home-on-person: #ffffff;
+  --d-home-blue: #3a67c4;
+  --d-home-blue-tint: #1b2a4a;
+  --d-home-blue-deep: #c6d7fb;
+  --d-home-orange: #b5501c;
+  --d-home-orange-tint: #3d2417;
+  --d-home-orange-deep: #f7cdb3;
+  --d-home-purple: #7a58c9;
+  --d-home-purple-tint: #2c2348;
+  --d-home-purple-deep: #ddd0f9;
+  --d-home-teal: #0f766e;
+  --d-home-teal-tint: #12332f;
+  --d-home-teal-deep: #aee5dc;
+  --d-home-offline: #f0b25a;
+  --d-home-offline-tint: #3a2a12;
+  --d-home-offline-deep: #f6d29c;
+  --d-home-offline-text: #f0b25a;
+  --d-home-danger: #ff9e86;
 }
 
 /* ==========================================================================
@@ -617,13 +752,55 @@
     --shadow-orb: var(--d-shadow-orb);
     --mark-center: var(--d-mark-center);
     --mark-west: var(--d-mark-west);
+    --home-canvas: var(--d-home-canvas);
+    --home-card: var(--d-home-card);
+    --home-soft: var(--d-home-soft);
+    --home-field: var(--d-home-field);
+    --home-hairline: var(--d-home-hairline);
+    --home-card-border: var(--d-home-card-border);
+    --home-card-lip: var(--d-home-card-lip);
+    --home-ink: var(--d-home-ink);
+    --home-ink-muted: var(--d-home-ink-muted);
+    --home-ink-faint: var(--d-home-ink-faint);
+    --home-line-dashed: var(--d-home-line-dashed);
+    --home-field-border: var(--d-home-field-border);
+    --home-link-hover: var(--d-home-link-hover);
+    --home-rail-bg: var(--d-home-rail-bg);
+    --home-rail-text: var(--d-home-rail-text);
+    --home-rail-strong: var(--d-home-rail-strong);
+    --home-rail-muted: var(--d-home-rail-muted);
+    --home-rail-soft: var(--d-home-rail-soft);
+    --home-rail-raised: var(--d-home-rail-raised);
+    --home-rail-divider: var(--d-home-rail-divider);
+    --home-lime: var(--d-home-lime);
+    --home-lime-ink: var(--d-home-lime-ink);
+    --home-lime-soft: var(--d-home-lime-soft);
+    --home-lime-hover: var(--d-home-lime-hover);
+    --home-on-person: var(--d-home-on-person);
+    --home-blue: var(--d-home-blue);
+    --home-blue-tint: var(--d-home-blue-tint);
+    --home-blue-deep: var(--d-home-blue-deep);
+    --home-orange: var(--d-home-orange);
+    --home-orange-tint: var(--d-home-orange-tint);
+    --home-orange-deep: var(--d-home-orange-deep);
+    --home-purple: var(--d-home-purple);
+    --home-purple-tint: var(--d-home-purple-tint);
+    --home-purple-deep: var(--d-home-purple-deep);
+    --home-teal: var(--d-home-teal);
+    --home-teal-tint: var(--d-home-teal-tint);
+    --home-teal-deep: var(--d-home-teal-deep);
+    --home-offline: var(--d-home-offline);
+    --home-offline-tint: var(--d-home-offline-tint);
+    --home-offline-deep: var(--d-home-offline-deep);
+    --home-offline-text: var(--d-home-offline-text);
+    --home-danger: var(--d-home-danger);
   }
 }
 
 /* ==========================================================================
    DARK BRANCH 2 — a control asked, whatever the OS says
    ==========================================================================
-   Identical mapping to branch 1, and it MUST STAY IDENTICAL — 34 lines, same
+   Identical mapping to branch 1, and it MUST STAY IDENTICAL — same lines, same
    order. `diff <(sed -n '/BRANCH 1/,/^}/p' …) …` if you touch either. This is
    the one place in the file where two lists have to agree; it is a mapping
    rather than a second copy of the values precisely so that the failure mode is
@@ -680,6 +857,48 @@
   --shadow-orb: var(--d-shadow-orb);
   --mark-center: var(--d-mark-center);
   --mark-west: var(--d-mark-west);
+  --home-canvas: var(--d-home-canvas);
+  --home-card: var(--d-home-card);
+  --home-soft: var(--d-home-soft);
+  --home-field: var(--d-home-field);
+  --home-hairline: var(--d-home-hairline);
+  --home-card-border: var(--d-home-card-border);
+  --home-card-lip: var(--d-home-card-lip);
+  --home-ink: var(--d-home-ink);
+  --home-ink-muted: var(--d-home-ink-muted);
+  --home-ink-faint: var(--d-home-ink-faint);
+  --home-line-dashed: var(--d-home-line-dashed);
+  --home-field-border: var(--d-home-field-border);
+  --home-link-hover: var(--d-home-link-hover);
+  --home-rail-bg: var(--d-home-rail-bg);
+  --home-rail-text: var(--d-home-rail-text);
+  --home-rail-strong: var(--d-home-rail-strong);
+  --home-rail-muted: var(--d-home-rail-muted);
+  --home-rail-soft: var(--d-home-rail-soft);
+  --home-rail-raised: var(--d-home-rail-raised);
+  --home-rail-divider: var(--d-home-rail-divider);
+  --home-lime: var(--d-home-lime);
+  --home-lime-ink: var(--d-home-lime-ink);
+  --home-lime-soft: var(--d-home-lime-soft);
+  --home-lime-hover: var(--d-home-lime-hover);
+  --home-on-person: var(--d-home-on-person);
+  --home-blue: var(--d-home-blue);
+  --home-blue-tint: var(--d-home-blue-tint);
+  --home-blue-deep: var(--d-home-blue-deep);
+  --home-orange: var(--d-home-orange);
+  --home-orange-tint: var(--d-home-orange-tint);
+  --home-orange-deep: var(--d-home-orange-deep);
+  --home-purple: var(--d-home-purple);
+  --home-purple-tint: var(--d-home-purple-tint);
+  --home-purple-deep: var(--d-home-purple-deep);
+  --home-teal: var(--d-home-teal);
+  --home-teal-tint: var(--d-home-teal-tint);
+  --home-teal-deep: var(--d-home-teal-deep);
+  --home-offline: var(--d-home-offline);
+  --home-offline-tint: var(--d-home-offline-tint);
+  --home-offline-deep: var(--d-home-offline-deep);
+  --home-offline-text: var(--d-home-offline-text);
+  --home-danger: var(--d-home-danger);
 }
 
 /* ==========================================================================

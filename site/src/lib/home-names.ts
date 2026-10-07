@@ -80,6 +80,20 @@ export function agentTint(id: string): Tint {
   return ((hash ^ (hash >>> 16)) >>> 0) % 4 as Tint;
 }
 
+/**
+ * A person's colour: 0 blue, 1 orange, 2 purple, 3 teal. The viewer always takes blue; everyone
+ * else is placed by the same FNV-1a fold over their id on orange, purple or teal, so it is stable
+ * across lists and reloads and never collides with the viewer. Agents take their owner's colour:
+ * pass the owner id and whether the agent is yours. Null is an agent whose owner left.
+ */
+export function personTint(id: string | null, you: boolean): Tint | null {
+  if (you) return 0;
+  if (id === null) return null;
+  let hash = 2166136261;
+  for (const char of id) { hash ^= char.codePointAt(0)!; hash = Math.imul(hash, 16777619); }
+  return (1 + (((hash ^ (hash >>> 16)) >>> 0) % 3)) as Tint;
+}
+
 export function ordinal(value: number): string {
   const n = Math.abs(Math.trunc(value));
   const lastTwo = n % 100;

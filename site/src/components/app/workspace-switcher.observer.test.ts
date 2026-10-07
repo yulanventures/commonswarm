@@ -53,7 +53,7 @@ test("the built rail has one permanent workspace-list mount and keeps the accoun
   assert.doesNotMatch(appHtml, /data-workspace-menu-trigger/);
   assert.equal((rail.match(/list.dataset.homeWorkspaceList/g) ?? []).length, 1);
   assert.match(appHtml, /data-user-menu-root/);
-  assert.match(rail, /wordmark.append\(options.wordmark\)/);
+  assert.match(rail, /brand.append\(brandMark\(doc\), node\(doc, "span", "hm-rail__brand-word", "CommonSwarm"\)\)/);
 });
 test("the list renders membership workspaces, marks the current one, and creates at the bottom", () => {
   assert.match(dashboard, /await myWorkspaces\(\)/);

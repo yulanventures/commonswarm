@@ -1,65 +1,82 @@
-/* Home UI: rail styles. Owned by lane R (see UI-SPEC.md sections 1.1, 5 and 6). Site tokens only.
+/* Home UI: the rail. The canvas design (Main.dc.html <nav>): an ink column in BOTH modes, the
+   identity of the app. --home-rail-* tokens carry their own dark values, so no dark override here.
 
-   The ink rail (UI-SPEC 5). Contrast, measured by the tokens.css L33-50 method (WCAG 2.1 relative
-   luminance, color-mix composited to its sRGB value first; the instrument reproduced 21.00, 4.48,
-   4.54 and 8.59 for the known pairs on the same run):
-     light  rail text     --canvas on --ink                                13.59:1
-     light  muted text    color-mix(--canvas 72%, --ink) on --ink           7.75:1
-     light  current row   --ink on --canvas                                13.59:1
-     light  person face   --ink on --canvas                                13.59:1
-     light  badge         --accent-ink on --accent                          5.12:1
-     light  focus halo    --focus-halo against --ink                       14.42:1
-     dark   rail text     --text on --elev-1                               14.45:1
-     dark   muted text    --text-muted on --elev-1                          8.81:1
-     dark   current row   --text on --elev-3 11.53:1; --text-muted on it    7.03:1
-     dark   person face   --canvas on --text                               15.43:1
-     dark   badge         --accent-ink on --accent                          8.25:1
-   No translucent -dim token is placed over ink. Status chips inside the rail are opaque
-   (--chip-active-*, --chip-review-*); Idle has no fill and takes the rail's muted colour. */
+   Contrast, measured by the tokens.css header method (controls 21.00 / 4.48 / 8.59 on the same run),
+   light / dark:
+     row text        --home-rail-text on --home-rail-bg             10.65 / 12.52
+     strong row      --home-rail-strong on --home-rail-bg           14.32 / 16.84
+     heads, "you", status words (12px)  --home-rail-muted on bg      5.96 /  7.00
+     offline word    --home-offline on --home-rail-bg                8.67 / 10.20
+     current row     --home-lime-ink on --home-lime                 12.65 / 12.65
+     badge           --home-lime-ink on --home-lime                 12.65; on the current row lime on ink 12.65
+     hover row       --home-rail-text on --home-rail-raised          7.60 /  9.54
+     New workspace   edge --home-ink-faint on --home-rail-bg         3.02 /  3.25 (non-text, 3:1)
+   The current row is also 700 weight and carries aria-current, so it is never colour alone. */
 
 .hm-rail {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--s-4);
+  gap: 18px;
   block-size: 100%;
   min-block-size: 0;
-  padding: var(--s-4) var(--s-3);
+  padding: 14px 12px 16px;
   overflow-y: auto;
-  background: var(--ink);
-  color: var(--canvas);
-  font-family: var(--font-sans);
-  font-size: var(--t-sm);
+  background: var(--home-rail-bg);
+  color: var(--home-rail-text);
+  font-family: var(--home-font-body);
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .hm-rail ul { margin: 0; padding: 0; list-style: none; }
 
-.hm-rail__wordmark:empty { display: none; }
-.hm-rail__wordmark { flex: none; padding-inline: var(--s-2); }
+/* Brand row: the two-shape mark and the word in the display face. */
+.hm-rail__brand {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  min-block-size: 44px;
+  padding: 0 8px;
+  border-radius: 12px;
+  color: var(--home-rail-strong);
+  font-family: var(--home-font-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+}
+/* 26px mark on a 28-unit grid (Main.dc.html): a lime circle r8 at (10,10) under a 14-unit rounded square at (12,12), stroke 2, no fill. */
+.hm-rail__mark { position: relative; flex: none; inline-size: 26px; block-size: 26px; }
+.hm-rail__mark-dot { position: absolute; inset-block-start: 1.86px; inset-inline-start: 1.86px; inline-size: 14.86px; block-size: 14.86px; border-radius: 50%; background: var(--home-lime); }
+.hm-rail__mark-square { position: absolute; inset-block-start: 10.21px; inset-inline-start: 10.21px; box-sizing: border-box; inline-size: 14.86px; block-size: 14.86px; border: 1.86px solid var(--home-rail-strong); border-radius: 5.1px; }
 
 .hm-rail__nav {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: var(--s-3);
+  gap: 18px;
   min-block-size: 0;
   max-block-size: 60%;
 }
 
-.hm-rail__workspaces { display: flex; flex-direction: column; gap: var(--s-1); min-block-size: 0; }
-.hm-rail__workspace-list { min-block-size: 0; overflow-y: auto; }
+.hm-rail__workspaces { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; }
+.hm-rail__workspace-list { display: flex; flex-direction: column; gap: 2px; min-block-size: 0; overflow-y: auto; }
 
 .hm-rail__heading,
 .hm-rail__other-head {
   margin: 0;
-  padding: var(--s-2) var(--s-2) var(--s-1);
-  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
-  font-size: var(--t-xs);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-eyebrow);
+  padding: 0 12px 6px;
+  color: var(--home-rail-muted);
+  font-family: var(--home-font-body);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.hm-rail__other-head { text-transform: none; letter-spacing: normal; }
+.hm-rail__other-head { padding-block-start: 6px; text-transform: none; letter-spacing: normal; }
 
 .hm-rail__link,
 .hm-rail__person,
@@ -67,37 +84,62 @@
 .hm-rail__more {
   display: flex;
   align-items: center;
-  gap: var(--s-2);
+  gap: 10px;
   inline-size: 100%;
   min-inline-size: 0;
   min-block-size: 44px;
-  padding: var(--s-1) var(--s-2);
+  padding: 0 12px;
   border: 0;
-  border-radius: var(--radius);
+  border-radius: 12px;
   background: transparent;
-  color: inherit;
+  color: var(--home-rail-text);
   font: inherit;
   text-align: start;
   text-decoration: none;
 }
+.hm-rail__agent { padding-inline-start: 34px; }
 
 .hm-rail a,
 .hm-rail button { cursor: pointer; }
 
 .hm-rail__link:hover,
-.hm-rail button:hover {
-  background: color-mix(in srgb, var(--canvas) 10%, var(--ink));
+.hm-rail button:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
+
+/* Catch up, the viewer and any workspace waiting on you read strong, as in the design. */
+.hm-rail__catch-up,
+.hm-rail__workspace[data-rail-attention],
+.hm-rail__group[data-rail-viewer] > .hm-rail__person { color: var(--home-rail-strong); font-weight: 700; }
+
+.hm-rail__link[aria-current="page"],
+.hm-rail__link[aria-current="page"]:hover {
+  background: var(--home-lime);
+  color: var(--home-lime-ink);
+  font-weight: 700;
 }
 
-.hm-rail__link[aria-current="page"] {
-  background: var(--canvas);
-  color: var(--ink);
-  font-weight: var(--weight-semibold);
+/* Line icons: 16-unit shapes as masks, painted in currentColor. */
+.hm-rail__icon {
+  flex: none;
+  inline-size: 18px;
+  block-size: 18px;
+  background: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
+}
+.hm-rail__icon[data-icon="inbox"] {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2.5 9.5l2-6h7l2 6v3a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-3z'/%3E%3Cpath d='M2.5 9.5h3.2a2.3 2.3 0 0 0 4.6 0h3.2'/%3E%3C/svg%3E");
+}
+.hm-rail__icon[data-icon="workspace"] {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='2' width='9' height='12' rx='1.5'/%3E%3Cpath d='M9.8 8.2h.1'/%3E%3C/svg%3E");
+}
+.hm-rail__icon[data-icon="plus"] {
+  inline-size: 14px;
+  block-size: 14px;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M8 3v10M3 8h10'/%3E%3C/svg%3E");
 }
 
-.hm-rail__more { color: color-mix(in srgb, var(--canvas) 72%, var(--ink)); }
-.hm-rail__new { color: color-mix(in srgb, var(--canvas) 72%, var(--ink)); }
-.hm-rail__plus { display: grid; place-items: center; inline-size: 24px; flex: none; font-size: var(--t-base); }
+.hm-rail__more { color: var(--home-rail-muted); font-size: var(--t-sm); }
 
 .hm-rail__name {
   flex: 1 1 auto;
@@ -107,92 +149,95 @@
   white-space: nowrap;
 }
 
+.hm-rail__identifier { flex: none; color: var(--home-rail-muted); font-size: 12px; }
+
 .hm-rail__badge {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  min-inline-size: 1.375rem;
-  padding: 0 var(--s-1);
+  box-sizing: border-box;
+  min-inline-size: 22px;
+  block-size: 22px;
+  padding: 0 6px;
   border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: var(--t-xs);
-  font-weight: var(--weight-semibold);
-  line-height: 1.375rem;
+  background: var(--home-lime);
+  color: var(--home-lime-ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
 }
+.hm-rail__link[aria-current="page"] .hm-rail__badge { background: var(--home-lime-ink); color: var(--home-lime); }
 
 /* People list: fills the height the rail has left and scrolls; a short list shrinks to fit. */
 .hm-rail__people {
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
-  gap: var(--s-1);
+  gap: 2px;
   min-block-size: 7rem;
 }
 
 .hm-rail__people-list {
+  display: flex;
   flex: 0 1 auto;
+  flex-direction: column;
+  gap: 2px;
   min-block-size: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-color: var(--home-rail-raised) transparent;
 }
 
-.hm-rail__group + .hm-rail__group { margin-block-start: var(--s-1); }
-.hm-rail .hm-rail__agents { padding-inline-start: var(--s-6); }
+.hm-rail__agents { display: flex; flex-direction: column; gap: 2px; margin-block-start: 2px; }
+.hm-rail__group--other .hm-rail__agents { margin-block-start: 0; }
 .hm-rail__face,
 .hm-rail__orb { display: inline-grid; place-items: center; flex: none; }
-.hm-rail .hm-rail__face > * { background: var(--canvas); color: var(--ink); }
 
 .hm-rail__you {
   flex: none;
-  padding: 0 var(--s-2);
-  border: 1px solid currentColor;
-  border-radius: var(--radius-pill);
-  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
-  font-size: var(--t-2xs);
-  line-height: 1.5;
+  color: var(--home-rail-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
+/* Status words: 12px muted; working = lime dot, disconnected = amber diamond and word, idle = hollow ring. */
 .hm-rail__agent { flex-wrap: nowrap; }
-.hm-rail__status {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
-  font-size: var(--t-xs);
-  white-space: nowrap;
-}
-.hm-rail__status .hm-status { flex-wrap: nowrap; gap: var(--s-1); white-space: nowrap; }
-.hm-rail__status .hm-status-word { background: transparent; white-space: nowrap; }
-.hm-rail__status .hm-status[data-state="working"],
-.hm-rail__status .hm-status[data-state="disconnected"] {
-  border-radius: var(--radius-pill);
-  padding-inline: var(--s-2);
-}
-.hm-rail__status .hm-status[data-state="working"] { color: var(--chip-active-ink); background: var(--chip-active-bg); }
-.hm-rail__status .hm-status[data-state="disconnected"] { color: var(--chip-review-ink); background: var(--chip-review-bg); }
-.hm-rail__status .hm-status[data-state="idle"] { background: transparent; }
-.hm-rail__status .hm-status[data-state="working"] .hm-status-word,
-.hm-rail__status .hm-status[data-state="working"] .hm-status-shape,
-.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-word,
-.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-shape {
-  background: transparent;
-  box-shadow: none;
-  color: inherit;
-}
-.hm-rail__status .hm-status[data-state="working"] .hm-status-shape,
-.hm-rail__status .hm-status[data-state="disconnected"] .hm-status-shape { background: currentColor; }
-.hm-rail__status .hm-status[data-state="idle"] .hm-status-shape { background: transparent; box-shadow: none; }
-.hm-rail [data-agent-state="idle"] .hm-rail__status * { color: inherit; }
+.hm-rail__status { display: inline-flex; align-items: center; flex: none; white-space: nowrap; }
+.hm-rail .hm-status { flex-wrap: nowrap; gap: 6px; color: var(--home-rail-muted); font-size: 12px; white-space: nowrap; }
+.hm-rail .hm-status-word { font-weight: 400; }
+.hm-rail .hm-status-shape { border-color: var(--home-rail-muted); }
+.hm-rail .hm-status-shape[data-shape="dot"] { border: 0; background: var(--home-lime); }
+.hm-rail .hm-status-shape[data-shape="diamond"] { background: var(--home-offline); }
+.hm-rail .hm-status[data-state="disconnected"],
+.hm-rail .hm-status[data-state="disconnected"] .hm-status-word { color: var(--home-offline); }
 
 .hm-rail__note {
   flex: none;
   margin: 0;
-  padding: var(--s-2);
-  color: color-mix(in srgb, var(--canvas) 72%, var(--ink));
-  font-size: var(--t-xs);
+  padding: 6px 12px 0;
+  color: var(--home-rail-muted);
+  font-size: 12px;
   line-height: 1.45;
 }
+
+/* New workspace: the outline button pinned to the foot of the rail. */
+.hm-rail__foot { display: flex; flex: none; flex-direction: column; gap: 8px; margin-block-start: auto; }
+.hm-rail__new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-block-size: 44px;
+  padding: 0 12px;
+  border: 1.5px solid var(--home-ink-faint);
+  border-radius: 12px;
+  color: var(--home-rail-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+.hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
+.hm-rail__new .hm-rail__icon { color: var(--home-lime); }
 
 .hm-rail__sr {
   position: absolute;
@@ -214,33 +259,27 @@
   .hm-rail button { transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
 }
 
-/* Dark: --ink flips to light text, so both dark blocks restate the rail (UI-SPEC 5). */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .hm-rail { background: var(--elev-1); color: var(--text); border-inline-end: 1px solid var(--border); }
-  :root:not([data-theme="light"]) .hm-rail__heading,
-  :root:not([data-theme="light"]) .hm-rail__other-head,
-  :root:not([data-theme="light"]) .hm-rail__more,
-  :root:not([data-theme="light"]) .hm-rail__new,
-  :root:not([data-theme="light"]) .hm-rail__you,
-  :root:not([data-theme="light"]) .hm-rail__status,
-  :root:not([data-theme="light"]) .hm-rail__note { color: var(--text-muted); }
-  :root:not([data-theme="light"]) .hm-rail__link:hover,
-  :root:not([data-theme="light"]) .hm-rail button:hover { background: var(--elev-3); }
-  :root:not([data-theme="light"]) .hm-rail__link[aria-current="page"] { background: var(--elev-3); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
-  :root:not([data-theme="light"]) .hm-rail .hm-rail__face > * { background: var(--text); color: var(--canvas); }
-  :root:not([data-theme="light"]) .hm-rail__link[aria-current="page"]:focus-visible { box-shadow: inset 3px 0 0 var(--accent), var(--focus-ring); }
+/* The rail's frame and account foot (markup in LiveDashboard) take the rail colours too. */
+.hm-frame__rail.dashboard__rail { background: var(--home-rail-bg); border-inline-end: 0; }
+.hm-frame__rail > .dashboard__rail-foot { border-block-start: 0; color: var(--home-rail-text); }
+@media (width > 52rem) {
+  .hm-frame__rail > .dashboard__rail-foot { padding: 0 12px 14px; background: var(--home-rail-bg); }
 }
-
-[data-theme="dark"] .hm-rail { background: var(--elev-1); color: var(--text); border-inline-end: 1px solid var(--border); }
-[data-theme="dark"] .hm-rail__heading,
-[data-theme="dark"] .hm-rail__other-head,
-[data-theme="dark"] .hm-rail__more,
-[data-theme="dark"] .hm-rail__new,
-[data-theme="dark"] .hm-rail__you,
-[data-theme="dark"] .hm-rail__status,
-[data-theme="dark"] .hm-rail__note { color: var(--text-muted); }
-[data-theme="dark"] .hm-rail__link:hover,
-[data-theme="dark"] .hm-rail button:hover { background: var(--elev-3); }
-[data-theme="dark"] .hm-rail__link[aria-current="page"] { background: var(--elev-3); color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
-[data-theme="dark"] .hm-rail .hm-rail__face > * { background: var(--text); color: var(--canvas); }
-[data-theme="dark"] .hm-rail__link[aria-current="page"]:focus-visible { box-shadow: inset 3px 0 0 var(--accent), var(--focus-ring); }
+.hm-frame__rail .dashboard__user-trigger { min-block-size: 44px; padding: 0 12px; border-radius: 12px; color: var(--home-rail-muted); font-family: var(--home-font-body); }
+.hm-frame__rail .dashboard__user-trigger:hover,
+.hm-frame__rail .dashboard__user-trigger[aria-expanded="true"] { border-color: transparent; background: var(--home-rail-raised); color: var(--home-rail-strong); }
+.hm-frame__rail .dashboard__user-trigger-name { font-size: var(--t-sm); }
+/* On a phone the account door floats at the top right, over the ink phone bar on a workspace and over
+   the canvas elsewhere. An ink disc keeps it legible on both: --home-rail-strong on it 14.32 / 16.84. */
+@media (width <= 52rem) {
+  .hm-frame__rail .dashboard__user-trigger,
+  .hm-frame__rail .dashboard__user-trigger:hover,
+  .hm-frame__rail .dashboard__user-trigger[aria-expanded="true"] {
+    inline-size: 44px;
+    justify-content: center;
+    padding: 0;
+    border-radius: var(--radius-pill);
+    background: var(--home-rail-bg);
+    color: var(--home-rail-strong);
+  }
+}

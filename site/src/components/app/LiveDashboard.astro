@@ -244,7 +244,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          <template data-home-wordmark><Wordmark href="/" /></template>
           <div class="hm-frame__rail-content" data-home-rail-slot></div>
 
           <div class="dashboard__rail-foot" data-user-menu-root>
@@ -4272,8 +4271,6 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
-      const template = one<HTMLTemplateElement>("[data-home-wordmark]");
-      const wordmark = template?.content.firstElementChild?.cloneNode(true) as HTMLElement | undefined;
       replaceHomeRegion(slot, "rail", [buildHomeRail(document, vm, {
         navigate: href => navigateHomeHref(href),
         openPerson: id => { void selectHomePerson(id); },
@@ -4284,7 +4281,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
-      }, { wordmark, workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }) })]);
+      }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }) })]);
       homeRailKey = key;
     };
     const renderHomeShell = (): void => {
@@ -10763,8 +10760,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     position: relative;
     display: block;
     min-block-size: var(--dashboard-viewport-height, 100dvh);
-    color: var(--text);
-    background: var(--bg);
+    /* Home canvas (home-visual lane): the page is the canvas, body text Instrument Sans 16/1.45 in ink. */
+    color: var(--home-ink);
+    background: var(--home-canvas);
+    font-family: var(--home-font-body);
+    font-size: 16px;
+    line-height: 1.45;
     isolation: isolate;
   }
 
@@ -10790,7 +10791,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     mask-image: linear-gradient(to bottom, black, transparent 76%);
   }
 
-  .dashboard[data-state="channel"] .dashboard__wash {
+  /* The canvas design has no wash on any screen (home-visual lane). */
+  .dashboard .dashboard__wash {
     display: none;
   }
 

@@ -1,7 +1,7 @@
 // Pure DOM builders. Dynamic content enters only through textContent.
 import type { AgentStateVM, AgentVM, CapsuleVM, ChoiceVM, NeedsYouVM, ObjectCardVM, PersonVM, QueueRowVM, SwitchRowVM } from "./home-types";
 import { IDENTITY_LABEL_SEPARATOR } from "./identity-label";
-import { agentLabel, ordinal } from "./home-names";
+import { agentLabel, ordinal, personTint } from "./home-names";
 
 export type NoticeTone = "info" | "warning" | "danger" | "success";
 export type QueueAction = "up" | "down" | "start-now" | "not-yet" | "release";
@@ -54,20 +54,28 @@ export function agentAccessibleName(a: AgentVM): string {
   return `${shown}, ${owner}, ${a.state.word}`;
 }
 
-/** Person avatar circle (24, 28, 36, 44 or 48 px). Dashed when invited and not joined. */
+/** The visible mark is one character, as in the canvas design; the accessible name is the full name. */
+const firstCharacter = (text: string) => Array.from(text.trim())[0] ?? "";
+/** The person's colour set ("0"-"3"), or "none" for an agent whose owner left. */
+const hue = (tint: number | null) => (tint === null ? "none" : String(tint));
+
+/** Person avatar circle (24, 28, 30, 36, 44 or 48 px), filled in the person's colour. Dashed when invited and not joined. */
 export function personAvatar(doc: Document, p: PersonVM, size: number): HTMLElement {
-  const avatar = node(doc, "span", "hm-person-avatar", p.initials);
+  const avatar = node(doc, "span", "hm-person-avatar", firstCharacter(p.initials));
   avatar.dataset.size = String(size); avatar.dataset.dashed = String(!!p.dashed);
+  avatar.dataset.hue = hue(personTint(p.id, p.you));
   avatar.setAttribute("role", "img"); avatar.setAttribute("aria-label", p.name); avatar.title = p.name;
   return avatar;
 }
-/** Agent orb (22, 28, 36 or 60 px) with an optional owner badge. */
+/** Agent avatar (22, 24, 26, 28, 32, 36 or 60 px): a rounded square in the owner's colour, with an optional owner badge. */
 export function agentOrb(doc: Document, a: AgentVM, opts: { size: number; badge: boolean }): HTMLElement {
   const orb = node(doc, "span", "hm-agent-orb"); orb.dataset.size = String(opts.size);
   orb.dataset.tint = String(a.tint); orb.dataset.dashed = String(!!a.dashed);
+  orb.dataset.hue = hue(personTint(a.ownerId, a.yours));
   orb.setAttribute("role", "img"); orb.setAttribute("aria-label", agentAccessibleName(a)); orb.title = a.label;
+  // The letter keeps the name's own case ("d" for dot), as the canvas design shows it.
   const letter = Array.from(a.name.replace(/[^\p{L}\p{N}]/gu, ""))[0] ?? "";
-  orb.append(decorative(node(doc, "span", "hm-orb-letter", letter.toLocaleUpperCase())));
+  orb.append(decorative(node(doc, "span", "hm-orb-letter", letter)));
   if (opts.badge && a.ownerId !== null) orb.append(decorative(node(doc, "span", "hm-owner-badge", a.ownerInitial)));
   return orb;
 }
@@ -77,8 +85,8 @@ export function capsule(doc: Document, c: CapsuleVM, opts?: { compact?: boolean;
   const root = interactive ? button(doc, "", () => opts!.onOpen!(c)) : node(doc, "span", "hm-capsule");
   root.className = "hm-capsule"; root.setAttribute("aria-label", capsuleLabel(c));
   if (!interactive) root.setAttribute("role", "img");
-  root.append(decorative(personAvatar(doc, c.person, 28)));
-  for (const agent of c.agents.slice(0, 3)) root.append(decorative(agentOrb(doc, agent, { size: 22, badge: false })));
+  root.append(decorative(personAvatar(doc, c.person, 30)));
+  for (const agent of c.agents.slice(0, 3)) root.append(decorative(agentOrb(doc, agent, { size: 26, badge: false })));
   if (c.agents.length > 3) root.append(decorative(node(doc, "span", "hm-capsule-more", `+${c.agents.length - 3}`)));
   if (!opts?.compact) root.append(decorative(node(doc, "span", "hm-capsule-name", c.person.firstName || c.person.name)));
   return root;
