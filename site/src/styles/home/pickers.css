@@ -43,7 +43,7 @@
 }
 /* The tag card sits in the flow between the comments and the field (Todo canvas): it never covers the
    comments it belongs to. */
-.hm-tag-picker .hm-picker-pop { position: static; inline-size: auto; max-block-size: min(22rem, 55vh); }
+.hm-tag-picker .hm-picker-pop { position: static; inline-size: auto; max-block-size: min(22rem, 55vh); box-shadow: var(--home-popover-shadow); }
 .hm-picker-pop[hidden] { display: none; }
 .hm-pick-heading {
   padding: 10px 16px; background: var(--home-soft); color: var(--home-ink-muted); font-size: 13px; font-weight: 700; overflow-wrap: anywhere;

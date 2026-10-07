@@ -18,6 +18,7 @@
 
 /* Base type for the whole app frame. Surfaces set their own sizes on top of this. */
 .hm-frame,
+.dashboard__gateway--create[data-create-rail],
 .hm-shell { font-family: var(--home-font-body); font-size: 16px; line-height: 1.45; color: var(--home-ink); }
 /* Zero specificity, so every surface's own heading rule wins whatever the import order. */
 :where(.hm-frame, .hm-shell) :where(h1, h2, h3) { font-family: var(--home-font-display); font-weight: 700; letter-spacing: -0.01em; }
@@ -232,10 +233,11 @@
   cursor: pointer;
 }
 
-.hm-phone-bar__people { max-inline-size: 40vw; padding: 0; overflow: hidden; }
-/* Capsules on the ink bar: a raised ink fill, no edge, 28 / 24 px faces (Phone-Space.dc.html). */
+/* Wide enough for two whole capsules at 390 px (158 px); the title keeps the rest and wraps if it must. */
+.hm-phone-bar__people { max-inline-size: 44vw; padding: 0; overflow: hidden; }
+/* Capsules on the ink bar: a raised ink fill, no edge, 28 / 24 px faces, 34 px tall (Phone-Space.dc.html). */
 .hm-phone-bar .hm-capsule-stack { gap: 8px; }
-.hm-phone-bar .hm-capsule { gap: 3px; padding: 3px 6px 3px 3px; border-color: var(--home-rail-raised); background: var(--home-rail-raised); }
+.hm-phone-bar .hm-capsule { gap: 3px; padding: 3px 6px 3px 3px; border: 0; background: var(--home-rail-raised); }
 .hm-phone-bar .hm-person-avatar[data-size="30"] { inline-size: 28px; block-size: 28px; font-size: 12px; }
 .hm-phone-bar .hm-agent-orb[data-size="26"] { inline-size: 24px; block-size: 24px; border-radius: 7px; font-size: 11px; }
 .hm-phone-bar__people--static { cursor: default; }

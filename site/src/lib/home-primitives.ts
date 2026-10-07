@@ -108,6 +108,20 @@ export function objectIcon(doc: Document, kind: ObjectCardVM["kind"] | "ask"): H
   const icon = node(doc, "span", "hm-object-icon"); icon.dataset.icon = kind;
   return icon;
 }
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** The canvas's 16 px padlock (Todo.dc.html: rect 3,7 10x7 rx 1.8 and the shackle, stroke 1.6), drawn in currentColor;
+ *  decorative. The surface names its class (the agent page's policy note, the to-do's steer line). */
+export function lockIcon(doc: Document, className: string): SVGSVGElement {
+  const svg = doc.createElementNS(SVG_NS, "svg");
+  for (const [name, value] of [["class", className], ["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"],
+    ["stroke", "currentColor"], ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"],
+    ["focusable", "false"]]) svg.setAttribute(name, value);
+  const body = doc.createElementNS(SVG_NS, "rect");
+  for (const [name, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) body.setAttribute(name, value);
+  const shackle = doc.createElementNS(SVG_NS, "path"); shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
+  svg.append(body, shackle);
+  return svg;
+}
 /** A needs-you card whose sender is unknown (no name, no initials) shows a neutral glyph, never a blank colour. */
 export function needsYouUnknownSender(n: NeedsYouVM): boolean {
   return !("label" in n.from) && !Array.from(n.from.initials.trim()).length;

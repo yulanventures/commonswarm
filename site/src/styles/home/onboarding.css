@@ -114,7 +114,8 @@
   border: 0;
 }
 
-.hm-new-workspace__purpose legend { margin-block-end: 12px; }
+/* The purpose pills sit 12px under the name field (canvas New-Space), not 28px. */
+.hm-new-workspace.hm-new-workspace .hm-new-workspace__card > .hm-new-workspace__field + .hm-new-workspace__purpose { margin-block-start: 12px; }
 
 .hm-new-workspace__purpose-list {
   display: flex;
@@ -122,35 +123,41 @@
   gap: 8px;
 }
 
-/* A purpose is a tile: the canvas pill (1.5px edge, ink fill when chosen) with its sentence kept
-   under the label, so the choice still says what it does before it is made. The native radio
-   covers the tile, transparent, so the tile is the click and focus target. */
+/* A purpose is the canvas pill: 44px, 0 16px, 999px, a 1.5px edge (an inset ring: a 1.5px border
+   renders 1px), 14px/600; chosen, it is ink-filled with a check. The native radio covers the pill,
+   transparent, so the pill is the click and focus target. */
 .hm-new-workspace__purpose-card {
   position: relative;
-  flex: 1 1 220px;
-  min-inline-size: 0;
+  min-inline-size: 44px;
   min-block-size: 44px;
+  max-inline-size: 100%;
   box-sizing: border-box;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
   color: var(--home-ink);
   background: transparent;
-  border: 1.5px solid var(--home-field-border);
-  border-radius: 16px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-field-border);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
   cursor: pointer;
 }
 
-.hm-new-workspace__purpose-card:hover { border-color: var(--home-ink); }
+.hm-new-workspace__purpose-card:hover { box-shadow: inset 0 0 0 1.5px var(--home-ink); }
 
 .hm-new-workspace__purpose-card:has(input:checked) {
-  color: var(--home-card);
+  color: var(--home-on-ink);
   background: var(--home-ink);
-  border-color: var(--home-ink);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
 }
 
-.hm-new-workspace__purpose-card:has(input:focus-visible) { box-shadow: var(--focus-ring); }
+.hm-new-workspace__purpose-card:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
+}
 
 .hm-new-workspace__purpose-card input {
   position: absolute;
@@ -164,34 +171,43 @@
 
 .hm-new-workspace__purpose-card input:disabled { cursor: default; }
 
-.hm-new-workspace__purpose-copy {
-  flex: 1;
-  min-inline-size: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
+.hm-new-workspace__purpose-copy { min-inline-size: 0; }
 
 .hm-new-workspace__purpose-card strong {
   color: inherit;
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.3;
+  font-size: inherit;
+  font-weight: inherit;
+  overflow-wrap: anywhere;
 }
 
-.hm-new-workspace__purpose-card small {
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--home-ink-muted);
-}
-
-.hm-new-workspace__purpose-card:has(input:checked) small { color: var(--home-card); }
-
+/* The check is the chosen pill's non-colour cue; unchosen pills carry none. */
 .hm-new-workspace__purpose-check {
+  display: none;
   flex: none;
   font-weight: 700;
   color: inherit;
 }
+
+.hm-new-workspace__purpose-card:has(input:checked) .hm-new-workspace__purpose-check { display: inline; }
+
+/* What the choices do: quiet lines under the pills (all of them until one is chosen). */
+.hm-new-workspace__purpose-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-block-start: 10px;
+}
+
+.hm-new-workspace__purpose-detail {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  text-wrap: pretty;
+}
+
+.hm-new-workspace__purpose-detail strong { font-weight: 600; color: var(--home-ink); }
+.hm-new-workspace__purpose-detail[hidden] { display: none; }
 
 /* A section of rows: the 21px heading, then 60px (people) or 64px (agents) rows, 4px apart. */
 .hm-new-workspace__note-block {
@@ -615,14 +631,15 @@
   max-inline-size: 100%;
   display: inline-flex;
   align-items: center;
-  padding: 0 18px;
+  padding: 0 19.5px;
   color: var(--home-ink);
   font: inherit;
   font-size: 15px;
   font-weight: 600;
   background: transparent;
-  border: 1.5px solid var(--home-ink);
+  border: 0;
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   cursor: pointer;
   transition: background var(--dur-2) var(--ease-standard);
 }
@@ -636,58 +653,55 @@
 
 .hm-ahp__more { display: contents; }
 
+/* "More apps" is one more app pill (the canvas draws every option the same); open, it is soft-filled. */
 .hm-ahp__more > summary {
   min-block-size: 46px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 18px;
+  padding: 0 19.5px;
   color: var(--home-ink);
   font-size: 15px;
   font-weight: 600;
   list-style: none;
-  border: 1.5px dashed var(--home-line-dashed);
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink);
   cursor: pointer;
+  transition: background var(--dur-2) var(--ease-standard);
 }
 
 .hm-ahp__more > summary::-webkit-details-marker { display: none; }
-.hm-ahp__more > summary::after { content: "+"; font-weight: 700; }
-.hm-ahp__more[open] > summary::after { content: "−"; }
-.hm-ahp__more > summary:hover { border-color: var(--home-ink); }
+.hm-ahp__more > summary:hover { background: var(--home-soft); }
+.hm-ahp__more[open] > summary { background: var(--home-soft); }
 .hm-ahp__more > .hm-ahp__chips { flex: 1 1 100%; }
 
 .hm-ahp__chip-btn:focus-visible,
+.hm-ahp__more > summary:focus-visible,
 .hm-ahp__copy:focus-visible,
 .hm-ahp__back:focus-visible,
 .hm-ahp__crumb:focus-visible,
 .hm-ahp__link:focus-visible,
 .hm-ahp__button:focus-visible,
 .hm-ahp__connect-action:focus-visible,
-.hm-ahp__more > summary:focus-visible,
 .hm-ahp__how > summary:focus-visible,
 .hm-ahp__testing > summary:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-.hm-ahp__status-chip {
-  display: inline-flex;
-  align-items: center;
-  min-block-size: 24px;
-  padding: 0 10px;
-  border-radius: var(--radius-pill);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.3;
-  white-space: nowrap;
-  color: var(--home-ink);
-  background: var(--home-canvas);
+.hm-ahp__chip-btn:focus-visible,
+.hm-ahp__more > summary:focus-visible,
+.hm-ahp__copy:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--home-ink), var(--focus-ring);
 }
 
-.hm-ahp__status-chip[data-status="ready"] { color: var(--home-ink); background: var(--home-lime-soft); }
-.hm-ahp__status-chip[data-status="untested"] { color: var(--home-offline-deep); background: var(--home-offline-tint); }
-.hm-ahp__status-chip[data-status="waiting"] { color: var(--home-ink-muted); background: var(--home-canvas); }
+/* A status other than Ready: quiet supporting text beside the step title, no capsule. */
+.hm-ahp__status-note {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--home-ink-muted);
+  white-space: nowrap;
+}
 
 /* The connection panel: a compact canvas panel, an ink action pill inline when the app has a link. */
 .hm-ahp__connect {
@@ -766,14 +780,15 @@
 .hm-ahp__copy {
   flex: none;
   min-block-size: 44px;
-  padding: 0 16px;
+  padding: 0 17.5px;
   color: var(--home-rail-strong);
   font: inherit;
   font-size: 14px;
   font-weight: 700;
   background: transparent;
-  border: 1.5px solid var(--home-ink-faint);
+  border: 0;
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   cursor: pointer;
 }
 
@@ -876,18 +891,18 @@
   50% { opacity: 1; }
 }
 
-/* Everything else about the route, one tap away. */
-.hm-ahp__how { margin-block-start: 14px; }
+/* Everything else about the route, one tap away, as the connect panel's last row. */
+.hm-ahp__how { flex: 1 1 100%; min-inline-size: 0; margin-block-start: -6px; }
 
 .hm-ahp__how > summary,
 .hm-ahp__testing > summary {
-  min-block-size: 44px;
+  min-block-size: 36px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--home-ink);
+  color: var(--home-ink-muted);
   list-style: none;
   border-radius: 10px;
   cursor: pointer;
@@ -914,7 +929,10 @@
 .hm-ahp__how > summary:hover,
 .hm-ahp__testing > summary:hover { text-decoration: underline; text-underline-offset: 2px; }
 
-.hm-ahp__how[open] > summary { margin-block-end: 8px; }
+.hm-ahp__how[open] > summary { margin-block-end: 8px; color: var(--home-ink); }
+
+/* Inside the canvas-filled panel the steps card is the card surface. */
+.hm-ahp__connect .hm-ahp__steps { background: var(--home-card); }
 
 .hm-ahp__testing { margin-block-start: 12px; }
 .hm-ahp__testing[open] > summary { margin-block-end: 8px; }
@@ -999,15 +1017,16 @@
   color: var(--home-ink-muted);
 }
 
+/* The person invite: a quiet line under the lead (the canvas lead's "other people" sentence). */
 .hm-ahp__footer {
-  margin: 0;
-  padding-block-start: 20px;
-  border-block-start: 1px solid var(--home-card-border);
+  margin: 6px 0 0;
   font-size: 14px;
   color: var(--home-ink-muted);
+  text-wrap: pretty;
 }
 
-.hm-ahp__joined:not([hidden]) ~ .hm-ahp__footer { border-block-start: 0; padding-block-start: 0; }
+/* The inline link keeps a 44px target without growing the line. */
+.hm-ahp__footer > .hm-ahp__link { margin-block: -12px; }
 
 .hm-ahp__link {
   min-block-size: 44px;
@@ -1111,6 +1130,23 @@
   font-weight: 700;
 }
 
+/* The capsule is bound to its owner's colour family (data-hue from personTint, as every person
+   dot): 0 blue (the viewer, the default above), 1 orange, 2 purple, 3 teal. */
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__person { background: var(--home-orange); }
+.hm-invite-connect__capsule[data-hue="1"] > .hm-invite-connect__agent {
+  border-color: var(--home-orange); background: var(--home-orange-tint); color: var(--home-orange-deep);
+}
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__person { background: var(--home-purple); }
+.hm-invite-connect__capsule[data-hue="2"] > .hm-invite-connect__agent {
+  border-color: var(--home-purple); background: var(--home-purple-tint); color: var(--home-purple-deep);
+}
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__person { background: var(--home-teal); }
+.hm-invite-connect__capsule[data-hue="3"] > .hm-invite-connect__agent {
+  border-color: var(--home-teal); background: var(--home-teal-tint); color: var(--home-teal-deep);
+}
+
+.hm-invite-connect__caption strong { font-weight: 700; color: var(--home-rail-strong); }
+
 .hm-invite-connect__status {
   display: inline-block;
   margin: 0;
@@ -1146,12 +1182,21 @@
   text-wrap: pretty;
 }
 
-/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it). */
-.hm-invite-connect .hm-ahp__steps {
+/* The steps: one ink panel, numbered rows (lime numbers, a 700 heading, a 14px line under it).
+   "Good to know" is the panel's last row, not a block of its own. */
+.hm-invite-connect__panel {
   margin-block-start: 20px;
   padding: 4px 16px;
   background: var(--home-rail-panel);
   border-radius: 18px;
+}
+
+.hm-invite-connect__panel:has(> [data-connect-steps][hidden]) { display: none; }
+
+.hm-invite-connect .hm-ahp__steps {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
 }
 
 /* A row wraps: heading, then a "Show" toggle beside it when it fits; the line and an open value
@@ -1247,7 +1292,13 @@
 
 .hm-invite-connect .hm-ahp__step > .hm-ahp__button { margin-block-start: 8px; }
 
-.hm-invite-connect__more { margin-block-start: 10px; }
+.hm-invite-connect__more {
+  padding-block: 6px;
+  border-block-start: 1px solid var(--home-rail-divider);
+}
+
+.hm-invite-connect__more > summary { min-block-size: 32px; }
+.hm-invite-connect__more[open] { padding-block-end: 12px; }
 .hm-invite-connect__more:has(> [data-connect-notes][hidden]) { display: none; }
 
 .hm-invite-connect .hm-ahp__notes {
@@ -1274,7 +1325,7 @@
 .hm-invite-connect__footnote {
   margin: 6px 0 0;
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.4;
   text-align: center;
   color: var(--home-rail-soft);
   text-wrap: pretty;
@@ -1341,10 +1392,24 @@
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__feed-more {
     padding-block-start: 0; margin-block-start: 0;
   }
-  /* The canvas Add-Agent page: 20px over the breadcrumb, 32px under the last block. */
+  /* The canvas Add-Agent page: 20px over the breadcrumb, 32px under the last block, the canvas
+     clamp(16px, 4vw, 32px) gutter, and the full column width on a phone. */
   .hm-frame.hm-frame .hm-frame__main .hm-frame__channel .dashboard__host-view {
+    inline-size: auto;
     padding-block: 20px 32px;
+    padding-inline: clamp(16px, 4vw, 32px);
   }
+}
+
+/* The breadcrumb is the page's first line: no extra margin over the picker (canvas title at y=68). */
+live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent .dashboard__host-view > .dashboard__host-picker {
+  margin-block-start: 0;
+}
+
+@media (width <= 32rem) {
+  /* On a phone the steps card opens inside the connect panel: give it the panel's width. */
+  .hm-ahp__connect .hm-ahp__steps { margin-inline: -10px; padding-inline: 14px; }
+  .hm-ahp__connect .hm-ahp__step { padding-inline-start: 30px; }
 }
 
 .hm-pane-title {

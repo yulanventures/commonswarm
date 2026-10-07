@@ -244,8 +244,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
       <div class="dashboard__frame hm-frame">
         <aside class="dashboard__rail hm-frame__rail" aria-label="Home navigation">
-          <div class="hm-frame__rail-content" data-home-rail-slot></div>
-
+          {/* On a wide screen the rail's BRAND ROW is the account control: the mark and "CommonSwarm", as the canvas
+              rail draws them, plus a quiet chevron (so New workspace is the rail's last element, 16px above the
+              bottom). It comes before the rail in the DOM, so focus meets it at the top, where it is drawn; the
+              rail's own brand link stands down there (rail.css), and the menu's "CommonSwarm home" is the way to
+              the site home. On a phone it is the chevron disc at the top right. The menu keeps the theme switch,
+              Connected apps and Sign out. */}
           <div class="dashboard__rail-foot" data-user-menu-root>
             <button
               class="dashboard__user-trigger"
@@ -254,8 +258,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               aria-haspopup="menu"
               aria-expanded="false"
               aria-controls="dashboard-user-menu"
-              aria-label="Account menu"
+              aria-label="CommonSwarm, account menu"
             >
+              <span class="hm-rail__mark dashboard__user-trigger-mark" aria-hidden="true"><span class="hm-rail__mark-dot"></span><span class="hm-rail__mark-square"></span></span>
+              <span class="dashboard__user-trigger-brand">CommonSwarm</span>
               <span class="dashboard__user-trigger-name" data-rail-account>Your account</span>
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
                 <path d="m4 6 4 4 4-4"></path>
@@ -294,6 +300,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
           </div>
+
+          <div class="hm-frame__rail-content" data-home-rail-slot></div>
         </aside>
 
         <div class="hm-frame__main">
@@ -749,8 +757,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     title="Send message (Enter)"
                   >
                     <span class="dashboard__composer-send-icon" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" width="18" height="18">
-                        <path d="m5 12 7-7 7 7M12 5v14"></path>
+                      {/* Phone-Space.dc.html: an 18px arrow on a 16-unit grid, stroke 2 (lime in workspace.css). */}
+                      <svg viewBox="0 0 16 16" width="18" height="18">
+                        <path d="M8 13V3M4 7l4-4 4 4"></path>
                       </svg>
                     </span>
                     <span class="dashboard__composer-send-word" aria-hidden="true">Send</span>
@@ -1721,6 +1730,16 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       name: "loading" | "signed-out" | "create" | "workspace-error" | "channel",
     ): void => {
       const previous = app.dataset.state;
+      /* ONE rail (New-Space.dc.html): a new workspace opens beside the same rail as every other route. The
+         create panel borrows the frame's rail while it shows with `data-create-rail`; every other panel
+         gives it back, first in the frame. It moves, so renderHomeRail keeps its one slot. */
+      const rail = one<HTMLElement>(".hm-frame__rail");
+      const frame = one<HTMLElement>(".hm-frame");
+      const createPanel = panel("create");
+      if (rail && frame && createPanel) {
+        const home = name === "create" && createPanel.hasAttribute("data-create-rail") ? createPanel : frame;
+        if (rail.parentElement !== home) home.prepend(rail);
+      }
       for (const section of all<HTMLElement>(".dashboard__root > [data-panel]")) {
         section.hidden = section.dataset.panel !== name;
       }
@@ -2003,11 +2022,23 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           onCreate: () => { void submitWorkspaceCreate(); },
         });
         if (!hasWorkspace) replacement.querySelector<HTMLElement>("h1")!.textContent = "Create your first workspace.";
-        panel.replaceChildren(replacement, ...footer);
-        if (hasWorkspace) { const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "hm-ahp__back";
-          cancel.textContent = "← Workspaces"; cancel.dataset.createCancel = ""; cancel.addEventListener("click", homeBack); panel.append(cancel); }
+        /* With a workspace, the form sits in the main column beside the rail (New-Space.dc.html), and the rail
+           carries the brand, the account menu (Sign out) and the way back. The first-run gateway has no rail,
+           so it keeps its own wordmark, account line and Sign out. Those stay in the DOM, hidden, for it. */
+        panel.toggleAttribute("data-create-rail", hasWorkspace);
+        for (const node of footer) node.hidden = hasWorkspace;
+        const rail = panel.querySelector<HTMLElement>(":scope > .hm-frame__rail");
+        if (hasWorkspace) {
+          const main = document.createElement("div"); main.className = "hm-create-main";
+          main.append(replacement, ...footer);
+          /* A phone has no rail column, so this is its way back; on a wider screen the rail is. */
+          const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "hm-ahp__back";
+          cancel.textContent = "← Workspaces"; cancel.dataset.createCancel = ""; cancel.addEventListener("click", homeBack); main.prepend(cancel);
+          panel.replaceChildren(...(rail ? [rail] : []), main);
+        } else panel.replaceChildren(...(rail ? [rail] : []), replacement, ...footer);
       };
       mount(); showPanel("create");
+      if (hasWorkspace) { renderHomeRail(); void loadRailOverview(); }
       window.requestAnimationFrame(() => panel.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true }));
     };
 
@@ -4576,10 +4607,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
         if (!sampleMode) await loadSignals(route.workspaceId, true, requestVersion);
       }
       if (navigation !== homeNavigation) return;
+      /* Back from New workspace to the workspace still open behind it reopens nothing, so the panel turns here. */
+      if (app.dataset.state === "create") showPanel("channel");
       renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
       void loadRailOverview();
       renderChannelRail();
-      if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
+      /* A workspace opens on its newest messages (Phone-Space.dc.html); a position the reader left is kept. */
+      if (scroll) { const saved = homeScroll.get(route.workspaceId); if (saved === undefined) scrollToNewest(); else scroll.scrollTop = saved; }
       if (route.view === "chat" && route.messageId) {
         expandedThreadIds.add(route.messageId); renderFeed();
       }
@@ -11272,6 +11306,14 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
   .dashboard__gateway--create h1 {
     max-inline-size: 22ch;
+  }
+
+  /* New workspace beside the rail (home/integration.css): one viewport tall, so the form column scrolls and the
+     rail stays, as in the frame. */
+  .dashboard[data-state="create"]:has(> .dashboard__root > .dashboard__gateway--create[data-create-rail]),
+  .dashboard__gateway--create[data-create-rail] {
+    block-size: var(--dashboard-viewport-height, 100dvh);
+    overflow: hidden;
   }
 
   .dashboard__gateway--create .dashboard__gateway-copy > p:last-child {

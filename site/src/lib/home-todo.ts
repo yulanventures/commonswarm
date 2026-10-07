@@ -2,7 +2,7 @@
 // User and agent text goes in through textContent or an input value only. Controls render only
 // where TodoVM.may allows them and never in sample mode; a hidden control makes no claim why.
 import type { AgentVM, Id, PersonVM, PickOptionVM, TodoVM } from "./home-types";
-import { agentOrb, choiceChips, notice, personAvatar } from "./home-primitives";
+import { agentOrb, choiceChips, lockIcon, notice, personAvatar } from "./home-primitives";
 import { personTint } from "./home-names";
 import { assignOptions, assignPicker, commentSegments, personNames, tagLabel, tagOptions, tagPicker, tagsInBody, type AssignFacts,
   type PickerPeople } from "./home-pickers";
@@ -177,18 +177,6 @@ function atEditor(doc: Document, todo: TodoVM, callbacks: TodoViewCallbacks): HT
   return form;
 }
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-/** The canvas's 16 px padlock (Todo.dc.html), drawn in currentColor; decorative. */
-function padlock(doc: Document): SVGSVGElement {
-  const svg = doc.createElementNS(SVG_NS, "svg");
-  for (const [key, value] of [["class", "hm-todo-steer-icon"], ["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"],
-    ["stroke", "currentColor"], ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(key, value);
-  const rect = doc.createElementNS(SVG_NS, "rect");
-  for (const [key, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) rect.setAttribute(key, value);
-  const path = doc.createElementNS(SVG_NS, "path"); path.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
-  svg.append(rect, path);
-  return svg;
-}
 
 function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: TodoViewCallbacks, ctx: TodoCopyContext): HTMLElement {
   const panel = node(doc, "section", "hm-todo-panel"); panel.dataset.todoAssigned = "";
@@ -229,7 +217,7 @@ function assignedPanel(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks: T
   // owner steers its line), so it shows only with the start chips, which render only for that owner.
   if (choice && todo.assignee?.kind === "agent") {
     const steer = node(doc, "p", "hm-todo-steer"); steer.dataset.todoSteer = "";
-    steer.append(padlock(doc), node(doc, "span", "", todoSteerLine(todo.assignee.agent, ctx.names)));
+    steer.append(lockIcon(doc, "hm-todo-steer-icon"), node(doc, "span", "", todoSteerLine(todo.assignee.agent, ctx.names)));
     panel.append(steer);
   }
   return panel;

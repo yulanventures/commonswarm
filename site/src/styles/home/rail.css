@@ -100,6 +100,10 @@
 /* Agent rows sit on the canvas design's 40px pitch (person and workspace rows 44px) while the button
    keeps the 44px target: 2px of it reaches into the gap above and below. */
 .hm-rail__agent { margin-block: -2px; padding-inline-start: 34px; }
+/* The visible surface is the canvas row, 40px with radius 12px (Agent.dc.html): the hover and current fills paint a
+   layer inset 2px top and bottom, so the 44px button keeps its target without a taller highlight. */
+.hm-rail__agent { position: relative; isolation: isolate; }
+.hm-rail__agent::before { content: ""; position: absolute; inset: 2px 0; z-index: -1; border-radius: 12px; background: transparent; }
 
 .hm-rail a,
 .hm-rail button { cursor: pointer; }
@@ -120,6 +124,9 @@
   color: var(--home-lime-ink);
   font-weight: 700;
 }
+.hm-rail .hm-rail__agent:is(:hover, [aria-current="page"]) { background: transparent; }
+.hm-rail__agent:hover::before { background: var(--home-rail-raised); }
+.hm-rail__agent[aria-current="page"]::before { background: var(--home-lime); }
 
 /* Line icons: 16-unit shapes as masks, painted in currentColor. */
 .hm-rail__icon {
@@ -220,8 +227,9 @@
 .hm-rail .hm-status[data-state="disconnected"],
 .hm-rail .hm-status[data-state="disconnected"] .hm-status-word { color: var(--home-offline); }
 /* On the current (lime) agent row the word reads in lime ink, 600, with no shape (Agent.dc.html): 12.65 / 12.65. */
-.hm-rail__agent[aria-current="page"] .hm-status,
-.hm-rail__agent[aria-current="page"] .hm-status-word { color: var(--home-lime-ink); font-weight: 600; }
+/* Scoped one class above the disconnected rule (.hm-rail .hm-status[data-state] .hm-status-word), so the word is ink on lime
+   in every state. */
+.hm-rail .hm-rail__agent[aria-current="page"] *:is(.hm-status, .hm-status-word) { color: var(--home-lime-ink); font-weight: 600; }
 .hm-rail__agent[aria-current="page"] .hm-status-shape { display: none; }
 
 /* The ownership line is read, not drawn: the canvas design has no note under the list. */
@@ -243,15 +251,21 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-block-size: 44px;
-  padding: 0 12px;
-  border: 1.5px solid var(--home-ink-faint);
+  box-sizing: border-box;
+  /* The canvas button is min-height 44px INSIDE a 1.5px stroke: 47px outside. Chromium rounds a 1.5px border to
+     1px, so the stroke is an inset 1.5px ring (the primitives' outline method; 3 device px at DPR 2), and the
+     padding carries the 1.5px the border used to. */
+  min-block-size: 47px;
+  padding: 0 13.5px;
+  border: 0;
   border-radius: 12px;
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   color: var(--home-rail-strong);
   font-weight: 600;
   text-decoration: none;
 }
 .hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
+.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--focus-ring); }
 .hm-rail__new .hm-rail__icon { color: var(--home-lime); }
 
 .hm-rail__sr {
@@ -274,16 +288,65 @@
   .hm-rail button { transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard); }
 }
 
-/* The rail's frame and account foot (markup in LiveDashboard) take the rail colours too. */
+/* The rail's frame and account control (markup in LiveDashboard) take the rail colours too. */
 .hm-frame__rail.dashboard__rail { background: var(--home-rail-bg); border-inline-end: 0; }
 .hm-frame__rail > .dashboard__rail-foot { border-block-start: 0; color: var(--home-rail-text); }
-@media (width > 52rem) {
-  .hm-frame__rail > .dashboard__rail-foot { padding: 0 12px 14px; background: var(--home-rail-bg); }
-}
 .hm-frame__rail .dashboard__user-trigger { min-block-size: 44px; padding: 0 12px; border-radius: 12px; color: var(--home-rail-muted); font-family: var(--home-font-body); }
 .hm-frame__rail .dashboard__user-trigger:hover,
 .hm-frame__rail .dashboard__user-trigger[aria-expanded="true"] { border-color: transparent; background: var(--home-rail-raised); color: var(--home-rail-strong); }
 .hm-frame__rail .dashboard__user-trigger-name { font-size: var(--t-sm); }
+.hm-frame__rail .dashboard__user-trigger :is(.dashboard__user-trigger-mark, .dashboard__user-trigger-brand) { display: none; }
+/* Wide screens: the brand row IS the account control (the canvas rail has no account foot, so New workspace is its
+   last element). The button draws the brand row exactly (mark, then the 20px display word in --home-rail-strong,
+   rail padding 14px 12px, 44px tall, full width) with one quiet cue, a 12px chevron in --home-rail-muted (5.96 light / 7.00 dark
+   on the rail). The rail's own brand link stands down here; the menu's "CommonSwarm home" is the site home link. */
+@media (width > 52rem) {
+  .hm-frame__rail > .dashboard__rail-foot { flex: none; display: block; padding: 14px 12px 0; background: var(--home-rail-bg); }
+  .hm-frame__rail .hm-rail__brand { display: none; }
+  .hm-frame__rail .hm-rail { padding-block-start: 18px; }
+  .hm-frame__rail .dashboard__user-trigger {
+    justify-content: flex-start;
+    gap: 10px;
+    inline-size: 100%;
+    min-block-size: 44px;
+    /* The word needs about 152px of 224: the chevron sits 6px after it and 4px from the row's end. */
+    padding: 0 4px 0 8px;
+    border: 0;
+    border-radius: 12px;
+    color: var(--home-rail-strong);
+  }
+  .hm-frame__rail .dashboard__user-trigger :is(.dashboard__user-trigger-mark, .dashboard__user-trigger-brand) { display: block; }
+  .hm-frame__rail .dashboard__user-trigger-brand {
+    min-inline-size: 0;
+    overflow: hidden;
+    font-family: var(--home-font-display);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.45;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hm-frame__rail .dashboard__user-trigger-name { display: none; }
+  .hm-frame__rail .dashboard__user-trigger > svg { inline-size: 12px; block-size: 12px; margin-inline-start: -4px; color: var(--home-rail-muted); }
+  .hm-frame__rail .dashboard__user-trigger:is(:hover, [aria-expanded="true"]) > svg { color: var(--home-rail-strong); }
+  /* The menu opens below the row, the rail's inner width, the signed-in line first (the button no longer shows it). */
+  .hm-frame__rail .dashboard__user-menu {
+    inset-block: calc(100% + 4px) auto;
+    inset-inline: 12px;
+    min-inline-size: 0;
+    box-sizing: border-box;
+  }
+  .hm-frame__rail .dashboard__user-menu-account {
+    display: block;
+    overflow: hidden;
+    padding: var(--s-2) var(--s-3);
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
 /* On a phone the account door floats at the top right, over the ink phone bar on a workspace and over
    the canvas elsewhere. An ink disc keeps it legible on both: --home-rail-strong on it 14.32 / 16.84. */
 @media (width <= 52rem) {

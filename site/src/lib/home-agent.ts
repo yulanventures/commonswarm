@@ -1,9 +1,9 @@
 import {
   agentOrb,
+  lockIcon,
   notice,
   queueRow,
   statusLine,
-  switchRow,
   type QueueAction,
 } from "./home-primitives";
 import type {
@@ -28,6 +28,7 @@ import {
   policyChangeLabel,
   removeLabel,
   steeringMay,
+  switchWord,
   waitingLine,
 } from "./home-agent-copy";
 
@@ -119,26 +120,12 @@ export interface AgentPageCallbacks {
   onManage?: (agent: AgentVM) => void;
   onQueueAction?: (action: QueueAction, row: QueueRowVM) => void;
   onFix?: (action: NonNullable<AgentStateVM["fix"]["action"]>, agent: AgentVM) => void;
+  /** Not drawn on this page: Lists & docs shows as a plain fact row, and People & agents (the Manage action) changes it. */
   onListsToggle?: (row: SwitchRowVM) => void;
   /** Opens the existing removal confirmation; the danger line shows only when this is wired and may.remove is true. */
   onRemove?: (agent: AgentVM) => void;
 }
 
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-/** The canvas's 16px padlock, drawn in currentColor; decorative. */
-function lockIcon(doc: Document): SVGSVGElement {
-  const svg = doc.createElementNS(SVG_NS, "svg");
-  for (const [name, value] of [["width", "16"], ["height", "16"], ["viewBox", "0 0 16 16"], ["fill", "none"], ["stroke", "currentColor"],
-    ["stroke-width", "1.6"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"], ["aria-hidden", "true"], ["focusable", "false"]]) svg.setAttribute(name, value);
-  svg.setAttribute("class", "hm-agent__lock");
-  const body = doc.createElementNS(SVG_NS, "rect");
-  for (const [name, value] of [["x", "3"], ["y", "7"], ["width", "10"], ["height", "7"], ["rx", "1.8"]]) body.setAttribute(name, value);
-  const shackle = doc.createElementNS(SVG_NS, "path");
-  shackle.setAttribute("d", "M5.5 7V5a2.5 2.5 0 0 1 5 0v2");
-  svg.append(body, shackle);
-  return svg;
-}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   doc: Document,
@@ -193,12 +180,15 @@ function notFoundPage(doc: Document, vm: AgentNotFoundVM): HTMLElement {
   return page;
 }
 
-function appendFact(doc: Document, list: HTMLDListElement, label: string, value: string, hook: string) {
+function appendFact(doc: Document, list: HTMLDListElement, label: string, value: string, hook: string, detail = ""): HTMLElement {
   const row = el(doc, "div", "hm-agent__fact");
   const term = el(doc, "dt", "hm-agent__fact-label", label);
   term.dataset.hmFact = hook;
+  // The canvas's ruled-row form: a 16px/600 label, then a 13px muted note on the same line.
+  if (detail) term.append(" ", el(doc, "span", "hm-agent__fact-detail", detail));
   row.append(term, el(doc, "dd", "hm-agent__fact-value", value));
   list.append(row);
+  return row;
 }
 
 function todoLinkRow(doc: Document, href: string, title: string, meta: string, extra?: string) {
@@ -403,26 +393,27 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
   last.dataset.hmFact = "last-active";
   summary.append(received, " ", last);
   facts.append(summary);
-  if (vm.facts.model) {
-    const list = el(doc, "dl", "hm-agent__fact-list");
-    appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
-    facts.append(list);
-  }
+  // Plain ruled rows (the canvas's seat rows): the current values only. Changing Lists & docs happens in
+  // People & agents, which the header's Manage action opens.
+  const list = el(doc, "dl", "hm-agent__fact-list");
+  if (vm.facts.model) appendFact(doc, list, AGENT_COPY.model, vm.facts.model, "model");
   if (canAct && agent.yours && vm.facts.listsAndDocs) {
-    const lists = el(doc, "div", "hm-agent__lists");
+    const row = vm.facts.listsAndDocs;
+    const lists = appendFact(doc, list, row.label, switchWord(row.state), "lists", row.detail);
     lists.dataset.hmLists = "";
-    lists.append(switchRow(doc, vm.facts.listsAndDocs, (row) => {
-      if (!canAct || !agent.yours) return;
-      callbacks.onListsToggle?.(row);
-    }));
-    facts.append(lists);
+    lists.dataset.switchId = row.id;
   }
-  if (agent.yours && vm.facts.postsHere) facts.append(switchRow(doc, vm.facts.postsHere, () => {}));
+  if (agent.yours && vm.facts.postsHere) {
+    const row = vm.facts.postsHere;
+    appendFact(doc, list, row.label, switchWord(row.state), "posts", row.detail).dataset.switchId = row.id;
+  }
+  if (list.childElementCount) facts.append(list);
   aside.append(facts);
 
   let receiptHome: HTMLElement = facts;
   if (agent.yours && vm.workPolicy) {
-    // The current policy as plain summary text; one secondary control switches it.
+    // The current policy as plain summary text. The one control that switches it is the summary's last
+    // 15px line (People & agents has no work-policy control yet, so it stays here).
     const current = vm.workPolicy;
     const policyCard = el(doc, "section", "hm-agent__policy");
     policyCard.dataset.hmPolicy = current;
@@ -434,17 +425,17 @@ export function agentPage(doc: Document, vm: AgentPageVM, callbacks: AgentPageCa
     now.append(el(doc, "strong", "", current === "owner" ? AGENT_COPY.policyOwner : AGENT_COPY.policyAnyone), ` in ${vm.workspaceName}`);
     summary.append(now);
     if (current === "owner") summary.append(el(doc, "p", "hm-agent__policy-offer", AGENT_COPY.policyOffer));
-    policyCard.append(summary);
     if (canAct && callbacks.onWorkPolicy) {
       const next = current === "owner" ? "anyone" : "owner";
       const change = actionButton(doc, policyChangeLabel(next), "hm-agent__policy-change", () => {
         callbacks.onWorkPolicy?.(next);
       });
       change.dataset.hmPolicyChange = next;
-      policyCard.append(change);
+      summary.append(change);
     }
+    policyCard.append(summary);
     const lock = el(doc, "p", "hm-agent__policy-note");
-    lock.append(lockIcon(doc), el(doc, "span", "", AGENT_COPY.policyLock));
+    lock.append(lockIcon(doc, "hm-agent__lock"), el(doc, "span", "", AGENT_COPY.policyLock));
     policyCard.append(lock);
     aside.append(policyCard);
     receiptHome = policyCard;

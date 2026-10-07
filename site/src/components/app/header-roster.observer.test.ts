@@ -199,7 +199,7 @@ test("the narrow shell keeps a top bar, channel menu and bottom links above the 
   assert.match(integration, /clip-path: inset\(50%\)/);
   assert.doesNotMatch(integration, /channel-menu[^}]*display: none/);
   const shellCss = homeShellCss;
-  assert.match(shellCss, /\.hm-phone-bar__people.*max-inline-size: 40vw/);
+  assert.match(shellCss, /\.hm-phone-bar__people.*max-inline-size: 44vw/);
   assert.match(shellCss, /\.hm-channel-menu__label.*white-space: nowrap/);
   assert.doesNotMatch(dashboard, /\.dashboard__channel(?:--roster)? \.dashboard__channel-body\s*\{[\s\S]*min-block-size:\s*calc\(100svh/);
 });

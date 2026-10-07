@@ -8,8 +8,11 @@
  * ONE PAGE. The breadcrumb, the title, the app pills and the chosen app's connection stay on
  * screen together: choosing a pill fills in the panel under it (the pills stay, the chosen one
  * ink-filled). The panel is the canvas one: a short summary with an action pill only when the
- * app has a real link (Cursor), the one sentence to copy, then the waiting line. Every numbered
- * step, the testing steps and the notes are kept under "How to connect, step by step".
+ * app has a real address (Claude's web app, Cursor's install link), then "How to connect, step by
+ * step" inside the same panel (every numbered step, the testing steps and the notes), the one
+ * sentence to copy, then the waiting line. A host status other than Ready is quiet text beside
+ * the step title. The person invite is a quiet line under the lead, where the canvas lead names
+ * other people's agents.
  *
  * NOT BUILT (RULINGS.md 5). The canvas "Name its seat" field: on the hosted route the agent names
  * itself when it joins (the sentence it is told to say); no command lets this page name or hold
@@ -60,6 +63,8 @@ const notesOf = (host: AgentHost): string[] => [
   MENU_LABELS_NOTE,
 ];
 const linkOf = (host: AgentHost) => host.steps.find((step) => step.link)?.link ?? null;
+/* The panel's pill: the app's own web address, else the step link (Cursor's install link). */
+const actionOf = (host: AgentHost) => host.open ?? linkOf(host);
 const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent" : host.name;
 ---
 
@@ -74,6 +79,12 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         Add one of your agents to <span data-ahp-slot="workspace-plain">this workspace</span>
       </h1>
       <p class="hm-ahp__lead" data-ahp-ownership-line></p>
+      {audience === "setter" && (
+        <p class="hm-ahp__footer">
+          Someone else's agent? Invite the person; they connect it themselves.
+          <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
+        </p>
+      )}
     </header>
 
     <section class="hm-ahp__section" aria-labelledby={`hm-ahp-${audience}-which`}>
@@ -125,16 +136,88 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
       </button>
       <div class="hm-ahp__detail-title">
         <h2 class="hm-ahp__step-title hm-ahp__title-anchor" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">2. Connect {host.name}</h2>
-        {host.status && (
-          <span class="hm-ahp__status-chip" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
+        {host.status && host.status !== "ready" && (
+          <span class="hm-ahp__status-note" data-status={host.status}>{AGENT_HOST_STATUS_LABELS[host.status]}</span>
         )}
       </div>
 
       <div class="hm-ahp__connect">
         <p class="hm-ahp__connect-line">{hostConnectLine(host)}</p>
-        {linkOf(host) && (
-          <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
+        {actionOf(host) && (
+          host.open
+            ? <a class="hm-ahp__connect-action" href={host.open.href} target="_blank" rel="noopener noreferrer">{host.open.label}</a>
+            : <a class="hm-ahp__connect-action" href={linkOf(host)!.href} rel="nofollow">{linkOf(host)!.label}</a>
         )}
+        <details class="hm-ahp__how" open={host.status === "waiting" ? true : undefined}>
+          <summary>How to connect, step by step</summary>
+          <ol class="hm-ahp__steps">
+            {stepsOf(host).map((step) => (
+              <li class="hm-ahp__step">
+                <p>
+                  {pieces(step.text).map((piece) =>
+                    piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
+                      : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
+                        : piece.value)}
+                </p>
+                {step.address && (
+                  <div class="hm-ahp__copyable">
+                    <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
+                  </div>
+                )}
+                {step.code && (
+                  <div class="hm-ahp__copyable">
+                    <pre class="hm-ahp__value">{step.code}</pre>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
+                  </div>
+                )}
+                {step.say && (
+                  <div class="hm-ahp__copyable">
+                    <p class="hm-ahp__value">{step.say}</p>
+                    <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+                  </div>
+                )}
+                {step.link && (
+                  <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
+                )}
+              </li>
+            ))}
+          </ol>
+
+          {host.testing && (
+            <details class="hm-ahp__testing">
+              <summary>{host.testing.heading}</summary>
+              <ol class="hm-ahp__steps">
+                {host.testing.steps.map((step) => (
+                  <li class="hm-ahp__step">
+                    <p>
+                      {pieces(step.text).map((piece) =>
+                        piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
+                          : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
+                            : piece.value)}
+                    </p>
+                    {step.address && (
+                      <div class="hm-ahp__copyable">
+                        <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
+                        <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
+                      </div>
+                    )}
+                    {step.say && (
+                      <div class="hm-ahp__copyable">
+                        <p class="hm-ahp__value">{step.say}</p>
+                        <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
+
+          <ul class="hm-ahp__notes" role="list">
+            {notesOf(host).map((note) => <li>{note}</li>)}
+          </ul>
+        </details>
       </div>
 
       {hostJoinPrompt(host) && (
@@ -154,77 +237,6 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
         </p>
       )}
       <p class="hm-ahp__waiting hm-ahp__waiting--done" data-ahp-joined-line role="status" aria-live="polite" hidden></p>
-
-      <details class="hm-ahp__how" open={host.status === "waiting" ? true : undefined}>
-        <summary>How to connect, step by step</summary>
-        <ol class="hm-ahp__steps">
-          {stepsOf(host).map((step) => (
-            <li class="hm-ahp__step">
-              <p>
-                {pieces(step.text).map((piece) =>
-                  piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
-                    : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
-                      : piece.value)}
-              </p>
-              {step.address && (
-                <div class="hm-ahp__copyable">
-                  <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
-                  <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
-                </div>
-              )}
-              {step.code && (
-                <div class="hm-ahp__copyable">
-                  <pre class="hm-ahp__value">{step.code}</pre>
-                  <button class="hm-ahp__copy" type="button" data-ahp-copy={step.code} aria-label="Copy the command">Copy</button>
-                </div>
-              )}
-              {step.say && (
-                <div class="hm-ahp__copyable">
-                  <p class="hm-ahp__value">{step.say}</p>
-                  <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
-                </div>
-              )}
-              {step.link && (
-                <a class="hm-ahp__button" href={step.link.href} rel="nofollow">{step.link.label}</a>
-              )}
-            </li>
-          ))}
-        </ol>
-
-        {host.testing && (
-          <details class="hm-ahp__testing">
-            <summary>{host.testing.heading}</summary>
-            <ol class="hm-ahp__steps">
-              {host.testing.steps.map((step) => (
-                <li class="hm-ahp__step">
-                  <p>
-                    {pieces(step.text).map((piece) =>
-                      piece.kind === "workspace" ? <strong data-ahp-slot="workspace">{piece.value}</strong>
-                        : piece.kind === "email" ? <span data-ahp-slot="email">{piece.value}</span>
-                          : piece.value)}
-                  </p>
-                  {step.address && (
-                    <div class="hm-ahp__copyable">
-                      <code class="hm-ahp__value">{AGENT_CONNECTOR_ADDRESS}</code>
-                      <button class="hm-ahp__copy" type="button" data-ahp-copy={AGENT_CONNECTOR_ADDRESS} aria-label="Copy the connector address">Copy</button>
-                    </div>
-                  )}
-                  {step.say && (
-                    <div class="hm-ahp__copyable">
-                      <p class="hm-ahp__value">{step.say}</p>
-                      <button class="hm-ahp__copy" type="button" data-ahp-copy={step.say} aria-label="Copy the sentence">Copy</button>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ol>
-          </details>
-        )}
-
-        <ul class="hm-ahp__notes" role="list">
-          {notesOf(host).map((note) => <li>{note}</li>)}
-        </ul>
-      </details>
     </section>
   ))}
 
@@ -238,12 +250,6 @@ const sayTo = (host: AgentHost): string => host.id === "other-app" ? "your agent
     <p class="hm-ahp__joined-lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
   </section>
 
-  {audience === "setter" && (
-    <p class="hm-ahp__footer">
-      Someone else's agent? Invite the person; they connect it themselves.
-      <button class="hm-ahp__link" type="button" data-agent-owner-teammate>Invite someone</button>
-    </p>
-  )}
 
   <p class="hm-ahp__status" role="status" aria-live="polite" data-ahp-status></p>
 </agent-host-picker>
