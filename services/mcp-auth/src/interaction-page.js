@@ -29,8 +29,6 @@ const ICONS = {
   revoke: `<svg ${ICON_ATTRS}><path d="M4 10a6 6 0 1 0 1.8-4.3"/><path d="M4 3.5v3.2h3.2"/></svg>`,
   chat: `<svg ${ICON_ATTRS}><path d="M3.5 5.5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-3.5 3v-3h0a2 2 0 0 1-2-2z"/></svg>`,
   alert: `<svg ${ICON_ATTRS}><path d="M10 3 2.5 16.5h15z"/><path d="M10 8.2v3.6M10 14.2v.1"/></svg>`,
-  shield: `<svg ${ICON_ATTRS}><path d="M10 2.5 4 4.8v4.6c0 3.8 2.6 6.6 6 8.1 3.4-1.5 6-4.3 6-8.1V4.8z"/><path d="m7.3 10 1.9 1.9 3.6-3.8"/></svg>`,
-  arrow: `<svg ${ICON_ATTRS}><path d="M4 10h11M11 6l4 4-4 4"/></svg>`,
 };
 const PROVIDER_GLYPHS = {
   github: '<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.87c-2.78.6-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.6 9.6 0 0 1 12 6.82a9.6 9.6 0 0 1 2.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85v2.77c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></svg>',
@@ -44,10 +42,11 @@ export function renderConsentDestination({ clientName, redirectUri, metadataHost
   const destination = ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
     ? "a program on this computer (localhost)"
     : hostname;
-  return `<p class="notice destination">
-    <span class="destination-line destination-return">${ICONS.arrow}<span>After you approve, you return to <strong>${escapeHtml(destination)}</strong>.</span></span>
-    <span class="destination-line">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong></span>
-    ${metadataHost ? `<span class="destination-line">Client ID URL host: <strong>${escapeHtml(metadataHost)}</strong>.</span>` : ""}</p>`;
+  // Shared with admin-interaction-page.js: line breaks stay in the markup so the
+  // facts keep one line each without this page's stylesheet.
+  return `<p class="notice destination"><span class="destination-line">Client name (supplied by the client): <strong>${escapeHtml(clientName ?? "Unnamed client")}</strong></span><br>
+    <span class="destination-line destination-return">After you approve, you return to <strong>${escapeHtml(destination)}</strong>.</span>
+    ${metadataHost ? `<br><span class="destination-line">Client ID URL host: <strong>${escapeHtml(metadataHost)}</strong>.</span>` : ""}</p>`;
 }
 
 function stepLabel(step, names) {
@@ -65,7 +64,7 @@ function renderClientIdentity(clientDisplay) {
   if (clientDisplay.verified) {
     return {
       verified: true,
-      badge: `<span class="badge badge-verified">${ICONS.shield}Verified app</span>`,
+      badge: `<span class="badge badge-neutral">HTTPS client ID</span>`,
       heading,
       facts: `<p class="app-fact">Client: <strong>${primary}</strong></p>`,
       warning: "",
@@ -149,7 +148,7 @@ export function renderConsentPage({
   const countText = `${choices.length} workspace${choices.length === 1 ? "" : "s"}${longList ? " · scroll for more" : ""}`;
   const pickerHelp = selectionLocked
     ? "These choices are locked because this connection has already started."
-    : "Check each workspace this app may reach. Home workspace is the default; the other checked workspaces stay reachable.";
+    : "Check each workspace this app may reach. If you select more than one workspace, choose one of them as Home workspace.";
   const emptyRow = choices.length === 0
     ? `<li class="workspace-empty">You have no workspaces to choose from. Create one in CommonSwarm first.</li>`
     : "";
@@ -174,7 +173,7 @@ export function renderConsentPage({
   --tile-bg:#DDE7FA;--tile-line:#2A5DBF;--tile-ink:#1B3F87;--avatar:#2A5DBF;
   --warn-bg:#FCEBCB;--warn-line:#F0B25A;--warn-ink:#5E3300;--warn-icon:#8A4B00;
   --danger:#8C2A14;--danger-bg:#FBE4D5;--danger-line:#E9B79B;
-  --ok-bg:#E9F5BC;--ok-ink:#2E3A0A;--pill-dot:#D4F04A;
+  --pill-dot:#D4F04A;
   --display:"Bricolage Grotesque",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
   --body:"Instrument Sans",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
 }
@@ -185,7 +184,7 @@ export function renderConsentPage({
   --tile-bg:#1E3156;--tile-line:#7FA3EC;--tile-ink:#DDE7FA;--avatar:#3B6FD4;
   --warn-bg:#3A2B10;--warn-line:#8A5A12;--warn-ink:#FCEBCB;--warn-icon:#F0B25A;
   --danger:#FFB4A0;--danger-bg:#3A1D14;--danger-line:#7A3420;
-  --ok-bg:#2F3F12;--ok-ink:#E4F78A;--pill-dot:#17231C;
+  --pill-dot:#17231C;
 }}
 *,*::before,*::after{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
@@ -212,7 +211,7 @@ svg{flex:none}
 .pair-link i{width:4px;height:4px;border-radius:50%;background:var(--muted);opacity:.7}
 .badge{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:3px 11px 3px 8px;border-radius:999px;font-size:13px;font-weight:700}
 .badge svg{width:15px;height:15px}
-.badge-verified{background:var(--ok-bg);color:var(--ok-ink)}
+.badge-neutral{padding:3px 11px;background:var(--card);color:var(--muted);border:1px solid var(--border)}
 .badge-unverified{background:var(--warn-bg);color:var(--warn-ink);border:1px solid var(--warn-line)}
 .intro{display:flex;flex-direction:column;gap:10px}
 .intro .connect-row{margin-bottom:6px}
@@ -245,7 +244,7 @@ svg{flex:none}
 .progress ul{list-style:none;margin:6px 0 0;padding:0}
 .progress li{position:relative;padding:4px 0 4px 26px;font-size:15px}
 .progress li::before{content:"";position:absolute;left:2px;top:9px;width:14px;height:14px;border-radius:50%;background:var(--lime);box-shadow:inset 0 0 0 1.5px #17231C}
-.progress .error{margin-top:10px;font-weight:600}
+.progress .error{margin-top:10px;font-weight:600;color:var(--danger);font-size:15px}
 form{margin:0}
 form[action$="/consent"]>*+*{margin-top:22px}
 fieldset{border:0;margin:0;padding:0;min-width:0;counter-reset:chosen}
@@ -253,7 +252,7 @@ legend{padding:0;font-family:var(--display);font-weight:700;font-size:19px;lette
 legend+*{clear:both}
 .picker-help{padding-top:6px;font-size:14px;color:var(--muted);text-wrap:pretty}
 .workspace-list{list-style:none;margin:12px 0 0;padding:0;border:1px solid var(--border);border-radius:14px;background:var(--card);overflow:hidden}
-.workspace-list.is-long{max-height:min(27rem,62vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.workspace-list.is-long{max-height:min(27rem,62vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scroll-padding-block:64px 80px}
 .workspace-choice{display:flex;align-items:center;gap:8px 12px;padding:6px 10px 6px 4px;border-top:1px solid var(--hair)}
 .workspace-choice:first-child{border-top:0}
 .workspace-choice:has(input[type=checkbox]:checked){background:var(--soft)}
@@ -262,7 +261,7 @@ legend+*{clear:both}
 .workspace-pick input,.home-choice input{flex:none;margin:0;accent-color:var(--ink);cursor:pointer}
 .workspace-pick input{width:20px;height:20px}
 .home-choice input{width:16px;height:16px}
-.home-choice{flex:none;display:inline-flex;align-items:center;gap:7px;min-height:40px;padding:0 13px 0 11px;border:1px solid var(--border);border-radius:999px;background:var(--card);font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap}
+.home-choice{flex:none;display:inline-flex;align-items:center;gap:7px;min-height:44px;padding:0 13px 0 11px;border:1px solid var(--border);border-radius:999px;background:var(--card);font-size:13px;font-weight:600;color:var(--muted);cursor:pointer;white-space:nowrap}
 .home-choice:has(input:checked){background:var(--primary-bg);border-color:var(--primary-bg);color:var(--primary-fg)}
 .home-choice:has(input:checked) input{accent-color:var(--pill-dot)}
 .workspace-pick input:checked{accent-color:var(--ink)}
@@ -276,9 +275,10 @@ form[action$="/consent"]>.warning{background:var(--soft);border:1px solid var(--
 form[action$="/consent"]>.warning svg{margin-top:2px}
 .destination{display:flex;flex-direction:column;gap:4px;padding:14px 16px 14px 16px;border-radius:14px;border:1px dashed var(--border);font-size:14px;color:var(--muted)}
 .destination strong{color:var(--ink);overflow-wrap:anywhere}
-.destination-line{padding-left:28px}
-.destination-return{display:flex;gap:10px;align-items:flex-start;padding-left:0;margin-bottom:2px;font-size:15px;font-weight:600;color:var(--ink)}
-.destination-return svg{margin-top:2px}
+.destination br{display:none}
+.destination-line{padding-left:26px}
+.destination-return{order:-1;position:relative;margin-bottom:2px;font-size:15px;font-weight:600;color:var(--ink)}
+.destination-return::before{content:"→";content:"→"/"";position:absolute;left:2px;top:-1px;font-weight:700}
 .actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px;padding-top:18px;border-top:1px solid var(--hair)}
 .actions button{min-height:52px;padding:0 30px;border:0;border-radius:999px;background:var(--primary-bg);color:var(--primary-fg);font:inherit;font-size:17px;font-weight:700;cursor:pointer}
 .actions button:hover{background:var(--primary-hover)}
@@ -295,7 +295,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
   .top{padding-bottom:20px}
   .workspace-choice{flex-wrap:wrap;padding:2px 8px 10px 2px;gap:0}
   .workspace-pick{flex:1 1 100%;gap:12px;min-height:46px;padding:4px 8px;font-size:15px}
-  .home-choice{margin-left:40px;min-height:34px;padding:0 12px 0 9px;font-size:12.5px;gap:6px}
+  .home-choice{margin-left:40px;min-height:44px;padding:0 14px 0 11px;font-size:13px;gap:7px}
   .switch-form{margin-left:52px}
   .actions{flex-direction:column;align-items:stretch;text-align:center}
   .actions button{width:100%}
@@ -304,7 +304,7 @@ form[action$="/consent"]>.warning svg{margin-top:2px}
 @media (forced-colors:active){.home-choice,.badge,.account,.workspace-list,.warning,.destination{border:1px solid CanvasText}}
 </style></head><body><main class="page">
   <header class="top"><span class="brand">${BRAND_MARK}<span>CommonSwarm</span></span><span class="top-note">Connect an app</span></header>
-  <div class="card ${client.verified ? "verified" : "unverified"}">
+  <div class="card${client.verified ? "" : " unverified"}">
   <section class="intro" aria-labelledby="consent-title">
     <div class="connect-row">
       <span class="pair" aria-hidden="true"><span class="app-mark">${initial(clientDisplay.primary)}</span><span class="pair-link"><i></i><i></i><i></i></span><span class="cs-mark">${BRAND_MARK}</span></span>
