@@ -2,7 +2,7 @@
 .hm-frame.hm-frame.hm-frame {
   position: relative;
   display: grid;
-  grid-template-columns: 17.5rem minmax(0, 1fr) minmax(18rem, 22rem);
+  grid-template-columns: 15.5rem minmax(0, 1fr) minmax(18rem, 22rem);
   block-size: 100%;
   max-block-size: 100dvh;
   grid-template-rows: minmax(0, 1fr);
@@ -36,7 +36,7 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 .hm-frame__main .hm-frame__channel > header { min-block-size: 52px; padding: var(--s-1) var(--s-5); }
 .hm-frame__channel > header > [data-home-channel-menu]:not([hidden]) + div { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (width > 52rem) and (width < 64rem) {
-  .hm-frame.hm-frame.hm-frame { grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame { grid-template-columns: 15.5rem minmax(0, 1fr); }
   .hm-frame__side { display: none; }
   .hm-frame__profile.hm-frame__profile { grid-column: 2; }
   .hm-frame__profile.hm-frame__profile { z-index: 10; justify-self: end; inline-size: min(22rem, 100%); }
@@ -70,7 +70,7 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
 
 @media (width >= 64rem) {
   .hm-frame__main .hm-frame__channel > header { min-block-size: 70px; }
-  .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: 17.5rem minmax(0, 1fr); }
+  .hm-frame.hm-frame.hm-frame.hm-frame--catchup { grid-template-columns: 15.5rem minmax(0, 1fr); }
   .hm-frame.hm-frame.hm-frame.hm-frame--catchup > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {

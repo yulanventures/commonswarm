@@ -93,7 +93,7 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
       body { margin: 0; font-family: Arial, sans-serif; }
       ${tokensCss} ${homeShellCss} ${homeRailCss}
       .fixture { display: flex; align-items: flex-start; gap: 2rem; }
-      .fixture .hm-shell__rail { inline-size: 17.5rem; }
+      .fixture .hm-shell__rail { inline-size: 15.5rem; }
     </style>
   </head>
   <body>

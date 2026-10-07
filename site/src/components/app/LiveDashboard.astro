@@ -1012,7 +1012,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { statusLine, needsYouCard } from "../../lib/home-primitives";
   import { buildNewWorkspaceForm, newWorkspaceCanCreate, newWorkspacePreviewTitle } from "../../lib/home-new-workspace";
   import { PURPOSE_COPY, CREATE_PURPOSE_DETAILS } from "../../lib/household-access";
-  import { agentLabelInSentence, agentTint, personFirstName } from "../../lib/home-names";
+  import { agentLabelInSentence, personFirstName, personTint } from "../../lib/home-names";
   import { homeAskAnswered } from "../../lib/home-map";
   import { createHouseholdDashboard } from "../../lib/household-dashboard";
   import {
@@ -4694,7 +4694,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           await setAgentModel(session, uuid(), scope.workspaceId, principalId, modelValue);
           if (scope.workspaceId !== activeWorkspaceId || scope.userId !== session?.user.id) return;
           await reloadPeopleDialog(scope.workspaceId, principalId, `Model changed for ${model.agents.find((agent) => agent.id === principalId)?.name ?? "this agent"}.`);
-        } }, { focus: peopleDialogFocus, tintFor: agentTint });
+        } }, { focus: peopleDialogFocus, tintFor: (agentId) => {
+          // An agent wears its owner's colour, the same rule the rail and the capsules use.
+          const owner = peopleDialogModel().agents.find((agent) => agent.id === agentId)?.ownerId ?? null;
+          return personTint(owner, owner !== null && owner === session?.user.id) ?? 0;
+        } });
       syncPeopleDialogLayout(); window.requestAnimationFrame(syncPeopleDialogLayout);
     };
     const reloadPeopleDialog = async (workspaceId: string, principalId: string, receipt: string, action?: PeopleDialogAction): Promise<void> => {

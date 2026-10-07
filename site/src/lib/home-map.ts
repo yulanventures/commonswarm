@@ -1,6 +1,6 @@
 /** Home integration: wire facts become UI models here, never in DOM builders. */
 import { homeAgentState, type HomeAgentStatusInput } from "./agent-status";
-import { agentLabel, agentTint, firstNames, initials, formatWhen } from "./home-names";
+import { agentLabel, firstNames, initials, formatWhen, personTint } from "./home-names";
 import { foldIdentityName } from "./identity-label";
 import { disambiguateVisibleLabels } from "./home-visible-labels";
 import { groupParticipantsByOwner, type RailAgent, type RailMember } from "./participant-rail";
@@ -79,7 +79,7 @@ export function mapHomePeople(input: HomePeopleInput): HomePeople {
     const labelInput = { name: raw, ownerId: owner ? row.ownerUserId : null, ownerName: owner?.name, ownerFirstName: names.get(row.ownerUserId), yours };
     return { id: row.principalId, name: raw, label: agentLabel(labelInput), nestedLabel: agentLabel(labelInput, { nested: true }),
       ownerId: owner ? row.ownerUserId : null, ownerFirstName: names.get(row.ownerUserId) ?? null,
-      ownerInitial: owner ? Array.from(initials(owner.name))[0] ?? "" : "", yours, tint: agentTint(row.principalId),
+      ownerInitial: owner ? Array.from(initials(owner.name))[0] ?? "" : "", yours, tint: personTint(owner ? row.ownerUserId : null, yours) ?? 0,
       hosted: facts.transport === "hosted_mcp", state: homeAgentState(facts, input.now) };
   };
   const result: HomePeople = { title: "People & agents", groups: [], other: [] };
