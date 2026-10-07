@@ -1,29 +1,40 @@
 /* Home UI: assign picker and tag picker (UI-SPEC.md 2.4 and 5; lane T), drawn to the canvas artboard
    "Todo" (ref/Todo.dc.html). --home-* tokens only; they switch in dark mode.
-   The trigger is the canvas's chosen chip (ink fill, avatar, name) in a card-coloured capsule. Both
-   popovers are the canvas's floating card: a soft heading band, 50 px rows with a hairline between
+   The assign picker is the canvas's row of chips, grouped in card-coloured capsules. The tag picker
+   is the canvas's floating card: a soft heading band, 50 px rows with a hairline between
    them, the active row in lime with a 3 px ink bar (shape, not colour alone; aria-selected for
    assistive tech). Contrast, from the audited token notes in tokens.css: --home-lime-ink on
    --home-lime 12.65; --home-ink-muted on --home-soft 6.21; --home-offline-text on --home-card 6.66. */
 
 .hm-picker { position: relative; display: grid; justify-items: start; min-inline-size: 0; }
-.hm-picker .hm-picker-trigger.hm-picker-trigger {
-  display: inline-flex; align-items: center; gap: 6px; max-inline-size: 100%;
-  min-block-size: 54px; padding: 4px 10px 4px 4px;
-  border: 1px solid var(--home-card-border); border-radius: 16px; background: var(--home-card); color: var(--home-ink);
-  font: inherit; text-align: start; cursor: pointer;
-  transition: border-color var(--dur-2) var(--ease-standard);
+/* Assign chips (Todo canvas): one capsule per person with their agents, 10 px apart; the chosen chip fills
+   ink with canvas text (--home-canvas on --home-ink 14.32). The pane's generic button rule (0,2,1,
+   integration.css) is outweighed by repeating the chip class (0,3,0). */
+.hm-assign-chips { display: flex; flex-wrap: wrap; gap: 10px; min-inline-size: 0; max-inline-size: 100%; }
+.hm-assign-capsule {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px; min-inline-size: 0; max-inline-size: 100%;
+  background: var(--home-card); border: 1px solid var(--home-card-border); border-radius: 16px;
 }
-.hm-picker-trigger:hover, .hm-picker-trigger[aria-expanded="true"] { border-color: var(--home-ink); }
-.hm-picker-chip {
-  display: inline-flex; align-items: center; gap: 8px; min-inline-size: 0;
-  min-block-size: 44px; padding: 0 14px 0 8px; border-radius: 12px;
-  background: var(--home-ink); color: var(--home-card); font-size: 15px; font-weight: 600;
+.hm-picker .hm-assign-chip.hm-assign-chip {
+  display: inline-flex; align-items: center; gap: 8px; min-block-size: 44px; min-inline-size: 44px; max-inline-size: 100%;
+  padding: 0 14px 0 8px; border: 0; border-radius: 12px; background: transparent; color: var(--home-ink);
+  font: inherit; font-size: 15px; font-weight: 600; line-height: 1.3; text-align: start; cursor: pointer;
+  transition: background-color var(--dur-2) var(--ease-standard), color var(--dur-2) var(--ease-standard);
 }
-.hm-picker-chip .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-ink); }
+.hm-picker .hm-assign-chip.hm-assign-chip:hover { background: var(--home-soft); }
+.hm-picker .hm-assign-chip.hm-assign-chip[aria-checked="true"] { background: var(--home-ink); color: var(--home-canvas); }
+.hm-picker .hm-assign-chip.hm-assign-chip[aria-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+.hm-picker .hm-assign-chip.hm-assign-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.hm-assign-chip .hm-agent-orb { border-radius: 9px; }
+.hm-assign-name { min-inline-size: 0; overflow-wrap: anywhere; }
+/* The caption the list used to show is each chip's description: read, not shown. The status line under
+   the chips says it for the chosen one. */
+.hm-assign-caption {
+  position: absolute; inline-size: 1px; block-size: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
 .hm-picker-value { min-inline-size: 0; overflow-wrap: anywhere; }
 .hm-picker > span.hm-picker-value { display: block; min-block-size: 44px; align-content: center; font-weight: 600; }
-.hm-picker-chevron { flex: none; padding-inline: 4px; color: var(--home-ink-muted); font-size: 13px; }
 
 .hm-picker-pop {
   position: absolute; inset-inline-start: 0; inline-size: min(100%, 30rem); inset-block-start: calc(100% + 6px); z-index: 20;
@@ -76,8 +87,6 @@
   color: var(--home-ink-muted); font-size: 13px; overflow-wrap: anywhere;
 }
 
-.hm-picker-trigger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-
 @media (prefers-reduced-motion: reduce) {
-  .hm-picker-trigger, .hm-pick-option { transition: none; }
+  .hm-picker .hm-assign-chip.hm-assign-chip, .hm-pick-option { transition: none; }
 }

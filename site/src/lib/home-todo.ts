@@ -37,6 +37,10 @@ export interface TodoViewCallbacks {
 }
 
 export const TODO_LOADING = "Loading this to-do…";
+/** Under the comment field when a tag delivers: the server sends each tagged person or agent a
+ * note ("Mentioned you in a comment.", household-todo-policy.ts). When a tag only highlights, the
+ * picker's own footer says so instead. */
+export const TODO_TAG_NOTE = "A tag sends that person or agent a note that you mentioned them.";
 const GATE_KINDS: { kind: TodoGateInput["kind"]; label: string }[] = [
   { kind: "todo", label: "Another to-do" }, { kind: "time", label: "A date and time" }, { kind: "note", label: "A note" },
 ];
@@ -240,12 +244,16 @@ function commentsSection(doc: Document, todo: TodoVM, vm: TodoViewVM, callbacks:
   const form = node(doc, "form", "hm-comment-form"); form.dataset.todoCommentForm = "";
   const area = node(doc, "textarea", "hm-todo-input hm-comment-input"); area.rows = 1; area.dataset.todoComment = "";
   const picked: { id: Id; label: string }[] = [];
-  const picker = tagPicker(doc, area, { id: `${headId}-tags`, label: "Tag someone", options: tagOptions(vm.people), people: vm.people, tagDelivers: todo.tagDelivers },
+  const picker = tagPicker(doc, area, { id: `${headId}-tags`, label: `Tag someone in ${vm.workspace.name}`, options: tagOptions(vm.people), people: vm.people, tagDelivers: todo.tagDelivers },
     (option) => picked.push({ id: option.value, label: tagLabel(option) }));
   // Todo canvas: the tag card sits in the flow between the comments and the field, so it never covers
   // the comments it belongs to; the field and Post share one row under it.
   const fieldWrap = node(doc, "div", "hm-comment-field"); fieldWrap.append(field(doc, "Add a comment", area), button(doc, "Post", "hm-todo-save hm-comment-post", "submit"));
   form.append(picker, fieldWrap);
+  if (todo.tagDelivers) {
+    const help = node(doc, "p", "hm-comment-help", TODO_TAG_NOTE); help.id = `${headId}-help`;
+    area.setAttribute("aria-describedby", help.id); form.append(help);
+  }
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const text = area.value.trim();
