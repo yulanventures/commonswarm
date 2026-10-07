@@ -241,7 +241,9 @@
 .hm-phone-bar__title {
   align-self: center;
   margin: 0;
-  padding-block: 0;
+  /* Whole-pixel padding gives the display face's tall glyphs room inside the box (home-rail-geometry "never cut
+     short", CI 37684460865) while the bar stays a whole number of pixels (31 px lines + 12 px). */
+  padding-block: 6px;
   font-family: var(--home-font-display);
   font-size: 28px;
   font-weight: 700;
