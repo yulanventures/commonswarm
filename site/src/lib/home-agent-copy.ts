@@ -87,6 +87,11 @@ export function policyChangeLabel(next: "owner" | "anyone"): string {
   return `Change to ${target.charAt(0).toLocaleLowerCase()}${target.slice(1)}`;
 }
 
+/** The value word of a plain fact row (Lists & docs, What it posts here); the same words the switch row used. */
+export function switchWord(state: "on" | "off" | "always" | "never"): string {
+  return { on: "On", off: "Off", always: AGENT_COPY.postsHereAlways, never: "Never" }[state];
+}
+
 /** The danger entry point; removal ends access to this workspace only (people dialog confirmation). */
 export function removeLabel(agentName: string, workspaceName: string): string {
   return `Remove ${agentName} from ${workspaceName}`;
