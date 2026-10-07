@@ -253,18 +253,19 @@
   gap: 8px;
   box-sizing: border-box;
   /* The canvas button is min-height 44px INSIDE a 1.5px stroke: 47px outside. Chromium rounds a 1.5px border to
-     1px, so the stroke is a 1px border plus a 0.5px inset ring of the same colour (3 device px at DPR 2). */
+     1px, so the stroke is an inset 1.5px ring (the primitives' outline method; 3 device px at DPR 2), and the
+     padding carries the 1.5px the border used to. */
   min-block-size: 47px;
-  padding: 0 12px;
-  border: 1px solid var(--home-ink-faint);
+  padding: 0 13.5px;
+  border: 0;
   border-radius: 12px;
-  box-shadow: inset 0 0 0 0.5px var(--home-ink-faint);
+  box-shadow: inset 0 0 0 1.5px var(--home-ink-faint);
   color: var(--home-rail-strong);
   font-weight: 600;
   text-decoration: none;
 }
 .hm-rail__new:hover { background: var(--home-rail-raised); color: var(--home-rail-strong); }
-.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 0.5px var(--home-ink-faint), var(--focus-ring); }
+.hm-rail .hm-rail__new:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-ink-faint), var(--focus-ring); }
 .hm-rail__new .hm-rail__icon { color: var(--home-lime); }
 
 .hm-rail__sr {

@@ -757,8 +757,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                     title="Send message (Enter)"
                   >
                     <span class="dashboard__composer-send-icon" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" width="18" height="18">
-                        <path d="m5 12 7-7 7 7M12 5v14"></path>
+                      {/* Phone-Space.dc.html: an 18px arrow on a 16-unit grid, stroke 2 (lime in workspace.css). */}
+                      <svg viewBox="0 0 16 16" width="18" height="18">
+                        <path d="M8 13V3M4 7l4-4 4 4"></path>
                       </svg>
                     </span>
                     <span class="dashboard__composer-send-word" aria-hidden="true">Send</span>
@@ -4611,7 +4612,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       renderHomeRail(); renderHomeShell(); applyHomePane(); focusHomeView();
       void loadRailOverview();
       renderChannelRail();
-      if (scroll) scroll.scrollTop = homeScroll.get(route.workspaceId) ?? 0;
+      /* A workspace opens on its newest messages (Phone-Space.dc.html); a position the reader left is kept. */
+      if (scroll) { const saved = homeScroll.get(route.workspaceId); if (saved === undefined) scrollToNewest(); else scroll.scrollTop = saved; }
       if (route.view === "chat" && route.messageId) {
         expandedThreadIds.add(route.messageId); renderFeed();
       }

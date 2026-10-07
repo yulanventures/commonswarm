@@ -93,7 +93,7 @@ live-dashboard[data-channel-view="agent-choice"] .hm-frame--add-agent *:is(.hm-f
   .dashboard__gateway--create[data-create-rail] { grid-template-columns: minmax(0, 1fr); }
   .hm-create-main { grid-column: 1; grid-row: 1; }
   /* The back link shares the top row with the account door (absolute, top right). */
-  .hm-create-main { padding-block-start: var(--s-1); }
+  .hm-create-main { padding-block-start: max(8px, env(safe-area-inset-top, 0px)); }
   .hm-create-main > [data-create-cancel] { margin-inline-end: calc(44px + var(--s-3)); }
 }
 /* Navigation moves focus to the view heading. That heading is not a tab stop, so it draws no ring. */
@@ -122,7 +122,9 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame.hm-frame.hm-frame { grid-template-columns: minmax(0, 1fr); padding: 0; }
   .hm-frame__rail.hm-frame__rail { display: contents; }
   .hm-frame__rail-content, .hm-frame__side { display: none; }
-  .hm-frame__rail > [data-user-menu-root] { position: absolute; inset-inline-end: var(--s-2); inset-block-start: var(--s-1); z-index: 21; }
+  /* The account door shares the phone bar's 44 px control row (same top as the back chevron and ⋯) and sits 4 px from
+     the edge, so the bar keeps room for two whole capsules and a one-word title at 390 px (Phone-Space.dc.html). */
+  .hm-frame__rail > [data-user-menu-root] { position: absolute; inset-inline-end: 4px; inset-block-start: max(8px, env(safe-area-inset-top, 0px)); z-index: 21; }
   .hm-frame__main { grid-column: 1; grid-row: 1; }
   /* The channel menu is an in-flow row under the phone bar. One grid row collapses that
      header to nothing and lets the transcript start underneath it. */
@@ -153,6 +155,6 @@ h2[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
   .hm-frame.hm-frame.hm-frame:is(.hm-frame--agent, .hm-frame--people) > .hm-frame__side { display: none; }
 }
 @media (width <= 52rem) {
-  .hm-frame__main .hm-phone-bar { padding-inline-end: calc(44px + var(--s-3)); }
+  .hm-frame__main .hm-phone-bar { padding-inline-end: calc(44px + 4px); }
   .hm-frame__main .hm-catchup-header { padding-inline-end: calc(44px + var(--s-3)); }
 }
