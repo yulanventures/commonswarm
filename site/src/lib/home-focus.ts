@@ -112,7 +112,7 @@ export function refreshHomeCatchUpTimes(slot: HTMLElement, vm: CatchUpVM): void 
   for (const row of slot.querySelectorAll<HTMLElement>("[data-needs-you], .hm-catchup-needs-preview")) {
     const item = vm.needsYou.find(item => row.dataset.needsYou === item.id || row.getAttribute("aria-labelledby") === `hm-catchup-needs-${item.id}`);
     const eyebrow = row.querySelector<HTMLElement>(".hm-eyebrow, .hm-catchup-needs-eyebrow");
-    if (item && eyebrow) eyebrow.textContent = `Needs you · ${item.workspace.name} · ${item.when}`;
+    if (item && eyebrow) eyebrow.textContent = ["Needs you", item.workspace.name, item.when].filter(Boolean).join(" · ");
     const what = row.querySelector<HTMLElement>(".hm-needs-title, .hm-catchup-needs-what");
     if (item?.kind === "agent-fix" && what) what.textContent = item.what;
   }

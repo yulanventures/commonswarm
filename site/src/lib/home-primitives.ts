@@ -122,7 +122,7 @@ export function needsYouCard(doc: Document, n: NeedsYouVM, onAction: (action: st
   const heading = node(doc, "h3", "hm-needs-title", n.what); heading.id = `hm-needs-${encodeURIComponent(n.id)}`;
   root.setAttribute("aria-labelledby", heading.id);
   root.append("label" in n.from ? agentOrb(doc, n.from, { size: 36, badge: true }) : personAvatar(doc, n.from, 36));
-  const copy = node(doc, "div", "hm-needs-copy"); copy.append(node(doc, "p", "hm-eyebrow", `Needs you · ${n.workspace.name} · ${n.when}`), heading);
+  const copy = node(doc, "div", "hm-needs-copy"); copy.append(node(doc, "p", "hm-eyebrow", ["Needs you", n.workspace.name, n.when].filter(Boolean).join(" · ")), heading);
   const actions = node(doc, "div", "hm-actions");
   if (!isSample(n)) for (const [index, action] of [n.primary, n.secondary].entries()) {
     if (!action) continue;
