@@ -1,4 +1,19 @@
-# Resume here: the home directory deletion on the Mac mini (2026-09-25)
+# HOLD LIFTED (2026-10-07): the home directory deletion on the Mac mini (2026-09-25)
+
+## Status at 2026-10-07
+
+- The home directory deletion recovery is complete. This file is no longer a resume point; it is kept as the
+  incident record. Everything below "Incident record" is historical and is not a list of open actions.
+- `main` is well past `d437c291`, the SHA that survived the deletion.
+- CI runs on GitHub-hosted runners.
+- The host controls stay in place: the `rm` guard at `~/.local/bin/rm`, the hourly APFS local snapshots
+  (`com.yulanbot.apfs-snapshot`), and the Claude `PreToolUse` hook that blocks the deletion pattern.
+- Tom's priority for 2026-10-07 is the redesign, the home UI, and the household stack. They ship in C1 F17d
+  window W5. Admin issuance (W6 and W7) follows and does not gate W5.
+- New work goes through HezLead.
+
+## Incident record
+
 
 Written by CSwarmDevLead for a cold successor. Read this before any lane work on the mini.
 
