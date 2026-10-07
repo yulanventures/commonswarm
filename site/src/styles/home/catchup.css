@@ -48,7 +48,7 @@
   font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  line-height: 1.2;
+  /* line-height inherits the body 1.45, as the canvas h2 does. */
 }
 
 .hm-catchup-latest > .hm-catchup-section-title { margin-block-end: 14px; }
@@ -249,6 +249,10 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   gap: 10px;
   min-inline-size: 0;
 }
+.hm-catchup-card-capsules[data-count="1"] > .hm-capsule { inline-size: 100%; }
+/* A person with no agents: an even ring round the avatar (the canvas always draws agents after the person). */
+.hm-catchup-card-capsules .hm-capsule:not(:has(.hm-agent-orb, .hm-capsule-more)) { padding: 3px; }
+.hm-catchup-card-capsules[data-count="3"] .hm-capsule:not(:has(.hm-agent-orb, .hm-capsule-more)) { padding: 2px; }
 .hm-catchup-card-capsules[data-count="3"] { gap: 5px; }
 .hm-catchup-card-capsules[data-count="3"] .hm-capsule { gap: 3px; padding: 2px 6px 2px 2px; }
 .hm-catchup-card-capsules[data-count="3"] .hm-person-avatar { inline-size: 28px; block-size: 28px; font-size: 12px; }
@@ -302,6 +306,7 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   flex: none;
   inline-size: 98px;
 }
+.hm-catchup-latest-who .hm-agent-orb { border-radius: 9px; }
 .hm-catchup-latest-who .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-card); }
 .hm-catchup-latest-body {
   flex: 1 1 280px;
@@ -323,16 +328,20 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
 }
 
 .hm-catchup-latest-workspace {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: none;
   box-sizing: border-box;
+  /* The hit box stays 44px; the drawn pill is the canvas 36px (::before). The negative margin keeps the row at 36px. */
   min-block-size: 44px;
   min-inline-size: 44px;
   max-inline-size: 100%;
+  margin-block: -4px;
   padding: 0 14px;
-  border: 1px solid var(--home-field-border);
+  border: 0;
   border-radius: var(--radius-pill);
   color: var(--home-ink);
   font-size: 14px;
@@ -340,11 +349,18 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   text-decoration: none;
   overflow-wrap: anywhere;
 }
-a.hm-catchup-latest-workspace:hover { background: var(--home-soft); }
-.hm-catchup-latest-workspace:focus-visible {
-  outline: 2px solid transparent;
-  box-shadow: var(--focus-ring);
+.hm-catchup-latest-workspace::before {
+  content: "";
+  position: absolute;
+  inset: 4px 0;
+  z-index: -1;
+  box-sizing: border-box;
+  border: 1px solid var(--home-card-border);
+  border-radius: var(--radius-pill);
 }
+a.hm-catchup-latest-workspace:hover::before { background: var(--home-soft); }
+.hm-catchup-latest-workspace:focus-visible { outline: 2px solid transparent; }
+.hm-catchup-latest-workspace:focus-visible::before { box-shadow: var(--focus-ring); }
 
 /* Phone width: the band wraps and its pill goes under the text; latest pills go under the sentence. */
 @container hm-catchup (width < 560px) {
@@ -362,7 +378,7 @@ a.hm-catchup-latest-workspace:hover { background: var(--home-soft); }
 @media (prefers-reduced-motion: no-preference) {
   .hm-catchup-card,
   .hm-catchup-show-more,
-  .hm-catchup-latest-workspace {
+  .hm-catchup-latest-workspace::before {
     transition: color var(--dur-2) var(--ease-standard), border-color var(--dur-2) var(--ease-standard),
       background-color var(--dur-2) var(--ease-standard);
   }
