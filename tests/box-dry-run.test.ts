@@ -2740,18 +2740,18 @@ function handoffPath(path: string): string {
 // Apply's full immutable-directory verifier needs Linux pwd/grp and real uid/gid metadata. The Mac
 // fixture cannot execute it. Model only its window writer, from the fields that writer actually emits,
 // at apply's boundary alongside the existing explicitly labeled directory product.
-function applyWindowValues(block: Block, state: string): Record<string, string> {
+function applyWindowValues(block: Block, state: string, kindList = "edge stack"): Record<string, string> {
   const writer = block.source.slice(block.source.indexOf('WINDOW_ENV="$PROOF_DIR/window.env"'));
   const fields = [...writer.matchAll(/printf '%s=%q\\n' ([A-Z][A-Z0-9_]*) /g)].map((match) => match[1]!);
   assert.ok(fields.length > 0, "apply has no window writer");
   const values: Record<string, string> = {
-    SHA: RELEASE_SHA, KIND_LIST: "edge stack", WINDOW_START_UTC: WINDOW_START,
+    SHA: RELEASE_SHA, KIND_LIST: kindList, WINDOW_START_UTC: WINDOW_START,
     WINDOW_END_UTC: "2026-09-28T05:02:03Z", WINDOW_ID, WINDOW_PRINCIPAL_SUFFIX: "010203",
     NEW_EDGE: CANDIDATE_EDGE, NEW_STACK: CANDIDATE_STACK, PREVIOUS_EDGE, PREVIOUS_STACK,
     RECYCLE_TIMER_STOPPED: "0", BACKUP_TIMERS_STOPPED: "0",
     RELEASE_DIR_STATE: state === "s1" ? "created" : "reused",
-    EDGE_RELEASE_DIR_STATE: state === "s1" ? "created" : "reused",
-    STACK_RELEASE_DIR_STATE: state === "s1" ? "created" : "reused",
+    EDGE_RELEASE_DIR_STATE: kindList.split(/\s+/).includes("edge") ? (state === "s1" ? "created" : "reused") : "not-requested",
+    STACK_RELEASE_DIR_STATE: kindList.split(/\s+/).includes("stack") ? (state === "s1" ? "created" : "reused") : "not-requested",
   };
   return Object.fromEntries(fields.map((name) => {
     assert.ok(Object.hasOwn(values, name), `unmodeled apply window field: ${name}`);
@@ -2762,7 +2762,7 @@ function applyWindowValues(block: Block, state: string): Record<string, string> 
 type ProductContext = Pick<Fixture, "env" | "model">;
 
 function modeledApplyFiles(block: Block, fixture: ProductContext): Record<string, string> {
-  const values = applyWindowValues(block, fixture.model!.state);
+  const values = applyWindowValues(block, fixture.model!.state, fixture.env.KIND_LIST);
   return {
     "window.env": "# SYNTHETIC cross-host apply product; not a release observation\n" + shellAssignments(values),
     "window-principal-suffix.txt": shellAssignments({ WINDOW_PRINCIPAL_SUFFIX: values.WINDOW_PRINCIPAL_SUFFIX! }),
@@ -2775,7 +2775,7 @@ function modeledApplyFiles(block: Block, fixture: ProductContext): Record<string
 }
 
 function modelApplyWindow(block: Block, fixture: Fixture): string[] {
-  const values = applyWindowValues(block, fixture.model!.state);
+  const values = applyWindowValues(block, fixture.model!.state, fixture.env.KIND_LIST);
   const seeded: string[] = [];
   const root = fixture.boxRoot!;
   const owner = /^\s*RELEASE_OWNER=([a-z]+)$/m.exec(block.source)?.[1];
@@ -2835,16 +2835,29 @@ function uploadWindowContent(fixture: ProductContext, archive: Buffer): string {
   })));
 }
 
+// Historical migration plans predate the explicit mode input. Supply it in their
+// durable writer, never in the consumer's environment. All original writer checks run.
+function historicalMigrationInputSource(block: Block, source: string): string {
+  if (block.file !== HM37 || shortStep(block) !== "hm37a-resolved-inputs") return source;
+  const end = '  } >"$EVIDENCE_DIR/item-resolved-inputs.env"';
+  assert.equal(source.split(end).length, 2, "historical resolved-input writer must have one durable destination");
+  return source.replace(end, `    printf 'NO_MIGRATIONS=%q\\n' no\n${end}`);
+}
+
 function resolvedTransferNames(): string[] {
-  const producer = planBlock(HM37, "hm37a-resolved-inputs");
+  const original = planBlock(HM37, "hm37a-resolved-inputs");
+  const producer = { ...original, source: historicalMigrationInputSource(original, original.source) };
   const writer = producer.source.slice(producer.source.indexOf("  {"), producer.source.indexOf('>"$EVIDENCE_DIR/item-resolved-inputs.env"'));
   return [...writer.matchAll(/printf '([A-Z][A-Z0-9_]*)=%q/g)].map((match) => match[1]!);
 }
 
 function proofArchiveContent(fixture: ProductContext): Buffer {
   const producer = planBlock(RUNBOOK, "runbook-07");
-  const names = /printf '%s\\n' ([^\n]+) >>"\$PROOF_LIST"/.exec(producer.source)?.[1]?.trim().split(/\s+/);
-  assert.ok(names, "proof list producer has no fixed members");
+  const kindList = fixture.env.KIND_LIST ?? "edge stack";
+  const prints = [...producer.source.matchAll(/printf '%s\\n' ([^\n]+?) >>"\$PROOF_LIST"/g)];
+  assert.ok(prints.length > 0, "proof list producer has no fixed members");
+  const names = prints.flatMap((match) => match[1]!.trim().split(/\s+/)).filter((name) =>
+    kindList.split(/\s+/).includes("edge") || !["required-edge-env.json", "edge-env-source-check.txt"].includes(name));
   const contents: Record<string, string> = {};
   for (const name of names) {
     if (name === "gate-evidence.txt") contents[name] = readFileSync(fixture.env.GATE_RECEIPT_PATH!, "utf8");
@@ -2972,7 +2985,8 @@ function macProductModel(product: TransferProduct, block: Block, fixture: Produc
   if (name === "hm37a-prep-seat-inventory.json") return prepSeatInventory(fixture);
   if (name === "item-resolved-inputs.env") {
     const values = Object.fromEntries(resolvedTransferNames().map((name) => {
-      const value = name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
+      const value = name === "NO_MIGRATIONS" ? "no"
+        : name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
       assert.notEqual(value, undefined, `unresolved prompt input: ${name}`);
       return [name, value!];
     }));
@@ -3099,7 +3113,7 @@ function modelMacWindowWriter(block: Block, fixture: Fixture): Execution | undef
 function modelMacWindowAppend(block: Block, fixture: Fixture): Execution | undefined {
   if (!/printf '[^'\n]*EXPECTED_ARCHIVE_SHA256=%q/.test(block.source) ||
       !block.source.includes('>>"$BOX_WINDOW_INPUT"')) return undefined;
-  return macLocalExecution(block, fixture, block.source);
+  return macLocalExecution(block, fixture, historicalMigrationInputSource(block, block.source));
 }
 
 function macNoWindowGuard(block: Block, fixture: Fixture): Execution | undefined {
@@ -3655,7 +3669,7 @@ function executeWholeBlock(
       stderr: seed.refused.join("\n"), stdout: "", seeded: seed.seeded, refused: seed.refused, declared,
     };
   }
-  let body = materialize(block);
+  let body = materialize({ ...block, source: historicalMigrationInputSource(block, block.source) });
   if (fixture.temporary) body = body.replaceAll(PLANNED_PREP_ROOT, join(fixture.temporary, "hm37-prep"));
   if (fixture.macTmp) body = mapMacTmp(body, fixture.macTmp);
   const script = [
@@ -5423,6 +5437,186 @@ function seedCopybackProofDirectory(fixture: Fixture): string {
   }
   return proof;
 }
+
+// Supply approved item inputs, then use the same Mac writer/transfer adapters and
+// whole box blocks as the existing window cases. No manifest or proof-list output is seeded.
+function section1Window(kindList: "stack" | "edge stack", run: (fixture: Fixture, evidence: string,
+  inputs: Record<string, string>, writeInputs: (values: Record<string, string>) => void) => void): void {
+  const steps = ["runbook-02", "1-upload-release-archive", "1-open-root-shell",
+    "1-apply-release-directories", "runbook-03", "runbook-04", "runbook-07", "runbook-05"];
+  const sequence = steps.map((step) => planBlock(RUNBOOK, step));
+  // The existing item input declaration provides RELEASE_SHA and gate-receipt fixture inputs.
+  const fixture = prepareBoxFixture("s1", [planBlock(HM37, "hm37a-resolved-input-transfer"), ...sequence]);
+  try {
+    fixture.env.KIND_LIST = kindList;
+    delete fixture.env.PROOF_SQL_MANIFEST; // This window has no migration SQL to transfer.
+    delete fixture.env.CHANGED_FUNCTIONS;
+    delete fixture.env.ROUTER_CHANGED;
+    const localRoot = fixture.macLocalRoot!;
+    writeMode(join(localRoot, "tmp", `commonswarm-release-open-${RELEASE_SHA}.env`), shellAssignments({
+      SHA: RELEASE_SHA, WINDOW_START_UTC: WINDOW_START, WINDOW_END_UTC: "2026-09-28T05:02:03Z",
+      WINDOW_ID, WINDOW_PRINCIPAL_SUFFIX: "010203", BACKUP_MAX_AGE_SECONDS: "86400",
+      EVIDENCE_ROOT: join(localRoot, "evidence"),
+    }));
+    const opened = executePlanUntilFailure([sequence[0]!], fixture, "box");
+    assert.equal(opened[0]!.execution.result, "not-executed", opened[0]!.execution.stderr);
+    const readWindow = macLocalExecution(sequence[0]!, fixture,
+      '. "$HOME/.commonswarm-release-window.env"\nprintf "%s\\0" "$EVIDENCE_DIR" "$ARCHIVE" "$BOX_WINDOW_INPUT"');
+    assert.equal(readWindow.status, 0, readWindow.stderr);
+    const [evidence, archive, boxInput] = readWindow.stdout.split("\0");
+    assert.ok(evidence && archive && boxInput);
+    // These are resolved operator inputs, appended before the unchanged upload/apply blocks.
+    writeMode(boxInput, readFileSync(boxInput, "utf8") + shellAssignments({
+      KIND_LIST: kindList, EXPECTED_ARCHIVE_SHA256: createHash("sha256").update(readFileSync(archive)).digest("hex"),
+    }));
+    copyFileSync(fixture.env.GATE_RECEIPT_PATH!, join(evidence, "gate-evidence.txt"));
+    chmodSync(join(evidence, "gate-evidence.txt"), 0o600);
+    const applied = executePlanUntilFailure(sequence.slice(1, 4), fixture, "box");
+    assert.deepEqual(applied.map(({ execution }) => [execution.step, execution.result]), [
+      ["1-upload-release-archive", "not-executed"], ["1-open-root-shell", "not-executed"],
+      ["1-apply-release-directories", "passed"],
+    ], applied.map(({ execution }) => execution.stderr).join("\n"));
+    const inputs: Record<string, string> = {
+      KIND_LIST: kindList, NO_MIGRATIONS: "yes", MIGRATION_VERSIONS: "", FUNCTIONAL_VERSIONS: "",
+      H0_LEDGER_BACKFILL: "no", GUARDED_STACK_SWITCH: "yes", BACKUP_STATUS_PROOF: "no",
+      API_CADDY_PAIR: "no", MCP_CADDY_RELEASE: "no",
+      ...(kindList === "edge stack" ? { CHANGED_FUNCTIONS: "command", ROUTER_CHANGED: "no" } : {}),
+    };
+    const writeInputs = (values: Record<string, string>): void => {
+      writeMode(join(evidence, "item-resolved-inputs.env"), shellAssignments(values));
+      writeRootMode(join(PROOF_DIR, "item-resolved-inputs.env"), shellAssignments(values));
+    };
+    writeInputs(inputs);
+    writeRootMode(join(PROOF_DIR, "item-copy-back-files.list"), "");
+    run(fixture, evidence, inputs, writeInputs);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+}
+
+const SECTION1_BOX_ONLY = process.env.BOX_DRY_RUN_PART !== "box"
+  ? "requires the disposable Linux root CI runner" : false;
+
+test("section 1: stack-only window reaches runbook-05 without migration or edge proofs", { skip: SECTION1_BOX_ONLY }, () => {
+  section1Window("stack", (fixture, evidence) => {
+    const manifest = executePlanUntilFailure([planBlock(RUNBOOK, "runbook-03")], fixture, "box");
+    assert.equal(manifest[0]!.execution.result, "passed", manifest[0]!.execution.stderr);
+    assert.deepEqual(readFileSync(join(PROOF_DIR, "copy-back.list"), "utf8").trim().split("\n"), [
+      "copy-back.list", "gate-evidence.txt", "box-archive.sha256", "window-principal-suffix.txt",
+      "stack.SHA256SUMS", "stack.release-dir-state.txt", "stack-switch-timers.txt",
+    ]);
+    assert.equal(pathExists(CANDIDATE_EDGE), false, "stack-only apply prepared an unrequested edge release");
+    const inventory = macLocalExecution(planBlock(RUNBOOK, "runbook-04"), fixture, planBlock(RUNBOOK, "runbook-04").source);
+    assert.equal(inventory.status, 0, inventory.stderr);
+    assert.equal(inventory.stdout, "runbook-04: not applicable (KIND_LIST has no edge)\n");
+    for (const name of ["required-edge-env.json", "edge-env-source-check.txt"]) {
+      assert.equal(pathExists(join(evidence, name)), false, `stack-only inventory produced ${name}`);
+    }
+    const proofList = macLocalExecution(planBlock(RUNBOOK, "runbook-07"), fixture, planBlock(RUNBOOK, "runbook-07").source);
+    assert.equal(proofList.status, 0, proofList.stderr);
+    assert.deepEqual(readFileSync(join(evidence, "proof-transfer.list"), "utf8").trim().split("\n"), ["gate-evidence.txt"]);
+    const verified = executePlanUntilFailure(["runbook-08", "runbook-09", "runbook-10", "runbook-05"]
+      .map((step) => planBlock(RUNBOOK, step)), fixture, "box");
+    assert.deepEqual(verified.map(({ execution }) => [execution.step, execution.result]), [
+      ["runbook-08", "not-executed"], ["runbook-09", "passed"], ["runbook-10", "passed"], ["runbook-05", "passed"],
+    ], verified.map(({ execution }) => execution.stderr).join("\n"));
+    assert.deepEqual(readFileSync(join(PROOF_DIR, "gate-evidence.txt")), readFileSync(join(evidence, "gate-evidence.txt")));
+    assert.equal(pathExists(join(PROOF_DIR, "required-edge-env.json")), false);
+  });
+});
+
+test("controls: section 1 rejects missing or contradictory no-migrations inputs", { skip: SECTION1_BOX_ONLY }, () => {
+  section1Window("stack", (fixture, _evidence, inputs, writeInputs) => {
+    const block = planBlock(RUNBOOK, "runbook-03");
+    const execute = () => executeWholeBlock(block, fixture, {
+      unsetEnv: ["NO_MIGRATIONS", "MIGRATION_VERSIONS", "FUNCTIONAL_VERSIONS"],
+    });
+    assert.equal(execute().result, "passed"); // Same boundary as every negative control below.
+    const manifestBefore = readFileSync(join(PROOF_DIR, "copy-back.list"));
+    const variants: Array<[string, Record<string, string>, RegExp]> = [
+      ["missing explicit input", {}, /NO_MIGRATIONS: resolved item input missing/],
+      ["empty explicit input", { NO_MIGRATIONS: "" }, /NO_MIGRATIONS: resolved item input missing/],
+      ["invalid explicit input", { NO_MIGRATIONS: "maybe" }, /: false$/m],
+      ["empty lists with no", { NO_MIGRATIONS: "no" }, /test -n "\$MIGRATION_VERSIONS"/],
+      ["empty functional list with no", { NO_MIGRATIONS: "no", MIGRATION_VERSIONS: "20260928000004" }, /test -n "\$FUNCTIONAL_VERSIONS"/],
+      ["non-empty migration list with yes", { MIGRATION_VERSIONS: "20260928000004" }, /test -z "\$MIGRATION_VERSIONS"/],
+      ["non-empty functional list with yes", { FUNCTIONAL_VERSIONS: "20260928000004" }, /test -z "\$FUNCTIONAL_VERSIONS"/],
+      ["missing migration list with yes", {}, /MIGRATION_VERSIONS: resolved item input missing/],
+      ["missing functional list with yes", {}, /FUNCTIONAL_VERSIONS: resolved item input missing/],
+      ["whitespace lists with yes", { MIGRATION_VERSIONS: " \t", FUNCTIONAL_VERSIONS: " \t" }, /test -z "\$MIGRATION_VERSIONS"/],
+      ["whitespace functional list with yes", { FUNCTIONAL_VERSIONS: " \t" }, /test -z "\$FUNCTIONAL_VERSIONS"/],
+      ["whitespace lists with no", { NO_MIGRATIONS: "no", MIGRATION_VERSIONS: " \t", FUNCTIONAL_VERSIONS: " \t" }, /test -n "\$\{MIGRATION_VERSIONS\[\*\]:-\}"/],
+      ["whitespace functional list with no", { NO_MIGRATIONS: "no", MIGRATION_VERSIONS: "20260928000004", FUNCTIONAL_VERSIONS: " \t" }, /test -n "\$\{FUNCTIONAL_VERSIONS\[\*\]:-\}"/],
+    ];
+    for (const [name, overrides, failure] of variants) {
+      const values = { ...inputs, ...overrides };
+      if (name === "missing explicit input") delete values.NO_MIGRATIONS;
+      if (name === "missing migration list with yes") delete values.MIGRATION_VERSIONS;
+      if (name === "missing functional list with yes") delete values.FUNCTIONAL_VERSIONS;
+      writeInputs(values);
+      const rejected = execute();
+      assert.equal(rejected.result, "failed", `${name}: ${rejected.stderr}`);
+      assert.match(rejected.stderr, failure, name);
+      assert.doesNotMatch(rejected.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub|unbound variable/, name);
+      assert.deepEqual(readFileSync(join(PROOF_DIR, "copy-back.list")), manifestBefore, `${name} overwrote the manifest`);
+    }
+    const missingMode = { ...inputs };
+    delete missingMode.NO_MIGRATIONS;
+    writeInputs(missingMode);
+    const inherited = executeWholeBlock(block, fixture, {
+      env: { NO_MIGRATIONS: "yes" }, unsetEnv: ["MIGRATION_VERSIONS", "FUNCTIONAL_VERSIONS"],
+    });
+    assert.equal(inherited.result, "failed", `inherited yes with missing durable input: ${inherited.stderr}`);
+    assert.match(inherited.stderr, /NO_MIGRATIONS: resolved item input missing/);
+    assert.doesNotMatch(inherited.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub|unbound variable/);
+    assert.deepEqual(readFileSync(join(PROOF_DIR, "copy-back.list")), manifestBefore, "inherited yes overwrote the manifest");
+    writeInputs(inputs);
+    assert.equal(execute().result, "passed");
+  });
+});
+
+test("controls: edge applicability requires valid durable kinds in runbook-04 and runbook-07", { skip: SECTION1_BOX_ONLY }, () => {
+  section1Window("stack", (fixture, _evidence, inputs, writeInputs) => {
+    for (const step of ["runbook-04", "runbook-07"]) {
+      const block = planBlock(RUNBOOK, step);
+      writeInputs(inputs);
+      const positive = macLocalExecution(block, fixture, block.source);
+      assert.equal(positive.status, 0, positive.stderr);
+      for (const kindList of [undefined, "", "stack edgeish", " \t"]) {
+        const values = { ...inputs };
+        if (kindList === undefined) delete values.KIND_LIST;
+        else values.KIND_LIST = kindList;
+        writeInputs(values);
+        const rejected = macLocalExecution(block, fixture, block.source);
+        assert.equal(rejected.status, 1, `${step} accepted ${JSON.stringify(kindList)}: ${rejected.stderr}`);
+        assert.doesNotMatch(rejected.stdout, /not applicable/);
+        assert.doesNotMatch(rejected.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub|unbound variable/);
+      }
+    }
+  });
+});
+
+test("controls: edge stack with migrations still enters runbook-04 and lists edge proofs", { skip: SECTION1_BOX_ONLY }, () => {
+  section1Window("edge stack", (fixture, evidence, inputs, writeInputs) => {
+    writeInputs({ ...inputs, NO_MIGRATIONS: "no", MIGRATION_VERSIONS: "20260928000004", FUNCTIONAL_VERSIONS: "20260928000004" });
+    const manifest = executeWholeBlock(planBlock(RUNBOOK, "runbook-03"), fixture);
+    assert.equal(manifest.result, "passed", manifest.stderr);
+    const names = readFileSync(join(PROOF_DIR, "copy-back.list"), "utf8").trim().split("\n");
+    for (const name of ["required-edge-env.json", "edge-env-source-check.txt", "migration-files.txt", "verification-sql.sha256",
+      "20260928000004-catalog.sql", "20260928000004-functional.sql", "20260928000004-functional.txt"]) assert.ok(names.includes(name), name);
+    const before = readFileSync(fixture.log, "utf8");
+    const inventory = macLocalExecution(planBlock(RUNBOOK, "runbook-04"), fixture, planBlock(RUNBOOK, "runbook-04").source);
+    // The Linux fixture has no Deno: prove it enters the inventory invocation and fails closed at that real boundary.
+    assert.equal(inventory.status, 69, inventory.stderr);
+    assert.match(inventory.stderr, /UNPRODUCED Deno executable observation/);
+    assert.doesNotMatch(inventory.stdout, /not applicable/);
+    assert.match(readFileSync(fixture.log, "utf8").slice(before.length), /deno run --no-config --allow-read=/);
+    const proofList = macLocalExecution(planBlock(RUNBOOK, "runbook-07"), fixture, planBlock(RUNBOOK, "runbook-07").source);
+    assert.equal(proofList.status, 0, proofList.stderr);
+    assert.deepEqual(readFileSync(join(evidence, "proof-transfer.list"), "utf8").trim().split("\n"),
+      ["gate-evidence.txt", "required-edge-env.json", "edge-env-source-check.txt"]);
+  });
+});
 
 test("controls: runbook-04's inventory runs the real inventory.ts and fails on an unknown function name", { skip: MAC_ONLY }, (t) => {
   const sequence = resolveSteps("inventory control", windowAPaths().get("pass")!);
@@ -7518,8 +7712,9 @@ test("controls: the box lane writes resolved prompt inputs by name", {
     assert.match(notExecutedLine(block, records[0]!.execution), /Seeded from committed evidence: nothing\. Plan-documented output: item-resolved-inputs\.env/);
     const bytes = readFileSync(target, "utf8");
     assert.doesNotMatch(bytes, /\[object Object\]|=undefined/);
+    assert.match(bytes, /^NO_MIGRATIONS='no'$/m, "historical migration mode must be a durable item input");
     const names = resolvedTransferNames();
-    const expectedValues = names.map((name) => name === "ARCHIVE_SHA256"
+    const expectedValues = names.map((name) => name === "NO_MIGRATIONS" ? "no" : name === "ARCHIVE_SHA256"
       ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name]);
     assert.equal([...bytes.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].length, names.length);
     const restored = containedCommand(fixture, "/bin/bash", ["-c",
@@ -9256,13 +9451,13 @@ test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missi
     assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
     const positive = executeWholeBlock(consumer, fixture);
     // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
-    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:398). A nounset failure there
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:470). A nounset failure there
     // is a separate plan defect, after the input file and required values were read.
     // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
     if (positive.result === "failed") {
       assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
       assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
-      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:398; transfer succeeded, consumer still fails.");
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:470; transfer succeeded, consumer still fails.");
     } else {
       assert.equal(positive.result, "passed", positive.stderr);
     }
