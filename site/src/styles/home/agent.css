@@ -88,6 +88,7 @@
 }
 
 .hm-agent__status .hm-status[data-form="pill"] {
+  column-gap: 0;
   font-size: 14px;
 }
 
@@ -105,6 +106,13 @@
 /* The canvas pill is one 14px 700 run (word and detail alike); primitives.css sets the shared pill's detail to 400. */
 .hm-agent__status .hm-status[data-form="pill"] .hm-status-detail {
   font-weight: 700;
+}
+
+/* The canvas joins the measured word and its detail with a middle dot ("Offline · seats empty"). Drawn here only, so the
+   shared status primitive keeps its text on other screens; the empty alternative text keeps screen readers on the words.
+   The dot's own spaces replace the pill's flex gap, so the pill reads as one text run. */
+.hm-agent__status .hm-status[data-form="pill"] .hm-status-detail:not(:empty)::before {
+  content: "\00A0\00B7\00A0" / "";
 }
 
 /* One amber notice for an agent that needs a fix: what happened, what waits, one action. */
@@ -470,7 +478,7 @@
   margin-top: 2px;
 }
 
-/* Facts: the canvas's first aside card. A 14px introduction, a 14px/600 summary line, then 48px ruled rows
+/* Facts: the canvas's first aside card. A 14px introduction, a 14px/600 summary line, then 49px ruled rows
    (16px/600 label with an optional 13px muted note, 13px/700 value right). Values only; no switch. */
 .hm-agent__facts {
   padding-block-end: 12px;
@@ -501,7 +509,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  min-block-size: 48px;
+  /* The canvas row: 48px of content plus its 1px rule (a 49px pitch), with no padding. */
+  min-block-size: 49px;
   border-block-start: 1px solid var(--home-hairline);
 }
 
@@ -514,22 +523,23 @@
 .hm-agent__fact-label {
   flex: 0 1 auto;
   max-inline-size: 75%;
-  padding-block: 6px;
   color: var(--home-ink);
   font-weight: 600;
+  /* A label that wraps to two lines makes the canvas's 52px row (2 x 26px); one line stays inside the 48px row. */
+  line-height: 26px;
 }
 
 .hm-agent__fact-detail {
   color: var(--home-ink-muted);
   font-size: 13px;
   font-weight: 400;
+  line-height: 1.45;
 }
 
 .hm-agent__fact-value {
   flex: none;
   max-inline-size: 40%;
   min-inline-size: 0;
-  padding-block: 6px;
   color: var(--home-ink);
   font-size: 13px;
   font-weight: 700;

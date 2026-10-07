@@ -63,8 +63,13 @@
   min-block-size: 50px; padding: 4px 16px; cursor: pointer; color: var(--home-ink);
   transition: background-color var(--dur-2) var(--ease-standard);
 }
+/* Every tag-card rule sits inside the 50px row below it, as on the canvas: between groups too, so a group boundary
+   adds no height (the first option follows the group's hidden heading). */
+.hm-tag-picker .hm-pick-group + .hm-pick-group { border-block-start: 0; }
 .hm-tag-picker .hm-pick-option + .hm-pick-option,
-.hm-tag-picker .hm-pick-group + .hm-pick-group { border-block-start: 1px solid var(--home-hairline); }
+.hm-tag-picker .hm-pick-group + .hm-pick-group > .hm-pick-group-head + .hm-pick-option {
+  box-sizing: border-box; border-block-start: 1px solid var(--home-hairline);
+}
 .hm-pick-option:hover { background: var(--home-soft); }
 .hm-pick-option[aria-selected="true"] { background: var(--home-lime); color: var(--home-lime-ink); }
 .hm-pick-option[aria-selected="true"] .hm-owner-badge { box-shadow: 0 0 0 2px var(--home-lime); }

@@ -507,13 +507,19 @@ section.pd-page[data-people-page] .pd-person-head .pd-fact-row { display: flex; 
 section.pd-page[data-people-page] .pd-person-head .pd-fact-row dd { margin: 0; }
 section.pd-page[data-people-page] .pd-person-head .hm-role-select {
   inline-size: auto; min-block-size: 44px; padding: 0 35.5px 0 15.5px; appearance: none;
-  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-line-dashed); border-radius: var(--radius-pill); color: var(--home-ink);
-  /* A 2px chevron drawn from two gradient strokes (no icon file, no raw colour). */
-  background: linear-gradient(45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 20px) 55% / 6px 6px no-repeat,
-    linear-gradient(-45deg, transparent calc(50% - 1px), currentColor calc(50% - 1px), currentColor calc(50% + 1px), transparent calc(50% + 1px)) calc(100% - 14px) 55% / 6px 6px no-repeat, transparent;
-  font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
+  border: 0; box-shadow: inset 0 0 0 1.5px var(--home-field-border); border-radius: var(--radius-pill); color: var(--home-ink);
+  background: transparent; font-family: var(--home-font-body); font-size: 14px; font-weight: 700;
 }
-section.pd-page[data-people-page] .pd-person-head .hm-role-select:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-line-dashed), var(--focus-ring); }
+section.pd-page[data-people-page] .pd-person-head .hm-role-select:focus-visible { box-shadow: inset 0 0 0 1.5px var(--home-field-border), var(--focus-ring); }
+/* The canvas chevron: a 12px icon (viewBox 0 0 16 16, 2px round stroke) 8px after the role, 14px inside the edge. A select
+   draws no pseudo-element, so its cell draws it as a mask in the ink token; clicks pass through to the native select. */
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select) { position: relative; }
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select)::after {
+  content: ""; position: absolute; inset-block: 0; inset-inline-end: 15.5px; inline-size: 12px; margin-block: auto; block-size: 12px;
+  background: var(--home-ink); pointer-events: none;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6l5 5 5-5'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+}
+section.pd-page[data-people-page] .pd-person-head .hm-role:not([data-own="true"]) dd:has(> .hm-role-select:disabled)::after { background: var(--home-ink-muted); }
 /* Your own role is the canvas "Owner" badge (5px 12px, 13px, no chevron); it stays the same native select. The 7px and
    8px transparent top and bottom borders keep a 44px target around the 29px pill (the canvas 5px + 18.85px + 5px; the
    background stops at the padding box; whole-pixel borders, because Chromium snaps a fractional border down). */
