@@ -102,6 +102,11 @@
   display: none;
 }
 
+/* The canvas pill is one 14px 700 run (word and detail alike); primitives.css sets the shared pill's detail to 400. */
+.hm-agent__status .hm-status[data-form="pill"] .hm-status-detail {
+  font-weight: 700;
+}
+
 /* One amber notice for an agent that needs a fix: what happened, what waits, one action. */
 .hm-agent__fix {
   display: flex;
@@ -151,6 +156,7 @@
 }
 
 .hm-agent__banner .hm-notice-tone {
+  color: inherit; /* the global strong colour would put a second ink in the amber banner */
   font-weight: 700;
 }
 
@@ -387,8 +393,8 @@
   margin-block: -10px;
   font-weight: 600;
   text-decoration: underline;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-decoration-thickness: auto;
+  text-underline-offset: auto;
 }
 
 .hm-agent .hm-queue-title:hover {
@@ -657,7 +663,8 @@
   font-weight: 700;
   text-align: start;
   text-decoration: underline;
-  text-underline-offset: 3px;
+  text-decoration-thickness: auto;
+  text-underline-offset: auto;
   cursor: pointer;
   overflow-wrap: anywhere;
 }

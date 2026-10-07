@@ -135,21 +135,26 @@
 }
 .hm-catchup-needs .hm-needs-you[data-needs-rank="more"] .hm-button:hover { background: var(--home-lime-hover); color: var(--home-lime-ink); }
 
+/* "Show N more": a quiet underlined text row under the needs list, not a pill. The hit box stays 44px; the negative
+   block margins let it overlap the 10px section gap above and the 32px gap below, so its layout footprint is about
+   one text line (the list's 8px rhythm above the text) and the sections keep the canvas's 32px spacing. */
 .hm-catchup-show-more {
   align-self: flex-start;
   min-block-size: 44px;
   min-inline-size: 44px;
-  padding: 0 18px;
-  border: 1.5px solid var(--home-ink);
-  border-radius: var(--radius-pill);
+  margin-block: -14px -12px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
   background: transparent;
-  color: var(--home-ink);
+  color: var(--home-ink-muted);
   font: inherit;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
+  text-decoration: underline;
   cursor: pointer;
 }
-.hm-catchup-show-more:hover { background: var(--home-soft); }
+.hm-catchup-show-more:hover { color: var(--home-ink); }
 .hm-catchup-show-more:focus-visible {
   outline: 2px solid transparent;
   box-shadow: var(--focus-ring);
@@ -340,7 +345,7 @@ a.hm-catchup-card:hover { border-color: var(--home-field-border); }
   min-inline-size: 44px;
   max-inline-size: 100%;
   margin-block: -3px;
-  padding: 0 14px;
+  padding: 0 15px; /* the canvas's 14px plus its 1px border, which ::before paints inside the box */
   border: 0;
   border-radius: var(--radius-pill);
   color: var(--home-ink);
