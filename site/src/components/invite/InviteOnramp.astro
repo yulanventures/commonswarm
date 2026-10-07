@@ -77,6 +77,11 @@ const assistantHosts = inviteAssistantHosts();
   </section>
 
   <section class="invite-onramp__panel invite-onramp__card" data-view="review" hidden aria-labelledby="invite-review-title">
+    <div class="invite-onramp__pair" aria-hidden="true">
+      <span class="invite-onramp__face" data-inviter-initial></span>
+      <svg class="invite-onramp__pair-arrow" width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8h11M9 4l4 4-4 4"></path></svg>
+      <span class="invite-onramp__face invite-onramp__face--you" data-viewer-initial></span>
+    </div>
     <h1 class="invite-onramp__title" id="invite-review-title"><span data-inviter>A teammate</span> invited you to <span data-review-workspace>Home</span>.</h1>
 
     <div class="invite-onramp__facts">
@@ -108,6 +113,7 @@ const assistantHosts = inviteAssistantHosts();
         {assistantHosts.map((host) => (
           <label class="invite-onramp__choice invite-onramp__assistant">
             <input type="radio" name="invite-assistant" value={host.id} data-assistant-host />
+            <span class="invite-onramp__tile-orb" aria-hidden="true">{host.name.slice(0, 1)}</span>
             <span>
               <strong>{host.name}</strong>
               <small>{host.maker}</small>
@@ -116,6 +122,7 @@ const assistantHosts = inviteAssistantHosts();
         ))}
         <label class="invite-onramp__choice invite-onramp__assistant">
           <input type="radio" name="invite-assistant" value="just-me" data-assistant-host />
+          <span class="invite-onramp__tile-orb invite-onramp__tile-orb--empty" aria-hidden="true"></span>
           <span><strong>Just me for now</strong></span>
         </label>
       </div>
@@ -203,6 +210,7 @@ const assistantHosts = inviteAssistantHosts();
   } from "../../lib/member-invite";
 
   import { browserHumanInvitations, HumanInviteRefused } from '../../lib/human-invitations';
+  import { personTint } from "../../lib/home-names";
   import type { HumanInvitePreview } from '../../../../src/cloud/human-invitations';
   import {
     AGENT_CONNECTOR_ADDRESS,
@@ -269,6 +277,11 @@ const assistantHosts = inviteAssistantHosts();
       }
       for (const node of host.querySelectorAll<HTMLElement>("[data-workspace]")) {
         node.textContent = invite.workspace_name;
+      }
+      const face = one<HTMLElement>("[data-inviter-initial]");
+      if (face) {
+        face.textContent = viewerInitials(invite.inviter_display_name);
+        face.dataset.hue = String(personTint(invite.inviter_user_id, false) ?? 1);
       }
     };
 
@@ -513,6 +526,8 @@ const assistantHosts = inviteAssistantHosts();
           if (generation !== authGeneration) return;
           if (value.status === 'joined') return continueToAgent(value.workspace_id, value.workspace_name);
           preview = value;
+          const you = one<HTMLElement>("[data-viewer-initial]");
+          if (you) you.textContent = viewerInitials(authEmail?.split("@")[0] ?? "");
           for (const node of host.querySelectorAll<HTMLElement>('[data-review-workspace]')) {
             node.textContent = value.workspace_name;
           }
@@ -748,29 +763,76 @@ const assistantHosts = inviteAssistantHosts();
 </script>
 
 <style>
+  /*
+   * /invite is an ink screen (canvas Phone-Join and Phone-Connect): the rail colours, which stay
+   * ink in light and dark mode, full-bleed behind a single column, lime for the one primary
+   * action. Measured on --home-rail-bg (light / dark): rail-strong 14.32 / 16.84, rail-soft
+   * 8.77 / 10.32, lime as a fill with lime-ink text 12.65; the 1.5px --home-ink-faint outline is
+   * 3.02 / 3.25 (non-text). Tokens only; no raw colour.
+   */
+  :global(html:has(invite-onramp)),
+  :global(body:has(invite-onramp)) {
+    color-scheme: dark;
+    background: var(--home-rail-bg);
+  }
+
   .invite-onramp {
+    position: relative;
+    box-sizing: border-box;
     min-block-size: 100svh;
-    inline-size: min(100% - var(--gutter) * 2, 38rem);
+    inline-size: min(100% - 48px, 34rem);
     margin-inline: auto;
-    padding-block: clamp(var(--s-6), 6vw, var(--s-16));
-    display: grid;
-    align-content: center;
-    gap: var(--s-6);
+    padding-block: 56px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    color: var(--home-rail-soft);
+    font-family: var(--home-font-body);
+    font-size: 16px;
+    line-height: 1.4;
   }
 
   .invite-onramp__brand {
     min-inline-size: 0;
-    justify-self: start;
+    min-block-size: 28px;
+    display: flex;
+    align-items: center;
+    align-self: flex-start;
+  }
+
+  .invite-onramp__brand :global(.wm) {
+    --mark-center: var(--home-lime);
+    --mark-west: var(--home-rail-strong);
+    color: var(--home-rail-strong);
+    font-family: var(--home-font-display);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 28px;
+    letter-spacing: -0.01em;
   }
 
   .invite-onramp__panel,
   .invite-onramp__connect {
     min-inline-size: 0;
-    display: grid;
-    gap: var(--s-5);
-    color: var(--text-muted);
-    font-size: var(--t-base);
-    line-height: var(--lh-base);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    color: var(--home-rail-soft);
+    font-size: 16px;
+    line-height: 1.4;
+  }
+
+  .invite-onramp__connect {
+    gap: 0;
+  }
+
+  .invite-onramp__connect > .invite-onramp__title {
+    margin-block-start: 18px;
+  }
+
+  .invite-onramp__panel > p {
+    margin: 0;
   }
 
   .invite-onramp__panel[hidden],
@@ -778,20 +840,21 @@ const assistantHosts = inviteAssistantHosts();
     display: none;
   }
 
-  /* Cards: white surface, 20px corners, one quiet shadow (Daylight Orbs). */
+  /* The card is the page now: no surface of its own on the ink screen. */
   .invite-onramp__card {
-    padding: var(--s-6);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-md);
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .invite-onramp .invite-onramp__eyebrow {
-    color: var(--accent-bright);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    font-weight: var(--weight-semibold);
+    margin: 0;
+    color: var(--home-lime);
+    font-size: 13px;
+    line-height: 1.4;
+    font-weight: 700;
     letter-spacing: var(--track-eyebrow);
     text-transform: uppercase;
   }
@@ -799,17 +862,18 @@ const assistantHosts = inviteAssistantHosts();
   .invite-onramp__title,
   .invite-onramp__receipt-title {
     margin: 0;
-    color: var(--text);
-    font-family: var(--font-display);
-    font-weight: var(--weight-head);
+    color: var(--home-rail-strong);
+    font-family: var(--home-font-display);
+    font-weight: 700;
     text-wrap: balance;
     overflow-wrap: anywhere;
   }
 
   .invite-onramp__title {
-    font-size: var(--t-2xl);
-    line-height: var(--lh-2xl);
-    letter-spacing: var(--track-head);
+    text-wrap: wrap;
+    font-size: 40px;
+    line-height: 1.05;
+    letter-spacing: -0.025em;
   }
 
   .invite-onramp__title:focus,
@@ -820,41 +884,85 @@ const assistantHosts = inviteAssistantHosts();
 
   .invite-onramp .invite-onramp__lead {
     max-inline-size: 52ch;
+    margin: 0;
+    font-size: 17px;
+    text-wrap: pretty;
   }
 
+  /* Who invited whom: the inviter's filled circle, an arrow, and the joiner's dashed one. The
+     joiner is the viewer here, so she takes blue (home-names personTint). */
+  .invite-onramp__pair {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-block-end: -2px;
+    color: var(--home-rail-soft);
+  }
+
+  .invite-onramp__face {
+    inline-size: 48px;
+    block-size: 48px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: 50%;
+    background: var(--home-orange);
+    color: var(--home-on-person);
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  .invite-onramp__face[data-hue="2"] { background: var(--home-purple); }
+  .invite-onramp__face[data-hue="3"] { background: var(--home-teal); }
+  .invite-onramp__face:empty { visibility: hidden; }
+
+  .invite-onramp__face--you {
+    background: transparent;
+    border: 1.5px dashed var(--home-blue-tint);
+    color: var(--home-blue-tint);
+  }
+
+  .invite-onramp__pair-arrow { flex: none; }
+
   .invite-onramp__steps {
-    display: grid;
-    gap: var(--s-3);
+    display: flex;
+    flex-direction: column;
     margin: 0;
-    padding: 0;
+    padding: 4px 16px;
     list-style: none;
+    background: var(--home-rail-raised);
+    border-radius: 18px;
   }
 
   .invite-onramp__steps li {
     display: flex;
     align-items: center;
-    gap: var(--s-3);
-    color: var(--text);
-    font-weight: var(--weight-medium);
+    gap: 12px;
+    min-block-size: 48px;
+    color: var(--home-rail-strong);
+    font-weight: 700;
+  }
+
+  .invite-onramp__steps li + li {
+    border-block-start: 1px solid var(--home-rail-divider);
   }
 
   .invite-onramp__steps span {
-    inline-size: 1.75rem;
-    block-size: 1.75rem;
-    display: grid;
-    place-items: center;
+    inline-size: 26px;
     flex: none;
-    color: var(--accent-bright);
-    background: var(--accent-dim);
-    border-radius: var(--radius-pill);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-semibold);
+    color: var(--home-lime);
+    font-family: var(--home-font-display);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.1;
   }
 
   /* Sign-in choices. The buttons come from ProviderButtons, so they are reached with :global. */
   .invite-onramp :global(.invite-onramp__providers) {
     display: grid;
-    gap: var(--s-3);
+    gap: 10px;
   }
 
   .invite-onramp :global(.invite-onramp__providers .invite-onramp__button) {
@@ -868,19 +976,25 @@ const assistantHosts = inviteAssistantHosts();
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: var(--s-3) var(--s-6);
-    color: var(--accent-ink);
-    background: var(--accent);
-    border: 1px solid var(--accent);
+    gap: 10px;
+    padding: 12px 24px;
+    color: var(--home-lime-ink);
+    background: var(--home-lime);
+    border: 1.5px solid var(--home-lime);
     border-radius: var(--radius-pill);
     font: inherit;
-    font-size: var(--t-base);
-    font-weight: var(--weight-semibold);
+    font-size: 16px;
+    font-weight: 700;
     line-height: 1.3;
     text-align: center;
     text-decoration: none;
     overflow-wrap: anywhere;
     cursor: pointer;
+  }
+
+  /* The connect step hides its Open button for apps without a link; [hidden] must win here. */
+  .invite-onramp :global(.invite-onramp__button[hidden]) {
+    display: none;
   }
 
   /* One element inside the button holds "Join" and the workspace name together. As separate
@@ -891,27 +1005,27 @@ const assistantHosts = inviteAssistantHosts();
   }
 
   .invite-onramp :global(.invite-onramp__button):hover {
-    color: var(--accent-ink);
-    background: var(--accent-bright);
-    border-color: var(--accent-bright);
+    color: var(--home-lime-ink);
+    background: var(--home-lime-hover);
+    border-color: var(--home-lime-hover);
   }
 
   .invite-onramp :global(.invite-onramp__button--quiet) {
-    color: var(--text);
-    background: var(--surface);
-    border-color: var(--border-interactive);
+    color: var(--home-rail-strong);
+    background: transparent;
+    border-color: var(--home-ink-faint);
   }
 
   .invite-onramp :global(.invite-onramp__button--quiet):hover {
-    color: var(--text);
-    background: var(--surface-2);
-    border-color: var(--border-interactive);
+    color: var(--home-rail-strong);
+    background: var(--home-rail-raised);
+    border-color: var(--home-ink-faint);
   }
 
   .invite-onramp :global(.invite-onramp__button):disabled {
-    color: var(--text-muted);
-    background: var(--surface-2);
-    border-color: var(--border);
+    color: var(--home-rail-muted);
+    background: var(--home-rail-raised);
+    border-color: var(--home-rail-raised);
     cursor: not-allowed;
   }
 
@@ -925,9 +1039,9 @@ const assistantHosts = inviteAssistantHosts();
   .invite-onramp__divider {
     display: flex;
     align-items: center;
-    gap: var(--s-3);
-    color: var(--text-muted);
-    font-size: var(--t-sm);
+    gap: 12px;
+    color: var(--home-rail-soft);
+    font-size: 14px;
   }
 
   .invite-onramp__divider::before,
@@ -935,71 +1049,99 @@ const assistantHosts = inviteAssistantHosts();
     content: "";
     block-size: 1px;
     flex: 1;
-    background: var(--border-strong);
+    background: var(--home-rail-divider);
   }
 
   .invite-onramp__auth {
     display: grid;
-    gap: var(--s-3);
+    gap: 10px;
   }
 
   .invite-onramp__auth label {
-    color: var(--text);
-    font-size: var(--t-sm);
-    font-weight: var(--weight-medium);
+    color: var(--home-rail-soft);
+    font-size: 14px;
+    font-weight: 700;
   }
 
   .invite-onramp__auth input {
-    min-block-size: 3rem;
+    box-sizing: border-box;
+    min-block-size: 52px;
     inline-size: 100%;
-    padding: var(--s-3) var(--s-4);
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-interactive);
-    border-radius: var(--radius);
+    padding: 0 16px;
+    color: var(--home-rail-strong);
+    background: var(--home-rail-raised);
+    border: 1.5px solid var(--home-ink-faint);
+    border-radius: 14px;
     font: inherit;
   }
 
+  .invite-onramp__auth input::placeholder {
+    color: var(--home-rail-muted);
+  }
+
   .invite-onramp__auth input:focus-visible {
-    border-color: var(--accent);
+    border-color: var(--home-lime);
     outline: 2px solid transparent;
     box-shadow: var(--focus-ring);
   }
 
   .invite-onramp .invite-onramp__status {
     min-block-size: 1.4em;
-    font-size: var(--t-sm);
+    margin: 0;
+    font-size: 14px;
   }
 
   .invite-onramp .invite-onramp__error,
   .invite-onramp .invite-onramp__hint {
-    padding: var(--s-3) var(--s-4);
-    color: var(--text);
-    background: var(--danger-dim);
-    border-radius: var(--radius);
-    font-size: var(--t-sm);
+    margin: 0;
+    padding: 12px 16px;
+    color: var(--home-offline-deep);
+    background: var(--home-offline-tint);
+    border-radius: 14px;
+    font-size: 14px;
+    font-weight: 600;
   }
 
-  /* Review card. */
+  .invite-onramp .invite-onramp__error[hidden],
+  .invite-onramp .invite-onramp__hint[hidden] {
+    display: none;
+  }
+
+  /* Review. */
   .invite-onramp__facts {
-    display: grid;
-    gap: var(--s-2);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .invite-onramp .invite-onramp__facet {
-    margin: var(--s-2) 0 0;
-    color: var(--text-muted);
-    font-family: var(--font-sans);
-    font-size: var(--t-xs);
-    line-height: var(--lh-xs);
-    font-weight: var(--weight-semibold);
-    letter-spacing: var(--track-eyebrow);
-    text-transform: uppercase;
+    margin: 10px 0 0;
+    color: var(--home-rail-soft);
+    font-family: var(--home-font-body);
+    font-size: 14px;
+    line-height: 1.4;
+    font-weight: 700;
+  }
+
+  .invite-onramp .invite-onramp__facet:first-child {
+    margin-block-start: 0;
   }
 
   .invite-onramp__facts p {
-    color: var(--text);
+    margin: 0;
+    color: var(--home-rail-strong);
     overflow-wrap: anywhere;
+    text-wrap: pretty;
+  }
+
+  .invite-onramp__facts .invite-onramp__private {
+    margin-block-start: 8px;
+    color: var(--home-rail-soft);
+    font-size: 14px;
+  }
+
+  .invite-onramp__private strong {
+    color: var(--home-rail-strong);
   }
 
   .invite-onramp__choices {
@@ -1011,34 +1153,38 @@ const assistantHosts = inviteAssistantHosts();
 
   .invite-onramp__choices legend {
     padding: 0;
-    margin-block-end: var(--s-3);
-    color: var(--text);
-    font-family: var(--font-display);
-    font-weight: var(--weight-head);
+    margin-block-end: 10px;
+    color: var(--home-rail-soft);
+    font-family: var(--home-font-body);
+    font-size: 14px;
+    font-weight: 700;
   }
 
-  .invite-onramp__choice-list {
-    display: grid;
-    gap: var(--s-3);
+  .invite-onramp__choice-list,
+  .invite-onramp__assistant-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
+  /* A choice is a tile: 14px corners, 1.5px edge, a ring on the right that fills lime when chosen. */
   .invite-onramp__choice {
     min-block-size: 3.5rem;
+    box-sizing: border-box;
     display: flex;
-    align-items: flex-start;
-    gap: var(--s-3);
-    padding: var(--s-4);
-    color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border-interactive);
-    border-radius: var(--radius);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    color: var(--home-rail-strong);
+    background: color-mix(in srgb, var(--home-rail-raised) 50%, var(--home-rail-bg));
+    border: 1.5px solid var(--home-rail-divider);
+    border-radius: 14px;
     cursor: pointer;
   }
 
   .invite-onramp__choice:has(input:checked) {
-    background: var(--accent-dim);
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    background: var(--home-rail-raised);
+    border-color: var(--home-lime);
   }
 
   .invite-onramp__choice:has(input:focus-visible) {
@@ -1055,58 +1201,175 @@ const assistantHosts = inviteAssistantHosts();
   }
 
   .invite-onramp__choice input {
-    margin-block-start: 0.15rem;
+    order: 3;
+    appearance: none;
+    box-sizing: border-box;
+    border: 1.5px solid var(--home-rail-soft);
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
   }
 
-  .invite-onramp__choice span {
-    display: grid;
+  .invite-onramp__choice input:checked {
+    background: var(--home-lime);
+  }
+
+  .invite-onramp__consent input {
+    accent-color: var(--home-lime);
+  }
+
+  @media (forced-colors: active) {
+    .invite-onramp__choice input {
+      appearance: auto;
+    }
+  }
+
+  .invite-onramp__choice > span:not(.invite-onramp__tile-orb) {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
     min-inline-size: 0;
   }
 
   .invite-onramp__choice strong {
-    font-weight: var(--weight-semibold);
+    color: inherit;
+    font-weight: 600;
   }
 
   .invite-onramp__choice small {
-    color: var(--text-muted);
-    font-size: var(--t-sm);
-    line-height: var(--lh-sm);
+    color: var(--home-rail-soft);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .invite-onramp__assistant {
+    min-block-size: 3rem;
+    padding-block: 6px;
+  }
+
+  .invite-onramp__assistant > span:not(.invite-onramp__tile-orb) {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 8px;
+  }
+
+  .invite-onramp__assistant small {
+    font-size: 13px;
+  }
+
+  /* Brand-neutral letter tile, in the joiner's (the viewer's) blue. */
+  .invite-onramp__tile-orb {
+    inline-size: 28px;
+    block-size: 28px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    border-radius: 9px;
+    background: var(--home-blue-tint);
+    border: 1.5px solid var(--home-blue);
+    color: var(--home-blue-deep);
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .invite-onramp__tile-orb--empty {
+    background: transparent;
+    border: 1.5px dashed var(--home-line-dashed);
   }
 
   .invite-onramp__consent {
     min-block-size: 2.75rem;
     display: flex;
     align-items: center;
-    gap: var(--s-3);
-    color: var(--text);
-    font-weight: var(--weight-medium);
+    gap: 12px;
+    color: var(--home-rail-strong);
+    font-weight: 600;
     cursor: pointer;
   }
 
   .invite-onramp__actions {
     display: flex;
-    flex-wrap: wrap;
-    gap: var(--s-3);
+    flex-direction: column;
+    gap: 6px;
+    margin-block-start: auto;
   }
 
   .invite-onramp__actions .invite-onramp__button {
-    flex: 1 1 11rem;
+    inline-size: 100%;
+  }
+
+  /* The one primary action on each ink step: full width, 56px, 18px. */
+  .invite-onramp__actions .invite-onramp__button:not(.invite-onramp__button--quiet),
+  .invite-onramp__connect > .invite-onramp__button {
+    inline-size: 100%;
+    min-block-size: 56px;
+    font-size: 18px;
+  }
+
+  /* The way out under it reads as a link, not a second button. */
+  .invite-onramp__actions .invite-onramp__button--quiet {
+    min-block-size: 46px;
+    padding-block: 0;
+    border-color: transparent;
+    background: transparent;
+    font-size: 15px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .invite-onramp__actions .invite-onramp__button--quiet:hover {
+    background: transparent;
+    border-color: transparent;
+    color: var(--home-lime);
   }
 
   .invite-onramp .invite-onramp__fineprint {
-    font-size: var(--t-sm);
+    margin: 0;
+    font-size: 13px;
+    text-align: center;
   }
 
-  /* After joining: a short receipt, then the shared agent picker. */
+  /* Connect: "Step 2 of 2" joins the brand on the top bar. */
+  .invite-onramp .hm-invite-connect__step {
+    position: absolute;
+    inset-block-start: 56px;
+    inset-inline-end: 0;
+    min-block-size: 28px;
+    display: flex;
+    align-items: center;
+  }
+
+  .invite-onramp .hm-invite-connect__step[hidden] {
+    display: none;
+  }
+
+  .invite-onramp__connect > .invite-onramp__button {
+    margin-block-start: 24px;
+  }
+
+  /* With the assistant's own Open button on screen, the workspace link is the quiet way on. */
+  .invite-onramp__connect:has([data-connect-open]:not([hidden])) > .invite-onramp__button[href="/app"] {
+    min-block-size: 3rem;
+    margin-block-start: 10px;
+    color: var(--home-rail-strong);
+    background: transparent;
+    border-color: var(--home-ink-faint);
+    font-size: 16px;
+  }
+
+  /* After joining: a short receipt. */
   .invite-onramp__receipt {
     display: flex;
     align-items: center;
-    gap: var(--s-3);
-    padding: var(--s-4) var(--s-5);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
+    gap: 12px;
+    margin-block-start: 20px;
+    padding: 16px 18px;
+    background: var(--home-rail-raised);
+    border-radius: 18px;
   }
 
   .invite-onramp__receipt-mark {
@@ -1115,23 +1378,23 @@ const assistantHosts = inviteAssistantHosts();
     display: grid;
     place-items: center;
     flex: none;
-    color: var(--success);
-    background: var(--success-dim);
+    color: var(--home-lime-ink);
+    background: var(--home-lime);
     border-radius: var(--radius-pill);
-    font-weight: var(--weight-semibold);
+    font-weight: 700;
   }
 
   .invite-onramp__receipt-title {
-    font-size: var(--t-lg);
-    line-height: var(--lh-lg);
-    letter-spacing: var(--track-xl);
+    font-size: 21px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
   }
 
   .invite-onramp__spinner {
     inline-size: 1.5rem;
     block-size: 1.5rem;
-    border: 2px solid var(--border);
-    border-block-start-color: var(--accent);
+    border: 2px solid var(--home-rail-divider);
+    border-block-start-color: var(--home-lime);
     border-radius: var(--radius-pill);
     animation: invite-spin 0.8s linear infinite;
   }
@@ -1140,15 +1403,19 @@ const assistantHosts = inviteAssistantHosts();
     to { transform: rotate(1turn); }
   }
 
-  @media (max-width: 40rem) {
+  @media (min-width: 48rem) {
     .invite-onramp {
-      align-content: start;
+      padding-block: 64px 40px;
+    }
+
+    .invite-onramp .hm-invite-connect__step {
+      inset-block-start: 64px;
     }
   }
 
   @media (max-width: 30rem) {
-    .invite-onramp__card {
-      padding: var(--s-5);
+    .invite-onramp__title {
+      font-size: 38px;
     }
 
     .invite-onramp :global(.invite-onramp__button) {

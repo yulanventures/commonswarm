@@ -4,6 +4,8 @@
  *
  * Setter: /app add-agent pane. Joiner: legacy embed; /invite uses its own connect step.
  * Host copy and steps come from agent-hosts.ts. Styles live in styles/home/onboarding.css.
+ * Every app wears a brand-neutral letter tile in the viewer's colour (the canvas Add-Agent and
+ * Phone-Join artboards), not its logo: the agent is the viewer's, so it takes the viewer's hue.
  */
 import "../../styles/home/onboarding.css";
 import {
@@ -41,14 +43,6 @@ const pieces = (text: string): Array<{ kind: "text" | "workspace" | "email"; val
 const orbLetters = (host: AgentHost): string =>
   host.id === "terminal" ? ">_" : host.id === "other-app" ? "+" : host.id === "claude-code" ? "CC" : host.name.slice(0, 1);
 
-const orbHue: Record<string, string> = {
-  claude: "peach",
-  "claude-code": "peach",
-  codex: "sky",
-  chatgpt: "sky",
-  "other-app": "sage",
-  terminal: "lavender",
-};
 
 const stepsOf = (host: AgentHost): readonly AgentHostStep[] => host.steps;
 const connects = (host: AgentHost): boolean => (host.status !== null && host.status !== "waiting") || Boolean(host.testing);
@@ -84,11 +78,7 @@ const notesOf = (host: AgentHost): string[] => [
               data-agent-owner-self={host.id === "terminal" ? "" : undefined}
               aria-pressed="false"
             >
-              <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                {host.logo
-                  ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-                  : <span>{orbLetters(host)}</span>}
-              </span>
+              <span class="hm-ahp__orb" aria-hidden="true">{orbLetters(host)}</span>
               <span data-ahp-host-name>{host.name}</span>
               <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
             </button>
@@ -108,11 +98,7 @@ const notesOf = (host: AgentHost): string[] => [
                   data-agent-owner-self={host.id === "terminal" ? "" : undefined}
                   aria-pressed="false"
                 >
-                  <span class:list={["hm-ahp__orb", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-                    {host.logo
-                      ? <img src={host.logo.src} alt="" width="18" height="18" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-                      : <span>{orbLetters(host)}</span>}
-                  </span>
+                  <span class="hm-ahp__orb" aria-hidden="true">{orbLetters(host)}</span>
                   <span data-ahp-host-name>{host.name}</span>
                   <span class="hm-ahp__selected-check" aria-hidden="true">✓</span>
                 </button>
@@ -138,11 +124,7 @@ const notesOf = (host: AgentHost): string[] => [
       </button>
       <h2 class="hm-ahp__step-title">2. Connect it</h2>
       <header class="hm-ahp__detail-head">
-        <span class:list={["hm-ahp__orb", "hm-ahp__orb--large", host.logo ? "hm-ahp__orb--logo" : `hm-ahp__orb--${orbHue[host.id] ?? "lavender"}`]} aria-hidden="true">
-          {host.logo
-            ? <img src={host.logo.src} alt="" width="28" height="28" loading="lazy" class:list={[{ "hm-ahp__logo--tile": host.logo.tile }]} />
-            : <span>{orbLetters(host)}</span>}
-        </span>
+        <span class="hm-ahp__orb hm-ahp__orb--large" aria-hidden="true">{orbLetters(host)}</span>
         <div>
           <h1 class="hm-ahp__title" id={`ahp-${audience}-${host.id}-title`} tabindex="-1">Connect {host.name}</h1>
           {host.status && (
@@ -231,7 +213,7 @@ const notesOf = (host: AgentHost): string[] => [
 
   <section class="hm-ahp__view hm-ahp__joined" data-ahp-joined aria-labelledby={`ahp-${audience}-joined-title`} hidden>
     <h2 class="hm-ahp__step-title">3. What it can use in Home</h2>
-    <span class="hm-ahp__orb hm-ahp__orb--large hm-ahp__orb--sage" aria-hidden="true"><span>✓</span></span>
+    <span class="hm-ahp__orb hm-ahp__orb--large hm-ahp__orb--done" aria-hidden="true">✓</span>
     <h1 class="hm-ahp__title" id={`ahp-${audience}-joined-title`} tabindex="-1" data-ahp-joined-title></h1>
     <p class="hm-ahp__lead" data-ahp-joined-lead>Let it use Lists &amp; docs here, or skip for now.</p>
     <div class="hm-ahp__actions">
