@@ -1,6 +1,7 @@
 import { AGENT_HOSTS } from "./agent-hosts";
 import { buildAgentModelEditor } from "./agent-model-editor";
 import type { PeopleAgentStatus } from "./agent-status";
+import { personTint } from "./home-names";
 
 export interface PeopleDialogPerson { id: string; name: string; role: "owner" | "admin" | "member"; own: boolean; mayRemove: boolean }
 export interface PeopleDialogAgent {
@@ -158,7 +159,8 @@ export function peopleDialogApplyFocus(model: PeopleDialogModel, state: PeopleDi
 }
 const validTint = (value: unknown): value is 0 | 1 | 2 | 3 => value === 0 || value === 1 || value === 2 || value === 3;
 
-const letters = (name: string) => name.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2).toLocaleUpperCase() || "CS";
+/** An agent avatar shows the first letter of its name as written (the canvas shows "C", "d"), as the rail does. */
+const letters = (name: string) => Array.from(name.replace(/[^\p{L}\p{N}]/gu, ""))[0] ?? "C";
 const personLetters = (name: string) => name.trim().split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toLocaleUpperCase();
 function node<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className = "", text?: string) {
   const element = doc.createElement(tag); element.className = className;
@@ -184,8 +186,16 @@ function orb(doc: Document, agent: PeopleDialogAgent, tint: number) {
   const element = node(doc, "span", "pd-orb", letters(agent.name));
   element.dataset.tint = String(tint); element.setAttribute("aria-hidden", "true"); return element;
 }
+/** A person's avatar wears their colour (home-names personTint): the viewer blue, everyone else by id. */
+function hue(face: HTMLElement, person: PeopleDialogPerson) {
+  const tint = personTint(person.id, person.own); if (tint !== null) face.dataset.hue = String(tint); return face;
+}
+/** The measured status as a pill with a shape: active is the working dot, needs attention the offline diamond, the rest a hollow ring. */
 function chip(doc: Document, status: PeopleAgentStatus) {
-  const element = node(doc, "span", "pd-status", `${status.attention ? "⚠ " : ["active", "connected"].includes(status.kind) ? "✓ " : ""}${status.label}`);
+  const element = node(doc, "span", "pd-status");
+  const shape = node(doc, "span", "pd-status-shape"); shape.setAttribute("aria-hidden", "true");
+  shape.dataset.shape = status.attention ? "diamond" : status.kind === "active" ? "dot" : "ring";
+  element.append(shape, node(doc, "span", "", status.label));
   element.dataset.agentStatus = status.kind; element.dataset.attention = String(status.attention); return element;
 }
 
@@ -322,7 +332,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
       const entry = node(doc, "li"); const jump = button(doc, "", () => {
         state.collapsed.delete(person.id); callbacks.render(); doc.getElementById(`pd-person-${person.id}`)?.focus();
       }, "pd-portrait");
-      const face = node(doc, "span", "pd-initials", personLetters(person.name)); face.setAttribute("aria-hidden", "true");
+      const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person); face.setAttribute("aria-hidden", "true");
       const needsAttention = agents.some((agent) => agent.status.attention);
       face.dataset.attention = String(needsAttention);
       if (needsAttention) {
@@ -363,7 +373,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
     if (person) {
       const personButton = button(doc, "", () => select("person", person.id), "pd-person-disclosure"); personButton.id = `pd-person-${person.id}`; personButton.dataset.pdFocus = `person-${person.id}`;
       personButton.setAttribute("aria-expanded", String(state.selected?.type === "person" && state.selected.id === person.id)); personButton.setAttribute("aria-controls", detail.id);
-      const face = node(doc, "span", "pd-initials", personLetters(person.name)); face.setAttribute("aria-hidden", "true");
+      const face = hue(node(doc, "span", "pd-initials", personLetters(person.name)), person); face.setAttribute("aria-hidden", "true");
       const copy = node(doc, "span", "pd-person-copy"); const name = node(doc, "strong", "pd-person-name", person.name); name.title = person.name;
       copy.append(name, node(doc, "span", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`)); personButton.append(face, copy); head.append(personButton);
       if (agents.length) { const toggle = button(doc, state.collapsed.has(person.id) ? "›" : "⌄", () => { state.collapsed.has(person.id) ? state.collapsed.delete(person.id) : state.collapsed.add(person.id); callbacks.render();
@@ -481,7 +491,7 @@ export function renderPeopleDialog(root: HTMLElement, detail: HTMLElement, model
         actions.append(actionButton("remove-agent", agent, `Remove ${agent.name}`, notice, "data-remove-agent")); danger.append(actions); detail.append(danger); }
       const error = node(doc, "p", "pd-error"); error.dataset.agentError = ""; error.setAttribute("role", "alert"); error.hidden = true; detail.append(error);
     } else {
-      const person = selected as PeopleDialogPerson; identity.append(node(doc, "span", "pd-initials", personLetters(person.name)), title, node(doc, "p", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`)); detail.append(identity);
+      const person = selected as PeopleDialogPerson; identity.append(hue(node(doc, "span", "pd-initials", personLetters(person.name)), person), title, node(doc, "p", "pd-muted", `${person.role[0].toUpperCase()}${person.role.slice(1)}${person.own ? " · You" : ""}`)); detail.append(identity);
       if (state.roleReceipt?.userId === person.id) { const done = node(doc, "p", "pd-receipt", state.roleReceipt.text); done.dataset.roleReceipt = ""; done.setAttribute("role", "status"); detail.append(done); }
       const roles = callbacks.changeRole ? peopleDialogRoleOptions(model, person.id) : [];
       if (roles.length) { const control = roleControl(person, roles); detail.append(control);
