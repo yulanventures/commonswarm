@@ -49,14 +49,14 @@ const planPath = resolve('docs/evidence/2026-10-03-admin-issuance-release/RELEAS
 const ordinaryKeys = ['hosted_mcp_consent_refresh', 'dcr_registration_consent', 'cimd_consent', 'human_recovery', 'worker_command_read'];
 const inDays = (days: number) => new Date(Date.now() + days * 86400_000).toISOString();
 function consentReceipt(phase: 'pre-W1' | 'post-W5', change: Record<string, unknown> = {}) {
-  return { kind: 'c1-consent', release_sha: sha, consent_phase: phase, measured_at: new Date(Date.now() - 60_000).toISOString(),
+  return { kind: 'c1-consent', release_sha: sha, live_edge_sha: phase === 'pre-W1' ? baseline : sha, consent_phase: phase, measured_at: new Date(Date.now() - 60_000).toISOString(),
     producer_sha256: hash(producerSource), controls: { cimd_consent: true, dcr_registration_consent: true },
     dcr_client_ids: ['dcr-post-w5-1'],
     cleanup: phase === 'pre-W1' ? null : { grants_revoked: true, dcr_clients_expiring: [{ client_id: 'dcr-pre-w1-1', expires_after: inDays(30) }] },
     ...change };
 }
 function liveReceipt(phase: string, consentText: string, change: Record<string, unknown> = {}) {
-  return { release_sha: sha, window_id: 'Fix123', window: 'W5', phase, controls: Object.fromEntries(ordinaryKeys.map(k => [k, true])),
+  return { release_sha: sha, live_edge_sha: sha, window_id: 'Fix123', window: 'W5', phase, controls: Object.fromEntries(ordinaryKeys.map(k => [k, true])),
     consent_receipt_sha256: hash(consentText), producer_sha256: hash(producerSource), dcr_client_ids: ['dcr-w5-after-1'], ...change };
 }
 const client = { client_id: 'https://commonswarm.com/oauth/c1-smoke/client.json',
@@ -295,7 +295,7 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   put('site/manifest.json', manifest);
   const goodClose = `CLOSED=yes\nOUTCOME=released\nPIN_RELEASED=yes\nMANIFEST_SHA256=${hash(manifest)}\n`;
   put('site/CLOSE.txt', goodClose);
-  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: baseline, baseline_postgres_image: image, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
+  const data = { release_sha: sha, baseline_site_sha: baseline, baseline_edge_sha: sha, baseline_postgres_image: image, baseline_edge_image: image, window: 'W5', window_id: 'Fix123',
     baseline_caddyfile_sha256: '', archive_sha256: '', plan_sha256: hash(readFileSync(planPath)) };
   put('authorization.json', { approver: 'HezLead', release_sha: sha, task_ref: 'fixture-qa', browser: 'headless-bundled-chromium' });
   put('fixture.json', { sha, baseline, image, client, producer: producerSource, ...config });
@@ -340,6 +340,12 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
   for (const version of ['20261001000001','20261001000002','20261001000003','20261001000004','20261001000005',
     '20260928000003','20261002000001','20261003000001','20261003000002','20261003000003','20261003000004','20261003000005'])
     put(`release/supabase/migrations/${version}_fixture.sql`, '-- reviewed migration fixture\n');
+  // Retained W4 close establishes the earlier edge, despite W5 INPUTS edge = release.
+  put('w4/inputs.json', { ...data, window: 'W4', window_id: 'W4Fx01', baseline_edge_sha: baseline });
+  put('w4/consent-pre-W1.json', preText);
+  put('w4/ordinary-before.json', { ...liveReceipt('before', preText), window: 'W4', window_id: 'W4Fx01', live_edge_sha: baseline });
+  put('w4/closed.txt', '2026-10-04T09:00:00Z\n');
+  put('w4/close-result.json', { release_sha: sha, window: 'W4', window_id: 'W4Fx01', result: 'success', closed_at: '2026-10-04T09:00:00Z' });
   put('inputs.json', data);
   const later = join(root, 'later.txt');
   function run(steps = ['ai-w5-closed'], env: Record<string, string> = {}, laterMarker = later) {
@@ -348,7 +354,7 @@ function fixture(config: Record<string, unknown> = {}, parent = scratch) {
     const result = spawnSync('/bin/bash', [], {
       input: 'set -euo pipefail\n' + source + `\nprintf 'later side effect\\n' >${quote(laterMarker)}\n`, encoding: 'utf8', timeout: 15_000,
       cwd: root, env: { ...process.env, PATH: bin, PYTHONDONTWRITEBYTECODE: '1', W45_ROOT: root,
-        INPUTS_FILE: join(root, 'inputs.json'), SITE_EVIDENCE: site, SITE_RELEASE_SHA: sha, EXPECTED_SITE_SHA: baseline,
+        W4_PROOF_DIR: join(root, 'w4'), INPUTS_FILE: join(root, 'inputs.json'), SITE_EVIDENCE: site, SITE_RELEASE_SHA: sha, EXPECTED_SITE_SHA: baseline,
         SITE_QA_AUTHORIZATION_FILE: join(root, 'authorization.json'), WINDOW: 'W4', WINDOW_ID: data.window_id,
         SECRET_STAGE: stage, PROOF_DIR: proof, NEW_EDGE: newEdge, RELEASE_ROOT: join(root, 'release'), RELEASE_SHA: sha,
         EDGE_RECYCLE_TIMER: 'fixture-recycle.timer', EDGE_RECYCLE_SERVICE: 'fixture-recycle.service',
@@ -399,6 +405,7 @@ ai_run() {
 }`;
 function rollbackFixture(config: Record<string, unknown> = {}, ignored = false) {
   const f = fixture({ timer_active: true, ...config });
+  f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4', baseline_edge_sha: baseline });
   const mode = (source: string) => ignored ? source.replace('set -euo pipefail', 'set +e') : source;
   f.put('timer.sh', f.remap(mode(block('ai-timer-guard'))));
   f.put('recovery.sh', f.remap(mode(block('ai-w4-timer-recovery'))));
@@ -791,9 +798,9 @@ test('release-plan-contract / w4-apply-candidate-guards: refuses a missing MCP o
 test('release-plan-contract / w4-preflight-override-and-new-edge-guards: refuses a missing or symlinked override and an existing or symlinked new edge release', () => {
   const ready = (f: Fixture, override = true) => {
     // W4 inputs and a valid retained opening pair: W4 preflight re-validates it in full.
-    f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4' });
+    f.put('inputs.json', { ...JSON.parse(readFileSync(join(f.root, 'inputs.json'), 'utf8')), window: 'W4', baseline_edge_sha: baseline });
     const pre = JSON.stringify(consentReceipt('pre-W1'));
-    f.put('proof/consent-pre-W1.json', pre); f.put('proof/ordinary-before.json', liveReceipt('before', pre, { window: 'W4' }));
+    f.put('proof/consent-pre-W1.json', pre); f.put('proof/ordinary-before.json', liveReceipt('before', pre, { window: 'W4', live_edge_sha: baseline }));
     f.put('proof/backup-gate.json', { status: 'PASS', backup_verified_at: '2026-10-04T00:00:00Z', restore_at: '2026-10-01T00:00:00Z' });
     if (override) f.put(`edge/releases/${baseline}/deploy/edge-runtime/compose.override.yaml`, 'reviewed override\n');
     renameSync(join(f.root, 'edge/releases', sha), join(f.root, 'moved-new-edge'));

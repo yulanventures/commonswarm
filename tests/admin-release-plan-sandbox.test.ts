@@ -147,7 +147,7 @@ function inputsFor(window: string) {
     release_sha: releaseSha, plan_sha256: digest(plan), archive_sha256: digest(archiveBytes),
     window, window_id: windowId, window_end_utc: new Date(Date.now() + 1_500_000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
     baseline_oauth_sha: 'c'.repeat(40), baseline_oauth_image: `sha256:${hex}`,
-    baseline_edge_sha: 'd'.repeat(40), baseline_edge_image: `sha256:${hex}`,
+    baseline_edge_sha: ['W5','W6','W7'].includes(window) ? releaseSha : 'd'.repeat(40), baseline_edge_image: `sha256:${hex}`,
     baseline_stack_sha: 'e'.repeat(40), baseline_postgres_image: `sha256:${hex}`,
     baseline_site_sha: siteSha, baseline_site_target: '/srv/commonswarm/site/releases/20261003T120000Z-ffffffffffff-abcdef0123456789',
     baseline_mcp_caddy_sha256: hex, baseline_api_caddy_sha256: hex, baseline_caddyfile_sha256: hex,
@@ -189,25 +189,31 @@ for (const name of ['index.html', 'manifest.json']) writeFileSync(join(siteRecov
 writeFileSync(join(siteRecoveryEvidence, 'CLOSE.txt'), `CLOSED=yes\nOUTCOME=rolled-back\nPIN_RELEASED=yes\nMANIFEST_SHA256=${digest(readFileSync(join(siteRecoveryEvidence, 'manifest.json')))}\n`);
 // W5 forward close (Amendments A/B): a phase-after live receipt bound to the post-W5
 // consent receipt, so ai-w5-closed passes ai-live-controls and still reaches its network step.
-const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'post-W5',
+const consentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, live_edge_sha: releaseSha, consent_phase: 'post-W5',
   measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
   controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-post-w5'],
   cleanup: { grants_revoked: true, dcr_clients_expiring: [{ client_id: 'dry-run-pre-w1', expires_after: new Date(Date.now() + 30 * 86400_000).toISOString() }] } });
 const liveControlsProof = join(scratch, 'live-controls-proof'); mkdirSync(liveControlsProof, { mode: 0o700 });
 const consentFile = join(scratch, 'consent-post-W5.json'); writeFileSync(consentFile, consentText);
 const liveControlsFile = join(scratch, 'live-W5-after.json');
-writeFileSync(liveControlsFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'after',
+writeFileSync(liveControlsFile, JSON.stringify({ release_sha: releaseSha, live_edge_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'after',
   controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
   consent_receipt_sha256: digest(consentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-after'] }));
 // W5 opening: a phase-before live receipt bound to the pre-W1 consent receipt (ai-w5-preflight).
-const preConsentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, consent_phase: 'pre-W1',
+const preConsentText = JSON.stringify({ kind: 'c1-consent', release_sha: releaseSha, live_edge_sha: 'd'.repeat(40), consent_phase: 'pre-W1',
   measured_at: new Date(Date.now() - 60_000).toISOString(), producer_sha256: digest(readFileSync(producerFile)),
   controls: { cimd_consent: true, dcr_registration_consent: true }, dcr_client_ids: ['dry-run-pre-w1'], cleanup: null });
 const preConsentFile = join(scratch, 'consent-pre-W1.json'); writeFileSync(preConsentFile, preConsentText);
 const liveBeforeFile = join(scratch, 'live-W5-before.json');
-writeFileSync(liveBeforeFile, JSON.stringify({ release_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'before',
+writeFileSync(liveBeforeFile, JSON.stringify({ release_sha: releaseSha, live_edge_sha: releaseSha, window_id: windowId, window: 'W5', phase: 'before',
   controls: { hosted_mcp_consent_refresh: true, dcr_registration_consent: true, cimd_consent: true, human_recovery: true, worker_command_read: true },
   consent_receipt_sha256: digest(preConsentText), producer_sha256: digest(readFileSync(producerFile)), dcr_client_ids: ['dry-run-w5-before'] }));
+const w4ProofDir = join(scratch, 'w4-proof'); mkdirSync(w4ProofDir, { mode: 0o700 });
+writeFileSync(join(w4ProofDir, 'inputs.json'), JSON.stringify({ ...JSON.parse(readFileSync(inputsFor('W4'), 'utf8')), window_id: 'W4Fx01' }));
+writeFileSync(join(w4ProofDir, 'consent-pre-W1.json'), preConsentText);
+writeFileSync(join(w4ProofDir, 'ordinary-before.json'), JSON.stringify({ ...JSON.parse(readFileSync(liveBeforeFile, 'utf8')), window: 'W4', window_id: 'W4Fx01', live_edge_sha: 'd'.repeat(40) }));
+writeFileSync(join(w4ProofDir, 'closed.txt'), '2026-10-04T09:00:00Z\n');
+writeFileSync(join(w4ProofDir, 'close-result.json'), JSON.stringify({ release_sha: releaseSha, window: 'W4', window_id: 'W4Fx01', result: 'success', closed_at: '2026-10-04T09:00:00Z' }));
 // C1 inputs: synthetic owner/workspace, fixture target file (no key) and state directory.
 const c1Dir = join(scratch, 'c1'); mkdirSync(join(c1Dir, 'state'), { recursive: true, mode: 0o700 });
 writeFileSync(join(c1Dir, 'target.json'), JSON.stringify({ url: 'https://api.commonswarm.com', anonKey: 'dry-run-fixture-not-a-key' }) + '\n');
@@ -468,7 +474,7 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
     const step = stepOf(source)!;
     const env: Record<string, string> = {
       INPUTS_FILE: inputsFor(windowOf(step)), PLAN_FILE: planPath, GATE_RECEIPT_FILE: gateReceiptFile,
-      EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
+      W4_PROOF_DIR: w4ProofDir, EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
       control_user_id: '11111111-1111-4111-8111-111111111111', control_workspace_id: '22222222-2222-8222-a222-222222222222',
