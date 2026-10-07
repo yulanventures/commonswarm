@@ -180,6 +180,30 @@
 }
 .hm-rail__link[aria-current="page"] .hm-rail__badge { background: var(--home-lime-ink); color: var(--home-lime); }
 
+/* The workspace being started (New-Space.dc.html), while the New workspace form is open: the current row as a draft.
+   44px, radius 12px, a 1.5px dashed lime edge (a dashed edge cannot be the lane's inset stroke, so it is a real border
+   inside the 44px, as the source's border-box), strong 700 text, a lime icon and a lime "new" marker. Display only:
+   no link, no hover. An empty name shows the door's label in the muted rail ink, at 400.
+     name    --home-rail-strong on --home-rail-bg 14.32 / 16.84; empty --home-rail-muted 5.96 / 7.00
+     marker  --home-lime on --home-rail-bg 12.65 / 14.87 (12px 600) */
+.hm-rail__draft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 44px;
+  padding: 0 12px;
+  border: 1.5px dashed var(--home-lime);
+  border-radius: 12px;
+  color: var(--home-rail-strong);
+  font-weight: 700;
+}
+.hm-rail__draft .hm-rail__icon { color: var(--home-lime); }
+.hm-rail__draft .hm-rail__name[data-empty] { color: var(--home-rail-muted); font-weight: 400; }
+.hm-rail__draft-marker { flex: none; color: var(--home-lime); font-size: 12px; font-weight: 600; }
+
 /* People list: fills the height the rail has left and scrolls; a short list shrinks to fit. */
 .hm-rail__people {
   display: flex;

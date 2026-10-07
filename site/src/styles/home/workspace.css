@@ -30,7 +30,12 @@
 .hm-side-card__empty, .hm-side-card__line { margin: 0; padding-block: 6px 10px; font-size: 14px; line-height: 1.45; color: var(--home-ink-muted); overflow-wrap: anywhere; }
 .hm-side-card__line { color: var(--home-ink); }
 .hm-side-card__line + .hm-side-card__line { padding-block-start: 0; }
-.hm-side-card[data-side-card="shared"] { padding-block-end: 8px; }
+/* "What's shared here" is the canvas's information card (Space.dc.html): no surface of its own (the column's canvas shows
+   through), a 1.5px dashed edge in the dashed-outline grey, 16px padding and no lip. A dashed edge cannot be the lane's
+   inset stroke, so it is a real border, which Chromium paints 1px wide, as the reference PNG does. The last line drops
+   its 10px foot so the card's own 16px is the space under the words. */
+.hm-side-card[data-side-card="shared"] { padding: 16px; background: transparent; border: 1.5px dashed var(--home-line-dashed); box-shadow: none; }
+.hm-side-card[data-side-card="shared"] .hm-side-card__line:last-child { padding-block-end: 0; }
 /* Wiki (ruling 4): one entry row on the canvas, not a card; it reads like a Lists row (ink 600, chevron). */
 .hm-side-entry { min-width: 0; }
 .hm-side-entry > .hm-side-link { display: flex; justify-content: space-between; gap: 12px; inline-size: 100%; padding: 0 16px; border-radius: 12px;
@@ -120,6 +125,9 @@
 .hm-extras .hm-object-title { font-size: 16px; font-weight: 600; line-height: 1.45; }
 .hm-extras .hm-object-meta { font-size: 13px; line-height: 1.45; }
 .hm-extras .hm-object-icon { inline-size: 20px; }
+/* A file under a message is the canvas's attachment card (Space.dc.html "Dinner confirmation"): the card surface, at most
+   420 px. To-do and list cards keep the soft 440 px form above. Same specificity as that rule; order decides. */
+.hm-extras__files .hm-object-card { max-inline-size: 420px; background: var(--home-card); }
 /* An ask for the viewer is the lime card itself; the row already shows who asked, so the card drops its picture. */
 .hm-extras__ask .hm-needs-you { box-sizing: border-box; max-inline-size: 520px; padding: 16px; border-radius: 16px; }
 .hm-extras__ask .hm-needs-you > :is(.hm-agent-orb, .hm-person-avatar, .hm-needs-glyph) { display: none; }
@@ -191,10 +199,13 @@
 .hm-frame .dashboard__message-target { color: var(--home-ink-muted); font-size: 13px; font-weight: 600; }
 .hm-frame .dashboard__message-channel { color: var(--home-ink-muted); font-size: 13px; }
 .hm-frame .dashboard__message-channel:hover { color: var(--home-ink); text-decoration: underline; }
-/* A message for an agent is a handoff: the lime pill of the source, "Handoff → <agent>". */
+/* A message for an agent is a handoff: the lime pill of the source, "Handoff", a 12px line arrow, "<agent>". The target's
+   own "→ " text stays in the DOM for its accessible name and is clipped; the drawn arrow is aria-hidden. */
 .hm-frame .dashboard__message-handoff { display: inline-flex; align-items: center; gap: 0 5px; padding: 1px 9px; border-radius: 999px; background: var(--home-lime);
-  color: var(--home-lime-ink); font-size: 12px; font-weight: 700; line-height: 1.5; }
+  color: var(--home-lime-ink); font-size: 12px; font-weight: 700; line-height: 1.45; }
 .hm-frame .dashboard__message-handoff .dashboard__message-target { color: inherit; font-size: inherit; font-weight: inherit; }
+.hm-frame .dashboard__message-handoff-arrow { flex: none; inline-size: 12px; block-size: 12px; }
+.hm-frame .dashboard__message-handoff-arrow-text { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* The body's 2 px row gap is the source's margin-top: 2px between the author line and the text. */
 .hm-frame .dashboard__message-markdown { margin-block-start: 0; color: var(--home-ink); font-size: 16px; line-height: var(--lh-base); text-wrap: pretty; }
@@ -295,8 +306,9 @@
 .hm-frame :is(.dashboard__composer-input--drop)::before { box-shadow: inset 0 0 0 1.5px var(--home-ink), 0 0 0 3px var(--home-lime); }
 .hm-frame .dashboard__composer-attachments { margin-inline-end: calc(85px + 10px); padding: 6px 6px 0; }
 .hm-frame .dashboard__composer textarea { min-block-size: 47px; padding: 12px calc(44px + 8px) 12px 16px; color: var(--home-ink); font-size: 16px; line-height: 23px; }
-/* The placeholder keeps the base rule's neutral grey (--text-faint, 5.69 on white), as the source's native grey
-   placeholder; the green --home-ink-faint read as a second ink. */
+/* The placeholder is the source's native neutral grey (--home-placeholder); the green --home-ink-faint read as a second
+   ink, and the site's --text-faint has a blue cast. */
+.hm-frame .dashboard__composer textarea::placeholder { color: var(--home-placeholder); opacity: 1; }
 .hm-frame .dashboard__composer-attach { inset-inline-end: calc(85px + 14px); inset-block-end: 3px; color: var(--home-ink-muted); border-radius: 10px; }
 /* At rest the field is the source's plain input (padding 0 16px, no icon). Attach shows while the composer has focus
    (so Tab from the field reaches it) and while files are staged; the field keeps room for it only then.
@@ -346,7 +358,10 @@
   .hm-frame .dashboard__message-avatar.hm-agent-orb[data-size="28"] .hm-owner-badge { inline-size: 15px; block-size: 15px; }
   .hm-frame .dashboard__message--reply { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
   .hm-frame .dashboard__message-body { gap: 2px 6px; }
-  .hm-frame .hm-author { font-size: 15px; gap: 2px 6px; }
+  /* Phone-Space.dc.html: the author line centres its items on the phone's 1.4 line (15px name, 21px line box). */
+  .hm-frame .hm-author { align-items: center; font-size: 15px; line-height: 1.4; gap: 2px 6px; }
+  .hm-frame .dashboard__message-handoff { gap: 0 4px; padding: 1px 8px; line-height: 1.4; }
+  .hm-frame .dashboard__message-handoff-arrow { inline-size: 11px; block-size: 11px; }
   .hm-frame .hm-author__when, .hm-frame .dashboard__message-meta time { font-size: 12px; }
   .hm-frame .dashboard__message-markdown { font-size: 15px; }
   .hm-frame .hm-needs-you .dashboard__message-markdown { font-size: 16px; }
@@ -363,7 +378,9 @@
   .hm-frame .dashboard__composer-input { gap: 8px; min-block-size: 46px; }
   .hm-frame .dashboard__composer-input::before { inset-inline-end: calc(46px + 8px); border-radius: 23px; }
   .hm-frame .dashboard__composer-attachments { margin-inline-end: calc(46px + 8px); }
+  /* The field stays 16px (iOS zooms a smaller field on focus); its placeholder and the label overlay are the source's 15px. */
   .hm-frame .dashboard__composer textarea { min-block-size: 43px; padding: 10px calc(44px + 4px) 10px 16px; font-size: 16px; line-height: 23px; }
+  .hm-frame .dashboard__composer textarea::placeholder { font-size: 15px; }
   .hm-frame .dashboard__composer-attach { inset-inline-end: calc(46px + 9px); inset-block-end: 1px; }
   .hm-frame .dashboard__composer-send { inline-size: 46px; min-inline-size: 0; block-size: 46px; padding: 0; border-radius: 50%; }
   .hm-frame .dashboard__composer-send-icon { display: grid; place-items: center; color: var(--home-lime); }
@@ -376,8 +393,8 @@
      placeholder, or a staged file, shows natively as before. */
   .hm-frame .dashboard__composer-box:has(textarea[placeholder^="Write to everyone"]:placeholder-shown):has(.dashboard__composer-attachments[hidden]) .dashboard__composer-label {
     z-index: 1; inset-block-start: 0; inset-inline-start: 0; inline-size: auto; max-inline-size: calc(100% - 46px - 8px - 32px);
-    block-size: 46px; padding-inline: 16px; overflow: hidden; clip-path: none; color: var(--text-faint);
-    font-size: 16px; font-weight: 400; line-height: 46px; text-overflow: ellipsis; pointer-events: none; }
+    block-size: 46px; padding-inline: 16px; overflow: hidden; clip-path: none; color: var(--home-placeholder);
+    font-size: 15px; font-weight: 400; line-height: 46px; text-overflow: ellipsis; pointer-events: none; }
   .hm-frame .dashboard__composer-box:has(.dashboard__composer-attachments[hidden]) textarea[placeholder^="Write to everyone"]::placeholder { color: transparent; }
 }
 

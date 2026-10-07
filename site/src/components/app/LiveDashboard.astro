@@ -985,7 +985,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
 
 <script>
   import { parseRoute, routeHref, parentRoute, type HomeRoute } from "../../lib/home-route";
-  import { buildHomeRail } from "../../lib/home-rail";
+  import { buildHomeRail, setRailDraftName } from "../../lib/home-rail";
   import { buildWorkspaceHeader, buildPhoneTopBar, buildWorkspaceNav, buildChannelMenu,
     type WorkspaceShellVM, type ShellCallbacks, type FeedMenuState, type FeedMenuAction, type AccountMenuState, type AccountMenuAction } from "../../lib/home-shell";
   import { renderCatchUp as buildCatchUp } from "../../lib/home-catchup";
@@ -1739,6 +1739,9 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       if (rail && frame && createPanel) {
         const home = name === "create" && createPanel.hasAttribute("data-create-rail") ? createPanel : frame;
         if (rail.parentElement !== home) home.prepend(rail);
+        /* The draft row of New workspace leaves with the form, before any later rail paint. */
+        const draft = name === "create" ? null : rail.querySelector("[data-rail-draft]")?.closest("li");
+        if (draft) { draft.remove(); homeRailKey = ""; }
       }
       for (const section of all<HTMLElement>(".dashboard__root > [data-panel]")) {
         section.hidden = section.dataset.panel !== name;
@@ -2037,7 +2040,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       panel.setAttribute("aria-labelledby", "hm-new-workspace-title");
       const mount = () => {
         const replacement = buildNewWorkspaceForm(document, vm, {
-          onNameInput: name => { vm.name = name; const preview = panel.querySelector<HTMLElement>(".hm-new-workspace__preview-title"); if (preview) preview.textContent = newWorkspacePreviewTitle(name);
+          onNameInput: name => { vm.name = name; const railSlot = one<HTMLElement>("[data-home-rail-slot]"); if (railSlot) setRailDraftName(railSlot, name);
+            const preview = panel.querySelector<HTMLElement>(".hm-new-workspace__preview-title"); if (preview) preview.textContent = newWorkspacePreviewTitle(name);
             const button = panel.querySelector<HTMLButtonElement>("[data-create-button]"); if (button) button.disabled = !newWorkspaceCanCreate(name, vm.purpose); },
           onPurposeSelect: purpose => { vm.purpose = purpose; mount(); panel.querySelector<HTMLInputElement>(`[data-create-purpose][value="${purpose}"]`)?.focus({ preventScroll: true }); },
           onCreate: () => { void submitWorkspaceCreate(); },
@@ -4379,7 +4383,10 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
          read first so its own measured states win (home-map homeRailPeople). */
       const railPeople = homeRailPeople(catchUpData, homeRoute.view === "catchup" ? null : currentHomePeople());
       const vm = mapHomeRail(workspaces, homeRoute, railPeople, sampleMode, homeOverviewCounts);
-      const key = homeStructureKey(vm);
+      /* While New workspace is open the rail shows the workspace being started as a draft row (display only); its name
+         follows the field in place (renderCreate's onNameInput), so only its presence is part of the key. */
+      const draftName = homeRoute.view === "new" ? one<HTMLInputElement>("[data-panel=create] #dashboard-workspace-name")?.value ?? null : null;
+      const key = homeStructureKey(vm) + (draftName === null ? "" : "|draft");
       if (key === homeRailKey && slot.childElementCount) {
         refreshHomeRailTimes(slot, vm); return;
       }
@@ -4396,7 +4403,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           if (workspaceId) void navigateHome({ view: "agent", workspaceId, agentId: id }, "push");
         },
         toggleWorkspaces: expanded => { railExpanded = expanded; },
-      }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }) })]);
+      }, { workspacesExpanded: railExpanded, newWorkspaceHref: routeHref({ view: "new" }),
+        ...(draftName === null ? {} : { draftWorkspace: { name: draftName } }) })]);
       homeRailKey = key;
     };
     const renderHomeShell = (): void => {
@@ -5852,7 +5860,22 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
           const word = document.createElement("span");
           word.className = "dashboard__message-handoff-word";
           word.textContent = "Handoff";
-          addressed.append(word, " ", target);
+          /* The canvas draws the arrow as a line icon. The target's own "→ " stays its text (its accessible name and
+             what the addressing checks read), clipped by the home sheet; the drawn arrow is decoration. */
+          const arrowText = target.firstChild;
+          if (arrowText?.nodeType === Node.TEXT_NODE) {
+            const clipped = document.createElement("span");
+            clipped.className = "dashboard__message-handoff-arrow-text";
+            target.replaceChild(clipped, arrowText); clipped.append(arrowText);
+          }
+          const svgNs = "http://www.w3.org/2000/svg";
+          const arrow = document.createElementNS(svgNs, "svg");
+          arrow.setAttribute("class", "dashboard__message-handoff-arrow");
+          arrow.setAttribute("viewBox", "0 0 16 16"); arrow.setAttribute("fill", "none"); arrow.setAttribute("stroke", "currentColor");
+          arrow.setAttribute("stroke-width", "2"); arrow.setAttribute("stroke-linecap", "round"); arrow.setAttribute("stroke-linejoin", "round");
+          arrow.setAttribute("aria-hidden", "true"); arrow.setAttribute("focusable", "false");
+          const arrowPath = document.createElementNS(svgNs, "path"); arrowPath.setAttribute("d", "M2 8h11M9 4l4 4-4 4"); arrow.append(arrowPath);
+          addressed.append(word, " ", arrow, target);
         }
         const badge = document.createElement("span");
         badge.className = `dashboard__message-kind dashboard__message-kind--${signal.kind}`;
