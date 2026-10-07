@@ -163,7 +163,7 @@ export function renderConsentPage({
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>Connect Claude to CommonSwarm</title>
+<title>Connect an app to CommonSwarm</title>
 <style>
 :root{
   color-scheme:light dark;
