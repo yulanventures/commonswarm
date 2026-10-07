@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import type { CloudTarget } from "./config.js";
 import type { AgentPresenceRow } from "./agent-presence.js";
 import { sanitizeDisplayLabel } from "./invite-link.js";
@@ -257,7 +258,7 @@ async function rows(
   }
   let response: Response;
   try {
-    response = await fetcher(url, {
+    response = await fetchRestReadRetrying(fetcher, url, {
       headers: {
         authorization: `Bearer ${session.accessToken}`,
         apikey: target.anonKey,
@@ -398,7 +399,7 @@ export async function readWorkspaceAgentPresence(
   url.searchParams.set("order", "principal_id.asc");
   let response: Response;
   try {
-    response = await fetcher(url, {
+    response = await fetchRestReadRetrying(fetcher, url, {
       headers: {
         authorization: `Bearer ${bearer}`,
         apikey: target.anonKey,

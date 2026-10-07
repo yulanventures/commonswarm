@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 /*
  * File artifact client (FILE-ARTIFACTS.md §3, §7) — the CLI half of the S1+S2
  * server surface in supabase/functions/command/file-artifacts.ts.
@@ -599,6 +600,11 @@ export async function listFilesAsHuman(
   fetcher: typeof fetch = fetch,
   options: ReadDeadlineOptions = {},
 ): Promise<FileListRow[]> {
+  const now = options.now ?? Date.now;
+  const deadlineMs = Math.min(options.deadlineMs ?? Infinity, now() + REQUEST_TIMEOUT_MS);
+  const restFetcher: typeof fetch = (input, init) => fetchRestReadRetrying(
+    fetcher, input, init ?? {}, { deadlineMs, now },
+  );
   const url = new URL("/rest/v1/files", target.url);
   url.searchParams.set("workspace_id", `eq.${workspaceId}`);
   url.searchParams.set(
@@ -612,7 +618,7 @@ export async function listFilesAsHuman(
     /* Human and agent lists use the same body-covering deadline. This path was
      * the missed sibling in the first read-deadline fix. */
     ({ response, body: rawBody } = await fetchWithDeadline(
-      fetcher,
+      restFetcher,
       url.toString(),
       {
         headers: {

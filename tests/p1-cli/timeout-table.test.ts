@@ -311,12 +311,12 @@ test("HEAD signal read citations resolve for each mapped row", { timeout: 10_000
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const lines = (await readFile(join(repo, "src/cloud/signals.ts"), "utf8")).split("\n");
   const expected: Record<string, { citation: string; sites: Array<[number, RegExp]> }> = {
-    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:41,896-944",
-      sites: [[41, /export const SIGNAL_READ_TIMEOUT_MS/], [944, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
-    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:944",
-      sites: [[944, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
-    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1057",
-      sites: [[1057, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:42,897-945",
+      sites: [[42, /export const SIGNAL_READ_TIMEOUT_MS/], [945, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:945",
+      sites: [[945, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1058",
+      sites: [[1058, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
   };
   const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
   for (const [id, target] of Object.entries(expected)) {
@@ -326,6 +326,33 @@ test("HEAD signal read citations resolve for each mapped row", { timeout: 10_000
     for (const [line, pattern] of target.sites) assert.match(lines[line - 1] ?? "", pattern, `${id}: ${line}`);
   }
   assert.equal(Object.keys(expected).length, 3);
+});
+
+test("HEAD inventories the PostgREST JWT retry wait as local backoff", { timeout: 10_000 }, async () => {
+  const id = "src/cloud/rest-read-retry.ts:setTimeout";
+  const inventory = enumerateRepository({ repo });
+  const waits = inventory.filter(row => row.id === id);
+  assert.equal(waits.length, 1, "the new helper must be included in the Git source inventory");
+  assert.equal(waits[0]!.value_ms, 1000);
+  assert.equal(waits[0]!.unit_note, "milliseconds");
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const row = mappingForRef(mapping, "HEAD").rows[id];
+  assert.equal(row.class, "local");
+  assert.equal(row.scope, "per-request");
+  assert.deepEqual(row.endpoints, []);
+  assert.equal(row.operation.class, "not-run");
+  assert.equal(row.operation.name, "postgrest-jwt-clock-retry-wait");
+  assert.match(row.detail, /backoff delay, not a request timeout/);
+  const source = (await readFile(join(repo, "src/cloud/rest-read-retry.ts"), "utf8")).split("\n");
+  for (const match of row.citation.matchAll(/(?:src\/cloud\/rest-read-retry\.ts:|,)(\d+)(?:-(\d+))?/g)) {
+    const first = Number(match[1]);
+    const last = Number(match[2] ?? first);
+    assert.ok(first > 0 && last >= first && last <= source.length, row.citation);
+  }
+  assert.equal(row.citation, "src/cloud/rest-read-retry.ts:1,83-90");
+  assert.match(source[0]!, /JWT_ISSUED_AT_FUTURE_RETRY_DELAY_MS = 1_000/);
+  assert.match(source.slice(82, 90).join("\n"), /setTimeout\(done, JWT_ISSUED_AT_FUTURE_RETRY_DELAY_MS\)/);
+  assert.equal(validateMapping(inventory, mapping, "HEAD"), true);
 });
 
 test("HEAD onboarding stdin timer is labeled for hook input", { timeout: 10_000 }, async () => {
