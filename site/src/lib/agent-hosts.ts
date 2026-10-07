@@ -88,6 +88,11 @@ export interface AgentHost {
   notes: readonly string[];
   /** Steps for testing only, collapsed under their own heading. */
   testing?: { heading: string; steps: readonly AgentHostStep[] };
+  /**
+   * The app's own web address, for the add-agent panel's "Open <app>" pill (canvas Add-Agent).
+   * Only where the status evidence was measured on that address; it opens the app, nothing more.
+   */
+  open?: { href: string; label: string };
 }
 
 /** The sentence that makes a connected agent join. Kept here so every host says the same thing. */
@@ -156,6 +161,7 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
       "Tested for messages on claude.ai. Lists & docs and the Claude desktop and mobile apps are not tested yet.",
       "A Claude Free account can add one custom connector.",
     ],
+    open: { href: "https://claude.ai/", label: "Open Claude" },
   },
   {
     id: "chatgpt",
@@ -328,7 +334,8 @@ export const AGENT_HOSTS: readonly AgentHost[] = Object.freeze([
 /**
  * The add-agent page's one-line summary of a host's route (the canvas Add-Agent connection panel).
  * It names the same three acts the numbered steps spell out; the steps stay one tap away under
- * "How to connect, step by step". A host that cannot connect yet keeps its own first step.
+ * "How to connect, step by step", inside the same panel. A host that cannot connect yet keeps its
+ * own first step.
  */
 export function hostConnectLine(host: AgentHost): string {
   if (host.status === "waiting") return host.steps[0]?.text ?? "";
@@ -336,7 +343,7 @@ export function hostConnectLine(host: AgentHost): string {
   const start = host.steps.some((step) => step.link)
     ? `Open the link to add CommonSwarm to ${app}`
     : `Add CommonSwarm in ${app}`;
-  return `${start}, sign in with the account you use here, then say the sentence below. The full steps are under How to connect, step by step.`;
+  return `${start}, sign in with the account you use here, then say the sentence below.`;
 }
 
 /** The sentence the add-agent page puts in its one copy block: the host's last "say" step. */
