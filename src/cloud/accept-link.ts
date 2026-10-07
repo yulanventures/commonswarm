@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 import { hostname, userInfo } from "node:os";
 import {
   CommandHttpError,
@@ -562,7 +563,7 @@ async function rows(
   for (const [key, value] of Object.entries(parameters)) {
     url.searchParams.set(key, value);
   }
-  const response = await fetcher(url, {
+  const response = await fetchRestReadRetrying(fetcher, url, {
     headers: {
       authorization: `Bearer ${session.accessToken}`,
       apikey: target.anonKey,

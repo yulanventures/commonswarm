@@ -1,3 +1,4 @@
+import { fetchRestReadRetrying } from "./rest-read-retry.js";
 /**
  * Channels, on the client side: the naming rule, the list, and the sentences
  * the CLI prints about both.
@@ -347,6 +348,7 @@ export async function listChannelsAsHuman(
   url.searchParams.set("select", CHANNEL_COLUMNS.join(","));
   url.searchParams.set("order", "slug.asc");
   const controller = new AbortController();
+  const deadlineMs = Date.now() + timeoutMs;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   /* THE DEADLINE COVERS THE BODY, not only the headers. D-034 is the rule and a
    * review arm found this function breaking it: clearTimeout used to run in the
@@ -356,14 +358,14 @@ export async function listChannelsAsHuman(
   try {
     let response: Response;
     try {
-      response = await fetcher(url.toString(), {
+      response = await fetchRestReadRetrying(fetcher, url.toString(), {
         headers: {
           authorization: `Bearer ${accessToken}`,
           apikey: target.anonKey,
           "accept-profile": "swarm_read",
         },
         signal: controller.signal,
-      });
+      }, { deadlineMs });
     } catch {
       throw new ChannelListError(
         0,
