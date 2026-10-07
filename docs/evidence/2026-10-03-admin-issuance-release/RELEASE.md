@@ -161,7 +161,7 @@ with site-release-shared-preflight and retaining every companion gate.
 
 ## Run orders (machine-read by scripts/c1-task-from-plan.mjs)
 
-site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha256":"37bfd2779ec7994ca25353e2f10bc0c6e59969add6a4589cb765caa3407a147b"}
+site-plan: {"path":"docs/evidence/2026-10-02-site-release/SITE-RELEASE.md","sha256":"2035aec73485ce5e8e9c15c36066dd7887fe9214bc37300e201413d6da7fcfad"}
 
 ```c1-order W1 forward
 {"id":"ai-inputs","host":"mac"}

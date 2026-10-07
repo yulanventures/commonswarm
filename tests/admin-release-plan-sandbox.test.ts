@@ -471,6 +471,7 @@ test('gui-denied dry run: every Mac block runs sandboxed with stubs; none attemp
       EDGE_MEASUREMENT_FILE: edgeMeasurementFile, EDGE_RECEIPT_REMOTE: '1',
       PREP_DIR: prepDir, STEP_ID: 'ai-inputs', RELEASE_SHA: releaseSha, WINDOW_ID: windowId,
       SITE_RELEASE_SHA: releaseSha, EXPECTED_SITE_SHA: siteSha, SITE_QA_AUTHORIZATION_FILE: siteQaFile,
+      control_user_id: '11111111-1111-4111-8111-111111111111', control_workspace_id: '22222222-2222-8222-a222-222222222222',
       SITE_STEP: 'site2-plan-inputs', SITE_RELEASE_REPO: repo,
       SITE_EVIDENCE: step === 'ai-w5-recovery-transfer' ? siteRecoveryEvidence : siteEvidence,
       LIVE_CONTROLS_FILE: step === 'ai-w5-preflight' ? liveBeforeFile : liveControlsFile,

@@ -46,6 +46,8 @@ by an absolute path and is read without printing it.
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | 40 lowercase hex; a commit on `origin/main`, descendant of base with a nonempty `site/` delta |
+| `control_user_id` | HezLead/Anvil, approved control human | lowercase non-nil UUID, version 1-8 and RFC variant |
+| `control_workspace_id` | HezLead/Anvil, approved control workspace | lowercase non-nil UUID, version 1-8 and RFC variant |
 | `EXPECTED_SITE_SHA` | Anvil, expected full baseline source SHA | 40 lowercase hex; a commit and ancestor of release; must equal the uniquely resolved box-recorded source prefix |
 | `BASELINE_DIR` | Produced by window open, never supplied or trusted | canonical current release directory measured on the box and retained in the protected window file |
 | `SITE_RELEASE_VERSION` | Produced from the exact checkout | root `package.json` version, used for the `/download` version control |
@@ -56,6 +58,8 @@ by an absolute path and is read without printing it.
 | `OP_SERVICE_ACCOUNT_TOKEN_FILE` | Anvil, existing protected 1Password service-account token file | absolute regular non-symlink mode-`0600` file; never a credential value in the prompt |
 
 ```prompt-inputs
+{"name":"control_user_id","format":"uuid","supplier":"HezLead and Anvil","meaning":"Approved control human; lowercase non-nil UUID, version 1-8 and RFC variant."}
+{"name":"control_workspace_id","format":"uuid","supplier":"HezLead and Anvil","meaning":"Approved control workspace; lowercase non-nil UUID, version 1-8 and RFC variant."}
 {"name":"GATE_EVIDENCE_FILE","format":"abs-file:site-gate-evidence","supplier":"HezLead","meaning":"Nonsecret exact-SHA site build, tests and CI PASS receipt."}
 {"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for this site release."}
 {"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing this generalized plan."}
@@ -83,8 +87,13 @@ never accepted from an old receipt or prompt; later pin/deploy/close paths
 compare against that retained measurement. The full source and directory are
 recorded together in `site2-01-open.txt` and the protected window file.
 
-The browser account and two workspace IDs remain the lane-8 approved view-only
-control fixtures. Their assertions and reduced-control behavior are unchanged.
+The control human and workspace come from `control_user_id` and
+`control_workspace_id` in the same nonsecret INPUTS JSON as the other named
+inputs. Shared preflight validates and exports them; `site2-plan-inputs` repeats
+the UUID gate before checkout/open. CLI and web identity checks use the control
+human, and browser selection uses the control workspace. The lane-8 account
+label and starting/restored workspace fixture, view-only assertions and
+reduced-control behavior remain unchanged.
 
 ## 2. Preparation and window open
 
@@ -96,7 +105,7 @@ succeeds. No forward retry after any failure without a new HezLead instruction.
 
 | Order | Step | Required result / next action |
 |---|---|---|
-| 0 | `site2-plan-inputs` | Required full expected site source validated and exported. |
+| 0 | `site2-plan-inputs` | Required full expected site source and control UUIDs validated and exported. |
 | 1 | `site2-00-source-checkout` | Exact landed commit, base ancestry, nonempty site delta and exact-SHA gates; no window yet. |
 | 2 | `site2-01` | Box clock, measured baseline directory/source, protected local and box window files, copied gate receipt. |
 | 3 | `site2-00-a-close-ingest` | Current hosted MCP ON receipt; preserves the historical step name. |
@@ -179,11 +188,14 @@ unset RELEASE_PREFLIGHT_EXPORTS
 # readonly: yes
 # host: Mac /bin/bash 3.2 before source checkout/open
 set -euo pipefail
-python3 - "${EXPECTED_SITE_SHA:-}" <<'PYINPUT'
+python3 - "${EXPECTED_SITE_SHA:-}" "${control_user_id:-}" "${control_workspace_id:-}" <<'PYINPUT'
 import re,sys
 if not re.fullmatch(r'[0-9a-f]{40}',sys.argv[1]): raise SystemExit('FAIL: invalid EXPECTED_SITE_SHA; STOP')
+for key,value in zip(('control_user_id','control_workspace_id'),sys.argv[2:]):
+    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',value):
+        raise SystemExit('FAIL: invalid '+key+'; STOP')
 PYINPUT
-export EXPECTED_SITE_SHA
+export EXPECTED_SITE_SHA control_user_id control_workspace_id
 ```
 
 ```sh
@@ -407,6 +419,8 @@ PY
     printf 'SITE_RELEASE_REPO=%q\n' "$SITE_RELEASE_REPO"
     printf 'SITE_RELEASE_SHA=%q\n' "$SITE_RELEASE_SHA"
     printf 'EXPECTED_SITE_SHA=%q\n' "$EXPECTED_SITE_SHA"
+    printf 'control_user_id=%q\n' "$control_user_id"
+    printf 'control_workspace_id=%q\n' "$control_workspace_id"
     printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
     printf 'OP_SERVICE_ACCOUNT_TOKEN_FILE=%q\n' "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
     printf 'BASELINE_DIR=%q\n' "$BASELINE_DIR"
@@ -416,6 +430,7 @@ PY
   chmod 0600 "$SITE_WINDOW_FILE"
   printf '%s\n' "$box_open" >"$SITE_EVIDENCE/site2-01-open.txt"
   printf 'BASELINE_SOURCE_SHA=%s\nBASELINE_DIR=%s\n' "$measured_source" "$BASELINE_DIR" >>"$SITE_EVIDENCE/site2-01-open.txt"
+  printf 'control_user_id=%s\ncontrol_workspace_id=%s\n' "$control_user_id" "$control_workspace_id" >>"$SITE_EVIDENCE/site2-01-open.txt"
   chmod 0600 "$SITE_EVIDENCE/site2-01-open.txt"
   install -m 0600 "$GATE_EVIDENCE_FILE" "$SITE_EVIDENCE/site2-00-gate-evidence.txt"
   # -p keeps the local 0600 mode; plain scp creates the box copy with the remote umask (0644), which the
@@ -848,8 +863,8 @@ PY
   case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac
   test -x "$chrome"
   CLI_USER_ID="$(cswarm status \
-    --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -er '.identity.user_id')"
-  test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
+    --workspace-id "$control_workspace_id" --json | jq -er '.identity.user_id')"
+  test "$CLI_USER_ID" = "$control_user_id"
   chrome_port=9335
   if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
   # setsid detaches from the block executor's process group; exec preserves $!.
@@ -874,7 +889,7 @@ PY
     printf 'SITE_CHROME_ENDPOINT=%q\n' "$endpoint"
   } >>"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
-  export CLI_USER_ID SITE_EVIDENCE
+  export CLI_USER_ID SITE_EVIDENCE control_user_id control_workspace_id
   harness_status=0
   harness_started=1
   BU_NAME="$harness_name" BU_CDP_URL="$endpoint" BU_CDP_WS= BU_BROWSER_ID= \
@@ -882,9 +897,9 @@ PY
     BH_TMP_DIR="$private_evidence" BH_TMP_DIR_SHARED=1 BH_RECORD=0 BH_TAB_MARKER=0 \
     browser-harness >"$harness_stdout" 2>"$harness_stderr" <<'PY' || harness_status=$?
 import json, os, pathlib, time, urllib.request
-expected_user = "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
+expected_user = os.environ["control_user_id"]
 start_workspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
-control_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+control_workspace = os.environ["control_workspace_id"]
 print("STEP 1", flush=True)
 endpoint = os.environ["BU_CDP_URL"]
 def endpoint_json(path):
@@ -960,7 +975,7 @@ else:
     print("STEP 11", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     switched=js("""(() => { const target=document.querySelector(
-      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      '[data-workspace-list] [data-workspace-id="' + """ + json.dumps(control_workspace) + """ + '"]');
       if(!target)return false; target.click(); return true; })()""")
     if not switched: raise SystemExit(1)
     print("STEP 12", flush=True)
@@ -971,6 +986,7 @@ else:
     result={"branch":"FULL-CONTROL","account_label":"Ridgeio",
       "cli_user_id":expected_user,"web_user_id":expected_user,
       "start_workspace_id":start_workspace,"control_workspace_id":control_workspace}
+result.update(control_user_id=expected_user,control_workspace_id=control_workspace)
 print("STEP 13", flush=True)
 path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site2-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
@@ -1529,7 +1545,7 @@ a non-blocking browser failure exits zero so the release continues to close.
       return 1
     fi
   }
-  export SITE_EVIDENCE SITE_CHROME_ENDPOINT
+  export SITE_EVIDENCE SITE_CHROME_ENDPOINT control_user_id control_workspace_id
   set +e
   # Capture the complete control failure without echoing its Python/source text.
   trap - ERR
@@ -1599,7 +1615,7 @@ if (not version.get("webSocketDebuggerUrl", "").startswith(
     or attached_version.get("userAgent") != version.get("User-Agent")
     or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
     raise SystemExit("STOP: STEP 1 endpoint ownership")
-expected_user="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"; expected_workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+expected_user=os.environ["control_user_id"]; expected_workspace=os.environ["control_workspace_id"]
 start_workspace="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
 print("STEP 2", flush=True)
@@ -1745,6 +1761,7 @@ else:
       "signed_out_bundle_creation_action_absent":"PASS","signed_in_connected_apps_load":"NOT PROVED",
       "signed_in_empty_state":"NOT PROVED","signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED"}
 print("STEP 14", flush=True)
+result.update(control_user_id=expected_user,control_workspace_id=expected_workspace)
 path=evidence/"site2-05-browser.json"; path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
     python3 - "$harness_stdout" "$harness_stderr" "$browser_status" "$SITE_EVIDENCE" <<'PY' || { if [ "$browser_status" -eq 0 ]; then browser_status=1; fi; }
@@ -2003,7 +2020,7 @@ BOX
   test ! -e "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt"
   rollback_phase=browser
   check_task_browser
-  export SITE_EVIDENCE
+  export SITE_EVIDENCE control_user_id control_workspace_id
   umask 077
   case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
   test -d "$SITE_BROWSER_ROOT"
@@ -2066,7 +2083,7 @@ if (not version.get("webSocketDebuggerUrl", "").startswith(
     or attached_version.get("userAgent") != version.get("User-Agent")
     or not any(target.get("id") == attached_target for target in endpoint_json("/json/list"))):
     raise SystemExit("STOP: STEP 1 endpoint ownership")
-workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+workspace=os.environ["control_workspace_id"]
 start="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
 evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
 print("STEP 2", flush=True)
@@ -2096,7 +2113,7 @@ if branch=="FULL-CONTROL":
     print("STEP 6", flush=True)
     js("document.querySelector('[data-workspace-menu-trigger]').click()")
     if not js("""(() => {const target=document.querySelector(
-      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      '[data-workspace-list] [data-workspace-id="' + """ + json.dumps(workspace) + """ + '"]');
       if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
     print("STEP 7", flush=True)
     for _ in range(60):
@@ -2375,6 +2392,7 @@ PY
   manifest_sha=$(shasum -a 256 "$SITE_EVIDENCE/manifest.json" | awk '{print $1}')
   {
     printf 'CLOSED=yes\nOUTCOME=failed-before-pin\nclosed_before_pin=true\n'
+    printf 'control_user_id=%s\ncontrol_workspace_id=%s\n' "$control_user_id" "$control_workspace_id"
     printf 'BASELINE_UNCHANGED=PASS\nPIN_RELEASED=not-created\n'
     printf 'MANIFEST_SHA256=%s\nCLOSED_AT=%s\n' "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } >"$SITE_EVIDENCE/CLOSE.txt"
@@ -2643,13 +2661,14 @@ PY
   branch="$(jq -er '.branch' "$SITE_EVIDENCE/site2-03-browser-preflight.json")"
   {
     printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
+    printf 'control_user_id=%s\ncontrol_workspace_id=%s\n' "$control_user_id" "$control_workspace_id"
     printf 'BROWSER_BRANCH=%s\n' "$branch"
     if test "$outcome" = released; then printf '%s\n' "$browser_acceptance_line"; fi
     if test "$branch" = FULL-CONTROL && test "$outcome" = released &&
       grep -q '^browser_acceptance=PASS reason=' "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt"; then
       printf '%s\n' \
         'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
-        'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
+        "BROWSER_CONTROL_WORKSPACE=$control_workspace_id" \
         'BROWSER_RESTORED_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
         'NOT_PROVED=[]'
     else
@@ -2710,6 +2729,10 @@ PY
 | Pre-seed: `GO.txt` | GO step produces it from approver, plan commit, release SHA and prompt number. |
 
 ## 9. Recorded outcomes
+
+`site2-01-open.txt` records both control input values and is included in each
+manifest. Browser JSON receipts also record them for either branch. Both close
+paths retain `control_user_id` and `control_workspace_id` in `CLOSE.txt`.
 
 `CLOSE.txt` separately records outcome, browser branch, manifest digest, pin
 release, and closure. A pre-pin failure instead records `OUTCOME=failed-before-pin`,
@@ -2835,30 +2858,30 @@ new release actions or claiming an unproved close.
 {
   "version": 1,
   "release_input": "SITE_RELEASE_SHA",
-  "inputs": {"EXPECTED_SITE_SHA": {"format": "sha40"}, "GATE_EVIDENCE_FILE": {"format": "abs-file"}, "OP_SERVICE_ACCOUNT_TOKEN_FILE": {"format": "abs-file", "mode": 384}, "SITE_APPROVER": {"format": "literal:HezLead"}, "SITE_BUILD_ENV_OP_REFERENCE": {"format": "op-reference"}, "SITE_EVIDENCE": {"format": "empty-dir", "mode": 448}, "SITE_PLAN_COMMIT": {"format": "sha40"}, "SITE_PLAN_FILE": {"format": "abs-file"}, "SITE_PROMPT_NUMBER": {"format": "decimal-positive"}, "SITE_RELEASE_REPO": {"format": "empty-dir"}, "SITE_RELEASE_SHA": {"format": "sha40"}},
+  "inputs": {"EXPECTED_SITE_SHA": {"format": "sha40"}, "GATE_EVIDENCE_FILE": {"format": "abs-file"}, "OP_SERVICE_ACCOUNT_TOKEN_FILE": {"format": "abs-file", "mode": 384}, "SITE_APPROVER": {"format": "literal:HezLead"}, "SITE_BUILD_ENV_OP_REFERENCE": {"format": "op-reference"}, "SITE_EVIDENCE": {"format": "empty-dir", "mode": 448}, "SITE_PLAN_COMMIT": {"format": "sha40"}, "SITE_PLAN_FILE": {"format": "abs-file"}, "SITE_PROMPT_NUMBER": {"format": "decimal-positive"}, "SITE_RELEASE_REPO": {"format": "empty-dir"}, "SITE_RELEASE_SHA": {"format": "sha40"}, "control_user_id": {"format": "uuid"}, "control_workspace_id": {"format": "uuid"}},
   "repo_paths": ["deploy/site", "deploy/site/deploy.sh", "deploy/site/validate-site-env.mjs", "docs/evidence/2026-10-02-site-release/SITE-RELEASE.md", "package.json", "scripts/release-preflight.py", "tests/p1-cli/site-deletion-safety.test.ts"],
   "runtime_paths": ["site/.env", "site/.env.local", "site/.env.production", "site/.env.production.local"],
   "input_files": ["$SITE_PLAN_FILE", "$GATE_EVIDENCE_FILE", "$OP_SERVICE_ACCOUNT_TOKEN_FILE"],
   "routes": {"before-pin": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-06", "site2-07-pre-pin-manifest-close"], "normal": ["site-release-shared-preflight", "site2-plan-inputs", "site2-00-source-checkout", "site2-01", "site2-00-a-close-ingest", "site2-00-build-env", "site2-02", "site2-03-browser-session-preflight", "site2-03", "site2-03-pin-previous", "site2-03-go-record", "site2-04", "site2-05", "site2-05-browser-acceptance", "site2-06", "site2-07-manifest-close"]},
   "steps": {
     "site-release-shared-preflight": {"reads": [], "sha256": "96d517dcab1a6d6a66da47dde411713ee22fa98071ca0ee72b01190326925dad"},
-    "site2-plan-inputs": {"reads": [], "sha256": "00aaf8909b470ef510117082a7dbf032bf5179a5b2ac229df67efeca596d0778"},
+    "site2-plan-inputs": {"reads": [], "sha256": "2a2378ef954104f83c4e50daa416d6319251c91f20f01c4e4280f85ca2bc3834"},
     "site2-00-source-checkout": {"reads": ["endpoint:https://github.com/yulanventures/commonswarm.git"], "sha256": "256dc045c7dc6ceaf59633b86cb87cfe49cfcd1a42874366b43758eb6ade6a5c"},
-    "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "86cd48cce0c1a2a280ed92dec05fe25d80e54c0232e9bbda597ddc1c8f9abe92"},
+    "site2-01": {"creates": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-01-box-open.txt", "$SITE_EVIDENCE/site2-01-open.txt", "$SITE_WINDOW_FILE", "/tmp/commonswarm-site-window.env", "SITE_WINDOW_FILE"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases", "command:readlink -f", "endpoint:https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke", "endpoint:https://commonswarm.com/app"], "sha256": "9b373b2f3d422a079c473b48b5f7f1f7918fe6fb247f527eabeab876100ba5ab"},
     "site2-00-a-close-ingest": {"creates": ["$SITE_EVIDENCE/site2-00-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "bdcf8bf51a5026bb16962bcfbfd75f606c2f3bb2cdb2ea1c9a514cd523a54ee5"},
     "site2-00-build-env": {"cleanup": ["SITE_BUILD_ENV_TEMP"], "cleanup_owners": {"$SITE_BUILD_ENV_TEMP": "site2-00-build-env"}, "creates": ["$SITE_BUILD_ENV_TEMP", "$SITE_EVIDENCE/site2-00-build-env.txt", "$SITE_RELEASE_REPO/site/.env", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env"], "reads": ["endpoint:https://api.commonswarm.com"], "sha256": "0d3a9088091db9063b31c9c5c5f847d7a5fde4000505cbc365baf8cb273fec21"},
     "site2-02": {"creates": ["$SITE_EVIDENCE/site2-02-commits.txt", "$SITE_EVIDENCE/site2-02-name-status.txt", "$SITE_EVIDENCE/site2-02-numstat.txt", "$SITE_EVIDENCE/site2-02-summary.txt"], "reads": [], "sha256": "21c147dd8bfd189a409709867ff655537b9f56991f4a8ba7a5ef98d64ddcc1ae"},
-    "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "947c0adbc0766307b5f6a922bc17e55ff93072d45d126e4180eaa39bce378353"},
+    "site2-03-browser-session-preflight": {"cleanup_owners": {"$browser_root": "site2-03-browser-session-preflight"}, "creates": ["$SITE_BROWSER_ROOT", "$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$browser_root", "SITE_BROWSER_ROOT"], "reads": ["endpoint:http://127.0.0.1:$chrome_port", "endpoint:http://127.0.0.1:${chrome_port}/json/version", "endpoint:https://commonswarm.com/app"], "sha256": "8f37e9106ff26033ef57ede9c028d541baaf3d882a3c74dbca88817f41089234"},
     "site2-03": {"consumes": ["$SITE_EVIDENCE/site2-03-browser-preflight.json"], "reads": [], "sha256": "1a14094bb8d583069ee9539e5c9201f71034058e17698d5fffcc428ccb575711"},
     "site2-03-pin-previous": {"creates": ["$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/site2-03-pin.txt", "$pin", "pin"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "9b6165bc95417186b9c6834c378b9c5aa11dd3e160dde0ee78d38c227e0c036d"},
     "site2-03-go-record": {"consumes": ["$SITE_EVIDENCE/site2-00-gate-evidence.txt", "$SITE_EVIDENCE/site2-00-mcp-live.txt", "$SITE_EVIDENCE/site2-02-summary.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-03-pin.txt"], "creates": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/site2-03-mcp-live.txt"], "reads": ["endpoint:https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp", "endpoint:https://mcp.commonswarm.com/mcp"], "sha256": "488d4bebc8c20291303511617c3d16e3d0ef7a88ddc3e01465b74579ddfee778"},
     "site2-04": {"consumes": ["$SITE_EVIDENCE/GO.txt", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/deploy-status.txt", "$SITE_EVIDENCE/deploy.log", "$SITE_EVIDENCE/pin-after-deploy.txt"], "reads": ["/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "4d39eac63aff11b8c92c06bada849f372f5d84a2302c80dd76cf93d56cc89b20"},
     "site2-04-reconcile-failure": {"creates": ["$SITE_EVIDENCE/retry-approved"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/current", "/srv/commonswarm/site/releases/", "command:readlink -f"], "sha256": "26338bc1ed09cb1b941a465fa375cc3ca9c7bb614a4d784067aa4415fd0ab704"},
     "site2-05": {"consumes": ["$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release"], "creates": ["$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-05-public-summary.txt", "$SITE_EVIDENCE/site2-05-public.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:https://commonswarm.com"], "sha256": "95a7ec41da3f1caf87c13c85cd91df28e6b3643a1b6499618cd1592016be5a50"},
-    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "97ac337a49aae5de6e92d9a7a90e5628886a4ff982c9add2c5f0b97780a26c31"},
-    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "aac9606c3df78b6b97b76eaf88cf8a8e935f542f2feb9f3e33a9bec3cbbcf226"},
-    "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "a871de698176515e1cb32853feb38562d4bfb7970759649a84e1ed79a191d835"},
-    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "9aab649ed92c038b0e9be192d47e20a83a654458735913e8bf19e2d2ddca84b1"}
+    "site2-05-browser-acceptance": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-public.txt"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-05", "$SITE_BROWSER_ROOT/site2-05-browser-acceptance-evidence", "$SITE_EVIDENCE/site2-05-browser-acceptance-assertions-started.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-browser-acceptance-summary.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app?w="], "sha256": "b5399d8d25df4a49566a85910cfe2b9083753fe87ed4df9a9514e06c6bc1760d"},
+    "site2-06": {"consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/site2-03-browser-preflight.json"], "creates": ["$SITE_BROWSER_ROOT/harness-runtime-06", "$SITE_BROWSER_ROOT/site2-06-evidence", "$SITE_EVIDENCE/site2-06-browser-assertions-started.txt", "$SITE_EVIDENCE/site2-06-browser-receipt.txt", "$SITE_EVIDENCE/site2-06-browser-summary.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "reads": ["/srv/commonswarm/site/current", "command:readlink -f", "endpoint:http://127.0.0.1:9335", "endpoint:https://commonswarm.com/app"], "sha256": "e67382d23f10084dfdd50f995cc687c5cf2a81273acba0aaff6dc17206df2007"},
+    "site2-07-pre-pin-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_BUILD_ENV_TEMP", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/site2-07-pre-pin-close.txt"], "reads": ["/srv/commonswarm/site", "command:readlink -f"], "sha256": "a4cb810b9fe5950601a4bf6c58ca8ae704839884518b2535f4e9e76abb91f09c"},
+    "site2-07-manifest-close": {"cleanup": ["/tmp/commonswarm-site-window.env", "SITE_BROWSER_ROOT", "SITE_RELEASE_REPO/site/.env", "SITE_WINDOW_FILE", "pin"], "cleanup_owners": {"$SITE_BROWSER_ROOT": "site2-03-browser-session-preflight", "$SITE_RELEASE_REPO/site/.env": "site2-00-build-env", "$SITE_WINDOW_FILE": "site2-01", "$pin": "site2-03-pin-previous", "/tmp/commonswarm-site-window.env": "site2-01"}, "consumes": ["$SITE_BROWSER_ROOT/browser-process.py", "$SITE_BROWSER_ROOT/browser-profile", "$SITE_EVIDENCE/after.release", "$SITE_EVIDENCE/previous.original", "$SITE_EVIDENCE/previous.release", "$SITE_EVIDENCE/rollback-auto.txt", "$SITE_EVIDENCE/site2-03-browser-preflight.json", "$SITE_EVIDENCE/site2-05-browser-acceptance-receipt.txt", "$SITE_EVIDENCE/site2-05-public.txt", "$SITE_EVIDENCE/site2-06-rollback-verify.txt"], "creates": ["$SITE_EVIDENCE/CLOSE.txt", "$SITE_EVIDENCE/manifest.json", "$SITE_EVIDENCE/site2-04-reconciliation.txt", "$SITE_EVIDENCE/site2-07-outcome.txt", "$SITE_EVIDENCE/site2-07-pin-close.txt"], "reads": ["/srv/commonswarm/site", "/srv/commonswarm/site/releases/", "/srv/commonswarm/site/releases/.site-window-pin-", "command:readlink -f"], "sha256": "4d7e623d37b0eeeb9beef210b13bd7b1c99638b1e1c5534f67b312eb0a89c329"}
   },
   "gate_receipts": [{"gates": ["site build", "site tests", "site CI"], "input": "GATE_EVIDENCE_FILE"}],
   "plan_input": "SITE_PLAN_FILE"
