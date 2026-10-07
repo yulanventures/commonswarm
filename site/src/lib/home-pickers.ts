@@ -192,6 +192,8 @@ export function tagOptionRow(doc: Document, option: PickOptionVM, opts: { id?: s
   if (option.disabled) row.setAttribute("aria-disabled", "true");
   row.dataset.pickValue = option.value; row.dataset.pickKind = option.kind;
   const who = opts.who;
+  // The measured state colours the caption (a disconnected agent's caption reads in the offline ink).
+  if (who && isAgentVM(who)) row.dataset.pickState = who.state.kind;
   const mark = who ? (isAgentVM(who) ? agentOrb(doc, who, { size: 28, badge: true }) : personAvatar(doc, who, 28))
     : node(doc, "span", "hm-pick-letter", option.label.trim().slice(0, 1).toLocaleUpperCase() || "?");
   mark.setAttribute("aria-hidden", "true");
@@ -201,8 +203,9 @@ export function tagOptionRow(doc: Document, option: PickOptionVM, opts: { id?: s
   return row;
 }
 
-/** What a picker popover shows. `id` prefixes every element id; `footer` sits under the listbox. */
-export interface PickerListVM { id: string; label: string; options: PickOptionVM[]; people: PickerPeople; footer?: string | null }
+/** What a picker popover shows. `id` prefixes every element id; `footer` sits under the listbox.
+ * `heading` shows `label` as a visible band above the list and names the listbox with it. */
+export interface PickerListVM { id: string; label: string; options: PickOptionVM[]; people: PickerPeople; footer?: string | null; heading?: boolean }
 
 function groupHead(doc: Document, people: PickerPeople, group: Id, headId: string): HTMLElement {
   const head = node(doc, "div", "hm-pick-group-head"); head.id = headId;
@@ -219,7 +222,12 @@ function groupHead(doc: Document, people: PickerPeople, group: Id, headId: strin
 export function pickerList(doc: Document, vm: PickerListVM, state: PickerState, onPick: (option: PickOptionVM) => void): HTMLElement {
   const pop = node(doc, "div", "hm-picker-pop"); pop.dataset.pickerPop = vm.id;
   const list = node(doc, "div", "hm-pick-list"); list.id = `${vm.id}-listbox`;
-  list.setAttribute("role", "listbox"); list.setAttribute("aria-label", vm.label);
+  list.setAttribute("role", "listbox");
+  if (vm.heading) {
+    // The same name as aria-label, now visible: the band at the top of the card.
+    const head = node(doc, "div", "hm-pick-heading", vm.label); head.id = `${vm.id}-heading`;
+    list.setAttribute("aria-labelledby", head.id); pop.append(head);
+  } else list.setAttribute("aria-label", vm.label);
   const who = whoIndex(vm.people);
   let group: HTMLElement | null = null; let groupId: Id | null = null;
   vm.options.forEach((option, index) => {
@@ -253,7 +261,17 @@ export function assignPicker(doc: Document, vm: AssignPickerVM, onPick: (option:
   trigger.setAttribute("aria-controls", `${vm.id}-listbox`); trigger.setAttribute("aria-expanded", "false");
   const value = node(doc, "span", "hm-picker-value", vm.current); value.id = `${vm.id}-value`;
   trigger.setAttribute("aria-labelledby", [vm.labelledBy, value.id].filter(Boolean).join(" "));
-  trigger.append(value, node(doc, "span", "hm-picker-chevron", "▾"));
+  // The current choice as the canvas's chosen chip: its avatar, then the name. The avatar is decoration;
+  // the name stays the trigger's accessible value.
+  const chip = node(doc, "span", "hm-picker-chip");
+  const index = whoIndex(vm.people);
+  const who = vm.currentValue === null ? undefined : index.get(`agent:${vm.currentValue}`) ?? index.get(`person:${vm.currentValue}`);
+  if (who) {
+    const mark = isAgentVM(who) ? agentOrb(doc, who, { size: 28, badge: true }) : personAvatar(doc, who, 28);
+    mark.setAttribute("aria-hidden", "true"); chip.append(mark);
+  }
+  chip.append(value);
+  trigger.append(chip, node(doc, "span", "hm-picker-chevron", "▾"));
   trigger.lastElementChild!.setAttribute("aria-hidden", "true");
   let state: PickerState = PICKER_CLOSED;
   let pop = pickerList(doc, vm, state, (option) => choose(option));
@@ -293,12 +311,16 @@ export function tagPicker(doc: Document, field: HTMLInputElement | HTMLTextAreaE
   field.setAttribute("aria-expanded", "false");
   const footer = vm.tagDelivers ? null : TAG_HIGHLIGHT_FOOTER;
   let state: PickerState = PICKER_CLOSED; let shown: PickOptionVM[] = [];
-  const list = (): PickerListVM => ({ id: vm.id, label: vm.label, options: shown, people: vm.people, footer });
+  const list = (): PickerListVM => ({ id: vm.id, label: vm.label, options: shown, people: vm.people, footer, heading: true });
   const holder = node(doc, "div", "hm-tag-picker");
   let pop = pickerList(doc, list(), state, (option) => choose(option)); holder.append(pop);
   const render = () => {
+    const opening = state.open && field.getAttribute("aria-expanded") !== "true";
     const next = pickerList(doc, list(), state, (option) => choose(option)); pop.replaceWith(next); pop = next;
     field.setAttribute("aria-expanded", String(state.open));
+    // The card sits in the flow above the field (Todo canvas), so opening it pushes the field down:
+    // keep the field the person is typing in on screen.
+    if (opening) field.scrollIntoView?.({ block: "nearest" });
     const id = activeDescendant(vm.id, state, shown);
     if (id) field.setAttribute("aria-activedescendant", id); else field.removeAttribute("aria-activedescendant");
     if (id) doc.getElementById(id)?.scrollIntoView?.({ block: "nearest" });
