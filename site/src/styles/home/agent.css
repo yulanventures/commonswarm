@@ -436,6 +436,8 @@
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+/* Not yet is the canvas's "Hold": 14px / 600 with the default underline offset. */
+.hm-agent .hm-queue-row .hm-button[data-queue-action="not-yet"] { text-underline-offset: auto; }
 /* The shared pill's edge is an inset stroke (primitives.css): these text controls drop it and keep the focus ring. */
 .hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]) { box-shadow: none; }
 .hm-agent .hm-queue-row .hm-button:is([data-queue-action="up"], [data-queue-action="down"], [data-queue-action="not-yet"]):focus-visible { box-shadow: var(--focus-ring); }
@@ -525,8 +527,9 @@
   max-inline-size: 75%;
   color: var(--home-ink);
   font-weight: 600;
-  /* A label that wraps to two lines makes the canvas's 52px row (2 x 26px); one line stays inside the 48px row. */
-  line-height: 26px;
+  /* The canvas label inherits the 16px body at line-height 1.45 (23.2px). One line sits inside the row's 48px
+     minimum (the 49px pitch with its rule); a wrapped label grows the row by its own lines only. */
+  line-height: 1.45;
 }
 
 .hm-agent__fact-detail {

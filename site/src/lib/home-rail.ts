@@ -170,11 +170,11 @@ function icon(doc: Document, name: "inbox" | "workspace" | "plus"): HTMLElement 
   return mark;
 }
 
-/** The two-shape mark: a lime circle and an outlined rounded square, drawn by rail.css. */
+/** The two-shape mark, the canvas's own SVG geometry (Main.dc.html), drawn by rail.css as two masks: a lime circle and an
+ *  outlined rounded square. */
 function brandMark(doc: Document): HTMLElement {
   const mark = node(doc, "span", "hm-rail__mark");
   mark.setAttribute("aria-hidden", "true");
-  mark.append(node(doc, "span", "hm-rail__mark-dot"), node(doc, "span", "hm-rail__mark-square"));
   return mark;
 }
 

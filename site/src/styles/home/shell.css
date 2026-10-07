@@ -306,6 +306,11 @@
 }
 .hm-ws-nav--phone .hm-ws-nav__entry { flex: 1 1 0; min-inline-size: 0; }
 .hm-ws-nav--phone .hm-ws-nav__link { min-block-size: 44px; padding: 0 var(--s-1); }
+/* Phone-Space.dc.html: the chosen tab's label is #EEF2EA on the ink pill, at rest and on hover. --home-on-ink is that
+   value in light mode (the same as --home-rail-strong) and flips with --home-ink in dark mode, where rail-strong would
+   sit light on the light pill. */
+.hm-ws-nav--phone .hm-ws-nav__link[aria-current="page"],
+.hm-ws-nav--phone .hm-ws-nav__link[aria-current="page"]:hover { color: var(--home-on-ink); }
 
 .hm-sr {
   position: absolute;

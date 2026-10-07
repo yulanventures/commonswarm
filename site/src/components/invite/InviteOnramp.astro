@@ -204,11 +204,13 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
       <a class="invite-onramp__button" data-connect-open hidden rel="nofollow">Open assistant</a>
       <a class="invite-onramp__button" href="/app">Open the workspace</a>
       <button class="hm-invite-connect__copy-link" type="button" data-connect-copy hidden>Copy the connect prompt instead</button>
-      <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
-      <details class="hm-invite-connect__more">
-        <summary>Good to know</summary>
-        <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
-      </details>
+      <div class="hm-invite-connect__foot">
+        <p class="hm-invite-connect__footnote" data-connect-footnote hidden>{INVITE_CONNECT_FOOTNOTE}</p>
+        <details class="hm-invite-connect__more">
+          <summary>Good to know</summary>
+          <ul class="hm-ahp__notes" data-connect-notes hidden role="list"></ul>
+        </details>
+      </div>
     </div>
   </section>
 
@@ -919,11 +921,10 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
     box-shadow: var(--focus-ring);
   }
 
-  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the 24px "Good to know"
-     row (13px/1.4 text, a 3px box margin under its line): 21px more makes the canvas 24px under
-     the text line. */
+  /* Phone-Connect pads its bottom 24px; Phone-Join 28px. Connect ends on the footnote's last text
+     line ("Good to know" runs on in that line), so the canvas 24px is the padding itself. */
   .invite-onramp:has(> [data-view="connect"]:not([hidden])) {
-    padding-block-end: 21px;
+    padding-block-end: 24px;
   }
 
   .invite-onramp__mark { flex: none; }
@@ -1041,9 +1042,29 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
      canvas emphasis: a mid outline (5.68 / 7.16 on --home-rail-bg, light / dark) and a lighter
      initial (9.30 / 11.28). Both are mixed with rail-strong, so they stay light in dark mode. */
   .invite-onramp__face--you {
+    position: relative;
     background: transparent;
-    border: 1.5px dashed color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
     color: color-mix(in oklab, var(--home-blue) 30%, var(--home-rail-strong));
+  }
+
+  /* The 1.5px dashed edges (Phone-Join.dc.html) are drawn as SVG strokes: a CSS dashed 1.5px border snaps to 1px in
+     Chromium, and the canvas paints 3 device pixels at 2x. The dash shape is a mask (a pseudo-element, so setting the
+     initial as text keeps it) and its colour is the token background. The canvas dash is 3px with a 1.5px gap;
+     pathLength fits a whole number of dashes, as the canvas does: 33 round the circle, 21 round the tile. */
+  .invite-onramp__face--you::before,
+  .invite-onramp__tile-orb--empty::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    mask-position: center;
+    mask-repeat: no-repeat;
+    mask-size: 100% 100%;
+    pointer-events: none;
+  }
+
+  .invite-onramp__face--you::before {
+    background: color-mix(in oklab, var(--home-blue) 60%, var(--home-rail-strong));
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Ccircle cx='24' cy='24' r='23.25' fill='none' stroke='black' stroke-width='1.5' pathLength='148.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
   }
 
   .invite-onramp__pair-arrow { flex: none; }
@@ -1501,9 +1522,19 @@ const moreAssistants = assistantHosts.filter((host) => host.joiner !== "primary"
   }
 
   .invite-onramp__tile-orb--empty {
+    position: relative;
     background: transparent;
     box-shadow: none;
-    border: 1.5px dashed var(--home-line-dashed);
+  }
+
+  .invite-onramp__tile-orb--empty::before {
+    background: var(--home-line-dashed);
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='0.75' y='0.75' width='26.5' height='26.5' rx='8.25' fill='none' stroke='black' stroke-width='1.5' pathLength='94.5' stroke-dasharray='3 1.5'/%3E%3C/svg%3E");
+  }
+
+  @media (forced-colors: active) {
+    .invite-onramp__face--you::before,
+    .invite-onramp__tile-orb--empty::before { forced-color-adjust: none; background: CanvasText; }
   }
 
   /* The consent line is secondary text beside a quiet 20px check (Join stays the one strong

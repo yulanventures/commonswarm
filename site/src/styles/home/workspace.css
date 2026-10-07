@@ -36,12 +36,14 @@
    its 10px foot so the card's own 16px is the space under the words. */
 .hm-side-card[data-side-card="shared"] { padding: 16px; background: transparent; border: 1.5px dashed var(--home-line-dashed); box-shadow: none; }
 .hm-side-card[data-side-card="shared"] .hm-side-card__line:last-child { padding-block-end: 0; }
+/* Its lines are the canvas body: 16px / 400 at line-height 1.45, 12px under the title (head 6 + 6) and 8px apart. */
+.hm-side-card[data-side-card="shared"] .hm-side-card__line { padding-block: 6px 8px; font-size: 16px; font-weight: 400; line-height: 1.45; }
+.hm-side-card[data-side-card="shared"] .hm-side-card__line + .hm-side-card__line { padding-block-start: 0; }
 /* Wiki (ruling 4): one entry row on the canvas, not a card; it reads like a Lists row (ink 600, chevron). */
 .hm-side-entry { min-width: 0; }
 .hm-side-entry > .hm-side-link { display: flex; justify-content: space-between; gap: 12px; inline-size: 100%; padding: 0 16px; border-radius: 12px;
   color: var(--home-ink); font-size: 16px; font-weight: 600; line-height: 1.45; }
-.hm-side-entry > .hm-side-link::after { content: ""; flex: none; inline-size: 7px; block-size: 7px; margin-inline: 4px 6px;
-  border-block-start: 2px solid var(--home-ink-muted); border-inline-end: 2px solid var(--home-ink-muted); transform: rotate(45deg); }
+.hm-side-entry > .hm-side-link > .hm-side-chevron { flex: none; align-self: center; color: var(--home-ink-muted); }
 .hm-side-entry > a.hm-side-link:hover { color: var(--home-ink); background: var(--home-card); text-decoration: none; }
 
 /* The "+" beside "To-dos": a 44 px round door, pulled 8 px into the card edge as in the source. */
@@ -86,8 +88,9 @@
 .hm-side-list .hm-object-icon { inline-size: 22px; color: var(--home-ink); }
 /* Lists show no icon in the source, a chevron instead. The icon's name ("List") stays for a screen reader. */
 .hm-side-card[data-side-card="lists"] .hm-object-icon { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.hm-side-card[data-side-card="lists"] .hm-object-card::after { content: ""; flex: none; inline-size: 7px; block-size: 7px; margin-inline: 4px 6px;
-  border-block-start: 2px solid var(--home-ink-muted); border-inline-end: 2px solid var(--home-ink-muted); transform: rotate(45deg); }
+/* Space.dc.html: the row is space-between, so the 16px chevron (home-side-cards.ts chevron(), stroke 1.8 in the muted ink)
+   sits flush with the card's inner edge. */
+.hm-side-card[data-side-card="lists"] .hm-object-card > .hm-side-chevron { flex: none; margin-inline-start: auto; color: var(--home-ink-muted); }
 
 /* ---- Links and buttons in the cards ---- */
 .hm-side-link, .hm-side-button { display: inline-flex; align-items: center; box-sizing: border-box; min-width: 2.75rem; min-height: 2.75rem; padding: 0; border-radius: 10px;

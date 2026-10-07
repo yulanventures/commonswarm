@@ -107,10 +107,21 @@ function link(doc: Document, text: string, href: string, hook: string, sample = 
   if (sample) return node(doc, "span", "hm-side-link", text);
   const anchor = node(doc, "a", "hm-side-link", text); anchor.href = href; anchor.dataset.sideLink = hook; return anchor;
 }
-function cardList(doc: Document, items: readonly ObjectCardVM[], label: string): HTMLUListElement {
+function cardList(doc: Document, items: readonly ObjectCardVM[], label: string, withChevron = false): HTMLUListElement {
   const list = node(doc, "ul", "hm-side-list"); list.setAttribute("aria-label", label);
-  for (const item of items) { const row = node(doc, "li", "hm-side-list__item"); row.append(objectCard(doc, item)); list.append(row); }
+  for (const item of items) {
+    const row = node(doc, "li", "hm-side-list__item"); const card = objectCard(doc, item);
+    if (withChevron) card.append(chevron(doc));
+    row.append(card); list.append(row);
+  }
   return list;
+}
+/** Space.dc.html Lists rows (and the Wiki entry that reads like one): the 16px chevron, stroke 1.8, round caps and joins. */
+function chevron(doc: Document): SVGSVGElement {
+  const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [name, value] of Object.entries({ class: "hm-side-chevron", viewBox: "0 0 16 16", width: "16", height: "16", fill: "none", stroke: "currentColor",
+    "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true", focusable: "false" })) svg.setAttribute(name, value);
+  const path = doc.createElementNS("http://www.w3.org/2000/svg", "path"); path.setAttribute("d", "M6 3l5 5-5 5"); svg.append(path); return svg;
 }
 function check(doc: Document): SVGSVGElement {
   const svg = doc.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -207,7 +218,7 @@ export function buildObjectsCards(doc: Document, vm: SideCardsVM, callbacks: Sid
     const { root, body } = section(doc, key, title, vm.sample ? undefined : vm.hrefs[key]);
     const { shown, more } = sideCapObjects(items);
     headRow(doc, root, more);
-    body.append(shown.length ? cardList(doc, vm.sample ? shown.map(item => Object.assign({ ...item }, { sample: true })) : shown, title) : node(doc, "p", "hm-side-card__empty", key === "lists" ? "No lists or docs yet." : "No files yet."));
+    body.append(shown.length ? cardList(doc, vm.sample ? shown.map(item => Object.assign({ ...item }, { sample: true })) : shown, title, key === "lists") : node(doc, "p", "hm-side-card__empty", key === "lists" ? "No lists or docs yet." : "No files yet."));
     return root;
   };
   return [make("lists", "Lists", objects.lists), make("files", "Files", objects.files)];
@@ -226,6 +237,6 @@ export function buildSideCards(doc: Document, vm: SideCardsVM, callbacks: SideCa
   const column = node(doc, "div", "hm-side"); column.dataset.homeSide = ""; if (vm.sample) column.dataset.sample = "true";
   const todos = buildTodosCard(doc, vm, callbacks); if (todos) column.append(todos);
   column.append(...buildObjectsCards(doc, vm, callbacks), buildSharedCard(doc, vm));
-  const wiki = node(doc, "div", "hm-side-entry"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); column.append(wiki);
+  const wiki = node(doc, "div", "hm-side-entry"); wiki.append(link(doc, "Wiki", vm.hrefs.wiki, "wiki", vm.sample)); wiki.firstElementChild?.append(chevron(doc)); column.append(wiki);
   return column;
 }

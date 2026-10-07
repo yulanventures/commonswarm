@@ -47,10 +47,17 @@
   letter-spacing: -0.01em;
   text-decoration: none;
 }
-/* 26px mark on a 28-unit grid (Main.dc.html): a lime circle r8 at (10,10) under a 14-unit rounded square at (12,12), stroke 2, no fill. */
+/* 26px mark, the canvas's own SVG (Main.dc.html: viewBox 0 0 28 28, a lime circle r8 at (10,10) under a 14-unit square at
+   (12,12), rx 4.5, stroke 2, no fill), drawn as two masks so each shape takes its token colour and the stroke is rasterised at
+   the device scale (a CSS border snaps; this paints the canvas's 2px edge). Used by home-rail.ts brandMark and the
+   LiveDashboard account button; the invite pages draw the same SVG inline at 24px. */
 .hm-rail__mark { position: relative; flex: none; inline-size: 26px; block-size: 26px; }
-.hm-rail__mark-dot { position: absolute; inset-block-start: 1.86px; inset-inline-start: 1.86px; inline-size: 14.86px; block-size: 14.86px; border-radius: 50%; background: var(--home-lime); }
-.hm-rail__mark-square { position: absolute; inset-block-start: 10.21px; inset-inline-start: 10.21px; box-sizing: border-box; inline-size: 14.86px; block-size: 14.86px; border: 1.86px solid var(--home-rail-strong); border-radius: 5.1px; }
+.hm-rail__mark::before,
+.hm-rail__mark::after { content: ""; position: absolute; inset: 0; mask-position: center; mask-repeat: no-repeat; mask-size: 100% 100%; }
+.hm-rail__mark::before { background: var(--home-lime);
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Ccircle cx='10' cy='10' r='8' fill='black'/%3E%3C/svg%3E"); }
+.hm-rail__mark::after { background: var(--home-rail-strong);
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='12' y='12' width='14' height='14' rx='4.5' fill='none' stroke='black' stroke-width='2'/%3E%3C/svg%3E"); }
 
 .hm-rail__nav {
   display: flex;
